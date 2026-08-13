@@ -1,0 +1,236 @@
+export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+export type Severity = 'P1' | 'P2' | 'P3';
+export type Verdict = 'APPROVE' | 'REVISE';
+export type QuestionKind = 'technical' | 'product';
+export type Confidence = 'high' | 'medium' | 'low';
+export type Sandbox = 'read-only' | 'workspace-write' | 'danger-full-access';
+export type PermissionMode = 'plan' | 'bypassPermissions' | 'acceptEdits' | 'auto' | 'manual' | 'dontAsk';
+
+export type RunStatus =
+  | 'planning'
+  | 'implementing'
+  | 'reviewing'
+  | 'planned'
+  | 'done'
+  | 'needs-input'
+  | 'stalled'
+  | 'error';
+
+export interface ClaudeConfig {
+  model: string;
+  effort: Effort;
+  planTimeoutMs: number;
+  implementTimeoutMs: number;
+}
+
+export interface CodexConfig {
+  model: string;
+  effort: Effort;
+  sandbox: Sandbox;
+  timeoutMs: number;
+  /**
+   * Keep one Codex thread for the whole run via `codex exec resume`, so the
+   * reviewer remembers what it already raised instead of re-deriving it.
+   */
+  persistSession: boolean;
+}
+
+export interface LoopConfig {
+  maxPlanRounds: number;
+  maxReviewRounds: number;
+  oscillationThreshold: number;
+}
+
+export interface BudgetConfig {
+  /**
+   * Ceiling on Claude's reported `total_cost_usd`.
+   *
+   * On a subscription this is NOT money: the CLI computes it from token counts
+   * at public API rates, and nothing is billed. Treat it as a proxy for work
+   * volume - a runaway-loop brake, not a spend limit.
+   */
+  maxCostUsd: number;
+  /** Ceiling on cumulative tokens. 0 disables. The real currency on a plan. */
+  maxTokens: number;
+  /**
+   * On hitting a subscription rate limit, wait for the window to reset and
+   * carry on instead of stopping the run.
+   */
+  waitOnRateLimit: boolean;
+  /** Cap on a single wait, so a run cannot hang for a weekly-cap reset. */
+  maxWaitMinutes: number;
+}
+
+export interface QuestionsConfig {
+  askCodex: boolean;
+  /**
+   * Send non-blocking questions to Codex too. A considered answer beats the
+   * planner's own fallback even when the fallback would have been survivable.
+   */
+  answerNonBlocking: boolean;
+  escalateOnDefer: boolean;
+  escalateOnLowConfidence: boolean;
+}
+
+/** A question Codex declined that was not important enough to stop the run. */
+export interface DeferredQuestion {
+  question: string;
+  kind: QuestionKind;
+  recommended: string;
+  reason: string;
+}
+
+export interface GitConfig {
+  useBranch: boolean;
+  branchPrefix: string;
+  commitEachRound: boolean;
+}
+
+export interface ContextConfig {
+  /** Rotate the Claude session once its prompt exceeds this share of the window. */
+  compactAboveRatio: number;
+  /**
+   * Rotate while Codex is busy rather than between Claude turns, so the
+   * summarisation cost overlaps work that was going to happen anyway.
+   */
+  compactDuringCodex: boolean;
+  enabled: boolean;
+}
+
+export interface Config {
+  claude: ClaudeConfig;
+  codex: CodexConfig;
+  loop: LoopConfig;
+  budget: BudgetConfig;
+  questions: QuestionsConfig;
+  git: GitConfig;
+  context: ContextConfig;
+}
+
+export interface LoadedConfig extends Config {
+  configPath: string | null;
+}
+
+/** Deep-partial shape accepted from vibe.config.json and CLI overrides. */
+export type ConfigOverrides = {
+  [K in keyof Config]?: Partial<Config[K]>;
+};
+
+export interface Assumption {
+  assumption: string;
+  why: string;
+  blast_radius: string;
+}
+
+export interface OpenQuestion {
+  question: string;
+  options: string[];
+  recommended: string;
+  kind: QuestionKind;
+  blocking: boolean;
+}
+
+export interface Plan {
+  plan_md: string;
+  assumptions: Assumption[];
+  open_questions: OpenQuestion[];
+}
+
+export interface Finding {
+  id: string;
+  severity: Severity;
+  title: string;
+  detail: string;
+  suggested_fix: string;
+}
+
+export interface FindingsReport {
+  verdict: Verdict;
+  summary: string;
+  findings: Finding[];
+}
+
+export interface Answer {
+  question: string;
+  answer: string;
+  confidence: Confidence;
+  defer_to_human: boolean;
+  rationale: string;
+}
+
+export interface AnswersReport {
+  answers: Answer[];
+}
+
+export interface ContextUsage {
+  /** Prompt tokens for the last request: a close proxy for live context size. */
+  promptTokens: number;
+  contextWindow: number;
+  ratio: number;
+}
+
+/** Total tokens moved by a turn, summed across its API requests. */
+export interface TokenUsage {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheCreation: number;
+  total: number;
+}
+
+export interface ClaudeTurnResult {
+  text: string;
+  costUsd: number;
+  sessionId: string;
+  denials: unknown[];
+  numTurns: number;
+  /** Live context occupancy, from the last assistant message. */
+  usage: ContextUsage | null;
+  /** Cumulative work for the turn, from the aggregated envelope. */
+  tokens: TokenUsage;
+}
+
+export interface RunEvent {
+  at: string;
+  type: string;
+  [key: string]: unknown;
+}
+
+export interface RunState {
+  id: string;
+  dir: string;
+  targetDir: string;
+  task: string;
+  sessionId: string;
+  createdAt: string;
+  status: RunStatus;
+  planRound: number;
+  reviewRound: number;
+  costUsd: number;
+  tokensUsed: number;
+  rateLimitWaits: number;
+  baseSha: string | null;
+  branch: string | null;
+  p1History: string[];
+  events: RunEvent[];
+  sessionStarted: boolean;
+  planOnly: boolean;
+  answeredQuestions: string[];
+  deferredQuestions: DeferredQuestion[];
+  sessionRotations: number;
+  /** Codex's own thread id, reused across critique/answer/review turns. */
+  codexSessionId: string | null;
+  /** Carried into the first turn of a rotated session. */
+  handoff: string | null;
+  contextRatio: number;
+  plan: Plan | null;
+  pendingAnswers: Answer[] | null;
+  extraContext: string | null;
+}
+
+export interface RunSummary {
+  id: string;
+  status: string;
+  task: string;
+  costUsd: number;
+}

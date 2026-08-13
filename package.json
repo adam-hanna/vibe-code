@@ -1,0 +1,31 @@
+{
+  "name": "vibe-code",
+  "version": "0.1.0",
+  "description": "Automated plan/critique/implement/review loop between Claude Code and Codex.",
+  "type": "module",
+  "bin": {
+    "vibe": "dist/bin/vibe.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc && tsc-alias",
+    "watch": "tsc --watch",
+    "typecheck": "tsc --noEmit",
+    "prepare": "npm run build",
+    "doctor": "npm run build && node dist/bin/vibe.js doctor"
+  },
+  "license": "MIT",
+  "private": true,
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "tsc-alias": "^1.9.1",
+    "typescript": "^7.0.2"
+  }
+}
