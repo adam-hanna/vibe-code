@@ -37,10 +37,28 @@ export interface CodexConfig {
   persistSession: boolean;
 }
 
+/** What one review round produced: which P1s, and how many. */
+export interface RoundRecord {
+  /** Fingerprint of the P1 id set, or null when the round had no P1s. */
+  signature: string | null;
+  count: number;
+}
+
 export interface LoopConfig {
   maxPlanRounds: number;
   maxReviewRounds: number;
+  /**
+   * Identical P1 set this many rounds running is a hard stop, at any point in
+   * the run. Nothing new is being produced, so more rounds cannot help.
+   */
   oscillationThreshold: number;
+  /**
+   * How many recent rounds the late-phase trend is judged over.
+   *
+   * Only consulted once most of the round budget is spent. Early churn is
+   * normal and is left alone.
+   */
+  convergenceWindow: number;
 }
 
 export interface BudgetConfig {
@@ -247,7 +265,8 @@ export interface RunState {
   rateLimitWaits: number;
   baseSha: string | null;
   branch: string | null;
-  p1History: string[];
+  /** One entry per review round, driving the convergence assessment. */
+  p1Rounds: RoundRecord[];
   events: RunEvent[];
   sessionStarted: boolean;
   planOnly: boolean;

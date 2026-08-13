@@ -14,7 +14,8 @@
   "loop": {
     "maxPlanRounds": 5,
     "maxReviewRounds": 5,
-    "oscillationThreshold": 2
+    "oscillationThreshold": 3,
+    "convergenceWindow": 3
   },
   "budget": {
     "maxCostUsd": 25

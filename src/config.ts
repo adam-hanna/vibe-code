@@ -25,8 +25,12 @@ export const DEFAULTS: Config = {
   loop: {
     maxPlanRounds: 5,
     maxReviewRounds: 5,
-    // Two models disagreeing in a stable cycle will not converge by being asked again.
-    oscillationThreshold: 2,
+    // Identical findings three rounds running, not two: a single repeat is a
+    // normal part of a review cycle - the fix shifts the problem and the next
+    // round catches the shift - and stopping on it discarded runs that would
+    // have converged.
+    oscillationThreshold: 3,
+    convergenceWindow: 3,
   },
   budget: {
     // NOT a spend limit on a Claude subscription - the CLI derives this from
@@ -168,7 +172,7 @@ function validate(cfg: Config): void {
   if (!SANDBOXES.includes(cfg.codex.sandbox)) {
     throw new Error(`codex.sandbox must be one of ${SANDBOXES.join(', ')}`);
   }
-  for (const key of ['maxPlanRounds', 'maxReviewRounds', 'oscillationThreshold'] as const) {
+  for (const key of ['maxPlanRounds', 'maxReviewRounds', 'oscillationThreshold', 'convergenceWindow'] as const) {
     const v = cfg.loop[key];
     if (!Number.isInteger(v) || v < 1) throw new Error(`loop.${key} must be a positive integer`);
   }

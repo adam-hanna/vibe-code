@@ -5,7 +5,7 @@ import * as git from '@src/git.js';
 import * as log from '@src/log.js';
 import * as P from '@src/prompts.js';
 import { ANSWERS_SCHEMA, FINDINGS_SCHEMA, PLAN_SCHEMA } from '@src/schemas.js';
-import { artifact, artifactDir, detectOscillation, p1Signature, recordEvent, saveState } from '@src/run.js';
+import { artifact, artifactDir, assessConvergence, p1Signature, recordEvent, recordRound, saveState } from '@src/run.js';
 import { parseAnswers, parseFindings, parsePlan, p1s } from '@src/validate.js';
 import { withConcurrentCompaction, rotateSession, shouldRotate } from '@src/context.js';
 import { describeFailure, runVerification } from '@src/verify.js';
@@ -135,7 +135,7 @@ export async function orchestrate(state: RunState, cfg: Config, resume: boolean)
 
   // ---- Review --------------------------------------------------------------
   state.status = 'reviewing';
-  state.p1History = [];
+  state.p1Rounds = [];
   saveState(state);
 
   for (;;) {
@@ -225,11 +225,18 @@ function guardProgress(
   blockers: readonly Finding[],
   { cap, round, capName, deadlockMsg }: GuardArgs,
 ): void {
-  const signature = p1Signature(all);
-  if (detectOscillation(state, signature, cfg.loop.oscillationThreshold)) {
+  recordRound(state, p1Signature(all), blockers.length);
+
+  const stall = assessConvergence(state, {
+    repeatThreshold: cfg.loop.oscillationThreshold,
+    window: cfg.loop.convergenceWindow,
+    cap,
+    round,
+  });
+  if (stall !== null) {
     throw new Escalation(
       EXIT.NO_CONVERGENCE,
-      `The same P1 set came back ${cfg.loop.oscillationThreshold} rounds running - ${deadlockMsg}.`,
+      `Stopping early: ${stall} - ${deadlockMsg}.`,
       null,
       [...blockers],
     );

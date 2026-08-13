@@ -41,7 +41,7 @@ export function createRun(targetDir: string, task: string, planOnly: boolean): R
     rateLimitWaits: 0,
     baseSha: null,
     branch: null,
-    p1History: [],
+    p1Rounds: [],
     events: [],
     sessionStarted: false,
     planOnly,
@@ -115,9 +115,10 @@ export function artifactDir(state: RunState, name: string): string {
 }
 
 /**
- * Fingerprint of a P1 set. If consecutive rounds produce the same fingerprint,
- * the reviewer and the implementer are deadlocked - asking again will not break
- * the tie, so the run escalates rather than burning its budget.
+ * Fingerprint of a P1 set, used to tell a repeated round from a new one.
+ *
+ * A repeat is evidence but not a verdict on its own - see `assessConvergence`,
+ * which tolerates repetition early and judges the trend late.
  */
 export function p1Signature(findings: readonly Finding[]): string | null {
   const ids = findings
@@ -128,13 +129,72 @@ export function p1Signature(findings: readonly Finding[]): string | null {
   return createHash('sha1').update(ids.join('|')).digest('hex').slice(0, 12);
 }
 
-export function detectOscillation(
-  state: RunState,
-  signature: string | null,
-  threshold: number,
-): boolean {
-  if (!signature) return false;
-  state.p1History.push(signature);
-  const recent = state.p1History.slice(-threshold);
-  return recent.length === threshold && recent.every((s) => s === signature);
+/**
+ * Rounds only count as late once this much of the cap is spent.
+ *
+ * Before that the loop is left alone: a review cycle churning early is normal,
+ * and two models trading revisions is how it converges. The question worth
+ * asking near the cap is different - not "did this round repeat?" but "is this
+ * heading anywhere?"
+ *
+ * Set from replaying round sequences: at 0.6 a five-round cap treats round
+ * three as late, and a run that went 2 -> 2 -> 2 -> 1 was cut off one round
+ * before it converged. Three quarters leaves room for early churn while still
+ * reclaiming the rounds at the end that a stalled run would waste.
+ */
+const LATE_ROUND_FRACTION = 0.75;
+
+export function recordRound(state: RunState, signature: string | null, count: number): void {
+  state.p1Rounds.push({ signature, count });
+}
+
+export interface ConvergenceArgs {
+  /** Identical P1 set this many rounds running is a hard stop at any point. */
+  repeatThreshold: number;
+  /** How many recent rounds the trend is judged over. */
+  window: number;
+  cap: number;
+  round: number;
+}
+
+/**
+ * Decide whether to stop, returning the reason or null to continue.
+ *
+ * Deliberately tolerant early and strict late. Some oscillation is a healthy
+ * part of review - the reviewer raises something, the fix shifts the problem,
+ * the next round catches the shift - and aborting on the first repeat throws
+ * away runs that would have converged. What matters is whether the trend is
+ * downward by the time the budget is nearly spent.
+ */
+export function assessConvergence(state: RunState, args: ConvergenceArgs): string | null {
+  const { repeatThreshold, window, cap, round } = args;
+  const history = state.p1Rounds;
+
+  // Identical findings N rounds running means no new information is being
+  // produced at all. More rounds cannot help, whenever it happens.
+  const repeats = history.slice(-repeatThreshold);
+  const first = repeats[0];
+  if (
+    repeats.length === repeatThreshold &&
+    first?.signature != null &&
+    repeats.every((r) => r.signature === first.signature)
+  ) {
+    return `the same P1 set came back ${repeatThreshold} rounds running`;
+  }
+
+  if (round < Math.ceil(cap * LATE_ROUND_FRACTION)) return null;
+
+  // Late phase: require evidence of progress. Findings may be new every round
+  // and still be going nowhere - a run that went 1 -> 1 -> 3 was producing
+  // correct, distinct findings while getting further from done, and spent its
+  // remaining rounds doing it.
+  const recent = history.slice(-window);
+  if (recent.length < window) return null;
+  const improved = recent.some((r, idx) => idx > 0 && r.count < (recent[idx - 1]?.count ?? r.count));
+  if (!improved) {
+    const trail = recent.map((r) => r.count).join(' -> ');
+    return `the P1 count has not fallen in ${window} rounds (${trail}) with ${cap - round} round(s) left`;
+  }
+
+  return null;
 }
