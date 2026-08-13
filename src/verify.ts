@@ -29,13 +29,62 @@ export interface VerifyResult {
  * mistyped path resolve. Observed costing two fix rounds and two commits'
  * worth of agent time on a `--verify-command` given a POSIX path on Windows.
  */
-const LAUNCH_FAILURE_RE =
-  /\bMODULE_NOT_FOUND\b|cannot find module|is not recognized as an internal or external command|command not found|\bENOENT\b|no such file or directory/i;
+/** `cmd.exe` returns this when the command name cannot be resolved. */
+const WINDOWS_NOT_FOUND = 9009;
+/** POSIX shells return this for the same condition. */
+const POSIX_NOT_FOUND = 127;
 
-function launchFailure(output: string, exitCode: number | null): string | null {
-  if (exitCode === 127) return 'the command was not found';
-  const hit = LAUNCH_FAILURE_RE.exec(output);
-  return hit ? `the command could not start (${hit[0]})` : null;
+const NOT_RECOGNIZED_RE = /'([^']+)' is not recognized as an internal or external command/i;
+const MISSING_MODULE_RE = /Cannot find module '([^']+)'/i;
+
+const normalise = (s: string): string => s.replace(/\\/g, '/').replace(/^"|"$/g, '').toLowerCase();
+
+/**
+ * Distinguish "the command never ran" from "the project failed its checks".
+ *
+ * Matched against the *command being run*, never against its output alone. An
+ * earlier version pattern-matched the output and misfired on nested noise:
+ * `npm.cmd` on Windows prints "'DOSKEY' is not recognized as an internal or
+ * external command" while running a perfectly normal suite, which turned a
+ * genuine test failure into a configuration error and would have halted a run
+ * that should have continued. A false positive here is worse than a false
+ * negative - it stops correct work, where the miss only costs a fix round.
+ */
+function launchFailure(output: string, exitCode: number | null, command: string): string | null {
+  if (exitCode === POSIX_NOT_FOUND || exitCode === WINDOWS_NOT_FOUND) {
+    return 'the command was not found';
+  }
+
+  const target = normalise(command.trim().split(/\s+/)[0] ?? '');
+
+  const notRecognized = NOT_RECOGNIZED_RE.exec(output);
+  if (notRecognized?.[1] !== undefined) {
+    const named = normalise(notRecognized[1]);
+    // Only when the shell is complaining about *our* command, not something
+    // it shelled out to.
+    if (named === target || target.endsWith(`/${named}`)) {
+      return `the command "${notRecognized[1]}" was not found`;
+    }
+  }
+
+  const missingModule = MISSING_MODULE_RE.exec(output);
+  if (missingModule?.[1] !== undefined) {
+    // Only when the missing module is one this command actually named - an
+    // interpreter that started but could not find its own script. The file
+    // name is compared as well as the full path, because a POSIX path handed
+    // to a Windows interpreter is reported back resolved against the current
+    // drive (`/c/dir/x.mjs` becomes `C:\c\dir\x.mjs`) and so never matches the
+    // command verbatim. That form is the likeliest way to mistype this
+    // setting, so it is worth catching.
+    const missing = normalise(missingModule[1]);
+    const fileName = missing.slice(missing.lastIndexOf('/') + 1);
+    const named = normalise(command);
+    if (named.includes(missing) || (fileName !== '' && named.includes(fileName))) {
+      return `the script "${missingModule[1]}" does not exist`;
+    }
+  }
+
+  return null;
 }
 
 /**
@@ -79,7 +128,7 @@ export async function runVerification(
         runs: attempt,
         exitCode: result.code,
         output: tail(result.output),
-        unlaunchable: launchFailure(result.output, result.code),
+        unlaunchable: launchFailure(result.output, result.code, command),
       };
     }
   }
@@ -142,13 +191,27 @@ function execute(
   timeoutMs: number,
 ): Promise<ExecResult> {
   return new Promise<ExecResult>((resolve) => {
-    const child = spawn(command, {
-      cwd,
-      env,
-      shell: true,
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    // The shell is invoked explicitly rather than via `shell: true`, which on
+    // Windows expands to `cmd.exe /d /s /c "<command>"`. That extra layer of
+    // quoting mangles a command whose arguments are themselves quoted:
+    // `node "C:\dir\file.mjs"` fails to launch, while the unquoted and
+    // forward-slash forms succeed. A quoted Windows path is the obvious thing
+    // to write, so it has to work.
+    const child =
+      process.platform === 'win32'
+        ? spawn(process.env['ComSpec'] ?? 'cmd.exe', ['/d', '/c', command], {
+            cwd,
+            env,
+            windowsHide: true,
+            windowsVerbatimArguments: true,
+            stdio: ['ignore', 'pipe', 'pipe'],
+          })
+        : spawn('/bin/sh', ['-c', command], {
+            cwd,
+            env,
+            windowsHide: true,
+            stdio: ['ignore', 'pipe', 'pipe'],
+          });
 
     let output = '';
     let settled = false;
