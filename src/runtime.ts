@@ -222,12 +222,22 @@ export function toolsFromRecord(record: ReadonlyMap<string, string>): Record<str
     const exitCode = Number(value);
     const output = record.get(`tool.${name}.out`) ?? '';
     const which = record.get(`tool.${name}.which`) ?? '';
+    // A success with no output is not a success. Contract probes are version
+    // commands, so silence means the reporter is unreliable rather than that
+    // the tool ran. Observed from the model-turn channel, which returned
+    // `exit=0` with an empty version for a tool a previous run of the same
+    // probe had correctly reported as missing.
+    const succeeded = exitCode === 0 && output !== '';
     tools[name] = {
-      available: exitCode === 0,
+      available: succeeded,
       executable: which === '' ? null : which,
-      version: exitCode === 0 ? output : null,
+      version: succeeded ? output : null,
       exitCode: Number.isFinite(exitCode) ? exitCode : null,
-      failure: exitCode === 0 ? null : output,
+      failure: succeeded
+        ? null
+        : exitCode === 0
+          ? 'reported success but produced no output; treating as unverified'
+          : output,
     };
   }
   return tools;

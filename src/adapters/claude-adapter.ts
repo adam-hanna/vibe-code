@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { detectPathStyle, pathListSeparator, toAgentPath } from '@src/pathstyle.js';
 import type { PathStyle } from '@src/pathstyle.js';
-import { resolveBin } from '@src/proc.js';
+import { hostDirectoryFor } from '@src/hosttools.js';
 import type {
   AgentAdapter,
   AgentRuntime,
@@ -408,40 +408,6 @@ export function parseProbeRecord(raw: string, hostCwd: string): AgentRuntime {
  * This is the one place vibe's environment is legitimately authoritative: it is
  * being used to locate a binary on disk, not to predict what the agent can see.
  */
-export function hostDirectoryFor(tool: string): string | null {
-  try {
-    const fallbacks = TOOL_FALLBACKS[tool];
-    return path.dirname(resolveBin(tool, fallbacks === undefined ? {} : { fallbacks }));
-  } catch {
-    // Absent from vibe's environment too, so there is nothing to prepend. The
-    // contract violation still stands and the doctor reports it.
-    return null;
-  }
-}
-
-/**
- * Conventional install locations for toolchain binaries.
- *
- * A safety net for the case this whole module exists for: a PATH broken badly
- * enough that even vibe's own lookup comes back empty. Checked only after the
- * normal resolution fails.
- */
-const TOOL_FALLBACKS: Readonly<Record<string, readonly string[]>> = {
-  node: [
-    'C:/Program Files/nodejs/node.exe',
-    '/usr/local/bin/node',
-    '/opt/homebrew/bin/node',
-    '/usr/bin/node',
-  ],
-  npm: [
-    'C:/Program Files/nodejs/npm.cmd',
-    '/usr/local/bin/npm',
-    '/opt/homebrew/bin/npm',
-    '/usr/bin/npm',
-  ],
-  git: ['C:/Program Files/Git/cmd/git.exe', '/usr/local/bin/git', '/usr/bin/git'],
-};
-
 function isDenial(failure: string | null): boolean {
   return /access is denied|unauthorized|permission denied|eacces|eperm/i.test(failure ?? '');
 }

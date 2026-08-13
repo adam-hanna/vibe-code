@@ -10,6 +10,7 @@ import type {
   ToolchainContract,
 } from '@src/runtime.js';
 import { envFromRecord, parseKeyValueRecord, toolsFromRecord } from '@src/runtime.js';
+import { hostExecutableFor } from '@src/hosttools.js';
 import type { Sandbox } from '@src/types.js';
 
 /**
@@ -28,6 +29,9 @@ export type CodexProbeExecutor = (input: {
 /** Delimiters that let vibe find the record inside the model's prose. */
 const BEGIN = 'VIBE-PROBE-BEGIN';
 const END = 'VIBE-PROBE-END';
+
+/** Attempts before giving up on the model emitting a parseable block. */
+const PROBE_ATTEMPTS = 2;
 
 /**
  * Codex adapter.
@@ -57,22 +61,34 @@ export class CodexAdapter implements AgentAdapter {
     private readonly sandbox: Sandbox,
   ) {}
 
+  /**
+   * Probe, with a bounded retry.
+   *
+   * The retry is not defensive padding: this channel is a language model, and
+   * the same probe against the same host has both produced a well-formed block
+   * and omitted it entirely. Claude's hook probe needs no such allowance, which
+   * is the practical argument for preferring a deterministic channel wherever
+   * a provider offers one.
+   */
   async probeRuntime(ctx: ProbeContext): Promise<AgentRuntime> {
-    const stdout = await this.execute({
-      prompt: renderProbePrompt(ctx.contract),
-      args: ['-s', this.sandbox, '--skip-git-repo-check'],
-      cwd: ctx.cwd,
-      timeoutMs: ctx.timeoutMs,
-    });
+    let lastOutput = '';
+    for (let attempt = 1; attempt <= PROBE_ATTEMPTS; attempt += 1) {
+      lastOutput = await this.execute({
+        prompt: renderProbePrompt(ctx.contract, attempt > 1),
+        args: ['-s', this.sandbox, '--skip-git-repo-check'],
+        cwd: ctx.cwd,
+        timeoutMs: ctx.timeoutMs,
+      });
 
-    const record = extractRecord(stdout);
-    if (record === null) {
-      throw new Error(
-        `The Codex probe returned no ${BEGIN} block. Codex reports environment ` +
-          'failures with exit code 0, so the block is the only reliable signal.',
-      );
+      const record = extractRecord(lastOutput);
+      if (record !== null) return parseProbeRecord(record, ctx.cwd, this.sandbox);
     }
-    return parseProbeRecord(record, ctx.cwd, this.sandbox);
+
+    throw new Error(
+      `The Codex probe returned no ${BEGIN} block in ${PROBE_ATTEMPTS} attempts. ` +
+        'Codex reports environment failures with exit code 0, so the block is the ' +
+        `only reliable signal. Last output:\n${lastOutput.slice(-600)}`,
+    );
   }
 
   async prepareEnvironment(
@@ -81,10 +97,20 @@ export class CodexAdapter implements AgentAdapter {
   ): Promise<PreparedEnvironment> {
     await Promise.resolve();
 
-    const unreachable = Object.entries(contract).some(([tool]) => {
+    // A tool vibe can find on disk but the agent cannot run, under anything
+    // short of full access, is a sandbox problem regardless of how the shell
+    // phrased it. PowerShell reports a sandbox-blocked binary as "not
+    // recognized" rather than "access denied" - only `Test-Path` surfaced the
+    // real `UnauthorizedAccessException` - so matching on denial text alone
+    // misses the case that actually occurs and proposes a PATH fix that
+    // cannot work.
+    const blocked = Object.keys(contract).filter((tool) => {
       const resolution = runtime.tools[tool];
-      return resolution !== undefined && !resolution.available && isDenial(resolution.failure);
+      if (resolution === undefined || resolution.available) return false;
+      if (isDenial(resolution.failure)) return true;
+      return this.sandbox !== 'danger-full-access' && hostExecutableFor(tool) !== null;
     });
+    const unreachable = blocked.length > 0;
 
     const inherited = process.env['PATH'] ?? '';
 
@@ -95,8 +121,8 @@ export class CodexAdapter implements AgentAdapter {
       extraArgs: ['-s', this.sandbox],
       artifacts: [],
       promptHint: unreachable
-        ? 'Some required tools are outside the sandbox. Do not attempt to work ' +
-          'around this; report it instead.'
+        ? `These tools exist on this machine but the ${this.sandbox} sandbox blocks ` +
+          `them: ${blocked.join(', ')}. Do not attempt to work around this; report it instead.`
         : null,
       // Both rungs, in order. A denial needs the sandbox widened; PATH alone
       // was verified insufficient.
@@ -120,7 +146,7 @@ export class CodexAdapter implements AgentAdapter {
  * between sentinels. It is not asked to interpret anything, because an
  * interpreting probe is a probe that can be wrong.
  */
-export function renderProbePrompt(contract: ToolchainContract): string {
+export function renderProbePrompt(contract: ToolchainContract, insist = false): string {
   const checks = Object.entries(contract)
     .map(([tool, requirement]) => `${tool}\t${requirement.probe}`)
     .join('\n');
@@ -144,6 +170,14 @@ export function renderProbePrompt(contract: ToolchainContract): string {
     '  tool.<name>.which=<resolved path, or empty>',
     '',
     checks,
+    ...(insist
+      ? [
+          '',
+          `IMPORTANT: the previous attempt omitted the ${BEGIN} block. The block is`,
+          'the entire point of this task. Emit it even if every command failed -',
+          'a failure recorded in the block is useful, a missing block is not.',
+        ]
+      : []),
   ].join('\n');
 }
 
