@@ -48,6 +48,23 @@ export interface LoopConfig {
   maxPlanRounds: number;
   maxReviewRounds: number;
   /**
+   * Fix rounds spent making the verification command pass.
+   *
+   * Separate from `maxReviewRounds` because they were previously one counter:
+   * a run that spent every round fixing a failing suite had none left for the
+   * reviewer's findings, and stopped with a message blaming a reviewer that
+   * had never run.
+   */
+  maxVerifyRounds: number;
+  /**
+   * Times the planner may answer its own questions and re-plan before the run
+   * stops for a human.
+   *
+   * The question path re-plans without ever consulting the round cap, so a
+   * planner that keeps inventing new questions was bounded only by budget.
+   */
+  maxQuestionRounds: number;
+  /**
    * Identical P1 set this many rounds running is a hard stop, at any point in
    * the run. Nothing new is being produced, so more rounds cannot help.
    */
@@ -277,8 +294,14 @@ export interface RunState {
   rateLimitWaits: number;
   baseSha: string | null;
   branch: string | null;
-  /** One entry per review round, driving the convergence assessment. */
+  /** One entry per code-review round, driving the convergence assessment. */
   p1Rounds: RoundRecord[];
+  /** The same, for verification-fix rounds, which converge independently. */
+  verifyRounds: RoundRecord[];
+  /** Verification-fix rounds spent so far. */
+  verifyRound: number;
+  /** Question-and-replan cycles spent so far. */
+  questionRound: number;
   events: RunEvent[];
   sessionStarted: boolean;
   planOnly: boolean;

@@ -16,6 +16,7 @@ import type {
   FindingsReport,
   OpenQuestion,
   PermissionMode,
+  RoundRecord,
   Plan,
   RunState,
 } from '@src/types.js';
@@ -77,6 +78,21 @@ export async function orchestrate(state: RunState, cfg: Config, resume: boolean)
       (q) => (q.blocking || cfg.questions.answerNonBlocking) && !isAnswered(state, q.question),
     );
     if (pending.length > 0) {
+      // The planner gets a bounded number of goes at resolving its own
+      // questions. Without this the path re-plans forever on newly-invented
+      // questions, since it never reaches the round cap below.
+      if (state.questionRound >= cfg.loop.maxQuestionRounds) {
+        throw new Escalation(
+          EXIT.NEEDS_HUMAN,
+          `The planner is still raising questions after ${cfg.loop.maxQuestionRounds} ` +
+            'rounds of answering its own. Answer these directly, or raise ' +
+            'loop.maxQuestionRounds.',
+          [...pending],
+        );
+      }
+      state.questionRound += 1;
+      saveState(state);
+
       const answers = await resolveQuestions(state, cfg, cwd, pending, plan);
       // Codex may have declined every one; only revise if something came back.
       plan = answers.length > 0 ? await revisePlan(state, cfg, cwd, { answers }) : plan;
@@ -98,7 +114,7 @@ export async function orchestrate(state: RunState, cfg: Config, resume: boolean)
     for (const f of blockers) log.info(`  - ${f.title}`);
 
     guardPlanBudget(state, cfg, blockers);
-    guardProgress(state, cfg, critique.findings, blockers, {
+    guardProgress(cfg, state.p1Rounds, critique.findings, blockers, {
       cap: cfg.loop.maxPlanRounds,
       round: state.planRound + 1,
       capName: 'maxPlanRounds',
@@ -137,6 +153,7 @@ export async function orchestrate(state: RunState, cfg: Config, resume: boolean)
   // ---- Review --------------------------------------------------------------
   state.status = 'reviewing';
   state.p1Rounds = [];
+  state.verifyRounds = [];
   saveState(state);
 
   for (;;) {
@@ -145,26 +162,29 @@ export async function orchestrate(state: RunState, cfg: Config, resume: boolean)
     // execute buys an opinion about the wrong thing.
     const verified = await runGate(state, cfg, cwd);
     if (verified !== null) {
-      guardProgress(state, cfg, [verified], [verified], {
-        cap: cfg.loop.maxReviewRounds,
-        round: state.reviewRound + 1,
-        capName: 'maxReviewRounds',
-        deadlockMsg: 'verification keeps failing the same way after fixes',
+      // Its own counter and its own history: making the suite pass and
+      // satisfying the reviewer are separate problems that converge
+      // separately, and sharing a budget starved whichever came second.
+      guardProgress(cfg, state.verifyRounds, [verified], [verified], {
+        cap: cfg.loop.maxVerifyRounds,
+        round: state.verifyRound + 1,
+        capName: 'maxVerifyRounds',
+        deadlockMsg: 'verification keeps failing after fixes',
       });
 
-      state.reviewRound += 1;
+      state.verifyRound += 1;
       saveState(state);
 
       log.step('Fixing the verification failure');
       const repair = await claudeStep(state, cfg, {
-        prompt: P.fixPrompt([verified], state.reviewRound),
+        prompt: P.fixPrompt([verified], state.verifyRound),
         cwd,
         permissionMode: 'bypassPermissions',
         timeoutMs: cfg.claude.implementTimeoutMs,
-        label: `verify-fix-${state.reviewRound}`,
+        label: `verify-fix-${state.verifyRound}`,
       });
-      artifact(state, `verify-fix-${state.reviewRound}.md`, repair);
-      await maybeCommit(cfg, cwd, `vibe: fix verification failure (round ${state.reviewRound})`);
+      artifact(state, `verify-fix-${state.verifyRound}.md`, repair);
+      await maybeCommit(cfg, cwd, `vibe: fix verification failure (round ${state.verifyRound})`);
       continue;
     }
 
@@ -182,7 +202,7 @@ export async function orchestrate(state: RunState, cfg: Config, resume: boolean)
     log.warn(`${blockers.length} P1 finding(s): ${blockers.map((f) => f.id).join(', ')}`);
     for (const f of blockers) log.info(`  - ${f.title}`);
 
-    guardProgress(state, cfg, review.findings, blockers, {
+    guardProgress(cfg, state.p1Rounds, review.findings, blockers, {
       cap: cfg.loop.maxReviewRounds,
       round: state.reviewRound + 1,
       capName: 'maxReviewRounds',
@@ -252,15 +272,15 @@ export function guardPlanBudget(state: RunState, cfg: Config, blockers: readonly
 }
 
 function guardProgress(
-  state: RunState,
   cfg: Config,
+  history: RoundRecord[],
   all: readonly Finding[],
   blockers: readonly Finding[],
   { cap, round, capName, deadlockMsg }: GuardArgs,
 ): void {
-  recordRound(state, p1Signature(all), blockers.length);
+  recordRound(history, p1Signature(all), blockers.length);
 
-  const stall = assessConvergence(state, {
+  const stall = assessConvergence(history, {
     repeatThreshold: cfg.loop.oscillationThreshold,
     window: cfg.loop.convergenceWindow,
     cap,

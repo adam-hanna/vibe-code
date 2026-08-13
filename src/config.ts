@@ -25,6 +25,14 @@ export const DEFAULTS: Config = {
   loop: {
     maxPlanRounds: 5,
     maxReviewRounds: 5,
+    // Fewer than review rounds: a suite that will not pass after three
+    // attempts is not going to pass on the fourth, and every one of these
+    // costs a full implementation-sized turn.
+    maxVerifyRounds: 3,
+    // The planner answering its own questions is useful once or twice; a third
+    // round of new questions means it is not converging on what to build, and
+    // a human is the right next step.
+    maxQuestionRounds: 3,
     // Identical findings three rounds running, not two: a single repeat is a
     // normal part of a review cycle - the fix shifts the problem and the next
     // round catches the shift - and stopping on it discarded runs that would
@@ -177,7 +185,14 @@ function validate(cfg: Config): void {
   if (!SANDBOXES.includes(cfg.codex.sandbox)) {
     throw new Error(`codex.sandbox must be one of ${SANDBOXES.join(', ')}`);
   }
-  for (const key of ['maxPlanRounds', 'maxReviewRounds', 'oscillationThreshold', 'convergenceWindow'] as const) {
+  for (const key of [
+    'maxPlanRounds',
+    'maxReviewRounds',
+    'maxVerifyRounds',
+    'maxQuestionRounds',
+    'oscillationThreshold',
+    'convergenceWindow',
+  ] as const) {
     const v = cfg.loop[key];
     if (!Number.isInteger(v) || v < 1) throw new Error(`loop.${key} must be a positive integer`);
   }

@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
-import type { Finding, RunState, RunSummary } from '@src/types.js';
+import type { Finding, RoundRecord, RunState, RunSummary } from '@src/types.js';
 
 const RUNS_DIR = path.join('.vibe', 'runs');
 
@@ -42,6 +42,9 @@ export function createRun(targetDir: string, task: string, planOnly: boolean): R
     baseSha: null,
     branch: null,
     p1Rounds: [],
+    verifyRounds: [],
+    verifyRound: 0,
+    questionRound: 0,
     events: [],
     sessionStarted: false,
     planOnly,
@@ -144,8 +147,17 @@ export function p1Signature(findings: readonly Finding[]): string | null {
  */
 const LATE_ROUND_FRACTION = 0.75;
 
-export function recordRound(state: RunState, signature: string | null, count: number): void {
-  state.p1Rounds.push({ signature, count });
+/**
+ * Histories are passed in rather than read from a fixed field: the review loop
+ * and the verification loop converge independently, and mixing their rounds
+ * makes each look less stable than it is.
+ */
+export function recordRound(
+  history: RoundRecord[],
+  signature: string | null,
+  count: number,
+): void {
+  history.push({ signature, count });
 }
 
 export interface ConvergenceArgs {
@@ -166,9 +178,11 @@ export interface ConvergenceArgs {
  * away runs that would have converged. What matters is whether the trend is
  * downward by the time the budget is nearly spent.
  */
-export function assessConvergence(state: RunState, args: ConvergenceArgs): string | null {
+export function assessConvergence(
+  history: readonly RoundRecord[],
+  args: ConvergenceArgs,
+): string | null {
   const { repeatThreshold, window, cap, round } = args;
-  const history = state.p1Rounds;
 
   // Identical findings N rounds running means no new information is being
   // produced at all. More rounds cannot help, whenever it happens.

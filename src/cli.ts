@@ -33,6 +33,12 @@ Options
   --codex-effort <e>         Default: xhigh
   --max-plan-rounds <n>      Default: 5
   --max-review-rounds <n>    Default: 5
+  --max-verify-rounds <n>    Fix rounds for a failing verification (default: 3)
+  --max-question-rounds <n>  Planner self-answer rounds before asking you (default: 3)
+  --plan-timeout <min>       Per planning turn (default: 30)
+  --implement-timeout <min>  Per implement/fix turn (default: 90)
+  --codex-timeout <min>      Per Codex turn (default: 45)
+  --verify-timeout <min>     Per verification command run (default: 15)
   --budget <usd>             Work ceiling, API-equivalent (default: 25; not a bill on a plan)
   --max-tokens <n>           Cumulative Claude token ceiling (0 = off)
   --no-wait-on-limit         Exit on a rate limit instead of waiting for the reset
@@ -64,6 +70,8 @@ interface ParsedArgs {
     codexEffort?: string;
     maxPlanRounds?: number;
     maxReviewRounds?: number;
+    maxVerifyRounds?: number;
+    maxQuestionRounds?: number;
     budget?: number;
     maxTokens?: number;
     noWaitOnLimit?: boolean;
@@ -77,6 +85,10 @@ interface ParsedArgs {
     noVerify?: boolean;
     verifyCommand?: string;
     verifyRuns?: number;
+    planTimeout?: number;
+    implementTimeout?: number;
+    codexTimeout?: number;
+    verifyTimeout?: number;
     help?: boolean;
   };
 }
@@ -144,6 +156,8 @@ function parseArgs(args: readonly string[]): ParsedArgs {
       case '--codex-effort': out.flags.codexEffort = next(); break;
       case '--max-plan-rounds': out.flags.maxPlanRounds = nextNum(); break;
       case '--max-review-rounds': out.flags.maxReviewRounds = nextNum(); break;
+      case '--max-verify-rounds': out.flags.maxVerifyRounds = nextNum(); break;
+      case '--max-question-rounds': out.flags.maxQuestionRounds = nextNum(); break;
       case '--budget': out.flags.budget = nextNum(); break;
       case '--max-tokens': out.flags.maxTokens = nextNum(); break;
       case '--no-wait-on-limit': out.flags.noWaitOnLimit = true; break;
@@ -157,6 +171,10 @@ function parseArgs(args: readonly string[]): ParsedArgs {
       case '--no-verify': out.flags.noVerify = true; break;
       case '--verify-command': out.flags.verifyCommand = next(); break;
       case '--verify-runs': out.flags.verifyRuns = nextNum(); break;
+      case '--plan-timeout': out.flags.planTimeout = nextNum(); break;
+      case '--implement-timeout': out.flags.implementTimeout = nextNum(); break;
+      case '--codex-timeout': out.flags.codexTimeout = nextNum(); break;
+      case '--verify-timeout': out.flags.verifyTimeout = nextNum(); break;
       case '-h':
       case '--help': out.flags.help = true; break;
       default: throw new Error(`Unknown option "${a}"`);
@@ -188,6 +206,8 @@ function buildOverrides(flags: ParsedArgs['flags']): ConfigOverrides {
   if (flags.codexEffort !== undefined) codex.effort = asEffort(flags.codexEffort, '--codex-effort');
   if (flags.maxPlanRounds !== undefined) loop.maxPlanRounds = flags.maxPlanRounds;
   if (flags.maxReviewRounds !== undefined) loop.maxReviewRounds = flags.maxReviewRounds;
+  if (flags.maxVerifyRounds !== undefined) loop.maxVerifyRounds = flags.maxVerifyRounds;
+  if (flags.maxQuestionRounds !== undefined) loop.maxQuestionRounds = flags.maxQuestionRounds;
   if (flags.budget !== undefined) budget.maxCostUsd = flags.budget;
   if (flags.maxTokens !== undefined) budget.maxTokens = flags.maxTokens;
   if (flags.noWaitOnLimit) budget.waitOnRateLimit = false;
@@ -200,6 +220,12 @@ function buildOverrides(flags: ParsedArgs['flags']): ConfigOverrides {
   if (flags.noVerify) verify.enabled = false;
   if (flags.verifyCommand !== undefined) verify.command = flags.verifyCommand;
   if (flags.verifyRuns !== undefined) verify.runs = flags.verifyRuns;
+  // Timeouts are given in minutes: the config stores milliseconds, which is a
+  // poor unit to type on a command line.
+  if (flags.planTimeout !== undefined) claude.planTimeoutMs = flags.planTimeout * 60_000;
+  if (flags.implementTimeout !== undefined) claude.implementTimeoutMs = flags.implementTimeout * 60_000;
+  if (flags.codexTimeout !== undefined) codex.timeoutMs = flags.codexTimeout * 60_000;
+  if (flags.verifyTimeout !== undefined) verify.timeoutMs = flags.verifyTimeout * 60_000;
 
   return { claude, codex, loop, budget, git: gitCfg, questions, context, verify };
 }

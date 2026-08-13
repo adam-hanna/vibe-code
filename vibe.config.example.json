@@ -14,6 +14,8 @@
   "loop": {
     "maxPlanRounds": 5,
     "maxReviewRounds": 5,
+    "maxVerifyRounds": 3,
+    "maxQuestionRounds": 3,
     "oscillationThreshold": 3,
     "convergenceWindow": 3
   },
