@@ -1,4 +1,4 @@
-import type { ToolchainContract } from '@src/runtime.js';
+import type { EnvironmentFacts, ToolchainContract } from '@src/runtime.js';
 
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 export type Severity = 'P1' | 'P2' | 'P3';
@@ -79,6 +79,18 @@ export interface BudgetConfig {
   waitOnRateLimit: boolean;
   /** Cap on a single wait, so a run cannot hang for a weekly-cap reset. */
   maxWaitMinutes: number;
+  /**
+   * Share of the ceiling the planning phase may consume before stopping.
+   *
+   * Planning that will not converge is the most expensive way for a run to
+   * fail: it produces nothing, and the overall ceiling only catches it after
+   * the whole budget is gone. One run spent $16 over two attempts and never
+   * reached implementation. A plan costing most of the budget is not going to
+   * leave enough to build anything, whatever the round counter says.
+   *
+   * 0 disables the sub-ceiling.
+   */
+  planShare: number;
 }
 
 export interface QuestionsConfig {
@@ -278,6 +290,8 @@ export interface RunState {
   /** Carried into the first turn of a rotated session. */
   handoff: string | null;
   contextRatio: number;
+  /** Verified agent environment facts, stated to both agents in their prompts. */
+  environment?: EnvironmentFacts | null;
   /**
    * The effective config this run started with.
    *

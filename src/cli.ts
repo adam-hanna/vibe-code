@@ -11,7 +11,7 @@ import { detectCommand } from '@src/verify.js';
 import type { AgentPreflight } from '@src/preflight.js';
 import * as git from '@src/git.js';
 import * as log from '@src/log.js';
-import type { Phase } from '@src/runtime.js';
+import type { EnvironmentFacts, Phase } from '@src/runtime.js';
 import type { Answer, Config, ConfigOverrides, Effort, RunState } from '@src/types.js';
 
 const USAGE = `
@@ -408,6 +408,40 @@ async function execute(
   }
 }
 
+/** Flatten a preflight report into the facts the prompts state. */
+function environmentFacts(
+  report: Awaited<ReturnType<typeof preflight>>,
+  cfg: Config,
+  targetDir: string,
+): EnvironmentFacts {
+  const agents: EnvironmentFacts['agents'] = [];
+  for (const result of [report.claude, report.codex]) {
+    const rt = result.runtime;
+    if (rt === null) continue;
+    const repaired =
+      result.prepared !== null && !result.prepared.mechanisms.includes('none');
+    agents.push({
+      provider: rt.provider,
+      shell: rt.shell,
+      pathStyle: rt.pathStyle,
+      repaired,
+      tools: Object.entries(rt.tools).map(([name, resolution]) => ({
+        name,
+        // Report the post-repair truth: a tool the repair restored is
+        // available to that agent, whatever the pre-repair probe saw.
+        available: resolution.available || (repaired && result.violations.length === 0),
+        version: resolution.version,
+      })),
+    });
+  }
+
+  return {
+    agents,
+    verifyCommand: cfg.verify.enabled ? (cfg.verify.command ?? detectCommand(targetDir)) : null,
+    verifyRuns: cfg.verify.runs,
+  };
+}
+
 /**
  * Gate the run on both agents' execution environments.
  *
@@ -445,6 +479,10 @@ async function runPreflight(state: RunState, cfg: Config): Promise<ExitCode | nu
     // preflight issued itself.
     const repairArgs = report.claude.prepared?.extraArgs ?? [];
     setSessionArgs(repairArgs);
+    // Hand both agents what was actually observed, so neither has to guess at
+    // the other's environment from its own.
+    state.environment = environmentFacts(report, cfg, state.targetDir);
+    saveState(state);
     if (repairArgs.length > 0) log.info('Environment repair will be applied to every Claude turn');
     log.ok('Toolchain contract satisfied');
     recordEvent(state, 'preflight-ok', { repairArgs: repairArgs.length > 0 });

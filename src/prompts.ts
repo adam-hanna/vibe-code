@@ -1,7 +1,65 @@
+import type { EnvironmentFacts } from '@src/runtime.js';
 import type { Answer, Assumption, Finding, OpenQuestion } from '@src/types.js';
 
 const RESPOND_WITH_JSON =
   'Respond with JSON matching the required schema. No prose outside the JSON.';
+
+/**
+ * Verified environment facts, rendered for a prompt.
+ *
+ * The reviewer cannot check the implementer's environment and will otherwise
+ * reason about it from its own. Codex runs read-only and sandboxed, found it
+ * could not execute `node`, and raised that as a plan-blocking P1 on three
+ * consecutive rounds of a run whose implementer had a working runtime the
+ * whole time. Stating the observations, and whose shell each belongs to,
+ * removes an entire category of false finding.
+ */
+export function environmentBlock(
+  facts: EnvironmentFacts | null | undefined,
+  audience: 'reviewer' | 'planner',
+): string {
+  if (!facts || facts.agents.length === 0) return '';
+
+  const lines = facts.agents.map((agent) => {
+    const role = agent.provider === 'claude' ? 'implementer' : 'reviewer';
+    const tools = agent.tools
+      .map((t) => {
+        if (!t.available) return `${t.name} UNAVAILABLE`;
+        const version = t.version ?? 'ok';
+        // `git --version` already prints "git version ...", so naming the tool
+        // again reads as a stutter.
+        return version.toLowerCase().startsWith(t.name.toLowerCase())
+          ? version
+          : `${t.name} ${version}`;
+      })
+      .join(', ');
+    const repaired = agent.repaired ? ' [PATH repaired by vibe for this run]' : '';
+    return `- **${agent.provider}** (the ${role}): ${agent.shell}, ${agent.pathStyle} paths - ${tools || 'no tools contracted'}${repaired}`;
+  });
+
+  const verification =
+    facts.verifyCommand === null
+      ? '\nNo verification command is configured, so nothing will execute this change automatically.'
+      : `\nVerification: vibe will run \`${facts.verifyCommand}\` itself - not an agent - and it must pass ${facts.verifyRuns} consecutive times before the change is accepted.`;
+
+  const caution =
+    audience === 'reviewer'
+      ? '\n\nYour own shell is sandboxed and deliberately more restricted than the ' +
+        'implementer\'s. **A tool you cannot run yourself is not evidence that the ' +
+        'implementer cannot run it.** Do not raise findings about tool availability, ' +
+        'runtime provisioning, or PATH - they are settled above, and a plan relying ' +
+        'on a tool listed as available to the implementer is correct to do so.'
+      : '\n\nPlan against these. Do not add steps to install or locate a tool listed as available.';
+
+  return `## Verified environment
+
+vibe established the following by executing each tool inside each agent's own shell before this run began. These are observations, not assumptions.
+
+${lines.join('\n')}
+${verification}${caution}
+
+`;
+}
 
 /**
  * Reviewer instruction against symptom-by-symptom review.
@@ -51,13 +109,17 @@ Fix the cause, not the line.
   checked for the same class of problem**, and what you found. "Checked X and Y,
   they were already correct" is useful; silence is not.`;
 
-export function planPrompt(task: string, extraContext: string | null): string {
+export function planPrompt(
+  task: string,
+  extraContext: string | null,
+  environment?: EnvironmentFacts | null,
+): string {
   return `You are planning an implementation. Do NOT write any code or modify any files - this is a planning pass only.
 
 ## Task
 ${task}
 ${extraContext ? `\n## Additional context\n${extraContext}\n` : ''}
-## What to produce
+${environmentBlock(environment, 'planner')}## What to produce
 
 Investigate the codebase first (read files, search, inspect the build and test setup), then produce a plan detailed enough that another engineer could execute it without asking you anything.
 
@@ -86,12 +148,15 @@ export function critiquePrompt(
   assumptions: readonly Assumption[],
   round: number,
   hasMemory: boolean,
+  environment?: EnvironmentFacts | null,
 ): string {
   return `You are a senior engineer reviewing an implementation plan before any code is written. Be adversarial: your job is to find what is wrong with it, not to praise it.${
     round > 1 ? continuityNote(round, hasMemory, 'plan') : ''
   }
 
 Read the actual repository to check the plan's claims against reality. A plan that references a file, function, or API that does not exist is a P1.
+
+${environmentBlock(environment, 'reviewer')}
 
 ## Severity
 
@@ -202,12 +267,15 @@ export function reviewPrompt(
   planMd: string,
   round: number,
   hasMemory: boolean,
+  environment?: EnvironmentFacts | null,
 ): string {
   return `You are reviewing a code change against the plan it was meant to implement.${
     round > 1 ? continuityNote(round, hasMemory, 'change') : ''
   }
 
 Read the repository as needed - the diff is context, not the whole picture. Check the surrounding code the change interacts with, and run the tests if that is the fastest way to settle a question.
+
+${environmentBlock(environment, 'reviewer')}
 
 Judge two things:
 1. **Correctness on its own terms** - bugs, security issues, race conditions, unhandled errors, resource leaks, broken edge cases.

@@ -40,6 +40,11 @@ export const DEFAULTS: Config = {
     maxTokens: 0,
     waitOnRateLimit: true,
     maxWaitMinutes: 360,
+    // Planning gets at most 40% of the ceiling. A plan that has eaten more
+    // than that has not left enough to implement and review what it describes,
+    // and the round counter alone will not notice - the run that motivated
+    // this spent its whole budget on plan revisions and never wrote a line.
+    planShare: 0.4,
   },
   questions: {
     // Codex answers Claude's blocking questions first. Anything Codex flags as
@@ -181,6 +186,9 @@ function validate(cfg: Config): void {
   }
   if (!Number.isFinite(cfg.budget.maxTokens) || cfg.budget.maxTokens < 0) {
     throw new Error('budget.maxTokens must be zero (disabled) or a positive number');
+  }
+  if (!Number.isFinite(cfg.budget.planShare) || cfg.budget.planShare < 0 || cfg.budget.planShare >= 1) {
+    throw new Error('budget.planShare must be between 0 (disabled) and 1 (exclusive)');
   }
   if (!Number.isFinite(cfg.budget.maxWaitMinutes) || cfg.budget.maxWaitMinutes <= 0) {
     throw new Error('budget.maxWaitMinutes must be a positive number');

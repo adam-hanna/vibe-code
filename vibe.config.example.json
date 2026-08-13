@@ -18,7 +18,8 @@
     "convergenceWindow": 3
   },
   "budget": {
-    "maxCostUsd": 25
+    "maxCostUsd": 25,
+    "planShare": 0.4
   },
   "questions": {
     "askCodex": true,

@@ -97,6 +97,7 @@ export async function orchestrate(state: RunState, cfg: Config, resume: boolean)
     log.warn(`${blockers.length} P1 finding(s): ${blockers.map((f) => f.id).join(', ')}`);
     for (const f of blockers) log.info(`  - ${f.title}`);
 
+    guardPlanBudget(state, cfg, blockers);
     guardProgress(state, cfg, critique.findings, blockers, {
       cap: cfg.loop.maxPlanRounds,
       round: state.planRound + 1,
@@ -218,6 +219,38 @@ interface GuardArgs {
 }
 
 /** Both brakes that stop a loop from running forever on the same disagreement. */
+/**
+ * Stop planning that has spent more than its share of the ceiling.
+ *
+ * Everything charged so far belongs to the plan phase - this runs before any
+ * implementation turn - so the run's own totals are the plan's totals. The
+ * round counter cannot see this: rounds can be cheap or enormous, and the run
+ * that motivated this had single revisions costing 12.7M tokens.
+ */
+export function guardPlanBudget(state: RunState, cfg: Config, blockers: readonly Finding[]): void {
+  const share = cfg.budget.planShare;
+  if (share <= 0) return;
+
+  const costCap = cfg.budget.maxCostUsd * share;
+  const tokenCap = cfg.budget.maxTokens > 0 ? cfg.budget.maxTokens * share : 0;
+  const overCost = state.costUsd > costCap;
+  const overTokens = tokenCap > 0 && state.tokensUsed > tokenCap;
+  if (!overCost && !overTokens) return;
+
+  const spent = overCost
+    ? `~$${state.costUsd.toFixed(2)} of the $${cfg.budget.maxCostUsd} ceiling`
+    : `${fmtTokens(state.tokensUsed)} of the ${fmtTokens(cfg.budget.maxTokens)} token ceiling`;
+
+  throw new Escalation(
+    EXIT.BUDGET,
+    `Planning has used ${spent} (${(share * 100).toFixed(0)}% cap) with ` +
+      `${blockers.length} P1(s) still open, and has not reached implementation. ` +
+      'Narrow the task or raise budget.planShare.',
+    null,
+    [...blockers],
+  );
+}
+
 function guardProgress(
   state: RunState,
   cfg: Config,
@@ -483,7 +516,7 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 async function runPlan(state: RunState, cfg: Config, cwd: string): Promise<Plan> {
   log.step('Claude is planning (read-only)');
   const text = await claudeStep(state, cfg, {
-    prompt: P.planPrompt(state.task, state.extraContext),
+    prompt: P.planPrompt(state.task, state.extraContext, state.environment),
     cwd,
     permissionMode: 'plan',
     tools: PLAN_TOOLS,
@@ -584,6 +617,7 @@ async function runCritique(
       plan.assumptions,
       state.planRound + 1,
       codexHasMemory(state, cfg),
+      state.environment,
     ),
     schemaName: `critique-${state.planRound}`,
   });
@@ -607,6 +641,7 @@ async function runReview(
       plan.plan_md,
       state.reviewRound + 1,
       codexHasMemory(state, cfg),
+      state.environment,
     ),
     schemaName: `review-${state.reviewRound}`,
   });

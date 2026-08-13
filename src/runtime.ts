@@ -305,6 +305,30 @@ export interface PreparedEnvironment {
   mechanisms: readonly EnvMechanism[];
 }
 
+/** What one agent's shell was observed to be and to have. */
+export interface AgentEnvironmentFacts {
+  provider: AgentProvider;
+  shell: AgentShell;
+  pathStyle: PathStyle;
+  repaired: boolean;
+  tools: { name: string; available: boolean; version: string | null }[];
+}
+
+/**
+ * Verified environment facts, for the agents' prompts.
+ *
+ * These belong in the review prompts because a reviewer with no way to check
+ * an environment will reason about it from its own, and be wrong: Codex runs
+ * in a deliberately restricted read-only sandbox and repeatedly raised
+ * "no Node runtime is available" as a plan-blocking P1 while the implementer
+ * had a working one. That cost three plan rounds on a healthy setup.
+ */
+export interface EnvironmentFacts {
+  agents: AgentEnvironmentFacts[];
+  verifyCommand: string | null;
+  verifyRuns: number;
+}
+
 export interface ProbeContext {
   /** Host-native working directory the agent will run in. */
   cwd: string;
