@@ -59,9 +59,16 @@ export async function markBase(cwd: string): Promise<string | null> {
 }
 
 export async function commitAll(cwd: string, message: string): Promise<string | null> {
-  await git(cwd, ['add', '-A']);
-  const { stdout: pending } = await git(cwd, ['status', '--porcelain']);
-  if (!pending) {
+  // Exclude vibe's own run directory. It lives inside the target repo so the
+  // artifacts sit next to the work they describe, but `add -A` would otherwise
+  // commit plans, schemas and Codex transcripts into the user's history as
+  // part of "implement approved plan".
+  await git(cwd, ['add', '-A', '--', '.', ':(exclude).vibe', ':(exclude).vibe/**']);
+  // Ask what is *staged*, not what is dirty. `.vibe` stays permanently
+  // untracked by design, so a working-tree check would always report pending
+  // work and every no-op round would attempt an empty commit.
+  const { stdout: staged } = await git(cwd, ['diff', '--cached', '--name-only']);
+  if (!staged) {
     detail('nothing to commit');
     return null;
   }

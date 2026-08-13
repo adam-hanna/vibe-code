@@ -17,6 +17,23 @@ export function claudeBin(): string {
   return cachedBin;
 }
 
+let sessionArgs: readonly string[] = [];
+
+/**
+ * Arguments every turn in this run must carry - currently the `--settings`
+ * file holding the environment repair.
+ *
+ * Set once by preflight rather than threaded through each call site. An
+ * earlier version returned the repair args from preflight and left callers to
+ * pass them; nothing did, so the repair applied only to preflight's own probe
+ * turns and the implementer had to patch its own PATH by hand. Applying them
+ * inside `claudeTurn` makes that omission impossible, including for the
+ * rotation turns issued from context.ts.
+ */
+export function setSessionArgs(args: readonly string[]): void {
+  sessionArgs = args;
+}
+
 export interface ClaudeTurnOptions {
   prompt: string;
   sessionId: string;
@@ -62,6 +79,7 @@ export async function claudeTurn(options: ClaudeTurnOptions): Promise<ClaudeTurn
   args.push(resume ? '--resume' : '--session-id', sessionId);
   args.push('--model', model, '--effort', effort);
   if (jsonSchema) args.push('--json-schema', JSON.stringify(jsonSchema));
+  args.push(...sessionArgs);
   // Variadic flags must come last: they greedily consume following tokens.
   if (tools && tools.length > 0) args.push('--tools', ...tools);
 

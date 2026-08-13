@@ -56,6 +56,17 @@ export const DEFAULTS: Config = {
     compactAboveRatio: 0.5,
     compactDuringCodex: true,
   },
+  verify: {
+    enabled: true,
+    // Auto-detected from package.json unless set.
+    command: null,
+    timeoutMs: 15 * 60 * 1000,
+    // Three, not one. Measured on the run that motivated this gate: a racy
+    // lock implementation failed roughly half its executions, and a single
+    // sample called it green twice in a row. At p=0.5 one run catches 50%,
+    // three catch 87%. The cost is linear and small; the false pass is not.
+    runs: 3,
+  },
   toolchain: {
     // Deliberately minimal. `git` is needed in every phase because vibe commits
     // per round; node and npm only matter once something is being built or
@@ -95,6 +106,7 @@ function mergeConfig(base: Config, override: unknown): Config {
     questions: mergeSection(base.questions, override['questions']),
     git: mergeSection(base.git, override['git']),
     context: mergeSection(base.context, override['context']),
+    verify: mergeSection(base.verify, override['verify']),
     toolchain: mergeToolchain(base.toolchain, override['toolchain']),
   };
 }
@@ -113,6 +125,18 @@ function mergeToolchain(base: ToolchainContract, override: unknown): ToolchainCo
     if (isRecord(requirement)) out[tool] = requirement as unknown as ToolRequirement;
   }
   return out;
+}
+
+/**
+ * Layer CLI overrides onto an already-resolved config.
+ *
+ * Used on resume, where the base is the config the run started with rather
+ * than freshly-loaded defaults.
+ */
+export function applyOverrides(base: Config, overrides: ConfigOverrides): Config {
+  const merged = mergeConfig(base, overrides);
+  validate(merged);
+  return merged;
 }
 
 /** Precedence: defaults < vibe.config.json in the target repo < CLI flags. */
@@ -168,6 +192,15 @@ function validate(cfg: Config): void {
   }
   if (!Number.isFinite(cfg.codex.timeoutMs) || cfg.codex.timeoutMs <= 0) {
     throw new Error('codex.timeoutMs must be a positive number');
+  }
+  if (!Number.isFinite(cfg.verify.timeoutMs) || cfg.verify.timeoutMs <= 0) {
+    throw new Error('verify.timeoutMs must be a positive number');
+  }
+  if (!Number.isInteger(cfg.verify.runs) || cfg.verify.runs < 1) {
+    throw new Error('verify.runs must be a positive integer');
+  }
+  if (cfg.verify.command !== null && typeof cfg.verify.command !== 'string') {
+    throw new Error('verify.command must be a command string or null to auto-detect');
   }
   validateToolchain(cfg.toolchain);
 }

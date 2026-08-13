@@ -34,6 +34,12 @@
     "compactAboveRatio": 0.5,
     "compactDuringCodex": true
   },
+  "verify": {
+    "enabled": true,
+    "command": null,
+    "timeoutMs": 900000,
+    "runs": 3
+  },
   "toolchain": {
     "git": { "probe": "git --version", "phases": ["plan", "implement", "review"] },
     "node": { "probe": "node --version", "minVersion": "20", "phases": ["implement", "review"], "agents": ["claude"] },

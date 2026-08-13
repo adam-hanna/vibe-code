@@ -99,6 +99,23 @@ export interface ContextConfig {
   enabled: boolean;
 }
 
+export interface VerifyConfig {
+  enabled: boolean;
+  /** Shell command to run. Null auto-detects (`npm test` when a test script exists). */
+  command: string | null;
+  timeoutMs: number;
+  /**
+   * How many times a passing command must pass.
+   *
+   * Not paranoia. The first run to reach implementation shipped a concurrency
+   * fix that failed roughly half its executions; the implementer ran it once,
+   * saw green, and reported success truthfully. A later four-run check passed
+   * cleanly and then failed on the next attempt. A single execution cannot
+   * distinguish working code from a race that happened to win.
+   */
+  runs: number;
+}
+
 export interface Config {
   claude: ClaudeConfig;
   codex: CodexConfig;
@@ -107,6 +124,14 @@ export interface Config {
   questions: QuestionsConfig;
   git: GitConfig;
   context: ContextConfig;
+  /**
+   * Does the code actually run.
+   *
+   * The loop previously terminated on "the reviewer found no P1s", which is a
+   * statement about reading, not about working. It declared success over an
+   * implementation that failed its own suite most of the time.
+   */
+  verify: VerifyConfig;
   /**
    * Tools each agent must be able to *run*, declared up front.
    *
@@ -234,6 +259,15 @@ export interface RunState {
   /** Carried into the first turn of a rotated session. */
   handoff: string | null;
   contextRatio: number;
+  /**
+   * The effective config this run started with.
+   *
+   * Resume reloaded config from defaults, so a run launched with
+   * `--claude-model sonnet` silently continued on opus - a 4x cost change
+   * chosen by accident. Stored settings are the base on resume; new flags
+   * still override them. Optional so runs created before this existed load.
+   */
+  config?: Config;
   plan: Plan | null;
   pendingAnswers: Answer[] | null;
   extraContext: string | null;

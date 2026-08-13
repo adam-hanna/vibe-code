@@ -1,12 +1,13 @@
 import { readFileSync, existsSync, renameSync } from 'node:fs';
 import path from 'node:path';
-import { EFFORTS, loadConfig } from '@src/config.js';
+import { applyOverrides, EFFORTS, loadConfig } from '@src/config.js';
 import { artifact, createRun, listRuns, loadRun, recordEvent, saveState } from '@src/run.js';
 import { Escalation, EXIT, orchestrate, writeEscalation } from '@src/orchestrator.js';
 import type { ExitCode } from '@src/orchestrator.js';
-import { claudeBin } from '@src/claude.js';
+import { claudeBin, setSessionArgs } from '@src/claude.js';
 import { codexBin } from '@src/codex.js';
 import { preflight } from '@src/preflight.js';
+import { detectCommand } from '@src/verify.js';
 import type { AgentPreflight } from '@src/preflight.js';
 import * as git from '@src/git.js';
 import * as log from '@src/log.js';
@@ -41,6 +42,9 @@ Options
   --no-codex-answers         Escalate every blocking question straight to you
   --blocking-questions-only  Only send Codex the questions marked blocking
   --no-codex-session         Run each Codex turn as a fresh one-shot (no memory)
+  --verify-command <cmd>     Verification command (default: auto-detect, e.g. npm test)
+  --verify-runs <n>          Times it must pass (default: 3; catches races)
+  --no-verify                Do not run the verification gate
   --skip-probe               Skip the agent environment preflight
   -h, --help
 
@@ -70,6 +74,9 @@ interface ParsedArgs {
     noCodexSession?: boolean;
     blockingQuestionsOnly?: boolean;
     skipProbe?: boolean;
+    noVerify?: boolean;
+    verifyCommand?: string;
+    verifyRuns?: number;
     help?: boolean;
   };
 }
@@ -147,6 +154,9 @@ function parseArgs(args: readonly string[]): ParsedArgs {
       case '--no-codex-session': out.flags.noCodexSession = true; break;
       case '--blocking-questions-only': out.flags.blockingQuestionsOnly = true; break;
       case '--skip-probe': out.flags.skipProbe = true; break;
+      case '--no-verify': out.flags.noVerify = true; break;
+      case '--verify-command': out.flags.verifyCommand = next(); break;
+      case '--verify-runs': out.flags.verifyRuns = nextNum(); break;
       case '-h':
       case '--help': out.flags.help = true; break;
       default: throw new Error(`Unknown option "${a}"`);
@@ -170,6 +180,7 @@ function buildOverrides(flags: ParsedArgs['flags']): ConfigOverrides {
   const gitCfg: Partial<Config['git']> = {};
   const questions: Partial<Config['questions']> = {};
   const context: Partial<Config['context']> = {};
+  const verify: Partial<Config['verify']> = {};
 
   if (flags.claudeModel !== undefined) claude.model = flags.claudeModel;
   if (flags.claudeEffort !== undefined) claude.effort = asEffort(flags.claudeEffort, '--claude-effort');
@@ -186,8 +197,11 @@ function buildOverrides(flags: ParsedArgs['flags']): ConfigOverrides {
   if (flags.noCodexAnswers) questions.askCodex = false;
   if (flags.noCodexSession) codex.persistSession = false;
   if (flags.blockingQuestionsOnly) questions.answerNonBlocking = false;
+  if (flags.noVerify) verify.enabled = false;
+  if (flags.verifyCommand !== undefined) verify.command = flags.verifyCommand;
+  if (flags.verifyRuns !== undefined) verify.runs = flags.verifyRuns;
 
-  return { claude, codex, loop, budget, git: gitCfg, questions, context };
+  return { claude, codex, loop, budget, git: gitCfg, questions, context, verify };
 }
 
 async function cmdRun(args: readonly string[], planOnly: boolean): Promise<ExitCode> {
@@ -207,6 +221,9 @@ async function cmdRun(args: readonly string[], planOnly: boolean): Promise<ExitC
   const targetDir = path.resolve(flags.cwd ?? process.cwd());
   const cfg = loadConfig(targetDir, buildOverrides(flags));
   const state = createRun(targetDir, task, planOnly);
+  // Persist the effective settings so resume continues on them.
+  state.config = cfg;
+  saveState(state);
 
   if (flags.context !== undefined) {
     const file = path.resolve(flags.context);
@@ -264,7 +281,16 @@ async function cmdResume(args: readonly string[]): Promise<ExitCode> {
   }
 
   const state = loadRun(targetDir, id);
-  const cfg = loadConfig(targetDir, buildOverrides(flags));
+  // The run's own settings are the base, so a resumed run continues on the
+  // model and effort it started with. Flags given now still win.
+  const stored = state.config;
+  const cfg =
+    stored === undefined
+      ? loadConfig(targetDir, buildOverrides(flags))
+      : applyOverrides(stored, buildOverrides(flags));
+  if (stored !== undefined) {
+    log.detail(`resuming with the run's settings: claude ${cfg.claude.model}/${cfg.claude.effort}`);
+  }
   log.attachTranscript(path.join(state.dir, 'transcript.log'));
 
   const answersFile = path.join(state.dir, 'NEEDS-INPUT.md');
@@ -403,8 +429,13 @@ async function runPreflight(state: RunState, cfg: Config): Promise<ExitCode | nu
   for (const warning of report.warnings) log.warn(warning);
 
   if (report.ok) {
+    // Carry the repair into every turn of the run, not just the probe turns
+    // preflight issued itself.
+    const repairArgs = report.claude.prepared?.extraArgs ?? [];
+    setSessionArgs(repairArgs);
+    if (repairArgs.length > 0) log.info('Environment repair will be applied to every Claude turn');
     log.ok('Toolchain contract satisfied');
-    recordEvent(state, 'preflight-ok', {});
+    recordEvent(state, 'preflight-ok', { repairArgs: repairArgs.length > 0 });
     return null;
   }
 
@@ -542,6 +573,16 @@ async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
       `  compaction ${cfg.context.enabled ? `above ${(cfg.context.compactAboveRatio * 100).toFixed(0)}%` : 'off'}` +
         `${cfg.context.compactDuringCodex ? ' (overlapped with Codex)' : ''}`,
     );
+    if (cfg.verify.enabled) {
+      const cmd = cfg.verify.command ?? detectCommand(targetDir);
+      log.info(
+        cmd === null
+          ? '  verify: enabled but no command configured or detected - runs will not be gated'
+          : `  verify: ${cmd} (must pass ${cfg.verify.runs}x)`,
+      );
+    } else {
+      log.info('  verify: off - the loop will not check that the code runs');
+    }
   } catch (err) {
     log.fail(`config: ${err instanceof Error ? err.message : String(err)}`);
     bad++;

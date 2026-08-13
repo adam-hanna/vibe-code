@@ -8,6 +8,7 @@ import { ANSWERS_SCHEMA, FINDINGS_SCHEMA, PLAN_SCHEMA } from '@src/schemas.js';
 import { artifact, artifactDir, detectOscillation, p1Signature, recordEvent, saveState } from '@src/run.js';
 import { parseAnswers, parseFindings, parsePlan, p1s } from '@src/validate.js';
 import { withConcurrentCompaction, rotateSession, shouldRotate } from '@src/context.js';
+import { describeFailure, runVerification } from '@src/verify.js';
 import type {
   Answer,
   Config,
@@ -138,6 +139,34 @@ export async function orchestrate(state: RunState, cfg: Config, resume: boolean)
   saveState(state);
 
   for (;;) {
+    // Does it run, before asking whether it reads well. A failing suite is an
+    // unambiguous P1, and spending a reviewer turn on code that does not
+    // execute buys an opinion about the wrong thing.
+    const verified = await runGate(state, cfg, cwd);
+    if (verified !== null) {
+      guardProgress(state, cfg, [verified], [verified], {
+        cap: cfg.loop.maxReviewRounds,
+        round: state.reviewRound + 1,
+        capName: 'maxReviewRounds',
+        deadlockMsg: 'verification keeps failing the same way after fixes',
+      });
+
+      state.reviewRound += 1;
+      saveState(state);
+
+      log.step('Fixing the verification failure');
+      const repair = await claudeStep(state, cfg, {
+        prompt: P.fixPrompt([verified], state.reviewRound),
+        cwd,
+        permissionMode: 'bypassPermissions',
+        timeoutMs: cfg.claude.implementTimeoutMs,
+        label: `verify-fix-${state.reviewRound}`,
+      });
+      artifact(state, `verify-fix-${state.reviewRound}.md`, repair);
+      await maybeCommit(cfg, cwd, `vibe: fix verification failure (round ${state.reviewRound})`);
+      continue;
+    }
+
     log.heading(`Code review (round ${state.reviewRound + 1})`);
     const review = await withConcurrentCompaction(state, cfg, () => runReview(state, cfg, cwd, plan));
     artifact(state, `code-review-${state.reviewRound}.json`, review);
@@ -250,6 +279,53 @@ interface ClaudeStepArgs {
 }
 
 /** Wraps a Claude turn with session rotation, cost accounting and the budget ceiling. */
+/**
+ * Run the project's verification command.
+ *
+ * Returns a P1 finding when it fails, or null when the code is good to review.
+ * The finding is shaped like any other so it flows through the existing fix
+ * loop, oscillation detection and round caps rather than needing its own.
+ */
+async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Finding | null> {
+  if (!cfg.verify.enabled) return null;
+
+  log.step('Verifying');
+  const result = await runVerification(cwd, cfg.verify, cfg.toolchain);
+
+  if (result.skipped !== null) {
+    // Say so rather than letting silence read as a pass.
+    log.warn(`Verification skipped: ${result.skipped}`);
+    recordEvent(state, 'verify_skipped', { reason: result.skipped });
+    return null;
+  }
+
+  if (result.ok) {
+    log.ok(`Verification passed: ${result.command} (${result.runs}x)`);
+    recordEvent(state, 'verify_passed', { command: result.command, runs: result.runs });
+    return null;
+  }
+
+  log.warn(`Verification failed: ${result.command} (attempt ${result.failedRun} of ${result.runs})`);
+  recordEvent(state, 'verify_failed', {
+    command: result.command,
+    failedRun: result.failedRun,
+    exitCode: result.exitCode,
+  });
+  artifact(state, `verify-failure-${state.reviewRound}.txt`, result.output);
+
+  return {
+    // A stable id: an identical failure across rounds is what oscillation
+    // detection needs to see to conclude the fixer is not making progress.
+    id: 'verification-failing',
+    severity: 'P1',
+    title: `${result.command} does not pass`,
+    detail: describeFailure(result),
+    suggested_fix:
+      'Make the verification command pass. If it fails only sometimes, the defect is a race - ' +
+      'fix the underlying synchronisation rather than retrying or loosening the test.',
+  };
+}
+
 async function claudeStep(state: RunState, cfg: Config, args: ClaudeStepArgs): Promise<string> {
   // A rotation that could not be overlapped with Codex work happens here, at a
   // turn boundary - never mid-turn.
