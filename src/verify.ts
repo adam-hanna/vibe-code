@@ -16,6 +16,26 @@ export interface VerifyResult {
   output: string;
   /** Set when verification could not run at all, as distinct from failing. */
   skipped: string | null;
+  /**
+   * Set when the command itself could not start, as distinct from the project
+   * failing its own checks.
+   */
+  unlaunchable: string | null;
+}
+
+/**
+ * A command that never ran looks exactly like a failing test suite from the
+ * outside, and the fix loop cannot repair it - no source change will make a
+ * mistyped path resolve. Observed costing two fix rounds and two commits'
+ * worth of agent time on a `--verify-command` given a POSIX path on Windows.
+ */
+const LAUNCH_FAILURE_RE =
+  /\bMODULE_NOT_FOUND\b|cannot find module|is not recognized as an internal or external command|command not found|\bENOENT\b|no such file or directory/i;
+
+function launchFailure(output: string, exitCode: number | null): string | null {
+  if (exitCode === 127) return 'the command was not found';
+  const hit = LAUNCH_FAILURE_RE.exec(output);
+  return hit ? `the command could not start (${hit[0]})` : null;
 }
 
 /**
@@ -39,6 +59,7 @@ export async function runVerification(
     exitCode: null,
     output: '',
     skipped: null,
+    unlaunchable: null,
   };
 
   if (command === null) {
@@ -58,6 +79,7 @@ export async function runVerification(
         runs: attempt,
         exitCode: result.code,
         output: tail(result.output),
+        unlaunchable: launchFailure(result.output, result.code),
       };
     }
   }

@@ -312,6 +312,20 @@ async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Findi
     return null;
   }
 
+  // A command that never started cannot be fixed by editing source. Stopping
+  // here costs one message; the alternative was observed burning two fix
+  // rounds asking an agent to repair a mistyped command path.
+  if (result.unlaunchable !== null) {
+    artifact(state, `verify-unlaunchable-${state.reviewRound}.txt`, result.output);
+    throw new Escalation(
+      EXIT.PREFLIGHT,
+      `The verification command could not run: ${result.unlaunchable}.\n` +
+        `Command: ${result.command}\n` +
+        'This is a configuration problem, not a defect in the code. Fix ' +
+        '--verify-command (or verify.command), then resume.',
+    );
+  }
+
   log.warn(`Verification failed: ${result.command} (attempt ${result.failedRun} of ${result.runs})`);
   recordEvent(state, 'verify_failed', {
     command: result.command,
