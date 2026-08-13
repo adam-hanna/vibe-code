@@ -295,7 +295,19 @@ async function cmdResume(args: readonly string[]): Promise<ExitCode> {
 
   const answersFile = path.join(state.dir, 'NEEDS-INPUT.md');
   if (existsSync(answersFile)) {
-    const answers = parseHumanAnswers(readFileSync(answersFile, 'utf8'));
+    const raw = readFileSync(answersFile, 'utf8');
+    // A round-cap or oscillation stall writes the same filename but reports
+    // findings rather than questions. Demanding answers there made those runs
+    // unresumable: there was nothing to answer, and the only way forward was
+    // to delete the file by hand.
+    if (!raw.includes('**Your answer:**')) {
+      log.info('Previous stop reported findings, not questions - continuing with raised limits.');
+      renameSync(answersFile, path.join(state.dir, `stalled-${state.planRound}.md`));
+      log.heading(`Resuming ${state.id}`);
+      return execute(state, cfg, true, flags.skipProbe === true);
+    }
+
+    const answers = parseHumanAnswers(raw);
     if (answers.length === 0) {
       log.fail(`No answers found in ${answersFile}`);
       log.info('Fill in the "**Your answer:**" blocks (replace the empty "> " line), then resume.');

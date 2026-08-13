@@ -3,6 +3,54 @@ import type { Answer, Assumption, Finding, OpenQuestion } from '@src/types.js';
 const RESPOND_WITH_JSON =
   'Respond with JSON matching the required schema. No prose outside the JSON.';
 
+/**
+ * Reviewer instruction against symptom-by-symptom review.
+ *
+ * Observed failure mode: the reviewer reports one narrow defect, the fixer
+ * patches exactly that line, and the next round surfaces the consequences as
+ * fresh P1s. On one run the counts went 1 -> 1 -> 3 across rounds, every
+ * finding correct and every one caused by the previous round's patch. Rounds
+ * are expensive, so a finding that names the root cause and every affected
+ * site is worth far more than three findings discovered one round apart.
+ */
+const REVIEW_BREADTH = `## Review breadth
+
+Do not stop at the first instance of a defect.
+
+- **Generalise it.** For each defect, name the *class* of mistake, then look for
+  the same class elsewhere - the same wrong assumption in a sibling function,
+  the same unchecked boundary on another code path, the same pattern copied
+  into a second module. Report every site you find, in one finding that lists
+  them, rather than one site now and its twin two rounds later.
+- **Trace downstream.** Ask what depends on the defective behaviour. A caller
+  relying on the current output, a test asserting it, a documented contract
+  that would become false once it is fixed - all of that belongs in the finding.
+- **Attack the previous round's fixes.** Where a fix landed, the likeliest new
+  defect is a consequence of that fix: a narrowed condition that now excludes a
+  valid case, a changed return shape a caller still reads the old way.
+- **Prefer root causes.** Given a choice between a finding that names the
+  underlying error and one that names a symptom, report the former and list the
+  symptoms under it. Symptom-level findings produce symptom-level patches.`;
+
+/**
+ * The other half: a fixer that changes only the reported line reproduces the
+ * same loop from the implementation side.
+ */
+const FIX_BREADTH = `## Fix breadth
+
+Fix the cause, not the line.
+
+- For each finding, decide what the underlying mistake is, then search for the
+  same mistake elsewhere and fix those occurrences too. A reviewer who found one
+  instance will find its twin next round, and that costs another full cycle.
+- Before changing anything, trace what depends on it: callers, tests,
+  serialised shapes, documented behaviour. Update them in the same pass.
+- After each change, ask what it could break that previously worked. Narrowing a
+  condition to exclude a bad case often excludes good ones too.
+- In your report, state for each finding what you changed, **what else you
+  checked for the same class of problem**, and what you found. "Checked X and Y,
+  they were already correct" is useful; silence is not.`;
+
 export function planPrompt(task: string, extraContext: string | null): string {
   return `You are planning an implementation. Do NOT write any code or modify any files - this is a planning pass only.
 
@@ -54,6 +102,8 @@ Read the actual repository to check the plan's claims against reality. A plan th
 Be strict about what earns P1. This plan enters an automated implement loop the moment you report zero P1s, so a P1 you miss ships. Equally, a P2 you inflate to P1 burns a full revision cycle - every P1 costs a round trip.
 
 Give each finding a stable kebab-case \`id\` so it can be tracked across rounds.
+
+${REVIEW_BREADTH}
 
 ## The plan
 
@@ -108,7 +158,9 @@ An independent reviewer raised the following. Every **P1 must be resolved** - th
 
 ${findings.map(formatFinding).join('\n\n')}
 
-For each P1: fix the plan, or, if you believe the finding is wrong, say so explicitly in the plan with your reasoning. Do not silently ignore one.`);
+For each P1: fix the plan, or, if you believe the finding is wrong, say so explicitly in the plan with your reasoning. Do not silently ignore one.
+
+${FIX_BREADTH}`);
   }
 
   if (answers && answers.length > 0) {
@@ -171,6 +223,8 @@ Reporting zero P1s ends the loop and the change is considered done, so do not wa
 
 Give each finding a stable kebab-case \`id\`.
 
+${REVIEW_BREADTH}
+
 ## Files changed
 
 ${changedFiles.length > 0 ? changedFiles.map((f) => `- ${f}`).join('\n') : '(none detected)'}
@@ -194,6 +248,8 @@ export function fixPrompt(findings: readonly Finding[], round: number): string {
 Resolve **every P1**. Address P2s where the fix is contained and low-risk; skip P3s unless trivial.
 
 ${findings.map(formatFinding).join('\n\n')}
+
+${FIX_BREADTH}
 
 Re-run the project's tests after fixing. If you believe a finding is incorrect, fix nothing for it but explain why in your final message - do not silently skip it.
 
