@@ -1,3 +1,5 @@
+import type { ToolchainContract } from '@src/runtime.js';
+
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 export type Severity = 'P1' | 'P2' | 'P3';
 export type Verdict = 'APPROVE' | 'REVISE';
@@ -105,6 +107,15 @@ export interface Config {
   questions: QuestionsConfig;
   git: GitConfig;
   context: ContextConfig;
+  /**
+   * Tools each agent must be able to *run*, declared up front.
+   *
+   * Verified before planning so a broken environment costs 30 seconds instead
+   * of the 35 minutes it took to reach the implementation phase and discover
+   * the shell had no node. Also keeps environment prerequisites out of the
+   * review loop, where they consumed a round as a plan-stage P1.
+   */
+  toolchain: ToolchainContract;
 }
 
 export interface LoadedConfig extends Config {

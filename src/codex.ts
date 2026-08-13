@@ -9,11 +9,22 @@ let cachedBin: string | null = null;
 export function codexBin(): string {
   cachedBin ??= resolveBin('codex', {
     envVar: 'VIBE_CODEX_BIN',
+    // `.sandbox-bin` appears on PATH ahead of the real install on this layout,
+    // but its `codex.exe` cannot execute shell commands without a
+    // `codex-code-mode-host.exe` that is not shipped alongside it. Skipping it
+    // during the PATH scan while keeping it as a last-resort fallback means a
+    // machine where it is the only copy still works.
+    deprioritize: /[\\/]\.sandbox-bin[\\/]/i,
     fallbacks: [
-      '~/.codex/.sandbox-bin/codex.exe',
+      // The versioned install directory first. `~/.codex/.sandbox-bin/codex.exe`
+      // is a sandbox helper copy that expects a sibling
+      // `codex-code-mode-host.exe`; where that sibling is absent every command
+      // fails with "failed to spawn code-mode host", which reads like a broken
+      // toolchain rather than a mis-resolved binary. Keep it last.
       '~/AppData/Local/OpenAI/Codex/bin/*/codex.exe',
       '~/.local/bin/codex',
       '/usr/local/bin/codex',
+      '~/.codex/.sandbox-bin/codex.exe',
     ],
   });
   return cachedBin;

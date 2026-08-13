@@ -91,9 +91,32 @@ export interface ToolRequirement {
   /** Semver-ish floor, compared against the parsed probe output. */
   minVersion?: string | undefined;
   phases: readonly Phase[];
+  /**
+   * Which agents must be able to run this. Omitted means all of them.
+   *
+   * `phases` alone says *when* a tool is needed, not *who* needs it, and the
+   * two differ: the implementer runs the test suite during review while the
+   * reviewer only reads the diff. Requiring a runtime of both makes the
+   * reviewer's deliberately restricted sandbox look like a broken environment.
+   */
+  agents?: readonly AgentProvider[] | undefined;
 }
 
 export type ToolchainContract = Readonly<Record<string, ToolRequirement>>;
+
+/** Narrow a contract to the tools one agent is responsible for running. */
+export function contractForAgent(
+  contract: ToolchainContract,
+  provider: AgentProvider,
+): ToolchainContract {
+  const out: Record<string, ToolRequirement> = {};
+  for (const [tool, requirement] of Object.entries(contract)) {
+    if (requirement.agents === undefined || requirement.agents.includes(provider)) {
+      out[tool] = requirement;
+    }
+  }
+  return out;
+}
 
 export type ViolationReason = 'missing' | 'unreachable' | 'version' | 'not-probed';
 
@@ -126,6 +149,7 @@ export function validateContract(
 
   for (const [tool, requirement] of Object.entries(contract)) {
     if (!requirement.phases.includes(phase)) continue;
+    if (requirement.agents !== undefined && !requirement.agents.includes(runtime.provider)) continue;
 
     const hostExecutable = hostExecutables[tool] ?? null;
     const base = { provider: runtime.provider, tool, hostExecutable } as const;

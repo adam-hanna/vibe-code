@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
+import type { AgentProvider, ToolchainContract, ToolRequirement, Phase } from '@src/runtime.js';
 import type { Config, ConfigOverrides, Effort, LoadedConfig, Sandbox } from '@src/types.js';
 
 export const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
@@ -55,6 +56,18 @@ export const DEFAULTS: Config = {
     compactAboveRatio: 0.5,
     compactDuringCodex: true,
   },
+  toolchain: {
+    // Deliberately minimal. `git` is needed in every phase because vibe commits
+    // per round; node and npm only matter once something is being built or
+    // verified, so a documentation change is not blocked by a missing runtime.
+    //
+    // node and npm are required of Claude only. Codex reads the diff rather
+    // than running it, and its sandbox is read-only by design - demanding a
+    // runtime of the reviewer would fail preflight on a correct setup.
+    git: { probe: 'git --version', phases: ['plan', 'implement', 'review'] },
+    node: { probe: 'node --version', phases: ['implement', 'review'], agents: ['claude'] },
+    npm: { probe: 'npm --version', phases: ['implement', 'review'], agents: ['claude'] },
+  },
 };
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -82,7 +95,24 @@ function mergeConfig(base: Config, override: unknown): Config {
     questions: mergeSection(base.questions, override['questions']),
     git: mergeSection(base.git, override['git']),
     context: mergeSection(base.context, override['context']),
+    toolchain: mergeToolchain(base.toolchain, override['toolchain']),
   };
+}
+
+/**
+ * Merge the contract per tool rather than per known key.
+ *
+ * Unlike every other section this one has open-ended keys - a project can
+ * require `go`, `cargo` or anything else - so `mergeSection`, which iterates
+ * the base's keys, would silently discard additions.
+ */
+function mergeToolchain(base: ToolchainContract, override: unknown): ToolchainContract {
+  if (!isRecord(override)) return base;
+  const out: Record<string, ToolRequirement> = { ...base };
+  for (const [tool, requirement] of Object.entries(override)) {
+    if (isRecord(requirement)) out[tool] = requirement as unknown as ToolRequirement;
+  }
+  return out;
 }
 
 /** Precedence: defaults < vibe.config.json in the target repo < CLI flags. */
@@ -138,5 +168,41 @@ function validate(cfg: Config): void {
   }
   if (!Number.isFinite(cfg.codex.timeoutMs) || cfg.codex.timeoutMs <= 0) {
     throw new Error('codex.timeoutMs must be a positive number');
+  }
+  validateToolchain(cfg.toolchain);
+}
+
+const PHASES: readonly Phase[] = ['plan', 'implement', 'review'];
+const PROVIDERS: readonly AgentProvider[] = ['claude', 'codex'];
+
+function validateToolchain(toolchain: ToolchainContract): void {
+  for (const [tool, requirement] of Object.entries(toolchain)) {
+    const where = `toolchain.${tool}`;
+    if (typeof requirement.probe !== 'string' || requirement.probe.trim() === '') {
+      throw new Error(`${where}.probe must be a non-empty command string`);
+    }
+    if (!Array.isArray(requirement.phases) || requirement.phases.length === 0) {
+      throw new Error(`${where}.phases must list at least one of ${PHASES.join(', ')}`);
+    }
+    for (const phase of requirement.phases) {
+      if (!PHASES.includes(phase)) {
+        throw new Error(`${where}.phases contains "${phase}"; expected one of ${PHASES.join(', ')}`);
+      }
+    }
+    const min = requirement.minVersion;
+    if (min !== undefined && (typeof min !== 'string' || !/\d/.test(min))) {
+      throw new Error(`${where}.minVersion must be a version string such as "20" or "2.40.0"`);
+    }
+    const agents = requirement.agents;
+    if (agents !== undefined) {
+      if (!Array.isArray(agents) || agents.length === 0) {
+        throw new Error(`${where}.agents must list at least one of ${PROVIDERS.join(', ')}`);
+      }
+      for (const agent of agents) {
+        if (!PROVIDERS.includes(agent)) {
+          throw new Error(`${where}.agents contains "${agent}"; expected ${PROVIDERS.join(' or ')}`);
+        }
+      }
+    }
   }
 }

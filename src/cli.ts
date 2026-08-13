@@ -6,8 +6,11 @@ import { Escalation, EXIT, orchestrate, writeEscalation } from '@src/orchestrato
 import type { ExitCode } from '@src/orchestrator.js';
 import { claudeBin } from '@src/claude.js';
 import { codexBin } from '@src/codex.js';
+import { preflight } from '@src/preflight.js';
+import type { AgentPreflight } from '@src/preflight.js';
 import * as git from '@src/git.js';
 import * as log from '@src/log.js';
+import type { Phase } from '@src/runtime.js';
 import type { Answer, Config, ConfigOverrides, Effort, RunState } from '@src/types.js';
 
 const USAGE = `
@@ -38,10 +41,12 @@ Options
   --no-codex-answers         Escalate every blocking question straight to you
   --blocking-questions-only  Only send Codex the questions marked blocking
   --no-codex-session         Run each Codex turn as a fresh one-shot (no memory)
+  --skip-probe               Skip the agent environment preflight
   -h, --help
 
 Exit codes
-  0 done   1 error   2 needs your input   3 no convergence   4 ceiling hit   5 rate limited
+  0 done   1 error   2 needs your input   3 no convergence   4 ceiling hit
+  5 rate limited   6 agent environment fails the toolchain contract
 `;
 
 interface ParsedArgs {
@@ -64,6 +69,7 @@ interface ParsedArgs {
     noCodexAnswers?: boolean;
     noCodexSession?: boolean;
     blockingQuestionsOnly?: boolean;
+    skipProbe?: boolean;
     help?: boolean;
   };
 }
@@ -140,6 +146,7 @@ function parseArgs(args: readonly string[]): ParsedArgs {
       case '--no-codex-answers': out.flags.noCodexAnswers = true; break;
       case '--no-codex-session': out.flags.noCodexSession = true; break;
       case '--blocking-questions-only': out.flags.blockingQuestionsOnly = true; break;
+      case '--skip-probe': out.flags.skipProbe = true; break;
       case '-h':
       case '--help': out.flags.help = true; break;
       default: throw new Error(`Unknown option "${a}"`);
@@ -239,7 +246,7 @@ async function cmdRun(args: readonly string[], planOnly: boolean): Promise<ExitC
     );
   }
 
-  return execute(state, cfg, false);
+  return execute(state, cfg, false, flags.skipProbe === true);
 }
 
 async function cmdResume(args: readonly string[]): Promise<ExitCode> {
@@ -277,7 +284,7 @@ async function cmdResume(args: readonly string[]): Promise<ExitCode> {
   }
 
   log.heading(`Resuming ${state.id}`);
-  return execute(state, cfg, true);
+  return execute(state, cfg, true, flags.skipProbe === true);
 }
 
 /**
@@ -316,8 +323,19 @@ export function parseHumanAnswers(md: string): Answer[] {
   return answers;
 }
 
-async function execute(state: RunState, cfg: Config, resume: boolean): Promise<ExitCode> {
+async function execute(
+  state: RunState,
+  cfg: Config,
+  resume: boolean,
+  skipProbe = false,
+): Promise<ExitCode> {
   const started = Date.now();
+
+  if (!skipProbe) {
+    const gate = await runPreflight(state, cfg);
+    if (gate !== null) return gate;
+  }
+
   try {
     await orchestrate(state, cfg, resume);
     log.heading('Done');
@@ -350,6 +368,52 @@ async function execute(state: RunState, cfg: Config, resume: boolean): Promise<E
     summary(state, started);
     return EXIT.ERROR;
   }
+}
+
+/**
+ * Gate the run on both agents' execution environments.
+ *
+ * Returns an exit code to stop on, or null to proceed. Deliberately before the
+ * first planning token: the failure this replaces cost 35 minutes and surfaced
+ * as a plan-stage P1 from the reviewer rather than as an environment error.
+ */
+async function runPreflight(state: RunState, cfg: Config): Promise<ExitCode | null> {
+  const phases: Phase[] = state.planOnly ? ['plan'] : ['plan', 'implement', 'review'];
+  log.heading('Preflight');
+
+  let report: Awaited<ReturnType<typeof preflight>>;
+  try {
+    report = await preflight(state.targetDir, cfg, phases, state.dir);
+  } catch (err) {
+    log.fail(`environment probe failed: ${err instanceof Error ? err.message : String(err)}`);
+    return EXIT.PREFLIGHT;
+  }
+
+  for (const [label, result] of [
+    ['claude', report.claude],
+    ['codex', report.codex],
+  ] as const) {
+    if (result.runtime === null) continue;
+    const repaired =
+      result.prepared !== null && !result.prepared.mechanisms.includes('none')
+        ? ` (repaired via ${result.prepared.mechanisms.join(' + ')})`
+        : '';
+    log.info(`${label}: ${result.runtime.shell} / ${result.runtime.pathStyle} paths${repaired}`);
+  }
+  for (const warning of report.warnings) log.warn(warning);
+
+  if (report.ok) {
+    log.ok('Toolchain contract satisfied');
+    recordEvent(state, 'preflight-ok', {});
+    return null;
+  }
+
+  for (const reason of report.blockingReasons) log.fail(reason);
+  state.status = 'error';
+  saveState(state);
+  recordEvent(state, 'preflight-failed', { reasons: report.blockingReasons });
+  log.info('Fix the environment, or re-run with --skip-probe to proceed anyway.');
+  return EXIT.PREFLIGHT;
 }
 
 /**
@@ -411,6 +475,39 @@ function cmdList(args: readonly string[]): ExitCode {
   return EXIT.OK;
 }
 
+/** One line of runtime facts per agent, then its tool results. */
+function reportAgent(label: string, result: AgentPreflight): void {
+  if (result.runtime === null) {
+    log.fail(`${label}: probe failed - ${result.probeError ?? 'unknown error'}`);
+    return;
+  }
+  const rt = result.runtime;
+  log.ok(`${label}: ${rt.shell} / ${rt.pathStyle} paths / ${rt.platform}`);
+
+  // The snapshot is the *pre-repair* environment. Where a repair was applied
+  // and verified, report the tool as fixed rather than as the failure it was -
+  // otherwise a healthy run prints a screen of FAILs under an OK heading.
+  const repaired =
+    result.prepared !== null &&
+    !result.prepared.mechanisms.includes('none') &&
+    result.violations.length === 0 &&
+    result.probeError === null;
+
+  for (const [tool, resolution] of Object.entries(rt.tools)) {
+    const status = resolution.available ? 'OK  ' : repaired ? 'FIXED' : 'FAIL';
+    const detail = resolution.available
+      ? (resolution.version ?? 'ok')
+      : repaired
+        ? 'was unavailable; repaired'
+        : (resolution.failure ?? 'not available');
+    log.info(`  ${status.padEnd(5)} ${tool.padEnd(6)} ${detail}`);
+  }
+  if (result.prepared !== null && !result.prepared.mechanisms.includes('none')) {
+    log.info(`  repaired via ${result.prepared.mechanisms.join(' + ')}`);
+  }
+  if (result.probeError !== null) log.warn(`  ${result.probeError}`);
+}
+
 async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
   const { flags } = parseArgs(args);
   const targetDir = path.resolve(flags.cwd ?? process.cwd());
@@ -426,7 +523,10 @@ async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
     }
   };
 
-  check('node', () => process.version);
+  // vibe's own process, labelled as such. An earlier version checked only this
+  // and reported a healthy environment while the agents' shells could not run
+  // node at all - the two are unrelated, and conflating them hid the failure.
+  check('vibe host node', () => process.version);
   check('claude', claudeBin);
   check('codex', codexBin);
   check('git', git.gitBin);
@@ -452,6 +552,34 @@ async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
     if (await git.isDirty(targetDir)) log.warn('working tree is dirty');
   } else {
     log.warn(`not a git repository: ${targetDir} - no branch isolation or commits`);
+  }
+
+  if (flags.skipProbe === true) {
+    log.info('agent environments: skipped (--skip-probe)');
+    return bad > 0 ? EXIT.ERROR : EXIT.OK;
+  }
+
+  log.heading('agent environments');
+  try {
+    const cfg = loadConfig(targetDir);
+    const report = await preflight(
+      targetDir,
+      cfg,
+      ['plan', 'implement', 'review'],
+      path.join(targetDir, '.vibe'),
+    );
+    reportAgent('claude', report.claude);
+    reportAgent('codex', report.codex);
+
+    for (const warning of report.warnings) log.warn(warning);
+    for (const reason of report.blockingReasons) {
+      log.fail(reason);
+      bad++;
+    }
+    if (report.ok) log.ok('both agents satisfy the toolchain contract');
+  } catch (err) {
+    log.fail(`agent probe: ${err instanceof Error ? err.message : String(err)}`);
+    bad++;
   }
 
   return bad > 0 ? EXIT.ERROR : EXIT.OK;

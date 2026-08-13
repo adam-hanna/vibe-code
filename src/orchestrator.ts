@@ -26,6 +26,8 @@ export const EXIT = {
   NO_CONVERGENCE: 3,
   BUDGET: 4,
   RATE_LIMITED: 5,
+  /** The agents' execution environments do not satisfy the toolchain contract. */
+  PREFLIGHT: 6,
 } as const;
 
 export type ExitCode = (typeof EXIT)[keyof typeof EXIT];

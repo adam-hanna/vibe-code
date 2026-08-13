@@ -12,6 +12,12 @@ export function expandHome(p: string): string {
 export interface ResolveOptions {
   envVar?: string;
   fallbacks?: readonly string[];
+  /**
+   * Paths matching this are skipped when scanning PATH, but still honoured as
+   * explicit fallbacks. For install layouts that put a non-functional helper
+   * copy of a CLI on PATH ahead of the real one.
+   */
+  deprioritize?: RegExp;
 }
 
 /**
@@ -24,7 +30,7 @@ export interface ResolveOptions {
  * are checked before settling for one.
  */
 export function resolveBin(name: string, options: ResolveOptions = {}): string {
-  const { envVar, fallbacks = [] } = options;
+  const { envVar, fallbacks = [], deprioritize } = options;
 
   const override = envVar ? process.env[envVar] : undefined;
   if (override) {
@@ -44,10 +50,11 @@ export function resolveBin(name: string, options: ResolveOptions = {}): string {
     ? path.join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'where.exe')
     : 'which';
   const found = spawnSync(finder, [name], { encoding: 'utf8' });
-  const hits =
+  const allHits =
     found.status === 0
       ? found.stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
       : [];
+  const hits = deprioritize ? allHits.filter((h) => !deprioritize.test(h)) : allHits;
 
   const exe = hits.find((h) => h.toLowerCase().endsWith('.exe'));
   if (exe) return exe;
@@ -75,7 +82,12 @@ export function resolveBin(name: string, options: ResolveOptions = {}): string {
 /** Resolve a single-`*` path such as `<root>/bin/(*)/codex.exe` to the newest match. */
 function scanVersionedDir(pattern: string): string | null {
   const idx = pattern.indexOf('*');
-  const root = path.dirname(pattern.slice(0, idx));
+  const head = pattern.slice(0, idx);
+  // When `*` is a whole segment (`.../bin/*/codex.exe`) the directory to scan
+  // is `head` itself once its trailing separator is dropped. Using dirname
+  // unconditionally climbs one level too far and the pattern silently matches
+  // nothing - which reads as "not installed" rather than as a bad pattern.
+  const root = /[\\/]$/.test(head) ? head.replace(/[\\/]+$/, '') : path.dirname(head);
   const tail = pattern.slice(idx + 1).replace(/^[\\/]/, '');
   if (!existsSync(root)) return null;
 
