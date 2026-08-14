@@ -59,11 +59,14 @@ export async function markBase(cwd: string): Promise<string | null> {
 }
 
 export async function commitAll(cwd: string, message: string): Promise<string | null> {
-  // Exclude vibe's own run directory. It lives inside the target repo so the
-  // artifacts sit next to the work they describe, but `add -A` would otherwise
-  // commit plans, schemas and Codex transcripts into the user's history as
-  // part of "implement approved plan".
-  await git(cwd, ['add', '-A', '--', '.', ':(exclude).vibe', ':(exclude).vibe/**']);
+  // vibe's own run directory is kept out of the user's history by the
+  // `.gitignore` written inside `.vibe` itself (see `ensureVibeIgnored`), not
+  // by a pathspec here. `:(exclude).vibe` was worse than useless: git counts a
+  // negative pathspec as explicitly naming the path, so the moment the target
+  // repo's own .gitignore also listed `.vibe` - the obvious thing for a user to
+  // write - `add` failed with "the following paths are ignored", exit 1, and
+  // took the run down after the implementation had already been paid for.
+  await git(cwd, ['add', '-A', '--', '.']);
   // Ask what is *staged*, not what is dirty. `.vibe` stays permanently
   // untracked by design, so a working-tree check would always report pending
   // work and every no-op round would attempt an empty commit.

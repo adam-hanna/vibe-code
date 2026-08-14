@@ -21,10 +21,31 @@ function stamp(): string {
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
 
+/**
+ * Make `.vibe` ignore itself.
+ *
+ * The run directory lives inside the target repo so artifacts sit next to the
+ * work they describe, but plans, schemas and Codex transcripts must never land
+ * in the user's history. A self-ignoring directory is the only mechanism that
+ * holds regardless of what the target repo's own .gitignore says: excluding it
+ * by pathspec breaks when the user also ignores `.vibe`, and relying on the
+ * user's .gitignore breaks when they do not.
+ *
+ * Written, never overwritten - a user who has deliberately changed it keeps
+ * their version.
+ */
+export function ensureVibeIgnored(targetDir: string): void {
+  const dir = path.join(targetDir, '.vibe');
+  mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, '.gitignore');
+  if (!existsSync(file)) writeFileSync(file, '*\n', 'utf8');
+}
+
 export function createRun(targetDir: string, task: string, planOnly: boolean): RunState {
   const id = `${stamp()}-${slugify(task)}`;
   const dir = path.join(targetDir, RUNS_DIR, id);
   mkdirSync(dir, { recursive: true });
+  ensureVibeIgnored(targetDir);
 
   const state: RunState = {
     id,
@@ -68,6 +89,8 @@ export function loadRun(targetDir: string, id: string): RunState {
   if (!existsSync(file)) throw new Error(`No run "${id}" under ${RUNS_DIR}`);
 
   const parsed = JSON.parse(readFileSync(file, 'utf8')) as RunState;
+  // Also on resume: a run created before this existed still needs the guard.
+  ensureVibeIgnored(targetDir);
   // Paths are re-derived so a run directory stays valid if the repo moves.
   return { ...parsed, dir, targetDir };
 }
