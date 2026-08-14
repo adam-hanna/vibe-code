@@ -18,6 +18,18 @@ export type RunStatus =
   | 'stalled'
   | 'error';
 
+/**
+ * How far the run got, as distinct from how it is currently doing.
+ *
+ * `status` cannot answer this: it carries both, so any terminal outcome
+ * ('error', 'stalled', 'needs-input') erases the phase it happened in. A run
+ * that died committing a finished implementation came back as 'error', resume
+ * could not tell it apart from a run that died while planning, and it restarted
+ * from the plan - re-critiquing an approved plan against a tree that already
+ * held the implementation, then paying for the implementation turn twice.
+ */
+export type RunPhase = 'planning' | 'implementing' | 'reviewing' | 'complete';
+
 export interface ClaudeConfig {
   model: string;
   effort: Effort;
@@ -287,6 +299,12 @@ export interface RunState {
   sessionId: string;
   createdAt: string;
   status: RunStatus;
+  /**
+   * The phase to resume into. Survives a terminal `status`, so work already
+   * paid for is not repeated. Optional so runs predating it still load; when
+   * absent it is inferred from `status`.
+   */
+  phase?: RunPhase;
   planRound: number;
   reviewRound: number;
   costUsd: number;

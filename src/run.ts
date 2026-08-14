@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
-import type { Finding, RoundRecord, RunState, RunSummary } from '@src/types.js';
+import type { Finding, RoundRecord, RunPhase, RunState, RunSummary } from '@src/types.js';
 
 const RUNS_DIR = path.join('.vibe', 'runs');
 
@@ -55,6 +55,7 @@ export function createRun(targetDir: string, task: string, planOnly: boolean): R
     sessionId: randomUUID(),
     createdAt: new Date().toISOString(),
     status: 'planning',
+    phase: 'planning',
     planRound: 0,
     reviewRound: 0,
     costUsd: 0,
@@ -116,6 +117,41 @@ export function listRuns(targetDir: string): RunSummary[] {
         return { id: d, status: 'unreadable', task: '', costUsd: 0 };
       }
     });
+}
+
+/**
+ * Record how far the run has got, and persist it immediately.
+ *
+ * Called at the point the work of a phase is *finished*, not when the next one
+ * starts, so a failure in between does not repeat it.
+ */
+export function advancePhase(state: RunState, phase: RunPhase): void {
+  state.phase = phase;
+  saveState(state);
+}
+
+/**
+ * Where to resume, for a run recorded before `phase` existed.
+ *
+ * `status` is the only evidence available, and it is only conclusive while the
+ * run is mid-flight: a terminal status has already overwritten the phase. Those
+ * fall back to 'planning', which is what such a run did before this existed -
+ * wasteful, but never wrong in the dangerous direction of skipping work that
+ * was never done.
+ */
+export function resumePhase(state: RunState): RunPhase {
+  if (state.phase !== undefined) return state.phase;
+  switch (state.status) {
+    case 'implementing':
+      return 'implementing';
+    case 'reviewing':
+      return 'reviewing';
+    case 'done':
+    case 'planned':
+      return 'complete';
+    default:
+      return 'planning';
+  }
 }
 
 export function saveState(state: RunState): void {

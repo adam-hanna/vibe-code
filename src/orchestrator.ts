@@ -5,7 +5,17 @@ import * as git from '@src/git.js';
 import * as log from '@src/log.js';
 import * as P from '@src/prompts.js';
 import { ANSWERS_SCHEMA, FINDINGS_SCHEMA, PLAN_SCHEMA } from '@src/schemas.js';
-import { artifact, artifactDir, assessConvergence, p1Signature, recordEvent, recordRound, saveState } from '@src/run.js';
+import {
+  advancePhase,
+  artifact,
+  artifactDir,
+  assessConvergence,
+  p1Signature,
+  recordEvent,
+  recordRound,
+  resumePhase,
+  saveState,
+} from '@src/run.js';
 import { parseAnswers, parseFindings, parsePlan, p1s } from '@src/validate.js';
 import { withConcurrentCompaction, rotateSession, shouldRotate } from '@src/context.js';
 import { describeFailure, runVerification } from '@src/verify.js';
@@ -54,7 +64,79 @@ export async function orchestrate(state: RunState, cfg: Config, resume: boolean)
 
   if (!resume) await prepareGit(state, cfg, cwd);
 
+  const phase = resumePhase(state);
+  if (phase === 'complete') {
+    log.ok('This run already finished - there is nothing to resume.');
+    return state;
+  }
+
   // ---- Planning ------------------------------------------------------------
+  // Skipped outright once the plan has been approved. Re-running it is not just
+  // wasted spend: the critique is made against a tree that now holds the
+  // implementation, so it reliably produces findings about the resume rather
+  // than about the task.
+  let plan: Plan;
+  if (phase === 'planning') {
+    plan = await planPhase(state, cfg, cwd);
+    if (state.planOnly) {
+      state.status = 'planned';
+      advancePhase(state, 'complete');
+      log.ok('Plan-only run: stopping before implementation.');
+      return state;
+    }
+    advancePhase(state, 'implementing');
+  } else {
+    const approved = state.plan;
+    if (approved === null) {
+      throw new Error(`Run ${state.id} is at the ${phase} phase but stored no plan.`);
+    }
+    plan = approved;
+    log.info(`Resuming at the ${phase} phase - the plan is already approved.`);
+  }
+
+  // ---- Implementation ------------------------------------------------------
+  if (phase !== 'reviewing') {
+    state.status = 'implementing';
+    state.baseSha = await git.markBase(cwd);
+    saveState(state);
+
+    log.heading('Implementing');
+    const impl = await claudeStep(state, cfg, {
+      prompt: P.implementPrompt(plan.plan_md),
+      cwd,
+      permissionMode: 'bypassPermissions',
+      timeoutMs: cfg.claude.implementTimeoutMs,
+      label: 'implement',
+    });
+    artifact(state, 'implementation-report.md', impl);
+
+    // Advanced before the commit, not after. The implementation turn is the
+    // single most expensive step in a run, and a failure while committing it
+    // must not charge for it twice - which is exactly what happened when a
+    // `git add` error came back as a bare 'error' status.
+    advancePhase(state, 'reviewing');
+    await maybeCommit(cfg, cwd, 'vibe: implement approved plan');
+
+    // Reset only on a fresh implementation. Resuming mid-review must keep the
+    // histories, or the convergence assessment loses the evidence it is built
+    // on and a stalled loop reads as a healthy one.
+    state.p1Rounds = [];
+    state.verifyRounds = [];
+  }
+
+  // ---- Review --------------------------------------------------------------
+  state.status = 'reviewing';
+  saveState(state);
+
+  await reviewPhase(state, cfg, cwd, plan);
+
+  state.status = 'done';
+  advancePhase(state, 'complete');
+  return state;
+}
+
+/** Plan, resolve questions, and critique until Codex raises no P1s. */
+async function planPhase(state: RunState, cfg: Config, cwd: string): Promise<Plan> {
   let plan: Plan;
   if (state.plan) {
     plan = state.plan;
@@ -126,36 +208,11 @@ export async function orchestrate(state: RunState, cfg: Config, resume: boolean)
 
   const planFile = artifact(state, 'PLAN.md', plan.plan_md);
   log.info(`Plan: ${path.relative(cwd, planFile)}`);
+  return plan;
+}
 
-  if (state.planOnly) {
-    state.status = 'planned';
-    saveState(state);
-    log.ok('Plan-only run: stopping before implementation.');
-    return state;
-  }
-
-  // ---- Implementation ------------------------------------------------------
-  state.status = 'implementing';
-  state.baseSha = await git.markBase(cwd);
-  saveState(state);
-
-  log.heading('Implementing');
-  const impl = await claudeStep(state, cfg, {
-    prompt: P.implementPrompt(plan.plan_md),
-    cwd,
-    permissionMode: 'bypassPermissions',
-    timeoutMs: cfg.claude.implementTimeoutMs,
-    label: 'implement',
-  });
-  artifact(state, 'implementation-report.md', impl);
-  await maybeCommit(cfg, cwd, 'vibe: implement approved plan');
-
-  // ---- Review --------------------------------------------------------------
-  state.status = 'reviewing';
-  state.p1Rounds = [];
-  state.verifyRounds = [];
-  saveState(state);
-
+/** Verify, then review, fixing each until both are clean. */
+async function reviewPhase(state: RunState, cfg: Config, cwd: string, plan: Plan): Promise<void> {
   for (;;) {
     // Does it run, before asking whether it reads well. A failing suite is an
     // unambiguous P1, and spending a reviewer turn on code that does not
@@ -223,10 +280,6 @@ export async function orchestrate(state: RunState, cfg: Config, resume: boolean)
     artifact(state, `fix-report-${state.reviewRound}.md`, fix);
     await maybeCommit(cfg, cwd, `vibe: address review round ${state.reviewRound}`);
   }
-
-  state.status = 'done';
-  saveState(state);
-  return state;
 }
 
 // ---------------------------------------------------------------------------
