@@ -78,8 +78,20 @@ function launchFailure(output: string, exitCode: number | null, command: string)
     // setting, so it is worth catching.
     const missing = normalise(missingModule[1]);
     const fileName = missing.slice(missing.lastIndexOf('/') + 1);
-    const named = normalise(command);
-    if (named.includes(missing) || (fileName !== '' && named.includes(fileName))) {
+
+    // Compared token by token, and the bare file name only counts when it
+    // looks like a file. Substring matching was too loose in both directions:
+    // node reports a missing directory as `Cannot find module '<dir>/test'`,
+    // and that basename `test` is a substring of the entirely ordinary command
+    // `npm test` - which would have turned a real suite failure into a
+    // configuration error and stopped the run.
+    const tokens = normalise(command)
+      .split(/\s+/)
+      .map((t) => t.replace(/^"+|"+$/g, ''));
+    const mentions = (needle: string): boolean =>
+      needle !== '' && tokens.some((t) => t === needle || t.endsWith(`/${needle}`));
+
+    if (mentions(missing) || (fileName.includes('.') && mentions(fileName))) {
       return `the script "${missingModule[1]}" does not exist`;
     }
   }
