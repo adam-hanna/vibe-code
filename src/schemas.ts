@@ -73,7 +73,7 @@ export const FINDINGS_SCHEMA = {
     verdict: {
       type: 'string',
       enum: ['APPROVE', 'REVISE'],
-      description: 'APPROVE if and only if there are zero P1 findings.',
+      description: 'APPROVE if and only if there are zero P0 and zero P1 findings.',
     },
     summary: { type: 'string' },
     findings: {
@@ -91,10 +91,16 @@ export const FINDINGS_SCHEMA = {
           },
           severity: {
             type: 'string',
-            enum: ['P1', 'P2', 'P3'],
+            enum: ['P0', 'P1', 'P2', 'P3'],
             description:
-              'P1 = must fix; correctness, security, data loss, or the plan cannot work as written. ' +
-              'P2 = should fix. P3 = nit. Reserve P1 for real blockers.',
+              'P0 = stop everything; the work cannot proceed with this outstanding. Data loss, a ' +
+              'security hole, or an approach that cannot be made to work. A P0 halts the run for a ' +
+              'human even if it is the only finding, so use it only when carrying on would be ' +
+              'worse than stopping. ' +
+              'P1 = must fix; correctness or a real defect, but the run may carry a small number ' +
+              'forward and settle them against the tests rather than in discussion. ' +
+              'P2 = should fix. P3 = nit. ' +
+              'If a finding is only answerable by running the code, it is a P1, not a P0.',
           },
           title: { type: 'string' },
           detail: { type: 'string' },

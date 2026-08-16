@@ -184,7 +184,9 @@ export function artifactDir(state: RunState, name: string): string {
  */
 export function p1Signature(findings: readonly Finding[]): string | null {
   const ids = findings
-    .filter((f) => f.severity === 'P1')
+    // P0s count too: a round that swapped a P1 for a P0 has changed, and
+    // fingerprinting only P1s would record it as having stood still.
+    .filter((f) => f.severity === 'P0' || f.severity === 'P1')
     .map((f) => f.id)
     .sort();
   if (ids.length === 0) return null;

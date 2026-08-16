@@ -35,6 +35,8 @@ Options
   --max-review-rounds <n>    Default: 5
   --max-verify-rounds <n>    Fix rounds for a failing verification (default: 3)
   --max-question-rounds <n>  Planner self-answer rounds before asking you (default: 3)
+  --p1-tolerance <n>         P1s a phase may carry forward rather than fix (default: 1;
+                             0 demands a spotless verdict. P0s are never carried)
   --plan-timeout <min>       Per planning turn (default: 30)
   --implement-timeout <min>  Per implement/fix turn (default: 90)
   --codex-timeout <min>      Per Codex turn (default: 45)
@@ -72,6 +74,7 @@ interface ParsedArgs {
     maxReviewRounds?: number;
     maxVerifyRounds?: number;
     maxQuestionRounds?: number;
+    p1Tolerance?: number;
     budget?: number;
     maxTokens?: number;
     noWaitOnLimit?: boolean;
@@ -158,6 +161,7 @@ function parseArgs(args: readonly string[]): ParsedArgs {
       case '--max-review-rounds': out.flags.maxReviewRounds = nextNum(); break;
       case '--max-verify-rounds': out.flags.maxVerifyRounds = nextNum(); break;
       case '--max-question-rounds': out.flags.maxQuestionRounds = nextNum(); break;
+      case '--p1-tolerance': out.flags.p1Tolerance = nextNum(); break;
       case '--budget': out.flags.budget = nextNum(); break;
       case '--max-tokens': out.flags.maxTokens = nextNum(); break;
       case '--no-wait-on-limit': out.flags.noWaitOnLimit = true; break;
@@ -208,6 +212,7 @@ function buildOverrides(flags: ParsedArgs['flags']): ConfigOverrides {
   if (flags.maxReviewRounds !== undefined) loop.maxReviewRounds = flags.maxReviewRounds;
   if (flags.maxVerifyRounds !== undefined) loop.maxVerifyRounds = flags.maxVerifyRounds;
   if (flags.maxQuestionRounds !== undefined) loop.maxQuestionRounds = flags.maxQuestionRounds;
+  if (flags.p1Tolerance !== undefined) loop.p1Tolerance = flags.p1Tolerance;
   if (flags.budget !== undefined) budget.maxCostUsd = flags.budget;
   if (flags.maxTokens !== undefined) budget.maxTokens = flags.maxTokens;
   if (flags.noWaitOnLimit) budget.waitOnRateLimit = false;

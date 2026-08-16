@@ -1,7 +1,16 @@
 import type { EnvironmentFacts, ToolchainContract } from '@src/runtime.js';
 
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
-export type Severity = 'P1' | 'P2' | 'P3';
+/**
+ * P0 exists because P1s are now survivable.
+ *
+ * The loop moves on with up to `loop.p1Tolerance` P1s outstanding, which is
+ * right for findings that are real but resolvable against a test suite. It
+ * would be badly wrong for a finding that makes the work unshippable, so there
+ * has to be a level the tolerance cannot swallow. P0 is that level, and it
+ * blocks on its own no matter how few there are.
+ */
+export type Severity = 'P0' | 'P1' | 'P2' | 'P3';
 export type Verdict = 'APPROVE' | 'REVISE';
 export type QuestionKind = 'technical' | 'product';
 export type Confidence = 'high' | 'medium' | 'low';
@@ -76,6 +85,18 @@ export interface LoopConfig {
    * planner that keeps inventing new questions was bounded only by budget.
    */
   maxQuestionRounds: number;
+  /**
+   * P1s the loop may carry forward instead of fixing, in both the plan and
+   * review phases. P0s are never carried.
+   *
+   * Zero restores the original behaviour of demanding a spotless verdict. The
+   * default of one exists because that demand is unmeetable on hard work: a
+   * plan for a 1416-line parser went eight rounds and $24 without reaching
+   * implementation, every finding legitimate and every one of them answerable
+   * in 400ms by the 1977-test suite nobody had run yet. A carried P1 is not
+   * ignored - it is handed to the phase that can actually settle it.
+   */
+  p1Tolerance: number;
   /**
    * Identical P1 set this many rounds running is a hard stop, at any point in
    * the run. Nothing new is being produced, so more rounds cannot help.
@@ -331,6 +352,17 @@ export interface RunState {
   /** Carried into the first turn of a rotated session. */
   handoff: string | null;
   contextRatio: number;
+  /**
+   * P1s the plan critique raised that were carried into implementation rather
+   * than argued out in prose. Stated in the implementation prompt.
+   */
+  carried?: Finding[];
+  /**
+   * P1s the review left unfixed, within `loop.p1Tolerance`. Written to
+   * OUTSTANDING.md and reported in the summary - a finished run must never
+   * quietly drop a finding it decided to live with.
+   */
+  outstanding?: Finding[];
   /** Verified agent environment facts, stated to both agents in their prompts. */
   environment?: EnvironmentFacts | null;
   /**

@@ -33,6 +33,9 @@ export const DEFAULTS: Config = {
     // round of new questions means it is not converging on what to build, and
     // a human is the right next step.
     maxQuestionRounds: 3,
+    // One P1 may ride along into the next phase; P0s never can. Perfection in
+    // prose is not worth buying when a test suite will settle the question.
+    p1Tolerance: 1,
     // Identical findings three rounds running, not two: a single repeat is a
     // normal part of a review cycle - the fix shifts the problem and the next
     // round catches the shift - and stopping on it discarded runs that would
@@ -195,6 +198,10 @@ function validate(cfg: Config): void {
   ] as const) {
     const v = cfg.loop[key];
     if (!Number.isInteger(v) || v < 1) throw new Error(`loop.${key} must be a positive integer`);
+  }
+  // Zero is meaningful here, unlike the round caps: it demands a spotless verdict.
+  if (!Number.isInteger(cfg.loop.p1Tolerance) || cfg.loop.p1Tolerance < 0) {
+    throw new Error('loop.p1Tolerance must be zero or a positive integer');
   }
   if (!Number.isFinite(cfg.budget.maxCostUsd) || cfg.budget.maxCostUsd <= 0) {
     throw new Error('budget.maxCostUsd must be a positive number');

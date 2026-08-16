@@ -160,11 +160,16 @@ ${environmentBlock(environment, 'reviewer')}
 
 ## Severity
 
-- **P1** - must fix before implementation. Correctness, security, data loss, an approach that cannot work as written, a factual claim about the codebase that is false, or an unstated assumption that would silently produce the wrong result.
+- **P0** - stop the run and fetch a human. An approach that cannot be made to work at all, or one whose failure mode is data loss or a security hole. A single P0 halts the run, so use it only when continuing would be worse than stopping.
+- **P1** - must fix. Correctness, security, an approach that cannot work as written, a factual claim about the codebase that is false, or an unstated assumption that would silently produce the wrong result.
 - **P2** - should fix. Maintainability, missing tests, unhandled edge cases.
 - **P3** - nit. Style, naming, wording.
 
-Be strict about what earns P1. This plan enters an automated implement loop the moment you report zero P1s, so a P1 you miss ships. Equally, a P2 you inflate to P1 burns a full revision cycle - every P1 costs a round trip.
+Be strict about what earns P1, and stricter still about P0. A P2 inflated to P1 burns a full revision cycle.
+
+**A plan does not have to be perfect to be worth implementing.** A small number of P1s may be carried into the implementation, which is told about them and expected to resolve them while writing the code. That is the right home for anything only a test run can settle - an exact output string, a boundary condition, whether a heuristic misfires on a real input. Raising it is useful; demanding it be resolved in prose first is not. If a finding would be answered in seconds by running the project's tests, it is a P1 and you should say so plainly rather than treating it as a blocker on the document.
+
+Reserve your objections for what genuinely cannot be discovered by building the thing: a wrong approach, a missed requirement, a false claim about the code.
 
 Give each finding a stable kebab-case \`id\` so it can be tracked across rounds.
 
@@ -244,8 +249,15 @@ Fold these into the plan and drop the corresponding open questions.`);
   return parts.join('\n\n');
 }
 
-export function implementPrompt(planMd: string): string {
-  return `The plan below has been reviewed and cleared of all P1 issues. Implement it now.
+export function implementPrompt(planMd: string, carried: readonly Finding[] = []): string {
+  const known =
+    carried.length === 0
+      ? ''
+      : `\n## Known open issues with this plan\n\nThe reviewer raised these and they were **not** resolved before implementation, because they are the kind of question that is settled by running the code rather than by more discussion. Treat them as work items: resolve each one as you implement, and say in your report what you did about it.\n\n${carried
+          .map((f) => `- **${f.title}** \`${f.id}\`\n  ${f.detail}\n  *Suggested fix:* ${f.suggested_fix}`)
+          .join('\n')}\n`;
+
+  return `The plan below has been reviewed.${carried.length > 0 ? ` ${carried.length} open issue(s) are listed after it and are yours to resolve.` : ' It is cleared of all blocking issues.'} Implement it now.
 
 You have write access. Work through the plan end to end:
 - Make the actual code changes.
@@ -258,7 +270,8 @@ When you are done, report concisely: what you changed, what you verified and how
 
 ## The approved plan
 
-${planMd}`;
+${planMd}
+${known}`;
 }
 
 export function reviewPrompt(
@@ -283,11 +296,14 @@ Judge two things:
 
 ## Severity
 
+- **P0** - stop the run and fetch a human. Data loss, a security hole, or an approach that cannot be made to work. A single P0 halts everything, so use it only when carrying on would be worse than stopping.
 - **P1** - must fix. Correctness, security, data loss, or a plan requirement dropped without justification.
 - **P2** - should fix. Missing tests, error handling, maintainability.
 - **P3** - nit.
 
-Reporting zero P1s ends the loop and the change is considered done, so do not wave through a real defect. Reserve P1 for defects you can name a concrete failure case for.
+The loop may carry a small number of P1s forward and settle them against the test suite rather than in discussion, so a P1 is not a demand that everything stop. It is never ignored. Do not inflate a finding to P0 to force attention: P0 is for defects where continuing is the wrong thing to do at all.
+
+Do not wave through a real defect. Reserve P1 for defects you can name a concrete failure case for, and prefer P1 over P0 for anything a test run could settle.
 
 Give each finding a stable kebab-case \`id\`.
 

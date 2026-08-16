@@ -16,7 +16,13 @@ import {
   resumePhase,
   saveState,
 } from '@src/run.js';
-import { parseAnswers, parseFindings, parsePlan, p1s } from '@src/validate.js';
+import {
+  blockers as blockingFindings,
+  gate,
+  parseAnswers,
+  parseFindings,
+  parsePlan,
+} from '@src/validate.js';
 import { withConcurrentCompaction, rotateSession, shouldRotate } from '@src/context.js';
 import { describeFailure, runVerification } from '@src/verify.js';
 import type {
@@ -102,7 +108,7 @@ export async function orchestrate(state: RunState, cfg: Config, resume: boolean)
 
     log.heading('Implementing');
     const impl = await claudeStep(state, cfg, {
-      prompt: P.implementPrompt(plan.plan_md),
+      prompt: P.implementPrompt(plan.plan_md, state.carried ?? []),
       cwd,
       permissionMode: 'bypassPermissions',
       timeoutMs: cfg.claude.implementTimeoutMs,
@@ -185,18 +191,33 @@ async function planPhase(state: RunState, cfg: Config, cwd: string): Promise<Pla
     const critique = await withConcurrentCompaction(state, cfg, () => runCritique(state, cfg, cwd, plan));
     artifact(state, `plan-critique-${state.planRound}.json`, critique);
 
-    const blockers = p1s(critique.findings);
-    if (blockers.length === 0) {
-      log.ok(`Plan approved - ${critique.findings.length} non-blocking finding(s)`);
-      recordEvent(state, 'plan_approved', { findings: critique.findings.length });
+    const decision = gate(critique.findings, cfg.loop.p1Tolerance);
+    const stoppers = blockingFindings(critique.findings);
+    if (decision.pass) {
+      if (decision.tolerated.length > 0) {
+        // Carried, not forgiven. The implementation is told about these so the
+        // phase that can actually settle them does.
+        state.carried = decision.tolerated;
+        log.ok(
+          `Plan accepted with ${decision.tolerated.length} P1(s) carried into implementation - ` +
+            decision.tolerated.map((f) => f.id).join(', '),
+        );
+        for (const f of decision.tolerated) log.info(`  ~ ${f.title}`);
+      } else {
+        log.ok(`Plan approved - ${critique.findings.length} non-blocking finding(s)`);
+      }
+      recordEvent(state, 'plan_approved', {
+        findings: critique.findings.length,
+        carried: decision.tolerated.map((f) => f.id),
+      });
       break;
     }
 
-    log.warn(`${blockers.length} P1 finding(s): ${blockers.map((f) => f.id).join(', ')}`);
-    for (const f of blockers) log.info(`  - ${f.title}`);
+    log.warn(`${decision.reason}: ${stoppers.map((f) => f.id).join(', ')}`);
+    for (const f of stoppers) log.info(`  - [${f.severity}] ${f.title}`);
 
-    guardPlanBudget(state, cfg, blockers);
-    guardProgress(cfg, state.p1Rounds, critique.findings, blockers, {
+    guardPlanBudget(state, cfg, stoppers);
+    guardProgress(cfg, state.p1Rounds, critique.findings, stoppers, {
       cap: cfg.loop.maxPlanRounds,
       round: state.planRound + 1,
       capName: 'maxPlanRounds',
@@ -249,17 +270,34 @@ async function reviewPhase(state: RunState, cfg: Config, cwd: string, plan: Plan
     const review = await withConcurrentCompaction(state, cfg, () => runReview(state, cfg, cwd, plan));
     artifact(state, `code-review-${state.reviewRound}.json`, review);
 
-    const blockers = p1s(review.findings);
-    if (blockers.length === 0) {
-      log.ok(`Review clean - ${review.findings.length} non-blocking finding(s)`);
-      recordEvent(state, 'review_approved', { findings: review.findings.length });
+    const decision = gate(review.findings, cfg.loop.p1Tolerance);
+    const stoppers = blockingFindings(review.findings);
+    if (decision.pass) {
+      if (decision.tolerated.length > 0) {
+        // Nothing downstream will fix these, so they are written where a human
+        // will see them rather than buried in a round artifact.
+        state.outstanding = decision.tolerated;
+        const file = artifact(state, 'OUTSTANDING.md', renderOutstanding(state, decision.tolerated));
+        log.warn(
+          `Review left ${decision.tolerated.length} P1(s) unfixed, within the tolerance of ` +
+            `${cfg.loop.p1Tolerance}: ${decision.tolerated.map((f) => f.id).join(', ')}`,
+        );
+        for (const f of decision.tolerated) log.info(`  ~ ${f.title}`);
+        log.info(`Outstanding: ${path.relative(cwd, file)}`);
+      } else {
+        log.ok(`Review clean - ${review.findings.length} non-blocking finding(s)`);
+      }
+      recordEvent(state, 'review_approved', {
+        findings: review.findings.length,
+        outstanding: decision.tolerated.map((f) => f.id),
+      });
       break;
     }
 
-    log.warn(`${blockers.length} P1 finding(s): ${blockers.map((f) => f.id).join(', ')}`);
-    for (const f of blockers) log.info(`  - ${f.title}`);
+    log.warn(`${decision.reason}: ${stoppers.map((f) => f.id).join(', ')}`);
+    for (const f of stoppers) log.info(`  - [${f.severity}] ${f.title}`);
 
-    guardProgress(cfg, state.p1Rounds, review.findings, blockers, {
+    guardProgress(cfg, state.p1Rounds, review.findings, stoppers, {
       cap: cfg.loop.maxReviewRounds,
       round: state.reviewRound + 1,
       capName: 'maxReviewRounds',
@@ -269,7 +307,7 @@ async function reviewPhase(state: RunState, cfg: Config, cwd: string, plan: Plan
     state.reviewRound += 1;
     saveState(state);
 
-    log.step(`Fixing ${blockers.length} P1(s)`);
+    log.step(`Fixing ${stoppers.length} blocking finding(s)`);
     const fix = await claudeStep(state, cfg, {
       prompt: P.fixPrompt(review.findings, state.reviewRound),
       cwd,
@@ -280,6 +318,25 @@ async function reviewPhase(state: RunState, cfg: Config, cwd: string, plan: Plan
     artifact(state, `fix-report-${state.reviewRound}.md`, fix);
     await maybeCommit(cfg, cwd, `vibe: address review round ${state.reviewRound}`);
   }
+}
+
+/** The findings a finished run is knowingly shipping with. */
+function renderOutstanding(state: RunState, findings: readonly Finding[]): string {
+  const body = findings
+    .map(
+      (f) =>
+        `## ${f.title} \`${f.id}\`\n\n${f.detail}\n\n*Suggested fix:* ${f.suggested_fix}\n`,
+    )
+    .join('\n');
+  return (
+    `# Outstanding findings\n\n` +
+    `**Run:** \`${state.id}\`\n` +
+    `**Task:** ${state.task}\n\n` +
+    `The review loop finished with ${findings.length} P1 finding(s) unfixed. They were within ` +
+    `\`loop.p1Tolerance\`, so the run completed rather than stopping - but nothing downstream ` +
+    `addressed them. Set \`loop.p1Tolerance\` to 0 to require a spotless review instead.\n\n` +
+    body
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -350,7 +407,7 @@ function guardProgress(
   if (round >= cap) {
     throw new Escalation(
       EXIT.NO_CONVERGENCE,
-      `Hit ${capName} (${cap}) with ${blockers.length} P1(s) outstanding.`,
+      `Hit ${capName} (${cap}) with ${blockers.length} blocking finding(s) outstanding.`,
       null,
       [...blockers],
     );
@@ -395,7 +452,7 @@ interface ClaudeStepArgs {
 /**
  * Run the project's verification command.
  *
- * Returns a P1 finding when it fails, or null when the code is good to review.
+ * Returns a P0 finding when it fails, or null when the code is good to review.
  * The finding is shaped like any other so it flows through the existing fix
  * loop, oscillation detection and round caps rather than needing its own.
  */
@@ -444,7 +501,10 @@ async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Findi
     // A stable id: an identical failure across rounds is what oscillation
     // detection needs to see to conclude the fixer is not making progress.
     id: 'verification-failing',
-    severity: 'P1',
+    // P0, so `loop.p1Tolerance` can never carry it. Every other finding is an
+    // opinion about the code; this one is the code not working, and a run that
+    // shipped past it would be reporting success over a failing suite.
+    severity: 'P0',
     title: `${result.command} does not pass`,
     detail: describeFailure(result),
     suggested_fix:

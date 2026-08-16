@@ -78,7 +78,7 @@ function stringList(obj: Record<string, unknown>, key: string): string[] {
   return v.filter((x): x is string => typeof x === 'string');
 }
 
-const SEVERITIES: readonly Severity[] = ['P1', 'P2', 'P3'];
+const SEVERITIES: readonly Severity[] = ['P0', 'P1', 'P2', 'P3'];
 const VERDICTS: readonly Verdict[] = ['APPROVE', 'REVISE'];
 const KINDS: readonly QuestionKind[] = ['technical', 'product'];
 const CONFIDENCES: readonly Confidence[] = ['high', 'medium', 'low'];
@@ -167,3 +167,59 @@ function slug(s: string): string {
 
 export const p1s = (findings: readonly Finding[]): Finding[] =>
   findings.filter((f) => f.severity === 'P1');
+
+export const p0s = (findings: readonly Finding[]): Finding[] =>
+  findings.filter((f) => f.severity === 'P0');
+
+/**
+ * Everything that could stop the loop, worst first.
+ *
+ * Used for the round fingerprint and the round-by-round count, so a run that
+ * trades a P1 for a P0 is not recorded as having stayed still.
+ */
+export const blockers = (findings: readonly Finding[]): Finding[] =>
+  findings.filter((f) => f.severity === 'P0' || f.severity === 'P1');
+
+export interface Gate {
+  /** True when the loop may move on. */
+  pass: boolean;
+  p0: Finding[];
+  p1: Finding[];
+  /** P1s being carried forward, which the next phase is told about. */
+  tolerated: Finding[];
+  /** Why the loop stopped, or null when it may proceed. */
+  reason: string | null;
+}
+
+/**
+ * Decide whether a set of findings lets the loop move forward.
+ *
+ * Any P0 blocks. Beyond that, up to `tolerance` P1s are carried rather than
+ * fixed: a finding that is real but only settleable by running the code is
+ * cheaper to hand to the next phase than to argue about in prose. Measured on a
+ * plan for a 1416-line parser that spent eight rounds and $24 without ever
+ * reaching implementation, while a definitive test suite sat unused.
+ */
+export function gate(findings: readonly Finding[], tolerance: number): Gate {
+  const p0 = p0s(findings);
+  const p1 = p1s(findings);
+  if (p0.length > 0) {
+    return {
+      pass: false,
+      p0,
+      p1,
+      tolerated: [],
+      reason: `${p0.length} P0 finding(s), which are never carried forward`,
+    };
+  }
+  if (p1.length > tolerance) {
+    return {
+      pass: false,
+      p0,
+      p1,
+      tolerated: [],
+      reason: `${p1.length} P1 finding(s), above the tolerance of ${tolerance}`,
+    };
+  }
+  return { pass: true, p0, p1, tolerated: [...p1], reason: null };
+}
