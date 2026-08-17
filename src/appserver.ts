@@ -133,6 +133,7 @@ export class AppServerClient {
   private readonly decoder = new LineDecoder();
   private readonly pending = new Map<number, Pending>();
   private readonly handlers = new Map<string, ((params: unknown) => void)[]>();
+  private readonly closeHandlers: ((reason: string) => void)[] = [];
   private nextId = 0;
   private closed = false;
 
@@ -141,7 +142,27 @@ export class AppServerClient {
     private readonly options: AppServerClientOptions,
   ) {
     transport.onLine((chunk) => this.receive(chunk));
-    transport.onClose((reason) => this.failAll(`app-server closed: ${reason}`));
+    transport.onClose((reason) => this.transportClosed(reason));
+  }
+
+  /** True once the child has gone or `close()` has been called. */
+  get isClosed(): boolean {
+    return this.closed;
+  }
+
+  /**
+   * Told when the connection dies, not only when a request is outstanding.
+   *
+   * Without this a dead app-server was invisible to anything holding cached
+   * data: no request was in flight to reject, so the owner went on serving a
+   * reading from a process that no longer existed.
+   */
+  onClosed(cb: (reason: string) => void): void {
+    if (this.closed) {
+      cb('app-server connection closed');
+      return;
+    }
+    this.closeHandlers.push(cb);
   }
 
   /** `initialize`, then the `initialized` notification. Order is load-bearing. */
@@ -192,14 +213,48 @@ export class AppServerClient {
    * that already settled.
    */
   close(): void {
-    if (this.closed) return;
+    const first = !this.closed;
     this.closed = true;
-    this.failAll('app-server connection closed');
+    if (first) this.failAll('app-server connection closed');
+    // Attempted on every call, not only the first. A child that exited on its
+    // own already marked this client closed, and returning early there left its
+    // pipes undestroyed and any grandchild of a `.cmd` shim still running - the
+    // exact leak the transport's close exists to clean up.
     try {
       this.transport.close();
     } catch {
       // Closing a transport that is already gone is not a failure worth raising
       // to a caller that only wanted a percentage.
+    }
+    if (first) this.notifyClosed('app-server connection closed');
+  }
+
+  /**
+   * The child went away on its own.
+   *
+   * Marking the client closed here is what makes the next request fail fast
+   * instead of waiting out a timeout against a dead pipe, and the notification
+   * is what lets an owner drop data it read from that process.
+   */
+  private transportClosed(reason: string): void {
+    if (this.closed) return;
+    this.closed = true;
+    const message = `app-server closed: ${reason}`;
+    this.failAll(message);
+    this.notifyClosed(message);
+  }
+
+  private notifyClosed(reason: string): void {
+    // Copied and cleared first: a handler may close the owner, which re-enters
+    // here, and the same callback must not run twice.
+    const handlers = this.closeHandlers.splice(0, this.closeHandlers.length);
+    for (const cb of handlers) {
+      try {
+        cb(reason);
+      } catch {
+        // Same rule as the notification handlers: this can run from a stream
+        // event, where a throw would take the run down.
+      }
     }
   }
 

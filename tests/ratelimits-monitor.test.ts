@@ -21,6 +21,10 @@ function config(readRateLimits = true): Config {
   return { ...DEFAULTS, codex: { ...DEFAULTS.codex, readRateLimits } };
 }
 
+/** Unix seconds, which is what app-server reports. */
+const futureEpoch = (): number => Math.floor(Date.now() / 1000) + 3600;
+const pastEpoch = (): number => Math.floor(Date.now() / 1000) - 3600;
+
 /** Counts how often the monitor asked for a transport, which is once per connection. */
 function countingFactory(make: () => AppServerTransport): {
   factory: (cwd: string) => AppServerTransport;
@@ -88,6 +92,83 @@ test('a pushed update refreshes the snapshot without a request', async () => {
   const limits = await monitor.read(config(), CWD);
 
   assert.equal(limits?.usedPercent, 42);
+  assert.equal(transport.sentFor('account/rateLimits/read').length, 1);
+  monitor.close();
+});
+
+test('a child that dies after a good read disables the monitor and drops its snapshot', async () => {
+  // The stale-data bug: nothing was in flight for the transport close to reject,
+  // so the cached reading kept being served from a process that had exited.
+  const { factory, calls } = countingFactory(() =>
+    respondingTransport({ 'account/rateLimits/read': READ_RESULT }),
+  );
+  let live: FakeTransport | null = null;
+  const monitor = new CodexRateLimitMonitor((cwd) => {
+    const transport = factory(cwd) as FakeTransport;
+    live = transport;
+    return transport;
+  });
+
+  assert.equal((await monitor.read(config(), CWD))?.usedPercent, 15);
+  assert.ok(live !== null);
+  (live as FakeTransport).emitClose('exited with code 1');
+
+  assert.equal(await monitor.read(config(), CWD), null);
+  assert.equal(calls(), 1);
+});
+
+test('a client that cannot register its stream callbacks closes the transport', async () => {
+  const transport = new FakeTransport();
+  transport.failRegistration = true;
+  const monitor = new CodexRateLimitMonitor(() => transport);
+
+  assert.equal(await monitor.read(config(), CWD), null);
+  assert.equal(transport.closed, true);
+});
+
+test('a cached reading of a reached limit is never reused', async () => {
+  // The one state that changes what the run does must not come from a cache:
+  // the retry after a wait has to be able to see the window clear.
+  const reached = {
+    rateLimits: {
+      primary: { usedPercent: 100, windowDurationMins: 10080, resetsAt: futureEpoch() },
+      rateLimitReachedType: 'primary',
+    },
+  };
+  const transport = respondingTransport({ 'account/rateLimits/read': reached });
+  const monitor = new CodexRateLimitMonitor(() => transport);
+
+  await monitor.read(config(), CWD);
+  await monitor.read(config(), CWD);
+
+  assert.equal(transport.sentFor('account/rateLimits/read').length, 2);
+  monitor.close();
+});
+
+test('a cached reading whose window has since reset is never reused', async () => {
+  const expired = {
+    rateLimits: { primary: { usedPercent: 96, windowDurationMins: 300, resetsAt: pastEpoch() } },
+  };
+  const transport = respondingTransport({ 'account/rateLimits/read': expired });
+  const monitor = new CodexRateLimitMonitor(() => transport);
+
+  await monitor.read(config(), CWD);
+  await monitor.read(config(), CWD);
+
+  assert.equal(transport.sentFor('account/rateLimits/read').length, 2);
+  monitor.close();
+});
+
+test('an ordinary reading is still served from the cache', async () => {
+  const healthy = {
+    rateLimits: { primary: { usedPercent: 15, windowDurationMins: 10080, resetsAt: futureEpoch() } },
+  };
+  const transport = respondingTransport({ 'account/rateLimits/read': healthy });
+  const monitor = new CodexRateLimitMonitor(() => transport);
+
+  await monitor.read(config(), CWD);
+  await monitor.read(config(), CWD);
+
   assert.equal(transport.sentFor('account/rateLimits/read').length, 1);
   monitor.close();
 });

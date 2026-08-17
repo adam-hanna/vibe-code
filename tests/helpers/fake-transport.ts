@@ -13,6 +13,8 @@ export class FakeTransport implements AppServerTransport {
   closed = false;
   /** Called with each outgoing message, so a test can answer it. */
   onSend: ((msg: Record<string, unknown>, transport: FakeTransport) => void) | null = null;
+  /** Make callback registration throw, as a real stream can when it is already gone. */
+  failRegistration = false;
 
   private lineCb: ((line: string) => void) | null = null;
   private closeCb: ((reason: string) => void) | null = null;
@@ -24,6 +26,7 @@ export class FakeTransport implements AppServerTransport {
   }
 
   onLine(cb: (line: string) => void): void {
+    if (this.failRegistration) throw new Error('stream is already destroyed');
     this.lineCb = cb;
   }
 

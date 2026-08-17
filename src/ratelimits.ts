@@ -253,7 +253,7 @@ export class CodexRateLimitMonitor {
       const client = this.client ?? (await this.connect(cwd));
 
       const cached = this.snapshot;
-      if (cached !== null && Date.now() - cached.at < this.ttlMs) return cached.limits;
+      if (cached !== null && this.stillDescribesNow(cached)) return cached.limits;
 
       const result = await client.request(RATE_LIMITS_READ, undefined, this.requestTimeoutMs);
       const limits = parseRateLimits(result);
@@ -270,6 +270,32 @@ export class CodexRateLimitMonitor {
     this.snapshot = null;
   }
 
+  /**
+   * Whether a cached reading can still stand in for a fresh one.
+   *
+   * The TTL alone was not enough to keep the cache out of the decision. Two
+   * readings must never be served from it, however recent:
+   *
+   * - one that says the limit is *reached*, because that is the only state that
+   *   changes what the run does, and re-reading it costs a single round trip;
+   * - one whose window has since reset, because it describes a window that no
+   *   longer exists - which would keep a run waiting, or stopped, on a limit
+   *   that had already cleared.
+   *
+   * What is left is the ordinary case: a window nowhere near its threshold,
+   * where a reading up to `ttlMs` old cannot change any decision.
+   */
+  private stillDescribesNow(snapshot: Snapshot): boolean {
+    const { limits } = snapshot;
+    if (limits.reachedType !== null) return false;
+
+    const now = Date.now();
+    for (const window of [limits.primary, limits.secondary]) {
+      if (window?.resetsAt != null && window.resetsAt.getTime() <= now) return false;
+    }
+    return now - snapshot.at < this.ttlMs;
+  }
+
   close(): void {
     // Disabled as well as closed: a probe arriving after the run has finished
     // must not spawn a fresh app-server that then outlives the process.
@@ -279,15 +305,36 @@ export class CodexRateLimitMonitor {
 
   private async connect(cwd: string): Promise<AppServerClient> {
     const transport = this.createTransport(cwd);
-    const client = new AppServerClient(transport, {
-      handshakeTimeoutMs: this.handshakeTimeoutMs,
-      requestTimeoutMs: this.requestTimeoutMs,
-    });
+
+    let client: AppServerClient;
+    try {
+      client = new AppServerClient(transport, {
+        handshakeTimeoutMs: this.handshakeTimeoutMs,
+        requestTimeoutMs: this.requestTimeoutMs,
+      });
+    } catch (err) {
+      // The constructor registers stream callbacks, so it can fail after the
+      // child exists. Nothing else holds the transport at this point.
+      try {
+        transport.close();
+      } catch {
+        // Already gone.
+      }
+      throw err;
+    }
+
     // Assigned before the await, and closed in the catch: a handshake that times
     // out otherwise rejects with the only reference to the spawned child still
     // on the stack, leaving an app-server process and its pipes alive for the
     // rest of the run.
     this.client = client;
+    // A child that dies of its own accord is otherwise invisible: no request is
+    // in flight to reject, so the cached reading kept being served for the rest
+    // of the TTL - a run deciding on a number read from a process that no longer
+    // existed.
+    client.onClosed((reason) => {
+      if (this.client === client) this.disable(new Error(reason));
+    });
     try {
       await client.handshake();
     } catch (err) {
@@ -306,8 +353,12 @@ export class CodexRateLimitMonitor {
   }
 
   private disable(err: unknown): void {
+    // Guarded so the reason is reported once: a dying child reaches here through
+    // both the close callback and the rejected request it caused.
+    const first = !this.disabled;
     this.disabled = true;
     this.closeClient();
+    if (!first) return;
     const message = err instanceof Error ? err.message : String(err);
     detail(`codex rate limits unavailable, continuing without them: ${message}`);
   }
