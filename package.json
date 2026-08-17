@@ -1,7 +1,17 @@
 {
   "name": "vibe-code",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Automated plan/critique/implement/review loop between Claude Code and Codex.",
+  "keywords": [
+    "claude",
+    "claude-code",
+    "codex",
+    "ai",
+    "agent",
+    "code-review",
+    "automation",
+    "cli"
+  ],
   "type": "module",
   "repository": {
     "type": "git",
@@ -30,7 +40,6 @@
     "doctor": "npm run build && node dist/src/main.js doctor"
   },
   "license": "MIT",
-  "private": true,
   "devDependencies": {
     "@types/node": "^26.2.0",
     "tsc-alias": "^1.9.1",

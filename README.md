@@ -21,14 +21,28 @@ PLAN ──> CRITIQUE ──blocking?──> REVISE ─┐
 ## Install
 
 ```bash
+npm install -g vibe-code
+vibe doctor
+```
+
+**`vibe` drives two CLIs it does not install.** You need `claude` and `codex` already installed *and logged in* — this tool shells out to them and inherits your existing subscriptions. npm cannot express that as a dependency, so it is on you. `vibe doctor` checks for both, prints the resolved paths, and verifies each agent can actually run the tools it needs; run it first.
+
+Node 20+ is required and is enforced via `engines`.
+
+Installing globally puts `vibe` on your PATH — rename the bin or use `npx vibe-code` if that collides with something you already have.
+
+<details>
+<summary>From source</summary>
+
+```bash
+git clone https://github.com/adam-hanna/vibe-code.git
 cd vibe-code
 npm install
 npm run build
 npm link          # or: node dist/src/main.js ...
 vibe doctor
 ```
-
-Requires Node 20+, the `claude` CLI, and the `codex` CLI. `vibe doctor` verifies all three and prints the resolved paths.
+</details>
 
 TypeScript, strict — `noImplicitAny`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `verbatimModuleSyntax`, and no `any` in the source. Internal imports go through the `@src/*` alias (rewritten to relative paths at build time by `tsc-alias`), so there are no `../..` chains. `npm run typecheck` checks without emitting.
 
