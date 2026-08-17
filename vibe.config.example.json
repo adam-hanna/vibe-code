@@ -21,7 +21,7 @@
   },
   "budget": {
     "maxCostUsd": 25,
-    "maxTokens": 0,
+    "maxTokens": 25000000,
     "planShare": 0.4
   },
   "questions": {

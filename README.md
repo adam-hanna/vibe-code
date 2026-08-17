@@ -99,7 +99,7 @@ Three independent brakes:
 |---|---|
 | **Round cap** | `maxPlanRounds` / `maxReviewRounds` (default 5 each) |
 | **Oscillation guard** | The set of P1 `id`s is fingerprinted each round. Same fingerprint twice running means the two models are deadlocked, and asking again will not break the tie — the run escalates instead of burning budget. |
-| **Budget ceiling** | Two figures, with different coverage. Claude reports `total_cost_usd` per turn and the run aborts past `budget.maxCostUsd` — **Claude only**, since Codex reports no cost in any output mode. Tokens are counted for **both** agents (Codex reports usage on its `turn.completed` event) and abort past `budget.maxTokens`. That makes `maxTokens` the only ceiling that sees the whole run; it is `0` (disabled) by default, and `vibe` warns at startup when it is. |
+| **Budget ceiling** | Two figures, with different coverage. Claude reports `total_cost_usd` per turn and the run aborts past `budget.maxCostUsd` — **Claude only**, since Codex reports no cost in any output mode. Tokens are counted for **both** agents (Codex reports usage on its `turn.completed` event) and abort past `budget.maxTokens` (default 25M). That makes `maxTokens` the ceiling that sees the whole run; `vibe` warns at startup if you disable it with `0`. |
 
 ## Safety
 
@@ -133,7 +133,7 @@ Drop `vibe.config.json` in the target repo; CLI flags override it. See `vibe.con
   "claude": { "model": "opus", "effort": "medium" },
   "codex":  { "model": "gpt-5.6-luna", "effort": "xhigh" },
   "loop":   { "maxPlanRounds": 5, "maxReviewRounds": 5, "oscillationThreshold": 2 },
-  "budget": { "maxCostUsd": 25, "maxTokens": 0 },
+  "budget": { "maxCostUsd": 25, "maxTokens": 25000000 },
   "questions": { "askCodex": true, "escalateOnDefer": true, "escalateOnLowConfidence": true },
   "git": { "useBranch": true, "branchPrefix": "vibe/", "commitEachRound": true },
   "context": { "enabled": true, "compactAboveRatio": 0.5, "compactDuringCodex": true }
@@ -156,7 +156,9 @@ Suitable for `if vibe run "..."; then ...` in a wrapper script.
 
 ## Notes and limitations
 
-- **Codex tokens are counted; Codex cost is not.** The Codex CLI reports token usage (via `codex exec --json`, on `turn.completed`) but no cost figure in any output mode. So `budget.maxCostUsd` caps the Claude side only, and deriving a dollar figure for Codex would mean hardcoding a price table for models that get renamed faster than it could be maintained — a fabricated number in the field the ceiling is enforced against. **Set `budget.maxTokens` if you want a brake that covers both agents**; with it at the default `0`, nothing bounds the Codex half of the run. The run summary reports the two token totals separately for the same reason.
+- **Codex tokens are counted; Codex cost is not.** The Codex CLI reports token usage (via `codex exec --json`, on `turn.completed`) but no cost figure in any output mode. So `budget.maxCostUsd` caps the Claude side only, and deriving a dollar figure for Codex would mean hardcoding a price table for models that get renamed faster than it could be maintained — a fabricated number in the field the ceiling is enforced against. `budget.maxTokens` (default 25M) is the brake that covers both agents; the run summary reports the two token totals separately for the same reason.
+
+  Nor is there an account-level cost API to fall back on. `codex app-server` (experimental JSON-RPC over stdio) exposes `account/usage/read` and `account/rateLimits/read`, but neither returns money: usage is lifetime and *daily* token buckets, account-wide, so it cannot be attributed to one run; rate limits are an integer `usedPercent` of a rolling window. A ChatGPT-auth account has a `credits.balance`, but it does not move when subscription-metered work is done — measured before and after a real turn — so it is not a per-turn cost signal either. Subscription Codex work is metered in window percentage, not dollars, and there is no figure to convert.
 
   One accounting detail if you extend the adapter: Codex nests its usage the OpenAI way — `cached_input_tokens` is a *subset* of `input_tokens`, and `reasoning_output_tokens` a subset of `output_tokens`. Claude's envelope nests neither. So `codex.ts` totals two fields where `claude.ts` totals four; summing all four on the Codex side counts the same prompt twice.
 - **Prompts go over stdin, never argv.** Claude's variadic flags (`--tools`, `--allowedTools`) will otherwise swallow a positional prompt argument. If you extend the adapters, keep it that way.

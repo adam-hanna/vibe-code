@@ -43,8 +43,8 @@ Options
   --verify-timeout <min>     Per verification command run (default: 15)
   --budget <usd>             Work ceiling, API-equivalent, Claude only - Codex reports no
                              cost (default: 25; not a bill on a plan)
-  --max-tokens <n>           Cumulative token ceiling across both agents. The only ceiling
-                             that bounds Codex work (0 = off)
+  --max-tokens <n>           Cumulative token ceiling across both agents - the only ceiling
+                             that bounds Codex work (default: 25,000,000; 0 = off)
   --no-wait-on-limit         Exit on a rate limit instead of waiting for the reset
   --compact-above <ratio>    Rotate the Claude session above this context share (default: 0.5)
   --no-compact               Never rotate the session

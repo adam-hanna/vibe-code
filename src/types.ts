@@ -134,6 +134,13 @@ export interface BudgetConfig {
    * models that are renamed faster than it could be maintained - a fabricated
    * number in the field the ceiling is enforced against. Use `maxTokens` for a
    * brake that covers both agents.
+   *
+   * The account API does not rescue this. `codex app-server` exposes
+   * `account/usage/read` and `account/rateLimits/read`, but usage is daily
+   * token buckets for the whole account - not attributable to one run - and
+   * rate limits are an integer percent of a rolling window. `credits.balance`
+   * does not move when subscription-metered work is done, so it is not a cost
+   * signal either. There is no dollar figure to read.
    */
   maxCostUsd: number;
   /**

@@ -48,10 +48,24 @@ export const DEFAULTS: Config = {
     // token counts at API rates and nothing is billed. It is a work-volume
     // brake. The Codex CLI reports no cost at all, so this covers half the run.
     maxCostUsd: 25,
-    // 0 disables. Worth setting: it is the only ceiling that counts Codex, whose
-    // tokens are measured but whose spend can never be, so with this off the
-    // reviewer's half of the run has no brake on it whatsoever.
-    maxTokens: 0,
+    // The only ceiling that counts both agents, so it is the one that actually
+    // bounds a run: Codex tokens are measurable but Codex spend is not, and at
+    // 0 the reviewer's half had no brake on it at all.
+    //
+    // 25M is drawn from the runs on record rather than picked round. Successful
+    // fixture runs land between 1.2M and 4.5M tokens, so this is roughly five
+    // times the largest one that finished normally. The run that justifies a
+    // token ceiling existing separately from the dollar one is the planning
+    // stall: 29.2M tokens for $16.03, under the $25 cost ceiling and therefore
+    // invisible to it, where 25M would have stopped it - and planShare would
+    // have stopped it at 10M, since it never left the plan phase.
+    //
+    // It is deliberately not sized for the hardest work. A from-scratch parser
+    // against a 1977-test suite took 138M tokens; a task like that is expected
+    // to raise this. Hitting the ceiling exits resumable, so the cost of the
+    // default being too low is one flag on `vibe resume`, while the cost of it
+    // being too high is another unnoticed 29M-token stall. 0 disables.
+    maxTokens: 25_000_000,
     waitOnRateLimit: true,
     maxWaitMinutes: 360,
     // Planning gets at most 40% of the ceiling. A plan that has eaten more
