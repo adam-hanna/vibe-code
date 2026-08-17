@@ -24,6 +24,7 @@ import {
   parsePlan,
 } from '@src/validate.js';
 import { withConcurrentCompaction, rotateSession, shouldRotate } from '@src/context.js';
+import { progressOptions, rememberContextWindow } from '@src/progress.js';
 import {
   closeCodexRateLimits,
   decideCodexLimit,
@@ -596,13 +597,19 @@ async function claudeStep(state: RunState, cfg: Config, args: ClaudeStepArgs): P
       jsonSchema: args.jsonSchema,
       tools: args.tools,
       timeoutMs: args.timeoutMs,
+      progress: progressOptions(state, cfg, args.label),
     }),
   );
 
   state.sessionStarted = true;
   state.costUsd = Number((state.costUsd + result.costUsd).toFixed(4));
   state.tokensUsed += result.tokens.total;
-  if (result.usage) state.contextRatio = result.usage.ratio;
+  if (result.usage) {
+    state.contextRatio = result.usage.ratio;
+    // Display only: the heartbeat needs a window to turn prompt tokens into a
+    // percentage, and this is the only place one is ever reported.
+    rememberContextWindow(cfg.claude.model, result.usage.contextWindow);
+  }
 
   recordEvent(state, 'claude_turn', {
     label: args.label,
@@ -797,6 +804,7 @@ async function runCodex(
       cwd,
       timeoutMs: cfg.codex.timeoutMs,
       sessionId: cfg.codex.persistSession ? state.codexSessionId : null,
+      progress: progressOptions(state, cfg, args.schemaName),
     });
   });
 

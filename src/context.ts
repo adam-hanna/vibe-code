@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { claudeTurn } from '@src/claude.js';
 import * as log from '@src/log.js';
+import { progressOptions } from '@src/progress.js';
 import { handoffPrompt } from '@src/prompts.js';
 import { artifact, recordEvent, saveState } from '@src/run.js';
 import type { Config, RunState } from '@src/types.js';
@@ -44,6 +45,7 @@ export async function rotateSession(state: RunState, cfg: Config): Promise<void>
     cwd: state.targetDir,
     tools: ['Read'],
     timeoutMs: cfg.claude.planTimeoutMs,
+    progress: progressOptions(state, cfg, 'compact'),
   });
 
   state.costUsd = Number((state.costUsd + result.costUsd).toFixed(4));

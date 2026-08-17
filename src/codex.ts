@@ -2,6 +2,8 @@ import { writeFileSync, readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { resolveBin, run } from '@src/proc.js';
 import { detail } from '@src/log.js';
+import { createHeartbeat, parseCodexLine, withHeartbeat } from '@src/progress.js';
+import type { ProgressOptions } from '@src/progress.js';
 import type { Effort, Sandbox, TokenUsage } from '@src/types.js';
 
 let cachedBin: string | null = null;
@@ -42,6 +44,8 @@ export interface CodexTurnOptions {
   timeoutMs: number;
   /** Existing Codex thread to continue. Null starts a new one. */
   sessionId?: string | null | undefined;
+  /** Live progress. Omitted disables it entirely, which is what preflight wants. */
+  progress?: ProgressOptions | undefined;
 }
 
 export interface CodexTurnResult {
@@ -191,7 +195,17 @@ export async function codexTurn(options: CodexTurnOptions): Promise<CodexTurnRes
 
   detail(`codex ${sessionId ? 'resume' : 'exec'} -m ${model} (${effort}) -> ${schemaName}`);
 
-  const { code, stdout, stderr } = await run(codexBin(), args, { input: prompt, cwd, timeoutMs });
+  const heartbeat = options.progress
+    ? createHeartbeat({ ...options.progress, parse: parseCodexLine, unit: 'event' })
+    : null;
+  const { code, stdout, stderr } = await withHeartbeat(heartbeat, () =>
+    run(codexBin(), args, {
+      input: prompt,
+      cwd,
+      timeoutMs,
+      ...(heartbeat === null ? {} : { onLine: heartbeat.onLine }),
+    }),
+  );
 
   const events = parseEvents(stdout);
   const returnedSession = events.threadId ?? SESSION_ID_RE.exec(stderr)?.[1] ?? sessionId ?? null;

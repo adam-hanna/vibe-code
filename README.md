@@ -108,6 +108,21 @@ If compaction fails for any reason the run continues on the existing session —
 
 **Codex is handled differently.** By default (`codex.persistSession`) every Codex call continues one thread via `codex exec resume`, so the reviewer remembers what it already raised instead of re-deriving it each round. That continuity matters for the oscillation guard: a stateless reviewer re-files a still-unresolved objection under a fresh `id` every round, which reads as progress when it is actually the same complaint. Codex manages that thread's context itself and reports no signal `vibe` could rotate on, so there is no compaction setting for it. `--no-codex-session` makes each turn a fresh one-shot instead.
 
+### Progress during a turn
+
+A planning or implementation turn is a **single** long-running `claude -p` invocation, so a run that printed one line and then nothing for thirty minutes was indistinguishable from a hung one — confirming the first real dogfood run was healthy took `Get-Process` plus reading `state.json`. A user who cannot tell working from hung eventually kills a healthy run, and killing mid-turn throws away everything that turn has paid for.
+
+Both CLIs already stream events as work happens (`--output-format stream-json --verbose`, `codex exec --json`); that stream was simply discarded until the process exited. `vibe` now consumes it live and emits at most one dim line every `progress.intervalMs` (default 30s):
+
+```
+plan: 4m12s · 23 tool uses · Read src/orchestrator.ts · 340k tok · ctx 31%
+review: 2m03s · 14 events · command_execution
+```
+
+Every segment except elapsed time is omitted when the stream did not supply it, which is why the sparser Codex line is shorter — partial information beats an invented number. `ctx%` needs a context window, which only a *completed* turn reports, so it appears from the second Claude turn of a process onward and is omitted entirely after a `--claude-model` change until a turn under the new model has measured one. The heartbeat is also driven by a timer, not only by arriving events, because a long silent reasoning block emits nothing at all and silence was the whole problem.
+
+It is a plain appended line, never a repainting one: runs are expected to be unattended and piped to a log. The same clock writes `lastActivityAt` into `state.json` — advancing even through silence, since vibe is still watching the turn — alongside `lastOutputAt`, the last line the agent actually wrote. The pair separates "thinking" from "gone" without inspecting the process table. `--no-progress` turns the output off; `--progress-interval <sec>` changes the cadence. No compaction or rotation behaviour changes.
+
 ## The verification gate
 
 The loop used to terminate on "the reviewer found no P1s", which is a statement about reading, not about working. It once declared success over an implementation that failed its own test suite most of the time.
@@ -158,7 +173,7 @@ answers-N.json             Codex's answers to blocking questions
 handoff-N.md               briefing carried across each session rotation
 NEEDS-INPUT.md             written when the run stops for you
 OUTSTANDING.md             carried P1s: fixed in a final round, but not re-reviewed
-state.json                 resumable state, tokens, cost, event log
+state.json                 resumable state, tokens, cost, event log, lastActivityAt/lastOutputAt
 transcript.log
 codex/                     raw schema and output files
 ```
@@ -179,7 +194,8 @@ Drop `vibe.config.json` in the target repo; CLI flags override it. See `vibe.con
   "verify": { "enabled": true, "command": null, "runs": 3 },
   "questions": { "askCodex": true, "escalateOnDefer": true, "escalateOnLowConfidence": true },
   "git": { "useBranch": true, "branchPrefix": "vibe/", "commitEachRound": true },
-  "context": { "enabled": true, "compactAboveRatio": 0.5, "compactDuringCodex": true }
+  "context": { "enabled": true, "compactAboveRatio": 0.5, "compactDuringCodex": true },
+  "progress": { "enabled": true, "intervalMs": 30000 }
 }
 ```
 

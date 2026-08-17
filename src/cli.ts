@@ -52,6 +52,8 @@ Options
   --no-codex-limits          Do not read Codex's rate-limit window from codex app-server
   --compact-above <ratio>    Rotate the Claude session above this context share (default: 0.5)
   --no-compact               Never rotate the session
+  --progress-interval <sec>  Heartbeat cadence during a turn (default: 30)
+  --no-progress              Do not emit the in-turn progress heartbeat
   --no-branch                Do not create an isolated branch
   --no-codex-answers         Escalate every blocking question straight to you
   --blocking-questions-only  Only send Codex the questions marked blocking
@@ -88,6 +90,8 @@ interface ParsedArgs {
     noCodexLimits?: boolean;
     compactAbove?: number;
     noCompact?: boolean;
+    progressInterval?: number;
+    noProgress?: boolean;
     noBranch?: boolean;
     noCodexAnswers?: boolean;
     noCodexSession?: boolean;
@@ -134,7 +138,8 @@ export async function main(argv: readonly string[]): Promise<ExitCode> {
   }
 }
 
-function parseArgs(args: readonly string[]): ParsedArgs {
+/** Exported for the flag tests: the whole flag contract without running main(). */
+export function parseArgs(args: readonly string[]): ParsedArgs {
   const out: ParsedArgs = { positional: [], flags: {} };
 
   for (let i = 0; i < args.length; i++) {
@@ -177,6 +182,8 @@ function parseArgs(args: readonly string[]): ParsedArgs {
       case '--no-codex-limits': out.flags.noCodexLimits = true; break;
       case '--compact-above': out.flags.compactAbove = nextNum(); break;
       case '--no-compact': out.flags.noCompact = true; break;
+      case '--progress-interval': out.flags.progressInterval = nextNum(); break;
+      case '--no-progress': out.flags.noProgress = true; break;
       case '--no-branch': out.flags.noBranch = true; break;
       case '--no-codex-answers': out.flags.noCodexAnswers = true; break;
       case '--no-codex-session': out.flags.noCodexSession = true; break;
@@ -204,7 +211,8 @@ function asEffort(value: string, flagName: string): Effort {
   return value as Effort;
 }
 
-function buildOverrides(flags: ParsedArgs['flags']): ConfigOverrides {
+/** Exported for the flag tests, alongside parseArgs. */
+export function buildOverrides(flags: ParsedArgs['flags']): ConfigOverrides {
   const claude: Partial<Config['claude']> = {};
   const codex: Partial<Config['codex']> = {};
   const loop: Partial<Config['loop']> = {};
@@ -213,6 +221,7 @@ function buildOverrides(flags: ParsedArgs['flags']): ConfigOverrides {
   const questions: Partial<Config['questions']> = {};
   const context: Partial<Config['context']> = {};
   const verify: Partial<Config['verify']> = {};
+  const progress: Partial<Config['progress']> = {};
 
   if (flags.claudeModel !== undefined) claude.model = flags.claudeModel;
   if (flags.claudeEffort !== undefined) claude.effort = asEffort(flags.claudeEffort, '--claude-effort');
@@ -230,6 +239,7 @@ function buildOverrides(flags: ParsedArgs['flags']): ConfigOverrides {
   if (flags.noCodexLimits) codex.readRateLimits = false;
   if (flags.compactAbove !== undefined) context.compactAboveRatio = flags.compactAbove;
   if (flags.noCompact) context.enabled = false;
+  if (flags.noProgress) progress.enabled = false;
   if (flags.noBranch) gitCfg.useBranch = false;
   if (flags.noCodexAnswers) questions.askCodex = false;
   if (flags.noCodexSession) codex.persistSession = false;
@@ -243,8 +253,10 @@ function buildOverrides(flags: ParsedArgs['flags']): ConfigOverrides {
   if (flags.implementTimeout !== undefined) claude.implementTimeoutMs = flags.implementTimeout * 60_000;
   if (flags.codexTimeout !== undefined) codex.timeoutMs = flags.codexTimeout * 60_000;
   if (flags.verifyTimeout !== undefined) verify.timeoutMs = flags.verifyTimeout * 60_000;
+  // Seconds here rather than minutes: a heartbeat cadence is on that scale.
+  if (flags.progressInterval !== undefined) progress.intervalMs = flags.progressInterval * 1000;
 
-  return { claude, codex, loop, budget, git: gitCfg, questions, context, verify };
+  return { claude, codex, loop, budget, git: gitCfg, questions, context, verify, progress };
 }
 
 async function cmdRun(args: readonly string[], planOnly: boolean): Promise<ExitCode> {

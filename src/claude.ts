@@ -1,5 +1,7 @@
 import { resolveBin, run } from '@src/proc.js';
 import { detail } from '@src/log.js';
+import { createHeartbeat, parseClaudeLine, withHeartbeat } from '@src/progress.js';
+import type { ProgressOptions } from '@src/progress.js';
 import type { ClaudeTurnResult, ContextUsage, Effort, PermissionMode, TokenUsage } from '@src/types.js';
 
 let cachedBin: string | null = null;
@@ -45,6 +47,8 @@ export interface ClaudeTurnOptions {
   jsonSchema?: object | undefined;
   tools?: readonly string[] | undefined;
   timeoutMs: number;
+  /** Live progress. Omitted disables it entirely, which is what preflight wants. */
+  progress?: ProgressOptions | undefined;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -85,7 +89,17 @@ export async function claudeTurn(options: ClaudeTurnOptions): Promise<ClaudeTurn
 
   detail(`claude ${args.filter((a) => !a.startsWith('{')).join(' ')}`);
 
-  const { code, stdout, stderr } = await run(claudeBin(), args, { input: prompt, cwd, timeoutMs });
+  const heartbeat = options.progress
+    ? createHeartbeat({ ...options.progress, parse: parseClaudeLine, unit: 'tool use' })
+    : null;
+  const { code, stdout, stderr } = await withHeartbeat(heartbeat, () =>
+    run(claudeBin(), args, {
+      input: prompt,
+      cwd,
+      timeoutMs,
+      ...(heartbeat === null ? {} : { onLine: heartbeat.onLine }),
+    }),
+  );
 
   if (!stdout.trim()) {
     throw new Error(`claude produced no output (exit ${code}). stderr:\n${stderr.slice(-2000)}`);

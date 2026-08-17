@@ -1,6 +1,7 @@
 import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
+import type { ActivityObservation } from '@src/progress.js';
 import type { Finding, RoundRecord, RunPhase, RunState, RunSummary } from '@src/types.js';
 
 const RUNS_DIR = path.join('.vibe', 'runs');
@@ -156,6 +157,36 @@ export function resumePhase(state: RunState): RunPhase {
 
 export function saveState(state: RunState): void {
   writeFileSync(path.join(state.dir, 'state.json'), JSON.stringify(state, null, 2), 'utf8');
+}
+
+/**
+ * How often a heartbeat may rewrite state.json. The file carries the whole
+ * event log, so a turn emitting thousands of stream events must not write it
+ * per event. The end-of-turn flush is exempt: it is the only chance to persist
+ * a line that arrived inside the window.
+ */
+const ACTIVITY_WRITE_MS = 5_000;
+
+/**
+ * Record that the current turn is alive, for a watcher reading state.json from
+ * another shell rather than from the process table.
+ */
+export function markActivity(state: RunState, observation: ActivityObservation): void {
+  const previous = state.lastActivityAt === undefined ? NaN : Date.parse(state.lastActivityAt);
+  const at = observation.at.getTime();
+  if (
+    observation.source !== 'final' &&
+    Number.isFinite(previous) &&
+    at - previous < ACTIVITY_WRITE_MS
+  ) {
+    return;
+  }
+
+  state.lastActivityAt = observation.at.toISOString();
+  // Taken from the observation, not the clock: a skipped write delays the value
+  // without ever making it claim the child was quieter than it was.
+  if (observation.lastLineAt !== null) state.lastOutputAt = observation.lastLineAt.toISOString();
+  saveState(state);
 }
 
 export function recordEvent(state: RunState, type: string, data: Record<string, unknown> = {}): void {
