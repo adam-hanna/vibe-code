@@ -209,6 +209,18 @@ export function p1Signature(findings: readonly Finding[]): string | null {
 const LATE_ROUND_FRACTION = 0.75;
 
 /**
+ * Rounds after which the trend is judged regardless of how high the cap is.
+ *
+ * `LATE_ROUND_FRACTION` alone scales with the cap, so raising a cap silently
+ * disables the brake: at `maxReviewRounds` 30 the trend check does not engage
+ * until round 23, leaving the 22 rounds where grinding actually happens
+ * unprotected. Observed on a run that sat at 2 -> 2 -> 2 with no check in
+ * sight. Whichever of the two triggers first wins, so small caps keep their
+ * existing behaviour and large ones stop being a blank cheque.
+ */
+const TREND_FLOOR = 8;
+
+/**
  * Histories are passed in rather than read from a fixed field: the review loop
  * and the verification loop converge independently, and mixing their rounds
  * makes each look less stable than it is.
@@ -217,8 +229,9 @@ export function recordRound(
   history: RoundRecord[],
   signature: string | null,
   count: number,
+  ids: readonly string[] = [],
 ): void {
-  history.push({ signature, count });
+  history.push({ signature, count, ids: [...ids] });
 }
 
 export interface ConvergenceArgs {
@@ -257,19 +270,48 @@ export function assessConvergence(
     return `the same P1 set came back ${repeatThreshold} rounds running`;
   }
 
-  if (round < Math.ceil(cap * LATE_ROUND_FRACTION)) return null;
-
-  // Late phase: require evidence of progress. Findings may be new every round
-  // and still be going nowhere - a run that went 1 -> 1 -> 3 was producing
-  // correct, distinct findings while getting further from done, and spent its
-  // remaining rounds doing it.
   const recent = history.slice(-window);
-  if (recent.length < window) return null;
-  const improved = recent.some((r, idx) => idx > 0 && r.count < (recent[idx - 1]?.count ?? r.count));
-  if (!improved) {
-    const trail = recent.map((r) => r.count).join(' -> ');
-    return `the P1 count has not fallen in ${window} rounds (${trail}) with ${cap - round} round(s) left`;
+  const hasWindow = recent.length === window;
+  const improved =
+    hasWindow && recent.some((r, idx) => idx > 0 && r.count < (recent[idx - 1]?.count ?? r.count));
+
+  // One finding the fixer cannot fix, whatever else changes around it.
+  //
+  // The fingerprint above only catches an *identical* set. A defect that
+  // survives every round while its companions rotate produces a new
+  // fingerprint each time and never trips it - observed on a run where one id
+  // came back four rounds running and nothing noticed. Requiring the count to
+  // have stalled too keeps this off runs that are genuinely converging while
+  // one stubborn item rides along.
+  const stuck = hasWindow ? persistentId(recent) : null;
+  if (stuck !== null && !improved) {
+    return `"${stuck}" has come back ${window} rounds running and the count is not falling`;
   }
 
+  // Trend: engaged near the cap, or once the run is simply long. Findings may
+  // be new every round and still be going nowhere - a run that went 1 -> 1 -> 3
+  // produced correct, distinct findings while getting further from done.
+  const late = round >= Math.ceil(cap * LATE_ROUND_FRACTION) || round >= TREND_FLOOR;
+  if (!late || !hasWindow) return null;
+
+  if (!improved) {
+    const trail = recent.map((r) => r.count).join(' -> ');
+    const left = cap - round;
+    return (
+      `the P1 count has not fallen in ${window} rounds (${trail})` +
+      (left > 0 ? ` with ${left} round(s) left` : '')
+    );
+  }
+
+  return null;
+}
+
+/** An id present in every round of the window, or null. */
+function persistentId(recent: readonly RoundRecord[]): string | null {
+  const first = recent[0]?.ids;
+  if (first === undefined || first.length === 0) return null;
+  for (const id of first) {
+    if (recent.every((r) => r.ids?.includes(id) === true)) return id;
+  }
   return null;
 }

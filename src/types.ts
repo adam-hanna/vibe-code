@@ -58,11 +58,21 @@ export interface CodexConfig {
   persistSession: boolean;
 }
 
-/** What one review round produced: which P1s, and how many. */
+/** What one review round produced: which blocking findings, and how many. */
 export interface RoundRecord {
-  /** Fingerprint of the P1 id set, or null when the round had no P1s. */
+  /** Fingerprint of the blocking id set, or null when the round had none. */
   signature: string | null;
   count: number;
+  /**
+   * The individual blocking ids.
+   *
+   * Kept alongside the fingerprint because the fingerprint only matches an
+   * *identical* set. One finding that survives every round while its companions
+   * rotate produces a different fingerprint each time and slips through - which
+   * is exactly what a defect the fixer cannot fix looks like. Optional so runs
+   * recorded before this field loaded still parse.
+   */
+  ids?: string[];
 }
 
 export interface LoopConfig {

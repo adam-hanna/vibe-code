@@ -388,7 +388,12 @@ function guardProgress(
   blockers: readonly Finding[],
   { cap, round, capName, deadlockMsg }: GuardArgs,
 ): void {
-  recordRound(history, p1Signature(all), blockers.length);
+  recordRound(
+    history,
+    p1Signature(all),
+    blockers.length,
+    blockers.map((f) => f.id),
+  );
 
   const stall = assessConvergence(history, {
     repeatThreshold: cfg.loop.oscillationThreshold,
