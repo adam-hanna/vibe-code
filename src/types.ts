@@ -56,6 +56,41 @@ export interface CodexConfig {
    * reviewer remembers what it already raised instead of re-deriving it.
    */
   persistSession: boolean;
+  /**
+   * Read Codex's rate-limit window from `codex app-server` before each Codex turn.
+   *
+   * A switch exists because this is a second process model - a persistent
+   * JSON-RPC connection alongside the one-shot `codex exec` spawns - against an
+   * interface OpenAI marks experimental. Turning it off restores exactly the
+   * behaviour of every release before it: the signal is never required.
+   */
+  readRateLimits: boolean;
+}
+
+/**
+ * The Codex rate-limit window as last read, persisted with the run.
+ *
+ * Plain primitives only: state.json is round-tripped through `JSON.parse`, so a
+ * `Date` would come back as a string and compare unequal to itself.
+ */
+export interface CodexRateLimitRecord {
+  /** Which of the two windows the numbers below describe. */
+  window: 'primary' | 'secondary';
+  /**
+   * True only when the server itself named this window in `rateLimitReachedType`.
+   *
+   * False means vibe picked the fuller of the two, which is a different claim -
+   * a reached type naming a window this version does not recognise lands here,
+   * and reporting that window's reset as if the server had named it would be a
+   * fabricated reset time in the one place a user acts on it.
+   */
+  windowFromServer: boolean;
+  usedPercent: number;
+  windowDurationMins: number | null;
+  resetsAt: string | null;
+  reachedType: string | null;
+  planType: string | null;
+  capturedAt: string;
 }
 
 /** What one review round produced: which blocking findings, and how many. */
@@ -158,6 +193,17 @@ export interface BudgetConfig {
   waitOnRateLimit: boolean;
   /** Cap on a single wait, so a run cannot hang for a weekly-cap reset. */
   maxWaitMinutes: number;
+  /**
+   * Stop the run before a Codex turn once Codex's fuller rate-limit window is
+   * this full, as a percentage. 0 disables.
+   *
+   * A whole-run brake, not per-turn metering: `usedPercent` is an integer
+   * percent of a rolling window - 10080 minutes, a week, on the account this
+   * was measured against - so it does not move measurably for a single turn.
+   * What it can do is stop a long unattended run before it starts work that
+   * will die partway through, which is the failure this exists for.
+   */
+  codexLimitPercent: number;
   /**
    * Share of the ceiling the planning phase may consume before stopping.
    *
@@ -367,6 +413,12 @@ export interface RunState {
    * Optional so runs recorded before Codex usage was read still load.
    */
   codexTokens?: number;
+  /**
+   * Codex's rate-limit window as last read from app-server, so the summary can
+   * report it. Optional: it is absent whenever app-server is unavailable, which
+   * is a normal outcome rather than an error.
+   */
+  codexRateLimit?: CodexRateLimitRecord | null;
   rateLimitWaits: number;
   baseSha: string | null;
   branch: string | null;

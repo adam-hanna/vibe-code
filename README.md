@@ -136,6 +136,7 @@ Brakes, all independent:
 | **Oscillation guard** | The set of blocking `id`s is fingerprinted each round. The same fingerprint `oscillationThreshold` rounds running (default 3) means nothing new is being produced and the run escalates. Three rather than two: a single repeat is a normal review cycle — the fix shifts the problem and the next round catches the shift. |
 | **Convergence trend** | Late in the round budget, a finding count that is not trending down stops the run. Only consulted once most of the budget is spent; early churn is left alone. |
 | **Plan share** | Planning may consume at most `budget.planShare` (0.4) of the ceiling. Planning that will not converge is the most expensive way to fail — it produces nothing, and the overall ceiling only notices once the whole budget is gone. |
+| **Codex rate-limit window** | Before each Codex turn, `vibe` reads `account/rateLimits/read` from `codex app-server` and holds the connection open for the pushed `account/rateLimits/updated` updates. If Codex reports the limit *reached*, the run waits for that window's reset under the same `budget.maxWaitMinutes` cap Claude's limits use. If the fuller window is at or above `budget.codexLimitPercent` (default 95), the run stops resumably rather than starting a turn the window would kill partway through. `app-server` is experimental, so this is strictly optional: if it is missing, fails its handshake, or the account is not logged in, the run continues exactly as before and says so once. `--no-codex-limits` turns it off. |
 | **Budget ceiling** | Two figures, with different coverage. Claude reports `total_cost_usd` per turn and the run aborts past `budget.maxCostUsd` — **Claude only**, since Codex reports no cost in any output mode. Tokens are counted for **both** agents (Codex reports usage on its `turn.completed` event) and abort past `budget.maxTokens` (default 25M). That makes `maxTokens` the ceiling that sees the whole run; `vibe` warns at startup if you disable it with `0`. |
 
 ## Safety
@@ -169,10 +170,12 @@ Drop `vibe.config.json` in the target repo; CLI flags override it. See `vibe.con
 ```json
 {
   "claude": { "model": "opus", "effort": "medium" },
-  "codex":  { "model": "gpt-5.6-luna", "effort": "xhigh", "sandbox": "read-only", "persistSession": true },
+  "codex":  { "model": "gpt-5.6-luna", "effort": "xhigh", "sandbox": "read-only", "persistSession": true,
+              "readRateLimits": true },
   "loop":   { "maxPlanRounds": 5, "maxReviewRounds": 5, "maxVerifyRounds": 3,
               "p1Tolerance": 1, "oscillationThreshold": 3 },
-  "budget": { "maxCostUsd": 25, "maxTokens": 25000000, "planShare": 0.4 },
+  "budget": { "maxCostUsd": 25, "maxTokens": 25000000, "planShare": 0.4,
+              "codexLimitPercent": 95 },
   "verify": { "enabled": true, "command": null, "runs": 3 },
   "questions": { "askCodex": true, "escalateOnDefer": true, "escalateOnLowConfidence": true },
   "git": { "useBranch": true, "branchPrefix": "vibe/", "commitEachRound": true },
@@ -191,6 +194,8 @@ Binaries can be pinned with `VIBE_CLAUDE_BIN`, `VIBE_CODEX_BIN`, `VIBE_GIT_BIN`.
 | 2 | Needs your input (see `NEEDS-INPUT.md`) |
 | 3 | No convergence — round cap or oscillation guard tripped |
 | 4 | Budget exceeded |
+| 5 | Rate limited — Claude's window, or Codex's above `budget.codexLimitPercent`. Resume once it resets |
+| 6 | An agent's environment fails the toolchain contract |
 
 Suitable for `if vibe run "..."; then ...` in a wrapper script.
 
@@ -199,6 +204,8 @@ Suitable for `if vibe run "..."; then ...` in a wrapper script.
 - **Codex tokens are counted; Codex cost is not.** The Codex CLI reports token usage (via `codex exec --json`, on `turn.completed`) but no cost figure in any output mode. So `budget.maxCostUsd` caps the Claude side only, and deriving a dollar figure for Codex would mean hardcoding a price table for models that get renamed faster than it could be maintained — a fabricated number in the field the ceiling is enforced against. `budget.maxTokens` (default 25M) is the brake that covers both agents; the run summary reports the two token totals separately for the same reason.
 
   Nor is there an account-level cost API to fall back on. `codex app-server` (experimental JSON-RPC over stdio) exposes `account/usage/read` and `account/rateLimits/read`, but neither returns money: usage is lifetime and *daily* token buckets, account-wide, so it cannot be attributed to one run; rate limits are an integer `usedPercent` of a rolling window. A ChatGPT-auth account has a `credits.balance`, but it does not move when subscription-metered work is done — measured before and after a real turn — so it is not a per-turn cost signal either. Subscription Codex work is metered in window percentage, not dollars, and there is no figure to convert.
+
+  What `vibe` *does* read from `app-server` is the rate limit itself, which is a different thing from cost and is the brake that actually stops long unattended runs on a subscription: `usedPercent`, its window length, its reset, and whether the limit is currently reached. That is a coarse whole-run signal, not per-turn metering — on the account this was measured against the primary window is 10080 minutes (a week), so a single turn does not move the integer percent at all. It is checked before each Codex turn and reported in the run summary. See the rate-limit brake above.
 
   One accounting detail if you extend the adapter: Codex nests its usage the OpenAI way — `cached_input_tokens` is a *subset* of `input_tokens`, and `reasoning_output_tokens` a subset of `output_tokens`. Claude's envelope nests neither. So `codex.ts` totals two fields where `claude.ts` totals four; summing all four on the Codex side counts the same prompt twice.
 - **Prompts go over stdin, never argv.** Claude's variadic flags (`--tools`, `--allowedTools`) will otherwise swallow a positional prompt argument. If you extend the adapters, keep it that way.

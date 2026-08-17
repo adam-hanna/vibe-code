@@ -7,6 +7,7 @@ import type { ExitCode } from '@src/orchestrator.js';
 import { claudeBin, setSessionArgs } from '@src/claude.js';
 import { codexBin } from '@src/codex.js';
 import { preflight } from '@src/preflight.js';
+import { closeCodexRateLimits, describeLimits, readCodexRateLimits } from '@src/ratelimits.js';
 import { detectCommand } from '@src/verify.js';
 import type { AgentPreflight } from '@src/preflight.js';
 import * as git from '@src/git.js';
@@ -46,6 +47,9 @@ Options
   --max-tokens <n>           Cumulative token ceiling across both agents - the only ceiling
                              that bounds Codex work (default: 25,000,000; 0 = off)
   --no-wait-on-limit         Exit on a rate limit instead of waiting for the reset
+  --codex-limit-percent <n>  Stop before a Codex turn once Codex's rate-limit window is
+                             this full (default: 95; 0 = off)
+  --no-codex-limits          Do not read Codex's rate-limit window from codex app-server
   --compact-above <ratio>    Rotate the Claude session above this context share (default: 0.5)
   --no-compact               Never rotate the session
   --no-branch                Do not create an isolated branch
@@ -80,6 +84,8 @@ interface ParsedArgs {
     budget?: number;
     maxTokens?: number;
     noWaitOnLimit?: boolean;
+    codexLimitPercent?: number;
+    noCodexLimits?: boolean;
     compactAbove?: number;
     noCompact?: boolean;
     noBranch?: boolean;
@@ -167,6 +173,8 @@ function parseArgs(args: readonly string[]): ParsedArgs {
       case '--budget': out.flags.budget = nextNum(); break;
       case '--max-tokens': out.flags.maxTokens = nextNum(); break;
       case '--no-wait-on-limit': out.flags.noWaitOnLimit = true; break;
+      case '--codex-limit-percent': out.flags.codexLimitPercent = nextNum(); break;
+      case '--no-codex-limits': out.flags.noCodexLimits = true; break;
       case '--compact-above': out.flags.compactAbove = nextNum(); break;
       case '--no-compact': out.flags.noCompact = true; break;
       case '--no-branch': out.flags.noBranch = true; break;
@@ -218,6 +226,8 @@ function buildOverrides(flags: ParsedArgs['flags']): ConfigOverrides {
   if (flags.budget !== undefined) budget.maxCostUsd = flags.budget;
   if (flags.maxTokens !== undefined) budget.maxTokens = flags.maxTokens;
   if (flags.noWaitOnLimit) budget.waitOnRateLimit = false;
+  if (flags.codexLimitPercent !== undefined) budget.codexLimitPercent = flags.codexLimitPercent;
+  if (flags.noCodexLimits) codex.readRateLimits = false;
   if (flags.compactAbove !== undefined) context.compactAboveRatio = flags.compactAbove;
   if (flags.noCompact) context.enabled = false;
   if (flags.noBranch) gitCfg.useBranch = false;
@@ -290,7 +300,14 @@ async function cmdRun(args: readonly string[], planOnly: boolean): Promise<ExitC
     );
   }
   log.info(
-    `Limits:  ${cfg.budget.waitOnRateLimit ? `wait up to ${cfg.budget.maxWaitMinutes} min for a rate-limit reset` : 'exit on rate limit'}`,
+    `Limits:  ${cfg.budget.waitOnRateLimit ? `wait up to ${cfg.budget.maxWaitMinutes} min for a rate-limit reset` : 'exit on rate limit'}` +
+      `${
+        cfg.codex.readRateLimits
+          ? cfg.budget.codexLimitPercent > 0
+            ? `, stop above ${cfg.budget.codexLimitPercent}% of Codex's window`
+            : ', Codex window read but no threshold'
+          : ', Codex window not read'
+      }`,
   );
   log.info(
     `Compact: ${cfg.context.enabled ? `above ${(cfg.context.compactAboveRatio * 100).toFixed(0)}% context` : 'disabled'}`,
@@ -591,6 +608,24 @@ function summary(state: RunState, started: number): void {
       `(~$${state.costUsd.toFixed(2)} API-equivalent)`,
   );
   if (codex > 0) log.info(`          Codex  ${codex.toLocaleString()} tok (cost not reported)`);
+  const limit = state.codexRateLimit;
+  if (limit) {
+    const window =
+      limit.windowDurationMins === null
+        ? `${limit.window} window`
+        : `${limit.window} window (${limit.windowDurationMins} min)`;
+    const reset = limit.resetsAt === null ? '' : `, resets ${new Date(limit.resetsAt).toLocaleString()}`;
+    log.info(`Codex:    ${limit.usedPercent}% of its ${window} used${reset}`);
+    // A window vibe picked is a different claim from one the server named, and
+    // reporting the fuller window's reset as the reported one would be a made-up
+    // time in the field a user acts on.
+    if (limit.reachedType !== null && !limit.windowFromServer) {
+      log.warn(
+        `          Codex reported its limit reached as "${limit.reachedType}", which names no ` +
+          'window vibe recognises - the figures above are the fullest window, not that one.',
+      );
+    }
+  }
   if (state.rateLimitWaits > 0) log.info(`Waits:    ${state.rateLimitWaits} rate-limit pause(s)`);
   log.info(`Rounds:   ${state.planRound} plan revision(s), ${state.reviewRound} fix round(s)`);
   if (state.sessionRotations > 0) log.info(`Compacted: ${state.sessionRotations} time(s)`);
@@ -697,6 +732,24 @@ async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
   } catch (err) {
     log.fail(`config: ${err instanceof Error ? err.message : String(err)}`);
     bad++;
+  }
+
+  // Deliberately outside `check()`, which counts a throw against the exit code:
+  // app-server is experimental and absent on older Codex builds, and a machine
+  // without it is not a broken environment.
+  try {
+    const cfg = loadConfig(targetDir);
+    const limits = await readCodexRateLimits(cfg, targetDir);
+    if (limits === null) {
+      log.info('codex rate limits: not available (codex app-server did not answer)');
+    } else {
+      log.ok(`codex rate limits: ${describeLimits(limits)}`);
+    }
+  } catch (err) {
+    log.detail(`codex rate limits: ${err instanceof Error ? err.message : String(err)}`);
+  } finally {
+    // Otherwise the persistent child keeps `vibe doctor` from exiting.
+    closeCodexRateLimits();
   }
 
   if (await git.isRepo(targetDir)) {

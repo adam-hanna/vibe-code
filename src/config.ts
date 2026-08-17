@@ -21,6 +21,7 @@ export const DEFAULTS: Config = {
     sandbox: 'read-only',
     timeoutMs: 45 * 60 * 1000,
     persistSession: true,
+    readRateLimits: true,
   },
   loop: {
     maxPlanRounds: 5,
@@ -68,6 +69,12 @@ export const DEFAULTS: Config = {
     maxTokens: 25_000_000,
     waitOnRateLimit: true,
     maxWaitMinutes: 360,
+    // 95, not 100: the point is to stop *before* starting an expensive turn that
+    // the window will kill partway through, and a turn cannot be un-started. It
+    // is deliberately high enough not to fire on a healthy account - the cost of
+    // a false stop is one `vibe resume`, but the cost of firing early on every
+    // run would be a brake nobody keeps switched on. 0 disables.
+    codexLimitPercent: 95,
     // Planning gets at most 40% of the ceiling. A plan that has eaten more
     // than that has not left enough to implement and review what it describes,
     // and the round counter alone will not notice - the run that motivated
@@ -169,9 +176,17 @@ function mergeToolchain(base: ToolchainContract, override: unknown): ToolchainCo
  *
  * Used on resume, where the base is the config the run started with rather
  * than freshly-loaded defaults.
+ *
+ * DEFAULTS go underneath that base rather than being skipped. `mergeSection`
+ * iterates the *base's* keys, so a config persisted by an older vibe is missing
+ * every setting added since - and a resume of such a run failed validation
+ * outright on the first required key that did not exist yet. Layering fills only
+ * the absent keys: every stored value still beats the default, and the flags
+ * given now still beat both. This is not specific to any one setting; without
+ * it, the next key added breaks resume for every run already on disk.
  */
 export function applyOverrides(base: Config, overrides: ConfigOverrides): Config {
-  const merged = mergeConfig(base, overrides);
+  const merged = mergeConfig(mergeConfig(DEFAULTS, base), overrides);
   validate(merged);
   return merged;
 }
@@ -231,6 +246,10 @@ function validate(cfg: Config): void {
   }
   if (!Number.isFinite(cfg.budget.maxWaitMinutes) || cfg.budget.maxWaitMinutes <= 0) {
     throw new Error('budget.maxWaitMinutes must be a positive number');
+  }
+  const limitPercent = cfg.budget.codexLimitPercent;
+  if (!Number.isFinite(limitPercent) || limitPercent < 0 || limitPercent > 100) {
+    throw new Error('budget.codexLimitPercent must be between 0 (disabled) and 100');
   }
   const ratio = cfg.context.compactAboveRatio;
   if (!Number.isFinite(ratio) || ratio <= 0 || ratio >= 1) {
