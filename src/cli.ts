@@ -41,8 +41,10 @@ Options
   --implement-timeout <min>  Per implement/fix turn (default: 90)
   --codex-timeout <min>      Per Codex turn (default: 45)
   --verify-timeout <min>     Per verification command run (default: 15)
-  --budget <usd>             Work ceiling, API-equivalent (default: 25; not a bill on a plan)
-  --max-tokens <n>           Cumulative Claude token ceiling (0 = off)
+  --budget <usd>             Work ceiling, API-equivalent, Claude only - Codex reports no
+                             cost (default: 25; not a bill on a plan)
+  --max-tokens <n>           Cumulative token ceiling across both agents. The only ceiling
+                             that bounds Codex work (0 = off)
   --no-wait-on-limit         Exit on a rate limit instead of waiting for the reset
   --compact-above <ratio>    Rotate the Claude session above this context share (default: 0.5)
   --no-compact               Never rotate the session
@@ -275,10 +277,18 @@ async function cmdRun(args: readonly string[], planOnly: boolean): Promise<ExitC
       `${cfg.codex.persistSession ? ' (single thread)' : ' (one-shot per turn)'}`,
   );
   log.info(
-    `Ceiling: ~$${cfg.budget.maxCostUsd} API-equivalent` +
-      `${cfg.budget.maxTokens > 0 ? ` / ${cfg.budget.maxTokens.toLocaleString()} tokens` : ''}` +
-      ` (Claude side; on a subscription this is a volume brake, not a bill)`,
+    `Ceiling: ~$${cfg.budget.maxCostUsd} API-equivalent, Claude only` +
+      `${cfg.budget.maxTokens > 0 ? ` / ${cfg.budget.maxTokens.toLocaleString()} tokens, both agents` : ''}` +
+      ` (on a subscription this is a volume brake, not a bill)`,
   );
+  // Codex reports tokens but no cost, so the dollar ceiling cannot see it. With
+  // maxTokens off, that leaves the reviewer's half of the run with no brake.
+  if (cfg.budget.maxTokens <= 0) {
+    log.warn(
+      'Codex reports no cost, so budget.maxCostUsd bounds the Claude side only and ' +
+        'Codex work is unbounded. Set budget.maxTokens (--max-tokens) for a ceiling covering both.',
+    );
+  }
   log.info(
     `Limits:  ${cfg.budget.waitOnRateLimit ? `wait up to ${cfg.budget.maxWaitMinutes} min for a rate-limit reset` : 'exit on rate limit'}`,
   );
@@ -572,10 +582,15 @@ function reportDeferred(state: RunState): void {
 function summary(state: RunState, started: number): void {
   const mins = ((Date.now() - started) / 60000).toFixed(1);
   log.info(`Run:      ${state.id}  (${state.status})`);
+  // Split by agent rather than printing one total beside one dollar figure: the
+  // cost covers only the Claude share, and a single line implied it covered all.
+  const codex = state.codexTokens ?? 0;
+  log.info(`Work:     ${state.tokensUsed.toLocaleString()} tokens, ${mins} min`);
   log.info(
-    `Work:     ${state.tokensUsed.toLocaleString()} Claude tokens ` +
-      `(~$${state.costUsd.toFixed(2)} API-equivalent), ${mins} min`,
+    `          Claude ${(state.tokensUsed - codex).toLocaleString()} tok ` +
+      `(~$${state.costUsd.toFixed(2)} API-equivalent)`,
   );
+  if (codex > 0) log.info(`          Codex  ${codex.toLocaleString()} tok (cost not reported)`);
   if (state.rateLimitWaits > 0) log.info(`Waits:    ${state.rateLimitWaits} rate-limit pause(s)`);
   log.info(`Rounds:   ${state.planRound} plan revision(s), ${state.reviewRound} fix round(s)`);
   if (state.sessionRotations > 0) log.info(`Compacted: ${state.sessionRotations} time(s)`);

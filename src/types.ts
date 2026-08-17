@@ -128,9 +128,21 @@ export interface BudgetConfig {
    * On a subscription this is NOT money: the CLI computes it from token counts
    * at public API rates, and nothing is billed. Treat it as a proxy for work
    * volume - a runaway-loop brake, not a spend limit.
+   *
+   * Claude-only, and unavoidably so: the Codex CLI reports no cost field in any
+   * output mode, and deriving one would mean hardcoding a price table for
+   * models that are renamed faster than it could be maintained - a fabricated
+   * number in the field the ceiling is enforced against. Use `maxTokens` for a
+   * brake that covers both agents.
    */
   maxCostUsd: number;
-  /** Ceiling on cumulative tokens. 0 disables. The real currency on a plan. */
+  /**
+   * Ceiling on cumulative tokens across BOTH agents. 0 disables.
+   *
+   * The real currency on a plan, and the only ceiling that sees the whole run:
+   * Codex reports usage on its `turn.completed` event, so its work counts here
+   * even though it can never count toward `maxCostUsd`.
+   */
   maxTokens: number;
   /**
    * On hitting a subscription rate limit, wait for the window to reset and
@@ -338,8 +350,16 @@ export interface RunState {
   phase?: RunPhase;
   planRound: number;
   reviewRound: number;
+  /** Claude's reported spend. Codex contributes nothing: it reports no cost. */
   costUsd: number;
+  /** Both agents' tokens, which is what makes `budget.maxTokens` the honest ceiling. */
   tokensUsed: number;
+  /**
+   * The Codex share of `tokensUsed`, so the summary can say how much of the run
+   * carries no cost figure instead of implying `costUsd` covered all of it.
+   * Optional so runs recorded before Codex usage was read still load.
+   */
+  codexTokens?: number;
   rateLimitWaits: number;
   baseSha: string | null;
   branch: string | null;

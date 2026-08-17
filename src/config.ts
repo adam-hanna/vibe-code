@@ -48,6 +48,9 @@ export const DEFAULTS: Config = {
     // token counts at API rates and nothing is billed. It is a work-volume
     // brake. The Codex CLI reports no cost at all, so this covers half the run.
     maxCostUsd: 25,
+    // 0 disables. Worth setting: it is the only ceiling that counts Codex, whose
+    // tokens are measured but whose spend can never be, so with this off the
+    // reviewer's half of the run has no brake on it whatsoever.
     maxTokens: 0,
     waitOnRateLimit: true,
     maxWaitMinutes: 360,

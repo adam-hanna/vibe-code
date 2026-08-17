@@ -99,7 +99,7 @@ Three independent brakes:
 |---|---|
 | **Round cap** | `maxPlanRounds` / `maxReviewRounds` (default 5 each) |
 | **Oscillation guard** | The set of P1 `id`s is fingerprinted each round. Same fingerprint twice running means the two models are deadlocked, and asking again will not break the tie — the run escalates instead of burning budget. |
-| **Budget ceiling** | Claude reports `total_cost_usd` per turn; the run aborts past `budget.maxCostUsd`. |
+| **Budget ceiling** | Two figures, with different coverage. Claude reports `total_cost_usd` per turn and the run aborts past `budget.maxCostUsd` — **Claude only**, since Codex reports no cost in any output mode. Tokens are counted for **both** agents (Codex reports usage on its `turn.completed` event) and abort past `budget.maxTokens`. That makes `maxTokens` the only ceiling that sees the whole run; it is `0` (disabled) by default, and `vibe` warns at startup when it is. |
 
 ## Safety
 
@@ -133,7 +133,7 @@ Drop `vibe.config.json` in the target repo; CLI flags override it. See `vibe.con
   "claude": { "model": "opus", "effort": "medium" },
   "codex":  { "model": "gpt-5.6-luna", "effort": "xhigh" },
   "loop":   { "maxPlanRounds": 5, "maxReviewRounds": 5, "oscillationThreshold": 2 },
-  "budget": { "maxCostUsd": 25 },
+  "budget": { "maxCostUsd": 25, "maxTokens": 0 },
   "questions": { "askCodex": true, "escalateOnDefer": true, "escalateOnLowConfidence": true },
   "git": { "useBranch": true, "branchPrefix": "vibe/", "commitEachRound": true },
   "context": { "enabled": true, "compactAboveRatio": 0.5, "compactDuringCodex": true }
@@ -156,7 +156,9 @@ Suitable for `if vibe run "..."; then ...` in a wrapper script.
 
 ## Notes and limitations
 
-- **Codex spend is not bounded.** The Codex CLI does not report cost, so `budget.maxCostUsd` caps the Claude side only.
+- **Codex tokens are counted; Codex cost is not.** The Codex CLI reports token usage (via `codex exec --json`, on `turn.completed`) but no cost figure in any output mode. So `budget.maxCostUsd` caps the Claude side only, and deriving a dollar figure for Codex would mean hardcoding a price table for models that get renamed faster than it could be maintained — a fabricated number in the field the ceiling is enforced against. **Set `budget.maxTokens` if you want a brake that covers both agents**; with it at the default `0`, nothing bounds the Codex half of the run. The run summary reports the two token totals separately for the same reason.
+
+  One accounting detail if you extend the adapter: Codex nests its usage the OpenAI way — `cached_input_tokens` is a *subset* of `input_tokens`, and `reasoning_output_tokens` a subset of `output_tokens`. Claude's envelope nests neither. So `codex.ts` totals two fields where `claude.ts` totals four; summing all four on the Codex side counts the same prompt twice.
 - **Prompts go over stdin, never argv.** Claude's variadic flags (`--tools`, `--allowedTools`) will otherwise swallow a positional prompt argument. If you extend the adapters, keep it that way.
 - **Codex output is read as UTF-8 explicitly** — its smart quotes and em dashes mangle under the Windows ANSI codepage.
 - **Large diffs are truncated** at 400k characters for the review prompt; the reviewer is told to read the working tree directly when that happens.

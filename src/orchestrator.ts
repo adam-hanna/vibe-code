@@ -600,13 +600,7 @@ async function claudeStep(state: RunState, cfg: Config, args: ClaudeStepArgs): P
 
   if (result.denials.length > 0) log.warn(`${result.denials.length} permission denial(s) in ${args.label}`);
 
-  if (cfg.budget.maxTokens > 0 && state.tokensUsed > cfg.budget.maxTokens) {
-    throw new Escalation(
-      EXIT.BUDGET,
-      `Token ceiling exceeded: ${fmtTokens(state.tokensUsed)} > ${fmtTokens(cfg.budget.maxTokens)}. ` +
-        'Raise budget.maxTokens to continue.',
-    );
-  }
+  enforceTokenCeiling(state, cfg);
   if (state.costUsd > cfg.budget.maxCostUsd) {
     throw new Escalation(
       EXIT.BUDGET,
@@ -615,6 +609,22 @@ async function claudeStep(state: RunState, cfg: Config, args: ClaudeStepArgs): P
     );
   }
   return result.text;
+}
+
+/**
+ * The one ceiling both agents answer to.
+ *
+ * Shared rather than duplicated per adapter because the Codex side has no cost
+ * figure to fall back on: if this check were only wired into the Claude path,
+ * a run whose expensive work sat with Codex would have no working brake at all.
+ */
+function enforceTokenCeiling(state: RunState, cfg: Config): void {
+  if (cfg.budget.maxTokens <= 0 || state.tokensUsed <= cfg.budget.maxTokens) return;
+  throw new Escalation(
+    EXIT.BUDGET,
+    `Token ceiling exceeded: ${fmtTokens(state.tokensUsed)} > ${fmtTokens(cfg.budget.maxTokens)}. ` +
+      'Raise budget.maxTokens to continue.',
+  );
 }
 
 function fmtTokens(n: number): string {
@@ -751,7 +761,7 @@ async function runCodex(
   cwd: string,
   args: { prompt: string; schemaName: string },
 ): Promise<unknown> {
-  const { structured, sessionId } = await codexTurn({
+  const { structured, sessionId, tokens } = await codexTurn({
     prompt: args.prompt,
     schema: args.schemaName.startsWith('answers') ? ANSWERS_SCHEMA : FINDINGS_SCHEMA,
     schemaName: args.schemaName,
@@ -770,6 +780,19 @@ async function runCodex(
     saveState(state);
     if (isFirst) log.detail(`codex thread ${sessionId}`);
   }
+
+  // Counted, but deliberately not costed: there is no USD figure to add, and
+  // inventing one would make `costUsd` a number nobody could trace to a source.
+  state.tokensUsed += tokens.total;
+  state.codexTokens = (state.codexTokens ?? 0) + tokens.total;
+  recordEvent(state, 'codex_turn', { label: args.schemaName, tokens: tokens.total });
+  log.detail(
+    `${args.schemaName}: ${fmtTokens(tokens.total)} tok, cost not reported ` +
+      `(run ${fmtTokens(state.tokensUsed)} tok / ~$${state.costUsd.toFixed(2)} Claude-side)`,
+  );
+  saveState(state);
+  enforceTokenCeiling(state, cfg);
+
   return structured;
 }
 
