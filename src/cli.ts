@@ -408,11 +408,23 @@ async function execute(
   try {
     await orchestrate(state, cfg, resume);
     log.heading('Done');
-    log.ok(
-      state.planOnly
-        ? 'Plan cleared critique with zero P1s. Not implemented (plan-only run).'
-        : 'Plan and implementation both cleared review with zero P1s.',
-    );
+    // Never claim a spotless finish when a P1 was carried. The tolerance lets a
+    // run complete with findings outstanding; reporting that as "zero P1s"
+    // would contradict the OUTSTANDING.md written moments earlier, and a
+    // summary a user cannot trust is worse than no summary.
+    const left = state.outstanding ?? [];
+    if (left.length > 0) {
+      log.warn(
+        `Finished with ${left.length} P1 finding(s) unfixed, within loop.p1Tolerance: ` +
+          `${left.map((f) => f.id).join(', ')}. See OUTSTANDING.md.`,
+      );
+    } else {
+      log.ok(
+        state.planOnly
+          ? 'Plan cleared critique with zero P1s. Not implemented (plan-only run).'
+          : 'Plan and implementation both cleared review with zero P1s.',
+      );
+    }
     reportDeferred(state);
     summary(state, started);
     return EXIT.OK;
