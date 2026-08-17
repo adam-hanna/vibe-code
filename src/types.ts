@@ -368,11 +368,17 @@ export interface RunState {
    */
   carried?: Finding[];
   /**
-   * P1s the review left unfixed, within `loop.p1Tolerance`. Written to
-   * OUTSTANDING.md and reported in the summary - a finished run must never
-   * quietly drop a finding it decided to live with.
+   * P1s the review carried, within `loop.p1Tolerance`. A final fix round
+   * addresses them and OUTSTANDING.md records them, because that round is not
+   * re-reviewed and so nothing has confirmed they are gone.
    */
   outstanding?: Finding[];
+  /**
+   * The final fix round has run. Stops the review loop reopening the argument
+   * the tolerance just settled, and survives resume so a restart does not
+   * review again.
+   */
+  finalFixDone?: boolean;
   /** Verified agent environment facts, stated to both agents in their prompts. */
   environment?: EnvironmentFacts | null;
   /**

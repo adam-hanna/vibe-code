@@ -266,6 +266,14 @@ async function reviewPhase(state: RunState, cfg: Config, cwd: string, plan: Plan
       continue;
     }
 
+    // The carried findings have been addressed and the suite still passes.
+    // Stop here rather than reviewing again: the point of the tolerance is to
+    // end the argument, and a fresh review would reopen it.
+    if (state.finalFixDone === true) {
+      log.ok('Carried findings addressed and verification still passes.');
+      break;
+    }
+
     log.heading(`Code review (round ${state.reviewRound + 1})`);
     const review = await withConcurrentCompaction(state, cfg, () => runReview(state, cfg, cwd, plan));
     artifact(state, `code-review-${state.reviewRound}.json`, review);
@@ -273,25 +281,49 @@ async function reviewPhase(state: RunState, cfg: Config, cwd: string, plan: Plan
     const decision = gate(review.findings, cfg.loop.p1Tolerance);
     const stoppers = blockingFindings(review.findings);
     if (decision.pass) {
-      if (decision.tolerated.length > 0) {
-        // Nothing downstream will fix these, so they are written where a human
-        // will see them rather than buried in a round artifact.
-        state.outstanding = decision.tolerated;
-        const file = artifact(state, 'OUTSTANDING.md', renderOutstanding(state, decision.tolerated));
-        log.warn(
-          `Review left ${decision.tolerated.length} P1(s) unfixed, within the tolerance of ` +
-            `${cfg.loop.p1Tolerance}: ${decision.tolerated.map((f) => f.id).join(', ')}`,
-        );
-        for (const f of decision.tolerated) log.info(`  ~ ${f.title}`);
-        log.info(`Outstanding: ${path.relative(cwd, file)}`);
-      } else {
+      if (decision.tolerated.length === 0) {
         log.ok(`Review clean - ${review.findings.length} non-blocking finding(s)`);
+        recordEvent(state, 'review_approved', { findings: review.findings.length });
+        break;
       }
+
+      // Tolerating a finding means stopping the argument, not abandoning the
+      // work. The loop ends after one more fix that incorporates what the
+      // reviewer found - the alternative was to finish with a known defect
+      // untouched, which is not what "move on" should buy.
+      //
+      // The result is deliberately not re-reviewed: that is what bounds this.
+      // Another review round could raise something new and the loop would never
+      // end, which is the situation the tolerance exists to escape.
+      state.reviewRound += 1;
+      state.finalFixDone = true;
+      state.outstanding = decision.tolerated;
+      saveState(state);
+
+      log.step(
+        `Incorporating ${decision.tolerated.length} carried P1(s), then finishing: ` +
+          decision.tolerated.map((f) => f.id).join(', '),
+      );
+      for (const f of decision.tolerated) log.info(`  ~ ${f.title}`);
+
+      const finalFix = await claudeStep(state, cfg, {
+        prompt: P.fixPrompt(review.findings, state.reviewRound),
+        cwd,
+        permissionMode: 'bypassPermissions',
+        timeoutMs: cfg.claude.implementTimeoutMs,
+        label: `final-fix-${state.reviewRound}`,
+      });
+      artifact(state, `fix-report-${state.reviewRound}.md`, finalFix);
+      await maybeCommit(cfg, cwd, `vibe: address carried review findings (final round)`);
+
+      const file = artifact(state, 'OUTSTANDING.md', renderOutstanding(state, decision.tolerated));
+      log.info(`Carried findings and what was done about them: ${path.relative(cwd, file)}`);
       recordEvent(state, 'review_approved', {
         findings: review.findings.length,
-        outstanding: decision.tolerated.map((f) => f.id),
+        carriedAndFixed: decision.tolerated.map((f) => f.id),
       });
-      break;
+      // Back to the top once, so the gate proves the final fix broke nothing.
+      continue;
     }
 
     log.warn(`${decision.reason}: ${stoppers.map((f) => f.id).join(', ')}`);
@@ -320,7 +352,7 @@ async function reviewPhase(state: RunState, cfg: Config, cwd: string, plan: Plan
   }
 }
 
-/** The findings a finished run is knowingly shipping with. */
+/** The findings the last fix round addressed without a reviewer confirming it. */
 function renderOutstanding(state: RunState, findings: readonly Finding[]): string {
   const body = findings
     .map(
@@ -329,12 +361,15 @@ function renderOutstanding(state: RunState, findings: readonly Finding[]): strin
     )
     .join('\n');
   return (
-    `# Outstanding findings\n\n` +
+    `# Carried findings\n\n` +
     `**Run:** \`${state.id}\`\n` +
     `**Task:** ${state.task}\n\n` +
-    `The review loop finished with ${findings.length} P1 finding(s) unfixed. They were within ` +
-    `\`loop.p1Tolerance\`, so the run completed rather than stopping - but nothing downstream ` +
-    `addressed them. Set \`loop.p1Tolerance\` to 0 to require a spotless review instead.\n\n` +
+    `The last review raised ${findings.length} P1 finding(s), within \`loop.p1Tolerance\`. ` +
+    `A final fix round addressed them and verification still passed, but that round was ` +
+    `deliberately **not reviewed again** - re-reviewing would reopen the loop the tolerance ` +
+    `exists to close. So these were worked on, and nobody has confirmed they are gone.\n\n` +
+    `Worth a human eye. Set \`loop.p1Tolerance\` to 0 to require a spotless review instead, ` +
+    `at the cost of runs that cannot converge.\n\n` +
     body
   );
 }

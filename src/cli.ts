@@ -415,8 +415,9 @@ async function execute(
     const left = state.outstanding ?? [];
     if (left.length > 0) {
       log.warn(
-        `Finished with ${left.length} P1 finding(s) unfixed, within loop.p1Tolerance: ` +
-          `${left.map((f) => f.id).join(', ')}. See OUTSTANDING.md.`,
+        `Finished after a final fix round for ${left.length} carried P1(s): ` +
+          `${left.map((f) => f.id).join(', ')}. Verification passed, but that round was not ` +
+          're-reviewed - see OUTSTANDING.md.',
       );
     } else {
       log.ok(
