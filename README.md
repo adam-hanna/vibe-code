@@ -24,7 +24,7 @@ PLAN ──> CRITIQUE ──blocking?──> REVISE ─┐
 cd vibe-code
 npm install
 npm run build
-npm link          # or: node dist/bin/vibe.js ...
+npm link          # or: node dist/src/main.js ...
 vibe doctor
 ```
 

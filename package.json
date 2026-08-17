@@ -12,7 +12,7 @@
   },
   "homepage": "https://github.com/adam-hanna/vibe-code#readme",
   "bin": {
-    "vibe": "dist/bin/vibe.js"
+    "vibe": "dist/src/main.js"
   },
   "engines": {
     "node": ">=20"
@@ -27,7 +27,7 @@
     "watch": "tsc --watch",
     "typecheck": "tsc --noEmit",
     "prepare": "npm run build",
-    "doctor": "npm run build && node dist/bin/vibe.js doctor"
+    "doctor": "npm run build && node dist/src/main.js doctor"
   },
   "license": "MIT",
   "private": true,
