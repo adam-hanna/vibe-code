@@ -676,7 +676,9 @@ async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
     log.ok(`config: ${cfg.configPath ?? 'defaults'}`);
     log.info(`  claude ${cfg.claude.model}/${cfg.claude.effort} - codex ${cfg.codex.model}/${cfg.codex.effort}`);
     log.info(
-      `  budget $${cfg.budget.maxCostUsd} - plan rounds ${cfg.loop.maxPlanRounds} - review rounds ${cfg.loop.maxReviewRounds}`,
+      `  budget $${cfg.budget.maxCostUsd} (Claude) / ` +
+        `${cfg.budget.maxTokens > 0 ? `${cfg.budget.maxTokens.toLocaleString()} tokens (both)` : 'no token ceiling'}` +
+        ` - plan rounds ${cfg.loop.maxPlanRounds} - review rounds ${cfg.loop.maxReviewRounds}`,
     );
     log.info(
       `  compaction ${cfg.context.enabled ? `above ${(cfg.context.compactAboveRatio * 100).toFixed(0)}%` : 'off'}` +
