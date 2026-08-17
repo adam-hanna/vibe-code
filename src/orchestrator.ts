@@ -24,6 +24,14 @@ import {
   parsePlan,
 } from '@src/validate.js';
 import { withConcurrentCompaction, rotateSession, shouldRotate } from '@src/context.js';
+import {
+  closeCodexRateLimits,
+  decideCodexLimit,
+  describeLimits,
+  invalidateCodexRateLimits,
+  readCodexRateLimits,
+  recordLimits,
+} from '@src/ratelimits.js';
 import { describeFailure, runVerification } from '@src/verify.js';
 import type {
   Answer,
@@ -66,6 +74,18 @@ export class Escalation extends Error {
 const PLAN_TOOLS = ['Read', 'Glob', 'Grep', 'Bash', 'WebSearch', 'WebFetch'] as const;
 
 export async function orchestrate(state: RunState, cfg: Config, resume: boolean): Promise<RunState> {
+  try {
+    return await runPhases(state, cfg, resume);
+  } finally {
+    // A `finally`, not a tail call: the phases below return early at the
+    // "already finished" check and at the plan-only exit, and a persistent
+    // app-server child left running would outlive the run on exactly those
+    // paths.
+    closeCodexRateLimits();
+  }
+}
+
+async function runPhases(state: RunState, cfg: Config, resume: boolean): Promise<RunState> {
   const cwd = state.targetDir;
 
   if (!resume) await prepareGit(state, cfg, cwd);
@@ -761,17 +781,23 @@ async function runCodex(
   cwd: string,
   args: { prompt: string; schemaName: string },
 ): Promise<unknown> {
-  const { structured, sessionId, tokens } = await codexTurn({
-    prompt: args.prompt,
-    schema: args.schemaName.startsWith('answers') ? ANSWERS_SCHEMA : FINDINGS_SCHEMA,
-    schemaName: args.schemaName,
-    artifactDir: artifactDir(state, 'codex'),
-    model: cfg.codex.model,
-    effort: cfg.codex.effort,
-    sandbox: cfg.codex.sandbox,
-    cwd,
-    timeoutMs: cfg.codex.timeoutMs,
-    sessionId: cfg.codex.persistSession ? state.codexSessionId : null,
+  // Through the same retry the Claude turns use, so a Codex rate limit gets the
+  // wait, the maxWaitMinutes cap and the resumable exit that already exist
+  // rather than a second implementation of all three.
+  const { structured, sessionId, tokens } = await withRateLimitRetry(state, cfg, args.schemaName, async () => {
+    await checkCodexLimits(state, cfg, cwd, args.schemaName);
+    return codexTurn({
+      prompt: args.prompt,
+      schema: args.schemaName.startsWith('answers') ? ANSWERS_SCHEMA : FINDINGS_SCHEMA,
+      schemaName: args.schemaName,
+      artifactDir: artifactDir(state, 'codex'),
+      model: cfg.codex.model,
+      effort: cfg.codex.effort,
+      sandbox: cfg.codex.sandbox,
+      cwd,
+      timeoutMs: cfg.codex.timeoutMs,
+      sessionId: cfg.codex.persistSession ? state.codexSessionId : null,
+    });
   });
 
   if (cfg.codex.persistSession && sessionId && sessionId !== state.codexSessionId) {
@@ -794,6 +820,52 @@ async function runCodex(
   enforceTokenCeiling(state, cfg);
 
   return structured;
+}
+
+/**
+ * Read Codex's rate-limit window before spending a turn against it.
+ *
+ * The Codex side previously had no equivalent of the Claude rate-limit brake at
+ * all: on a subscription the window, not cost, is what ends a long unattended
+ * run, and a turn started against an exhausted window dies partway through
+ * having spent the tokens anyway. Every failure to read is a no-op - the signal
+ * is optional and `readCodexRateLimits` never throws.
+ */
+async function checkCodexLimits(
+  state: RunState,
+  cfg: Config,
+  cwd: string,
+  label: string,
+): Promise<void> {
+  const limits = await readCodexRateLimits(cfg, cwd);
+  if (limits === null) return;
+
+  const decision = decideCodexLimit(limits, cfg.budget.codexLimitPercent);
+  // recordLimits does the fallback rather than this call site: `wait` carries no
+  // window when the server named a reached type this version does not know, and
+  // `proceed` carries none at all.
+  const chosen = decision.action === 'proceed' ? null : decision.window;
+  state.codexRateLimit = recordLimits(limits, chosen);
+  recordEvent(state, 'codex_rate_limit', {
+    label,
+    action: decision.action,
+    usedPercent: limits.usedPercent,
+    reachedType: limits.reachedType,
+  });
+  log.detail(describeLimits(limits));
+
+  if (decision.action === 'wait') {
+    // The cached reading must not survive the wait. budget.maxWaitMinutes may
+    // legally be under a minute, and plannedWait's no-reset branch honours it,
+    // so a retry inside the snapshot TTL would keep re-reading the same
+    // "reached" answer and never see the window clear.
+    invalidateCodexRateLimits();
+    throw new RateLimitError(decision.reason, decision.resetsAt);
+  }
+  if (decision.action === 'stop') {
+    saveState(state);
+    throw new Escalation(EXIT.RATE_LIMITED, decision.reason);
+  }
 }
 
 function codexHasMemory(state: RunState, cfg: Config): boolean {
