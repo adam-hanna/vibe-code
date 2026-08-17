@@ -279,13 +279,25 @@ export function assessConvergence(
   //
   // The fingerprint above only catches an *identical* set. A defect that
   // survives every round while its companions rotate produces a new
-  // fingerprint each time and never trips it - observed on a run where one id
-  // came back four rounds running and nothing noticed. Requiring the count to
-  // have stalled too keeps this off runs that are genuinely converging while
-  // one stubborn item rides along.
-  const stuck = hasWindow ? persistentId(recent) : null;
-  if (stuck !== null && !improved) {
-    return `"${stuck}" has come back ${window} rounds running and the count is not falling`;
+  // fingerprint each time and never trips it.
+  //
+  // Judged on persistence alone, deliberately. An earlier version also required
+  // the total count to have stalled, which sounded prudent and was useless: on
+  // the run that motivated this, one id survived six consecutive fix attempts
+  // while the count wobbled 2 -> 4 -> 3, so every window contained a decrease
+  // and the rule could never fire. The count and a single defect are separate
+  // axes - findings falling elsewhere says nothing about the one that keeps
+  // coming back.
+  //
+  // One round longer than the set rule, because a single repeated id is weaker
+  // evidence per round than an identical set.
+  const persistWindow = repeatThreshold + 1;
+  const persisted = history.slice(-persistWindow);
+  if (persisted.length === persistWindow) {
+    const stuck = persistentId(persisted);
+    if (stuck !== null) {
+      return `"${stuck}" has come back ${persistWindow} rounds running; the fixer cannot resolve it`;
+    }
   }
 
   // Trend: engaged near the cap, or once the run is simply long. Findings may
