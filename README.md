@@ -21,7 +21,7 @@ PLAN ──> CRITIQUE ──blocking?──> REVISE ─┐
 ## Install
 
 ```bash
-npm install -g vibe-code
+npm install -g @adam-hanna/vibe-code
 vibe doctor
 ```
 
@@ -29,7 +29,9 @@ vibe doctor
 
 Node 20+ is required and is enforced via `engines`.
 
-Installing globally puts `vibe` on your PATH — rename the bin or use `npx vibe-code` if that collides with something you already have.
+Installing globally puts `vibe` on your PATH — rename the bin or use `npx @adam-hanna/vibe-code` if that collides with something you already have.
+
+> The npm package is scoped because the unscoped `vibe-code` is refused by npm's similarity check against the unrelated `vibecode`. The repo, the tags and the command are all still `vibe-code` / `vibe`.
 
 <details>
 <summary>From source</summary>

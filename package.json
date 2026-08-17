@@ -1,6 +1,9 @@
 {
-  "name": "vibe-code",
+  "name": "@adam-hanna/vibe-code",
   "version": "1.0.1",
+  "publishConfig": {
+    "access": "public"
+  },
   "description": "Automated plan/critique/implement/review loop between Claude Code and Codex.",
   "keywords": [
     "claude",
