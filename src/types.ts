@@ -271,6 +271,12 @@ export interface VerifyConfig {
   runs: number;
 }
 
+export interface ProgressConfig {
+  enabled: boolean;
+  /** Minimum gap between heartbeat lines, and the tick interval for a silent turn. */
+  intervalMs: number;
+}
+
 export interface Config {
   claude: ClaudeConfig;
   codex: CodexConfig;
@@ -287,6 +293,15 @@ export interface Config {
    * implementation that failed its own suite most of the time.
    */
   verify: VerifyConfig;
+  /**
+   * In-turn progress output.
+   *
+   * A turn is a single long-running CLI invocation, so without this the
+   * terminal prints one line and then nothing for up to ninety minutes - a
+   * healthy run being indistinguishable from a hung one is how a user ends up
+   * killing work that was nearly finished.
+   */
+  progress: ProgressConfig;
   /**
    * Tools each agent must be able to *run*, declared up front.
    *
@@ -441,6 +456,23 @@ export interface RunState {
   /** Carried into the first turn of a rotated session. */
   handoff: string | null;
   contextRatio: number;
+  /**
+   * When vibe last observed the current turn making progress - from the child's
+   * stdout OR from its own heartbeat tick.
+   *
+   * The field a watcher in another shell should read: it answers "is this run
+   * still being worked", which previously took `Get-Process` plus a guess. It
+   * deliberately advances during a silent reasoning block, because a turn that
+   * emits no events for twelve minutes is still a healthy turn.
+   */
+  lastActivityAt?: string;
+  /**
+   * The exact time of the last line the child wrote. Flushed at the end of a
+   * completed turn, so it is never left behind by the write throttle. Distinct
+   * from `lastActivityAt` on purpose: this is the one that goes quiet, so the
+   * pair separates "thinking" from "gone".
+   */
+  lastOutputAt?: string;
   /**
    * P1s the plan critique raised that were carried into implementation rather
    * than argued out in prose. Stated in the implementation prompt.

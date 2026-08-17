@@ -41,6 +41,10 @@
     "compactAboveRatio": 0.5,
     "compactDuringCodex": true
   },
+  "progress": {
+    "enabled": true,
+    "intervalMs": 30000
+  },
   "verify": {
     "enabled": true,
     "command": null,

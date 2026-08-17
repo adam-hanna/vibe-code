@@ -111,6 +111,13 @@ export const DEFAULTS: Config = {
     // three catch 87%. The cost is linear and small; the false pass is not.
     runs: 3,
   },
+  progress: {
+    enabled: true,
+    // 30s. A line every 30 seconds in a log file is cheap; one line per stream
+    // event is not - a single implementation turn runs 28 agentic iterations
+    // and emits thousands.
+    intervalMs: 30_000,
+  },
   toolchain: {
     // Deliberately minimal. `git` is needed in every phase because vibe commits
     // per round; node and npm only matter once something is being built or
@@ -151,6 +158,7 @@ function mergeConfig(base: Config, override: unknown): Config {
     git: mergeSection(base.git, override['git']),
     context: mergeSection(base.context, override['context']),
     verify: mergeSection(base.verify, override['verify']),
+    progress: mergeSection(base.progress, override['progress']),
     toolchain: mergeToolchain(base.toolchain, override['toolchain']),
   };
 }
@@ -271,6 +279,12 @@ function validate(cfg: Config): void {
   }
   if (cfg.verify.command !== null && typeof cfg.verify.command !== 'string') {
     throw new Error('verify.command must be a command string or null to auto-detect');
+  }
+  // A floor rather than "positive": the heartbeat also drives a state write, and
+  // a sub-second cadence would rewrite state.json continuously for a line
+  // nobody can read that fast.
+  if (!Number.isFinite(cfg.progress.intervalMs) || cfg.progress.intervalMs < 1000) {
+    throw new Error('progress.intervalMs must be at least 1000ms');
   }
   validateToolchain(cfg.toolchain);
 }
