@@ -172,6 +172,19 @@ export function measuredWindow(state: RunState, model: string): number | undefin
   return state.contextModel === model ? state.contextWindow : undefined;
 }
 
+/**
+ * The window alone, for a turn whose ratio describes a session being abandoned.
+ *
+ * A rotation's handoff turn measures a real window but its occupancy belongs to
+ * the conversation being discarded, so only the window survives. Guarded on
+ * `contextModel` because the handoff may have run under the outgoing model: a
+ * window that model measured says nothing about the incoming one, and storing it
+ * anyway is the misattribution `resetContextMeasurement` exists to prevent.
+ */
+export function recordMeasuredWindow(state: RunState, model: string, contextWindow: number): void {
+  if (contextWindow > 0 && state.contextModel === model) state.contextWindow = contextWindow;
+}
+
 /** Record a measurement together with the model that produced it. */
 export function recordContextMeasurement(
   state: RunState,
@@ -187,11 +200,16 @@ export function recordContextMeasurement(
 /**
  * A fresh session under `model`: nothing has been measured on it yet.
  *
- * The window is deleted rather than kept, because a rotation may be the very
- * point at which the model changed - reporting the outgoing model's window
- * against the incoming model is the same unattributed number this exists to
- * remove. Tagging the reset with `model` is also what stops an unknown-
- * provenance rotation asking for another rotation at the next turn boundary.
+ * Ratio and window are different kinds of fact, and the reset treats them
+ * differently. The ratio is occupancy of the session just abandoned, so it goes
+ * to zero. The window is metadata about `model` itself, and it is deleted here
+ * because a rotation may be the very point at which the model changed -
+ * reporting the outgoing model's window against the incoming one is the same
+ * unattributed number this exists to remove. A same-model measurement may put it
+ * back afterwards via `recordMeasuredWindow`, which is why a zero ratio beside a
+ * present window is a valid state. Tagging the reset with `model` is also what
+ * stops an unknown-provenance rotation asking for another rotation at the next
+ * turn boundary.
  */
 export function resetContextMeasurement(state: RunState, model: string): void {
   state.contextModel = model;
@@ -214,10 +232,28 @@ const ACTIVITY_WRITE_MS = 5_000;
 /**
  * Record that the current turn is alive, for a watcher reading state.json from
  * another shell rather than from the process table.
+ *
+ * The fields describe the turn - or, under `withConcurrentCompaction`, the two
+ * turns - vibe is running right now, never the run as a whole. A turn boundary
+ * rebases them, so a new turn that dies before its first line cannot present the
+ * previous turn's timestamps as its own pulse. `turnStartedAt` is the start of
+ * the most recently started turn.
  */
 export function markActivity(state: RunState, observation: ActivityObservation): void {
   const previous = state.lastActivityAt === undefined ? NaN : Date.parse(state.lastActivityAt);
   const at = observation.at.getTime();
+
+  if (observation.source === 'start') {
+    state.turnStartedAt = observation.at.toISOString();
+    state.lastActivityAt = state.turnStartedAt;
+    // Only when this is the sole live turn. A rotation started by
+    // withConcurrentCompaction overlaps a Codex turn that is still talking, and
+    // erasing its output time would report a live child as having gone silent.
+    if (!observation.concurrent) delete state.lastOutputAt;
+    saveState(state);
+    return;
+  }
+
   if (
     observation.source !== 'final' &&
     Number.isFinite(previous) &&
@@ -226,10 +262,21 @@ export function markActivity(state: RunState, observation: ActivityObservation):
     return;
   }
 
-  state.lastActivityAt = observation.at.toISOString();
+  // Advance-only, both fields: two heartbeats can be live at once, and a late
+  // observation from the older one - or a 'final' flush, which skips the
+  // throttle - must never wind either field backwards.
+  if (!Number.isFinite(previous) || at > previous) {
+    state.lastActivityAt = observation.at.toISOString();
+  }
   // Taken from the observation, not the clock: a skipped write delays the value
   // without ever making it claim the child was quieter than it was.
-  if (observation.lastLineAt !== null) state.lastOutputAt = observation.lastLineAt.toISOString();
+  if (observation.lastLineAt !== null) {
+    const line = observation.lastLineAt.getTime();
+    const previousLine = state.lastOutputAt === undefined ? NaN : Date.parse(state.lastOutputAt);
+    if (!Number.isFinite(previousLine) || line > previousLine) {
+      state.lastOutputAt = observation.lastLineAt.toISOString();
+    }
+  }
   saveState(state);
 }
 

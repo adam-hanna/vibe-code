@@ -63,6 +63,20 @@ test('a long tool target is truncated rather than wrapping the terminal', () => 
 
   assert.ok((snapshot.lastActivity ?? '').length < longPath.length);
   assert.match(snapshot.lastActivity ?? '', /^Read src\/nested\//);
+
+  // The budget is 60 characters *including* the ellipsis, not 60 plus three.
+  const target = (snapshot.lastActivity ?? '').slice('Read '.length);
+  assert.equal(target.length, 60);
+  assert.ok(target.endsWith('...'));
+});
+
+test('a target of exactly the budget is not truncated', () => {
+  const snapshot = emptySnapshot();
+  const exact = 'a'.repeat(60);
+
+  parseClaudeLine(snapshot, assistantLine({ content: [{ type: 'tool_use', name: 'Read', input: { file_path: exact } }] }));
+
+  assert.equal(snapshot.lastActivity, `Read ${exact}`);
 });
 
 test('claude usage accumulates turn tokens and replaces the prompt size', () => {
@@ -457,6 +471,7 @@ function recordingHeartbeat(): { heartbeat: Heartbeat; calls: string[] } {
   return {
     calls,
     heartbeat: {
+      begin: () => calls.push('begin'),
       onLine: () => calls.push('line'),
       flush: () => calls.push('flush'),
       stop: () => calls.push('stop'),
@@ -464,13 +479,13 @@ function recordingHeartbeat(): { heartbeat: Heartbeat; calls: string[] } {
   };
 }
 
-test('withHeartbeat flushes then stops on a completed turn', async () => {
+test('withHeartbeat opens the turn, then flushes and stops on a completed turn', async () => {
   const { heartbeat, calls } = recordingHeartbeat();
 
   const result = await withHeartbeat(heartbeat, () => Promise.resolve('the output'));
 
   assert.equal(result, 'the output');
-  assert.deepEqual(calls, ['flush', 'stop']);
+  assert.deepEqual(calls, ['begin', 'flush', 'stop']);
 });
 
 test('withHeartbeat stops but does not flush a turn that failed', async () => {
@@ -481,7 +496,86 @@ test('withHeartbeat stops but does not flush a turn that failed', async () => {
     /timed out/,
   );
 
-  assert.deepEqual(calls, ['stop']);
+  assert.deepEqual(calls, ['begin', 'stop']);
+});
+
+test('a turn opens the boundary before the child has said anything', () => {
+  const h = harness();
+
+  h.heartbeat.begin();
+
+  assert.equal(h.lines.length, 0, 'a boundary is not a heartbeat line');
+  assert.equal(h.seen.length, 1);
+  assert.equal(h.seen[0]?.source, 'start');
+  assert.equal(h.seen[0]?.lastLineAt, null);
+  assert.equal(h.seen[0]?.concurrent, false);
+  h.heartbeat.stop();
+});
+
+test('a second live turn is marked concurrent, and so are the first one later observations', () => {
+  const a = harness();
+  const b = harness();
+
+  a.heartbeat.begin();
+  b.heartbeat.begin();
+  a.advance(30_000);
+  a.heartbeat.onLine(TOOL_LINE);
+
+  assert.equal(a.seen[0]?.concurrent, false, 'a was alone when it started');
+  assert.equal(b.seen[0]?.concurrent, true, 'b started while a was live');
+  assert.equal(a.seen[1]?.concurrent, true, 'a is still speaking while b runs');
+  a.heartbeat.stop();
+  b.heartbeat.stop();
+});
+
+test('the count is only released when every live turn has stopped', () => {
+  const a = harness();
+  const b = harness();
+  a.heartbeat.begin();
+  b.heartbeat.begin();
+
+  b.heartbeat.stop();
+  const c = harness();
+  c.heartbeat.begin();
+  assert.equal(c.seen[0]?.concurrent, true, 'a is still live');
+
+  a.heartbeat.stop();
+  c.heartbeat.stop();
+  const d = harness();
+  d.heartbeat.begin();
+  assert.equal(d.seen[0]?.concurrent, false, 'nothing else is live now');
+  d.heartbeat.stop();
+});
+
+test('begin and stop are idempotent, so the live count cannot drift', () => {
+  const a = harness();
+  a.heartbeat.begin();
+  a.heartbeat.begin();
+  a.heartbeat.stop();
+  a.heartbeat.stop();
+
+  const b = harness();
+  b.heartbeat.begin();
+
+  assert.equal(b.seen[0]?.concurrent, false);
+  b.heartbeat.stop();
+});
+
+test('output the adapter rejects is not flushed as a completed turn', async () => {
+  // The adapter shape after the boundary moved: validation of the buffered
+  // output happens inside the work, so a rejected turn never reaches flush.
+  const h = harness();
+
+  await assert.rejects(
+    () =>
+      withHeartbeat(h.heartbeat, () => {
+        h.heartbeat.onLine(TOOL_LINE);
+        return Promise.reject(new Error('claude emitted no result event'));
+      }),
+    /no result event/,
+  );
+
+  assert.deepEqual(h.seen.map((observation) => observation.source), ['start', 'stdout']);
 });
 
 test('withHeartbeat passes the value through when progress is disabled', async () => {

@@ -53,7 +53,9 @@ function asEvent(line: string): Record<string, unknown> | null {
 }
 
 const TARGET_KEYS = ['file_path', 'path', 'pattern', 'command', 'description'] as const;
+/** Total budget for the rendered target, ellipsis included. */
 const TARGET_MAX = 60;
+const ELLIPSIS = '...';
 
 /** The most identifying string in a tool's input, if it carries one. */
 function toolTarget(input: unknown): string | null {
@@ -62,7 +64,9 @@ function toolTarget(input: unknown): string | null {
     const value = input[key];
     if (typeof value === 'string' && value !== '') {
       const flat = value.replace(/\s+/g, ' ').trim();
-      return flat.length > TARGET_MAX ? `${flat.slice(0, TARGET_MAX)}...` : flat;
+      return flat.length > TARGET_MAX
+        ? `${flat.slice(0, TARGET_MAX - ELLIPSIS.length)}${ELLIPSIS}`
+        : flat;
     }
   }
   return null;
@@ -201,15 +205,23 @@ export function dueForEmit(lastEmitAt: number, now: number, intervalMs: number):
  *
  * `lastLineAt` is the *exact* time of the most recent stdout line, carried
  * separately from `at` so a throttled state write records when the child really
- * spoke rather than when vibe got round to writing the file. `'final'` is the
- * end-of-turn flush and is the one source that bypasses the write throttle -
- * without it, a line arriving inside the throttle window immediately before the
- * child closed would never be persisted at all.
+ * spoke rather than when vibe got round to writing the file.
+ *
+ * `'start'` is the turn boundary and `'final'` the end-of-turn flush; both
+ * bypass the write throttle. Without `'final'`, a line arriving inside the
+ * throttle window immediately before the child closed would never be persisted
+ * at all. Without `'start'`, a turn that failed before saying anything left the
+ * previous turn's timestamps in place, and a watcher read them as this turn.
  */
 export interface ActivityObservation {
-  source: 'stdout' | 'heartbeat' | 'final';
+  source: 'start' | 'stdout' | 'heartbeat' | 'final';
   at: Date;
   lastLineAt: Date | null;
+  /**
+   * Another turn was live when this was observed. Only `withConcurrentCompaction`
+   * produces it, by overlapping a rotation turn with a Codex turn.
+   */
+  concurrent: boolean;
 }
 
 /** Behind an interface so a test can observe that `unref` was called. */
@@ -249,11 +261,25 @@ export interface ProgressOptions {
 }
 
 export interface Heartbeat {
+  /** Open the turn: rebase the persisted liveness fields onto it. Emits nothing. */
+  begin: () => void;
   onLine: (line: string) => void;
   /** Persist the last line's time, ignoring the write throttle. Emits nothing. */
   flush: () => void;
   stop: () => void;
 }
+
+/**
+ * Turns with a live heartbeat, this process.
+ *
+ * `withConcurrentCompaction` overlaps a rotation turn with a Codex turn, so
+ * "the current turn" is occasionally two turns. The count is what tells a turn
+ * boundary whether it is allowed to clear the other one's output time.
+ * Deliberately in memory only: a persisted liveness counter left behind by a
+ * killed process would assert that a turn is running when none is, which is the
+ * stale claim this whole area exists to remove.
+ */
+let liveTurns = 0;
 
 /**
  * A throttled progress reporter for one turn.
@@ -283,6 +309,7 @@ export function createHeartbeat(
   let lastEmitAt = startedAt;
   let lastLineAt: number | null = null;
   let stopped = false;
+  let begun = false;
 
   /** Emits if the throttle allows. Notifies nobody: see the ownership rule. */
   const emitNow = (): boolean => {
@@ -310,15 +337,17 @@ export function createHeartbeat(
         source,
         at: new Date(now()),
         lastLineAt: lastLineAt === null ? null : new Date(lastLineAt),
+        concurrent: liveTurns > 1,
       });
     } catch {
       // A failing state write must not take down a run either.
     }
   };
 
-  // Ownership: onLine is the ONLY caller for 'stdout', the tick the ONLY caller
-  // for 'heartbeat', flush the ONLY caller for 'final', and emitNow calls none
-  // of them. A line that also triggers an emission notifies exactly once.
+  // Ownership: begin is the ONLY caller for 'start', onLine the ONLY caller for
+  // 'stdout', the tick the ONLY caller for 'heartbeat', flush the ONLY caller
+  // for 'final', and emitNow calls none of them. A line that also triggers an
+  // emission notifies exactly once.
   const onLine = (line: string): void => {
     if (stopped) return;
     lastLineAt = now();
@@ -337,6 +366,12 @@ export function createHeartbeat(
   handle.unref();
 
   return {
+    begin: () => {
+      if (stopped || begun) return;
+      begun = true;
+      liveTurns += 1;
+      notify('start');
+    },
     onLine,
     flush: () => {
       if (!stopped && lastLineAt !== null) notify('final');
@@ -344,6 +379,10 @@ export function createHeartbeat(
     stop: () => {
       if (stopped) return;
       stopped = true;
+      if (begun) {
+        begun = false;
+        liveTurns -= 1;
+      }
       handle.cancel();
     },
   };
@@ -352,16 +391,26 @@ export function createHeartbeat(
 /**
  * Run `work` with a heartbeat attached.
  *
- * The flush happens only on a normal completion: a line arriving inside the
- * write throttle just before the child closed would otherwise never reach
- * state.json, while a timed-out turn must write nothing at all after its
- * promise has settled. Shared by both adapters so the ordering exists once.
+ * `begin()` opens the turn, which is what rebases the persisted liveness fields
+ * onto it - this is the one seam both adapters share, so the boundary exists
+ * once rather than per adapter.
+ *
+ * The flush happens only once `work` has succeeded, and `work` now spans the
+ * adapter's validation of the buffered output as well as the child process: a
+ * turn whose output the adapter rejected must not record a completed-turn
+ * observation, which is what it did while only the raw `run()` call was wrapped.
+ * "Accepted" means the payload the adapter requires, not the child's exit
+ * status - see the exit-status note on `claudeTurn` and `codexTurn`. A line
+ * arriving inside the write throttle just before the child closed would
+ * otherwise never reach state.json, while a timed-out turn must write nothing
+ * at all after its promise has settled.
  */
 export async function withHeartbeat<T>(
   heartbeat: Heartbeat | null,
   work: () => Promise<T>,
 ): Promise<T> {
   try {
+    heartbeat?.begin();
     const result = await work();
     heartbeat?.flush();
     return result;

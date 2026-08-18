@@ -24,8 +24,14 @@ function observation(
   source: ActivityObservation['source'],
   atMs: number,
   lastLineMs: number | null,
+  concurrent = false,
 ): ActivityObservation {
-  return { source, at: at(atMs), lastLineAt: lastLineMs === null ? null : at(lastLineMs) };
+  return {
+    source,
+    at: at(atMs),
+    lastLineAt: lastLineMs === null ? null : at(lastLineMs),
+    concurrent,
+  };
 }
 
 test('output from the child records both timestamps', () => {
@@ -97,9 +103,86 @@ test('an unparseable lastActivityAt is treated as stale rather than wedging the 
 test('both timestamps survive a reload', () => {
   const state = scratchRun();
   markActivity(state, observation('stdout', 0, 0));
+  markActivity(state, observation('start', 10_000, null));
 
   const reloaded = loadRun(state.targetDir, state.id);
 
-  assert.equal(reloaded.lastActivityAt, T0.toISOString());
-  assert.equal(reloaded.lastOutputAt, T0.toISOString());
+  assert.equal(reloaded.lastActivityAt, at(10_000).toISOString());
+  assert.equal(reloaded.turnStartedAt, at(10_000).toISOString());
+});
+
+test('a new turn rebases the pulse and clears the previous turn output time', () => {
+  const state = scratchRun();
+  markActivity(state, observation('stdout', 0, 0));
+
+  markActivity(state, observation('start', 60_000, null));
+
+  const file = persisted(state);
+  assert.equal(file.turnStartedAt, at(60_000).toISOString());
+  assert.equal(file.lastActivityAt, at(60_000).toISOString());
+  assert.equal(file.lastOutputAt, undefined, 'the previous turn wrote that line, not this one');
+});
+
+test('a turn that fails before producing output cannot show the previous turn pulse', () => {
+  // The case the whole rebase exists for: a new child dies before its first
+  // line, so nothing else in the turn ever writes. What a watcher reads must
+  // describe this turn - and this turn has said nothing.
+  const state = scratchRun();
+  markActivity(state, observation('stdout', 0, 0));
+
+  markActivity(state, observation('start', 60_000, null));
+  // No 'final': the adapter threw.
+
+  const file = persisted(state);
+  assert.equal(file.lastOutputAt, undefined);
+  assert.equal(file.lastActivityAt, file.turnStartedAt);
+});
+
+test('the turn boundary is not subject to the write throttle', () => {
+  const state = scratchRun();
+  markActivity(state, observation('stdout', 0, 0));
+
+  markActivity(state, observation('start', 1_000, null));
+
+  assert.equal(persisted(state).turnStartedAt, at(1_000).toISOString());
+});
+
+test('a rotation starting mid-Codex-turn does not erase the live turn output time', () => {
+  // withConcurrentCompaction: the Codex turn is still talking, so clearing its
+  // output time would report a live child as having gone silent.
+  const state = scratchRun();
+  markActivity(state, observation('stdout', 0, 0));
+
+  markActivity(state, observation('start', 60_000, null, true));
+
+  const file = persisted(state);
+  assert.equal(file.turnStartedAt, at(60_000).toISOString());
+  assert.equal(file.lastOutputAt, T0.toISOString());
+});
+
+test('the older turn keeps reporting liveness after the newer one starts', () => {
+  // Filtering by heartbeat generation would freeze this: the Codex turn runs for
+  // minutes past the short rotation that overlapped it, and dropping its
+  // observations would report a healthy turn as gone.
+  const state = scratchRun();
+  markActivity(state, observation('stdout', 0, 0));
+  markActivity(state, observation('start', 60_000, null, true));
+
+  markActivity(state, observation('stdout', 66_000, 66_000, true));
+
+  const file = persisted(state);
+  assert.equal(file.lastActivityAt, at(66_000).toISOString());
+  assert.equal(file.lastOutputAt, at(66_000).toISOString());
+});
+
+test('a late observation from the older turn cannot wind either field backwards', () => {
+  const state = scratchRun();
+  markActivity(state, observation('stdout', 66_000, 66_000));
+
+  // The older heartbeat's end-of-turn flush, which skips the throttle.
+  markActivity(state, observation('final', 61_000, 30_000, true));
+
+  const file = persisted(state);
+  assert.equal(file.lastActivityAt, at(66_000).toISOString());
+  assert.equal(file.lastOutputAt, at(66_000).toISOString());
 });
