@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { claudeTurn, parseStructured, RateLimitError } from '@src/claude.js';
 import { codexTurn } from '@src/codex.js';
+import type { CodexTurnOptions, CodexTurnResult } from '@src/codex.js';
 import * as git from '@src/git.js';
 import * as log from '@src/log.js';
 import * as P from '@src/prompts.js';
@@ -31,6 +32,7 @@ import {
   rotateSession,
   shouldRotate,
 } from '@src/context.js';
+import type { ClaudeTurnFn } from '@src/context.js';
 import { progressOptions } from '@src/progress.js';
 import {
   closeCodexRateLimits,
@@ -51,6 +53,7 @@ import type {
   RoundRecord,
   Plan,
   RunState,
+  Sandbox,
 } from '@src/types.js';
 
 export const EXIT = {
@@ -135,14 +138,14 @@ async function runPhases(state: RunState, cfg: Config, resume: boolean): Promise
     saveState(state);
 
     log.heading('Implementing');
-    const impl = await claudeStep(state, cfg, {
+    const impl = await runTurn(state, cfg, {
+      role: 'implementer',
       prompt: P.implementPrompt(plan.plan_md, state.carried ?? []),
       cwd,
-      permissionMode: 'bypassPermissions',
       timeoutMs: cfg.claude.implementTimeoutMs,
       label: 'implement',
     });
-    artifact(state, 'implementation-report.md', impl);
+    artifact(state, 'implementation-report.md', impl.text);
 
     // Advanced before the commit, not after. The implementation turn is the
     // single most expensive step in a run, and a failure while committing it
@@ -282,14 +285,14 @@ async function reviewPhase(state: RunState, cfg: Config, cwd: string, plan: Plan
       saveState(state);
 
       log.step('Fixing the verification failure');
-      const repair = await claudeStep(state, cfg, {
+      const repair = await runTurn(state, cfg, {
+        role: 'implementer',
         prompt: P.fixPrompt([verified], state.verifyRound),
         cwd,
-        permissionMode: 'bypassPermissions',
         timeoutMs: cfg.claude.implementTimeoutMs,
         label: `verify-fix-${state.verifyRound}`,
       });
-      artifact(state, `verify-fix-${state.verifyRound}.md`, repair);
+      artifact(state, `verify-fix-${state.verifyRound}.md`, repair.text);
       await maybeCommit(cfg, cwd, `vibe: fix verification failure (round ${state.verifyRound})`);
       continue;
     }
@@ -334,14 +337,14 @@ async function reviewPhase(state: RunState, cfg: Config, cwd: string, plan: Plan
       );
       for (const f of decision.tolerated) log.info(`  ~ ${f.title}`);
 
-      const finalFix = await claudeStep(state, cfg, {
+      const finalFix = await runTurn(state, cfg, {
+        role: 'implementer',
         prompt: P.fixPrompt(review.findings, state.reviewRound),
         cwd,
-        permissionMode: 'bypassPermissions',
         timeoutMs: cfg.claude.implementTimeoutMs,
         label: `final-fix-${state.reviewRound}`,
       });
-      artifact(state, `fix-report-${state.reviewRound}.md`, finalFix);
+      artifact(state, `fix-report-${state.reviewRound}.md`, finalFix.text);
       await maybeCommit(cfg, cwd, `vibe: address carried review findings (final round)`);
 
       const file = artifact(state, 'OUTSTANDING.md', renderOutstanding(state, decision.tolerated));
@@ -368,14 +371,14 @@ async function reviewPhase(state: RunState, cfg: Config, cwd: string, plan: Plan
     saveState(state);
 
     log.step(`Fixing ${stoppers.length} blocking finding(s)`);
-    const fix = await claudeStep(state, cfg, {
+    const fix = await runTurn(state, cfg, {
+      role: 'implementer',
       prompt: P.fixPrompt(review.findings, state.reviewRound),
       cwd,
-      permissionMode: 'bypassPermissions',
       timeoutMs: cfg.claude.implementTimeoutMs,
       label: `fix-${state.reviewRound}`,
     });
-    artifact(state, `fix-report-${state.reviewRound}.md`, fix);
+    artifact(state, `fix-report-${state.reviewRound}.md`, fix.text);
     await maybeCommit(cfg, cwd, `vibe: address review round ${state.reviewRound}`);
   }
 }
@@ -545,17 +548,6 @@ async function maybeCommit(cfg: Config, cwd: string, message: string): Promise<v
   if (sha) log.ok(`Committed ${sha}`);
 }
 
-interface ClaudeStepArgs {
-  prompt: string;
-  cwd: string;
-  permissionMode: PermissionMode;
-  timeoutMs: number;
-  label: string;
-  jsonSchema?: object | undefined;
-  tools?: readonly string[] | undefined;
-}
-
-/** Wraps a Claude turn with session rotation, cost accounting and the budget ceiling. */
 /**
  * Run the project's verification command.
  *
@@ -620,10 +612,166 @@ async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Findi
   };
 }
 
-async function claudeStep(state: RunState, cfg: Config, args: ClaudeStepArgs): Promise<string> {
+// ---------------------------------------------------------------------------
+// The agent seam.
+//
+// One dispatch taking a role and routing it to a provider, replacing the two
+// parallel `claudeStep` / `runCodex` paths. The providers disagree about how to
+// say "this turn may write" - Claude spells it `--permission-mode`, Codex spells
+// it `-s` - so the role carries the intent and each adapter translates it.
+// ---------------------------------------------------------------------------
+
+/**
+ * Injectable for the seam tests, which must not spawn a real `codex`.
+ *
+ * Mirrors `ClaudeTurnFn` in context.ts, which is declared beside its own
+ * injection point for the same reason. One convention, not two.
+ */
+export type CodexTurnFn = (options: CodexTurnOptions) => Promise<CodexTurnResult>;
+
+export interface AgentTurns {
+  claude: ClaudeTurnFn;
+  codex: CodexTurnFn;
+}
+
+/** What a run actually dispatches to. Tests substitute fakes for both. */
+export const REAL_AGENTS: AgentTurns = { claude: claudeTurn, codex: codexTurn };
+
+/** Whether a turn may change the working tree. The one place that intent is stated. */
+export type Access = 'read-only' | 'write';
+
+export type Role = 'planner' | 'implementer' | 'critic' | 'answerer' | 'reviewer';
+
+type RoleSpec =
+  | { provider: 'claude'; access: Access }
+  | { provider: 'codex'; access: Access; schema: object };
+
+/**
+ * Who does what, fixed at today's assignment: Claude plans and implements,
+ * Codex critiques, answers and reviews. Deliberately a constant and not a
+ * config key - making these swappable is its own change.
+ *
+ * The schema rides on the role rather than being sniffed out of the turn label,
+ * which is what the previous `schemaName.startsWith('answers')` check did.
+ */
+export const ROLES: Record<Role, RoleSpec> = {
+  planner: { provider: 'claude', access: 'read-only' },
+  implementer: { provider: 'claude', access: 'write' },
+  critic: { provider: 'codex', access: 'read-only', schema: FINDINGS_SCHEMA },
+  answerer: { provider: 'codex', access: 'read-only', schema: ANSWERS_SCHEMA },
+  reviewer: { provider: 'codex', access: 'read-only', schema: FINDINGS_SCHEMA },
+};
+
+export function claudePermission(access: Access): PermissionMode {
+  return access === 'write' ? 'bypassPermissions' : 'plan';
+}
+
+/**
+ * Read-only yields the configured sandbox rather than the literal 'read-only'.
+ *
+ * `codex.sandbox` is a user setting, and cli.ts already warns about a
+ * non-default one rather than forbidding it. Hardcoding the literal here would
+ * silently discard that setting on the first Codex turn - a behaviour change,
+ * which this seam is not allowed to make.
+ */
+export function codexSandbox(access: Access, cfg: Config): Sandbox {
+  return access === 'write' ? 'workspace-write' : cfg.codex.sandbox;
+}
+
+export interface TurnRequest {
+  role: Role;
+  prompt: string;
+  cwd: string;
+  /** The retry label, the progress label, and - for Codex - the output name. */
+  label: string;
+  timeoutMs: number;
+  /** Claude only: the response schema the turn is constrained to. */
+  jsonSchema?: object | undefined;
+  /** Claude only: the tools the turn may use. */
+  tools?: readonly string[] | undefined;
+}
+
+export interface TurnOutcome {
+  /** Claude: the result text. Codex: the raw structured-output file. */
+  text: string;
+  /** Codex: its parsed structured output. Null for Claude, whose callers parse `text`. */
+  structured: unknown;
+}
+
+/**
+ * What one turn cost the run, in the shape the shared accounting needs.
+ *
+ * `costUsd` is null where the provider reports no cost. Codex reports none, and
+ * inventing a figure would make `state.costUsd` a number nobody could trace to
+ * a source.
+ */
+export interface TurnCharge {
+  costUsd: number | null;
+  tokens: number;
+  event: { type: string; data: Record<string, unknown> };
+  /** Built after the totals are updated, so the line can quote the run total. */
+  describe: () => string;
+  /** Emitted after the detail line and before the ceilings, as both paths did. */
+  warnings: readonly string[];
+}
+
+/**
+ * The per-turn accounting both providers share.
+ *
+ * Deliberately synchronous, and deliberately called by each adapter in the same
+ * continuation as its provider result rather than by `runTurn` after another
+ * `await`. Critique and review run under `withConcurrentCompaction`, so a
+ * rotation is completing on another promise chain while a Codex turn finishes;
+ * an extra await boundary here would let `session_rotated` and its handoff cost
+ * land between the Codex result and the Codex turn's own event and log line,
+ * reordering the run record against what the two separate paths produced.
+ */
+export function applyCharge(state: RunState, cfg: Config, charge: TurnCharge): void {
+  state.tokensUsed += charge.tokens;
+  if (charge.costUsd === null) {
+    state.codexTokens = (state.codexTokens ?? 0) + charge.tokens;
+  } else {
+    state.costUsd = Number((state.costUsd + charge.costUsd).toFixed(4));
+  }
+
+  recordEvent(state, charge.event.type, charge.event.data);
+  log.detail(charge.describe());
+  for (const warning of charge.warnings) log.warn(warning);
+
+  enforceTokenCeiling(state, cfg);
+  // Only where the provider reported a cost. The check has always lived on the
+  // Claude path alone, and `state.costUsd` can rise during a Codex turn from a
+  // concurrent rotation - so running it here unconditionally would end the run
+  // one turn earlier than it does today, before the critique or review artifact
+  // that turn just paid for had been written.
+  if (charge.costUsd !== null) enforceCostCeiling(state, cfg);
+}
+
+/** One turn by whichever provider this role belongs to. */
+export function runTurn(
+  state: RunState,
+  cfg: Config,
+  req: TurnRequest,
+  turns: AgentTurns = REAL_AGENTS,
+): Promise<TurnOutcome> {
+  const spec = ROLES[req.role];
+  // Returned, not awaited: `runTurn` adds no continuation of its own between a
+  // provider finishing and its charge being applied. See `applyCharge`.
+  return spec.provider === 'claude'
+    ? claudeDispatch(state, cfg, req, spec.access, turns.claude)
+    : codexDispatch(state, cfg, req, spec, turns.codex);
+}
+
+async function claudeDispatch(
+  state: RunState,
+  cfg: Config,
+  req: TurnRequest,
+  access: Access,
+  turn: ClaudeTurnFn,
+): Promise<TurnOutcome> {
   // A rotation that could not be overlapped with Codex work happens here, at a
   // turn boundary - never mid-turn.
-  if (shouldRotate(state, cfg)) await rotateSession(state, cfg);
+  if (shouldRotate(state, cfg)) await rotateSession(state, cfg, turn);
 
   const resume = state.sessionStarted;
   // Not conditional on there being a briefing: a rotation that could not
@@ -631,63 +779,61 @@ async function claudeStep(state: RunState, cfg: Config, args: ClaudeStepArgs): P
   // record has to travel with it either way - revisePlanPrompt and the fix
   // prompts all assume the plan is already in the conversation.
   const prompt = resume
-    ? args.prompt
+    ? req.prompt
     : P.handoffContext(state.handoff, state.plan?.plan_md ?? null, state.handoffStale === true) +
-      args.prompt;
+      req.prompt;
 
-  const result = await withRateLimitRetry(state, cfg, args.label, () =>
-    claudeTurn({
+  const result = await withRateLimitRetry(state, cfg, req.label, () =>
+    turn({
       prompt,
       sessionId: state.sessionId,
       resume,
-      permissionMode: args.permissionMode,
+      permissionMode: claudePermission(access),
       model: cfg.claude.model,
       effort: cfg.claude.effort,
-      cwd: args.cwd,
-      jsonSchema: args.jsonSchema,
-      tools: args.tools,
-      timeoutMs: args.timeoutMs,
-      progress: progressOptions(state, cfg, args.label),
+      cwd: req.cwd,
+      jsonSchema: req.jsonSchema,
+      tools: req.tools,
+      timeoutMs: req.timeoutMs,
+      progress: progressOptions(state, cfg, req.label),
     }),
   );
 
   state.sessionStarted = true;
-  state.costUsd = Number((state.costUsd + result.costUsd).toFixed(4));
-  state.tokensUsed += result.tokens.total;
   // Tagged with the model that produced it: the ratio is a fraction of this
   // model's window and means nothing under another one. Through the shared seam
   // so the rotation turn in context.ts cannot drift out of step with this one.
   recordTurnContext(state, cfg.claude.model, result.usage);
 
   const measured = measuredRatio(state, cfg.claude.model);
-  recordEvent(state, 'claude_turn', {
-    label: args.label,
+  const ctx = result.usage ? `, ctx ${(result.usage.ratio * 100).toFixed(0)}%` : '';
+  applyCharge(state, cfg, {
     costUsd: result.costUsd,
     tokens: result.tokens.total,
-    turns: result.numTurns,
-    // null rather than the stored figure when this turn reported no usage and
-    // the last measurement belongs to another model: the event log is the
-    // record of what a run did, and a ratio against the wrong window is not it.
-    contextRatio: measured === null ? null : Number(measured.toFixed(3)),
+    event: {
+      type: 'claude_turn',
+      data: {
+        label: req.label,
+        costUsd: result.costUsd,
+        tokens: result.tokens.total,
+        turns: result.numTurns,
+        // null rather than the stored figure when this turn reported no usage
+        // and the last measurement belongs to another model: the event log is
+        // the record of what a run did, and a ratio against the wrong window is
+        // not it.
+        contextRatio: measured === null ? null : Number(measured.toFixed(3)),
+      },
+    },
+    describe: () =>
+      `${req.label}: ${fmtTokens(result.tokens.total)} tok, ~$${result.costUsd.toFixed(3)} ` +
+      `(run ${fmtTokens(state.tokensUsed)} tok / ~$${state.costUsd.toFixed(2)}${ctx})`,
+    warnings:
+      result.denials.length > 0
+        ? [`${result.denials.length} permission denial(s) in ${req.label}`]
+        : [],
   });
 
-  const ctx = result.usage ? `, ctx ${(result.usage.ratio * 100).toFixed(0)}%` : '';
-  log.detail(
-    `${args.label}: ${fmtTokens(result.tokens.total)} tok, ~$${result.costUsd.toFixed(3)} ` +
-      `(run ${fmtTokens(state.tokensUsed)} tok / ~$${state.costUsd.toFixed(2)}${ctx})`,
-  );
-
-  if (result.denials.length > 0) log.warn(`${result.denials.length} permission denial(s) in ${args.label}`);
-
-  enforceTokenCeiling(state, cfg);
-  if (state.costUsd > cfg.budget.maxCostUsd) {
-    throw new Escalation(
-      EXIT.BUDGET,
-      `Work ceiling reached: ~$${state.costUsd.toFixed(2)} API-equivalent > $${cfg.budget.maxCostUsd}. ` +
-        'On a subscription this is a volume brake, not a bill. Raise budget.maxCostUsd to continue.',
-    );
-  }
-  return result.text;
+  return { text: result.text, structured: null };
 }
 
 /**
@@ -703,6 +849,16 @@ function enforceTokenCeiling(state: RunState, cfg: Config): void {
     EXIT.BUDGET,
     `Token ceiling exceeded: ${fmtTokens(state.tokensUsed)} > ${fmtTokens(cfg.budget.maxTokens)}. ` +
       'Raise budget.maxTokens to continue.',
+  );
+}
+
+/** The Claude-side ceiling. Codex reports no cost, so it can never trip this. */
+function enforceCostCeiling(state: RunState, cfg: Config): void {
+  if (state.costUsd <= cfg.budget.maxCostUsd) return;
+  throw new Escalation(
+    EXIT.BUDGET,
+    `Work ceiling reached: ~$${state.costUsd.toFixed(2)} API-equivalent > $${cfg.budget.maxCostUsd}. ` +
+      'On a subscription this is a volume brake, not a bill. Raise budget.maxCostUsd to continue.',
   );
 }
 
@@ -777,10 +933,10 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
 
 async function runPlan(state: RunState, cfg: Config, cwd: string): Promise<Plan> {
   log.step('Claude is planning (read-only)');
-  const text = await claudeStep(state, cfg, {
+  const { text } = await runTurn(state, cfg, {
+    role: 'planner',
     prompt: P.planPrompt(state.task, state.extraContext, state.environment),
     cwd,
-    permissionMode: 'plan',
     tools: PLAN_TOOLS,
     jsonSchema: PLAN_SCHEMA,
     timeoutMs: cfg.claude.planTimeoutMs,
@@ -807,14 +963,14 @@ async function revisePlan(state: RunState, cfg: Config, cwd: string, args: Revis
   saveState(state);
   log.step(`Claude is revising the plan (round ${state.planRound})`);
 
-  const text = await claudeStep(state, cfg, {
+  const { text } = await runTurn(state, cfg, {
+    role: 'planner',
     prompt: P.revisePlanPrompt({
       findings: args.findings,
       answers: args.answers,
       round: state.planRound,
     }),
     cwd,
-    permissionMode: 'plan',
     tools: PLAN_TOOLS,
     jsonSchema: PLAN_SCHEMA,
     timeoutMs: cfg.claude.planTimeoutMs,
@@ -834,29 +990,30 @@ async function revisePlan(state: RunState, cfg: Config, cwd: string, args: Revis
  * a still-unresolved issue under a fresh id each round, which reads as progress
  * when it is actually the same objection.
  */
-async function runCodex(
+async function codexDispatch(
   state: RunState,
   cfg: Config,
-  cwd: string,
-  args: { prompt: string; schemaName: string },
-): Promise<unknown> {
+  req: TurnRequest,
+  spec: { access: Access; schema: object },
+  turn: CodexTurnFn,
+): Promise<TurnOutcome> {
   // Through the same retry the Claude turns use, so a Codex rate limit gets the
   // wait, the maxWaitMinutes cap and the resumable exit that already exist
   // rather than a second implementation of all three.
-  const { structured, sessionId, tokens } = await withRateLimitRetry(state, cfg, args.schemaName, async () => {
-    await checkCodexLimits(state, cfg, cwd, args.schemaName);
-    return codexTurn({
-      prompt: args.prompt,
-      schema: args.schemaName.startsWith('answers') ? ANSWERS_SCHEMA : FINDINGS_SCHEMA,
-      schemaName: args.schemaName,
+  const { structured, raw, sessionId, tokens } = await withRateLimitRetry(state, cfg, req.label, async () => {
+    await checkCodexLimits(state, cfg, req.cwd, req.label);
+    return turn({
+      prompt: req.prompt,
+      schema: spec.schema,
+      schemaName: req.label,
       artifactDir: artifactDir(state, 'codex'),
       model: cfg.codex.model,
       effort: cfg.codex.effort,
-      sandbox: cfg.codex.sandbox,
-      cwd,
-      timeoutMs: cfg.codex.timeoutMs,
+      sandbox: codexSandbox(spec.access, cfg),
+      cwd: req.cwd,
+      timeoutMs: req.timeoutMs,
       sessionId: cfg.codex.persistSession ? state.codexSessionId : null,
-      progress: progressOptions(state, cfg, args.schemaName),
+      progress: progressOptions(state, cfg, req.label),
     });
   });
 
@@ -869,16 +1026,17 @@ async function runCodex(
 
   // Counted, but deliberately not costed: there is no USD figure to add, and
   // inventing one would make `costUsd` a number nobody could trace to a source.
-  state.tokensUsed += tokens.total;
-  state.codexTokens = (state.codexTokens ?? 0) + tokens.total;
-  recordEvent(state, 'codex_turn', { label: args.schemaName, tokens: tokens.total });
-  log.detail(
-    `${args.schemaName}: ${fmtTokens(tokens.total)} tok, cost not reported ` +
+  applyCharge(state, cfg, {
+    costUsd: null,
+    tokens: tokens.total,
+    event: { type: 'codex_turn', data: { label: req.label, tokens: tokens.total } },
+    describe: () =>
+      `${req.label}: ${fmtTokens(tokens.total)} tok, cost not reported ` +
       `(run ${fmtTokens(state.tokensUsed)} tok / ~$${state.costUsd.toFixed(2)} Claude-side)`,
-  );
-  enforceTokenCeiling(state, cfg);
+    warnings: [],
+  });
 
-  return structured;
+  return { text: raw, structured };
 }
 
 /**
@@ -938,7 +1096,8 @@ async function runCritique(
   plan: Plan,
 ): Promise<FindingsReport> {
   log.step('Codex is critiquing the plan');
-  const structured = await runCodex(state, cfg, cwd, {
+  const { structured } = await runTurn(state, cfg, {
+    role: 'critic',
     prompt: P.critiquePrompt(
       plan.plan_md,
       plan.assumptions,
@@ -946,7 +1105,9 @@ async function runCritique(
       codexHasMemory(state, cfg),
       state.environment,
     ),
-    schemaName: `critique-${state.planRound}`,
+    cwd,
+    timeoutMs: cfg.codex.timeoutMs,
+    label: `critique-${state.planRound}`,
   });
   return parseFindings(structured);
 }
@@ -961,7 +1122,8 @@ async function runReview(
   const diff = await git.diffSince(cwd, state.baseSha);
   const files = await git.changedFiles(cwd, state.baseSha);
 
-  const structured = await runCodex(state, cfg, cwd, {
+  const { structured } = await runTurn(state, cfg, {
+    role: 'reviewer',
     prompt: P.reviewPrompt(
       diff,
       files,
@@ -970,7 +1132,9 @@ async function runReview(
       codexHasMemory(state, cfg),
       state.environment,
     ),
-    schemaName: `review-${state.reviewRound}`,
+    cwd,
+    timeoutMs: cfg.codex.timeoutMs,
+    label: `review-${state.reviewRound}`,
   });
   return parseFindings(structured);
 }
@@ -1008,9 +1172,12 @@ async function resolveQuestions(
   }
 
   log.step('Codex is answering');
-  const structured = await runCodex(state, cfg, cwd, {
+  const { structured } = await runTurn(state, cfg, {
+    role: 'answerer',
     prompt: P.answerPrompt(questions, plan.plan_md),
-    schemaName: `answers-${state.planRound}`,
+    cwd,
+    timeoutMs: cfg.codex.timeoutMs,
+    label: `answers-${state.planRound}`,
   });
 
   const { answers } = parseAnswers(structured);
