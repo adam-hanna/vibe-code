@@ -186,6 +186,7 @@ answers-N.json             Codex's answers to blocking questions
 handoff-N.md               briefing carried across each session rotation
 NEEDS-INPUT.md             written when the run stops for you
 OUTSTANDING.md             carried P1s: fixed in a final round, but not re-reviewed
+FOLLOW-UPS.md              deferred findings and the plan's declared out-of-scope work
 state.json                 resumable state, tokens, cost, event log, turnStartedAt/lastActivityAt/lastOutputAt
 transcript.log
 codex/                     raw schema and output files

@@ -6,6 +6,7 @@ import type {
   Finding,
   FindingsReport,
   OpenQuestion,
+  OutOfScopeItem,
   Plan,
   QuestionKind,
   Severity,
@@ -105,10 +106,23 @@ export function parsePlan(raw: unknown): Plan {
     };
   });
 
+  // Strict, unlike the tolerant reads elsewhere in this file: this parser only
+  // ever sees fresh model output, and the whole point of the field is that the
+  // planner draws a boundary *before* the critic tests one. A plan that omitted
+  // it would be a plan defending a boundary it never stated.
+  const outOfScope: OutOfScopeItem[] = arr(o, 'out_of_scope', 'plan', raw).map((s, i) => {
+    const r = record(s, `plan.out_of_scope[${i}]`, raw);
+    return {
+      item: str(r, 'item', `plan.out_of_scope[${i}]`, raw),
+      why: str(r, 'why', `plan.out_of_scope[${i}]`, raw),
+    };
+  });
+
   return {
     plan_md: str(o, 'plan_md', 'plan', raw),
     assumptions,
     open_questions: openQuestions,
+    out_of_scope: outOfScope,
   };
 }
 
@@ -122,12 +136,20 @@ export function parseFindings(raw: unknown): FindingsReport {
     // than dropping a finding that omitted it.
     const rawId = r['id'];
     const id = typeof rawId === 'string' && rawId.trim() ? rawId.trim() : slug(title);
+    // Tolerant on read, for two different reasons. A report stored before this
+    // field existed carries none, and must still parse. And a blocking finding
+    // can never be a follow-up whatever the model claimed, so `defer` on a
+    // P0/P1 is dropped here - the schema states the constraint, this makes it
+    // true on our side of the wire. Both defaults only ever make a finding more
+    // blocking, and `gate` reads severity alone, so no control flow changes.
+    const defer = r['defer'] === true && severity !== 'P0' && severity !== 'P1';
     return {
       id,
       severity,
       title,
       detail: str(r, 'detail', `report.findings[${i}]`, raw),
       suggested_fix: str(r, 'suggested_fix', `report.findings[${i}]`, raw),
+      defer,
     };
   });
 

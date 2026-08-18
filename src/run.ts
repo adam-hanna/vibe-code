@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import type { ActivityObservation } from '@src/progress.js';
@@ -290,6 +290,21 @@ export function artifact(state: RunState, name: string, content: string | object
   const body = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
   writeFileSync(file, body, 'utf8');
   return file;
+}
+
+/**
+ * Delete an artifact that no longer describes the run. True if one was there.
+ *
+ * The counterpart to `artifact` for a file that is rewritten as the run
+ * proceeds: FOLLOW-UPS.md is regenerated from the current plan, and a plan
+ * revision that drops its last out-of-scope item has to be able to take the
+ * file with it. A stale artifact contradicting PLAN.md is worse than none.
+ */
+export function removeArtifact(state: RunState, name: string): boolean {
+  const file = path.join(state.dir, name);
+  if (!existsSync(file)) return false;
+  rmSync(file);
+  return true;
 }
 
 export function artifactDir(state: RunState, name: string): string {

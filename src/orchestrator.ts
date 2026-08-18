@@ -18,6 +18,7 @@ import {
   persistenceNotice,
   recordEvent,
   recordRound,
+  removeArtifact,
   resumePhase,
   saveState,
 } from '@src/run.js';
@@ -221,6 +222,8 @@ async function planPhase(state: RunState, cfg: Config, cwd: string): Promise<Pla
     log.heading(`Plan critique (round ${state.planRound + 1})`);
     const critique = await withConcurrentCompaction(state, cfg, () => runCritique(state, cfg, cwd, plan));
     artifact(state, `plan-critique-${state.planRound}.json`, critique);
+    collectDeferred(state, critique.findings);
+    writeFollowUps(state, plan);
 
     const decision = gate(critique.findings, cfg.loop.p1Tolerance);
     const stoppers = blockingFindings(critique.findings);
@@ -258,8 +261,10 @@ async function planPhase(state: RunState, cfg: Config, cwd: string): Promise<Pla
     plan = await revisePlan(state, cfg, cwd, { findings: critique.findings });
   }
 
-  const planFile = artifact(state, 'PLAN.md', plan.plan_md);
+  const planFile = artifact(state, 'PLAN.md', P.renderPlanDoc(plan));
   log.info(`Plan: ${path.relative(cwd, planFile)}`);
+  const followUps = writeFollowUps(state, plan);
+  if (followUps !== null) log.info(`Follow-ups: ${path.relative(cwd, followUps)}`);
   return plan;
 }
 
@@ -308,6 +313,8 @@ async function reviewPhase(state: RunState, cfg: Config, cwd: string, plan: Plan
     log.heading(`Code review (round ${state.reviewRound + 1})`);
     const review = await withConcurrentCompaction(state, cfg, () => runReview(state, cfg, cwd, plan));
     artifact(state, `code-review-${state.reviewRound}.json`, review);
+    collectDeferred(state, review.findings);
+    writeFollowUps(state, plan);
 
     const decision = gate(review.findings, cfg.loop.p1Tolerance);
     const stoppers = blockingFindings(review.findings);
@@ -402,6 +409,95 @@ function renderOutstanding(state: RunState, findings: readonly Finding[]): strin
     `Worth a human eye. Set \`loop.p1Tolerance\` to 0 to require a spotless review instead, ` +
     `at the cost of runs that cannot converge.\n\n` +
     body
+  );
+}
+
+/**
+ * Merge this round's deferred findings into the run's list, newest id wins.
+ *
+ * Filters on severity as well as on `defer`, even though `parseFindings`
+ * already normalises: this helper is exported and callable directly, and the
+ * artifact it feeds asserts in prose that everything in it was non-blocking.
+ * An invariant a boundary states should be one the boundary keeps.
+ *
+ * An id a later round re-raises as a blocker is deliberately not pruned.
+ * Reconciling a human record against the live blocking set would couple it to
+ * the review loop, so the artifact time-qualifies its own claims instead.
+ */
+export function collectDeferred(state: RunState, findings: readonly Finding[]): void {
+  const fresh = findings.filter(
+    (f) => f.defer === true && (f.severity === 'P2' || f.severity === 'P3'),
+  );
+  if (fresh.length === 0) return;
+
+  const merged = new Map<string, Finding>();
+  for (const f of state.deferred ?? []) merged.set(f.id, f);
+  // Later round wins: the same finding restated is usually better stated.
+  for (const f of fresh) merged.set(f.id, f);
+
+  state.deferred = [...merged.values()];
+  saveState(state);
+}
+
+/**
+ * Write FOLLOW-UPS.md, or return null when there is nothing to say - deleting a
+ * stale one an earlier round wrote.
+ *
+ * Called after every plan write and every review round rather than once at the
+ * end. Every stall this project has had produced findings that survived only
+ * because a human copied them out by hand, and a run can stop at a budget
+ * ceiling, a rate limit or a guard long before any tidy finish. Deleting on the
+ * way down matters for the same reason: a revision that drops its last
+ * out-of-scope item persists a plan the old artifact contradicts, and the next
+ * critique that would have rewritten the file may never run.
+ */
+export function writeFollowUps(state: RunState, plan: Plan): string | null {
+  const deferred = state.deferred ?? [];
+  // The one place absent and empty are treated alike: neither has anything to
+  // report, so neither gets a section.
+  const scope = plan.out_of_scope ?? [];
+
+  if (deferred.length === 0 && scope.length === 0) {
+    removeArtifact(state, 'FOLLOW-UPS.md');
+    return null;
+  }
+
+  const sections: string[] = [];
+  if (scope.length > 0) {
+    sections.push(
+      '## Declared out of scope by the plan\n\n' +
+        scope.map((s) => `### ${s.item}\n\n${s.why}\n`).join('\n'),
+    );
+  }
+  if (deferred.length > 0) {
+    sections.push(
+      '## Deferred by review\n\n' +
+        deferred
+          .map(
+            (f) =>
+              `### ${f.title} \`${f.id}\`\n\n*Severity when deferred:* ${f.severity}\n\n` +
+              `${f.detail}\n\n*Suggested fix:* ${f.suggested_fix}\n`,
+          )
+          .join('\n'),
+    );
+  }
+
+  return artifact(
+    state,
+    'FOLLOW-UPS.md',
+    `# Follow-ups\n\n` +
+      `**Run:** \`${state.id}\`\n` +
+      `**Task:** ${state.task}\n\n` +
+      `Work this run identified and deliberately did not do, as of the latest round.\n\n` +
+      `Each finding below was **non-blocking at the moment it was deferred** - P2 or P3, ` +
+      `below both the reviewer's APPROVE rule and the loop gate, which stops only on a P0 ` +
+      `or on more P1s than \`loop.p1Tolerance\`. A later round may have re-raised the same ` +
+      `id at a blocking severity; the severity shown is the one it carried when it was ` +
+      `deferred, so check the \`plan-critique-*.json\` and \`code-review-*.json\` artifacts ` +
+      `before assuming an item is still just a follow-up. The out-of-scope list is the ` +
+      `plan's own stated boundary.\n\n` +
+      `Raw material for the next issue, not a defect report.\n\n` +
+      sections.join('\n'),
   );
 }
 
@@ -745,10 +841,16 @@ async function claudeDispatch(
   // summarise the outgoing session still starts a fresh one, and the plan of
   // record has to travel with it either way - revisePlanPrompt and the fix
   // prompts all assume the plan is already in the conversation.
+  // The full plan document, not `plan_md`: the boundary the plan drew is part
+  // of the plan of record, and a session rehydrated without it can revise the
+  // plan into a different one without ever being told it had a boundary.
   const prompt = resume
     ? req.prompt
-    : P.handoffContext(state.handoff, state.plan?.plan_md ?? null, state.handoffStale === true) +
-      req.prompt;
+    : P.handoffContext(
+        state.handoff,
+        state.plan === null ? null : P.renderPlanDoc(state.plan),
+        state.handoffStale === true,
+      ) + req.prompt;
 
   const result = await withRateLimitRetry(state, cfg, req.label, () =>
     turn({
@@ -914,6 +1016,11 @@ async function runPlan(state: RunState, cfg: Config, cwd: string): Promise<Plan>
   state.plan = plan;
   saveState(state);
   artifact(state, `plan-${state.planRound}.json`, plan);
+  // Reconciled here, not only at the round boundaries: this and `revisePlan`
+  // are the only places `state.plan` is persisted, and an artifact that
+  // disagrees with the stored plan is exactly what a run dying before the next
+  // critique would leave behind.
+  writeFollowUps(state, plan);
   log.ok(
     `Plan drafted - ${plan.assumptions.length} assumption(s), ${plan.open_questions.length} open question(s)`,
   );
@@ -935,6 +1042,10 @@ async function revisePlan(state: RunState, cfg: Config, cwd: string, args: Revis
     prompt: P.revisePlanPrompt({
       findings: args.findings,
       answers: args.answers,
+      // The plan of record's boundary, restated: a revision returns the whole
+      // plan, and a session rotated concurrently with the critique would
+      // otherwise re-derive `out_of_scope` from nothing.
+      outOfScope: state.plan?.out_of_scope,
       round: state.planRound,
     }),
     cwd,
@@ -948,6 +1059,10 @@ async function revisePlan(state: RunState, cfg: Config, cwd: string, args: Revis
   state.plan = plan;
   saveState(state);
   artifact(state, `plan-${state.planRound}.json`, plan);
+  // With the new plan persisted, the follow-ups artifact is reconciled against
+  // it immediately - including deleting it when this revision dropped the last
+  // out-of-scope item and nothing has been deferred.
+  writeFollowUps(state, plan);
   return plan;
 }
 
@@ -1068,6 +1183,7 @@ async function runCritique(
     prompt: P.critiquePrompt(
       plan.plan_md,
       plan.assumptions,
+      plan.out_of_scope,
       state.planRound + 1,
       codexHasMemory(state, cfg),
       state.environment,
@@ -1095,6 +1211,7 @@ async function runReview(
       diff,
       files,
       plan.plan_md,
+      plan.out_of_scope,
       state.reviewRound + 1,
       codexHasMemory(state, cfg),
       state.environment,
