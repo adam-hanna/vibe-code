@@ -5,7 +5,9 @@ import type { CodexTurnOptions, CodexTurnResult } from '@src/codex.js';
 import * as git from '@src/git.js';
 import * as log from '@src/log.js';
 import * as P from '@src/prompts.js';
-import { ANSWERS_SCHEMA, FINDINGS_SCHEMA, PLAN_SCHEMA } from '@src/schemas.js';
+import { PLAN_SCHEMA } from '@src/schemas.js';
+import { claudePermission, codexSandbox, ROLES } from '@src/roles.js';
+import type { Access, Role } from '@src/roles.js';
 import {
   advancePhase,
   artifact,
@@ -49,11 +51,9 @@ import type {
   Finding,
   FindingsReport,
   OpenQuestion,
-  PermissionMode,
   RoundRecord,
   Plan,
   RunState,
-  Sandbox,
 } from '@src/types.js';
 
 export const EXIT = {
@@ -637,46 +637,13 @@ export interface AgentTurns {
 /** What a run actually dispatches to. Tests substitute fakes for both. */
 export const REAL_AGENTS: AgentTurns = { claude: claudeTurn, codex: codexTurn };
 
-/** Whether a turn may change the working tree. The one place that intent is stated. */
-export type Access = 'read-only' | 'write';
-
-export type Role = 'planner' | 'implementer' | 'critic' | 'answerer' | 'reviewer';
-
-type RoleSpec =
-  | { provider: 'claude'; access: Access }
-  | { provider: 'codex'; access: Access; schema: object };
-
-/**
- * Who does what, fixed at today's assignment: Claude plans and implements,
- * Codex critiques, answers and reviews. Deliberately a constant and not a
- * config key - making these swappable is its own change.
- *
- * The schema rides on the role rather than being sniffed out of the turn label,
- * which is what the previous `schemaName.startsWith('answers')` check did.
- */
-export const ROLES: Record<Role, RoleSpec> = {
-  planner: { provider: 'claude', access: 'read-only' },
-  implementer: { provider: 'claude', access: 'write' },
-  critic: { provider: 'codex', access: 'read-only', schema: FINDINGS_SCHEMA },
-  answerer: { provider: 'codex', access: 'read-only', schema: ANSWERS_SCHEMA },
-  reviewer: { provider: 'codex', access: 'read-only', schema: FINDINGS_SCHEMA },
-};
-
-export function claudePermission(access: Access): PermissionMode {
-  return access === 'write' ? 'bypassPermissions' : 'plan';
-}
-
-/**
- * Read-only yields the configured sandbox rather than the literal 'read-only'.
- *
- * `codex.sandbox` is a user setting, and cli.ts already warns about a
- * non-default one rather than forbidding it. Hardcoding the literal here would
- * silently discard that setting on the first Codex turn - a behaviour change,
- * which this seam is not allowed to make.
- */
-export function codexSandbox(access: Access, cfg: Config): Sandbox {
-  return access === 'write' ? 'workspace-write' : cfg.codex.sandbox;
-}
+// The role vocabulary lives in @src/roles.js, a leaf: preflight needs the same
+// Access notion to decide what to enforce, and importing this module would pull
+// the whole run loop - claude, codex, git, context, ratelimits, verify - into
+// `vibe doctor`'s probe path. Re-exported so the seam's callers and tests keep
+// one import site.
+export { claudePermission, codexSandbox, providerAccess, ROLES } from '@src/roles.js';
+export type { Access, Role } from '@src/roles.js';
 
 export interface TurnRequest {
   role: Role;
