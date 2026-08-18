@@ -103,9 +103,12 @@ export interface RoundRecord {
    *
    * Kept alongside the fingerprint because the fingerprint only matches an
    * *identical* set. One finding that survives every round while its companions
-   * rotate produces a different fingerprint each time and slips through - which
-   * is exactly what a defect the fixer cannot fix looks like. Optional so runs
-   * recorded before this field loaded still parse.
+   * rotate produces a different fingerprint each time and slips through, so the
+   * ids are what makes such a finding *reportable* - see `persistenceNotice`.
+   * It is reported rather than stopped on: one finding in this project's own
+   * history survived rounds 3 through 8 and was cleared at round 9, in a run
+   * that then passed 1977/1977 tests. Optional so runs recorded before this
+   * field loaded still parse.
    */
   ids?: string[];
 }

@@ -12,6 +12,7 @@ import {
   assessConvergence,
   measuredRatio,
   p1Signature,
+  persistenceNotice,
   recordEvent,
   recordRound,
   resumePhase,
@@ -443,7 +444,39 @@ export function guardPlanBudget(state: RunState, cfg: Config, blockers: readonly
   );
 }
 
-function guardProgress(
+/**
+ * The whole-run budget ceilings that are currently armed, worded for a user.
+ *
+ * NOT a list of everything that can stop a run: budget.planShare stops the plan
+ * loop before this guard is reached, maxQuestionRounds bounds the question
+ * cycle, and a rate-limit or maxWaitMinutes exit can end any turn. Callers must
+ * present these as examples. maxTokens is omitted when 0 disables it - naming a
+ * ceiling that is not enforced would send the user to raise the wrong setting.
+ * maxCostUsd is always armed (validation forbids <= 0) but is Claude-side only,
+ * which the wording says so it does not overstate coverage.
+ */
+export function budgetCeilings(cfg: Config): string[] {
+  const ceilings = [`budget.maxCostUsd ($${cfg.budget.maxCostUsd}, Claude only)`];
+  if (cfg.budget.maxTokens > 0) ceilings.push(`budget.maxTokens (${fmtTokens(cfg.budget.maxTokens)})`);
+  return ceilings;
+}
+
+/** The persistence line for this round, or null when there is nothing to report. */
+export function persistenceWarning(
+  cfg: Config,
+  history: readonly RoundRecord[],
+  args: { cap: number; capName: string },
+): string | null {
+  return persistenceNotice(history, {
+    // The threshold that used to end the run now only speaks.
+    minRounds: cfg.loop.oscillationThreshold + 1,
+    capLimit: `${args.capName} (${args.cap})`,
+    ceilings: budgetCeilings(cfg),
+  });
+}
+
+/** Exported for tests: appends to `history`, may log, and may throw `Escalation`. */
+export function guardProgress(
   cfg: Config,
   history: RoundRecord[],
   all: readonly Finding[],
@@ -479,6 +512,13 @@ function guardProgress(
       [...blockers],
     );
   }
+
+  // Last, deliberately: the notice tells the user the run is continuing, which
+  // is only true once every stop above has declined to fire. Emitted earlier it
+  // said "continuing" on the same round the cap or the trend guard ended the
+  // run.
+  const notice = persistenceWarning(cfg, history, { cap, capName });
+  if (notice !== null) log.warn(notice);
 }
 
 async function prepareGit(state: RunState, cfg: Config, cwd: string): Promise<void> {
