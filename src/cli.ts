@@ -361,15 +361,18 @@ export function resumeConfig(targetDir: string, state: RunState, flags: ParsedAr
       ? loadConfig(targetDir, overrides)
       : applyOverrides(stored, overrides);
 
-  state.config = cfg;
-  saveState(state);
-
   // state.config holds only the latest snapshot, so on its own it cannot say
   // when a setting changed or what it was before. The resume line printed by
   // cmdResume is no substitute: it names the Claude model and effort only, and
   // is emitted before the transcript is attached.
+  //
+  // Computed before the config is assigned, and written by a single state write
+  // either way: a save between the two would leave a window in which the new
+  // settings are persisted and the record of the change is not.
   const changed = configDiff(base, cfg);
+  state.config = cfg;
   if (changed.length > 0) recordEvent(state, 'resume_config', { changed });
+  else saveState(state);
   return cfg;
 }
 
@@ -503,7 +506,8 @@ async function execute(
   } catch (err) {
     if (err instanceof Escalation) {
       state.status = err.code === EXIT.NEEDS_HUMAN ? 'needs-input' : 'stalled';
-      saveState(state);
+      // recordEvent persists, so the status and the event that explains it land
+      // in one write rather than two.
       recordEvent(state, 'escalation', { code: err.code, message: err.message });
       const file = writeEscalation(state, err);
       log.heading('Stopped for input');
@@ -514,7 +518,6 @@ async function execute(
       return err.code;
     }
     state.status = 'error';
-    saveState(state);
     recordEvent(state, 'error', { message: err instanceof Error ? err.message : String(err) });
     log.heading('Failed');
     log.fail(err instanceof Error ? (err.stack ?? err.message) : String(err));
@@ -597,7 +600,6 @@ async function runPreflight(state: RunState, cfg: Config): Promise<ExitCode | nu
     // Hand both agents what was actually observed, so neither has to guess at
     // the other's environment from its own.
     state.environment = environmentFacts(report, cfg, state.targetDir);
-    saveState(state);
     if (repairArgs.length > 0) log.info('Environment repair will be applied to every Claude turn');
     log.ok('Toolchain contract satisfied');
     recordEvent(state, 'preflight-ok', { repairArgs: repairArgs.length > 0 });
@@ -606,7 +608,6 @@ async function runPreflight(state: RunState, cfg: Config): Promise<ExitCode | nu
 
   for (const reason of report.blockingReasons) log.fail(reason);
   state.status = 'error';
-  saveState(state);
   recordEvent(state, 'preflight-failed', { reasons: report.blockingReasons });
   log.info('Fix the environment, or re-run with --skip-probe to proceed anyway.');
   return EXIT.PREFLIGHT;

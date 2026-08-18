@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DEFAULTS } from '@src/config.js';
 import { rotateSession, shouldRotate } from '@src/context.js';
+import { handoffContext } from '@src/prompts.js';
 import { progressOptions } from '@src/progress.js';
 import {
   createRun,
@@ -132,6 +133,8 @@ test('a baseline rotation asks the model that grew the conversation for the hand
   const state = runFor('baseline handoff model');
   recordContextMeasurement(state, 'opus', 0.4, 1_000_000);
   state.sessionStarted = true;
+  // A briefing flagged stale by an earlier failure; this rotation replaces it.
+  state.handoffStale = true;
   const asked: ClaudeTurnOptions[] = [];
 
   await rotateSession(state, cfgWith('sonnet'), (options) => {
@@ -142,9 +145,43 @@ test('a baseline rotation asks the model that grew the conversation for the hand
   assert.equal(asked.length, 1);
   assert.equal(asked[0]?.model, 'opus');
   assert.equal(state.handoff, 'briefing');
+  assert.equal('handoffStale' in state, false);
   assert.equal(state.contextModel, 'sonnet');
   assert.equal(state.contextRatio, 0);
   assert.equal('contextWindow' in state, false);
+});
+
+test('a failed baseline handoff with no prior briefing still carries the plan', async () => {
+  // The damaging case: nothing to fall back on, and revisePlanPrompt does not
+  // restate the plan - so a fresh session with neither was asked to revise a
+  // plan it could not see.
+  const state = runFor('baseline no prior handoff');
+  state.contextRatio = 0.4;
+  state.sessionStarted = true;
+  state.handoff = null;
+  state.plan = { plan_md: '# the plan of record', assumptions: [], open_questions: [] };
+
+  await rotateSession(state, cfgWith('sonnet'), () => Promise.reject(new Error('prompt too long')));
+
+  assert.equal(state.handoff, null);
+  assert.equal(state.handoffStale, true);
+  const prefix = handoffContext(state.handoff, state.plan?.plan_md ?? null, state.handoffStale === true);
+  assert.match(prefix, /# the plan of record/);
+  assert.match(prefix, /no briefing could be taken/i);
+});
+
+test('a briefing kept through a failed rotation is presented as stale, not as current', () => {
+  const prefix = handoffContext('an earlier briefing', '# the plan of record', true);
+
+  assert.match(prefix, /earlier point in the run/);
+  assert.match(prefix, /# the plan of record/);
+  // The claim the fresh session must not be given: that this is what it knew
+  // when the session it is replacing ended.
+  assert.doesNotMatch(prefix, /This briefing is what you knew/);
+});
+
+test('a fresh session with neither a briefing nor a plan gets no preamble', () => {
+  assert.equal(handoffContext(null, null), '');
 });
 
 test('a failed baseline handoff still leaves the unattributed session behind', async () => {
@@ -164,8 +201,10 @@ test('a failed baseline handoff still leaves the unattributed session behind', a
   assert.notEqual(state.sessionId, oldSession);
   assert.equal(state.sessionStarted, false);
   assert.equal(state.sessionRotations, 1);
-  // Not nulled: a stale briefing plus the plan of record beats no seed at all.
+  // Not nulled - a briefing from earlier in the run beats no seed at all - but
+  // flagged, so it is never handed over as the session that just ended.
   assert.equal(state.handoff, 'an earlier briefing');
+  assert.equal(state.handoffStale, true);
   assert.equal(state.contextModel, 'sonnet');
   assert.equal(shouldRotate(state, cfgWith('sonnet')), false);
   assert.equal(

@@ -582,10 +582,14 @@ async function claudeStep(state: RunState, cfg: Config, args: ClaudeStepArgs): P
   if (shouldRotate(state, cfg)) await rotateSession(state, cfg);
 
   const resume = state.sessionStarted;
-  const prompt =
-    !resume && state.handoff
-      ? P.handoffContext(state.handoff, state.plan?.plan_md ?? null) + args.prompt
-      : args.prompt;
+  // Not conditional on there being a briefing: a rotation that could not
+  // summarise the outgoing session still starts a fresh one, and the plan of
+  // record has to travel with it either way - revisePlanPrompt and the fix
+  // prompts all assume the plan is already in the conversation.
+  const prompt = resume
+    ? args.prompt
+    : P.handoffContext(state.handoff, state.plan?.plan_md ?? null, state.handoffStale === true) +
+      args.prompt;
 
   const result = await withRateLimitRetry(state, cfg, args.label, () =>
     claudeTurn({
@@ -830,7 +834,6 @@ async function runCodex(
     `${args.schemaName}: ${fmtTokens(tokens.total)} tok, cost not reported ` +
       `(run ${fmtTokens(state.tokensUsed)} tok / ~$${state.costUsd.toFixed(2)} Claude-side)`,
   );
-  saveState(state);
   enforceTokenCeiling(state, cfg);
 
   return structured;

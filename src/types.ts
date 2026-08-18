@@ -455,6 +455,17 @@ export interface RunState {
   codexSessionId: string | null;
   /** Carried into the first turn of a rotated session. */
   handoff: string | null;
+  /**
+   * The briefing describes an earlier point in the run, not the session that
+   * just ended.
+   *
+   * Set when a rotation completed without a new briefing - the baseline
+   * rotation for an unattributable measurement abandons the old session whether
+   * or not it could be summarised. The previous briefing is still worth
+   * carrying, but handing it over as "what you knew" would deny the work done
+   * since it was written. Optional so runs recorded before this load.
+   */
+  handoffStale?: boolean;
   contextRatio: number;
   /**
    * The Claude model `contextRatio` and `contextWindow` were measured under.

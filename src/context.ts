@@ -4,7 +4,7 @@ import type { ClaudeTurnOptions } from '@src/claude.js';
 import * as log from '@src/log.js';
 import { progressOptions } from '@src/progress.js';
 import { handoffPrompt } from '@src/prompts.js';
-import { artifact, measuredRatio, recordEvent, resetContextMeasurement, saveState } from '@src/run.js';
+import { artifact, measuredRatio, recordEvent, resetContextMeasurement } from '@src/run.js';
 import type { ClaudeTurnResult, Config, RunState } from '@src/types.js';
 
 /**
@@ -101,13 +101,17 @@ export async function rotateSession(
   state.sessionStarted = false;
   resetContextMeasurement(state, cfg.claude.model);
 
-  // Nothing here runs on the failure path, which leaves `state.handoff` as it
-  // was: an earlier rotation's briefing is stale but true, and the plan of
-  // record is re-attached from disk either way, so the new session is still
-  // seeded with more than nothing.
-  if (result !== null) {
+  if (result === null) {
+    // The previous briefing is kept - it is the only account of the run the new
+    // session can be given - but flagged, because it describes an earlier point
+    // than the session just abandoned. The plan of record is attached by
+    // handoffContext regardless of either, so a fresh session is never started
+    // blind to what it is meant to be building.
+    state.handoffStale = true;
+  } else {
     state.costUsd = Number((state.costUsd + result.costUsd).toFixed(4));
     state.handoff = result.text;
+    delete state.handoffStale;
     artifact(state, `handoff-${state.sessionRotations}.md`, result.text);
   }
 
@@ -120,7 +124,6 @@ export async function rotateSession(
     handoffModel,
     handoff: result !== null,
   });
-  saveState(state);
 
   log.ok(
     result === null
