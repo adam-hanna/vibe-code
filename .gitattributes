@@ -1,0 +1,8 @@
+# Git for Windows sets core.autocrlf=true in its system config; cygwin's git does
+# not. Two shells on the same machine therefore commit the same file differently,
+# which is how a 54-file CRLF rewrite once landed on top of an 8-file change.
+#
+# eol=lf rather than text=auto alone: leaving the working tree to core.autocrlf is
+# what let the two disagree in the first place. LF in the index and LF on disk,
+# whichever git runs.
+* text=auto eol=lf
