@@ -1,5 +1,5 @@
 import { detail } from '@src/log.js';
-import { markActivity } from '@src/run.js';
+import { markActivity, measuredWindow } from '@src/run.js';
 import type { Config, RunState } from '@src/types.js';
 
 /**
@@ -373,11 +373,10 @@ export async function withHeartbeat<T>(
 /**
  * Context windows reported by completed Claude turns, this process only.
  *
- * Deliberately not in state.json. A persisted window would outlive the model it
- * was measured under - `--claude-model` may be overridden on resume - and the
- * fix for stale context measurements belongs to the rotation logic, not to a
- * progress line (issue #6). Keeping it in memory means the worst case is no
- * `ctx%` at all, which is the right failure for a display.
+ * The persisted window in state.json now carries the model that measured it
+ * (issue #6), so it is a second, equally justifiable source - see
+ * progressOptions. This map stays because it is the fresher of the two and
+ * needs no state write to maintain.
  */
 const windows = new Map<string, number>();
 
@@ -391,14 +390,18 @@ export function progressOptions(
   label: string,
 ): ProgressOptions | undefined {
   if (!cfg.progress.enabled) return undefined;
-  const contextWindow = windows.get(cfg.claude.model);
+  // Either source has to name this exact model: the in-process map is keyed by
+  // it, and the persisted one is only returned when its `contextModel` tag
+  // matches. A resumed run can therefore show `ctx%` on its first turn instead
+  // of its second, without the rule changing.
+  const contextWindow = windows.get(cfg.claude.model) ?? measuredWindow(state, cfg.claude.model);
   return {
     label,
     intervalMs: cfg.progress.intervalMs,
     onActivity: (observation) => markActivity(state, observation),
-    // Absent until a turn under this exact model has reported a window in this
-    // process. Omitting the segment is always preferable to a number that
-    // cannot be justified.
+    // Absent until some turn under this exact model has reported a window.
+    // Omitting the segment is always preferable to a number that cannot be
+    // justified.
     ...(contextWindow === undefined ? {} : { contextWindow }),
   };
 }

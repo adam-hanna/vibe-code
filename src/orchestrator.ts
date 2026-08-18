@@ -10,7 +10,9 @@ import {
   artifact,
   artifactDir,
   assessConvergence,
+  measuredRatio,
   p1Signature,
+  recordContextMeasurement,
   recordEvent,
   recordRound,
   resumePhase,
@@ -605,18 +607,22 @@ async function claudeStep(state: RunState, cfg: Config, args: ClaudeStepArgs): P
   state.costUsd = Number((state.costUsd + result.costUsd).toFixed(4));
   state.tokensUsed += result.tokens.total;
   if (result.usage) {
-    state.contextRatio = result.usage.ratio;
-    // Display only: the heartbeat needs a window to turn prompt tokens into a
-    // percentage, and this is the only place one is ever reported.
+    // Tagged with the model that produced it: the ratio is a fraction of this
+    // model's window and means nothing under another one.
+    recordContextMeasurement(state, cfg.claude.model, result.usage.ratio, result.usage.contextWindow);
     rememberContextWindow(cfg.claude.model, result.usage.contextWindow);
   }
 
+  const measured = measuredRatio(state, cfg.claude.model);
   recordEvent(state, 'claude_turn', {
     label: args.label,
     costUsd: result.costUsd,
     tokens: result.tokens.total,
     turns: result.numTurns,
-    contextRatio: Number(state.contextRatio.toFixed(3)),
+    // null rather than the stored figure when this turn reported no usage and
+    // the last measurement belongs to another model: the event log is the
+    // record of what a run did, and a ratio against the wrong window is not it.
+    contextRatio: measured === null ? null : Number(measured.toFixed(3)),
   });
 
   const ctx = result.usage ? `, ctx ${(result.usage.ratio * 100).toFixed(0)}%` : '';

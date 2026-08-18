@@ -155,6 +155,50 @@ export function resumePhase(state: RunState): RunPhase {
   }
 }
 
+/**
+ * The stored context ratio, but only when it provably describes `model`.
+ *
+ * null is "unknown", which is a different claim from a number: the measurement
+ * is a fraction of the measuring model's window, so under any other model it
+ * describes nothing. Callers must decide what unknown means rather than falling
+ * back to the raw field.
+ */
+export function measuredRatio(state: RunState, model: string): number | null {
+  return state.contextModel === model ? state.contextRatio : null;
+}
+
+/** The stored context window, only when it provably describes `model`. */
+export function measuredWindow(state: RunState, model: string): number | undefined {
+  return state.contextModel === model ? state.contextWindow : undefined;
+}
+
+/** Record a measurement together with the model that produced it. */
+export function recordContextMeasurement(
+  state: RunState,
+  model: string,
+  ratio: number,
+  contextWindow: number,
+): void {
+  state.contextModel = model;
+  state.contextRatio = ratio;
+  state.contextWindow = contextWindow;
+}
+
+/**
+ * A fresh session under `model`: nothing has been measured on it yet.
+ *
+ * The window is deleted rather than kept, because a rotation may be the very
+ * point at which the model changed - reporting the outgoing model's window
+ * against the incoming model is the same unattributed number this exists to
+ * remove. Tagging the reset with `model` is also what stops an unknown-
+ * provenance rotation asking for another rotation at the next turn boundary.
+ */
+export function resetContextMeasurement(state: RunState, model: string): void {
+  state.contextModel = model;
+  state.contextRatio = 0;
+  delete state.contextWindow;
+}
+
 export function saveState(state: RunState): void {
   writeFileSync(path.join(state.dir, 'state.json'), JSON.stringify(state, null, 2), 'utf8');
 }

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyOverrides, DEFAULTS } from '@src/config.js';
+import { applyOverrides, configDiff, DEFAULTS } from '@src/config.js';
 import type { Config } from '@src/types.js';
 
 /**
@@ -53,6 +53,25 @@ test('a stored value that is genuinely invalid is still rejected', () => {
   stored.budget.codexLimitPercent = 150;
 
   assert.throws(() => applyOverrides(stored, {}), /codexLimitPercent/);
+});
+
+test('an unchanged config diffs to nothing', () => {
+  assert.deepEqual(configDiff(DEFAULTS, structuredClone(DEFAULTS) as Config), []);
+});
+
+test('a nullable setting and an open-ended toolchain change are both reported', () => {
+  const after = structuredClone(DEFAULTS) as Config;
+  after.verify.command = 'npm test';
+  after.toolchain = { ...after.toolchain, go: { probe: 'go version', phases: ['implement'] } };
+
+  assert.deepEqual(configDiff(DEFAULTS, after), ['toolchain', 'verify.command']);
+});
+
+test('a key one side does not have at all counts as a difference', () => {
+  const before = structuredClone(DEFAULTS) as unknown as Record<string, Record<string, unknown>>;
+  delete before['progress']?.['intervalMs'];
+
+  assert.deepEqual(configDiff(before as unknown as Config, DEFAULTS), ['progress.intervalMs']);
 });
 
 test('a toolchain entry the run added is kept when defaults are layered under it', () => {

@@ -1,6 +1,6 @@
 import { readFileSync, existsSync, renameSync } from 'node:fs';
 import path from 'node:path';
-import { applyOverrides, EFFORTS, loadConfig } from '@src/config.js';
+import { applyOverrides, configDiff, EFFORTS, loadConfig } from '@src/config.js';
 import { artifact, createRun, listRuns, loadRun, recordEvent, saveState } from '@src/run.js';
 import { Escalation, EXIT, orchestrate, writeEscalation } from '@src/orchestrator.js';
 import type { ExitCode } from '@src/orchestrator.js';
@@ -336,6 +336,43 @@ async function cmdRun(args: readonly string[], planOnly: boolean): Promise<ExitC
   return execute(state, cfg, false, flags.skipProbe === true);
 }
 
+/**
+ * The config a resume runs on, written back onto the run.
+ *
+ * The run's own settings are the base, so a resumed run continues on the model
+ * and effort it started with; flags given now still win. What was missing is
+ * the write-back: overrides were applied to a local config and never persisted,
+ * so a run resumed with `--max-question-rounds 5` reverted to 3 the next time
+ * it was resumed without the flag. That is the same silent-revert bug
+ * `state.config` exists to prevent, one command later, and it applied to every
+ * flag rather than just the model.
+ *
+ * Exported for the resume tests: `cmdResume` goes on to spawn agents.
+ */
+export function resumeConfig(targetDir: string, state: RunState, flags: ParsedArgs['flags']): Config {
+  const stored = state.config;
+  const overrides = buildOverrides(flags);
+  // What this resume would have run on with no flags at all. Compared against
+  // the effective config so the event below records the user's change, and not
+  // the defaults applyOverrides fills in for keys an older vibe never stored.
+  const base = stored === undefined ? loadConfig(targetDir) : applyOverrides(stored, {});
+  const cfg =
+    stored === undefined
+      ? loadConfig(targetDir, overrides)
+      : applyOverrides(stored, overrides);
+
+  state.config = cfg;
+  saveState(state);
+
+  // state.config holds only the latest snapshot, so on its own it cannot say
+  // when a setting changed or what it was before. The resume line printed by
+  // cmdResume is no substitute: it names the Claude model and effort only, and
+  // is emitted before the transcript is attached.
+  const changed = configDiff(base, cfg);
+  if (changed.length > 0) recordEvent(state, 'resume_config', { changed });
+  return cfg;
+}
+
 async function cmdResume(args: readonly string[]): Promise<ExitCode> {
   const { positional, flags } = parseArgs(args);
   if (flags.help) {
@@ -351,13 +388,8 @@ async function cmdResume(args: readonly string[]): Promise<ExitCode> {
   }
 
   const state = loadRun(targetDir, id);
-  // The run's own settings are the base, so a resumed run continues on the
-  // model and effort it started with. Flags given now still win.
   const stored = state.config;
-  const cfg =
-    stored === undefined
-      ? loadConfig(targetDir, buildOverrides(flags))
-      : applyOverrides(stored, buildOverrides(flags));
+  const cfg = resumeConfig(targetDir, state, flags);
   if (stored !== undefined) {
     log.detail(`resuming with the run's settings: claude ${cfg.claude.model}/${cfg.claude.effort}`);
   }

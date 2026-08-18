@@ -457,6 +457,20 @@ export interface RunState {
   handoff: string | null;
   contextRatio: number;
   /**
+   * The Claude model `contextRatio` and `contextWindow` were measured under.
+   *
+   * A ratio is a fraction of one model's window: a run measured at 40% of a 1M
+   * window and resumed with `--claude-model` onto a 200k one is really at 200%,
+   * and reading the stored number deferred compaction past the turn that
+   * overflowed. Absent means the measurement cannot be attributed - not that it
+   * is valid. `state.config` cannot stand in for it: resume overrides were
+   * applied to a local config for most of this tool's history, so a stored
+   * config may name a model no turn ever ran under.
+   */
+  contextModel?: string;
+  /** Window, in tokens, reported by the turn that produced `contextRatio`. */
+  contextWindow?: number;
+  /**
    * When vibe last observed the current turn making progress - from the child's
    * stdout OR from its own heartbeat tick.
    *

@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { claudeTurn } from '@src/claude.js';
+import type { ClaudeTurnOptions } from '@src/claude.js';
 import * as log from '@src/log.js';
 import { progressOptions } from '@src/progress.js';
 import { handoffPrompt } from '@src/prompts.js';
-import { artifact, recordEvent, saveState } from '@src/run.js';
-import type { Config, RunState } from '@src/types.js';
+import { artifact, measuredRatio, recordEvent, resetContextMeasurement, saveState } from '@src/run.js';
+import type { ClaudeTurnResult, Config, RunState } from '@src/types.js';
 
 /**
  * Context control for the Claude side of the loop.
@@ -24,46 +25,108 @@ import type { Config, RunState } from '@src/types.js';
 export function shouldRotate(state: RunState, cfg: Config): boolean {
   if (!cfg.context.enabled) return false;
   if (!state.sessionStarted) return false;
-  return state.contextRatio >= cfg.context.compactAboveRatio;
+
+  const ratio = measuredRatio(state, cfg.claude.model);
+  // An unattributable ratio is unknown, not a number. A non-zero one is still
+  // evidence that a real session accumulated somewhere - under a window this
+  // process cannot name, because `--claude-model` may have changed on resume.
+  // Against a smaller window the stored figure understates occupancy, which is
+  // how compaction got deferred past the turn that overflowed. Rotating
+  // establishes a baseline; `resetContextMeasurement` tags it with this model,
+  // so it is asked for once rather than at every turn boundary. A zero ratio is
+  // no evidence of anything, so it buys nothing.
+  if (ratio === null) return state.contextRatio > 0;
+  return ratio >= cfg.context.compactAboveRatio;
 }
+
+/** Injectable for the rotation tests, which must not spawn a real `claude`. */
+export type ClaudeTurnFn = (options: ClaudeTurnOptions) => Promise<ClaudeTurnResult>;
 
 /**
  * Summarise and rotate. Safe to run concurrently with a Codex turn: it only
  * touches the outgoing Claude session, which nothing else is using.
+ *
+ * Two paths, because a rotation on an unattributable measurement is not the
+ * same operation as one on a measured overflow. The baseline rotation exists
+ * precisely when the outgoing conversation may not fit the model now
+ * configured, so the handoff request - which has to load that conversation -
+ * is the turn most likely to fail. Failing it must not leave the run on the
+ * session it was trying to abandon, so the baseline path rotates anyway,
+ * carrying whatever briefing it already had. A measured rotation still throws
+ * to its caller: there the existing session is known to be usable, and
+ * `withConcurrentCompaction` is right to keep working on it.
  */
-export async function rotateSession(state: RunState, cfg: Config): Promise<void> {
-  const ratioPct = (state.contextRatio * 100).toFixed(0);
-  log.step(`Compacting Claude session (context at ${ratioPct}%)`);
+export async function rotateSession(
+  state: RunState,
+  cfg: Config,
+  turn: ClaudeTurnFn = claudeTurn,
+): Promise<void> {
+  const measured = measuredRatio(state, cfg.claude.model);
+  const baseline = measured === null;
+  log.step(
+    baseline
+      ? 'Compacting Claude session (context was measured under another model)'
+      : `Compacting Claude session (context at ${(measured * 100).toFixed(0)}%)`,
+  );
 
-  const result = await claudeTurn({
-    prompt: handoffPrompt(),
-    sessionId: state.sessionId,
-    resume: true,
-    permissionMode: 'plan',
-    model: cfg.claude.model,
-    effort: 'low',
-    cwd: state.targetDir,
-    tools: ['Read'],
-    timeoutMs: cfg.claude.planTimeoutMs,
-    progress: progressOptions(state, cfg, 'compact'),
-  });
+  // Ask the model that grew the conversation, not the one that is about to
+  // inherit it: replaying a session recorded against a 1M window into a 200k
+  // one is exactly the request that fails. Absent provenance leaves nothing
+  // better than the configured model, which is why the failure path below is
+  // not optional.
+  const handoffModel = baseline && state.contextModel !== undefined ? state.contextModel : cfg.claude.model;
 
-  state.costUsd = Number((state.costUsd + result.costUsd).toFixed(4));
+  let result: ClaudeTurnResult | null = null;
+  try {
+    result = await turn({
+      prompt: handoffPrompt(),
+      sessionId: state.sessionId,
+      resume: true,
+      permissionMode: 'plan',
+      model: handoffModel,
+      effort: 'low',
+      cwd: state.targetDir,
+      tools: ['Read'],
+      timeoutMs: cfg.claude.planTimeoutMs,
+      progress: progressOptions(state, cfg, 'compact'),
+    });
+  } catch (err: unknown) {
+    if (!baseline) throw err;
+    const message = err instanceof Error ? err.message : String(err);
+    log.warn(`Handoff briefing failed (${message}); rotating to a fresh session without a new one.`);
+  }
+
   state.sessionRotations += 1;
-  state.handoff = result.text;
   state.sessionId = randomUUID();
   state.sessionStarted = false;
-  state.contextRatio = 0;
+  resetContextMeasurement(state, cfg.claude.model);
 
-  artifact(state, `handoff-${state.sessionRotations}.md`, result.text);
+  // Nothing here runs on the failure path, which leaves `state.handoff` as it
+  // was: an earlier rotation's briefing is stale but true, and the plan of
+  // record is re-attached from disk either way, so the new session is still
+  // seeded with more than nothing.
+  if (result !== null) {
+    state.costUsd = Number((state.costUsd + result.costUsd).toFixed(4));
+    state.handoff = result.text;
+    artifact(state, `handoff-${state.sessionRotations}.md`, result.text);
+  }
+
   recordEvent(state, 'session_rotated', {
     rotation: state.sessionRotations,
-    costUsd: result.costUsd,
+    costUsd: result?.costUsd ?? 0,
     newSessionId: state.sessionId,
+    contextModel: cfg.claude.model,
+    baseline,
+    handoffModel,
+    handoff: result !== null,
   });
   saveState(state);
 
-  log.ok(`Rotated to a fresh session (handoff-${state.sessionRotations}.md)`);
+  log.ok(
+    result === null
+      ? 'Rotated to a fresh session (no handoff briefing)'
+      : `Rotated to a fresh session (handoff-${state.sessionRotations}.md)`,
+  );
 }
 
 /**
@@ -85,7 +148,10 @@ export async function withConcurrentCompaction<T>(
   const [result] = await Promise.all([
     work(),
     rotateSession(state, cfg).catch((err: unknown) => {
-      // Compaction is an optimisation; losing it must not fail the run.
+      // Compaction on a measured session is an optimisation; losing it must not
+      // fail the run. A baseline rotation never lands here - it rotates even
+      // when the briefing fails, because continuing on an unattributable
+      // session is the thing it exists to prevent.
       const message = err instanceof Error ? err.message : String(err);
       log.warn(`Compaction failed, continuing on the existing session: ${message}`);
     }),
