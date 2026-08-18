@@ -1,6 +1,6 @@
 import { readFileSync, existsSync, renameSync } from 'node:fs';
 import path from 'node:path';
-import { applyOverrides, EFFORTS, loadConfig } from '@src/config.js';
+import { applyOverrides, configDiff, EFFORTS, loadConfig } from '@src/config.js';
 import { artifact, createRun, listRuns, loadRun, recordEvent, saveState } from '@src/run.js';
 import { Escalation, EXIT, orchestrate, writeEscalation } from '@src/orchestrator.js';
 import type { ExitCode } from '@src/orchestrator.js';
@@ -336,6 +336,46 @@ async function cmdRun(args: readonly string[], planOnly: boolean): Promise<ExitC
   return execute(state, cfg, false, flags.skipProbe === true);
 }
 
+/**
+ * The config a resume runs on, written back onto the run.
+ *
+ * The run's own settings are the base, so a resumed run continues on the model
+ * and effort it started with; flags given now still win. What was missing is
+ * the write-back: overrides were applied to a local config and never persisted,
+ * so a run resumed with `--max-question-rounds 5` reverted to 3 the next time
+ * it was resumed without the flag. That is the same silent-revert bug
+ * `state.config` exists to prevent, one command later, and it applied to every
+ * flag rather than just the model.
+ *
+ * Exported for the resume tests: `cmdResume` goes on to spawn agents.
+ */
+export function resumeConfig(targetDir: string, state: RunState, flags: ParsedArgs['flags']): Config {
+  const stored = state.config;
+  const overrides = buildOverrides(flags);
+  // What this resume would have run on with no flags at all. Compared against
+  // the effective config so the event below records the user's change, and not
+  // the defaults applyOverrides fills in for keys an older vibe never stored.
+  const base = stored === undefined ? loadConfig(targetDir) : applyOverrides(stored, {});
+  const cfg =
+    stored === undefined
+      ? loadConfig(targetDir, overrides)
+      : applyOverrides(stored, overrides);
+
+  // state.config holds only the latest snapshot, so on its own it cannot say
+  // when a setting changed or what it was before. The resume line printed by
+  // cmdResume is no substitute: it names the Claude model and effort only, and
+  // is emitted before the transcript is attached.
+  //
+  // Computed before the config is assigned, and written by a single state write
+  // either way: a save between the two would leave a window in which the new
+  // settings are persisted and the record of the change is not.
+  const changed = configDiff(base, cfg);
+  state.config = cfg;
+  if (changed.length > 0) recordEvent(state, 'resume_config', { changed });
+  else saveState(state);
+  return cfg;
+}
+
 async function cmdResume(args: readonly string[]): Promise<ExitCode> {
   const { positional, flags } = parseArgs(args);
   if (flags.help) {
@@ -351,13 +391,8 @@ async function cmdResume(args: readonly string[]): Promise<ExitCode> {
   }
 
   const state = loadRun(targetDir, id);
-  // The run's own settings are the base, so a resumed run continues on the
-  // model and effort it started with. Flags given now still win.
   const stored = state.config;
-  const cfg =
-    stored === undefined
-      ? loadConfig(targetDir, buildOverrides(flags))
-      : applyOverrides(stored, buildOverrides(flags));
+  const cfg = resumeConfig(targetDir, state, flags);
   if (stored !== undefined) {
     log.detail(`resuming with the run's settings: claude ${cfg.claude.model}/${cfg.claude.effort}`);
   }
@@ -471,7 +506,8 @@ async function execute(
   } catch (err) {
     if (err instanceof Escalation) {
       state.status = err.code === EXIT.NEEDS_HUMAN ? 'needs-input' : 'stalled';
-      saveState(state);
+      // recordEvent persists, so the status and the event that explains it land
+      // in one write rather than two.
       recordEvent(state, 'escalation', { code: err.code, message: err.message });
       const file = writeEscalation(state, err);
       log.heading('Stopped for input');
@@ -482,7 +518,6 @@ async function execute(
       return err.code;
     }
     state.status = 'error';
-    saveState(state);
     recordEvent(state, 'error', { message: err instanceof Error ? err.message : String(err) });
     log.heading('Failed');
     log.fail(err instanceof Error ? (err.stack ?? err.message) : String(err));
@@ -565,7 +600,6 @@ async function runPreflight(state: RunState, cfg: Config): Promise<ExitCode | nu
     // Hand both agents what was actually observed, so neither has to guess at
     // the other's environment from its own.
     state.environment = environmentFacts(report, cfg, state.targetDir);
-    saveState(state);
     if (repairArgs.length > 0) log.info('Environment repair will be applied to every Claude turn');
     log.ok('Toolchain contract satisfied');
     recordEvent(state, 'preflight-ok', { repairArgs: repairArgs.length > 0 });
@@ -574,7 +608,6 @@ async function runPreflight(state: RunState, cfg: Config): Promise<ExitCode | nu
 
   for (const reason of report.blockingReasons) log.fail(reason);
   state.status = 'error';
-  saveState(state);
   recordEvent(state, 'preflight-failed', { reasons: report.blockingReasons });
   log.info('Fix the environment, or re-run with --skip-probe to proceed anyway.');
   return EXIT.PREFLIGHT;

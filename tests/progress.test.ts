@@ -525,3 +525,28 @@ test('a window of zero is not remembered: it would render as ctx 0%', () => {
 
   assert.equal(progressOptions(state(), config({}, 'fixture-zero'), 'plan')?.contextWindow, undefined);
 });
+
+/** A resumed run: nothing measured in this process, a window on the run. */
+function persistedState(model: string): RunState {
+  return { dir: '/nowhere', events: [], contextModel: model, contextWindow: 300_000 } as unknown as RunState;
+}
+
+test('the window persisted with the run is used when it names the model in use', () => {
+  const options = progressOptions(
+    persistedState('fixture-persisted'),
+    config({}, 'fixture-persisted'),
+    'plan',
+  );
+
+  assert.equal(options?.contextWindow, 300_000);
+});
+
+test('a persisted window measured under another model is still omitted', () => {
+  const options = progressOptions(
+    persistedState('fixture-persisted'),
+    config({}, 'fixture-persisted-other'),
+    'plan',
+  );
+
+  assert.equal(options?.contextWindow, undefined);
+});

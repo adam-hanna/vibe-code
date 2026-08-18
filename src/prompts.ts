@@ -362,14 +362,43 @@ Be specific - name real files and symbols. Prefer detail over brevity in the tec
 Output the briefing as markdown. No preamble.`;
 }
 
-/** Prefix carried into the first turn of a rotated session. */
-export function handoffContext(handoff: string, planMd: string | null): string {
-  return `## Handoff from your previous session
+/**
+ * Prefix carried into the first turn of a rotated session.
+ *
+ * The two halves are independent. A rotation can produce no briefing at all -
+ * the baseline rotation for an unattributable measurement rotates even when its
+ * handoff turn fails - and the plan of record is the one thing a fresh session
+ * must never start without: `revisePlanPrompt` does not restate it, so a turn
+ * that lost both was asked to revise a plan it could not see.
+ *
+ * `stale` marks a briefing that survived a failed rotation. It describes an
+ * earlier point in the run, so presenting it as "what you knew" would assert
+ * that the work done since then never happened.
+ */
+export function handoffContext(handoff: string | null, planMd: string | null, stale = false): string {
+  if (handoff === null && planMd === null) return '';
+
+  const briefing =
+    handoff === null
+      ? `## Your previous session
+
+The conversation so far was rotated to control context growth, and no briefing could be taken from it. Re-read whatever you need from the codebase rather than assuming it.
+`
+      : stale
+        ? `## Briefing from earlier in this run
+
+The conversation so far was rotated to control context growth. No briefing could be taken from the session that just ended, so this one is from an earlier point in the run: it predates whatever has happened since, and later work may contradict it.
+
+${handoff}
+`
+        : `## Handoff from your previous session
 
 The conversation so far was compacted to control context growth. This briefing is what you knew:
 
 ${handoff}
-${planMd ? `\n## Current plan of record\n\n${planMd}\n` : ''}
+`;
+
+  return `${briefing}${planMd === null ? '' : `\n## Current plan of record\n\n${planMd}\n`}
 ---
 
 Continue from here.

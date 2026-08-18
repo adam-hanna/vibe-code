@@ -199,6 +199,43 @@ export function applyOverrides(base: Config, overrides: ConfigOverrides): Config
   return merged;
 }
 
+const SECTIONS = [
+  'claude',
+  'codex',
+  'loop',
+  'budget',
+  'questions',
+  'git',
+  'context',
+  'verify',
+  'progress',
+] as const;
+
+/**
+ * Dotted paths whose values differ: ['claude.model', 'loop.maxQuestionRounds'].
+ *
+ * Only resolved configs are compared, so `LoadedConfig.configPath` and anything
+ * else describing where a setting came from never appears - the question this
+ * answers is what the run will now behave like, not how it was sourced.
+ *
+ * Compared as JSON because `verify.command` is nullable and toolchain entries
+ * are objects. Both sides come out of `mergeConfig`, which builds keys in a
+ * fixed order, so key order cannot produce a false difference.
+ */
+export function configDiff(before: Config, after: Config): string[] {
+  const changed: string[] = [];
+  for (const section of SECTIONS) {
+    const b = before[section] as unknown as Record<string, unknown>;
+    const a = after[section] as unknown as Record<string, unknown>;
+    for (const key of new Set([...Object.keys(b), ...Object.keys(a)])) {
+      if (JSON.stringify(b[key]) !== JSON.stringify(a[key])) changed.push(`${section}.${key}`);
+    }
+  }
+  // Open-ended keys, so compared whole rather than per tool.
+  if (JSON.stringify(before.toolchain) !== JSON.stringify(after.toolchain)) changed.push('toolchain');
+  return changed.sort();
+}
+
 /** Precedence: defaults < vibe.config.json in the target repo < CLI flags. */
 export function loadConfig(targetDir: string, overrides: ConfigOverrides = {}): LoadedConfig {
   const configPath = path.join(targetDir, 'vibe.config.json');
