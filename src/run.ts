@@ -397,30 +397,9 @@ export function assessConvergence(
   const improved =
     hasWindow && recent.some((r, idx) => idx > 0 && r.count < (recent[idx - 1]?.count ?? r.count));
 
-  // One finding the fixer cannot fix, whatever else changes around it.
-  //
-  // The fingerprint above only catches an *identical* set. A defect that
-  // survives every round while its companions rotate produces a new
-  // fingerprint each time and never trips it.
-  //
-  // Judged on persistence alone, deliberately. An earlier version also required
-  // the total count to have stalled, which sounded prudent and was useless: on
-  // the run that motivated this, one id survived six consecutive fix attempts
-  // while the count wobbled 2 -> 4 -> 3, so every window contained a decrease
-  // and the rule could never fire. The count and a single defect are separate
-  // axes - findings falling elsewhere says nothing about the one that keeps
-  // coming back.
-  //
-  // One round longer than the set rule, because a single repeated id is weaker
-  // evidence per round than an identical set.
-  const persistWindow = repeatThreshold + 1;
-  const persisted = history.slice(-persistWindow);
-  if (persisted.length === persistWindow) {
-    const stuck = persistentId(persisted);
-    if (stuck !== null) {
-      return `"${stuck}" has come back ${persistWindow} rounds running; the fixer cannot resolve it`;
-    }
-  }
+  // A single id surviving many rounds is NOT a stop condition - see
+  // `persistenceNotice`, which reports it instead. It used to abort the run
+  // here, and the picomatch reimplementation disproved the premise.
 
   // Trend: engaged near the cap, or once the run is simply long. Findings may
   // be new every round and still be going nowhere - a run that went 1 -> 1 -> 3
@@ -440,12 +419,84 @@ export function assessConvergence(
   return null;
 }
 
-/** An id present in every round of the window, or null. */
-function persistentId(recent: readonly RoundRecord[]): string | null {
-  const first = recent[0]?.ids;
-  if (first === undefined || first.length === 0) return null;
-  for (const id of first) {
-    if (recent.every((r) => r.ids?.includes(id) === true)) return id;
+/**
+ * The id with the longest unbroken run of presence ending at the last round.
+ *
+ * Trailing streaks only: an id that persisted for five rounds and was then
+ * cleared is not what anyone needs telling about.
+ */
+export function persistentStreak(
+  history: readonly RoundRecord[],
+): { id: string; rounds: number } | null {
+  const last = history[history.length - 1]?.ids;
+  if (last === undefined || last.length === 0) return null;
+
+  let best: { id: string; rounds: number } | null = null;
+  for (const id of last) {
+    let rounds = 0;
+    for (let i = history.length - 1; i >= 0; i -= 1) {
+      if (history[i]?.ids?.includes(id) !== true) break;
+      rounds += 1;
+    }
+    if (best === null || rounds > best.rounds) best = { id, rounds };
   }
-  return null;
+  return best;
+}
+
+export interface PersistenceNoticeArgs {
+  /** Rounds of unbroken persistence before the run says anything. */
+  minRounds: number;
+  /**
+   * The phase round cap, already worded, e.g. "maxReviewRounds (12)". This is
+   * the one limit that can be stated exactly: it bounds the loop, and nothing
+   * makes the loop run longer.
+   */
+  capLimit: string;
+  /**
+   * Armed whole-run budget ceilings, already worded. Deliberately NOT a
+   * complete list of what can stop the run - planShare, maxQuestionRounds and
+   * the rate-limit exits can all stop it sooner - so the wording built from
+   * this offers examples, never an enumeration. May be empty.
+   */
+  ceilings: readonly string[];
+}
+
+/**
+ * What to tell the user about a long-lived finding, or null when there is
+ * nothing to say.
+ *
+ * This used to be a stop: a finding that came back `oscillationThreshold + 1`
+ * rounds running ended the run, on the claim that the fixer could not resolve
+ * it. The picomatch reimplementation disproved the claim -
+ * `regex-group-prefix-not-literalized` was present in rounds 3 through 8 and
+ * was cleared on the sixth attempt at round 9, in a run that went on to pass
+ * 1977/1977 tests. Persistence measures how long something has taken, not
+ * whether it can be done, and the thing the stop was really proxying for -
+ * runaway spend - is now measured directly by `budget.maxTokens`, which counts
+ * both agents.
+ *
+ * It only ever describes a survivor amid rotating companions. An id that is the
+ * whole blocking set repeats its signature and is stopped earlier by the set
+ * rule in `assessConvergence`.
+ *
+ * The wording hedges about which brake will stop the run because several of
+ * them - `budget.planShare`, `maxQuestionRounds`, the rate-limit exits - are
+ * outside what this function is told, and naming one of them as *the* limit
+ * would send the user to raise the wrong setting.
+ */
+export function persistenceNotice(
+  history: readonly RoundRecord[],
+  args: PersistenceNoticeArgs,
+): string | null {
+  const streak = persistentStreak(history);
+  if (streak === null || streak.rounds < args.minRounds) return null;
+
+  const examples = args.ceilings.length > 0 ? ` - ${args.ceilings.join(', ')} -` : '';
+  return (
+    `"${streak.id}" has been blocking for ${streak.rounds} rounds running - continuing, ` +
+    'since a finding coming back is not evidence it cannot be fixed. ' +
+    `This loop runs to ${args.capLimit} at the latest and can stop sooner on a ` +
+    `budget ceiling${examples} or another brake. Whichever limit stops the run, ` +
+    "raise it and 'vibe resume <run-id>' to carry on."
+  );
 }
