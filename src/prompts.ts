@@ -1,5 +1,12 @@
 import type { EnvironmentFacts } from '@src/runtime.js';
-import type { Answer, Assumption, Finding, OpenQuestion } from '@src/types.js';
+import type {
+  Answer,
+  Assumption,
+  Finding,
+  OpenQuestion,
+  OutOfScopeItem,
+  Plan,
+} from '@src/types.js';
 
 const RESPOND_WITH_JSON =
   'Respond with JSON matching the required schema. No prose outside the JSON.';
@@ -109,6 +116,71 @@ Fix the cause, not the line.
   checked for the same class of problem**, and what you found. "Checked X and Y,
   they were already correct" is useful; silence is not.`;
 
+/**
+ * The plan's declared boundary, rendered.
+ *
+ * `undefined` and `[]` are different facts. Absent means no boundary was ever
+ * recorded - a plan stored before the field existed - while empty means the
+ * planner considered the question and claims there are no interesting edges.
+ * Printing the second where the first is true puts a claim in the plan's mouth
+ * that it never made.
+ */
+function formatOutOfScope(items: readonly OutOfScopeItem[] | undefined): string {
+  if (items === undefined) {
+    return '(this plan predates the out-of-scope field - no boundary was recorded)';
+  }
+  if (items.length === 0) {
+    return '(the planner considered this and declared nothing out of scope)';
+  }
+  return items.map((s, i) => `${i + 1}. **${s.item}**\n   - Why: ${s.why}`).join('\n');
+}
+
+/**
+ * What a reviewer may do with the plan's boundary - conditional on there being
+ * one.
+ *
+ * The defer instruction only makes sense against a boundary someone drew.
+ * Offering it where none was recorded would let a reviewer wave off a
+ * legitimate finding on the authority of a plan that never claimed anything,
+ * and legacy runs are exactly the ones with no boundary to check the finding
+ * against.
+ */
+function scopeGuidance(
+  items: readonly OutOfScopeItem[] | undefined,
+  subject: 'plan' | 'change',
+): string {
+  const what = subject === 'plan' ? 'the plan' : 'this change';
+
+  if (items === undefined) {
+    return `## Scope
+
+This plan predates the out-of-scope field, so **no boundary was recorded**. Nothing here has been declared out of scope, and you must not treat anything as out of scope on the plan's authority - judge every finding on its merits, at its true severity.
+
+\`defer\` is required on every finding: set it to \`false\` unless the finding is plainly about work ${what} never touches.`;
+  }
+
+  return `## Scope
+
+${formatOutOfScope(items)}
+
+${what === 'the plan' ? 'The plan' : 'The plan behind this change'} has drawn the boundary above. Work it declared out of scope is not a hole in the plan - it is the plan being explicit. **Demanding work beyond that boundary is a defect in your finding, not in the plan.**
+
+If you notice something real that belongs in separate work, that is worth reporting: raise it as a finding with \`defer: true\`, at P2 or P3. Deferring costs you the same honesty as choosing a severity does - a finding you defer is one you are saying does not have to be resolved for ${what} to be correct, so it can never be a P0 or a P1.
+
+If the boundary itself is wrong - ${what} cannot work without the thing it excluded - say *that*, at its real severity, and explain why the exclusion breaks it. An empty boundary is a claim like any other, and disputing it is legitimate.`;
+}
+
+/**
+ * The plan as a standalone document: the prose plus the boundary it drew.
+ *
+ * `plan_md` alone is not the plan of record any more. Used for the PLAN.md
+ * artifact and for the rehydration prefix a rotated session starts from, so a
+ * fresh session cannot lose the boundary the previous one stated.
+ */
+export function renderPlanDoc(plan: Plan): string {
+  return `${plan.plan_md}\n\n## Out of scope\n\n${formatOutOfScope(plan.out_of_scope)}\n`;
+}
+
 export function planPrompt(
   task: string,
   extraContext: string | null,
@@ -146,6 +218,7 @@ ${RESPOND_WITH_JSON}`;
 export function critiquePrompt(
   planMd: string,
   assumptions: readonly Assumption[],
+  outOfScope: readonly OutOfScopeItem[] | undefined,
   round: number,
   hasMemory: boolean,
   environment?: EnvironmentFacts | null,
@@ -172,6 +245,8 @@ Be strict about what earns P1, and stricter still about P0. A P2 inflated to P1 
 Reserve your objections for what genuinely cannot be discovered by building the thing: a wrong approach, a missed requirement, a false claim about the code.
 
 Give each finding a stable kebab-case \`id\` so it can be tracked across rounds.
+
+${scopeGuidance(outOfScope, 'plan')}
 
 ${REVIEW_BREADTH}
 
@@ -215,10 +290,19 @@ ${RESPOND_WITH_JSON}`;
 export interface RevisePlanArgs {
   findings?: readonly Finding[] | undefined;
   answers?: readonly Answer[] | undefined;
+  /**
+   * The boundary the current plan drew.
+   *
+   * Restated to the planner every round because a revision returns the
+   * *complete* plan: a fresh session - and the session can be rotated
+   * concurrently with the critique - would otherwise re-derive `out_of_scope`
+   * from nothing and silently drop a boundary the run had already settled.
+   */
+  outOfScope?: readonly OutOfScopeItem[] | undefined;
   round: number;
 }
 
-export function revisePlanPrompt({ findings, answers, round }: RevisePlanArgs): string {
+export function revisePlanPrompt({ findings, answers, outOfScope, round }: RevisePlanArgs): string {
   const parts: string[] = [`Revise your plan. This is revision round ${round}.`];
 
   if (findings && findings.length > 0) {
@@ -240,6 +324,12 @@ ${answers.map(formatAnswer).join('\n\n')}
 
 Fold these into the plan and drop the corresponding open questions.`);
   }
+
+  parts.push(`## The boundary your current plan drew
+
+${formatOutOfScope(outOfScope)}
+
+\`out_of_scope\` is the whole boundary, not a delta: restate every item that still holds. Dropping one is a deliberate decision to take that work on - if you drop it, say so in the plan and explain why. Adding one is how you decline a finding that is real and worth doing but belongs in separate work.`);
 
   parts.push(
     'Return the **complete revised plan**, not a diff or a summary of changes - the plan is consumed standalone by the implementer. Keep `assumptions` current: remove any that were resolved, add any the revision introduced.',
@@ -278,6 +368,7 @@ export function reviewPrompt(
   diff: string,
   changedFiles: readonly string[],
   planMd: string,
+  outOfScope: readonly OutOfScopeItem[] | undefined,
   round: number,
   hasMemory: boolean,
   environment?: EnvironmentFacts | null,
@@ -306,6 +397,8 @@ The loop may carry a small number of P1s forward and settle them against the tes
 Do not wave through a real defect. Reserve P1 for defects you can name a concrete failure case for, and prefer P1 over P0 for anything a test run could settle.
 
 Give each finding a stable kebab-case \`id\`.
+
+${scopeGuidance(outOfScope, 'change')}
 
 ${REVIEW_BREADTH}
 

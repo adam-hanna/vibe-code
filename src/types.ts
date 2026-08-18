@@ -339,10 +339,31 @@ export interface OpenQuestion {
   blocking: boolean;
 }
 
+/** A boundary the plan drew deliberately: real work it is not doing, and why. */
+export interface OutOfScopeItem {
+  item: string;
+  why: string;
+}
+
 export interface Plan {
   plan_md: string;
   assumptions: Assumption[];
   open_questions: OpenQuestion[];
+  /**
+   * What the plan is deliberately not doing.
+   *
+   * Absent and empty are different facts and must stay different. `undefined`
+   * means no boundary was ever recorded - a plan stored before this field
+   * existed. `[]` means the planner considered the question and claims the
+   * change has no interesting edges. Collapsing the two with `?? []` would make
+   * a legacy plan assert something it never said, so only `writeFollowUps` does
+   * it, where both cases legitimately contribute nothing.
+   *
+   * Optional in TypeScript, required in `PLAN_SCHEMA`: the schema governs fresh
+   * model output, while `loadRun` casts stored JSON with no validation and must
+   * keep loading runs recorded before this existed.
+   */
+  out_of_scope?: OutOfScopeItem[];
 }
 
 export interface Finding {
@@ -351,6 +372,18 @@ export interface Finding {
   title: string;
   detail: string;
   suggested_fix: string;
+  /**
+   * Real, worth doing, and belongs in separate work rather than in this change.
+   *
+   * The third option the loop previously lacked: without it a legitimate
+   * finding outside the change can only be absorbed or argued away, and a good
+   * planner absorbs - which grows the plan, which grows the critique surface.
+   *
+   * A deferred finding is by definition non-blocking, so it is P2 or P3 and
+   * never P0 or P1; `parseFindings` enforces that on read. Optional in
+   * TypeScript because a report stored before this field existed has none.
+   */
+  defer?: boolean;
 }
 
 export interface FindingsReport {
@@ -551,6 +584,16 @@ export interface RunState {
    * re-reviewed and so nothing has confirmed they are gone.
    */
   outstanding?: Finding[];
+  /**
+   * Findings the critic or the reviewer marked `defer`: real work that belongs
+   * in separate effort, collected across every plan-critique and code-review
+   * round and deduped by id.
+   *
+   * Distinct from `deferredQuestions`, which is about questions Codex declined.
+   * Purely a record: `FOLLOW-UPS.md` is rendered from it and nothing in the loop
+   * reads it, because a deferred finding is P2/P3 and already non-blocking.
+   */
+  deferred?: Finding[];
   /**
    * The final fix round has run. Stops the review loop reopening the argument
    * the tolerance just settled, and survives resume so a restart does not

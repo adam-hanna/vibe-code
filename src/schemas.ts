@@ -8,7 +8,7 @@
 export const PLAN_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['plan_md', 'assumptions', 'open_questions'],
+  required: ['plan_md', 'assumptions', 'open_questions', 'out_of_scope'],
   properties: {
     plan_md: {
       type: 'string',
@@ -32,6 +32,26 @@ export const PLAN_SCHEMA = {
             type: 'string',
             description: 'What has to be redone if this assumption is wrong.',
           },
+        },
+      },
+    },
+    out_of_scope: {
+      type: 'array',
+      description:
+        'Real work you are deliberately NOT doing in this change, and why it belongs ' +
+        'elsewhere. Draw the boundary before a reviewer tests one: a plan that never stated ' +
+        'a boundary can only defend one it does not have, so every legitimate finding outside ' +
+        'the change has to be absorbed, and each absorption enlarges what there is to critique. ' +
+        'An empty array is legal, but it is a claim that this change has no interesting edges - ' +
+        'make it only when that is true. When you revise a plan, restate the boundary in full: ' +
+        'this field is the whole boundary, not a delta.',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['item', 'why'],
+        properties: {
+          item: { type: 'string', description: 'The work you are not doing.' },
+          why: { type: 'string', description: 'Why it is separable from this change.' },
         },
       },
     },
@@ -81,7 +101,7 @@ export const FINDINGS_SCHEMA = {
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['id', 'severity', 'title', 'detail', 'suggested_fix'],
+        required: ['id', 'severity', 'title', 'detail', 'suggested_fix', 'defer'],
         properties: {
           id: {
             type: 'string',
@@ -105,6 +125,20 @@ export const FINDINGS_SCHEMA = {
           title: { type: 'string' },
           detail: { type: 'string' },
           suggested_fix: { type: 'string' },
+          defer: {
+            // Typed, not just required: with `additionalProperties: false` a
+            // required property carrying no `type` still accepts a string or a
+            // number, and `parseFindings` reads anything that is not literally
+            // `true` as false - so malformed output would satisfy the schema
+            // and silently fail to defer.
+            type: 'boolean',
+            description:
+              'true = this is real and worth doing, but it belongs in separate work rather ' +
+              'than in this change. A deferred finding is by definition not blocking: it must ' +
+              'be P2 or P3, never P0 or P1. That is deliberate - choosing to defer costs the ' +
+              'same honesty as choosing a severity does. If the work has to happen inside this ' +
+              'change for it to be correct, do not defer it; raise it at its true severity.',
+          },
         },
       },
     },
