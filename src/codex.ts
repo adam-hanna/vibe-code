@@ -1,7 +1,8 @@
-import { writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { writeFileSync, readFileSync, existsSync, renameSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { resolveBin, run } from '@src/proc.js';
-import { detail } from '@src/log.js';
+import type { RunFn } from '@src/proc.js';
+import { detail, warn } from '@src/log.js';
 import { createHeartbeat, parseCodexLine, withHeartbeat } from '@src/progress.js';
 import type { ProgressOptions } from '@src/progress.js';
 import type { Effort, Sandbox, TokenUsage } from '@src/types.js';
@@ -75,6 +76,13 @@ interface CodexEvents {
   tokens: TokenUsage;
   /** Message from a `turn.failed` or top-level `error` event, for diagnostics. */
   failure: string | null;
+  /**
+   * A `turn.failed` event: Codex's own verdict on the turn, as distinct from a
+   * top-level `error`, which it also emits for conditions it goes on to recover
+   * from. Only the verdict fails the turn - treating every `error` as fatal
+   * would fail turns that completed.
+   */
+  failed: boolean;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -117,7 +125,7 @@ function extractTokens(usage: Record<string, unknown>): TokenUsage {
  * and losing a token count is not worth losing the work for.
  */
 function parseEvents(stdout: string): CodexEvents {
-  const out: CodexEvents = { threadId: null, tokens: ZERO_TOKENS, failure: null };
+  const out: CodexEvents = { threadId: null, tokens: ZERO_TOKENS, failure: null, failed: false };
 
   for (const line of stdout.split(/\r?\n/)) {
     const trimmed = line.trim();
@@ -139,9 +147,26 @@ function parseEvents(stdout: string): CodexEvents {
       const err = event['error'];
       const message = isRecord(err) ? err['message'] : event['message'];
       if (typeof message === 'string') out.failure = message;
+      if (event['type'] === 'turn.failed') out.failed = true;
     }
   }
   return out;
+}
+
+/**
+ * Clear `file`, keeping its content at `keepAt` if there was any.
+ *
+ * The removal is what matters and must happen either way: if the rename fails -
+ * a locked file, a directory that has gone away - the file is deleted instead,
+ * because leaving it would let the next turn mistake it for its own output.
+ */
+function supersede(file: string, keepAt: string): void {
+  if (!existsSync(file)) return;
+  try {
+    renameSync(file, keepAt);
+  } catch {
+    rmSync(file, { force: true });
+  }
 }
 
 /**
@@ -153,14 +178,40 @@ function parseEvents(stdout: string): CodexEvents {
  * When `sessionId` is supplied the turn continues that thread via
  * `codex exec resume`, so the reviewer keeps everything it already worked out
  * about this repo and knows which findings it has already raised.
+ *
+ * **What counts as a failed turn.** A `turn.failed` verdict, or no parseable
+ * structured output written by this child. Not the exit status: a non-zero exit
+ * alongside a schema-conformant output file means teardown failed after the work
+ * was done, so it is warned about and accepted rather than discarding a turn
+ * that has already been paid for. Deterministic tools are judged the other way
+ * round; see git.ts and verify.ts.
+ *
+ * `exec` is injected so the adapter's boundary with the heartbeat can be tested
+ * without spawning a real agent, as `rotateSession` and `ClaudeProbeExecutor`
+ * already are.
  */
-export async function codexTurn(options: CodexTurnOptions): Promise<CodexTurnResult> {
+export async function codexTurn(
+  options: CodexTurnOptions,
+  exec: RunFn = run,
+): Promise<CodexTurnResult> {
   const { prompt, schema, schemaName, artifactDir, model, effort, sandbox, cwd, timeoutMs, sessionId } =
     options;
 
   const schemaFile = path.join(artifactDir, `${schemaName}.schema.json`);
   const outFile = path.join(artifactDir, `${schemaName}.out.json`);
   writeFileSync(schemaFile, JSON.stringify(schema, null, 2), 'utf8');
+  // Moved aside before the child runs, because the name is derived from the
+  // round (`review-2`) and withRateLimitRetry re-runs the same turn under the
+  // same name. Left in place, a retry whose child wrote nothing found the
+  // previous attempt's file, parsed it, and reported a superseded result as this
+  // turn's - a failed turn passing as a successful one by way of the filesystem.
+  //
+  // Renamed rather than deleted: nothing else persists a rejected turn's raw
+  // output (runCodex keeps only the parsed structure), so deleting it would make
+  // the attempt that went wrong the one attempt with no evidence left. One slot,
+  // overwritten by the next supersede - the point is diagnosing the last
+  // failure, not keeping a history.
+  supersede(outFile, path.join(artifactDir, `${schemaName}.superseded.json`));
 
   // `resume` accepts neither -C nor -s: it takes its working directory from the
   // spawned process cwd, and its sandbox defaults to read-only. It does NOT
@@ -198,40 +249,54 @@ export async function codexTurn(options: CodexTurnOptions): Promise<CodexTurnRes
   const heartbeat = options.progress
     ? createHeartbeat({ ...options.progress, parse: parseCodexLine, unit: 'event' })
     : null;
-  const { code, stdout, stderr } = await withHeartbeat(heartbeat, () =>
-    run(codexBin(), args, {
+  // Validation runs inside the heartbeat's work, not after it: the end-of-turn
+  // flush is a claim that the turn completed, and while only `run()` was wrapped
+  // a turn that wrote no usable output still persisted as one that had.
+  return withHeartbeat(heartbeat, async () => {
+    const { code, stdout, stderr } = await exec(codexBin(), args, {
       input: prompt,
       cwd,
       timeoutMs,
       ...(heartbeat === null ? {} : { onLine: heartbeat.onLine }),
-    }),
-  );
+    });
 
-  const events = parseEvents(stdout);
-  const returnedSession = events.threadId ?? SESSION_ID_RE.exec(stderr)?.[1] ?? sessionId ?? null;
+    const events = parseEvents(stdout);
+    const returnedSession = events.threadId ?? SESSION_ID_RE.exec(stderr)?.[1] ?? sessionId ?? null;
 
-  if (!existsSync(outFile)) {
-    // `turn.failed` states the actual cause (a bad model name, a refused
-    // request); the raw streams are the fallback when it does not.
-    const cause = events.failure === null ? '' : `\ncodex reported: ${events.failure}`;
-    throw new Error(
-      `codex wrote no structured output (exit ${code}).${cause}\n` +
-        `stderr:\n${stderr.slice(-2000)}\nstdout:\n${stdout.slice(-1000)}`,
-    );
-  }
+    if (!existsSync(outFile)) {
+      // `turn.failed` states the actual cause (a bad model name, a refused
+      // request); the raw streams are the fallback when it does not.
+      const cause = events.failure === null ? '' : `\ncodex reported: ${events.failure}`;
+      throw new Error(
+        `codex wrote no structured output (exit ${code}).${cause}\n` +
+          `stderr:\n${stderr.slice(-2000)}\nstdout:\n${stdout.slice(-1000)}`,
+      );
+    }
 
-  // Always read as UTF-8: Codex emits smart quotes and em dashes that mangle
-  // under the Windows ANSI codepage.
-  const raw = readFileSync(outFile, 'utf8');
-  try {
-    return {
-      structured: JSON.parse(raw) as unknown,
-      raw,
-      sessionId: returnedSession,
-      tokens: events.tokens,
-    };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`codex output was not valid JSON: ${message}\n${raw.slice(0, 1500)}`);
-  }
+    if (events.failed) {
+      // Checked even though a file exists. `turn.failed` is Codex's own verdict,
+      // and a file beside it is either a partial write or an artifact of an
+      // earlier phase of the same turn; accepting it would hand the loop a
+      // result the agent said was not one.
+      throw new Error(`codex reported the turn failed (exit ${code}): ${events.failure ?? 'no detail'}`);
+    }
+
+    // Always read as UTF-8: Codex emits smart quotes and em dashes that mangle
+    // under the Windows ANSI codepage.
+    const raw = readFileSync(outFile, 'utf8');
+    let structured: unknown;
+    try {
+      structured = JSON.parse(raw) as unknown;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(`codex output was not valid JSON: ${message}\n${raw.slice(0, 1500)}`);
+    }
+
+    if (code !== 0) {
+      // Logged, not thrown: see the exit-status note above.
+      warn(`codex exited ${String(code)} but wrote schema-conformant output; accepting it.`);
+    }
+
+    return { structured, raw, sessionId: returnedSession, tokens: events.tokens };
+  });
 }

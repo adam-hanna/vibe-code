@@ -466,36 +466,75 @@ export interface RunState {
    * since it was written. Optional so runs recorded before this load.
    */
   handoffStale?: boolean;
+  /**
+   * Occupancy of the current Claude session, as a fraction of `contextModel`'s
+   * window. Zero means nothing has been measured on this session yet, which is
+   * the state a rotation leaves behind - not evidence that the session is empty
+   * under some other model.
+   */
   contextRatio: number;
   /**
-   * The Claude model `contextRatio` and `contextWindow` were measured under.
+   * Provenance tag: the Claude model the stored measurements describe.
    *
-   * A ratio is a fraction of one model's window: a run measured at 40% of a 1M
-   * window and resumed with `--claude-model` onto a 200k one is really at 200%,
-   * and reading the stored number deferred compaction past the turn that
-   * overflowed. Absent means the measurement cannot be attributed - not that it
-   * is valid. `state.config` cannot stand in for it: resume overrides were
-   * applied to a local config for most of this tool's history, so a stored
-   * config may name a model no turn ever ran under.
+   * Set by a completed turn under that model, and by the rotation reset that
+   * tags the incoming model before anything has been measured on it. A ratio is
+   * a fraction of one model's window: a run measured at 40% of a 1M window and
+   * resumed with `--claude-model` onto a 200k one is really at 200%, and reading
+   * the stored number deferred compaction past the turn that overflowed. Absent
+   * means the measurement cannot be attributed - not that it is valid.
+   * `state.config` cannot stand in for it: resume overrides were applied to a
+   * local config for most of this tool's history, so a stored config may name a
+   * model no turn ever ran under.
    */
   contextModel?: string;
-  /** Window, in tokens, reported by the turn that produced `contextRatio`. */
+  /**
+   * Window, in tokens, of `contextModel` - metadata about the model rather than
+   * about the session, and read only by the `ctx%` display.
+   *
+   * Present with a zero `contextRatio` is a valid state: a rotation's handoff
+   * turn measures a window while its occupancy, which belongs to the session
+   * being abandoned, is discarded.
+   */
   contextWindow?: number;
   /**
-   * When vibe last observed the current turn making progress - from the child's
+   * When the most recently started *running* turn began.
+   *
+   * The boundary marker for `lastOutputAt`: it is what distinguishes "quiet
+   * because the turn started three seconds ago" from "quiet for twenty minutes".
+   *
+   * "Most recently started" rather than "the" turn because a rotation overlapped
+   * with a Codex turn makes two turns live at once. Both this and `lastOutputAt`
+   * are recomputed across the live turns on every observation, so when the
+   * rotation finishes they fall back to the Codex turn that is still running -
+   * they can move backwards, and must, or a finished turn's output reads as the
+   * live one's progress. Between turns they keep the last turn's values until
+   * the next turn's boundary rebases them, which is what makes the end-of-turn
+   * flush worth doing. Maintained only while progress is enabled.
+   */
+  turnStartedAt?: string;
+  /**
+   * When vibe last observed any of its turns making progress - from a child's
    * stdout OR from its own heartbeat tick.
    *
    * The field a watcher in another shell should read: it answers "is this run
    * still being worked", which previously took `Get-Process` plus a guess. It
    * deliberately advances during a silent reasoning block, because a turn that
    * emits no events for twelve minutes is still a healthy turn.
+   *
+   * Monotonic, and the one of the three that is about the run rather than about
+   * a turn: it stays readable between turns, when the other two describe a turn
+   * that has ended.
    */
   lastActivityAt?: string;
   /**
-   * The exact time of the last line the child wrote. Flushed at the end of a
-   * completed turn, so it is never left behind by the write throttle. Distinct
-   * from `lastActivityAt` on purpose: this is the one that goes quiet, so the
-   * pair separates "thinking" from "gone".
+   * The exact time of the last line a running turn wrote. Flushed at the end of
+   * a turn whose output the adapter accepted, so it is never left behind by the
+   * write throttle and never records a rejected turn as a completed one.
+   * Distinct from `lastActivityAt` on purpose: this is the one that goes quiet,
+   * so the pair separates "thinking" from "gone".
+   *
+   * Absent means no running turn has spoken yet - the turn boundary clears it,
+   * unless another turn is still running and has.
    */
   lastOutputAt?: string;
   /**

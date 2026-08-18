@@ -53,7 +53,9 @@ function asEvent(line: string): Record<string, unknown> | null {
 }
 
 const TARGET_KEYS = ['file_path', 'path', 'pattern', 'command', 'description'] as const;
+/** Total budget for the rendered target, ellipsis included. */
 const TARGET_MAX = 60;
+const ELLIPSIS = '...';
 
 /** The most identifying string in a tool's input, if it carries one. */
 function toolTarget(input: unknown): string | null {
@@ -62,7 +64,9 @@ function toolTarget(input: unknown): string | null {
     const value = input[key];
     if (typeof value === 'string' && value !== '') {
       const flat = value.replace(/\s+/g, ' ').trim();
-      return flat.length > TARGET_MAX ? `${flat.slice(0, TARGET_MAX)}...` : flat;
+      return flat.length > TARGET_MAX
+        ? `${flat.slice(0, TARGET_MAX - ELLIPSIS.length)}${ELLIPSIS}`
+        : flat;
     }
   }
   return null;
@@ -199,17 +203,29 @@ export function dueForEmit(lastEmitAt: number, now: number, intervalMs: number):
 /**
  * One progress observation, handed to the state layer.
  *
- * `lastLineAt` is the *exact* time of the most recent stdout line, carried
- * separately from `at` so a throttled state write records when the child really
- * spoke rather than when vibe got round to writing the file. `'final'` is the
- * end-of-turn flush and is the one source that bypasses the write throttle -
- * without it, a line arriving inside the throttle window immediately before the
- * child closed would never be persisted at all.
+ * `lastLineAt` and `turnStartedAt` are *recomputed across every live turn* on
+ * each observation rather than reported per heartbeat, and the state layer
+ * writes them as given. That is what keeps them describing the turns actually
+ * running: `withConcurrentCompaction` overlaps a rotation with a Codex turn, and
+ * when the shorter one ended, a per-heartbeat value left the finished
+ * rotation's output time and start behind while the Codex turn was still going.
+ * They are carried separately from `at` so a throttled write records when a
+ * child really spoke rather than when vibe got round to writing the file.
+ *
+ * `'start'` is the turn boundary, `'end'` a turn leaving while others continue,
+ * and `'final'` the end-of-turn flush; all three bypass the write throttle.
+ * Without `'final'`, a line arriving inside the throttle window immediately
+ * before the child closed would never be persisted at all. Without `'start'`, a
+ * turn that failed before saying anything left the previous turn's timestamps in
+ * place, and a watcher read them as this turn's.
  */
 export interface ActivityObservation {
-  source: 'stdout' | 'heartbeat' | 'final';
+  source: 'start' | 'stdout' | 'heartbeat' | 'final' | 'end';
   at: Date;
+  /** Most recent line from any live turn; null when none has spoken yet. */
   lastLineAt: Date | null;
+  /** Start of the most recently started live turn; null when none is live. */
+  turnStartedAt: Date | null;
 }
 
 /** Behind an interface so a test can observe that `unref` was called. */
@@ -241,6 +257,17 @@ export interface ProgressOptions {
   intervalMs: number;
   /** Enables the `ctx N%` segment. Omitted means the segment is omitted. */
   contextWindow?: number | undefined;
+  /**
+   * Which run's live turns this heartbeat is one of - the `RunState` it reports
+   * to, supplied by `progressOptions`.
+   *
+   * Liveness is aggregated per scope, not per process: two runs driven from one
+   * process each write their own state.json, and a turn in one must not make a
+   * turn in the other look concurrent - which would stop its turn boundary
+   * clearing a stale output time. Omitted shares one default scope, which is
+   * right for a single heartbeat under test.
+   */
+  scope?: object | undefined;
   /** Called once per observation. See the ownership rule in createHeartbeat. */
   onActivity?: ((observation: ActivityObservation) => void) | undefined;
   now?: (() => number) | undefined;
@@ -249,10 +276,51 @@ export interface ProgressOptions {
 }
 
 export interface Heartbeat {
+  /** Open the turn: rebase the persisted liveness fields onto it. Emits nothing. */
+  begin: () => void;
   onLine: (line: string) => void;
   /** Persist the last line's time, ignoring the write throttle. Emits nothing. */
   flush: () => void;
   stop: () => void;
+}
+
+/** What one live turn contributes to the shared liveness fields. */
+interface LiveTurn {
+  startedAt: number;
+  lastLineAt: number | null;
+}
+
+/**
+ * Turns with an open heartbeat, per run.
+ *
+ * `withConcurrentCompaction` overlaps a rotation turn with a Codex turn, so
+ * "the current turn" is occasionally two turns, and every observation has to be
+ * computed from the set rather than from whichever heartbeat happened to fire.
+ * Deliberately in memory only: a persisted liveness record left behind by a
+ * killed process would assert that a turn is running when none is, which is the
+ * stale claim this whole area exists to remove.
+ */
+const liveTurns = new WeakMap<object, Map<number, LiveTurn>>();
+/** The scope for heartbeats that name none - one heartbeat under test. */
+const DEFAULT_SCOPE: object = {};
+let nextTurnId = 0;
+
+function liveTurnsFor(scope: object): Map<number, LiveTurn> {
+  let turns = liveTurns.get(scope);
+  if (turns === undefined) {
+    turns = new Map<number, LiveTurn>();
+    liveTurns.set(scope, turns);
+  }
+  return turns;
+}
+
+/** The latest of a set of times, or null when the set contributes none. */
+function latest(values: readonly (number | null)[]): number | null {
+  let best: number | null = null;
+  for (const value of values) {
+    if (value !== null && (best === null || value > best)) best = value;
+  }
+  return best;
 }
 
 /**
@@ -273,6 +341,7 @@ export function createHeartbeat(
     onActivity,
     parse,
     unit,
+    scope = DEFAULT_SCOPE,
     now = () => Date.now(),
     emit = detail,
     timers = nodeTimers,
@@ -280,9 +349,13 @@ export function createHeartbeat(
 
   const snapshot = emptySnapshot();
   const startedAt = now();
+  const turns = liveTurnsFor(scope);
+  const id = (nextTurnId += 1);
+  const self: LiveTurn = { startedAt, lastLineAt: null };
   let lastEmitAt = startedAt;
   let lastLineAt: number | null = null;
   let stopped = false;
+  let begun = false;
 
   /** Emits if the throttle allows. Notifies nobody: see the ownership rule. */
   const emitNow = (): boolean => {
@@ -304,24 +377,43 @@ export function createHeartbeat(
     return true;
   };
 
-  const notify = (source: ActivityObservation['source']): void => {
+  /**
+   * Every live turn in this scope, plus this one when it is not registered.
+   *
+   * The unregistered case is a heartbeat that reports before `begin` or that has
+   * already stopped: it still describes itself rather than reporting nothing,
+   * which is what keeps a single heartbeat's behaviour independent of whether
+   * the turn boundary was opened.
+   */
+  const contributors = (includeSelf: boolean): readonly LiveTurn[] => {
+    const live = [...turns.values()];
+    return includeSelf && !turns.has(id) ? [...live, self] : live;
+  };
+
+  const notify = (source: ActivityObservation['source'], includeSelf = true): void => {
     try {
+      const live = contributors(includeSelf);
+      const line = latest(live.map((turn) => turn.lastLineAt));
+      const started = latest(live.map((turn) => turn.startedAt));
       onActivity?.({
         source,
         at: new Date(now()),
-        lastLineAt: lastLineAt === null ? null : new Date(lastLineAt),
+        lastLineAt: line === null ? null : new Date(line),
+        turnStartedAt: started === null ? null : new Date(started),
       });
     } catch {
       // A failing state write must not take down a run either.
     }
   };
 
-  // Ownership: onLine is the ONLY caller for 'stdout', the tick the ONLY caller
-  // for 'heartbeat', flush the ONLY caller for 'final', and emitNow calls none
-  // of them. A line that also triggers an emission notifies exactly once.
+  // Ownership: begin is the ONLY caller for 'start', onLine the ONLY caller for
+  // 'stdout', the tick the ONLY caller for 'heartbeat', flush the ONLY caller
+  // for 'final', and emitNow calls none of them. A line that also triggers an
+  // emission notifies exactly once.
   const onLine = (line: string): void => {
     if (stopped) return;
     lastLineAt = now();
+    self.lastLineAt = lastLineAt;
     try {
       parse(snapshot, line);
     } catch {
@@ -337,6 +429,13 @@ export function createHeartbeat(
   handle.unref();
 
   return {
+    begin: () => {
+      if (stopped || begun) return;
+      begun = true;
+      self.startedAt = now();
+      turns.set(id, self);
+      notify('start');
+    },
     onLine,
     flush: () => {
       if (!stopped && lastLineAt !== null) notify('final');
@@ -345,6 +444,16 @@ export function createHeartbeat(
       if (stopped) return;
       stopped = true;
       handle.cancel();
+      if (!begun) return;
+      begun = false;
+      turns.delete(id);
+      // Only while another turn is still running. That turn's output time and
+      // start have to replace this one's, or a watcher reads the finished
+      // rotation's last line as the live Codex turn's progress. With nothing
+      // left running there is nothing to recompute *to*: the completed turn's
+      // final state stands as the run's last known pulse until the next turn
+      // boundary rebases it.
+      if (turns.size > 0) notify('end', false);
     },
   };
 }
@@ -352,16 +461,26 @@ export function createHeartbeat(
 /**
  * Run `work` with a heartbeat attached.
  *
- * The flush happens only on a normal completion: a line arriving inside the
- * write throttle just before the child closed would otherwise never reach
- * state.json, while a timed-out turn must write nothing at all after its
- * promise has settled. Shared by both adapters so the ordering exists once.
+ * `begin()` opens the turn, which is what rebases the persisted liveness fields
+ * onto it - this is the one seam both adapters share, so the boundary exists
+ * once rather than per adapter.
+ *
+ * The flush happens only once `work` has succeeded, and `work` now spans the
+ * adapter's validation of the buffered output as well as the child process: a
+ * turn whose output the adapter rejected must not record a completed-turn
+ * observation, which is what it did while only the raw `run()` call was wrapped.
+ * "Accepted" means the payload the adapter requires, not the child's exit
+ * status - see the exit-status note on `claudeTurn` and `codexTurn`. A line
+ * arriving inside the write throttle just before the child closed would
+ * otherwise never reach state.json, while a timed-out turn must write nothing
+ * at all after its promise has settled.
  */
 export async function withHeartbeat<T>(
   heartbeat: Heartbeat | null,
   work: () => Promise<T>,
 ): Promise<T> {
   try {
+    heartbeat?.begin();
     const result = await work();
     heartbeat?.flush();
     return result;
@@ -398,6 +517,10 @@ export function progressOptions(
   return {
     label,
     intervalMs: cfg.progress.intervalMs,
+    // The run this turn belongs to, so liveness is aggregated per run rather
+    // than per process: the fields it feeds live in this state.json and nowhere
+    // else, and a turn from another run must not be counted among them.
+    scope: state,
     onActivity: (observation) => markActivity(state, observation),
     // Absent until some turn under this exact model has reported a window.
     // Omitting the segment is always preferable to a number that cannot be

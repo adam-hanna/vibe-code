@@ -121,6 +121,16 @@ export interface RunResult {
 }
 
 /**
+ * The shape of `run`, so an adapter can take it as an injected dependency and
+ * be driven by a test without spawning an agent.
+ */
+export type RunFn = (
+  bin: string,
+  args: readonly string[],
+  options?: RunOptions,
+) => Promise<RunResult>;
+
+/**
  * Run a command, feeding `input` on stdin. Never uses a shell unless forced to
  * by a `.cmd` shim.
  *

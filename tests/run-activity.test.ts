@@ -4,7 +4,8 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createRun, loadRun, markActivity } from '@src/run.js';
-import type { ActivityObservation } from '@src/progress.js';
+import { createHeartbeat, parseClaudeLine } from '@src/progress.js';
+import type { ActivityObservation, RepeatingTimer, TimerApi } from '@src/progress.js';
 import type { RunState } from '@src/types.js';
 
 /** A run in a throwaway directory, so state.json can be read back from disk. */
@@ -19,13 +20,25 @@ function persisted(state: RunState): Partial<RunState> {
 
 const T0 = new Date('2026-08-17T12:00:00.000Z');
 const at = (offsetMs: number): Date => new Date(T0.getTime() + offsetMs);
+const iso = (offsetMs: number): string => at(offsetMs).toISOString();
 
+/**
+ * One observation as the heartbeat layer produces it: `lastLineAt` and
+ * `turnStartedAt` are already aggregated across the turns still running, which
+ * is why they are given per observation rather than accumulated here.
+ */
 function observation(
   source: ActivityObservation['source'],
   atMs: number,
   lastLineMs: number | null,
+  turnStartedMs: number | null = 0,
 ): ActivityObservation {
-  return { source, at: at(atMs), lastLineAt: lastLineMs === null ? null : at(lastLineMs) };
+  return {
+    source,
+    at: at(atMs),
+    lastLineAt: lastLineMs === null ? null : at(lastLineMs),
+    turnStartedAt: turnStartedMs === null ? null : at(turnStartedMs),
+  };
 }
 
 test('output from the child records both timestamps', () => {
@@ -58,7 +71,7 @@ test('writes are throttled, then resume once the window has passed', () => {
   assert.equal(persisted(state).lastActivityAt, T0.toISOString());
 
   markActivity(state, observation('stdout', 6_000, 6_000));
-  assert.equal(persisted(state).lastActivityAt, at(6_000).toISOString());
+  assert.equal(persisted(state).lastActivityAt, iso(6_000));
 });
 
 test('lastOutputAt is the time of the line, not of the write that published it', () => {
@@ -69,8 +82,8 @@ test('lastOutputAt is the time of the line, not of the write that published it',
   markActivity(state, observation('heartbeat', 6_000, 4_000));
 
   const file = persisted(state);
-  assert.equal(file.lastActivityAt, at(6_000).toISOString());
-  assert.equal(file.lastOutputAt, at(4_000).toISOString(), 'the published time was stamped, not observed');
+  assert.equal(file.lastActivityAt, iso(6_000));
+  assert.equal(file.lastOutputAt, iso(4_000), 'the published time was stamped, not observed');
 });
 
 test('the end-of-turn flush persists a line that arrived inside the throttle', () => {
@@ -82,7 +95,7 @@ test('the end-of-turn flush persists a line that arrived inside the throttle', (
 
   markActivity(state, observation('final', 1_000, 1_000));
 
-  assert.equal(persisted(state).lastOutputAt, at(1_000).toISOString());
+  assert.equal(persisted(state).lastOutputAt, iso(1_000));
 });
 
 test('an unparseable lastActivityAt is treated as stale rather than wedging the field', () => {
@@ -94,7 +107,7 @@ test('an unparseable lastActivityAt is treated as stale rather than wedging the 
   assert.equal(persisted(state).lastActivityAt, T0.toISOString());
 });
 
-test('both timestamps survive a reload', () => {
+test('the three timestamps survive a reload', () => {
   const state = scratchRun();
   markActivity(state, observation('stdout', 0, 0));
 
@@ -102,4 +115,147 @@ test('both timestamps survive a reload', () => {
 
   assert.equal(reloaded.lastActivityAt, T0.toISOString());
   assert.equal(reloaded.lastOutputAt, T0.toISOString());
+  assert.equal(reloaded.turnStartedAt, T0.toISOString());
+});
+
+test('a new turn rebases the pulse and clears the previous turn output time', () => {
+  const state = scratchRun();
+  markActivity(state, observation('stdout', 0, 0));
+
+  // Nothing else is running, so the boundary reports no live output at all.
+  markActivity(state, observation('start', 60_000, null, 60_000));
+
+  const file = persisted(state);
+  assert.equal(file.turnStartedAt, iso(60_000));
+  assert.equal(file.lastActivityAt, iso(60_000));
+  assert.equal(file.lastOutputAt, undefined, 'the previous turn wrote that line, not this one');
+});
+
+test('a turn that fails before producing output cannot show the previous turn pulse', () => {
+  // The case the whole rebase exists for: a new child dies before its first
+  // line, so nothing else in the turn ever writes. What a watcher reads must
+  // describe this turn - and this turn has said nothing.
+  const state = scratchRun();
+  markActivity(state, observation('stdout', 0, 0));
+
+  markActivity(state, observation('start', 60_000, null, 60_000));
+  // No 'final': the adapter threw.
+
+  const file = persisted(state);
+  assert.equal(file.lastOutputAt, undefined);
+  assert.equal(file.lastActivityAt, file.turnStartedAt);
+});
+
+test('the turn boundary is not subject to the write throttle', () => {
+  const state = scratchRun();
+  markActivity(state, observation('stdout', 0, 0));
+
+  markActivity(state, observation('start', 1_000, null, 1_000));
+
+  assert.equal(persisted(state).turnStartedAt, iso(1_000));
+});
+
+test('lastActivityAt never moves backwards, even on an unthrottled source', () => {
+  const state = scratchRun();
+  markActivity(state, observation('stdout', 66_000, 66_000));
+
+  markActivity(state, observation('final', 61_000, 30_000, 0));
+
+  assert.equal(persisted(state).lastActivityAt, iso(66_000));
+});
+
+test('a rotation starting mid-Codex-turn does not erase the live turn output time', () => {
+  // withConcurrentCompaction: the Codex turn is still talking, so its line is
+  // still part of what is running and the boundary carries it through.
+  const state = scratchRun();
+  markActivity(state, observation('stdout', 0, 0));
+
+  markActivity(state, observation('start', 60_000, 0, 60_000));
+
+  const file = persisted(state);
+  assert.equal(file.turnStartedAt, iso(60_000));
+  assert.equal(file.lastOutputAt, T0.toISOString());
+});
+
+test('the older turn keeps reporting liveness after the newer one starts', () => {
+  // Filtering by heartbeat generation would freeze this: the Codex turn runs for
+  // minutes past the short rotation that overlapped it, and dropping its
+  // observations would report a healthy turn as gone.
+  const state = scratchRun();
+  markActivity(state, observation('stdout', 0, 0));
+  markActivity(state, observation('start', 60_000, 0, 60_000));
+
+  markActivity(state, observation('stdout', 66_000, 66_000, 60_000));
+
+  const file = persisted(state);
+  assert.equal(file.lastActivityAt, iso(66_000));
+  assert.equal(file.lastOutputAt, iso(66_000));
+});
+
+test('a finished overlapping turn takes its pulse with it', () => {
+  // The rotation spoke last and started last, then ended while the Codex turn
+  // carried on. Leaving its values in place would show a completed turn's output
+  // as the live turn's progress.
+  const state = scratchRun();
+  markActivity(state, observation('stdout', 0, 0)); // codex turn, started at 0
+  markActivity(state, observation('start', 60_000, 0, 60_000)); // rotation begins
+  markActivity(state, observation('stdout', 66_000, 66_000, 60_000)); // rotation speaks
+
+  markActivity(state, observation('end', 70_000, 0, 0)); // rotation ends, codex lives
+
+  const file = persisted(state);
+  assert.equal(file.turnStartedAt, T0.toISOString(), 'back to the turn still running');
+  assert.equal(file.lastOutputAt, T0.toISOString(), 'the rotation took its output with it');
+  assert.equal(file.lastActivityAt, iso(70_000), 'vibe did observe something just now');
+});
+
+/** A timer that never fires on its own: nothing here waits for wall-clock. */
+function idleTimers(): TimerApi {
+  return { repeat: (): RepeatingTimer => ({ unref: () => {}, cancel: () => {} }) };
+}
+
+const TOOL_LINE = JSON.stringify({
+  type: 'assistant',
+  message: { content: [{ type: 'tool_use', name: 'Read', input: { file_path: 'a.ts' } }] },
+});
+
+test('a rotation overlapping a Codex turn leaves state describing the Codex turn', () => {
+  // End to end over the real heartbeats: withConcurrentCompaction's shape, with
+  // both turns reporting into one run's state.json.
+  const state = scratchRun();
+  let clock = T0.getTime();
+  const heartbeat = (): ReturnType<typeof createHeartbeat> =>
+    createHeartbeat({
+      label: 'fixture',
+      intervalMs: 30_000,
+      parse: parseClaudeLine,
+      unit: 'tool use',
+      scope: state,
+      now: () => clock,
+      emit: () => {},
+      timers: idleTimers(),
+      onActivity: (o) => markActivity(state, o),
+    });
+
+  const codex = heartbeat();
+  codex.begin();
+  codex.onLine(TOOL_LINE);
+
+  clock += 60_000;
+  const rotation = heartbeat();
+  rotation.begin();
+  assert.equal(persisted(state).lastOutputAt, T0.toISOString(), 'the Codex line is still live');
+
+  clock += 6_000;
+  rotation.onLine(TOOL_LINE);
+  assert.equal(persisted(state).lastOutputAt, iso(66_000));
+
+  clock += 4_000;
+  rotation.flush();
+  rotation.stop();
+
+  const file = persisted(state);
+  assert.equal(file.turnStartedAt, T0.toISOString(), 'the Codex turn is what is running');
+  assert.equal(file.lastOutputAt, T0.toISOString(), 'and it has not spoken since');
+  codex.stop();
 });

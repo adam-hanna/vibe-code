@@ -12,7 +12,6 @@ import {
   assessConvergence,
   measuredRatio,
   p1Signature,
-  recordContextMeasurement,
   recordEvent,
   recordRound,
   resumePhase,
@@ -25,8 +24,13 @@ import {
   parseFindings,
   parsePlan,
 } from '@src/validate.js';
-import { withConcurrentCompaction, rotateSession, shouldRotate } from '@src/context.js';
-import { progressOptions, rememberContextWindow } from '@src/progress.js';
+import {
+  withConcurrentCompaction,
+  recordTurnContext,
+  rotateSession,
+  shouldRotate,
+} from '@src/context.js';
+import { progressOptions } from '@src/progress.js';
 import {
   closeCodexRateLimits,
   decideCodexLimit,
@@ -610,12 +614,10 @@ async function claudeStep(state: RunState, cfg: Config, args: ClaudeStepArgs): P
   state.sessionStarted = true;
   state.costUsd = Number((state.costUsd + result.costUsd).toFixed(4));
   state.tokensUsed += result.tokens.total;
-  if (result.usage) {
-    // Tagged with the model that produced it: the ratio is a fraction of this
-    // model's window and means nothing under another one.
-    recordContextMeasurement(state, cfg.claude.model, result.usage.ratio, result.usage.contextWindow);
-    rememberContextWindow(cfg.claude.model, result.usage.contextWindow);
-  }
+  // Tagged with the model that produced it: the ratio is a fraction of this
+  // model's window and means nothing under another one. Through the shared seam
+  // so the rotation turn in context.ts cannot drift out of step with this one.
+  recordTurnContext(state, cfg.claude.model, result.usage);
 
   const measured = measuredRatio(state, cfg.claude.model);
   recordEvent(state, 'claude_turn', {

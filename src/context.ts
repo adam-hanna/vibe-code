@@ -2,10 +2,17 @@ import { randomUUID } from 'node:crypto';
 import { claudeTurn } from '@src/claude.js';
 import type { ClaudeTurnOptions } from '@src/claude.js';
 import * as log from '@src/log.js';
-import { progressOptions } from '@src/progress.js';
+import { progressOptions, rememberContextWindow } from '@src/progress.js';
 import { handoffPrompt } from '@src/prompts.js';
-import { artifact, measuredRatio, recordEvent, resetContextMeasurement } from '@src/run.js';
-import type { ClaudeTurnResult, Config, RunState } from '@src/types.js';
+import {
+  artifact,
+  measuredRatio,
+  recordContextMeasurement,
+  recordEvent,
+  recordMeasuredWindow,
+  resetContextMeasurement,
+} from '@src/run.js';
+import type { ClaudeTurnResult, Config, ContextUsage, RunState } from '@src/types.js';
 
 /**
  * Context control for the Claude side of the loop.
@@ -41,6 +48,24 @@ export function shouldRotate(state: RunState, cfg: Config): boolean {
 
 /** Injectable for the rotation tests, which must not spawn a real `claude`. */
 export type ClaudeTurnFn = (options: ClaudeTurnOptions) => Promise<ClaudeTurnResult>;
+
+/**
+ * The one place an ordinary completed Claude turn's context measurement lands.
+ *
+ * Both stores are written together on purpose. They were written by one call
+ * site and forgotten by the other, which is exactly how the rotation turn ended
+ * up measuring a window and recording it nowhere - leaving the next turn without
+ * a `ctx%` it could have shown.
+ */
+export function recordTurnContext(
+  state: RunState,
+  model: string,
+  usage: ContextUsage | null,
+): void {
+  if (usage === null) return;
+  recordContextMeasurement(state, model, usage.ratio, usage.contextWindow);
+  rememberContextWindow(model, usage.contextWindow);
+}
 
 /**
  * Summarise and rotate. Safe to run concurrently with a Codex turn: it only
@@ -100,6 +125,18 @@ export async function rotateSession(
   state.sessionId = randomUUID();
   state.sessionStarted = false;
   resetContextMeasurement(state, cfg.claude.model);
+
+  // After the reset, which would otherwise wipe it. The handoff turn's *ratio*
+  // describes the session just abandoned and stays discarded; its *window* is a
+  // property of the model that measured it, and is read only by the `ctx%`
+  // display. Recorded under `handoffModel` rather than the configured one, so a
+  // baseline rotation that asked the outgoing model contributes nothing to the
+  // incoming one. Without this, a rotation as the first Claude turn of a process
+  // left the next ordinary turn with no window and no `ctx%`.
+  if (result?.usage) {
+    rememberContextWindow(handoffModel, result.usage.contextWindow);
+    recordMeasuredWindow(state, handoffModel, result.usage.contextWindow);
+  }
 
   if (result === null) {
     // The previous briefing is kept - it is the only account of the run the new

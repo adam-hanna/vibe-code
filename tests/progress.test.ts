@@ -63,6 +63,20 @@ test('a long tool target is truncated rather than wrapping the terminal', () => 
 
   assert.ok((snapshot.lastActivity ?? '').length < longPath.length);
   assert.match(snapshot.lastActivity ?? '', /^Read src\/nested\//);
+
+  // The budget is 60 characters *including* the ellipsis, not 60 plus three.
+  const target = (snapshot.lastActivity ?? '').slice('Read '.length);
+  assert.equal(target.length, 60);
+  assert.ok(target.endsWith('...'));
+});
+
+test('a target of exactly the budget is not truncated', () => {
+  const snapshot = emptySnapshot();
+  const exact = 'a'.repeat(60);
+
+  parseClaudeLine(snapshot, assistantLine({ content: [{ type: 'tool_use', name: 'Read', input: { file_path: exact } }] }));
+
+  assert.equal(snapshot.lastActivity, `Read ${exact}`);
 });
 
 test('claude usage accumulates turn tokens and replaces the prompt size', () => {
@@ -258,30 +272,47 @@ interface Harness {
   timers: ReturnType<typeof fakeTimers>;
 }
 
-function harness(over: { parse?: LineParser; intervalMs?: number } = {}): Harness {
+/** A clock several heartbeats can share, for the overlapping-turn cases. */
+function sharedClock(): { now: () => number; advance: (ms: number) => void } {
+  let value = 1_000;
+  return {
+    now: () => value,
+    advance: (ms) => {
+      value += ms;
+    },
+  };
+}
+
+function harness(
+  over: {
+    parse?: LineParser;
+    intervalMs?: number;
+    scope?: object;
+    clock?: ReturnType<typeof sharedClock>;
+  } = {},
+): Harness {
   const lines: string[] = [];
   const seen: ActivityObservation[] = [];
   const timers = fakeTimers();
-  let clock = 1_000;
+  const clock = over.clock ?? sharedClock();
 
   const heartbeat = createHeartbeat({
     label: 'plan',
     intervalMs: over.intervalMs ?? 30_000,
     parse: over.parse ?? parseClaudeLine,
     unit: 'tool use',
-    now: () => clock,
+    now: clock.now,
     emit: (line) => lines.push(line),
     onActivity: (observation) => seen.push(observation),
     timers: timers.api,
+    ...(over.scope === undefined ? {} : { scope: over.scope }),
   });
 
   return {
     heartbeat,
     lines,
     seen,
-    advance: (ms) => {
-      clock += ms;
-    },
+    advance: clock.advance,
     tick: timers.tick,
     timers,
   };
@@ -457,6 +488,7 @@ function recordingHeartbeat(): { heartbeat: Heartbeat; calls: string[] } {
   return {
     calls,
     heartbeat: {
+      begin: () => calls.push('begin'),
       onLine: () => calls.push('line'),
       flush: () => calls.push('flush'),
       stop: () => calls.push('stop'),
@@ -464,13 +496,13 @@ function recordingHeartbeat(): { heartbeat: Heartbeat; calls: string[] } {
   };
 }
 
-test('withHeartbeat flushes then stops on a completed turn', async () => {
+test('withHeartbeat opens the turn, then flushes and stops on a completed turn', async () => {
   const { heartbeat, calls } = recordingHeartbeat();
 
   const result = await withHeartbeat(heartbeat, () => Promise.resolve('the output'));
 
   assert.equal(result, 'the output');
-  assert.deepEqual(calls, ['flush', 'stop']);
+  assert.deepEqual(calls, ['begin', 'flush', 'stop']);
 });
 
 test('withHeartbeat stops but does not flush a turn that failed', async () => {
@@ -481,7 +513,125 @@ test('withHeartbeat stops but does not flush a turn that failed', async () => {
     /timed out/,
   );
 
-  assert.deepEqual(calls, ['stop']);
+  assert.deepEqual(calls, ['begin', 'stop']);
+});
+
+test('a turn opens the boundary before the child has said anything', () => {
+  const h = harness();
+
+  h.heartbeat.begin();
+
+  assert.equal(h.lines.length, 0, 'a boundary is not a heartbeat line');
+  assert.equal(h.seen.length, 1);
+  assert.equal(h.seen[0]?.source, 'start');
+  assert.equal(h.seen[0]?.lastLineAt, null, 'nothing running has spoken');
+  assert.equal(h.seen[0]?.turnStartedAt?.getTime(), 1_000);
+  h.heartbeat.stop();
+});
+
+/** Two turns in one run, which is what withConcurrentCompaction produces. */
+function overlappingPair(): { scope: object; a: Harness; b: Harness; clock: ReturnType<typeof sharedClock> } {
+  const scope = {};
+  const clock = sharedClock();
+  return { scope, clock, a: harness({ scope, clock }), b: harness({ scope, clock }) };
+}
+
+test('a second live turn does not erase the first one output time', () => {
+  const { a, b, clock } = overlappingPair();
+
+  a.heartbeat.begin();
+  a.heartbeat.onLine(TOOL_LINE);
+  clock.advance(60_000);
+  b.heartbeat.begin();
+
+  const opened = b.seen[0];
+  assert.equal(opened?.lastLineAt?.getTime(), 1_000, 'the first turn is still talking');
+  assert.equal(opened?.turnStartedAt?.getTime(), 61_000, 'but the newest start is this one');
+  a.heartbeat.stop();
+  b.heartbeat.stop();
+});
+
+test('a turn that ends hands the fields back to the turn still running', () => {
+  // The regression: the rotation spoke last and started last, so leaving its
+  // values in place showed a finished turn's output as the live turn's progress.
+  const { a, b, clock } = overlappingPair();
+  a.heartbeat.begin();
+  a.heartbeat.onLine(TOOL_LINE);
+  clock.advance(60_000);
+  b.heartbeat.begin();
+  clock.advance(6_000);
+  b.heartbeat.onLine(TOOL_LINE);
+
+  clock.advance(4_000);
+  b.heartbeat.stop();
+
+  const ended = b.seen[b.seen.length - 1];
+  assert.equal(ended?.source, 'end');
+  assert.equal(ended?.lastLineAt?.getTime(), 1_000, 'back to the running turn last line');
+  assert.equal(ended?.turnStartedAt?.getTime(), 1_000, 'and to its start');
+  a.heartbeat.stop();
+});
+
+test('the last turn to stop reports nothing: there is nothing left to describe', () => {
+  // Deliberately silent. With no turn running there is nothing to recompute to,
+  // and clearing the fields here would undo the flush that just persisted the
+  // completed turn's final line.
+  const h = harness();
+  h.heartbeat.begin();
+  h.heartbeat.onLine(TOOL_LINE);
+  const before = h.seen.length;
+
+  h.heartbeat.stop();
+
+  assert.equal(h.seen.length, before);
+});
+
+test('begin and stop are idempotent, so the live set cannot drift', () => {
+  const { a, b } = overlappingPair();
+
+  a.heartbeat.begin();
+  a.heartbeat.begin();
+  a.heartbeat.stop();
+  a.heartbeat.stop();
+  b.heartbeat.begin();
+
+  assert.equal(b.seen[0]?.lastLineAt, null, 'the double begin left nothing registered');
+  assert.equal(b.seen.length, 1, 'and the double stop emitted no second end');
+  b.heartbeat.stop();
+});
+
+test('turns in another run are not counted among this run live turns', () => {
+  // The count is per run, not per process: a turn elsewhere must not stop this
+  // turn's boundary clearing an output time that belongs to a finished turn.
+  const clock = sharedClock();
+  const other = harness({ scope: {}, clock });
+  other.heartbeat.begin();
+  other.heartbeat.onLine(TOOL_LINE);
+
+  const mine = harness({ scope: {}, clock });
+  mine.heartbeat.begin();
+
+  assert.equal(mine.seen[0]?.lastLineAt, null, 'the other run line is not mine');
+  assert.equal(mine.seen[0]?.turnStartedAt?.getTime(), 1_000);
+  mine.heartbeat.stop();
+  other.heartbeat.stop();
+});
+
+test('output the adapter rejects is not flushed as a completed turn', async () => {
+  // The adapter shape after the boundary moved: validation of the buffered
+  // output happens inside the work, so a rejected turn never reaches flush.
+  const h = harness();
+
+  await assert.rejects(
+    () =>
+      withHeartbeat(h.heartbeat, () => {
+        h.heartbeat.onLine(TOOL_LINE);
+        return Promise.reject(new Error('claude emitted no result event'));
+      }),
+    /no result event/,
+  );
+
+  assert.deepEqual(h.seen.map((observation) => observation.source), ['start', 'stdout']);
 });
 
 test('withHeartbeat passes the value through when progress is disabled', async () => {

@@ -129,6 +129,14 @@ function turnResult(text: string): ClaudeTurnResult {
   };
 }
 
+/** A handoff turn that reported a window, which is what a real one does. */
+function measuringTurnResult(text: string, contextWindow: number): ClaudeTurnResult {
+  return {
+    ...turnResult(text),
+    usage: { promptTokens: contextWindow * 0.6, contextWindow, ratio: 0.6 },
+  };
+}
+
 test('a baseline rotation asks the model that grew the conversation for the handoff', async () => {
   const state = runFor('baseline handoff model');
   recordContextMeasurement(state, 'opus', 0.4, 1_000_000);
@@ -229,4 +237,44 @@ test('a measured rotation still fails loudly when its handoff fails', async () =
   assert.equal(state.sessionId, oldSession);
   assert.equal(state.sessionRotations, 0);
   assert.equal(measuredRatio(state, 'opus'), 0.6);
+});
+
+test('a rotation as the first Claude turn leaves a window for the next turn', async () => {
+  // The measurement a rotation turn makes used to go nowhere, so a process whose
+  // first Claude turn was a rotation showed no ctx% on the turn after it either.
+  const state = runFor('rotation records its window');
+  recordContextMeasurement(state, 'fixture-rot', 0.6, 200_000);
+  state.sessionStarted = true;
+
+  await rotateSession(state, cfgWith('fixture-rot'), () =>
+    Promise.resolve(measuringTurnResult('briefing', 200_000)),
+  );
+
+  assert.equal(
+    progressOptions(state, cfgWith('fixture-rot'), 'plan')?.contextWindow,
+    200_000,
+    'the next turn can render ctx%',
+  );
+  assert.equal(state.contextWindow, 200_000, 'and a resumed process can too');
+  // Rotation policy is untouched: the ratio described the session just left.
+  assert.equal(state.contextRatio, 0);
+  assert.equal(state.contextModel, 'fixture-rot');
+  assert.equal(shouldRotate(state, cfgWith('fixture-rot')), false);
+});
+
+test('a baseline rotation window is not attributed to the incoming model', async () => {
+  // The handoff ran under the outgoing model, so its window describes that
+  // model. Showing it against the incoming one is the unattributed number the
+  // display rule exists to omit.
+  const state = runFor('baseline window attribution');
+  state.contextModel = 'fixture-old';
+  state.contextRatio = 0.4;
+  state.sessionStarted = true;
+
+  await rotateSession(state, cfgWith('fixture-new'), () =>
+    Promise.resolve(measuringTurnResult('briefing', 1_000_000)),
+  );
+
+  assert.equal('contextWindow' in state, false);
+  assert.equal(progressOptions(state, cfgWith('fixture-new'), 'plan')?.contextWindow, undefined);
 });

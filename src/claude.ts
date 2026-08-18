@@ -1,5 +1,6 @@
 import { resolveBin, run } from '@src/proc.js';
-import { detail } from '@src/log.js';
+import type { RunFn } from '@src/proc.js';
+import { detail, warn } from '@src/log.js';
 import { createHeartbeat, parseClaudeLine, withHeartbeat } from '@src/progress.js';
 import type { ProgressOptions } from '@src/progress.js';
 import type { ClaudeTurnResult, ContextUsage, Effort, PermissionMode, TokenUsage } from '@src/types.js';
@@ -66,8 +67,23 @@ function num(v: unknown): number {
  * first call; later turns pass `resume: true` with the same id. Permission mode
  * is per-invocation, which is how a read-only plan session becomes a
  * bypassPermissions implementation session without losing the plan from context.
+ *
+ * **What counts as a failed turn.** The `result` envelope, not the exit status:
+ * no stdout, no result event, or a result the CLI itself marks as an error. A
+ * non-zero exit alongside a complete successful envelope means teardown failed
+ * after the work was done - and the envelope is where the cost and usage the run
+ * depends on live - so it is warned about and accepted rather than throwing away
+ * a turn that has already been paid for. Deterministic tools are judged the
+ * other way round; see git.ts and verify.ts.
+ *
+ * `exec` is injected so the adapter's boundary with the heartbeat can be tested
+ * without spawning a real agent, as `rotateSession` and `ClaudeProbeExecutor`
+ * already are.
  */
-export async function claudeTurn(options: ClaudeTurnOptions): Promise<ClaudeTurnResult> {
+export async function claudeTurn(
+  options: ClaudeTurnOptions,
+  exec: RunFn = run,
+): Promise<ClaudeTurnResult> {
   const { prompt, sessionId, resume, permissionMode, model, effort, cwd, jsonSchema, tools, timeoutMs } =
     options;
 
@@ -92,50 +108,61 @@ export async function claudeTurn(options: ClaudeTurnOptions): Promise<ClaudeTurn
   const heartbeat = options.progress
     ? createHeartbeat({ ...options.progress, parse: parseClaudeLine, unit: 'tool use' })
     : null;
-  const { code, stdout, stderr } = await withHeartbeat(heartbeat, () =>
-    run(claudeBin(), args, {
+  // Validation runs inside the heartbeat's work, not after it: the end-of-turn
+  // flush is a claim that the turn completed, and while only `run()` was wrapped
+  // a turn whose output failed every check below still persisted as one that
+  // had.
+  return withHeartbeat(heartbeat, async () => {
+    const { code, stdout, stderr } = await exec(claudeBin(), args, {
       input: prompt,
       cwd,
       timeoutMs,
       ...(heartbeat === null ? {} : { onLine: heartbeat.onLine }),
-    }),
-  );
+    });
 
-  if (!stdout.trim()) {
-    throw new Error(`claude produced no output (exit ${code}). stderr:\n${stderr.slice(-2000)}`);
-  }
+    if (!stdout.trim()) {
+      throw new Error(`claude produced no output (exit ${code}). stderr:\n${stderr.slice(-2000)}`);
+    }
 
-  const { result: parsed, lastAssistantUsage } = parseStream(stdout);
-  if (!parsed) {
-    throw new Error(
-      `claude emitted no result event (exit ${code}):\n${stdout.slice(-2000)}`,
-    );
-  }
+    const { result: parsed, lastAssistantUsage } = parseStream(stdout);
+    if (!parsed) {
+      throw new Error(
+        `claude emitted no result event (exit ${code}):\n${stdout.slice(-2000)}`,
+      );
+    }
 
-  if (parsed['is_error'] === true || parsed['subtype'] !== 'success') {
-    const subtype = typeof parsed['subtype'] === 'string' ? parsed['subtype'] : 'unknown';
-    const status = parsed['api_error_status'];
-    const result = parsed['result'];
-    const detail = `${String(status ?? '')} ${String(result ?? '')}`.trim();
+    if (parsed['is_error'] === true || parsed['subtype'] !== 'success') {
+      const subtype = typeof parsed['subtype'] === 'string' ? parsed['subtype'] : 'unknown';
+      const status = parsed['api_error_status'];
+      const result = parsed['result'];
+      const detail = `${String(status ?? '')} ${String(result ?? '')}`.trim();
 
-    const limit = detectRateLimit(`${detail}\n${stderr}`);
-    if (limit) throw limit;
+      const limit = detectRateLimit(`${detail}\n${stderr}`);
+      if (limit) throw limit;
 
-    throw new Error(`claude turn failed (${subtype}): ${detail}`);
-  }
+      throw new Error(`claude turn failed (${subtype}): ${detail}`);
+    }
 
-  const denialsRaw = parsed['permission_denials'];
-  const text = typeof parsed['result'] === 'string' ? parsed['result'] : '';
+    const denialsRaw = parsed['permission_denials'];
+    const text = typeof parsed['result'] === 'string' ? parsed['result'] : '';
 
-  return {
-    text,
-    costUsd: num(parsed['total_cost_usd']),
-    sessionId: typeof parsed['session_id'] === 'string' ? parsed['session_id'] : sessionId,
-    denials: Array.isArray(denialsRaw) ? denialsRaw : [],
-    numTurns: num(parsed['num_turns']),
-    usage: extractUsage(parsed, lastAssistantUsage),
-    tokens: extractTokens(parsed),
-  };
+    if (code !== 0) {
+      // Logged, not thrown: see the exit-status note above. Worth saying out
+      // loud so that if it ever becomes routine, it is visible in the run log
+      // rather than being mistaken for an oversight.
+      warn(`claude exited ${String(code)} but returned a complete successful result; accepting it.`);
+    }
+
+    return {
+      text,
+      costUsd: num(parsed['total_cost_usd']),
+      sessionId: typeof parsed['session_id'] === 'string' ? parsed['session_id'] : sessionId,
+      denials: Array.isArray(denialsRaw) ? denialsRaw : [],
+      numTurns: num(parsed['num_turns']),
+      usage: extractUsage(parsed, lastAssistantUsage),
+      tokens: extractTokens(parsed),
+    };
+  });
 }
 
 /**

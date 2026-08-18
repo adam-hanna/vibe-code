@@ -125,9 +125,15 @@ plan: 4m12s · 23 tool uses · Read src/orchestrator.ts · 340k tok · ctx 31%
 review: 2m03s · 14 events · command_execution
 ```
 
-Every segment except elapsed time is omitted when the stream did not supply it, which is why the sparser Codex line is shorter — partial information beats an invented number. `ctx%` needs a context window, which only a *completed* turn reports, so it appears from the second Claude turn of a process onward — or from the first, on a resumed run whose stored window was measured under the same model — and is omitted entirely after a `--claude-model` change until a turn under the new model has measured one. The heartbeat is also driven by a timer, not only by arriving events, because a long silent reasoning block emits nothing at all and silence was the whole problem.
+Every segment except elapsed time is omitted when the stream did not supply it, which is why the sparser Codex line is shorter — partial information beats an invented number. `ctx%` needs a context window, which only a *completed* turn reports — an ordinary turn or a session-rotation turn, whichever comes first — so it appears from the second Claude turn of a process onward, or from the first on a resumed run whose stored window was measured under the same model, and is omitted entirely after a `--claude-model` change until a turn under the new model has measured one. The heartbeat is also driven by a timer, not only by arriving events, because a long silent reasoning block emits nothing at all and silence was the whole problem.
 
-It is a plain appended line, never a repainting one: runs are expected to be unattended and piped to a log. The same clock writes `lastActivityAt` into `state.json` — advancing even through silence, since vibe is still watching the turn — alongside `lastOutputAt`, the last line the agent actually wrote. The pair separates "thinking" from "gone" without inspecting the process table. `--no-progress` turns the output off; `--progress-interval <sec>` changes the cadence. No compaction or rotation behaviour changes.
+It is a plain appended line, never a repainting one: runs are expected to be unattended and piped to a log. The same clock writes `lastActivityAt` into `state.json` — advancing even through silence, since vibe is still watching the turn — alongside `lastOutputAt`, the last line the agent actually wrote. The pair separates "thinking" from "gone" without inspecting the process table.
+
+**`turnStartedAt` and `lastOutputAt` describe the turn running now, not the run.** A turn boundary rebases them and clears `lastOutputAt`; without that, a turn that died before its first line left the previous turn's timestamps in place and a watcher read a finished turn's pulse as current work. `lastOutputAt` is flushed at the end of a turn only when the adapter *accepted* that turn's output — for these CLIs that means a complete `result` envelope or a schema-conformant output file, not a zero exit status, since a bad exit beside a good payload is teardown failing after the work was done, and it is logged rather than throwing the turn away.
+
+Compaction can overlap a rotation turn with a Codex turn, so two turns are occasionally live. Both fields are then recomputed across the live turns on every observation: `turnStartedAt` is the most recently started one, `lastOutputAt` the most recent line from either, and when the rotation finishes they fall back to the Codex turn still running rather than leaving a completed turn's output standing as the live turn's progress. `lastActivityAt` is the exception and only advances — it is about the run, so it stays readable between turns, when the other two still describe the turn that just ended. All three are maintained only while progress is enabled.
+
+`--no-progress` turns the output off; `--progress-interval <sec>` changes the cadence. No compaction or rotation behaviour changes.
 
 ## The verification gate
 
@@ -179,7 +185,7 @@ answers-N.json             Codex's answers to blocking questions
 handoff-N.md               briefing carried across each session rotation
 NEEDS-INPUT.md             written when the run stops for you
 OUTSTANDING.md             carried P1s: fixed in a final round, but not re-reviewed
-state.json                 resumable state, tokens, cost, event log, lastActivityAt/lastOutputAt
+state.json                 resumable state, tokens, cost, event log, turnStartedAt/lastActivityAt/lastOutputAt
 transcript.log
 codex/                     raw schema and output files
 ```
