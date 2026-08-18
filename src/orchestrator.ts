@@ -490,9 +490,6 @@ export function guardProgress(
     blockers.map((f) => f.id),
   );
 
-  const notice = persistenceWarning(cfg, history, { cap, capName });
-  if (notice !== null) log.warn(notice);
-
   const stall = assessConvergence(history, {
     repeatThreshold: cfg.loop.oscillationThreshold,
     window: cfg.loop.convergenceWindow,
@@ -515,6 +512,13 @@ export function guardProgress(
       [...blockers],
     );
   }
+
+  // Last, deliberately: the notice tells the user the run is continuing, which
+  // is only true once every stop above has declined to fire. Emitted earlier it
+  // said "continuing" on the same round the cap or the trend guard ended the
+  // run.
+  const notice = persistenceWarning(cfg, history, { cap, capName });
+  if (notice !== null) log.warn(notice);
 }
 
 async function prepareGit(state: RunState, cfg: Config, cwd: string): Promise<void> {

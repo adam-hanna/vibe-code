@@ -397,9 +397,11 @@ export function assessConvergence(
   const improved =
     hasWindow && recent.some((r, idx) => idx > 0 && r.count < (recent[idx - 1]?.count ?? r.count));
 
-  // A single id surviving many rounds is NOT a stop condition - see
-  // `persistenceNotice`, which reports it instead. It used to abort the run
-  // here, and the picomatch reimplementation disproved the premise.
+  // A single id surviving many rounds *while its companions rotate* is NOT a
+  // stop condition - see `persistenceNotice`, which reports it instead. It used
+  // to abort the run here, and the picomatch reimplementation disproved the
+  // premise. An unchanging singleton set is a different case and still stops:
+  // it repeats its signature, so the set rule above catches it.
 
   // Trend: engaged near the cap, or once the run is simply long. Findings may
   // be new every round and still be going nowhere - a run that went 1 -> 1 -> 3

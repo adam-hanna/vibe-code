@@ -112,6 +112,57 @@ test('a lone unchanging blocker still stops, via the oscillation guard', () => {
   );
 });
 
+test('the final cap round says nothing about continuing, because it does not', () => {
+  // The notice claims the run is continuing. On the round the cap ends the run
+  // that is false, so it must not be emitted - even though the streak (5) is
+  // well past the threshold. Counts fall, so the trend guard stays out of it.
+  const cfg = DEFAULTS;
+  const cap = cfg.loop.maxReviewRounds;
+  const rounds = [
+    [STUCK, 'a-1', 'a-2', 'a-3'],
+    [STUCK, 'b-1', 'b-2'],
+    [STUCK, 'c-1', 'c-2', 'c-3'],
+    [STUCK, 'd-1', 'd-2'],
+    [STUCK, 'e-1'],
+  ];
+  const history: RoundRecord[] = [];
+  const logged: string[][] = [];
+  let thrown: unknown = null;
+
+  rounds.forEach((ids, idx) => {
+    if (thrown !== null) return;
+    const result = guardedRound(cfg, history, ids, { cap, round: idx + 1 });
+    logged.push(result.lines);
+    thrown = result.thrown;
+  });
+
+  assert.ok(thrown instanceof Escalation);
+  assert.match(thrown.message, /Hit maxReviewRounds \(5\)/);
+  // Round 4 crosses the threshold and legitimately speaks; round 5 does not.
+  assert.equal(logged[3]?.filter((l) => l.includes(STUCK)).length, 1);
+  assert.deepEqual(logged[4]?.filter((l) => l.includes(STUCK)), []);
+});
+
+test('a late stalled trend says nothing about continuing either', () => {
+  // Same contradiction by the other route: at a raised cap the trend guard can
+  // stop a round on which the persistence streak has long since qualified.
+  const history: RoundRecord[] = [];
+  const logged: string[][] = [];
+  let thrown: unknown = null;
+
+  for (let round = 1; round <= 8 && thrown === null; round += 1) {
+    const result = guardedRound(DEFAULTS, history, [STUCK, `m-${round}`], { cap: CAP, round });
+    logged.push(result.lines);
+    thrown = result.thrown;
+  }
+
+  assert.ok(thrown instanceof Escalation);
+  assert.match(thrown.message, /has not fallen in 3 rounds/);
+  assert.deepEqual(logged[logged.length - 1]?.filter((l) => l.includes(STUCK)), []);
+  // It did report on the earlier rounds, where continuing was true.
+  assert.ok(logged.slice(0, -1).some((lines) => lines.some((l) => l.includes(STUCK))));
+});
+
 test('the round cap still escalates with blockers outstanding', () => {
   const history: RoundRecord[] = [];
 
