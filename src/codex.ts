@@ -1,4 +1,4 @@
-import { writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { writeFileSync, readFileSync, existsSync, renameSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { resolveBin, run } from '@src/proc.js';
 import type { RunFn } from '@src/proc.js';
@@ -154,6 +154,22 @@ function parseEvents(stdout: string): CodexEvents {
 }
 
 /**
+ * Clear `file`, keeping its content at `keepAt` if there was any.
+ *
+ * The removal is what matters and must happen either way: if the rename fails -
+ * a locked file, a directory that has gone away - the file is deleted instead,
+ * because leaving it would let the next turn mistake it for its own output.
+ */
+function supersede(file: string, keepAt: string): void {
+  if (!existsSync(file)) return;
+  try {
+    renameSync(file, keepAt);
+  } catch {
+    rmSync(file, { force: true });
+  }
+}
+
+/**
  * One Codex turn with a schema-constrained final message.
  *
  * `--output-schema` is what makes the surrounding loop terminable: the stop
@@ -184,12 +200,18 @@ export async function codexTurn(
   const schemaFile = path.join(artifactDir, `${schemaName}.schema.json`);
   const outFile = path.join(artifactDir, `${schemaName}.out.json`);
   writeFileSync(schemaFile, JSON.stringify(schema, null, 2), 'utf8');
-  // Removed before the child runs, because the name is derived from the round
-  // (`review-2`) and withRateLimitRetry re-runs the same turn under the same
-  // name. Without this, a retry whose child wrote nothing found the previous
-  // attempt's file, parsed it, and reported a superseded result as this turn's -
-  // a failed turn passing as a successful one by way of the filesystem.
-  rmSync(outFile, { force: true });
+  // Moved aside before the child runs, because the name is derived from the
+  // round (`review-2`) and withRateLimitRetry re-runs the same turn under the
+  // same name. Left in place, a retry whose child wrote nothing found the
+  // previous attempt's file, parsed it, and reported a superseded result as this
+  // turn's - a failed turn passing as a successful one by way of the filesystem.
+  //
+  // Renamed rather than deleted: nothing else persists a rejected turn's raw
+  // output (runCodex keeps only the parsed structure), so deleting it would make
+  // the attempt that went wrong the one attempt with no evidence left. One slot,
+  // overwritten by the next supersede - the point is diagnosing the last
+  // failure, not keeping a history.
+  supersede(outFile, path.join(artifactDir, `${schemaName}.superseded.json`));
 
   // `resume` accepts neither -C nor -s: it takes its working directory from the
   // spawned process cwd, and its sandbox defaults to read-only. It does NOT

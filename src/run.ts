@@ -229,53 +229,53 @@ export function saveState(state: RunState): void {
  */
 const ACTIVITY_WRITE_MS = 5_000;
 
+/** Boundary sources, which say something the write throttle must not swallow. */
+const UNTHROTTLED: readonly ActivityObservation['source'][] = ['start', 'end', 'final'];
+
 /**
  * Record that the current turn is alive, for a watcher reading state.json from
  * another shell rather than from the process table.
  *
- * The fields describe the turn - or, under `withConcurrentCompaction`, the two
- * turns - vibe is running right now, never the run as a whole. A turn boundary
- * rebases them, so a new turn that dies before its first line cannot present the
- * previous turn's timestamps as its own pulse. `turnStartedAt` is the start of
- * the most recently started turn.
+ * `turnStartedAt` and `lastOutputAt` describe the turn - or, under
+ * `withConcurrentCompaction`, the two turns - vibe is running right now, never
+ * the run as a whole. They are therefore written from the observation exactly as
+ * given, including downwards: the heartbeat layer recomputes them across the
+ * live turns, and a turn ending has to take its output time with it. Two earlier
+ * versions of this got it wrong in opposite directions - one left the previous
+ * turn's pulse in place for a turn that died before speaking, the other left a
+ * finished rotation's last line standing while the Codex turn it overlapped was
+ * still running.
+ *
+ * `lastActivityAt` is the exception, and is monotonic: "when vibe last observed
+ * anything at all" is a fact about the run, and it is what remains readable
+ * between turns, when the other two are describing nothing.
  */
 export function markActivity(state: RunState, observation: ActivityObservation): void {
   const previous = state.lastActivityAt === undefined ? NaN : Date.parse(state.lastActivityAt);
   const at = observation.at.getTime();
 
-  if (observation.source === 'start') {
-    state.turnStartedAt = observation.at.toISOString();
-    state.lastActivityAt = state.turnStartedAt;
-    // Only when this is the sole live turn. A rotation started by
-    // withConcurrentCompaction overlaps a Codex turn that is still talking, and
-    // erasing its output time would report a live child as having gone silent.
-    if (!observation.concurrent) delete state.lastOutputAt;
-    saveState(state);
-    return;
-  }
-
   if (
-    observation.source !== 'final' &&
+    !UNTHROTTLED.includes(observation.source) &&
     Number.isFinite(previous) &&
     at - previous < ACTIVITY_WRITE_MS
   ) {
     return;
   }
 
-  // Advance-only, both fields: two heartbeats can be live at once, and a late
-  // observation from the older one - or a 'final' flush, which skips the
-  // throttle - must never wind either field backwards.
   if (!Number.isFinite(previous) || at > previous) {
     state.lastActivityAt = observation.at.toISOString();
   }
   // Taken from the observation, not the clock: a skipped write delays the value
-  // without ever making it claim the child was quieter than it was.
-  if (observation.lastLineAt !== null) {
-    const line = observation.lastLineAt.getTime();
-    const previousLine = state.lastOutputAt === undefined ? NaN : Date.parse(state.lastOutputAt);
-    if (!Number.isFinite(previousLine) || line > previousLine) {
-      state.lastOutputAt = observation.lastLineAt.toISOString();
-    }
+  // without ever making it claim a child was quieter than it was.
+  if (observation.lastLineAt === null) {
+    delete state.lastOutputAt;
+  } else {
+    state.lastOutputAt = observation.lastLineAt.toISOString();
+  }
+  if (observation.turnStartedAt === null) {
+    delete state.turnStartedAt;
+  } else {
+    state.turnStartedAt = observation.turnStartedAt.toISOString();
   }
   saveState(state);
 }

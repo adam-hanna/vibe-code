@@ -497,20 +497,23 @@ export interface RunState {
    */
   contextWindow?: number;
   /**
-   * When the most recently started turn began.
+   * When the most recently started *running* turn began.
    *
-   * The boundary marker for the pair below: it is what distinguishes "quiet
+   * The boundary marker for `lastOutputAt`: it is what distinguishes "quiet
    * because the turn started three seconds ago" from "quiet for twenty minutes".
    *
    * "Most recently started" rather than "the" turn because a rotation overlapped
-   * with a Codex turn makes two turns live at once. While that holds, the pair
-   * below is the most recent observation of *either*; both fields only ever
-   * advance, and the newer turn's boundary does not erase the older turn's
-   * output time. All three are maintained only while progress is enabled.
+   * with a Codex turn makes two turns live at once. Both this and `lastOutputAt`
+   * are recomputed across the live turns on every observation, so when the
+   * rotation finishes they fall back to the Codex turn that is still running -
+   * they can move backwards, and must, or a finished turn's output reads as the
+   * live one's progress. Between turns they keep the last turn's values until
+   * the next turn's boundary rebases them, which is what makes the end-of-turn
+   * flush worth doing. Maintained only while progress is enabled.
    */
   turnStartedAt?: string;
   /**
-   * When vibe last observed the current turn making progress - from the child's
+   * When vibe last observed any of its turns making progress - from a child's
    * stdout OR from its own heartbeat tick.
    *
    * The field a watcher in another shell should read: it answers "is this run
@@ -518,20 +521,20 @@ export interface RunState {
    * deliberately advances during a silent reasoning block, because a turn that
    * emits no events for twelve minutes is still a healthy turn.
    *
-   * Scoped to the turn vibe is running now, not to the run: it is rebased when a
-   * turn starts, because a turn that failed before its first line used to leave
-   * the previous turn's value in place and a watcher read it as current work.
+   * Monotonic, and the one of the three that is about the run rather than about
+   * a turn: it stays readable between turns, when the other two describe a turn
+   * that has ended.
    */
   lastActivityAt?: string;
   /**
-   * The exact time of the last line the child wrote. Flushed at the end of a
-   * turn whose output the adapter accepted, so it is never left behind by the
+   * The exact time of the last line a running turn wrote. Flushed at the end of
+   * a turn whose output the adapter accepted, so it is never left behind by the
    * write throttle and never records a rejected turn as a completed one.
    * Distinct from `lastActivityAt` on purpose: this is the one that goes quiet,
    * so the pair separates "thinking" from "gone".
    *
-   * Absent means the current turn's child has not spoken yet - the turn boundary
-   * clears it.
+   * Absent means no running turn has spoken yet - the turn boundary clears it,
+   * unless another turn is still running and has.
    */
   lastOutputAt?: string;
   /**

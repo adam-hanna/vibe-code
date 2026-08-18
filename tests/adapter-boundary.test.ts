@@ -220,7 +220,13 @@ test('codex: a previous attempt output file is not accepted as this turn result'
     /wrote no structured output/,
   );
 
-  assert.equal(existsSync(outPath(dir)), false, 'the stale file is removed before the child runs');
+  assert.equal(existsSync(outPath(dir)), false, 'the stale file is moved before the child runs');
+  // Kept, because nothing else persists a rejected turn's raw output: the
+  // attempt that went wrong would otherwise be the one with no evidence left.
+  assert.equal(
+    readFileSync(path.join(dir, 'review-0.superseded.json'), 'utf8'),
+    '{"findings":["from the previous attempt"]}',
+  );
   assert.ok(!sources.includes('final'));
 });
 

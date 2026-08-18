@@ -203,25 +203,29 @@ export function dueForEmit(lastEmitAt: number, now: number, intervalMs: number):
 /**
  * One progress observation, handed to the state layer.
  *
- * `lastLineAt` is the *exact* time of the most recent stdout line, carried
- * separately from `at` so a throttled state write records when the child really
- * spoke rather than when vibe got round to writing the file.
+ * `lastLineAt` and `turnStartedAt` are *recomputed across every live turn* on
+ * each observation rather than reported per heartbeat, and the state layer
+ * writes them as given. That is what keeps them describing the turns actually
+ * running: `withConcurrentCompaction` overlaps a rotation with a Codex turn, and
+ * when the shorter one ended, a per-heartbeat value left the finished
+ * rotation's output time and start behind while the Codex turn was still going.
+ * They are carried separately from `at` so a throttled write records when a
+ * child really spoke rather than when vibe got round to writing the file.
  *
- * `'start'` is the turn boundary and `'final'` the end-of-turn flush; both
- * bypass the write throttle. Without `'final'`, a line arriving inside the
- * throttle window immediately before the child closed would never be persisted
- * at all. Without `'start'`, a turn that failed before saying anything left the
- * previous turn's timestamps in place, and a watcher read them as this turn.
+ * `'start'` is the turn boundary, `'end'` a turn leaving while others continue,
+ * and `'final'` the end-of-turn flush; all three bypass the write throttle.
+ * Without `'final'`, a line arriving inside the throttle window immediately
+ * before the child closed would never be persisted at all. Without `'start'`, a
+ * turn that failed before saying anything left the previous turn's timestamps in
+ * place, and a watcher read them as this turn's.
  */
 export interface ActivityObservation {
-  source: 'start' | 'stdout' | 'heartbeat' | 'final';
+  source: 'start' | 'stdout' | 'heartbeat' | 'final' | 'end';
   at: Date;
+  /** Most recent line from any live turn; null when none has spoken yet. */
   lastLineAt: Date | null;
-  /**
-   * Another turn was live when this was observed. Only `withConcurrentCompaction`
-   * produces it, by overlapping a rotation turn with a Codex turn.
-   */
-  concurrent: boolean;
+  /** Start of the most recently started live turn; null when none is live. */
+  turnStartedAt: Date | null;
 }
 
 /** Behind an interface so a test can observe that `unref` was called. */
@@ -253,6 +257,17 @@ export interface ProgressOptions {
   intervalMs: number;
   /** Enables the `ctx N%` segment. Omitted means the segment is omitted. */
   contextWindow?: number | undefined;
+  /**
+   * Which run's live turns this heartbeat is one of - the `RunState` it reports
+   * to, supplied by `progressOptions`.
+   *
+   * Liveness is aggregated per scope, not per process: two runs driven from one
+   * process each write their own state.json, and a turn in one must not make a
+   * turn in the other look concurrent - which would stop its turn boundary
+   * clearing a stale output time. Omitted shares one default scope, which is
+   * right for a single heartbeat under test.
+   */
+  scope?: object | undefined;
   /** Called once per observation. See the ownership rule in createHeartbeat. */
   onActivity?: ((observation: ActivityObservation) => void) | undefined;
   now?: (() => number) | undefined;
@@ -269,17 +284,44 @@ export interface Heartbeat {
   stop: () => void;
 }
 
+/** What one live turn contributes to the shared liveness fields. */
+interface LiveTurn {
+  startedAt: number;
+  lastLineAt: number | null;
+}
+
 /**
- * Turns with a live heartbeat, this process.
+ * Turns with an open heartbeat, per run.
  *
  * `withConcurrentCompaction` overlaps a rotation turn with a Codex turn, so
- * "the current turn" is occasionally two turns. The count is what tells a turn
- * boundary whether it is allowed to clear the other one's output time.
- * Deliberately in memory only: a persisted liveness counter left behind by a
+ * "the current turn" is occasionally two turns, and every observation has to be
+ * computed from the set rather than from whichever heartbeat happened to fire.
+ * Deliberately in memory only: a persisted liveness record left behind by a
  * killed process would assert that a turn is running when none is, which is the
  * stale claim this whole area exists to remove.
  */
-let liveTurns = 0;
+const liveTurns = new WeakMap<object, Map<number, LiveTurn>>();
+/** The scope for heartbeats that name none - one heartbeat under test. */
+const DEFAULT_SCOPE: object = {};
+let nextTurnId = 0;
+
+function liveTurnsFor(scope: object): Map<number, LiveTurn> {
+  let turns = liveTurns.get(scope);
+  if (turns === undefined) {
+    turns = new Map<number, LiveTurn>();
+    liveTurns.set(scope, turns);
+  }
+  return turns;
+}
+
+/** The latest of a set of times, or null when the set contributes none. */
+function latest(values: readonly (number | null)[]): number | null {
+  let best: number | null = null;
+  for (const value of values) {
+    if (value !== null && (best === null || value > best)) best = value;
+  }
+  return best;
+}
 
 /**
  * A throttled progress reporter for one turn.
@@ -299,6 +341,7 @@ export function createHeartbeat(
     onActivity,
     parse,
     unit,
+    scope = DEFAULT_SCOPE,
     now = () => Date.now(),
     emit = detail,
     timers = nodeTimers,
@@ -306,6 +349,9 @@ export function createHeartbeat(
 
   const snapshot = emptySnapshot();
   const startedAt = now();
+  const turns = liveTurnsFor(scope);
+  const id = (nextTurnId += 1);
+  const self: LiveTurn = { startedAt, lastLineAt: null };
   let lastEmitAt = startedAt;
   let lastLineAt: number | null = null;
   let stopped = false;
@@ -331,13 +377,29 @@ export function createHeartbeat(
     return true;
   };
 
-  const notify = (source: ActivityObservation['source']): void => {
+  /**
+   * Every live turn in this scope, plus this one when it is not registered.
+   *
+   * The unregistered case is a heartbeat that reports before `begin` or that has
+   * already stopped: it still describes itself rather than reporting nothing,
+   * which is what keeps a single heartbeat's behaviour independent of whether
+   * the turn boundary was opened.
+   */
+  const contributors = (includeSelf: boolean): readonly LiveTurn[] => {
+    const live = [...turns.values()];
+    return includeSelf && !turns.has(id) ? [...live, self] : live;
+  };
+
+  const notify = (source: ActivityObservation['source'], includeSelf = true): void => {
     try {
+      const live = contributors(includeSelf);
+      const line = latest(live.map((turn) => turn.lastLineAt));
+      const started = latest(live.map((turn) => turn.startedAt));
       onActivity?.({
         source,
         at: new Date(now()),
-        lastLineAt: lastLineAt === null ? null : new Date(lastLineAt),
-        concurrent: liveTurns > 1,
+        lastLineAt: line === null ? null : new Date(line),
+        turnStartedAt: started === null ? null : new Date(started),
       });
     } catch {
       // A failing state write must not take down a run either.
@@ -351,6 +413,7 @@ export function createHeartbeat(
   const onLine = (line: string): void => {
     if (stopped) return;
     lastLineAt = now();
+    self.lastLineAt = lastLineAt;
     try {
       parse(snapshot, line);
     } catch {
@@ -369,7 +432,8 @@ export function createHeartbeat(
     begin: () => {
       if (stopped || begun) return;
       begun = true;
-      liveTurns += 1;
+      self.startedAt = now();
+      turns.set(id, self);
       notify('start');
     },
     onLine,
@@ -379,11 +443,17 @@ export function createHeartbeat(
     stop: () => {
       if (stopped) return;
       stopped = true;
-      if (begun) {
-        begun = false;
-        liveTurns -= 1;
-      }
       handle.cancel();
+      if (!begun) return;
+      begun = false;
+      turns.delete(id);
+      // Only while another turn is still running. That turn's output time and
+      // start have to replace this one's, or a watcher reads the finished
+      // rotation's last line as the live Codex turn's progress. With nothing
+      // left running there is nothing to recompute *to*: the completed turn's
+      // final state stands as the run's last known pulse until the next turn
+      // boundary rebases it.
+      if (turns.size > 0) notify('end', false);
     },
   };
 }
@@ -447,6 +517,10 @@ export function progressOptions(
   return {
     label,
     intervalMs: cfg.progress.intervalMs,
+    // The run this turn belongs to, so liveness is aggregated per run rather
+    // than per process: the fields it feeds live in this state.json and nowhere
+    // else, and a turn from another run must not be counted among them.
+    scope: state,
     onActivity: (observation) => markActivity(state, observation),
     // Absent until some turn under this exact model has reported a window.
     // Omitting the segment is always preferable to a number that cannot be
