@@ -1,3 +1,5 @@
+import { describedRole, ROLES } from '@src/roles.js';
+import type { RoleTable } from '@src/roles.js';
 import type { EnvironmentFacts } from '@src/runtime.js';
 import type {
   Answer,
@@ -24,11 +26,13 @@ const RESPOND_WITH_JSON =
 export function environmentBlock(
   facts: EnvironmentFacts | null | undefined,
   audience: 'reviewer' | 'planner',
+  /** The seam `runTurn` already has: who does what is read, not inferred. */
+  roles: RoleTable = ROLES,
 ): string {
   if (!facts || facts.agents.length === 0) return '';
 
   const lines = facts.agents.map((agent) => {
-    const role = agent.provider === 'claude' ? 'implementer' : 'reviewer';
+    const role = describedRole(agent.provider, roles);
     const tools = agent.tools
       .map((t) => {
         if (!t.available) return `${t.name} UNAVAILABLE`;
@@ -41,7 +45,10 @@ export function environmentBlock(
       })
       .join(', ');
     const repaired = agent.repaired ? ' [PATH repaired by vibe for this run]' : '';
-    return `- **${agent.provider}** (the ${role}): ${agent.shell}, ${agent.pathStyle} paths - ${tools || 'no tools contracted'}${repaired}`;
+    // The parenthetical is dropped rather than filled with a provider name when
+    // a table gives this agent no role at all: the slot is for what it does.
+    const does = role === null ? '' : ` (the ${role})`;
+    return `- **${agent.provider}**${does}: ${agent.shell}, ${agent.pathStyle} paths - ${tools || 'no tools contracted'}${repaired}`;
   });
 
   const verification =

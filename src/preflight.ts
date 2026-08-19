@@ -5,7 +5,7 @@ import { claudeBin, parseProbeTurn } from '@src/claude.js';
 import { codexBin, parseProbeStream } from '@src/codex.js';
 import { hostExecutableFor } from '@src/hosttools.js';
 import { run } from '@src/proc.js';
-import { providerAccess } from '@src/roles.js';
+import { codexProbeSandbox, providerAccess } from '@src/roles.js';
 import type { Access } from '@src/roles.js';
 import { contractForAgent, validateContract } from '@src/runtime.js';
 import type {
@@ -298,6 +298,14 @@ async function preflightCodex(
   // Codex turn is.
   const spend = accumulator(false);
 
+  // The sandbox a Codex turn is actually spawned with, not the raw config key
+  // the probe used to read. The two agree for every value today - no Codex role
+  // writes, so every Codex turn gets `codexSandbox('read-only', cfg)`, which is
+  // that key - but they are different statements, and the raw key would have
+  // preflight vouching for a sandbox no turn runs in the moment a Codex role
+  // holds write access.
+  const sandbox = codexProbeSandbox(cfg);
+
   const adapter = new CodexAdapter(async ({ prompt, args, cwd, timeoutMs }) => {
     // `--json` is the only mode that reports token usage, and it changes nothing
     // else about the turn. `codexTurn` already sends it beside these same flags.
@@ -324,7 +332,7 @@ async function preflightCodex(
     // sentinels itself, so an echoed prompt is a probe record that was never
     // probed.
     return selectProbeTranscript(stream.strings, stream.plain, prompt);
-  }, cfg.codex.sandbox);
+  }, sandbox);
 
   let runtime: AgentRuntime;
   try {
