@@ -388,8 +388,10 @@ export async function codexTurn(
     // it out and let the dispatch layer charge the failure through the shared
     // accounting rather than losing it. `costUsd` is null, not zero: Codex
     // reports no cost, and that is the distinction `applyCharge` routes on.
-    // Where no `turn.completed` was seen this is ZERO_TOKENS and nothing is
-    // charged.
+    // Where no `turn.completed` was seen this is ZERO_TOKENS, and `attachSpend`
+    // records nothing at all for it: a turn that reported no usage and one that
+    // reported none worth charging are the same answer to the only question the
+    // accounting asks, so `spendOf` says null for both.
     const spent = { costUsd: null, tokens: events.tokens.total };
 
     if (!existsSync(outFile)) {

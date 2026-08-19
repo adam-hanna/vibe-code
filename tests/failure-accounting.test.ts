@@ -9,7 +9,7 @@ import type { ClaudeTurnOptions } from '@src/claude.js';
 import { codexTurn } from '@src/codex.js';
 import type { CodexTurnOptions } from '@src/codex.js';
 import { rotateSession, withConcurrentCompaction } from '@src/context.js';
-import { attachSpend, Escalation, EXIT, runTurn, spendOf } from '@src/orchestrator.js';
+import { attachSpend, chargeFailure, Escalation, EXIT, runTurn, spendOf } from '@src/orchestrator.js';
 import type { AgentTurns, Role, TurnRequest } from '@src/orchestrator.js';
 import { createRun, recordContextMeasurement } from '@src/run.js';
 import type { RunFn, RunResult } from '@src/proc.js';
@@ -214,10 +214,23 @@ test('a codex turn that never reported usage carries nothing worth charging', as
     () => codexTurn(codexOptions(dir), fakeExec(1, [CODEX_FAILED])),
     (err: unknown) => {
       assert.match((err as Error).message, /codex wrote no structured output/);
-      assert.deepEqual(spendOf(err), { costUsd: null, tokens: 0 });
+      // Null, not a zero sentinel: "reported no usage" and "reported none worth
+      // charging" are one answer, so there is one way of saying it.
+      assert.equal(spendOf(err), null);
       return true;
     },
   );
+});
+
+test('a spend of nothing is never attached, whichever provider reports it', async () => {
+  const claudeErr = attachSpend(new Error('claude'), { costUsd: 0, tokens: 0 });
+  const codexErr = attachSpend(new Error('codex'), { costUsd: null, tokens: 0 });
+  const realErr = attachSpend(new Error('real'), { costUsd: 0, tokens: 12 });
+
+  assert.equal(spendOf(claudeErr), null);
+  assert.equal(spendOf(codexErr), null);
+  // A turn that moved tokens but reported no cost is still worth charging.
+  assert.deepEqual(spendOf(realErr), { costUsd: 0, tokens: 12 });
 });
 
 // ---- The seam: the failure is charged, and the failure still wins -----------
@@ -343,6 +356,30 @@ test('an accounting fault while charging a failure does not become the failure',
   assert.equal(state.tokensUsed, 1000);
   assert.ok(
     lines.some((l) => l.includes('Could not record what the failed "plan" turn spent')),
+    lines.join('\n'),
+  );
+});
+
+test('an accounting fault does not cost the run the ceiling it just crossed', async () => {
+  // A lost record must not also be a lost brake. `recordEvent` persists
+  // state.json, so it throws here - after the totals have been updated and
+  // before `applyCharge` would have reached the ceilings. The charge is still
+  // over `maxTokens`, so the escalation must come back to the caller, which is
+  // what decides whether the rotation it belongs to may complete.
+  const state = freshState();
+  const cfg = config({ budget: { ...DEFAULTS.budget, maxTokens: 1000 } });
+  const dead = attachSpend(new Error('prompt too long'), { costUsd: 0.05, tokens: 12_000 });
+  rmSync(state.dir, { recursive: true, force: true });
+
+  const { result, lines } = await captureLog(() =>
+    Promise.resolve(chargeFailure(state, cfg, dead, { label: 'compact', provider: 'claude' })),
+  );
+
+  assert.ok(result instanceof Escalation, 'the ceiling still has to be raised');
+  assert.equal(result.code, EXIT.BUDGET);
+  assert.equal(state.tokensUsed, 12_000);
+  assert.ok(
+    lines.some((l) => l.includes('the ceilings were still enforced')),
     lines.join('\n'),
   );
 });
@@ -565,6 +602,63 @@ test('a rejected work alongside an ordinary compaction failure is unchanged', as
     lines.join('\n'),
   );
   assert.equal(state.sessionRotations, 0);
+});
+
+test('a rotation whose own failure handling fails is not discarded by a successful work', async () => {
+  // The second settled result is read, not assumed. `.catch` normally absorbs
+  // everything the rotation raises - but it can throw on the way, and a
+  // fulfilled `work` used to return over the top of that in silence.
+  const state = measuredRun();
+  const cfg = config({ context: { ...DEFAULTS.context, enabled: true } });
+
+  const lines: string[] = [];
+  const original = console.log;
+  console.log = (...parts: unknown[]): void => {
+    const line = parts.map((p) => String(p)).join(' ');
+    lines.push(line);
+    // The console goes away exactly as the compaction failure is being reported,
+    // so the absorbing catch rejects instead of resolving.
+    if (line.includes('Compaction failed, continuing')) throw new Error('console gone');
+  };
+  let result: string;
+  try {
+    result = await withConcurrentCompaction(state, cfg, () => Promise.resolve('critique'), () =>
+      Promise.reject(new Error('claude timed out')),
+    );
+  } finally {
+    console.log = original;
+  }
+
+  // Compaction is still an optimisation, so the run continues with its work.
+  assert.equal(result, 'critique');
+  assert.ok(
+    lines.some((l) => l.includes('Compaction failed and could not report why')),
+    lines.join('\n'),
+  );
+});
+
+test('an escalation that escapes the rotation catch still stops the run', async () => {
+  // The same slot, carrying the one thing that is not an optimisation: a
+  // compaction failure may be passed over, a ceiling may not.
+  const state = measuredRun();
+  const cfg = config({ context: { ...DEFAULTS.context, enabled: true } });
+  const stop = new Escalation(EXIT.BUDGET, 'ceiling reached');
+
+  const original = console.log;
+  console.log = (...parts: unknown[]): void => {
+    if (parts.map((p) => String(p)).join(' ').includes('Compaction failed, continuing')) throw stop;
+  };
+  try {
+    await assert.rejects(
+      () =>
+        withConcurrentCompaction(state, cfg, () => Promise.resolve('critique'), () =>
+          Promise.reject(new Error('claude timed out')),
+        ),
+      (err: unknown) => err === stop,
+    );
+  } finally {
+    console.log = original;
+  }
 });
 
 // ---- The run in which nothing fails -----------------------------------------

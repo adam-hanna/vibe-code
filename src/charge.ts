@@ -84,8 +84,16 @@ const SPENT = new WeakMap<object, TurnSpend>();
 /**
  * Record what the turn this error ends spent. Returns `err`, so a throw site
  * can attach and throw in one expression.
+ *
+ * A spend of nothing is not recorded, and that is the contract every reader
+ * gets: `spendOf` returning null means "nothing to charge", whether the turn
+ * reported no usage at all or reported none worth charging. The two are
+ * indistinguishable to the accounting - neither moves a total and neither
+ * deserves an event - so they are not distinguished here either, rather than
+ * leaving each call site to decide whether a zero is worth attaching.
  */
 export function attachSpend<E>(err: E, spend: TurnSpend): E {
+  if (spend.tokens <= 0 && (spend.costUsd ?? 0) <= 0) return err;
   if (typeof err === 'object' && err !== null) SPENT.set(err, spend);
   return err;
 }
@@ -122,6 +130,10 @@ export function takeSpend(err: unknown): TurnSpend | null {
  * write error, which is precisely what charging on the way out must never do.
  * This differs from `chargePreflight`, which propagates: nothing is in flight
  * there.
+ *
+ * The ceilings are run either way. A failed write is a lost record; it must not
+ * also be a lost brake, and the totals it failed to persist are in memory and
+ * already over.
  */
 export function chargeFailure(
   state: RunState,
@@ -129,11 +141,10 @@ export function chargeFailure(
   err: unknown,
   meta: { label: string; provider: 'claude' | 'codex' },
 ): Escalation | null {
+  // Null is the whole "nothing to charge" answer - `attachSpend` never records a
+  // spend of nothing - so there is no second zero test here. One definition.
   const spend = takeSpend(err);
   if (spend === null) return null;
-  // Nothing reported is nothing to charge: no totals to move, and no event
-  // claiming a turn spent when it did not.
-  if (spend.tokens <= 0 && (spend.costUsd ?? 0) <= 0) return null;
 
   const message = err instanceof Error ? err.message : String(err);
   try {
@@ -158,11 +169,33 @@ export function chargeFailure(
     });
   } catch (chargeErr: unknown) {
     if (chargeErr instanceof Escalation) return chargeErr;
+
+    // The totals moved before the write or the log line failed, so the ceilings
+    // still have something to check - and a run that has just crossed one must
+    // not carry on because state.json could not be written. Enforced here rather
+    // than left to the next charge, which may never come.
+    let ceiling: Escalation | null = null;
+    try {
+      enforceCeilings(state, cfg, spend.costUsd !== null);
+    } catch (ceilingErr: unknown) {
+      // `enforceCeilings` raises nothing else. Anything that is not a ceiling is
+      // a fault in the accounting itself and belongs with the fault below.
+      if (!(ceilingErr instanceof Escalation)) throw ceilingErr;
+      ceiling = ceilingErr;
+    }
+
     const why = chargeErr instanceof Error ? chargeErr.message : String(chargeErr);
-    log.warn(
-      `Could not record what the failed "${meta.label}" turn spent (${why}); ` +
-        'the tokens are in the run totals but the ceilings were not consulted.',
-    );
+    // Quietly, and last: a broken console is one of the ways to arrive here, and
+    // it must not cost the run the ceiling that was just enforced.
+    try {
+      log.warn(
+        `Could not record what the failed "${meta.label}" turn spent (${why}); ` +
+          'the tokens are in the run totals and the ceilings were still enforced.',
+      );
+    } catch {
+      // Reporting a lost record must never be what takes down the run.
+    }
+    return ceiling;
   }
   return null;
 }

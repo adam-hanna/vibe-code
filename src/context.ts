@@ -261,7 +261,7 @@ export async function withConcurrentCompaction<T>(
   // never read. Settling both first makes the run record coherent at the moment
   // the error propagates. On the path where nothing fails the two are
   // indistinguishable: both await both.
-  const [outcome] = await Promise.allSettled([
+  const [outcome, compaction] = await Promise.allSettled([
     work(),
     rotateSession(state, cfg, turn).catch((err: unknown) => {
       // A budget escalation is the run being told to stop, not a lost
@@ -294,10 +294,15 @@ export async function withConcurrentCompaction<T>(
   // change is about.
   if (outcome.status === 'rejected') {
     if (escalated.err !== null) {
-      log.warn(
-        `Compaction hit a budget ceiling (${escalated.err.message}) while the turn beside it ` +
-          'failed; that failure is what ends the run, and the rotation is already charged.',
-      );
+      try {
+        log.warn(
+          `Compaction hit a budget ceiling (${escalated.err.message}) while the turn beside it ` +
+            'failed; that failure is what ends the run, and the rotation is already charged.',
+        );
+      } catch {
+        // Reporting the outranked ceiling must not cost the run the failure it
+        // is reporting alongside. Same rule as `chargeFailure`'s.
+      }
     }
     throw outcome.reason;
   }
@@ -305,5 +310,18 @@ export async function withConcurrentCompaction<T>(
   // After `work` has resolved and its caller-owned records have been written by
   // the callback itself.
   if (escalated.err !== null) throw escalated.err;
+
+  // The catch above absorbs everything the rotation can raise, so this rejects
+  // only if the absorbing itself failed - a console that has gone away, an
+  // `err.message` that throws. Read rather than assumed: "the second slot cannot
+  // reject" is exactly the assumption that lost the escalation in the first
+  // place. An escalation that got that far is still the run being told to stop;
+  // anything else is a compaction failure, which must not fail the run.
+  if (compaction.status === 'rejected') {
+    const reason: unknown = compaction.reason;
+    if (reason instanceof Escalation) throw reason;
+    const message = reason instanceof Error ? reason.message : String(reason);
+    log.warn(`Compaction failed and could not report why (${message}); continuing.`);
+  }
   return outcome.value;
 }
