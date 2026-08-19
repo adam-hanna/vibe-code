@@ -36,7 +36,13 @@ export function codexBin(): string {
 
 export interface CodexTurnOptions {
   prompt: string;
-  schema: object;
+  /**
+   * The shape the final message must take, or omitted for a turn whose product
+   * is the working tree rather than a verdict - an implementing Codex role.
+   * `-o` (`--output-last-message`) is what writes the file either way;
+   * `--output-schema` only constrains what goes in it.
+   */
+  schema?: object | undefined;
   schemaName: string;
   artifactDir: string;
   model: string;
@@ -51,6 +57,7 @@ export interface CodexTurnOptions {
 }
 
 export interface CodexTurnResult {
+  /** The parsed output, or null for a turn that was given no schema. */
   structured: unknown;
   raw: string;
   /** Thread id for this turn, to be passed back on the next call. */
@@ -319,7 +326,10 @@ export async function codexTurn(
 
   const schemaFile = path.join(artifactDir, `${schemaName}.schema.json`);
   const outFile = path.join(artifactDir, `${schemaName}.out.json`);
-  writeFileSync(schemaFile, JSON.stringify(schema, null, 2), 'utf8');
+  // No schema, no schema file: a writing role's product is the tree, and its
+  // final message is a report. Writing an empty one would leave an artifact
+  // claiming a contract this turn was never held to.
+  if (schema !== undefined) writeFileSync(schemaFile, JSON.stringify(schema, null, 2), 'utf8');
   // Moved aside before the child runs, because the name is derived from the
   // round (`review-2`) and withRateLimitRetry re-runs the same turn under the
   // same name. Left in place, a retry whose child wrote nothing found the
@@ -340,6 +350,11 @@ export async function codexTurn(
   // `--json` turns stdout into JSONL, which is the only way Codex reports token
   // usage. It does not change what lands in `outFile`, so the result path is
   // unaffected; it is accepted by both `exec` and `exec resume`.
+  // Only when there is a schema to enforce. `-o` is `--output-last-message` and
+  // stands alone, so a schema-less turn still writes its final message to the
+  // same file - which is what the result path reads either way.
+  const schemaArgs = schema === undefined ? [] : ['--output-schema', schemaFile];
+
   const args: string[] = sessionId
     ? [
         'exec', 'resume', sessionId,
@@ -347,7 +362,7 @@ export async function codexTurn(
         '-m', model,
         '-c', `model_reasoning_effort="${effort}"`,
         '--skip-git-repo-check',
-        '--output-schema', schemaFile,
+        ...schemaArgs,
         '-o', outFile,
         '-',
       ]
@@ -359,7 +374,7 @@ export async function codexTurn(
         '-s', sandbox,
         '--skip-git-repo-check',
         '-C', cwd,
-        '--output-schema', schemaFile,
+        ...schemaArgs,
         '-o', outFile,
         '-',
       ];
@@ -421,15 +436,20 @@ export async function codexTurn(
     // Always read as UTF-8: Codex emits smart quotes and em dashes that mangle
     // under the Windows ANSI codepage.
     const raw = readFileSync(outFile, 'utf8');
-    let structured: unknown;
-    try {
-      structured = JSON.parse(raw) as unknown;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      throw attachSpend(
-        new Error(`codex output was not valid JSON: ${message}\n${raw.slice(0, 1500)}`),
-        spent,
-      );
+    // Parsed only where a schema was asked for. A writing turn's last message is
+    // a report in prose, and demanding JSON of it would fail a turn that did
+    // exactly what it was told - the same distinction `structured: null` states.
+    let structured: unknown = null;
+    if (schema !== undefined) {
+      try {
+        structured = JSON.parse(raw) as unknown;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        throw attachSpend(
+          new Error(`codex output was not valid JSON: ${message}\n${raw.slice(0, 1500)}`),
+          spent,
+        );
+      }
     }
 
     if (code !== 0) {

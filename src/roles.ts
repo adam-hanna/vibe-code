@@ -1,5 +1,5 @@
-import { ANSWERS_SCHEMA, FINDINGS_SCHEMA } from '@src/schemas.js';
-import { SLOTS } from '@src/slots.js';
+import { ANSWERS_SCHEMA, FINDINGS_SCHEMA, PLAN_SCHEMA } from '@src/schemas.js';
+import { SLOTS, slotRotatable } from '@src/slots.js';
 import type { SlotName } from '@src/slots.js';
 import type { AgentProvider } from '@src/runtime.js';
 import type { Config, PermissionMode, Sandbox } from '@src/types.js';
@@ -9,42 +9,94 @@ export type Access = 'read-only' | 'write';
 
 export type Role = 'planner' | 'implementer' | 'critic' | 'answerer' | 'reviewer';
 
+/** Every role, in a fixed order, so a table can be iterated and validated. */
+export const ROLE_NAMES: readonly Role[] = [
+  'planner',
+  'implementer',
+  'critic',
+  'answerer',
+  'reviewer',
+];
+
+/** The providers a role may be seated on. The config surface accepts these and nothing else. */
+export const PROVIDERS: readonly AgentProvider[] = ['claude', 'codex'];
+
 /**
+ * One shape for both providers.
+ *
+ * `schema` is optional on either: a Codex planner must be given `PLAN_SCHEMA`
+ * and a Codex implementer has no schema at all, so "which provider" stopped
+ * being the thing that decides whether one exists. It states what the turn is
+ * *asked* for - `--json-schema` for Claude, `--output-schema` for Codex - and is
+ * not a promise about what came back, which is why nothing parses at the seam.
+ *
  * `slot` is optional because a table that names none still describes something
  * coherent: one conversation per provider, which is what every table predating
  * named slots meant. See `slotForRole`.
  */
-export type RoleSpec =
-  | { provider: 'claude'; access: Access; slot?: SlotName }
-  | { provider: 'codex'; access: Access; schema: object; slot?: SlotName };
+export interface RoleSpec {
+  provider: AgentProvider;
+  access: Access;
+  schema?: object | undefined;
+  tools?: readonly string[] | undefined;
+  slot?: SlotName | undefined;
+}
 
 /**
  * The shape of `ROLES`, so the functions below can be handed a different one.
  *
- * Not a config surface: there is exactly one table, `ROLES`, and every consumer
- * defaults to it. The parameter exists so a test can point a table at the other
- * provider and prove a site follows it - the same reason `runTurn` takes its
- * providers and `withConcurrentCompaction` takes its turn.
+ * Built from config by `rolesFor`; `ROLES` remains the default table, for tests
+ * and for leaf callers that genuinely have no config in hand.
  */
 export type RoleTable = Record<Role, RoleSpec>;
 
+/** Read-only toolset for a turn that may look but not touch. */
+export const READ_ONLY_TOOLS: readonly string[] = [
+  'Read',
+  'Glob',
+  'Grep',
+  'Bash',
+  'WebSearch',
+  'WebFetch',
+];
+
 /**
- * Who does what, fixed at today's assignment: Claude plans and implements,
- * Codex critiques, answers and reviews. Deliberately a constant and not a
- * config key - making these swappable is its own change.
+ * What each job is, independent of who holds it.
  *
- * The schema rides on the role rather than being sniffed out of the turn label,
- * which is what the previous `schemaName.startsWith('answers')` check did. The
- * slot rides on it for the same reason: which conversation a role talks through
- * is a fact about the role, not something to re-derive from its provider.
+ * `access`, `schema` and the tool list are facts about the work: a reviewer is
+ * read-only and returns findings whoever holds it, and an implementer writes.
+ * They are deliberately not a config surface - the only choice a run makes is
+ * which provider sits in each seat.
  */
-export const ROLES: Record<Role, RoleSpec> = {
-  planner: { provider: 'claude', access: 'read-only', slot: 'main' },
-  implementer: { provider: 'claude', access: 'write', slot: 'main' },
-  critic: { provider: 'codex', access: 'read-only', schema: FINDINGS_SCHEMA, slot: 'judge' },
-  answerer: { provider: 'codex', access: 'read-only', schema: ANSWERS_SCHEMA, slot: 'judge' },
-  reviewer: { provider: 'codex', access: 'read-only', schema: FINDINGS_SCHEMA, slot: 'judge' },
+const JOBS: Readonly<
+  Record<Role, { access: Access; schema?: object; tools?: readonly string[] }>
+> = {
+  planner: { access: 'read-only', schema: PLAN_SCHEMA, tools: READ_ONLY_TOOLS },
+  implementer: { access: 'write' },
+  critic: { access: 'read-only', schema: FINDINGS_SCHEMA, tools: READ_ONLY_TOOLS },
+  answerer: { access: 'read-only', schema: ANSWERS_SCHEMA, tools: READ_ONLY_TOOLS },
+  reviewer: { access: 'read-only', schema: FINDINGS_SCHEMA, tools: READ_ONLY_TOOLS },
 };
+
+/** The config surface: one provider per role, and nothing else. */
+export type RoleProviders = Record<Role, AgentProvider>;
+
+/**
+ * Who does what when a run says nothing: Claude plans and implements, Codex
+ * critiques, answers and reviews. A run with no `roles` key behaves exactly as
+ * every run before this key existed.
+ */
+export const DEFAULT_ROLE_PROVIDERS: RoleProviders = {
+  planner: 'claude',
+  implementer: 'claude',
+  critic: 'codex',
+  answerer: 'codex',
+  reviewer: 'codex',
+};
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
 
 /**
  * The slot a table that names none means: one conversation per provider, which
@@ -52,12 +104,55 @@ export const ROLES: Record<Role, RoleSpec> = {
  *
  * Not the provider-name guessing this file exists to have deleted - it decides
  * no one's job and answers no question about who does what. It is the fallback
- * shape for a table that left the field out, and `ROLES` leaves none out.
+ * shape for a table that left the field out, and every table `tableFor` builds
+ * names one.
  */
 const DEFAULT_SLOT: Readonly<Record<AgentProvider, SlotName>> = {
   claude: 'main',
   codex: 'judge',
 };
+
+/**
+ * Join an assignment with the jobs to make a table.
+ *
+ * Loud about a provider it does not recognise rather than indexing
+ * `DEFAULT_SLOT` with garbage. Config validation normally makes that
+ * unreachable, but `loadRun` casts a stored `state.config` with no validation at
+ * all, and an error naming the role beats a crash three frames away.
+ */
+export function tableFor(providers: RoleProviders): RoleTable {
+  if (!isRecord(providers)) {
+    throw new Error('roles must be an object mapping role names to "claude" or "codex"');
+  }
+  const table = {} as RoleTable;
+  for (const role of ROLE_NAMES) {
+    const provider = providers[role];
+    if (!PROVIDERS.includes(provider)) {
+      throw new Error(`roles.${role} is ${JSON.stringify(provider)}; expected "claude" or "codex"`);
+    }
+    table[role] = { ...JOBS[role], provider, slot: DEFAULT_SLOT[provider] };
+  }
+  return table;
+}
+
+/**
+ * The table this config describes.
+ *
+ * Absence - a `state.config` stored before this key existed - falls back to the
+ * default assignment. A *present* value does not, however malformed: `null` is
+ * not the same fact as "no key", and reading it as one would run a different
+ * agent than the config names, silently. `tableFor` reports it instead.
+ */
+export function rolesFor(cfg: Config): RoleTable {
+  const providers: RoleProviders | undefined = cfg.roles;
+  return tableFor(providers === undefined ? DEFAULT_ROLE_PROVIDERS : providers);
+}
+
+/**
+ * The default table, for tests and for leaf callers with no config in hand.
+ * Built through `tableFor`, so it cannot drift from what a configured table is.
+ */
+export const ROLES: RoleTable = tableFor(DEFAULT_ROLE_PROVIDERS);
 
 /**
  * The conversation this role talks through.
@@ -98,20 +193,52 @@ export function codexSandbox(access: Access, cfg: Config): Sandbox {
 }
 
 /**
+ * The roles this provider actually takes a turn in: held in this table AND not
+ * switched off by config.
+ *
+ * The single definition of "what does this provider do on this run", and the one
+ * every enforcement site must ask. Held-but-disabled and not-held are the same
+ * answer, because both mean no turn is ever dispatched to this provider for that
+ * role. Two sites used to answer it separately and neither consulted
+ * `roleEnabled`, so a Codex holding only the answerer with
+ * `questions.askCodex: false` - a provider that never runs - could still fail the
+ * run at preflight on a widened `codex.sandbox`.
+ *
+ * Not the same question as `describedRole`, which picks the label a *prompt*
+ * calls an agent by; a held role is a fair thing to name even where a switch
+ * skips its turn.
+ */
+export function enabledRolesFor(
+  provider: AgentProvider,
+  cfg: Config,
+  roles: RoleTable = rolesFor(cfg),
+): Role[] {
+  return ROLE_NAMES.filter((role) => roles[role].provider === provider && roleEnabled(role, cfg));
+}
+
+/**
  * The strongest access this provider can hold on this run.
  *
- * Derived from ROLES rather than from the provider's name, so preflight's
+ * Derived from the table rather than from the provider's name, so preflight's
  * enforcement level cannot drift out of step with what a turn is actually
  * spawned with. The sandbox clause is not a second notion of write capability:
  * `codexSandbox('read-only', cfg)` is literally what a read-only Codex turn is
  * spawned with, and `--no-codex-session` plus `workspace-write` yields a Codex
- * that can rewrite the tree on every turn while every ROLES entry still says
+ * that can rewrite the tree on every turn while every table entry still says
  * read-only.
  */
-export function providerAccess(provider: AgentProvider, cfg: Config): Access {
-  for (const spec of Object.values(ROLES)) {
-    if (spec.provider === provider && spec.access === 'write') return 'write';
-  }
+export function providerAccess(
+  provider: AgentProvider,
+  cfg: Config,
+  roles: RoleTable = rolesFor(cfg),
+): Access {
+  const held = enabledRolesFor(provider, cfg, roles);
+  // No enabled role: no turn is dispatched to this provider, so there is nothing
+  // it could write and nothing to enforce at write level. Checked first, because
+  // the sandbox clause below describes what a Codex turn is spawned with - and
+  // none is.
+  if (held.length === 0) return 'read-only';
+  if (held.some((role) => roles[role].access === 'write')) return 'write';
   if (provider === 'codex' && codexSandbox('read-only', cfg) !== 'read-only') return 'write';
   return 'read-only';
 }
@@ -132,7 +259,14 @@ const DESCRIBED_BY: readonly Role[] = [
   'planner',
 ];
 
-/** The role a prompt should call this provider by, or null if it holds none. */
+/**
+ * The role a prompt should call this provider by, or null if it holds none.
+ *
+ * Not `enabledRolesFor`: this is what an agent is *here to do*, which is a fair
+ * thing to state about a held role even on a run where a switch skips its turn.
+ * The enforcement question - does this provider take any turn at all - is
+ * `enabledRolesFor`, and only that one consults config.
+ */
 export function describedRole(provider: AgentProvider, roles: RoleTable = ROLES): Role | null {
   return DESCRIBED_BY.find((role) => roles[role].provider === provider) ?? null;
 }
@@ -202,7 +336,7 @@ const SANDBOX_RANK: Readonly<Record<Sandbox, number>> = {
  * probing the wider `danger-full-access` would clear tools the run cannot then
  * execute - preflight passing for a turn that fails.
  */
-export function codexProbeSandbox(cfg: Config, roles: RoleTable = ROLES): Sandbox {
+export function codexProbeSandbox(cfg: Config, roles: RoleTable = rolesFor(cfg)): Sandbox {
   let strongest: Sandbox | null = null;
   for (const spec of Object.values(roles)) {
     if (spec.provider !== 'codex') continue;
@@ -228,15 +362,138 @@ export function providersForRoles(
  *
  * The split it replaces was a role fact stated as a provider one: implementing
  * takes longer than reviewing, so Claude got two keys and Codex one. Which key
- * is read is now decided by the role's access. The *sections* are still
- * provider-named, and Codex still has a single `timeoutMs` - so a writing Codex
- * role would get the reviewing figure. Expressing that needs a new key, which is
- * a config surface and belongs to the change that makes roles configurable.
+ * is read is decided by the role's access, for both providers now that a Codex
+ * role can write: `codex.timeoutMs` is the reviewing figure and
+ * `codex.implementTimeoutMs` the writing one, the same pair Claude has had.
  */
-export function turnTimeoutMs(role: Role, cfg: Config, roles: RoleTable = ROLES): number {
+export function turnTimeoutMs(role: Role, cfg: Config, roles: RoleTable = rolesFor(cfg)): number {
   const spec = roles[role];
   if (spec.provider === 'claude') {
     return spec.access === 'write' ? cfg.claude.implementTimeoutMs : cfg.claude.planTimeoutMs;
   }
-  return cfg.codex.timeoutMs;
+  return spec.access === 'write' ? cfg.codex.implementTimeoutMs : cfg.codex.timeoutMs;
+}
+
+/** What a log line calls each agent. */
+const PROVIDER_LABEL: Readonly<Record<AgentProvider, string>> = {
+  claude: 'Claude',
+  codex: 'Codex',
+};
+
+/**
+ * The name a log line should use for whoever holds this role.
+ *
+ * `'Claude is planning'` was true of one table and read as a fact about the
+ * tool. Under the default assignment every line this produces is byte-identical
+ * to the one it replaced.
+ */
+export function holderLabel(role: Role, roles: RoleTable = ROLES): string {
+  return PROVIDER_LABEL[roles[role].provider];
+}
+
+/**
+ * The roles that produce the work product rather than judge it.
+ *
+ * Two things hang off this. Their conversation grows across every revision and
+ * fix round, so a Codex seat is worth warning about; and when such a role has no
+ * memory it must be handed the plan of record, because `revisePlanPrompt` and
+ * `fixPrompt` deliberately do not restate it. The judging roles are excluded on
+ * purpose: they sit on Codex with `persistSession` on under the default table,
+ * and a warning - or a prompt prefix - firing on every default run is not a
+ * change this may make.
+ */
+export const GENERATIVE_ROLES: readonly Role[] = ['planner', 'implementer'];
+
+/**
+ * Assignments that cannot work, worded for a user. Empty means the table runs.
+ *
+ * `codex exec resume` takes no `-s` flag: a non-default sandbox applies to the
+ * first turn and every resumed turn silently reverts to read-only. So a writing
+ * Codex role with a persisted thread is either an implementer that cannot write
+ * after turn one, or - if the flag were forced off silently - a run whose memory
+ * quietly disappeared. Refused rather than repaired, so the choice stays the
+ * user's.
+ */
+export function roleRefusals(cfg: Config, roles: RoleTable = rolesFor(cfg)): string[] {
+  if (!cfg.codex.persistSession) return [];
+  return ROLE_NAMES.filter(
+    (role) => roles[role].provider === 'codex' && roles[role].access === 'write',
+  ).map(
+    (role) =>
+      `roles.${role} is Codex and codex.persistSession is on. \`codex exec resume\` takes no ` +
+      `-s flag, so the workspace-write sandbox applies to the first turn only and every ` +
+      `resumed turn silently reverts to read-only. Set codex.persistSession to false ` +
+      `(--no-codex-session) for a Codex ${role}.`,
+  );
+}
+
+/** The judging roles, for the independence warning below. */
+const JUDGING_ROLES: readonly Role[] = ['critic', 'answerer', 'reviewer'];
+
+/**
+ * What is worth saying out loud about a table that still runs.
+ *
+ * Each line is about one property of one table, and says only what is true of
+ * it - a warning that overstates is worse than none, because the next one gets
+ * ignored too. Under the default assignment this is empty.
+ */
+/** `roles.critic, roles.reviewer` - a list of settings, not one dotted path. */
+const namePaths = (roles: readonly Role[]): string => roles.map((role) => `roles.${role}`).join(', ');
+
+export function roleWarnings(cfg: Config, roles: RoleTable = rolesFor(cfg)): string[] {
+  const warnings: string[] = [];
+  const implementer = roles.implementer.provider;
+
+  // W1: the judge is the agent that wrote the code. Review independence is most
+  // of what this tool buys, so it is named - and the run continues.
+  const [firstShared, ...restShared] = JUDGING_ROLES.filter(
+    (role) => roles[role].provider === implementer,
+  );
+  if (firstShared !== undefined) {
+    const named = namePaths([firstShared, ...restShared]);
+    // Whether they share a *conversation* is a different fact from sharing a
+    // provider, and claiming memory a one-shot thread does not have would be a
+    // false statement in the one place a user acts on it. One slot answers for
+    // all of them: a table gives a provider one conversation.
+    const persists = SLOTS[slotForRole(firstShared, roles)].persists(cfg);
+    warnings.push(
+      persists
+        ? `${named} share the implementer's ${implementer} conversation, so the judge remembers ` +
+          `writing the code it is judging. Review independence is most of what this tool buys; ` +
+          `the run continues without it.`
+        : `${named} run on the same provider and model as the implementer (${implementer}), so ` +
+          `their judgement is not independent of the code's author. Each turn is one-shot, so no ` +
+          `conversation is shared; the run continues.`,
+    );
+  }
+
+  // W2: rotation belongs to a slot, and not every slot has one.
+  if (!slotRotatable(rotatingSlot(roles))) {
+    warnings.push(
+      `roles.implementer is ${implementer}, whose conversation has no rotation mechanism. ` +
+        'Session rotation and context compaction are off for this run: nothing measures that ' +
+        'thread and nothing can compact it.',
+    );
+  }
+
+  const generativeOnCodex = GENERATIVE_ROLES.filter((role) => roles[role].provider === 'codex');
+  if (generativeOnCodex.length > 0) {
+    const named = namePaths(generativeOnCodex);
+    // W3: a persisted Codex thread doing generative work grows unmeasured.
+    if (cfg.codex.persistSession) {
+      warnings.push(
+        `${named} run on a persisted Codex thread and nothing measures its context. It grows ` +
+          'across every plan revision, question round and fix round with no threshold and no ' +
+          'handoff.',
+      );
+    }
+    // W4: the dollar ceiling never sees the expensive half of such a run.
+    warnings.push(
+      `${named} run on Codex, which reports no cost, so budget.maxCostUsd bounds only the Claude ` +
+        'side and cannot see the expensive half of this run. budget.maxTokens still counts both ' +
+        'agents.',
+    );
+  }
+
+  return warnings;
 }

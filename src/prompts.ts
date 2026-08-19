@@ -192,13 +192,14 @@ export function planPrompt(
   task: string,
   extraContext: string | null,
   environment?: EnvironmentFacts | null,
+  roles: RoleTable = ROLES,
 ): string {
   return `You are planning an implementation. Do NOT write any code or modify any files - this is a planning pass only.
 
 ## Task
 ${task}
 ${extraContext ? `\n## Additional context\n${extraContext}\n` : ''}
-${environmentBlock(environment, 'planner')}## What to produce
+${environmentBlock(environment, 'planner', roles)}## What to produce
 
 Investigate the codebase first (read files, search, inspect the build and test setup), then produce a plan detailed enough that another engineer could execute it without asking you anything.
 
@@ -229,6 +230,7 @@ export function critiquePrompt(
   round: number,
   hasMemory: boolean,
   environment?: EnvironmentFacts | null,
+  roles: RoleTable = ROLES,
 ): string {
   return `You are a senior engineer reviewing an implementation plan before any code is written. Be adversarial: your job is to find what is wrong with it, not to praise it.${
     round > 1 ? continuityNote(round, hasMemory, 'plan') : ''
@@ -236,7 +238,7 @@ export function critiquePrompt(
 
 Read the actual repository to check the plan's claims against reality. A plan that references a file, function, or API that does not exist is a P1.
 
-${environmentBlock(environment, 'reviewer')}
+${environmentBlock(environment, 'reviewer', roles)}
 
 ## Severity
 
@@ -379,6 +381,7 @@ export function reviewPrompt(
   round: number,
   hasMemory: boolean,
   environment?: EnvironmentFacts | null,
+  roles: RoleTable = ROLES,
 ): string {
   return `You are reviewing a code change against the plan it was meant to implement.${
     round > 1 ? continuityNote(round, hasMemory, 'change') : ''
@@ -386,7 +389,7 @@ export function reviewPrompt(
 
 Read the repository as needed - the diff is context, not the whole picture. Check the surrounding code the change interacts with, and run the tests if that is the fastest way to settle a question.
 
-${environmentBlock(environment, 'reviewer')}
+${environmentBlock(environment, 'reviewer', roles)}
 
 Judge two things:
 1. **Correctness on its own terms** - bugs, security issues, race conditions, unhandled errors, resource leaks, broken edge cases.

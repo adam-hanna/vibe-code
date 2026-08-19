@@ -6,16 +6,17 @@ import type { CodexTurnOptions, CodexTurnResult } from '@src/codex.js';
 import * as git from '@src/git.js';
 import * as log from '@src/log.js';
 import * as P from '@src/prompts.js';
-import { PLAN_SCHEMA } from '@src/schemas.js';
 import {
   claudePermission,
   codexSandbox,
+  GENERATIVE_ROLES,
+  holderLabel,
   roleEnabled,
-  ROLES,
+  rolesFor,
   slotForRole,
   turnTimeoutMs,
 } from '@src/roles.js';
-import type { Access, Role, RoleTable } from '@src/roles.js';
+import type { Access, Role, RoleSpec, RoleTable } from '@src/roles.js';
 import { ensureSlotId, markSlotStarted, slotHasMemory, slotId, slotResumeId } from '@src/slots.js';
 import {
   advancePhase,
@@ -83,9 +84,6 @@ export {
 } from '@src/charge.js';
 export type { ExitCode, TurnCharge, TurnSpend } from '@src/charge.js';
 
-/** Read-only toolset for planning turns, alongside plan mode itself. */
-const PLAN_TOOLS = ['Read', 'Glob', 'Grep', 'Bash', 'WebSearch', 'WebFetch'] as const;
-
 export async function orchestrate(state: RunState, cfg: Config, resume: boolean): Promise<RunState> {
   try {
     // Before any phase runs. On a fresh run `state.plan` is null and this does
@@ -104,6 +102,9 @@ export async function orchestrate(state: RunState, cfg: Config, resume: boolean)
 
 async function runPhases(state: RunState, cfg: Config, resume: boolean): Promise<RunState> {
   const cwd = state.targetDir;
+  // Resolved once and threaded, so no step below can answer "who does this job"
+  // from the module default while holding a config that says otherwise.
+  const roles = rolesFor(cfg);
 
   if (!resume) await prepareGit(state, cfg, cwd);
 
@@ -120,7 +121,7 @@ async function runPhases(state: RunState, cfg: Config, resume: boolean): Promise
   // than about the task.
   let plan: Plan;
   if (phase === 'planning') {
-    plan = await planPhase(state, cfg, cwd);
+    plan = await planPhase(state, cfg, cwd, roles);
     if (state.planOnly) {
       state.status = 'planned';
       advancePhase(state, 'complete');
@@ -144,12 +145,18 @@ async function runPhases(state: RunState, cfg: Config, resume: boolean): Promise
     saveState(state);
 
     log.heading('Implementing');
-    const impl = await runTurn(state, cfg, {
-      role: 'implementer',
-      prompt: P.implementPrompt(plan.plan_md, state.carried ?? []),
-      cwd,
-      label: 'implement',
-    });
+    const impl = await runTurn(
+      state,
+      cfg,
+      {
+        role: 'implementer',
+        prompt: P.implementPrompt(plan.plan_md, state.carried ?? []),
+        cwd,
+        label: 'implement',
+      },
+      REAL_AGENTS,
+      roles,
+    );
     artifact(state, 'implementation-report.md', impl.text);
 
     // Advanced before the commit, not after. The implementation turn is the
@@ -170,27 +177,32 @@ async function runPhases(state: RunState, cfg: Config, resume: boolean): Promise
   state.status = 'reviewing';
   saveState(state);
 
-  await reviewPhase(state, cfg, cwd, plan);
+  await reviewPhase(state, cfg, cwd, plan, roles);
 
   state.status = 'done';
   advancePhase(state, 'complete');
   return state;
 }
 
-/** Plan, resolve questions, and critique until Codex raises no P1s. */
-async function planPhase(state: RunState, cfg: Config, cwd: string): Promise<Plan> {
+/** Plan, resolve questions, and critique until the critic raises no P1s. */
+async function planPhase(
+  state: RunState,
+  cfg: Config,
+  cwd: string,
+  roles: RoleTable,
+): Promise<Plan> {
   let plan: Plan;
   if (state.plan) {
     plan = state.plan;
   } else {
     log.heading('Planning');
-    plan = await runPlan(state, cfg, cwd);
+    plan = await runPlan(state, cfg, cwd, roles);
   }
 
   // Answers supplied by a human in NEEDS-INPUT.md, picked up on resume.
   if (state.pendingAnswers && state.pendingAnswers.length > 0) {
     for (const a of state.pendingAnswers) markAnswered(state, a.question);
-    plan = await revisePlan(state, cfg, cwd, { answers: state.pendingAnswers });
+    plan = await revisePlan(state, cfg, cwd, { answers: state.pendingAnswers }, roles);
     state.pendingAnswers = null;
     saveState(state);
   }
@@ -217,9 +229,9 @@ async function planPhase(state: RunState, cfg: Config, cwd: string): Promise<Pla
       state.questionRound += 1;
       saveState(state);
 
-      const answers = await resolveQuestions(state, cfg, cwd, pending, plan);
-      // Codex may have declined every one; only revise if something came back.
-      plan = answers.length > 0 ? await revisePlan(state, cfg, cwd, { answers }) : plan;
+      const answers = await resolveQuestions(state, cfg, cwd, pending, plan, roles);
+      // The answerer may have declined every one; only revise if something came back.
+      plan = answers.length > 0 ? await revisePlan(state, cfg, cwd, { answers }, roles) : plan;
       continue;
     }
 
@@ -233,7 +245,7 @@ async function planPhase(state: RunState, cfg: Config, cwd: string): Promise<Pla
       state,
       cfg,
       async () => {
-        const found = await runCritique(state, cfg, cwd, plan);
+        const found = await runCritique(state, cfg, cwd, plan, roles);
         artifact(state, `plan-critique-${state.planRound}.json`, found);
         collectDeferred(state, found.findings);
         writeFollowUps(state, plan);
@@ -241,6 +253,7 @@ async function planPhase(state: RunState, cfg: Config, cwd: string): Promise<Pla
       },
       undefined,
       'critic',
+      roles,
     );
 
     const decision = gate(critique.findings, cfg.loop.p1Tolerance);
@@ -276,7 +289,7 @@ async function planPhase(state: RunState, cfg: Config, cwd: string): Promise<Pla
       deadlockMsg: 'the planner and reviewer are deadlocked',
     });
 
-    plan = await revisePlan(state, cfg, cwd, { findings: critique.findings });
+    plan = await revisePlan(state, cfg, cwd, { findings: critique.findings }, roles);
   }
 
   const planFile = artifact(state, 'PLAN.md', P.renderPlanDoc(plan));
@@ -287,7 +300,13 @@ async function planPhase(state: RunState, cfg: Config, cwd: string): Promise<Pla
 }
 
 /** Verify, then review, fixing each until both are clean. */
-async function reviewPhase(state: RunState, cfg: Config, cwd: string, plan: Plan): Promise<void> {
+async function reviewPhase(
+  state: RunState,
+  cfg: Config,
+  cwd: string,
+  plan: Plan,
+  roles: RoleTable,
+): Promise<void> {
   for (;;) {
     // Does it run, before asking whether it reads well. A failing suite is an
     // unambiguous P1, and spending a reviewer turn on code that does not
@@ -308,12 +327,18 @@ async function reviewPhase(state: RunState, cfg: Config, cwd: string, plan: Plan
       saveState(state);
 
       log.step('Fixing the verification failure');
-      const repair = await runTurn(state, cfg, {
-        role: 'implementer',
-        prompt: P.fixPrompt([verified], state.verifyRound),
-        cwd,
-        label: `verify-fix-${state.verifyRound}`,
-      });
+      const repair = await runTurn(
+        state,
+        cfg,
+        {
+          role: 'implementer',
+          prompt: P.fixPrompt([verified], state.verifyRound),
+          cwd,
+          label: `verify-fix-${state.verifyRound}`,
+        },
+        REAL_AGENTS,
+        roles,
+      );
       artifact(state, `verify-fix-${state.verifyRound}.md`, repair.text);
       await maybeCommit(cfg, cwd, `vibe: fix verification failure (round ${state.verifyRound})`);
       continue;
@@ -335,7 +360,7 @@ async function reviewPhase(state: RunState, cfg: Config, cwd: string, plan: Plan
       state,
       cfg,
       async () => {
-        const found = await runReview(state, cfg, cwd, plan);
+        const found = await runReview(state, cfg, cwd, plan, roles);
         artifact(state, `code-review-${state.reviewRound}.json`, found);
         collectDeferred(state, found.findings);
         writeFollowUps(state, plan);
@@ -343,6 +368,7 @@ async function reviewPhase(state: RunState, cfg: Config, cwd: string, plan: Plan
       },
       undefined,
       'reviewer',
+      roles,
     );
 
     const decision = gate(review.findings, cfg.loop.p1Tolerance);
@@ -373,12 +399,18 @@ async function reviewPhase(state: RunState, cfg: Config, cwd: string, plan: Plan
       );
       for (const f of decision.tolerated) log.info(`  ~ ${f.title}`);
 
-      const finalFix = await runTurn(state, cfg, {
-        role: 'implementer',
-        prompt: P.fixPrompt(review.findings, state.reviewRound),
-        cwd,
-        label: `final-fix-${state.reviewRound}`,
-      });
+      const finalFix = await runTurn(
+        state,
+        cfg,
+        {
+          role: 'implementer',
+          prompt: P.fixPrompt(review.findings, state.reviewRound),
+          cwd,
+          label: `final-fix-${state.reviewRound}`,
+        },
+        REAL_AGENTS,
+        roles,
+      );
       artifact(state, `fix-report-${state.reviewRound}.md`, finalFix.text);
       await maybeCommit(cfg, cwd, `vibe: address carried review findings (final round)`);
 
@@ -406,12 +438,18 @@ async function reviewPhase(state: RunState, cfg: Config, cwd: string, plan: Plan
     saveState(state);
 
     log.step(`Fixing ${stoppers.length} blocking finding(s)`);
-    const fix = await runTurn(state, cfg, {
-      role: 'implementer',
-      prompt: P.fixPrompt(review.findings, state.reviewRound),
-      cwd,
-      label: `fix-${state.reviewRound}`,
-    });
+    const fix = await runTurn(
+      state,
+      cfg,
+      {
+        role: 'implementer',
+        prompt: P.fixPrompt(review.findings, state.reviewRound),
+        cwd,
+        label: `fix-${state.reviewRound}`,
+      },
+      REAL_AGENTS,
+      roles,
+    );
     artifact(state, `fix-report-${state.reviewRound}.md`, fix.text);
     await maybeCommit(cfg, cwd, `vibe: address review round ${state.reviewRound}`);
   }
@@ -862,18 +900,27 @@ export {
   claudePermission,
   codexProbeSandbox,
   codexSandbox,
+  DEFAULT_ROLE_PROVIDERS,
   describedRole,
+  enabledRolesFor,
+  GENERATIVE_ROLES,
+  holderLabel,
   providerAccess,
   providersForRoles,
+  READ_ONLY_TOOLS,
   roleEnabled,
+  roleRefusals,
   ROLES,
+  rolesFor,
+  roleWarnings,
   ROTATING_ROLE,
   rotatesConcurrentlyWith,
   rotatingSlot,
   slotForRole,
+  tableFor,
   turnTimeoutMs,
 } from '@src/roles.js';
-export type { Access, Role, RoleSpec, RoleTable } from '@src/roles.js';
+export type { Access, Role, RoleProviders, RoleSpec, RoleTable } from '@src/roles.js';
 export {
   SLOTS,
   slotHasMemory,
@@ -903,10 +950,23 @@ export interface TurnRequest {
 }
 
 export interface TurnOutcome {
-  /** Claude: the result text. Codex: the raw structured-output file. */
+  /** Claude: the result text. Codex: the raw last-message file. */
   text: string;
-  /** Codex: its parsed structured output. Null for Claude, whose callers parse `text`. */
+  /** Codex: its parsed structured output. Null for Claude, and for a turn with no schema. */
   structured: unknown;
+}
+
+/**
+ * The turn's structured result, for a caller that needs one.
+ *
+ * Codex parses its own output file, so `structured` is already there; Claude's
+ * arrives as text under `--json-schema`. Reading it here rather than at the seam
+ * keeps the parse where the caller knows what the text was for - and keeps a
+ * turn whose text is not JSON a *successful turn* that a caller then rejects,
+ * which is exactly what `parsePlan(parseStructured(text))` has always done.
+ */
+export function readStructured(outcome: TurnOutcome): unknown {
+  return outcome.structured ?? parseStructured(outcome.text);
 }
 
 /** A request with the role's own timeout already resolved onto it. */
@@ -918,13 +978,23 @@ export function runTurn(
   cfg: Config,
   req: TurnRequest,
   turns: AgentTurns = REAL_AGENTS,
-  /** The same seam as `turns`, for the table rather than the providers. */
-  roles: RoleTable = ROLES,
+  /**
+   * The same seam as `turns`, for the table rather than the providers. Defaulted
+   * from the config rather than to `ROLES`: a config is in hand here, and
+   * resolving the module constant instead would ignore the run's own assignment.
+   */
+  roles: RoleTable = rolesFor(cfg),
 ): Promise<TurnOutcome> {
   const spec = roles[req.role];
   const dispatch: DispatchRequest = {
     ...req,
     timeoutMs: req.timeoutMs ?? turnTimeoutMs(req.role, cfg, roles),
+    // The schema and the tool list are the role's, and the request still wins
+    // for a caller with a reason of its own. Both ride on the role for the same
+    // reason the timeout does: they are facts about the job, and a Claude critic
+    // needs the schema its Codex twin was always given.
+    jsonSchema: req.jsonSchema ?? spec.schema,
+    tools: req.tools ?? spec.tools,
   };
   // Returned, not awaited: `runTurn` adds no continuation of its own between a
   // provider finishing and its charge being applied. See `applyCharge`.
@@ -935,6 +1005,34 @@ export function runTurn(
   return spec.provider === 'claude'
     ? claudeDispatch(state, cfg, dispatch, spec.access, roles, turns.claude)
     : codexDispatch(state, cfg, dispatch, spec, roles, turns.codex);
+}
+
+/**
+ * What a turn is told when its conversation carries nothing.
+ *
+ * Not conditional on there being a briefing: a rotation that could not summarise
+ * the outgoing session still starts a fresh one, and the plan of record has to
+ * travel with it either way - `revisePlanPrompt` and the fix prompts all assume
+ * the plan is already in the conversation. The full plan document, not
+ * `plan_md`: the boundary the plan drew is part of the plan of record, and a
+ * session rehydrated without it can revise the plan into a different one without
+ * ever being told it had a boundary.
+ *
+ * Shared by both dispatch paths, and scoped to the generative roles. A Codex
+ * implementer must run with `--no-codex-session` (config refuses the pair), so
+ * it has no thread memory at all - without this it would be asked to fix code
+ * against a plan it cannot see. A judging role is excluded: its prompts restate
+ * the plan themselves and take an explicit `hasMemory`, so today's first Codex
+ * critique turn is unchanged, as is every Claude turn under the default table -
+ * where Claude holds exactly the two generative roles.
+ */
+function freshConversationPrefix(state: RunState, role: Role, hasMemory: boolean): string {
+  if (hasMemory || !GENERATIVE_ROLES.includes(role)) return '';
+  return P.handoffContext(
+    state.handoff,
+    state.plan === null ? null : P.renderPlanDoc(state.plan),
+    state.handoffStale === true,
+  );
 }
 
 async function claudeDispatch(
@@ -952,20 +1050,7 @@ async function claudeDispatch(
   if (shouldRotate(state, cfg, roles)) await rotateSession(state, cfg, turn, roles);
 
   const resume = slotHasMemory(state, cfg, slot);
-  // Not conditional on there being a briefing: a rotation that could not
-  // summarise the outgoing session still starts a fresh one, and the plan of
-  // record has to travel with it either way - revisePlanPrompt and the fix
-  // prompts all assume the plan is already in the conversation.
-  // The full plan document, not `plan_md`: the boundary the plan drew is part
-  // of the plan of record, and a session rehydrated without it can revise the
-  // plan into a different one without ever being told it had a boundary.
-  const prompt = resume
-    ? req.prompt
-    : P.handoffContext(
-        state.handoff,
-        state.plan === null ? null : P.renderPlanDoc(state.plan),
-        state.handoffStale === true,
-      ) + req.prompt;
+  const prompt = freshConversationPrefix(state, req.role, resume) + req.prompt;
 
   const result = await withRateLimitRetry(state, cfg, req.label, 'claude', () =>
     turn({
@@ -1101,18 +1186,27 @@ function describeReset(err: RateLimitError): string {
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function runPlan(state: RunState, cfg: Config, cwd: string): Promise<Plan> {
-  log.step('Claude is planning (read-only)');
-  const { text } = await runTurn(state, cfg, {
-    role: 'planner',
-    prompt: P.planPrompt(state.task, state.extraContext, state.environment),
-    cwd,
-    tools: PLAN_TOOLS,
-    jsonSchema: PLAN_SCHEMA,
-    label: 'plan',
-  });
+async function runPlan(
+  state: RunState,
+  cfg: Config,
+  cwd: string,
+  roles: RoleTable,
+): Promise<Plan> {
+  log.step(`${holderLabel('planner', roles)} is planning (read-only)`);
+  const outcome = await runTurn(
+    state,
+    cfg,
+    {
+      role: 'planner',
+      prompt: P.planPrompt(state.task, state.extraContext, state.environment, roles),
+      cwd,
+      label: 'plan',
+    },
+    REAL_AGENTS,
+    roles,
+  );
 
-  const plan = parsePlan(parseStructured(text));
+  const plan = parsePlan(readStructured(outcome));
   state.plan = plan;
   saveState(state);
   artifact(state, `plan-${state.planRound}.json`, plan);
@@ -1132,29 +1226,39 @@ interface ReviseArgs {
   answers?: readonly Answer[] | undefined;
 }
 
-async function revisePlan(state: RunState, cfg: Config, cwd: string, args: ReviseArgs): Promise<Plan> {
+async function revisePlan(
+  state: RunState,
+  cfg: Config,
+  cwd: string,
+  args: ReviseArgs,
+  roles: RoleTable,
+): Promise<Plan> {
   state.planRound += 1;
   saveState(state);
-  log.step(`Claude is revising the plan (round ${state.planRound})`);
+  log.step(`${holderLabel('planner', roles)} is revising the plan (round ${state.planRound})`);
 
-  const { text } = await runTurn(state, cfg, {
-    role: 'planner',
-    prompt: P.revisePlanPrompt({
-      findings: args.findings,
-      answers: args.answers,
-      // The plan of record's boundary, restated: a revision returns the whole
-      // plan, and a session rotated concurrently with the critique would
-      // otherwise re-derive `out_of_scope` from nothing.
-      outOfScope: state.plan?.out_of_scope,
-      round: state.planRound,
-    }),
-    cwd,
-    tools: PLAN_TOOLS,
-    jsonSchema: PLAN_SCHEMA,
-    label: `revise-${state.planRound}`,
-  });
+  const outcome = await runTurn(
+    state,
+    cfg,
+    {
+      role: 'planner',
+      prompt: P.revisePlanPrompt({
+        findings: args.findings,
+        answers: args.answers,
+        // The plan of record's boundary, restated: a revision returns the whole
+        // plan, and a session rotated concurrently with the critique would
+        // otherwise re-derive `out_of_scope` from nothing.
+        outOfScope: state.plan?.out_of_scope,
+        round: state.planRound,
+      }),
+      cwd,
+      label: `revise-${state.planRound}`,
+    },
+    REAL_AGENTS,
+    roles,
+  );
 
-  const plan = parsePlan(parseStructured(text));
+  const plan = parsePlan(readStructured(outcome));
   state.plan = plan;
   saveState(state);
   artifact(state, `plan-${state.planRound}.json`, plan);
@@ -1175,11 +1279,12 @@ async function codexDispatch(
   state: RunState,
   cfg: Config,
   req: DispatchRequest,
-  spec: { access: Access; schema: object },
+  spec: Pick<RoleSpec, 'access' | 'schema'>,
   roles: RoleTable,
   turn: CodexTurnFn,
 ): Promise<TurnOutcome> {
   const slot = slotForRole(req.role, roles);
+  const prompt = freshConversationPrefix(state, req.role, slotHasMemory(state, cfg, slot)) + req.prompt;
 
   // Through the same retry the Claude turns use, so a Codex rate limit gets the
   // wait, the maxWaitMinutes cap and the resumable exit that already exist
@@ -1192,7 +1297,7 @@ async function codexDispatch(
     async () => {
       await checkCodexLimits(state, cfg, req.cwd, req.label);
       return turn({
-        prompt: req.prompt,
+        prompt,
         schema: spec.schema,
         schemaName: req.label,
         artifactDir: artifactDir(state, 'codex'),
@@ -1286,7 +1391,12 @@ async function checkCodexLimits(
  * second site that ignores an injected table; the two call sites are top-level
  * loop steps, which are never handed one.
  */
-function roleHasMemory(state: RunState, cfg: Config, role: Role, roles: RoleTable = ROLES): boolean {
+function roleHasMemory(
+  state: RunState,
+  cfg: Config,
+  role: Role,
+  roles: RoleTable = rolesFor(cfg),
+): boolean {
   return slotHasMemory(state, cfg, slotForRole(role, roles));
 }
 
@@ -1295,22 +1405,30 @@ async function runCritique(
   cfg: Config,
   cwd: string,
   plan: Plan,
+  roles: RoleTable,
 ): Promise<FindingsReport> {
-  log.step('Codex is critiquing the plan');
-  const { structured } = await runTurn(state, cfg, {
-    role: 'critic',
-    prompt: P.critiquePrompt(
-      plan.plan_md,
-      plan.assumptions,
-      plan.out_of_scope,
-      state.planRound + 1,
-      roleHasMemory(state, cfg, 'critic'),
-      state.environment,
-    ),
-    cwd,
-    label: `critique-${state.planRound}`,
-  });
-  return parseFindings(structured);
+  log.step(`${holderLabel('critic', roles)} is critiquing the plan`);
+  const outcome = await runTurn(
+    state,
+    cfg,
+    {
+      role: 'critic',
+      prompt: P.critiquePrompt(
+        plan.plan_md,
+        plan.assumptions,
+        plan.out_of_scope,
+        state.planRound + 1,
+        roleHasMemory(state, cfg, 'critic', roles),
+        state.environment,
+        roles,
+      ),
+      cwd,
+      label: `critique-${state.planRound}`,
+    },
+    REAL_AGENTS,
+    roles,
+  );
+  return parseFindings(readStructured(outcome));
 }
 
 async function runReview(
@@ -1318,26 +1436,34 @@ async function runReview(
   cfg: Config,
   cwd: string,
   plan: Plan,
+  roles: RoleTable,
 ): Promise<FindingsReport> {
-  log.step('Codex is reviewing the implementation');
+  log.step(`${holderLabel('reviewer', roles)} is reviewing the implementation`);
   const diff = await git.diffSince(cwd, state.baseSha);
   const files = await git.changedFiles(cwd, state.baseSha);
 
-  const { structured } = await runTurn(state, cfg, {
-    role: 'reviewer',
-    prompt: P.reviewPrompt(
-      diff,
-      files,
-      plan.plan_md,
-      plan.out_of_scope,
-      state.reviewRound + 1,
-      roleHasMemory(state, cfg, 'reviewer'),
-      state.environment,
-    ),
-    cwd,
-    label: `review-${state.reviewRound}`,
-  });
-  return parseFindings(structured);
+  const outcome = await runTurn(
+    state,
+    cfg,
+    {
+      role: 'reviewer',
+      prompt: P.reviewPrompt(
+        diff,
+        files,
+        plan.plan_md,
+        plan.out_of_scope,
+        state.reviewRound + 1,
+        roleHasMemory(state, cfg, 'reviewer', roles),
+        state.environment,
+        roles,
+      ),
+      cwd,
+      label: `review-${state.reviewRound}`,
+    },
+    REAL_AGENTS,
+    roles,
+  );
+  return parseFindings(readStructured(outcome));
 }
 
 /**
@@ -1359,7 +1485,9 @@ async function resolveQuestions(
   cwd: string,
   questions: readonly OpenQuestion[],
   plan: Plan,
+  roles: RoleTable,
 ): Promise<Answer[]> {
+  const answerer = holderLabel('answerer', roles);
   const blockingCount = questions.filter((q) => q.blocking).length;
   log.heading(
     `${questions.length} open question(s) - ${blockingCount} blocking, ${questions.length - blockingCount} advisory`,
@@ -1374,15 +1502,21 @@ async function resolveQuestions(
     throw new Escalation(EXIT.NEEDS_HUMAN, 'Blocking questions need answers.', [...blockers]);
   }
 
-  log.step('Codex is answering');
-  const { structured } = await runTurn(state, cfg, {
-    role: 'answerer',
-    prompt: P.answerPrompt(questions, plan.plan_md),
-    cwd,
-    label: `answers-${state.planRound}`,
-  });
+  log.step(`${answerer} is answering`);
+  const outcome = await runTurn(
+    state,
+    cfg,
+    {
+      role: 'answerer',
+      prompt: P.answerPrompt(questions, plan.plan_md),
+      cwd,
+      label: `answers-${state.planRound}`,
+    },
+    REAL_AGENTS,
+    roles,
+  );
 
-  const { answers } = parseAnswers(structured);
+  const { answers } = parseAnswers(readStructured(outcome));
   artifact(state, `answers-${state.planRound}.json`, answers);
 
   // Every question asked is marked answered regardless of outcome, so a
@@ -1402,7 +1536,7 @@ async function resolveQuestions(
   const refusedAdvisory = questions.filter((q) => !q.blocking && refused.some((a) => matches(q, a)));
 
   for (const q of refusedAdvisory) {
-    const reason = refused.find((a) => matches(q, a))?.rationale ?? 'Codex declined to answer.';
+    const reason = refused.find((a) => matches(q, a))?.rationale ?? `${answerer} declined to answer.`;
     state.deferredQuestions.push({
       question: q.question,
       kind: q.kind,
@@ -1417,12 +1551,12 @@ async function resolveQuestions(
   if (refusedBlocking.length > 0) {
     throw new Escalation(
       EXIT.NEEDS_HUMAN,
-      `${refusedBlocking.length} blocking question(s) need you - Codex declined to guess at product intent.`,
+      `${refusedBlocking.length} blocking question(s) need you - ${answerer} declined to guess at product intent.`,
       refusedBlocking,
     );
   }
 
-  log.ok(`Codex answered ${usable.length} of ${questions.length} question(s)`);
+  log.ok(`${answerer} answered ${usable.length} of ${questions.length} question(s)`);
   return usable;
 }
 

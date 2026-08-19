@@ -5,8 +5,8 @@ import { claudeBin, parseProbeTurn } from '@src/claude.js';
 import { codexBin, parseProbeStream } from '@src/codex.js';
 import { hostExecutableFor } from '@src/hosttools.js';
 import { run } from '@src/proc.js';
-import { codexProbeSandbox, providerAccess } from '@src/roles.js';
-import type { Access } from '@src/roles.js';
+import { codexProbeSandbox, enabledRolesFor, providerAccess, rolesFor } from '@src/roles.js';
+import type { Access, RoleTable } from '@src/roles.js';
 import { contractForAgent, validateContract } from '@src/runtime.js';
 import type {
   AgentProvider,
@@ -95,6 +95,8 @@ export async function preflight(
   probes: PreflightProbes = REAL_PROBES,
 ): Promise<PreflightReport> {
   const contract = contractForPhases(cfg.toolchain, phases);
+  // The run's own table, so enforcement follows who actually takes a turn.
+  const roles = rolesFor(cfg);
 
   // Each agent is probed only against the tools it is responsible for running.
   const claude = await probes.claude(
@@ -107,10 +109,10 @@ export async function preflight(
   const codex = await probes.codex(targetDir, cfg, contractForAgent(contract, 'codex'), phases);
 
   const verdicts: AgentVerdict[] = [
-    { provider: 'claude', access: providerAccess('claude', cfg), result: claude },
-    { provider: 'codex', access: providerAccess('codex', cfg), result: codex },
+    { provider: 'claude', access: providerAccess('claude', cfg, roles), result: claude },
+    { provider: 'codex', access: providerAccess('codex', cfg, roles), result: codex },
   ];
-  const { blockingReasons, warnings } = adjudicate(verdicts, cfg);
+  const { blockingReasons, warnings } = adjudicate(verdicts, cfg, roles);
 
   return { claude, codex, ok: blockingReasons.length === 0, blockingReasons, warnings };
 }
@@ -138,6 +140,7 @@ const LABEL: Readonly<Record<AgentProvider, string>> = { claude: 'Claude', codex
 export function adjudicate(
   verdicts: readonly AgentVerdict[],
   cfg: Config,
+  roles: RoleTable = rolesFor(cfg),
 ): { blockingReasons: string[]; warnings: string[] } {
   const blockingReasons: string[] = [];
   const warnings: string[] = [];
@@ -157,8 +160,15 @@ export function adjudicate(
   // are separately observed and imply different fixes - widen the sandbox
   // versus repair the tool - and folding them together would hide which tool
   // failed behind a message about policy.
+  //
+  // Gated on Codex holding an *enabled* role, and through the same predicate
+  // `providerAccess` uses rather than a second spelling of the question. What
+  // makes this worth stopping for is that a Codex turn would be spawned into a
+  // sandbox that cannot run the toolchain; where no such turn is dispatched, the
+  // finding describes a shell nothing will use.
   const codex = verdicts.find((verdict) => verdict.provider === 'codex');
-  if (codex?.result.prepared?.mechanisms.includes('sandbox-policy') === true) {
+  const codexRuns = enabledRolesFor('codex', cfg, roles).length > 0;
+  if (codexRuns && codex?.result.prepared?.mechanisms.includes('sandbox-policy') === true) {
     blockingReasons.push(
       `Codex's ${cfg.codex.sandbox} sandbox blocks required tools. ` +
         'Only danger-full-access permits running toolchain binaries outside the workspace.',
