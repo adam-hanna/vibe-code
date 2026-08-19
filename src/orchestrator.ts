@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { applyCharge, Escalation, EXIT, fmtTokens } from '@src/charge.js';
+import { applyCharge, chargeFailure, enforceCeilings, Escalation, EXIT, fmtTokens } from '@src/charge.js';
 import { claudeTurn, parseStructured, RateLimitError } from '@src/claude.js';
 import { codexTurn } from '@src/codex.js';
 import type { CodexTurnOptions, CodexTurnResult } from '@src/codex.js';
@@ -63,8 +63,17 @@ import type {
 // module's adapters use, and this module already imports context.js - so
 // leaving it here would be a cycle. Re-exported so callers and tests keep one
 // import site.
-export { applyCharge, Escalation, EXIT } from '@src/charge.js';
-export type { ExitCode, TurnCharge } from '@src/charge.js';
+export {
+  applyCharge,
+  attachSpend,
+  chargeFailure,
+  enforceCeilings,
+  Escalation,
+  EXIT,
+  spendOf,
+  takeSpend,
+} from '@src/charge.js';
+export type { ExitCode, TurnCharge, TurnSpend } from '@src/charge.js';
 
 /** Read-only toolset for planning turns, alongside plan mode itself. */
 const PLAN_TOOLS = ['Read', 'Glob', 'Grep', 'Bash', 'WebSearch', 'WebFetch'] as const;
@@ -896,7 +905,7 @@ async function claudeDispatch(
         state.handoffStale === true,
       ) + req.prompt;
 
-  const result = await withRateLimitRetry(state, cfg, req.label, () =>
+  const result = await withRateLimitRetry(state, cfg, req.label, 'claude', () =>
     turn({
       prompt,
       sessionId: state.sessionId,
@@ -961,13 +970,29 @@ async function withRateLimitRetry<T>(
   state: RunState,
   cfg: Config,
   label: string,
+  provider: 'claude' | 'codex',
   work: () => Promise<T>,
 ): Promise<T> {
   for (;;) {
     try {
       return await work();
     } catch (err) {
+      // What this attempt spent, whether or not it is retryable, and per attempt
+      // rather than per turn: a turn that burns tokens, fails, waits and burns
+      // them again used to have nothing consulted between the two. Any ceiling
+      // the charge crosses is held rather than thrown - it must not displace
+      // `err`, which has to reach cli.ts as the type it already is - and the
+      // totals it updated are what the check below reads.
+      chargeFailure(state, cfg, err, { label, provider });
+
       if (!(err instanceof RateLimitError)) throw err;
+
+      // Before the wait, not after it, and this is the one place a failed turn's
+      // charge is allowed to end the run: a run already over its ceiling must
+      // not sit out a reset and then spend again. Cost is Claude-only here for
+      // the reason applyCharge records - `state.costUsd` can rise during a Codex
+      // turn from a concurrent rotation.
+      enforceCeilings(state, cfg, provider === 'claude');
 
       const waitMs = plannedWait(err, cfg);
       const minutes = Math.ceil(waitMs / 60_000);
@@ -1094,22 +1119,28 @@ async function codexDispatch(
   // Through the same retry the Claude turns use, so a Codex rate limit gets the
   // wait, the maxWaitMinutes cap and the resumable exit that already exist
   // rather than a second implementation of all three.
-  const { structured, raw, sessionId, tokens } = await withRateLimitRetry(state, cfg, req.label, async () => {
-    await checkCodexLimits(state, cfg, req.cwd, req.label);
-    return turn({
-      prompt: req.prompt,
-      schema: spec.schema,
-      schemaName: req.label,
-      artifactDir: artifactDir(state, 'codex'),
-      model: cfg.codex.model,
-      effort: cfg.codex.effort,
-      sandbox: codexSandbox(spec.access, cfg),
-      cwd: req.cwd,
-      timeoutMs: req.timeoutMs,
-      sessionId: cfg.codex.persistSession ? state.codexSessionId : null,
-      progress: progressOptions(state, cfg, req.label),
-    });
-  });
+  const { structured, raw, sessionId, tokens } = await withRateLimitRetry(
+    state,
+    cfg,
+    req.label,
+    'codex',
+    async () => {
+      await checkCodexLimits(state, cfg, req.cwd, req.label);
+      return turn({
+        prompt: req.prompt,
+        schema: spec.schema,
+        schemaName: req.label,
+        artifactDir: artifactDir(state, 'codex'),
+        model: cfg.codex.model,
+        effort: cfg.codex.effort,
+        sandbox: codexSandbox(spec.access, cfg),
+        cwd: req.cwd,
+        timeoutMs: req.timeoutMs,
+        sessionId: cfg.codex.persistSession ? state.codexSessionId : null,
+        progress: progressOptions(state, cfg, req.label),
+      });
+    },
+  );
 
   if (cfg.codex.persistSession && sessionId && sessionId !== state.codexSessionId) {
     const isFirst = state.codexSessionId === null;

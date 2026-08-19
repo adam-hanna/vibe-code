@@ -201,6 +201,17 @@ export function run(bin: string, args: readonly string[], options: RunOptions = 
       fn();
     };
 
+    // The accumulated `stdout` dies with this closure, and that is deliberate.
+    // A timed-out turn's usage is not a number worth charging: Codex reports
+    // usage only on `turn.completed`, which a killed turn never emits, so there
+    // is literally nothing to recover; and Claude's timed-out stream has no
+    // `result` envelope, leaving only the per-message `usage` blocks that
+    // claude.ts's `extractUsage` already documents as unsummable - their cache
+    // reads repeat the whole prompt per request. Either figure would put a
+    // number in `state.tokensUsed` that nobody could trace to a source, against
+    // a ceiling that stops runs. Carrying the partial output out would also
+    // change this boundary for git, verify and the app-server, which do not
+    // want it.
     if (timeoutMs !== undefined) {
       timer = setTimeout(() => {
         child.kill('SIGKILL');

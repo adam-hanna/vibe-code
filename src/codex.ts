@@ -1,5 +1,6 @@
 import { writeFileSync, readFileSync, existsSync, renameSync, rmSync } from 'node:fs';
 import path from 'node:path';
+import { attachSpend } from '@src/charge.js';
 import { resolveBin, run } from '@src/proc.js';
 import type { RunFn } from '@src/proc.js';
 import { detail, warn } from '@src/log.js';
@@ -382,13 +383,27 @@ export async function codexTurn(
     const events = parseEvents(stdout);
     const returnedSession = events.threadId ?? SESSION_ID_RE.exec(stderr)?.[1] ?? sessionId ?? null;
 
+    // What the turn spent before it failed. `parseEvents` has already read the
+    // `turn.completed` usage block by this point, so every throw below can carry
+    // it out and let the dispatch layer charge the failure through the shared
+    // accounting rather than losing it. `costUsd` is null, not zero: Codex
+    // reports no cost, and that is the distinction `applyCharge` routes on.
+    // Where no `turn.completed` was seen this is ZERO_TOKENS, and `attachSpend`
+    // records nothing at all for it: a turn that reported no usage and one that
+    // reported none worth charging are the same answer to the only question the
+    // accounting asks, so `spendOf` says null for both.
+    const spent = { costUsd: null, tokens: events.tokens.total };
+
     if (!existsSync(outFile)) {
       // `turn.failed` states the actual cause (a bad model name, a refused
       // request); the raw streams are the fallback when it does not.
       const cause = events.failure === null ? '' : `\ncodex reported: ${events.failure}`;
-      throw new Error(
-        `codex wrote no structured output (exit ${code}).${cause}\n` +
-          `stderr:\n${stderr.slice(-2000)}\nstdout:\n${stdout.slice(-1000)}`,
+      throw attachSpend(
+        new Error(
+          `codex wrote no structured output (exit ${code}).${cause}\n` +
+            `stderr:\n${stderr.slice(-2000)}\nstdout:\n${stdout.slice(-1000)}`,
+        ),
+        spent,
       );
     }
 
@@ -397,7 +412,10 @@ export async function codexTurn(
       // and a file beside it is either a partial write or an artifact of an
       // earlier phase of the same turn; accepting it would hand the loop a
       // result the agent said was not one.
-      throw new Error(`codex reported the turn failed (exit ${code}): ${events.failure ?? 'no detail'}`);
+      throw attachSpend(
+        new Error(`codex reported the turn failed (exit ${code}): ${events.failure ?? 'no detail'}`),
+        spent,
+      );
     }
 
     // Always read as UTF-8: Codex emits smart quotes and em dashes that mangle
@@ -408,7 +426,10 @@ export async function codexTurn(
       structured = JSON.parse(raw) as unknown;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      throw new Error(`codex output was not valid JSON: ${message}\n${raw.slice(0, 1500)}`);
+      throw attachSpend(
+        new Error(`codex output was not valid JSON: ${message}\n${raw.slice(0, 1500)}`),
+        spent,
+      );
     }
 
     if (code !== 0) {
