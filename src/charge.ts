@@ -59,6 +59,115 @@ export interface TurnCharge {
 }
 
 /**
+ * What a turn spent, in the shape `applyCharge` already takes.
+ *
+ * `costUsd` follows the same rule `TurnCharge` does: null where the provider
+ * reports none.
+ */
+export interface TurnSpend {
+  costUsd: number | null;
+  tokens: number;
+}
+
+/**
+ * What a failed turn spent, keyed by the error carrying it out.
+ *
+ * A side table rather than a field, and deliberately not a new error class:
+ * every error raised today must still be raised with the same type and reach
+ * the same handler in cli.ts, and the value has to ride on a `RateLimitError`
+ * as readily as on a plain `Error` - the retry loop's `instanceof` check is
+ * what decides whether a turn is retried at all. Nothing in `err.message`,
+ * `err.stack`, `writeEscalation` or the `error` event changes.
+ */
+const SPENT = new WeakMap<object, TurnSpend>();
+
+/**
+ * Record what the turn this error ends spent. Returns `err`, so a throw site
+ * can attach and throw in one expression.
+ */
+export function attachSpend<E>(err: E, spend: TurnSpend): E {
+  if (typeof err === 'object' && err !== null) SPENT.set(err, spend);
+  return err;
+}
+
+/** What a failed turn spent, without consuming it. For tests and diagnostics. */
+export function spendOf(err: unknown): TurnSpend | null {
+  if (typeof err !== 'object' || err === null) return null;
+  return SPENT.get(err) ?? null;
+}
+
+/**
+ * Read and clear, so the same failure cannot be charged twice as it unwinds
+ * through more than one frame that knows how to pay.
+ */
+export function takeSpend(err: unknown): TurnSpend | null {
+  const spend = spendOf(err);
+  if (spend !== null) SPENT.delete(err as object);
+  return spend;
+}
+
+/**
+ * Charge what a failed turn spent, if it reported anything.
+ *
+ * Returns the `Escalation` a ceiling raised rather than throwing it: a failure
+ * is already in flight, and it is the one that must reach cli.ts with its own
+ * type and its own exit code, so each call site decides whether the ceiling may
+ * displace it. The totals are updated either way, so a held ceiling is deferred
+ * to the next check, not lost.
+ *
+ * An accounting fault - `recordEvent` persists state.json, so a full disk or a
+ * deleted run directory can throw here - is reported and swallowed for the same
+ * reason. It arrives *after* `state.tokensUsed` has been updated, so the spend
+ * is still counted; letting it out would replace the run's real failure with a
+ * write error, which is precisely what charging on the way out must never do.
+ * This differs from `chargePreflight`, which propagates: nothing is in flight
+ * there.
+ */
+export function chargeFailure(
+  state: RunState,
+  cfg: Config,
+  err: unknown,
+  meta: { label: string; provider: 'claude' | 'codex' },
+): Escalation | null {
+  const spend = takeSpend(err);
+  if (spend === null) return null;
+  // Nothing reported is nothing to charge: no totals to move, and no event
+  // claiming a turn spent when it did not.
+  if (spend.tokens <= 0 && (spend.costUsd ?? 0) <= 0) return null;
+
+  const message = err instanceof Error ? err.message : String(err);
+  try {
+    applyCharge(state, cfg, {
+      costUsd: spend.costUsd,
+      tokens: spend.tokens,
+      event: {
+        type: 'turn_failed',
+        data: {
+          label: meta.label,
+          provider: meta.provider,
+          tokens: spend.tokens,
+          costUsd: spend.costUsd,
+          error: message.slice(0, 200),
+        },
+      },
+      describe: () =>
+        `${meta.label} (failed): ${fmtTokens(spend.tokens)} tok` +
+        (spend.costUsd === null ? ', cost not reported' : `, ~$${spend.costUsd.toFixed(3)}`) +
+        ` (run ${fmtTokens(state.tokensUsed)} tok / ~$${state.costUsd.toFixed(2)})`,
+      warnings: [],
+    });
+  } catch (chargeErr: unknown) {
+    if (chargeErr instanceof Escalation) return chargeErr;
+    const why = chargeErr instanceof Error ? chargeErr.message : String(chargeErr);
+    log.warn(
+      `Could not record what the failed "${meta.label}" turn spent (${why}); ` +
+        'the tokens are in the run totals but the ceilings were not consulted.',
+    );
+  }
+  return null;
+}
+
+/**
  * The per-turn accounting every turn shares - both providers, and the session
  * rotation in `@src/context.js`.
  *
@@ -82,13 +191,26 @@ export function applyCharge(state: RunState, cfg: Config, charge: TurnCharge): v
   log.detail(charge.describe());
   for (const warning of charge.warnings) log.warn(warning);
 
-  enforceTokenCeiling(state, cfg);
   // Only where the provider reported a cost. The check has always lived on the
   // Claude path alone, and `state.costUsd` can rise during a Codex turn from a
   // concurrent rotation - so running it here unconditionally would end the run
   // one turn earlier than it does today, before the critique or review artifact
   // that turn just paid for had been written.
-  if (charge.costUsd !== null) enforceCostCeiling(state, cfg);
+  enforceCeilings(state, cfg, charge.costUsd !== null);
+}
+
+/**
+ * The ceilings, without a charge.
+ *
+ * `includeCost` mirrors the routing `applyCharge` applies, because it is the
+ * same rule and a second definition of what a ceiling means is how the session
+ * rotation went unmetered in the first place. The retry loop needs this without
+ * a charge: a failed attempt has already paid through `chargeFailure`, and what
+ * is left to decide is whether the run may make another one.
+ */
+export function enforceCeilings(state: RunState, cfg: Config, includeCost: boolean): void {
+  enforceTokenCeiling(state, cfg);
+  if (includeCost) enforceCostCeiling(state, cfg);
 }
 
 /**

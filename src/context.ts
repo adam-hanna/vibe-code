@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { applyCharge, Escalation, fmtTokens } from '@src/charge.js';
+import { applyCharge, chargeFailure, Escalation, fmtTokens } from '@src/charge.js';
 import { claudeTurn } from '@src/claude.js';
 import type { ClaudeTurnOptions } from '@src/claude.js';
 import * as log from '@src/log.js';
@@ -103,6 +103,9 @@ export async function rotateSession(
   const handoffModel = baseline && state.contextModel !== undefined ? state.contextModel : cfg.claude.model;
 
   let result: ClaudeTurnResult | null = null;
+  // A ceiling crossed by a *failed* handoff, held until the rotation this
+  // function exists to perform has actually happened. See the catch below.
+  let held: Escalation | null = null;
   try {
     result = await turn({
       prompt: handoffPrompt(),
@@ -117,7 +120,20 @@ export async function rotateSession(
       progress: progressOptions(state, cfg, 'compact'),
     });
   } catch (err: unknown) {
+    // A handoff that failed still spent. Charged through the seam a dispatched
+    // turn pays through, and before the split below so both paths charge: a
+    // handoff summarises a whole session, so these are among the largest turns
+    // a run makes, and losing one of them to a failure is the same hole #24
+    // closed for the ones that succeed. A briefing that reported nothing - the
+    // usual case, and every existing test - charges nothing.
+    const ceiling = chargeFailure(state, cfg, err, { label: 'compact', provider: 'claude' });
+    // The measured path is unchanged, and the ceiling is deliberately dropped
+    // here rather than raised: `err` must reach `withConcurrentCompaction` as
+    // the same object of the same type it does today, or a swallowed compaction
+    // failure becomes a run-ending escalation. The charge stays in the totals,
+    // so the next one raises it.
     if (!baseline) throw err;
+    held = ceiling;
     const message = err instanceof Error ? err.message : String(err);
     log.warn(`Handoff briefing failed (${message}); rotating to a fresh session without a new one.`);
   }
@@ -162,8 +178,17 @@ export async function rotateSession(
     // handoffContext regardless of either, so a fresh session is never started
     // blind to what it is meant to be building.
     state.handoffStale = true;
+    // Still 0/0: no briefing was produced, so the rotation delivered nothing,
+    // and what the failed turn spent is recorded by its own `turn_failed` event
+    // rather than folded into one that would then claim a handoff it does not
+    // have. One operation, one `session_rotated` event, unchanged.
     recordEvent(state, 'session_rotated', rotationEvent(0, 0));
     log.ok('Rotated to a fresh session (no handoff briefing)');
+    // Last, for the reason the successful path's charge is last: the rotation
+    // has already happened - new session id, measurement reset - so the ceiling
+    // stops what comes next rather than the rotation itself, and the run is
+    // resumable on the session it just moved to.
+    if (held !== null) throw held;
     return;
   }
 
@@ -230,7 +255,13 @@ export async function withConcurrentCompaction<T>(
   // the assignment living inside a closure.
   const escalated: { err: Escalation | null } = { err: null };
 
-  const [result] = await Promise.all([
+  // `allSettled`, not `all`: `Promise.all` rejects the moment `work` does,
+  // leaving the rotation running - charging, logging and mutating state - into a
+  // run whose failure handling has already begun, and leaving `escalated.err`
+  // never read. Settling both first makes the run record coherent at the moment
+  // the error propagates. On the path where nothing fails the two are
+  // indistinguishable: both await both.
+  const [outcome] = await Promise.allSettled([
     work(),
     rotateSession(state, cfg, turn).catch((err: unknown) => {
       // A budget escalation is the run being told to stop, not a lost
@@ -255,9 +286,24 @@ export async function withConcurrentCompaction<T>(
     }),
   ]);
 
+  // A `work` that throws wins: the run is ending either way, and its own error
+  // says more about why than the ceiling does. The escalation is outranked, not
+  // lost - `rotateSession` charged before it raised, so the totals are right and
+  // the next charge raises it again - but it is said out loud, because a ceiling
+  // enforced and then passed over in silence is the failure mode this whole
+  // change is about.
+  if (outcome.status === 'rejected') {
+    if (escalated.err !== null) {
+      log.warn(
+        `Compaction hit a budget ceiling (${escalated.err.message}) while the turn beside it ` +
+          'failed; that failure is what ends the run, and the rotation is already charged.',
+      );
+    }
+    throw outcome.reason;
+  }
+
   // After `work` has resolved and its caller-owned records have been written by
-  // the callback itself. A `work` that throws wins: the run is ending either
-  // way, and its own error says more about why than the ceiling does.
+  // the callback itself.
   if (escalated.err !== null) throw escalated.err;
-  return result;
+  return outcome.value;
 }

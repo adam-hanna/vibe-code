@@ -1,3 +1,4 @@
+import { attachSpend } from '@src/charge.js';
 import { resolveBin, run } from '@src/proc.js';
 import type { RunFn } from '@src/proc.js';
 import { detail, warn } from '@src/log.js';
@@ -137,10 +138,18 @@ export async function claudeTurn(
       const result = parsed['result'];
       const detail = `${String(status ?? '')} ${String(result ?? '')}`.trim();
 
-      const limit = detectRateLimit(`${detail}\n${stderr}`);
-      if (limit) throw limit;
+      // What the turn spent before it failed, read from the same envelope the
+      // success path costs a completed turn from. The figure is in hand at the
+      // throw site; carrying it out is what lets the dispatch layer charge a
+      // failure through `applyCharge` instead of losing it. Attached to the
+      // error rather than changing what is thrown: both of these must still
+      // reach their existing handlers as the types they already are.
+      const spent = { costUsd: num(parsed['total_cost_usd']), tokens: extractTokens(parsed).total };
 
-      throw new Error(`claude turn failed (${subtype}): ${detail}`);
+      const limit = detectRateLimit(`${detail}\n${stderr}`);
+      if (limit) throw attachSpend(limit, spent);
+
+      throw attachSpend(new Error(`claude turn failed (${subtype}): ${detail}`), spent);
     }
 
     const denialsRaw = parsed['permission_denials'];
