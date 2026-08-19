@@ -1,8 +1,8 @@
 import path from 'node:path';
 import { ClaudeAdapter } from '@src/adapters/claude-adapter.js';
-import { CodexAdapter } from '@src/adapters/codex-adapter.js';
-import { claudeBin } from '@src/claude.js';
-import { codexBin } from '@src/codex.js';
+import { CodexAdapter, selectProbeTranscript } from '@src/adapters/codex-adapter.js';
+import { claudeBin, parseProbeTurn } from '@src/claude.js';
+import { codexBin, parseProbeStream } from '@src/codex.js';
 import { hostExecutableFor } from '@src/hosttools.js';
 import { run } from '@src/proc.js';
 import { providerAccess } from '@src/roles.js';
@@ -22,12 +22,34 @@ import type { Config } from '@src/types.js';
 const PROBE_MODEL = 'haiku';
 const PROBE_TIMEOUT_MS = 5 * 60 * 1000;
 
+/**
+ * What a probe's agent turns spent.
+ *
+ * `costUsd` is null where the provider reports none, which is the same
+ * distinction `applyCharge` already routes on - Codex reports no cost, so its
+ * probe is counted in tokens only.
+ */
+export interface ProbeUsage {
+  costUsd: number | null;
+  tokens: number;
+  /** Agent turns behind the figure: Claude's probe can make two, Codex can retry. */
+  turns: number;
+}
+
 export interface AgentPreflight {
   runtime: AgentRuntime | null;
   violations: readonly ContractViolation[];
   prepared: PreparedEnvironment | null;
   /** Set when the probe itself failed, as distinct from the contract failing. */
   probeError: string | null;
+  /**
+   * What this probe spent, or absent where nothing reported usage.
+   *
+   * Reported, not charged: `vibe doctor` probes with no `RunState` at all, so
+   * preflight cannot be the thing that pays. The run path charges this through
+   * the shared accounting seam before the first real turn.
+   */
+  usage?: ProbeUsage | null | undefined;
 }
 
 export interface PreflightReport {
@@ -158,6 +180,33 @@ export function contractForPhases(
   return out;
 }
 
+/**
+ * A probe's running total, and the figure to report.
+ *
+ * Null until a turn actually reports one: a probe that was skipped, failed
+ * before spending, or timed out has no figure, and inventing one would make the
+ * run's totals a number nobody could trace to a source. A turn killed by the
+ * timeout is the unrecoverable case - `run()` rejects and the child's stdout
+ * goes with it, so what it spent cannot be known here at all.
+ */
+function accumulator(costed: boolean): {
+  add: (costUsd: number, tokens: number) => void;
+  snapshot: () => ProbeUsage | null;
+} {
+  const spend = { costUsd: 0, tokens: 0, turns: 0 };
+  return {
+    add: (costUsd, tokens) => {
+      spend.costUsd += costUsd;
+      spend.tokens += tokens;
+      spend.turns += 1;
+    },
+    snapshot: () =>
+      spend.turns === 0
+        ? null
+        : { costUsd: costed ? spend.costUsd : null, tokens: spend.tokens, turns: spend.turns },
+  };
+}
+
 async function preflightClaude(
   targetDir: string,
   cfg: Config,
@@ -165,13 +214,34 @@ async function preflightClaude(
   phases: readonly Phase[],
   workDir: string,
 ): Promise<AgentPreflight> {
+  // Claude reports a cost, so the probe is charged on the Claude side - the same
+  // routing an ordinary Claude turn takes.
+  const spend = accumulator(true);
+
   const adapter = new ClaudeAdapter(async ({ args, prompt, cwd, timeoutMs }) => {
+    // stream-json rather than plain output: it is the mode that reports what the
+    // turn spent, and `claude.ts` already parses it. `--verbose` is required
+    // alongside it under `-p`, and `--tools` stays last because it is variadic.
     const result = await run(
       claudeBin(),
-      ['-p', '--model', PROBE_MODEL, '--permission-mode', 'bypassPermissions', ...args, '--tools', 'Bash'],
+      [
+        '-p',
+        '--output-format', 'stream-json',
+        '--verbose',
+        '--model', PROBE_MODEL,
+        '--permission-mode', 'bypassPermissions',
+        ...args,
+        '--tools', 'Bash',
+      ],
       { input: prompt, cwd, timeoutMs },
     );
-    return result.stdout;
+
+    const turn = parseProbeTurn(result.stdout);
+    if (turn.usage !== null) spend.add(turn.usage.costUsd, turn.usage.tokens.total);
+    // The result event's text, not the raw stream: `verifyRepair` reads its
+    // probe block out of this, and NDJSON carries that block with its newlines
+    // escaped, which parses as one unusable line.
+    return turn.text;
   }, path.join(workDir, 'preflight'));
 
   const ctx = { cwd: targetDir, contract, timeoutMs: PROBE_TIMEOUT_MS };
@@ -180,11 +250,13 @@ async function preflightClaude(
   try {
     runtime = await adapter.probeRuntime(ctx);
   } catch (err) {
+    // Still reported: a probe that spent and then failed has spent.
     return {
       runtime: null,
       violations: [],
       prepared: null,
       probeError: err instanceof Error ? err.message : String(err),
+      usage: spend.snapshot(),
     };
   }
 
@@ -195,18 +267,25 @@ async function preflightClaude(
   if (prepared.mechanisms.includes('claude-env-file')) {
     const verification = await adapter.verifyRepair(ctx);
     if (verification.ok) {
-      return { runtime, violations: [], prepared, probeError: null };
+      return { runtime, violations: [], prepared, probeError: null, usage: spend.snapshot() };
     }
     return {
       runtime,
       violations: violationsFor(runtime, contract, phases),
       prepared,
       probeError: `repair did not take effect: ${verification.detail}`,
+      usage: spend.snapshot(),
     };
   }
 
   void cfg;
-  return { runtime, violations: violationsFor(runtime, contract, phases), prepared, probeError: null };
+  return {
+    runtime,
+    violations: violationsFor(runtime, contract, phases),
+    prepared,
+    probeError: null,
+    usage: spend.snapshot(),
+  };
 }
 
 async function preflightCodex(
@@ -215,11 +294,18 @@ async function preflightCodex(
   contract: ToolchainContract,
   phases: readonly Phase[],
 ): Promise<AgentPreflight> {
+  // Codex reports no cost, so its probe is counted in tokens only - exactly as a
+  // Codex turn is.
+  const spend = accumulator(false);
+
   const adapter = new CodexAdapter(async ({ prompt, args, cwd, timeoutMs }) => {
+    // `--json` is the only mode that reports token usage, and it changes nothing
+    // else about the turn. `codexTurn` already sends it beside these same flags.
     const result = await run(
       codexBin(),
       [
         'exec',
+        '--json',
         '-m',
         cfg.codex.model,
         '-c',
@@ -231,23 +317,37 @@ async function preflightCodex(
       ],
       { input: prompt, cwd, timeoutMs },
     );
-    return result.stdout;
+
+    const stream = parseProbeStream(result.stdout);
+    if (stream.tokens !== null) spend.add(0, stream.tokens.total);
+    // The prompt is handed over so an echo of it can be excluded: it names both
+    // sentinels itself, and extractRecord takes the first pair it finds.
+    return selectProbeTranscript(stream.strings, stream.plain, prompt);
   }, cfg.codex.sandbox);
 
   let runtime: AgentRuntime;
   try {
     runtime = await adapter.probeRuntime({ cwd: targetDir, contract, timeoutMs: PROBE_TIMEOUT_MS });
   } catch (err) {
+    // Both attempts behind a give-up were paid for, so the figure is reported
+    // even though the probe failed.
     return {
       runtime: null,
       violations: [],
       prepared: null,
       probeError: err instanceof Error ? err.message : String(err),
+      usage: spend.snapshot(),
     };
   }
 
   const prepared = await adapter.prepareEnvironment(runtime, contract);
-  return { runtime, violations: violationsFor(runtime, contract, phases), prepared, probeError: null };
+  return {
+    runtime,
+    violations: violationsFor(runtime, contract, phases),
+    prepared,
+    probeError: null,
+    usage: spend.snapshot(),
+  };
 }
 
 function violationsFor(

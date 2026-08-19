@@ -267,6 +267,40 @@ function parseStream(stdout: string): StreamParse {
   return { result, lastAssistantUsage };
 }
 
+/** What one probe turn reported, beside the text a plain `-p` run would print. */
+export interface ProbeTurnOutput {
+  /** The result event's text; the raw stdout when the stream had no result event. */
+  text: string;
+  /** Null when nothing reported usage - there is then nothing to charge. */
+  usage: { costUsd: number; tokens: TokenUsage } | null;
+}
+
+/**
+ * A probe turn's text and what it spent.
+ *
+ * Preflight runs its probes through `run()` directly rather than `claudeTurn`,
+ * because a probe's verdict comes from the artifacts its hook wrote, not from
+ * the envelope. This reads the same `--output-format stream-json` stream
+ * `claudeTurn` reads, so the probe can report what it cost without a second
+ * parser - and returns the result event's text, so the adapter reading the turn
+ * sees the same single final message a plain `-p` run printed.
+ *
+ * Deliberately does not throw on `is_error` or a failed subtype, which is the
+ * one place this file's "what counts as a failed turn" rule is knowingly not
+ * applied: a turn that failed after spending has still spent, and the caller
+ * needs the figure more than it needs the verdict.
+ */
+export function parseProbeTurn(stdout: string): ProbeTurnOutput {
+  const { result } = parseStream(stdout);
+  if (result === null) return { text: stdout, usage: null };
+
+  const text = typeof result['result'] === 'string' ? result['result'] : stdout;
+  return {
+    text,
+    usage: { costUsd: num(result['total_cost_usd']), tokens: extractTokens(result) },
+  };
+}
+
 /**
  * Live context occupancy, which drives session rotation.
  *

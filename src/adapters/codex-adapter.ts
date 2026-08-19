@@ -1,4 +1,5 @@
 import { detectPathStyle, toAgentPath } from '@src/pathstyle.js';
+import type { ProbeString } from '@src/codex.js';
 import type {
   AccessPolicy,
   AgentAdapter,
@@ -27,8 +28,8 @@ export type CodexProbeExecutor = (input: {
 }) => Promise<string>;
 
 /** Delimiters that let vibe find the record inside the model's prose. */
-const BEGIN = 'VIBE-PROBE-BEGIN';
-const END = 'VIBE-PROBE-END';
+export const BEGIN = 'VIBE-PROBE-BEGIN';
+export const END = 'VIBE-PROBE-END';
 
 /** Attempts before giving up on the model emitting a parseable block. */
 const PROBE_ATTEMPTS = 2;
@@ -179,6 +180,84 @@ export function renderProbePrompt(contract: ToolchainContract, insist = false): 
         ]
       : []),
   ].join('\n');
+}
+
+/** Whether `text` holds a whole sentinel pair, which is what `extractRecord` needs. */
+function hasBlock(text: string): boolean {
+  const start = text.indexOf(BEGIN);
+  return start >= 0 && text.indexOf(END, start + 1) > start;
+}
+
+/** How many `key=value` lines a reassembly's block yields - how whole it is. */
+function recordLines(text: string): number {
+  const block = extractRecord(text) ?? '';
+  return block.split(/\r?\n/).filter((line) => line.includes('=')).length;
+}
+
+/** The last of `strings` holding a whole block, or null. */
+function lastWithBlock(strings: readonly ProbeString[]): string | null {
+  for (let i = strings.length - 1; i >= 0; i -= 1) {
+    const value = strings[i]?.value ?? '';
+    if (hasBlock(value)) return value;
+  }
+  return null;
+}
+
+/**
+ * The string the probe record should be read out of, from a `--json` stream.
+ *
+ * Not a concatenation of everything. `extractRecord` takes the FIRST sentinel
+ * pair it finds, and `renderProbePrompt` names both sentinels in its own
+ * instructions - so an echoed prompt, a `command` string mentioning them, or a
+ * truncated streaming partial would beat the model's actual answer and produce
+ * a confidently wrong runtime. Candidates are therefore ranked and one is
+ * chosen, and where a whole block exists the choice is the LAST one: the answer
+ * always follows the instructions that asked for it.
+ */
+export function selectProbeTranscript(
+  strings: readonly ProbeString[],
+  plain: string,
+  promptEcho: string,
+): string {
+  // What vibe sent, removed outright wherever it is echoed back: an echo is
+  // never the answer, and it is the one candidate guaranteed to carry a whole
+  // sentinel pair.
+  const echo = promptEcho.trim();
+  const candidates =
+    echo === '' ? strings : strings.filter((probe) => !probe.value.includes(echo));
+  const settled = candidates.filter((probe) => !probe.partial && !probe.meta);
+
+  const answer = lastWithBlock(settled);
+  if (answer !== null) return answer;
+
+  // A whole block anywhere else: a schema that marks the final message as an
+  // update, or output arriving under an input-looking key.
+  const anywhere = lastWithBlock(candidates);
+  if (anywhere !== null) return anywhere;
+
+  // No single string holds one, so the stream split the answer across fragments.
+  // Reassembled in arrival order rather than dropped - a stream that sends its
+  // reply in deltas answered the probe, it did not fail it.
+  //
+  // Two ways to put the pieces back, because two kinds of fragment occur: a
+  // delta is a slice of one text and carries its own newlines, while a
+  // line-wise event has had them stripped. Joining the wrong way still yields
+  // both sentinels, so "has a block" cannot choose between them - the record
+  // with more `key=value` lines in it is the one that came back whole.
+  const fragments = candidates.filter((probe) => !probe.meta).map((probe) => probe.value);
+  let best: { text: string; lines: number } | null = null;
+  for (const joiner of ['', '\n']) {
+    const joined = fragments.join(joiner);
+    if (!hasBlock(joined)) continue;
+    const lines = recordLines(joined);
+    if (best === null || lines > best.lines) best = { text: joined, lines };
+  }
+  if (best !== null) return best.text;
+
+  // Nothing usable. Hand back what there is: `probeRuntime` retries and then
+  // reports a probe error, exactly as it does today for an unusable turn.
+  const rest = settled.map((probe) => probe.value).join('\n');
+  return rest === '' ? plain : rest;
 }
 
 /** Pull the sentinel-delimited block out of the transcript. */

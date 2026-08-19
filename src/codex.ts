@@ -153,6 +153,125 @@ function parseEvents(stdout: string): CodexEvents {
   return out;
 }
 
+/** One string seen in the event stream, with what the stream said about it. */
+export interface ProbeString {
+  value: string;
+  /** From a streaming partial (`item.updated`, a `*.delta` type) - a prefix, not a result. */
+  partial: boolean;
+  /**
+   * An envelope field or a tool's input: it describes the turn rather than
+   * answering it, so it is never the probe record.
+   */
+  meta: boolean;
+}
+
+export interface CodexProbeStream {
+  /** Every string in the stream, in the order it arrived. */
+  strings: readonly ProbeString[];
+  /** Null when no `turn.completed` usage block was seen. */
+  tokens: TokenUsage | null;
+  /** Lines that were not JSON at all - what plain `exec` would have printed. */
+  plain: string;
+}
+
+/**
+ * Keys whose strings describe the turn or feed a tool, rather than answering.
+ *
+ * Two groups, and both matter. The envelope names (`type`, `id`, ...) would
+ * otherwise be spliced between the fragments of a streamed reply, corrupting
+ * the very record the reassembly exists to recover. The input names (`command`,
+ * `prompt`, ...) are what vibe or the model sent, and the probe prompt names
+ * both sentinels itself, so a command echoing them must not pass as the answer.
+ */
+const META_KEYS: ReadonlySet<string> = new Set([
+  // Envelope.
+  'type',
+  'id',
+  'item_id',
+  'thread_id',
+  'turn_id',
+  'role',
+  'status',
+  'model',
+  // Input.
+  'command',
+  'input',
+  'prompt',
+  'instructions',
+  'arguments',
+  'argv',
+  'cwd',
+]);
+
+/**
+ * Read a probe turn's `--json` stream: its token usage, and every string in it.
+ *
+ * Deliberately sentinel-agnostic, and deliberately keyed off nothing but the
+ * event `type` prefix: this module knows the wire format, not what the probe is
+ * looking for. Choosing which of these strings holds the probe record is
+ * `selectProbeTranscript`'s job, in the adapter that owns the sentinels. Keying
+ * this off `item.completed` or `agent_message` would couple token accounting to
+ * item names that cannot be verified without a live Codex.
+ */
+export function parseProbeStream(stdout: string): CodexProbeStream {
+  const strings: ProbeString[] = [];
+  const plain: string[] = [];
+  let tokens: TokenUsage | null = null;
+
+  for (const line of stdout.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed === '') continue;
+
+    let event: unknown = null;
+    if (trimmed.startsWith('{')) {
+      try {
+        event = JSON.parse(trimmed);
+      } catch {
+        event = null;
+      }
+    }
+    if (!isRecord(event)) {
+      plain.push(line);
+      continue;
+    }
+
+    const type = typeof event['type'] === 'string' ? event['type'] : '';
+    if (type === 'turn.completed' && isRecord(event['usage'])) {
+      tokens = extractTokens(event['usage']);
+      continue;
+    }
+    collectStrings(event, type === 'item.updated' || type.endsWith('.delta'), false, strings);
+  }
+
+  return { strings, tokens, plain: plain.join('\n') };
+}
+
+/**
+ * Every string under `value`, in order, carrying down what the event said about it.
+ *
+ * `meta` is inherited rather than tested per level: the elements of a `command`
+ * array are as much input as the array itself.
+ */
+function collectStrings(
+  value: unknown,
+  partial: boolean,
+  meta: boolean,
+  out: ProbeString[],
+): void {
+  if (typeof value === 'string') {
+    if (value !== '') out.push({ value, partial, meta });
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectStrings(item, partial, meta, out);
+    return;
+  }
+  if (!isRecord(value)) return;
+  for (const [key, nested] of Object.entries(value)) {
+    collectStrings(nested, partial, meta || META_KEYS.has(key), out);
+  }
+}
+
 /**
  * Clear `file`, keeping its content at `keepAt` if there was any.
  *
