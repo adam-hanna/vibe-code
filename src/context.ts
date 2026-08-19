@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { applyCharge, Escalation, fmtTokens } from '@src/charge.js';
 import { claudeTurn } from '@src/claude.js';
 import type { ClaudeTurnOptions } from '@src/claude.js';
 import * as log from '@src/log.js';
@@ -138,23 +139,15 @@ export async function rotateSession(
     recordMeasuredWindow(state, handoffModel, result.usage.contextWindow);
   }
 
-  if (result === null) {
-    // The previous briefing is kept - it is the only account of the run the new
-    // session can be given - but flagged, because it describes an earlier point
-    // than the session just abandoned. The plan of record is attached by
-    // handoffContext regardless of either, so a fresh session is never started
-    // blind to what it is meant to be building.
-    state.handoffStale = true;
-  } else {
-    state.costUsd = Number((state.costUsd + result.costUsd).toFixed(4));
-    state.handoff = result.text;
-    delete state.handoffStale;
-    artifact(state, `handoff-${state.sessionRotations}.md`, result.text);
-  }
-
-  recordEvent(state, 'session_rotated', {
+  // One operation, one event, whichever path it took - so `session_rotated`
+  // still means "a rotation happened here" and nothing has to correlate two
+  // records of the same one. `tokens` is the field that was missing: a handoff
+  // summarises a whole session, so these are among the largest turns a run
+  // makes and every one of them used to be invisible to `budget.maxTokens`.
+  const rotationEvent = (costUsd: number, tokens: number): Record<string, unknown> => ({
     rotation: state.sessionRotations,
-    costUsd: result?.costUsd ?? 0,
+    costUsd,
+    tokens,
     newSessionId: state.sessionId,
     contextModel: cfg.claude.model,
     baseline,
@@ -162,11 +155,56 @@ export async function rotateSession(
     handoff: result !== null,
   });
 
-  log.ok(
-    result === null
-      ? 'Rotated to a fresh session (no handoff briefing)'
-      : `Rotated to a fresh session (handoff-${state.sessionRotations}.md)`,
-  );
+  if (result === null) {
+    // The previous briefing is kept - it is the only account of the run the new
+    // session can be given - but flagged, because it describes an earlier point
+    // than the session just abandoned. The plan of record is attached by
+    // handoffContext regardless of either, so a fresh session is never started
+    // blind to what it is meant to be building.
+    state.handoffStale = true;
+    recordEvent(state, 'session_rotated', rotationEvent(0, 0));
+    log.ok('Rotated to a fresh session (no handoff briefing)');
+    return;
+  }
+
+  state.handoff = result.text;
+  delete state.handoffStale;
+  // The write cannot be allowed to cost the run the accounting for a turn it
+  // has already paid for - the same reasoning that moved the critique and
+  // review artifacts inside the callback in `orchestrator.ts`. A throw here
+  // would skip the charge entirely, and under `withConcurrentCompaction` it
+  // would then be swallowed as an ordinary compaction failure, leaving a
+  // rotated session that no ceiling ever saw. The briefing is a record of a
+  // rotation that has already happened; losing the record is the smaller loss,
+  // and `state.handoff` is set above either way, so the next session still gets
+  // it.
+  try {
+    artifact(state, `handoff-${state.sessionRotations}.md`, result.text);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    log.warn(`Could not write handoff-${state.sessionRotations}.md (${message}); rotation still charged.`);
+  }
+
+  // Before the charge, not after: the charge can now end the run, and the
+  // rotation it would be reporting has already happened - new session id,
+  // measurement reset, briefing on disk. Suppressing the line would leave the
+  // log claiming a rotation that is committed in state never completed.
+  log.ok(`Rotated to a fresh session (handoff-${state.sessionRotations}.md)`);
+
+  // Through the same seam an ordinary turn pays through, rather than the
+  // hand-rolled cost line this replaced. That line added cost and nothing else,
+  // so the tokens went uncounted and no ceiling was ever consulted. `applyCharge`
+  // is synchronous, so this still cannot land inside the accounting of a Codex
+  // turn running concurrently under `withConcurrentCompaction`.
+  applyCharge(state, cfg, {
+    costUsd: result.costUsd,
+    tokens: result.tokens.total,
+    event: { type: 'session_rotated', data: rotationEvent(result.costUsd, result.tokens.total) },
+    describe: () =>
+      `compact: ${fmtTokens(result.tokens.total)} tok, ~$${result.costUsd.toFixed(3)} ` +
+      `(run ${fmtTokens(state.tokensUsed)} tok / ~$${state.costUsd.toFixed(2)})`,
+    warnings: [],
+  });
 }
 
 /**
@@ -180,21 +218,46 @@ export async function withConcurrentCompaction<T>(
   state: RunState,
   cfg: Config,
   work: () => Promise<T>,
+  /** The seam `rotateSession` already has, for the same reason: this wrapper's
+   * escalation path cannot be exercised against a real `claude`. */
+  turn: ClaudeTurnFn = claudeTurn,
 ): Promise<T> {
   if (!cfg.context.compactDuringCodex || !shouldRotate(state, cfg)) {
     return work();
   }
 
+  // A box rather than a `let`, so the check below is not narrowed to `null` by
+  // the assignment living inside a closure.
+  const escalated: { err: Escalation | null } = { err: null };
+
   const [result] = await Promise.all([
     work(),
-    rotateSession(state, cfg).catch((err: unknown) => {
+    rotateSession(state, cfg, turn).catch((err: unknown) => {
+      // A budget escalation is the run being told to stop, not a lost
+      // optimisation, so it is held and rethrown below rather than swallowed.
+      // Held rather than rejected straight into Promise.all: `work` is a turn
+      // already paid for, and abandoning it mid-flight would discard the
+      // critique or review the run just bought - the same reasoning applyCharge
+      // records for not running the cost ceiling during a Codex turn.
+      if (err instanceof Escalation) {
+        escalated.err = err;
+        return;
+      }
       // Compaction on a measured session is an optimisation; losing it must not
-      // fail the run. A baseline rotation never lands here - it rotates even
-      // when the briefing fails, because continuing on an unattributable
-      // session is the thing it exists to prevent.
+      // fail the run. A baseline rotation whose *briefing* fails never lands
+      // here either - it rotates anyway and returns, because continuing on an
+      // unattributable session is the thing it exists to prevent. A baseline
+      // rotation that succeeds is charged like any other and can trip either
+      // ceiling, which is why the escalation branch above is not conditional on
+      // the rotation having been a measured one.
       const message = err instanceof Error ? err.message : String(err);
       log.warn(`Compaction failed, continuing on the existing session: ${message}`);
     }),
   ]);
+
+  // After `work` has resolved and its caller-owned records have been written by
+  // the callback itself. A `work` that throws wins: the run is ending either
+  // way, and its own error says more about why than the ceiling does.
+  if (escalated.err !== null) throw escalated.err;
   return result;
 }
