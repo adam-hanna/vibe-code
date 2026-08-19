@@ -1,12 +1,12 @@
-import { randomUUID } from 'node:crypto';
 import { applyCharge, chargeFailure, Escalation, fmtTokens } from '@src/charge.js';
 import { claudeTurn } from '@src/claude.js';
 import type { ClaudeTurnOptions } from '@src/claude.js';
 import * as log from '@src/log.js';
 import { progressOptions, rememberContextWindow } from '@src/progress.js';
 import { handoffPrompt } from '@src/prompts.js';
-import { ROLES, rotatesConcurrentlyWith } from '@src/roles.js';
+import { ROLES, rotatesConcurrentlyWith, rotatingSlot } from '@src/roles.js';
 import type { Role, RoleTable } from '@src/roles.js';
+import { ensureSlotId, resetSlot, slotId, slotRotatable, slotStarted } from '@src/slots.js';
 import {
   artifact,
   measuredRatio,
@@ -28,13 +28,26 @@ import type { ClaudeTurnResult, Config, ContextUsage, RunState } from '@src/type
  * losing the two things that matter: the plan, and the hard-won knowledge of
  * the codebase.
  *
- * Codex needs no equivalent. Every Codex call is a one-shot `codex exec` with
- * no resumed session, so its context does not accumulate across the run.
+ * This is a *client-origin* slot operation: vibe mints the replacement id and
+ * spawns the next turn under it. A slot whose id the provider mints has no such
+ * mechanism - `codex exec resume` has no session-id flag, so starting a fresh
+ * thread with a briefing is a different operation, not this one with another
+ * provider behind it. `SLOTS.judge.reset` is therefore null, and everything
+ * below refuses to rotate a slot that cannot be reset rather than half-doing it.
  */
 
-export function shouldRotate(state: RunState, cfg: Config): boolean {
+export function shouldRotate(state: RunState, cfg: Config, roles: RoleTable = ROLES): boolean {
   if (!cfg.context.enabled) return false;
-  if (!state.sessionStarted) return false;
+
+  const slot = rotatingSlot(roles);
+  // A slot with no reset mechanism cannot be rotated, so nothing may decide it
+  // is time to: `withConcurrentCompaction` would otherwise permit concurrent
+  // work on the strength of a rotation that cannot happen.
+  if (!slotRotatable(slot)) return false;
+  // `started`, not `hasMemory`: the question is whether a conversation has
+  // accumulated anything, which is a fact about turns rather than about whether
+  // the run is configured to carry it.
+  if (!slotStarted(state, slot)) return false;
 
   const ratio = measuredRatio(state, cfg.claude.model);
   // An unattributable ratio is unknown, not a number. A non-zero one is still
@@ -88,7 +101,17 @@ export async function rotateSession(
   state: RunState,
   cfg: Config,
   turn: ClaudeTurnFn = claudeTurn,
+  roles: RoleTable = ROLES,
 ): Promise<void> {
+  const slot = rotatingSlot(roles);
+  // Before anything is spent. `shouldRotate` already refuses such a slot, so
+  // reaching this means a caller decided to rotate on its own, and a handoff
+  // turn charged against a conversation that cannot be replaced is worse than
+  // the throw.
+  if (!slotRotatable(slot)) {
+    throw new Error(`slot "${slot}" has no rotation mechanism; nothing may compact it`);
+  }
+
   const measured = measuredRatio(state, cfg.claude.model);
   const baseline = measured === null;
   log.step(
@@ -111,7 +134,10 @@ export async function rotateSession(
   try {
     result = await turn({
       prompt: handoffPrompt(),
-      sessionId: state.sessionId,
+      sessionId: ensureSlotId(state, slot),
+      // A literal, not `slotHasMemory`: a rotation is only ever entered on a
+      // conversation that has started, and deriving it here would make the flag
+      // depend on state a direct caller may have set by hand.
       resume: true,
       permissionMode: 'plan',
       model: handoffModel,
@@ -141,8 +167,10 @@ export async function rotateSession(
   }
 
   state.sessionRotations += 1;
-  state.sessionId = randomUUID();
-  state.sessionStarted = false;
+  // A fresh id and a cleared marker together: what a slot's fresh conversation
+  // looks like is stated in one place, so the next turn cannot read the new id
+  // as evidence that anything has run on it.
+  resetSlot(state, slot);
   resetContextMeasurement(state, cfg.claude.model);
 
   // After the reset, which would otherwise wipe it. The handoff turn's *ratio*
@@ -166,7 +194,7 @@ export async function rotateSession(
     rotation: state.sessionRotations,
     costUsd,
     tokens,
-    newSessionId: state.sessionId,
+    newSessionId: slotId(state, slot),
     contextModel: cfg.claude.model,
     baseline,
     handoffModel,
@@ -262,7 +290,11 @@ export async function withConcurrentCompaction<T>(
   if (
     !cfg.context.compactDuringCodex ||
     !rotatesConcurrentlyWith(workRole, roles) ||
-    !shouldRotate(state, cfg)
+    // The same table both decisions above used: asking whether it is time to
+    // rotate under `ROLES` while the guard consulted an injected table is how
+    // the wrapper came to permit concurrent work beside a rotation of the very
+    // conversation that work was being done through.
+    !shouldRotate(state, cfg, roles)
   ) {
     return work();
   }
@@ -279,7 +311,7 @@ export async function withConcurrentCompaction<T>(
   // indistinguishable: both await both.
   const [outcome, compaction] = await Promise.allSettled([
     work(),
-    rotateSession(state, cfg, turn).catch((err: unknown) => {
+    rotateSession(state, cfg, turn, roles).catch((err: unknown) => {
       // A budget escalation is the run being told to stop, not a lost
       // optimisation, so it is held and rethrown below rather than swallowed.
       // Held rather than rejected straight into Promise.all: `work` is a turn

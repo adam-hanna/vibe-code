@@ -7,8 +7,16 @@ import * as git from '@src/git.js';
 import * as log from '@src/log.js';
 import * as P from '@src/prompts.js';
 import { PLAN_SCHEMA } from '@src/schemas.js';
-import { claudePermission, codexSandbox, roleEnabled, ROLES, turnTimeoutMs } from '@src/roles.js';
+import {
+  claudePermission,
+  codexSandbox,
+  roleEnabled,
+  ROLES,
+  slotForRole,
+  turnTimeoutMs,
+} from '@src/roles.js';
 import type { Access, Role, RoleTable } from '@src/roles.js';
+import { ensureSlotId, markSlotStarted, slotHasMemory, slotId, slotResumeId } from '@src/slots.js';
 import {
   advancePhase,
   artifact,
@@ -843,11 +851,13 @@ export interface AgentTurns {
 /** What a run actually dispatches to. Tests substitute fakes for both. */
 export const REAL_AGENTS: AgentTurns = { claude: claudeTurn, codex: codexTurn };
 
-// The role vocabulary lives in @src/roles.js, a leaf: preflight needs the same
-// Access notion to decide what to enforce, and importing this module would pull
-// the whole run loop - claude, codex, git, context, ratelimits, verify - into
-// `vibe doctor`'s probe path. Re-exported so the seam's callers and tests keep
-// one import site.
+// The role vocabulary lives in @src/roles.js, and the slot lifecycle in
+// @src/slots.js - both leaves, for the same reason: preflight needs the Access
+// notion to decide what to enforce, and importing this module would pull the
+// whole run loop - claude, codex, git, context, ratelimits, verify - into `vibe
+// doctor`'s probe path. Re-exported so the seam's callers and tests keep one
+// import site; leaf modules import them directly, which is what keeps the
+// dependency pointing one way.
 export {
   claudePermission,
   codexProbeSandbox,
@@ -859,9 +869,20 @@ export {
   ROLES,
   ROTATING_ROLE,
   rotatesConcurrentlyWith,
+  rotatingSlot,
+  slotForRole,
   turnTimeoutMs,
 } from '@src/roles.js';
 export type { Access, Role, RoleSpec, RoleTable } from '@src/roles.js';
+export {
+  SLOTS,
+  slotHasMemory,
+  slotId,
+  slotResumeId,
+  slotRotatable,
+  slotStarted,
+} from '@src/slots.js';
+export type { IdOrigin, SlotName, SlotSpec } from '@src/slots.js';
 
 export interface TurnRequest {
   role: Role;
@@ -907,9 +928,13 @@ export function runTurn(
   };
   // Returned, not awaited: `runTurn` adds no continuation of its own between a
   // provider finishing and its charge being applied. See `applyCharge`.
+  // The table rather than a resolved slot: `claudeDispatch` needs two of them -
+  // the conversation its own turn talks through, and the one it may compact
+  // first - and resolving the second against the module default while the first
+  // came from an injected table is how the two fall out of step.
   return spec.provider === 'claude'
-    ? claudeDispatch(state, cfg, dispatch, spec.access, turns.claude)
-    : codexDispatch(state, cfg, dispatch, spec, turns.codex);
+    ? claudeDispatch(state, cfg, dispatch, spec.access, roles, turns.claude)
+    : codexDispatch(state, cfg, dispatch, spec, roles, turns.codex);
 }
 
 async function claudeDispatch(
@@ -917,13 +942,16 @@ async function claudeDispatch(
   cfg: Config,
   req: DispatchRequest,
   access: Access,
+  roles: RoleTable,
   turn: ClaudeTurnFn,
 ): Promise<TurnOutcome> {
+  const slot = slotForRole(req.role, roles);
+
   // A rotation that could not be overlapped with Codex work happens here, at a
   // turn boundary - never mid-turn.
-  if (shouldRotate(state, cfg)) await rotateSession(state, cfg, turn);
+  if (shouldRotate(state, cfg, roles)) await rotateSession(state, cfg, turn, roles);
 
-  const resume = state.sessionStarted;
+  const resume = slotHasMemory(state, cfg, slot);
   // Not conditional on there being a briefing: a rotation that could not
   // summarise the outgoing session still starts a fresh one, and the plan of
   // record has to travel with it either way - revisePlanPrompt and the fix
@@ -942,7 +970,7 @@ async function claudeDispatch(
   const result = await withRateLimitRetry(state, cfg, req.label, 'claude', () =>
     turn({
       prompt,
-      sessionId: state.sessionId,
+      sessionId: ensureSlotId(state, slot),
       resume,
       permissionMode: claudePermission(access),
       model: cfg.claude.model,
@@ -955,7 +983,9 @@ async function claudeDispatch(
     }),
   );
 
-  state.sessionStarted = true;
+  // The slot's marker, not its id: this turn returning is the only evidence
+  // that the conversation exists at all.
+  markSlotStarted(state, cfg, slot, result.sessionId);
   // Tagged with the model that produced it: the ratio is a fraction of this
   // model's window and means nothing under another one. Through the shared seam
   // so the rotation turn in context.ts cannot drift out of step with this one.
@@ -1146,8 +1176,11 @@ async function codexDispatch(
   cfg: Config,
   req: DispatchRequest,
   spec: { access: Access; schema: object },
+  roles: RoleTable,
   turn: CodexTurnFn,
 ): Promise<TurnOutcome> {
+  const slot = slotForRole(req.role, roles);
+
   // Through the same retry the Claude turns use, so a Codex rate limit gets the
   // wait, the maxWaitMinutes cap and the resumable exit that already exist
   // rather than a second implementation of all three.
@@ -1168,17 +1201,21 @@ async function codexDispatch(
         sandbox: codexSandbox(spec.access, cfg),
         cwd: req.cwd,
         timeoutMs: req.timeoutMs,
-        sessionId: cfg.codex.persistSession ? state.codexSessionId : null,
+        sessionId: slotResumeId(state, cfg, slot),
         progress: progressOptions(state, cfg, req.label),
       });
     },
   );
 
-  if (cfg.codex.persistSession && sessionId && sessionId !== state.codexSessionId) {
-    const isFirst = state.codexSessionId === null;
-    state.codexSessionId = sessionId;
+  // The marker is set whatever the run does with the id: a turn either succeeded
+  // or it did not. `idChanged` is false when this run is not carrying the
+  // thread, when the provider named no usable id, and when it named the one
+  // already stored - so the write and the line below happen exactly where they
+  // always did.
+  const { idChanged, first } = markSlotStarted(state, cfg, slot, sessionId ?? null);
+  if (idChanged) {
     saveState(state);
-    if (isFirst) log.detail(`codex thread ${sessionId}`);
+    if (first) log.detail(`codex thread ${slotId(state, slot) ?? ''}`);
   }
 
   // Counted, but deliberately not costed: there is no USD figure to add, and
@@ -1242,8 +1279,15 @@ async function checkCodexLimits(
   }
 }
 
-function codexHasMemory(state: RunState, cfg: Config): boolean {
-  return cfg.codex.persistSession && state.codexSessionId !== null;
+/**
+ * Whether the conversation this role talks through already carries the run.
+ *
+ * The `roles` parameter is defaulted rather than absent so this cannot become a
+ * second site that ignores an injected table; the two call sites are top-level
+ * loop steps, which are never handed one.
+ */
+function roleHasMemory(state: RunState, cfg: Config, role: Role, roles: RoleTable = ROLES): boolean {
+  return slotHasMemory(state, cfg, slotForRole(role, roles));
 }
 
 async function runCritique(
@@ -1260,7 +1304,7 @@ async function runCritique(
       plan.assumptions,
       plan.out_of_scope,
       state.planRound + 1,
-      codexHasMemory(state, cfg),
+      roleHasMemory(state, cfg, 'critic'),
       state.environment,
     ),
     cwd,
@@ -1287,7 +1331,7 @@ async function runReview(
       plan.plan_md,
       plan.out_of_scope,
       state.reviewRound + 1,
-      codexHasMemory(state, cfg),
+      roleHasMemory(state, cfg, 'reviewer'),
       state.environment,
     ),
     cwd,

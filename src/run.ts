@@ -1,7 +1,8 @@
 import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
-import { randomUUID, createHash } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import type { ActivityObservation } from '@src/progress.js';
+import { initialSlotFields } from '@src/slots.js';
 import type { Finding, RoundRecord, RunPhase, RunState, RunSummary } from '@src/types.js';
 
 const RUNS_DIR = path.join('.vibe', 'runs');
@@ -53,7 +54,9 @@ export function createRun(targetDir: string, task: string, planOnly: boolean): R
     dir,
     targetDir,
     task,
-    sessionId: randomUUID(),
+    // Every managed conversation's starting state, stated where the lifecycle
+    // is rather than as three literals here.
+    ...initialSlotFields(),
     createdAt: new Date().toISOString(),
     status: 'planning',
     phase: 'planning',
@@ -69,12 +72,10 @@ export function createRun(targetDir: string, task: string, planOnly: boolean): R
     verifyRound: 0,
     questionRound: 0,
     events: [],
-    sessionStarted: false,
     planOnly,
     answeredQuestions: [],
     deferredQuestions: [],
     sessionRotations: 0,
-    codexSessionId: null,
     handoff: null,
     contextRatio: 0,
     plan: null,
