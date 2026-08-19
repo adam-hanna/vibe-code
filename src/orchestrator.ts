@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { applyCharge, Escalation, EXIT, fmtTokens } from '@src/charge.js';
 import { claudeTurn, parseStructured, RateLimitError } from '@src/claude.js';
 import { codexTurn } from '@src/codex.js';
 import type { CodexTurnOptions, CodexTurnResult } from '@src/codex.js';
@@ -57,30 +58,13 @@ import type {
   RunState,
 } from '@src/types.js';
 
-export const EXIT = {
-  OK: 0,
-  ERROR: 1,
-  NEEDS_HUMAN: 2,
-  NO_CONVERGENCE: 3,
-  BUDGET: 4,
-  RATE_LIMITED: 5,
-  /** The agents' execution environments do not satisfy the toolchain contract. */
-  PREFLIGHT: 6,
-} as const;
-
-export type ExitCode = (typeof EXIT)[keyof typeof EXIT];
-
-export class Escalation extends Error {
-  constructor(
-    readonly code: ExitCode,
-    message: string,
-    readonly questions: OpenQuestion[] | null = null,
-    readonly findings: Finding[] | null = null,
-  ) {
-    super(message);
-    this.name = 'Escalation';
-  }
-}
+// The accounting vocabulary lives in @src/charge.js, a leaf: the session
+// rotation in @src/context.js has to charge through the same `applyCharge` this
+// module's adapters use, and this module already imports context.js - so
+// leaving it here would be a cycle. Re-exported so callers and tests keep one
+// import site.
+export { applyCharge, Escalation, EXIT } from '@src/charge.js';
+export type { ExitCode, TurnCharge } from '@src/charge.js';
 
 /** Read-only toolset for planning turns, alongside plan mode itself. */
 const PLAN_TOOLS = ['Read', 'Glob', 'Grep', 'Bash', 'WebSearch', 'WebFetch'] as const;
@@ -224,10 +208,18 @@ async function planPhase(state: RunState, cfg: Config, cwd: string): Promise<Pla
     }
 
     log.heading(`Plan critique (round ${state.planRound + 1})`);
-    const critique = await withConcurrentCompaction(state, cfg, () => runCritique(state, cfg, cwd, plan));
-    artifact(state, `plan-critique-${state.planRound}.json`, critique);
-    collectDeferred(state, critique.findings);
-    writeFollowUps(state, plan);
+    // The record of the turn is written by the callback, not after the wrapper
+    // returns: a concurrent rotation can now raise a budget escalation, and
+    // `withConcurrentCompaction` surfaces it once `work` has resolved. Anything
+    // left outside the callback would be skipped for a critique the run has
+    // already paid for.
+    const critique = await withConcurrentCompaction(state, cfg, async () => {
+      const found = await runCritique(state, cfg, cwd, plan);
+      artifact(state, `plan-critique-${state.planRound}.json`, found);
+      collectDeferred(state, found.findings);
+      writeFollowUps(state, plan);
+      return found;
+    });
 
     const decision = gate(critique.findings, cfg.loop.p1Tolerance);
     const stoppers = blockingFindings(critique.findings);
@@ -315,10 +307,16 @@ async function reviewPhase(state: RunState, cfg: Config, cwd: string, plan: Plan
     }
 
     log.heading(`Code review (round ${state.reviewRound + 1})`);
-    const review = await withConcurrentCompaction(state, cfg, () => runReview(state, cfg, cwd, plan));
-    artifact(state, `code-review-${state.reviewRound}.json`, review);
-    collectDeferred(state, review.findings);
-    writeFollowUps(state, plan);
+    // Inside the callback, for the reason given at the critique call site: a
+    // held budget escalation must not cost the run the record of the review it
+    // paid for.
+    const review = await withConcurrentCompaction(state, cfg, async () => {
+      const found = await runReview(state, cfg, cwd, plan);
+      artifact(state, `code-review-${state.reviewRound}.json`, found);
+      collectDeferred(state, found.findings);
+      writeFollowUps(state, plan);
+      return found;
+    });
 
     const decision = gate(review.findings, cfg.loop.p1Tolerance);
     const stoppers = blockingFindings(review.findings);
@@ -856,55 +854,6 @@ export interface TurnOutcome {
   structured: unknown;
 }
 
-/**
- * What one turn cost the run, in the shape the shared accounting needs.
- *
- * `costUsd` is null where the provider reports no cost. Codex reports none, and
- * inventing a figure would make `state.costUsd` a number nobody could trace to
- * a source.
- */
-export interface TurnCharge {
-  costUsd: number | null;
-  tokens: number;
-  event: { type: string; data: Record<string, unknown> };
-  /** Built after the totals are updated, so the line can quote the run total. */
-  describe: () => string;
-  /** Emitted after the detail line and before the ceilings, as both paths did. */
-  warnings: readonly string[];
-}
-
-/**
- * The per-turn accounting both providers share.
- *
- * Deliberately synchronous, and deliberately called by each adapter in the same
- * continuation as its provider result rather than by `runTurn` after another
- * `await`. Critique and review run under `withConcurrentCompaction`, so a
- * rotation is completing on another promise chain while a Codex turn finishes;
- * an extra await boundary here would let `session_rotated` and its handoff cost
- * land between the Codex result and the Codex turn's own event and log line,
- * reordering the run record against what the two separate paths produced.
- */
-export function applyCharge(state: RunState, cfg: Config, charge: TurnCharge): void {
-  state.tokensUsed += charge.tokens;
-  if (charge.costUsd === null) {
-    state.codexTokens = (state.codexTokens ?? 0) + charge.tokens;
-  } else {
-    state.costUsd = Number((state.costUsd + charge.costUsd).toFixed(4));
-  }
-
-  recordEvent(state, charge.event.type, charge.event.data);
-  log.detail(charge.describe());
-  for (const warning of charge.warnings) log.warn(warning);
-
-  enforceTokenCeiling(state, cfg);
-  // Only where the provider reported a cost. The check has always lived on the
-  // Claude path alone, and `state.costUsd` can rise during a Codex turn from a
-  // concurrent rotation - so running it here unconditionally would end the run
-  // one turn earlier than it does today, before the critique or review artifact
-  // that turn just paid for had been written.
-  if (charge.costUsd !== null) enforceCostCeiling(state, cfg);
-}
-
 /** One turn by whichever provider this role belongs to. */
 export function runTurn(
   state: RunState,
@@ -998,38 +947,6 @@ async function claudeDispatch(
   });
 
   return { text: result.text, structured: null };
-}
-
-/**
- * The one ceiling both agents answer to.
- *
- * Shared rather than duplicated per adapter because the Codex side has no cost
- * figure to fall back on: if this check were only wired into the Claude path,
- * a run whose expensive work sat with Codex would have no working brake at all.
- */
-function enforceTokenCeiling(state: RunState, cfg: Config): void {
-  if (cfg.budget.maxTokens <= 0 || state.tokensUsed <= cfg.budget.maxTokens) return;
-  throw new Escalation(
-    EXIT.BUDGET,
-    `Token ceiling exceeded: ${fmtTokens(state.tokensUsed)} > ${fmtTokens(cfg.budget.maxTokens)}. ` +
-      'Raise budget.maxTokens to continue.',
-  );
-}
-
-/** The Claude-side ceiling. Codex reports no cost, so it can never trip this. */
-function enforceCostCeiling(state: RunState, cfg: Config): void {
-  if (state.costUsd <= cfg.budget.maxCostUsd) return;
-  throw new Escalation(
-    EXIT.BUDGET,
-    `Work ceiling reached: ~$${state.costUsd.toFixed(2)} API-equivalent > $${cfg.budget.maxCostUsd}. ` +
-      'On a subscription this is a volume brake, not a bill. Raise budget.maxCostUsd to continue.',
-  );
-}
-
-function fmtTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
-  return String(n);
 }
 
 /**
