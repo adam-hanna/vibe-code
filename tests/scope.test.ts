@@ -320,6 +320,39 @@ test('collectDeferred enforces the P2/P3 invariant at its own boundary', () => {
   assert.deepEqual(state.deferred ?? [], []);
 });
 
+test('stored entries sharing an id are deduped rather than passed through as clean', () => {
+  const state = freshRun();
+  // Individually valid, so the per-entry predicate has nothing to say - but
+  // `RunState` documents `deferred` as deduped by id, and only the merge
+  // enforces it. Treating this as clean would return early and keep both.
+  state.deferred = [
+    finding({ id: 'dupe', title: 'First telling', defer: true }),
+    finding({ id: 'dupe', title: 'Better telling', defer: true }),
+  ];
+
+  collectDeferred(state, []);
+
+  assert.equal(state.deferred.length, 1);
+  assert.equal(state.deferred[0]?.title, 'Better telling', 'later entry wins, as in a merge');
+});
+
+test('a duplicate reached straight through writeFollowUps renders once', () => {
+  const state = freshRun();
+  // The exported artifact path, with state no collection has passed over: it
+  // makes the claim, so it has to render what collecting first would have.
+  state.deferred = [
+    finding({ id: 'dupe', title: 'First telling', defer: true }),
+    finding({ id: 'dupe', title: 'Better telling', defer: true }),
+  ];
+
+  const file = writeFollowUps(state, plan({ out_of_scope: [] }));
+  assert.notEqual(file, null);
+
+  const body = readFileSync(file as string, 'utf8');
+  assert.equal(body.split('Better telling').length - 1, 1);
+  assert.ok(!body.includes('First telling'), 'the superseded telling is not also rendered');
+});
+
 test('a run with nothing to defer produces no misleading empty file', () => {
   const state = freshRun();
   assert.equal(writeFollowUps(state, plan({ out_of_scope: [] })), null);

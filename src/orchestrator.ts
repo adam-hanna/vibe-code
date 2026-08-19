@@ -479,9 +479,18 @@ export function collectDeferred(state: RunState, findings: readonly Finding[]): 
   const fresh = findings.filter(isDeferrable);
   const stored = storedDeferred(state);
   const inherited = stored === null ? [] : stored.filter(isDeferrable);
-  // Clean: a well-formed array from which nothing was dropped.
+  // Clean: a well-formed array from which nothing was dropped, and which
+  // already holds the deduped-by-id shape `RunState` documents. Duplicates
+  // count as dirty even though every entry is individually valid - the early
+  // return skips the `Map` merge that is the only thing enforcing that
+  // contract, and `writeFollowUps` filters without deduping, so a stored pair
+  // sharing an id would render the same follow-up twice.
+  const uniqueIds = new Set(inherited.map((f) => f.id)).size;
   const clean =
-    stored !== null && Array.isArray(state.deferred) && inherited.length === stored.length;
+    stored !== null &&
+    Array.isArray(state.deferred) &&
+    inherited.length === stored.length &&
+    uniqueIds === inherited.length;
 
   if (fresh.length === 0 && (stored === null || clean)) return;
 
@@ -509,10 +518,14 @@ export function collectDeferred(state: RunState, findings: readonly Finding[]): 
  * critique that would have rewritten the file may never run.
  */
 export function writeFollowUps(state: RunState, plan: Plan): string | null {
-  // Guarded and filtered here too, not only in `collectDeferred`: this is the
-  // function whose output makes the non-blocking claim, and it is exported, so
-  // it can be reached with stored state no collection has passed over.
-  const deferred = Array.isArray(state.deferred) ? state.deferred.filter(isDeferrable) : [];
+  // Guarded, filtered and deduped here too, not only in `collectDeferred`:
+  // this is the function whose output makes the non-blocking claim, and it is
+  // exported, so it can be reached with stored state no collection has passed
+  // over. Deduping last-wins matches the merge order in `collectDeferred`, so
+  // reaching this directly renders what collecting first would have.
+  const deferred = Array.isArray(state.deferred)
+    ? [...new Map(state.deferred.filter(isDeferrable).map((f) => [f.id, f])).values()]
+    : [];
   // The one place absent and empty are treated alike: neither has anything to
   // report, so neither gets a section.
   const scope = plan.out_of_scope ?? [];
