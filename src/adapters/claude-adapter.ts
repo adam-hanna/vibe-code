@@ -351,12 +351,25 @@ export function renderVerifyPrompt(contract: ToolchainContract): string {
   ].join('\n');
 }
 
-/** Pull the sentinel-delimited block out of a turn's output. */
+/**
+ * Pull the sentinel-delimited block out of a turn's output.
+ *
+ * The LAST whole pair, not the first, for the same reason `extractRecord` takes
+ * it on the Codex side: `renderVerifyPrompt` names both sentinels, so a turn
+ * that restates its instructions before answering, or corrects a truncated
+ * first attempt, puts a pair in front of the real one - and the earlier pair is
+ * never the answer. `BEGIN`s that never got an `END` are skipped rather than
+ * ending the search, so trailing prose cannot hide a block that is there.
+ */
 export function extractBlock(stdout: string): string | null {
-  const start = stdout.indexOf(BEGIN);
-  const end = stdout.indexOf(END, start + 1);
-  if (start < 0 || end < 0) return null;
-  return stdout.slice(start + BEGIN.length, end).trim();
+  let start = stdout.lastIndexOf(BEGIN);
+  while (start >= 0) {
+    const end = stdout.indexOf(END, start + BEGIN.length);
+    if (end > start) return stdout.slice(start + BEGIN.length, end).trim();
+    if (start === 0) return null;
+    start = stdout.lastIndexOf(BEGIN, start - 1);
+  }
+  return null;
 }
 
 /** Parse the hook's `key=value` output into a runtime snapshot. */

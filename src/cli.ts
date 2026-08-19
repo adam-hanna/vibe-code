@@ -6,7 +6,11 @@ import { Escalation, EXIT, orchestrate, writeEscalation } from '@src/orchestrato
 import type { ExitCode } from '@src/orchestrator.js';
 import { claudeBin, setSessionArgs } from '@src/claude.js';
 import { codexBin } from '@src/codex.js';
-import { preflight } from '@src/preflight.js';
+// The accounting seam, from the leaf it lives in: orchestrator.js re-exports
+// applyCharge but not fmtTokens, and charge.js imports nothing that imports this.
+import { applyCharge, fmtTokens } from '@src/charge.js';
+import { preflight, REAL_PROBES } from '@src/preflight.js';
+import type { PreflightProbes, PreflightReport } from '@src/preflight.js';
 import { closeCodexRateLimits, describeLimits, readCodexRateLimits } from '@src/ratelimits.js';
 import { detectCommand } from '@src/verify.js';
 import type { AgentPreflight } from '@src/preflight.js';
@@ -466,21 +470,35 @@ export function parseHumanAnswers(md: string): Answer[] {
   return answers;
 }
 
-async function execute(
+/** The preflight gate, injected so its escalation path is testable without spawning. */
+export type PreflightGate = (state: RunState, cfg: Config) => Promise<ExitCode | null>;
+
+/**
+ * The loop itself, injected alongside the gate for the same reason: a test that
+ * pins what happens *before* the first turn must be able to prove no turn ran.
+ */
+export type RunLoop = (state: RunState, cfg: Config, resume: boolean) => Promise<unknown>;
+
+export async function execute(
   state: RunState,
   cfg: Config,
   resume: boolean,
   skipProbe = false,
+  preflightGate: PreflightGate = runPreflight,
+  loop: RunLoop = orchestrate,
 ): Promise<ExitCode> {
   const started = Date.now();
 
-  if (!skipProbe) {
-    const gate = await runPreflight(state, cfg);
-    if (gate !== null) return gate;
-  }
-
   try {
-    await orchestrate(state, cfg, resume);
+    // Inside the try, not above it: preflight now charges what its probes spent,
+    // so it can raise the same budget Escalation a turn can, and that belongs in
+    // the one handler that reports an escalation rather than escaping uncaught.
+    if (!skipProbe) {
+      const gate = await preflightGate(state, cfg);
+      if (gate !== null) return gate;
+    }
+
+    await loop(state, cfg, resume);
     log.heading('Done');
     // Never claim a spotless finish when a P1 was carried. The tolerance lets a
     // run complete with findings outstanding; reporting that as "zero P1s"
@@ -567,13 +585,17 @@ function environmentFacts(
  * first planning token: the failure this replaces cost 35 minutes and surfaced
  * as a plan-stage P1 from the reviewer rather than as an environment error.
  */
-async function runPreflight(state: RunState, cfg: Config): Promise<ExitCode | null> {
+export async function runPreflight(
+  state: RunState,
+  cfg: Config,
+  probes: PreflightProbes = REAL_PROBES,
+): Promise<ExitCode | null> {
   const phases: Phase[] = state.planOnly ? ['plan'] : ['plan', 'implement', 'review'];
   log.heading('Preflight');
 
   let report: Awaited<ReturnType<typeof preflight>>;
   try {
-    report = await preflight(state.targetDir, cfg, phases, state.dir);
+    report = await preflight(state.targetDir, cfg, phases, state.dir, probes);
   } catch (err) {
     log.fail(`environment probe failed: ${err instanceof Error ? err.message : String(err)}`);
     return EXIT.PREFLIGHT;
@@ -603,14 +625,88 @@ async function runPreflight(state: RunState, cfg: Config): Promise<ExitCode | nu
     if (repairArgs.length > 0) log.info('Environment repair will be applied to every Claude turn');
     log.ok('Toolchain contract satisfied');
     recordEvent(state, 'preflight-ok', { repairArgs: repairArgs.length > 0 });
-    return null;
+  } else {
+    for (const reason of report.blockingReasons) log.fail(reason);
+    state.status = 'error';
+    recordEvent(state, 'preflight-failed', { reasons: report.blockingReasons });
+    log.info('Fix the environment, or re-run with --skip-probe to proceed anyway.');
   }
 
-  for (const reason of report.blockingReasons) log.fail(reason);
-  state.status = 'error';
-  recordEvent(state, 'preflight-failed', { reasons: report.blockingReasons });
-  log.info('Fix the environment, or re-run with --skip-probe to proceed anyway.');
-  return EXIT.PREFLIGHT;
+  // Charged after the verdict has been logged and recorded, so the run record
+  // shows what preflight found before it shows the ceiling that stopped it.
+  try {
+    chargePreflight(state, cfg, report);
+  } catch (err) {
+    // A ceiling the probes themselves crossed. On the proceeding path this is
+    // the point of charging here - the run stops before the first planning turn
+    // rather than after paying for it - so it is rethrown for execute()'s
+    // escalation handler. On the blocked path the run is already ending on the
+    // environment fault, which is the more actionable report of the two, and
+    // every charge and event has already landed by the time this throws.
+    if (report.ok || !(err instanceof Escalation)) throw err;
+  }
+
+  return report.ok ? null : EXIT.PREFLIGHT;
+}
+
+/**
+ * What preflight's probes spent, through the same seam a turn pays through.
+ *
+ * Here rather than inside `preflight` because `vibe doctor` probes with no
+ * `RunState` at all: preflight reports, the run path charges. A probe that
+ * reported nothing is charged nothing - a skipped, failed or timed-out probe
+ * has no figure, and an invented one would put a number in the run's totals
+ * that nobody could trace to a source.
+ *
+ * Both probes have already run and returned by the time this is called, so a
+ * ceiling crossed by the first charge must not cost the second its place in the
+ * totals and the event log. The escalation is held and raised once everything
+ * reported has been recorded - the same reasoning `withConcurrentCompaction`
+ * records for work that has already been paid for.
+ */
+export function chargePreflight(state: RunState, cfg: Config, report: PreflightReport): void {
+  let held: Escalation | null = null;
+
+  for (const [provider, result] of [
+    ['claude', report.claude],
+    ['codex', report.codex],
+  ] as const) {
+    const usage = result.usage;
+    if (usage === null || usage === undefined) continue;
+
+    try {
+      applyCharge(state, cfg, {
+        // Straight through the existing routing: Claude reports a cost, Codex
+        // reports none, so Codex's tokens land in codexTokens exactly as a Codex
+        // turn's do. No second rule.
+        costUsd: usage.costUsd,
+        tokens: usage.tokens,
+        event: {
+          type: 'preflight_probe',
+          data: {
+            provider,
+            tokens: usage.tokens,
+            costUsd: usage.costUsd,
+            turns: usage.turns,
+          },
+        },
+        describe: () =>
+          `preflight ${provider}: ${fmtTokens(usage.tokens)} tok` +
+          (usage.costUsd === null ? '' : `, ~$${usage.costUsd.toFixed(3)}`) +
+          ` (run ${fmtTokens(state.tokensUsed)} tok / ~$${state.costUsd.toFixed(2)})`,
+        warnings: [],
+      });
+    } catch (err) {
+      // Held, not rethrown here. Anything that is not a ceiling is a real fault
+      // and still propagates immediately. The latest escalation is the one
+      // raised: its message quotes the running total at the moment it was built,
+      // and a later charge only makes that figure more complete.
+      if (!(err instanceof Escalation)) throw err;
+      held = err;
+    }
+  }
+
+  if (held !== null) throw held;
 }
 
 /**
