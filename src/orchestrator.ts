@@ -7,8 +7,8 @@ import * as git from '@src/git.js';
 import * as log from '@src/log.js';
 import * as P from '@src/prompts.js';
 import { PLAN_SCHEMA } from '@src/schemas.js';
-import { claudePermission, codexSandbox, ROLES } from '@src/roles.js';
-import type { Access, Role } from '@src/roles.js';
+import { claudePermission, codexSandbox, roleEnabled, ROLES, turnTimeoutMs } from '@src/roles.js';
+import type { Access, Role, RoleTable } from '@src/roles.js';
 import {
   advancePhase,
   artifact,
@@ -140,7 +140,6 @@ async function runPhases(state: RunState, cfg: Config, resume: boolean): Promise
       role: 'implementer',
       prompt: P.implementPrompt(plan.plan_md, state.carried ?? []),
       cwd,
-      timeoutMs: cfg.claude.implementTimeoutMs,
       label: 'implement',
     });
     artifact(state, 'implementation-report.md', impl.text);
@@ -222,13 +221,19 @@ async function planPhase(state: RunState, cfg: Config, cwd: string): Promise<Pla
     // `withConcurrentCompaction` surfaces it once `work` has resolved. Anything
     // left outside the callback would be skipped for a critique the run has
     // already paid for.
-    const critique = await withConcurrentCompaction(state, cfg, async () => {
-      const found = await runCritique(state, cfg, cwd, plan);
-      artifact(state, `plan-critique-${state.planRound}.json`, found);
-      collectDeferred(state, found.findings);
-      writeFollowUps(state, plan);
-      return found;
-    });
+    const critique = await withConcurrentCompaction(
+      state,
+      cfg,
+      async () => {
+        const found = await runCritique(state, cfg, cwd, plan);
+        artifact(state, `plan-critique-${state.planRound}.json`, found);
+        collectDeferred(state, found.findings);
+        writeFollowUps(state, plan);
+        return found;
+      },
+      undefined,
+      'critic',
+    );
 
     const decision = gate(critique.findings, cfg.loop.p1Tolerance);
     const stoppers = blockingFindings(critique.findings);
@@ -299,7 +304,6 @@ async function reviewPhase(state: RunState, cfg: Config, cwd: string, plan: Plan
         role: 'implementer',
         prompt: P.fixPrompt([verified], state.verifyRound),
         cwd,
-        timeoutMs: cfg.claude.implementTimeoutMs,
         label: `verify-fix-${state.verifyRound}`,
       });
       artifact(state, `verify-fix-${state.verifyRound}.md`, repair.text);
@@ -319,13 +323,19 @@ async function reviewPhase(state: RunState, cfg: Config, cwd: string, plan: Plan
     // Inside the callback, for the reason given at the critique call site: a
     // held budget escalation must not cost the run the record of the review it
     // paid for.
-    const review = await withConcurrentCompaction(state, cfg, async () => {
-      const found = await runReview(state, cfg, cwd, plan);
-      artifact(state, `code-review-${state.reviewRound}.json`, found);
-      collectDeferred(state, found.findings);
-      writeFollowUps(state, plan);
-      return found;
-    });
+    const review = await withConcurrentCompaction(
+      state,
+      cfg,
+      async () => {
+        const found = await runReview(state, cfg, cwd, plan);
+        artifact(state, `code-review-${state.reviewRound}.json`, found);
+        collectDeferred(state, found.findings);
+        writeFollowUps(state, plan);
+        return found;
+      },
+      undefined,
+      'reviewer',
+    );
 
     const decision = gate(review.findings, cfg.loop.p1Tolerance);
     const stoppers = blockingFindings(review.findings);
@@ -359,7 +369,6 @@ async function reviewPhase(state: RunState, cfg: Config, cwd: string, plan: Plan
         role: 'implementer',
         prompt: P.fixPrompt(review.findings, state.reviewRound),
         cwd,
-        timeoutMs: cfg.claude.implementTimeoutMs,
         label: `final-fix-${state.reviewRound}`,
       });
       artifact(state, `fix-report-${state.reviewRound}.md`, finalFix.text);
@@ -393,7 +402,6 @@ async function reviewPhase(state: RunState, cfg: Config, cwd: string, plan: Plan
       role: 'implementer',
       prompt: P.fixPrompt(review.findings, state.reviewRound),
       cwd,
-      timeoutMs: cfg.claude.implementTimeoutMs,
       label: `fix-${state.reviewRound}`,
     });
     artifact(state, `fix-report-${state.reviewRound}.md`, fix.text);
@@ -840,8 +848,20 @@ export const REAL_AGENTS: AgentTurns = { claude: claudeTurn, codex: codexTurn };
 // the whole run loop - claude, codex, git, context, ratelimits, verify - into
 // `vibe doctor`'s probe path. Re-exported so the seam's callers and tests keep
 // one import site.
-export { claudePermission, codexSandbox, providerAccess, ROLES } from '@src/roles.js';
-export type { Access, Role } from '@src/roles.js';
+export {
+  claudePermission,
+  codexProbeSandbox,
+  codexSandbox,
+  describedRole,
+  providerAccess,
+  providersForRoles,
+  roleEnabled,
+  ROLES,
+  ROTATING_ROLE,
+  rotatesConcurrentlyWith,
+  turnTimeoutMs,
+} from '@src/roles.js';
+export type { Access, Role, RoleSpec, RoleTable } from '@src/roles.js';
 
 export interface TurnRequest {
   role: Role;
@@ -849,7 +869,12 @@ export interface TurnRequest {
   cwd: string;
   /** The retry label, the progress label, and - for Codex - the output name. */
   label: string;
-  timeoutMs: number;
+  /**
+   * Omitted at every call site in this file: how long a turn gets is a property
+   * of the role, and `turnTimeoutMs` reads it off the same table this dispatch
+   * does. Still accepted, for a caller that has a reason of its own.
+   */
+  timeoutMs?: number | undefined;
   /** Claude only: the response schema the turn is constrained to. */
   jsonSchema?: object | undefined;
   /** Claude only: the tools the turn may use. */
@@ -863,25 +888,34 @@ export interface TurnOutcome {
   structured: unknown;
 }
 
+/** A request with the role's own timeout already resolved onto it. */
+type DispatchRequest = TurnRequest & { timeoutMs: number };
+
 /** One turn by whichever provider this role belongs to. */
 export function runTurn(
   state: RunState,
   cfg: Config,
   req: TurnRequest,
   turns: AgentTurns = REAL_AGENTS,
+  /** The same seam as `turns`, for the table rather than the providers. */
+  roles: RoleTable = ROLES,
 ): Promise<TurnOutcome> {
-  const spec = ROLES[req.role];
+  const spec = roles[req.role];
+  const dispatch: DispatchRequest = {
+    ...req,
+    timeoutMs: req.timeoutMs ?? turnTimeoutMs(req.role, cfg, roles),
+  };
   // Returned, not awaited: `runTurn` adds no continuation of its own between a
   // provider finishing and its charge being applied. See `applyCharge`.
   return spec.provider === 'claude'
-    ? claudeDispatch(state, cfg, req, spec.access, turns.claude)
-    : codexDispatch(state, cfg, req, spec, turns.codex);
+    ? claudeDispatch(state, cfg, dispatch, spec.access, turns.claude)
+    : codexDispatch(state, cfg, dispatch, spec, turns.codex);
 }
 
 async function claudeDispatch(
   state: RunState,
   cfg: Config,
-  req: TurnRequest,
+  req: DispatchRequest,
   access: Access,
   turn: ClaudeTurnFn,
 ): Promise<TurnOutcome> {
@@ -1045,7 +1079,6 @@ async function runPlan(state: RunState, cfg: Config, cwd: string): Promise<Plan>
     cwd,
     tools: PLAN_TOOLS,
     jsonSchema: PLAN_SCHEMA,
-    timeoutMs: cfg.claude.planTimeoutMs,
     label: 'plan',
   });
 
@@ -1088,7 +1121,6 @@ async function revisePlan(state: RunState, cfg: Config, cwd: string, args: Revis
     cwd,
     tools: PLAN_TOOLS,
     jsonSchema: PLAN_SCHEMA,
-    timeoutMs: cfg.claude.planTimeoutMs,
     label: `revise-${state.planRound}`,
   });
 
@@ -1112,7 +1144,7 @@ async function revisePlan(state: RunState, cfg: Config, cwd: string, args: Revis
 async function codexDispatch(
   state: RunState,
   cfg: Config,
-  req: TurnRequest,
+  req: DispatchRequest,
   spec: { access: Access; schema: object },
   turn: CodexTurnFn,
 ): Promise<TurnOutcome> {
@@ -1232,7 +1264,6 @@ async function runCritique(
       state.environment,
     ),
     cwd,
-    timeoutMs: cfg.codex.timeoutMs,
     label: `critique-${state.planRound}`,
   });
   return parseFindings(structured);
@@ -1260,7 +1291,6 @@ async function runReview(
       state.environment,
     ),
     cwd,
-    timeoutMs: cfg.codex.timeoutMs,
     label: `review-${state.reviewRound}`,
   });
   return parseFindings(structured);
@@ -1292,7 +1322,9 @@ async function resolveQuestions(
   );
   for (const q of questions) log.info(`- [${q.kind}${q.blocking ? ', blocking' : ''}] ${q.question}`);
 
-  if (!cfg.questions.askCodex) {
+  // Asked of the role, not of the provider: the key is provider-named for
+  // history, but what it gates is whether the answerer takes a turn at all.
+  if (!roleEnabled('answerer', cfg)) {
     const blockers = questions.filter((q) => q.blocking);
     if (blockers.length === 0) return [];
     throw new Escalation(EXIT.NEEDS_HUMAN, 'Blocking questions need answers.', [...blockers]);
@@ -1303,7 +1335,6 @@ async function resolveQuestions(
     role: 'answerer',
     prompt: P.answerPrompt(questions, plan.plan_md),
     cwd,
-    timeoutMs: cfg.codex.timeoutMs,
     label: `answers-${state.planRound}`,
   });
 

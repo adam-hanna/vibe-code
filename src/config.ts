@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
+import { providersForRoles } from '@src/roles.js';
 import type { AgentProvider, ToolchainContract, ToolRequirement, Phase } from '@src/runtime.js';
 import type { Config, ConfigOverrides, Effort, LoadedConfig, Sandbox } from '@src/types.js';
 
@@ -123,12 +124,23 @@ export const DEFAULTS: Config = {
     // per round; node and npm only matter once something is being built or
     // verified, so a documentation change is not blocked by a missing runtime.
     //
-    // node and npm are required of Claude only. Codex reads the diff rather
-    // than running it, and its sandbox is read-only by design - demanding a
-    // runtime of the reviewer would fail preflight on a correct setup.
+    // node and npm are required of the implementer only - it is the one that
+    // builds and runs the suite. The reviewer reads the diff rather than
+    // running it, and its sandbox is read-only by design, so demanding a
+    // runtime of it would fail preflight on a correct setup. The rule is about
+    // the role, so it is asked of the role table rather than spelled as a
+    // provider name that happens to hold it today.
     git: { probe: 'git --version', phases: ['plan', 'implement', 'review'] },
-    node: { probe: 'node --version', phases: ['implement', 'review'], agents: ['claude'] },
-    npm: { probe: 'npm --version', phases: ['implement', 'review'], agents: ['claude'] },
+    node: {
+      probe: 'node --version',
+      phases: ['implement', 'review'],
+      agents: providersForRoles(['implementer']),
+    },
+    npm: {
+      probe: 'npm --version',
+      phases: ['implement', 'review'],
+      agents: providersForRoles(['implementer']),
+    },
   },
 };
 

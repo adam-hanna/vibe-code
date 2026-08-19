@@ -5,6 +5,8 @@ import type { ClaudeTurnOptions } from '@src/claude.js';
 import * as log from '@src/log.js';
 import { progressOptions, rememberContextWindow } from '@src/progress.js';
 import { handoffPrompt } from '@src/prompts.js';
+import { ROLES, rotatesConcurrentlyWith } from '@src/roles.js';
+import type { Role, RoleTable } from '@src/roles.js';
 import {
   artifact,
   measuredRatio,
@@ -238,6 +240,12 @@ export async function rotateSession(
  * This is the point of doing it here: the summarisation happens while Codex is
  * already busy critiquing or reviewing, so it costs no extra wall-clock and
  * never interrupts a Claude turn mid-flight.
+ *
+ * What makes that safe is not that the concurrent turn is Codex's: it is that
+ * the agent working alongside the rotation is not the agent whose session is
+ * being rotated. `rotatesConcurrentlyWith` states that, against `ROTATING_ROLE`,
+ * so a table that seated `workRole` on the rotating agent would fall through to
+ * a plain `work()` instead of compacting the session mid-turn.
  */
 export async function withConcurrentCompaction<T>(
   state: RunState,
@@ -246,8 +254,16 @@ export async function withConcurrentCompaction<T>(
   /** The seam `rotateSession` already has, for the same reason: this wrapper's
    * escalation path cannot be exercised against a real `claude`. */
   turn: ClaudeTurnFn = claudeTurn,
+  /** Who is doing the concurrent work. Defaulted so the existing callers and
+   * their tests keep their four-argument shape; both real call sites pass it. */
+  workRole: Role = 'reviewer',
+  roles: RoleTable = ROLES,
 ): Promise<T> {
-  if (!cfg.context.compactDuringCodex || !shouldRotate(state, cfg)) {
+  if (
+    !cfg.context.compactDuringCodex ||
+    !rotatesConcurrentlyWith(workRole, roles) ||
+    !shouldRotate(state, cfg)
+  ) {
     return work();
   }
 
