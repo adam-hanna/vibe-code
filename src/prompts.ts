@@ -310,7 +310,7 @@ export function revisePlanPrompt({ findings, answers, outOfScope, round }: Revis
 
 An independent reviewer raised the following. Every **P1 must be resolved** - that is the gate for proceeding to implementation.
 
-${findings.map(formatFinding).join('\n\n')}
+${findings.map(formatFinding).join('\n\n')}${deferralNote(findings, 'planner')}
 
 For each P1: fix the plan, or, if you believe the finding is wrong, say so explicitly in the plan with your reasoning. Do not silently ignore one.
 
@@ -424,7 +424,7 @@ export function fixPrompt(findings: readonly Finding[], round: number): string {
 
 Resolve **every P1**. Address P2s where the fix is contained and low-risk; skip P3s unless trivial.
 
-${findings.map(formatFinding).join('\n\n')}
+${findings.map(formatFinding).join('\n\n')}${deferralNote(findings, 'fixer')}
 
 ${FIX_BREADTH}
 
@@ -516,11 +516,44 @@ Two things follow. If a finding of yours is **still unresolved**, re-raise it wi
   return `\n\nThis is review round ${round}. The ${what} has already been revised in response to earlier findings, which are quoted below. Re-raise one with its original \`id\` only if it is genuinely still unresolved - do not re-litigate points that were addressed.`;
 }
 
+/**
+ * The deferral, carried to wherever a finding is shown.
+ *
+ * Appended only on `defer === true`: a legacy finding stored before the field
+ * existed, and a finding the reviewer did not defer, must render exactly as
+ * they did before, or every prompt in the run changes shape for nothing. The
+ * `=== true` test mirrors `parseFindings`, so a stored `defer: 'yes'` is not
+ * read as a deferral here either.
+ */
+const DEFERRED_MARK =
+  '**Deferred by the reviewer** - real, and agreed to belong in separate work rather than in this change.';
+
 function formatFinding(f: Finding): string {
   return `### [${f.severity}] ${f.title}  \`${f.id}\`
 ${f.detail}
 
-*Suggested fix:* ${f.suggested_fix}`;
+*Suggested fix:* ${f.suggested_fix}${f.defer === true ? `\n\n${DEFERRED_MARK}` : ''}`;
+}
+
+/**
+ * What a deferral obliges the reader to do - and it differs by reader, which is
+ * why the mark on the finding does not try to say it.
+ *
+ * Empty when the round deferred nothing, so a prompt only ever carries the
+ * paragraph when there is something for it to describe.
+ *
+ * The planner half asks for an `out_of_scope` entry but nothing depends on
+ * getting one: this prompt is rendered only when the gate failed, so a round
+ * whose findings were all deferred never reaches it. FOLLOW-UPS.md, written
+ * every round regardless of the gate, is the record that always exists.
+ */
+function deferralNote(findings: readonly Finding[], audience: 'planner' | 'fixer'): string {
+  if (!findings.some((f) => f.defer === true)) return '';
+
+  if (audience === 'planner') {
+    return `\n\nOne or more findings above are marked **deferred**. That is the reviewer agreeing the work belongs elsewhere, not a request that you do it. Preserving the boundary is the correct response, not resolving the item: do not fold the work into the plan. Since you are revising anyway, record it in \`out_of_scope\` if the boundary does not already cover it - that is where a reader of the plan will look for it. If you believe deferred work genuinely has to happen inside this change, say so explicitly in the plan and explain why; disputing a deferral is legitimate, absorbing one silently is not.`;
+  }
+  return `\n\nOne or more findings above are marked **deferred**. A deferred finding is not work to do here: the reviewer has already agreed it belongs in separate effort, and it is recorded in FOLLOW-UPS.md. The instruction to address contained, low-risk P2s does not apply to it - leave it alone. If you think it has to be fixed now, say so in your report rather than fixing it silently.`;
 }
 
 function formatAssumptions(assumptions: readonly Assumption[]): string {

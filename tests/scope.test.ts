@@ -4,9 +4,21 @@ import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DEFAULTS } from '@src/config.js';
-import { collectDeferred, runTurn, writeFollowUps } from '@src/orchestrator.js';
+import {
+  collectDeferred,
+  orchestrate,
+  reconcileFollowUps,
+  runTurn,
+  writeFollowUps,
+} from '@src/orchestrator.js';
 import type { AgentTurns } from '@src/orchestrator.js';
-import { critiquePrompt, renderPlanDoc, revisePlanPrompt, reviewPrompt } from '@src/prompts.js';
+import {
+  critiquePrompt,
+  fixPrompt,
+  renderPlanDoc,
+  revisePlanPrompt,
+  reviewPrompt,
+} from '@src/prompts.js';
 import { createRun } from '@src/run.js';
 import { FINDINGS_SCHEMA, PLAN_SCHEMA } from '@src/schemas.js';
 import { parseFindings, parsePlan, ShapeError } from '@src/validate.js';
@@ -330,4 +342,225 @@ test('a legacy plan with no boundary contributes no section and no file', () => 
   const state = freshRun();
   assert.equal(writeFollowUps(state, plan()), null);
   assert.equal(existsSync(followUpsPath(state)), false);
+});
+
+// ---- The deferral reaches the prompts that show a finding -------------------
+
+/**
+ * A deferral that is not rendered is a deferral the next agent absorbs. These
+ * pin the three states - deferred, not deferred, and the legacy shape with no
+ * `defer` field at all - on both prompts that show findings.
+ */
+
+const DEFERRED_MARK = 'Deferred by the reviewer';
+const PLANNER_NOTE = 'Preserving the boundary is the correct response';
+const FIXER_NOTE = 'A deferred finding is not work to do here';
+const OTHER: OutOfScopeItem = { item: 'configurable roles', why: 'tracked in issue #2' };
+
+test('a revision is told which of its findings the reviewer deferred', () => {
+  // The mixed round is the case: a blocker is what sends the plan back at all,
+  // and the deferred item rides along with it.
+  const prompt = revisePlanPrompt({
+    findings: [finding({ id: 'keep', defer: true }), finding({ id: 'fix', severity: 'P1' })],
+    outOfScope: [ITEM],
+    round: 2,
+  });
+  assert.ok(prompt.includes(DEFERRED_MARK));
+  assert.ok(prompt.includes(PLANNER_NOTE));
+});
+
+test('a revision whose findings are all live carries no deferral wording', () => {
+  const prompt = revisePlanPrompt({ findings: [finding()], outOfScope: [ITEM], round: 2 });
+  assert.ok(!prompt.includes(DEFERRED_MARK));
+  assert.ok(!prompt.includes(PLANNER_NOTE));
+});
+
+test('the fixer is told a deferred finding is not work to do', () => {
+  const deferred = fixPrompt([finding({ defer: true })], 1);
+  assert.ok(deferred.includes(DEFERRED_MARK));
+  // Otherwise "address P2s where the fix is contained and low-risk" offers the
+  // reviewer's own declined item back to the implementer as easy work.
+  assert.ok(deferred.includes(FIXER_NOTE));
+
+  const live = fixPrompt([finding()], 1);
+  assert.ok(!live.includes(DEFERRED_MARK));
+  assert.ok(!live.includes(FIXER_NOTE));
+});
+
+test('a finding with no defer field renders exactly as one that declines to defer', () => {
+  const legacy: Finding = {
+    id: 'old',
+    severity: 'P2',
+    title: 'Old finding',
+    detail: 'Detail.',
+    suggested_fix: 'Fix it.',
+  };
+  const explicit = finding({ ...legacy, defer: false });
+
+  assert.equal(fixPrompt([legacy], 1), fixPrompt([explicit], 1));
+  assert.equal(
+    revisePlanPrompt({ findings: [legacy], round: 2 }),
+    revisePlanPrompt({ findings: [explicit], round: 2 }),
+  );
+  assert.ok(!fixPrompt([legacy], 1).includes(DEFERRED_MARK));
+});
+
+test('a round that defers without blocking is recorded even though no revision runs', () => {
+  // `revisePlanPrompt` is reached only when the gate fails, so a critique whose
+  // only findings are deferred passes straight through. The artifact, written
+  // every round before the gate is consulted, is the record that always exists.
+  const state = freshRun();
+  collectDeferred(state, [finding({ id: 'later', defer: true })]);
+
+  assert.notEqual(writeFollowUps(state, plan({ out_of_scope: [] })), null);
+  assert.ok(readFileSync(followUpsPath(state), 'utf8').includes('later'));
+});
+
+// ---- collectDeferred sanitises what it inherits -----------------------------
+
+/** What `loadRun` can hand back: JSON cast to `RunState`, never validated. */
+const storedDeferred = (state: RunState): unknown =>
+  (JSON.parse(readFileSync(path.join(state.dir, 'state.json'), 'utf8')) as Record<string, unknown>)[
+    'deferred'
+  ];
+
+test('a bad entry already in state is dropped, on a round that defers nothing', () => {
+  const state = freshRun();
+  state.deferred = [
+    finding({ id: 'blocker', severity: 'P1', defer: true }),
+    finding({ id: 'not-deferred' }),
+    { id: 'junk' } as unknown as Finding,
+    finding({ id: 'good', defer: true }),
+  ];
+
+  collectDeferred(state, []);
+
+  assert.deepEqual((state.deferred ?? []).map((f) => f.id), ['good']);
+  // Persisted, not just mutated: the early return used to skip the write, so a
+  // bad entry outlived the only code that would have removed it.
+  assert.deepEqual(storedDeferred(state), [{ ...finding({ id: 'good', defer: true }) }]);
+});
+
+test('sanitising down to nothing persists the empty list', () => {
+  const state = freshRun();
+  state.deferred = [finding({ id: 'blocker', severity: 'P1', defer: true })];
+
+  collectDeferred(state, []);
+
+  assert.deepEqual(state.deferred, []);
+  assert.deepEqual(storedDeferred(state), []);
+});
+
+test('a stored value that is not an array is replaced rather than filtered', () => {
+  // `stored ?? []` defended against null only; a string or an object is truthy
+  // and `.filter` throws - inside the code a resume calls before it can
+  // reconcile or delete anything.
+  for (const bad of ['oops', { id: 'x' }, null, 7]) {
+    const state = freshRun();
+    (state as unknown as Record<string, unknown>)['deferred'] = bad;
+
+    assert.doesNotThrow(() => collectDeferred(state, []));
+    assert.deepEqual(state.deferred, []);
+    assert.deepEqual(storedDeferred(state), []);
+  }
+});
+
+test('a clean round on clean state invents no empty list', () => {
+  const state = freshRun();
+  collectDeferred(state, []);
+  assert.equal(state.deferred, undefined);
+  assert.equal(storedDeferred(state), undefined);
+});
+
+test('the inherited list is sanitised on a round that does defer something', () => {
+  const state = freshRun();
+  state.deferred = [finding({ id: 'blocker', severity: 'P1', defer: true })];
+
+  collectDeferred(state, [finding({ id: 'nit', severity: 'P3', defer: true })]);
+
+  assert.deepEqual((state.deferred ?? []).map((f) => f.id), ['nit']);
+});
+
+test('writeFollowUps refuses a bad container too', () => {
+  const state = freshRun();
+  (state as unknown as Record<string, unknown>)['deferred'] = 'oops';
+
+  const file = writeFollowUps(state, plan({ out_of_scope: [ITEM] }));
+
+  assert.notEqual(file, null);
+  const body = readFileSync(followUpsPath(state), 'utf8');
+  assert.ok(body.includes(ITEM.item));
+  // It is this function that claims everything below was non-blocking, and it
+  // is exported, so it can be reached with state no collection passed over.
+  assert.ok(!body.includes('## Deferred by review'));
+});
+
+// ---- FOLLOW-UPS.md cannot outlive the plan it describes ---------------------
+
+test('a stale artifact is rewritten from the plan actually stored', () => {
+  const state = freshRun();
+  writeFollowUps(state, plan({ out_of_scope: [ITEM] }));
+  state.plan = plan({ out_of_scope: [OTHER] });
+
+  assert.notEqual(reconcileFollowUps(state), null);
+
+  const body = readFileSync(followUpsPath(state), 'utf8');
+  assert.ok(body.includes(OTHER.item));
+  assert.ok(!body.includes(ITEM.item));
+});
+
+test('reconciling can mean deleting', () => {
+  const state = freshRun();
+  writeFollowUps(state, plan({ out_of_scope: [ITEM] }));
+  assert.equal(existsSync(followUpsPath(state)), true);
+
+  // What a run killed between `state.plan = plan` and the artifact write leaves
+  // behind: a file asserting a boundary the stored plan no longer draws.
+  state.plan = plan({ out_of_scope: [] });
+
+  assert.equal(reconcileFollowUps(state), null);
+  assert.equal(existsSync(followUpsPath(state)), false);
+});
+
+test('junk in stored state is not resurrected by the reconciliation', () => {
+  const state = freshRun();
+  writeFollowUps(state, plan({ out_of_scope: [ITEM] }));
+  state.deferred = [finding({ id: 'blocker', severity: 'P1', defer: true })];
+  state.plan = plan({ out_of_scope: [] });
+
+  assert.equal(reconcileFollowUps(state), null);
+  assert.equal(existsSync(followUpsPath(state)), false);
+  assert.deepEqual(state.deferred, []);
+});
+
+test('a run with no stored plan reconciles nothing', () => {
+  const state = freshRun();
+  assert.equal(reconcileFollowUps(state), null);
+  assert.equal(existsSync(followUpsPath(state)), false);
+});
+
+test('the run entry point reconciles before any phase runs', async () => {
+  // Drives the real `orchestrate`: resume skips git, and a completed run
+  // returns before any turn. If the call is dropped, this fails.
+  const state = freshRun();
+  writeFollowUps(state, plan({ out_of_scope: [ITEM] }));
+  state.plan = plan({ out_of_scope: [] });
+  state.phase = 'complete';
+
+  await orchestrate(state, DEFAULTS, true);
+
+  assert.equal(existsSync(followUpsPath(state)), false);
+});
+
+test('the run entry point rewrites a stale artifact as well as removing one', async () => {
+  const state = freshRun();
+  writeFollowUps(state, plan({ out_of_scope: [ITEM] }));
+  state.plan = plan({ out_of_scope: [OTHER] });
+  state.phase = 'complete';
+
+  await orchestrate(state, DEFAULTS, true);
+
+  const body = readFileSync(followUpsPath(state), 'utf8');
+  assert.ok(body.includes(OTHER.item));
+  assert.ok(!body.includes(ITEM.item));
 });
