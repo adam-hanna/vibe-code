@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DEFAULTS } from '@src/config.js';
@@ -224,6 +224,71 @@ test('a baseline rotation whose briefing fails charges nothing and throws nothin
   const rotations = state.events.filter((e) => e.type === 'session_rotated');
   assert.equal(rotations.length, 1);
   assert.equal(rotations[0]?.['tokens'], 0);
+});
+
+test('a rotation that crosses budget.maxCostUsd raises the escalation too', async () => {
+  // The token ceiling is the one this change was about, so it is the one the
+  // cases above pin. Without this, a regression that charged rotations through
+  // a path skipping `enforceCostCeiling` would pass every other test here.
+  const state = measuredRun('rotation trips the cost ceiling');
+  const cfg = config({ budget: { ...DEFAULTS.budget, maxCostUsd: 0.5 } });
+
+  await assert.rejects(
+    () => captureLog(() => rotateSession(state, cfg, () => Promise.resolve(handoffResult(2, 100)))),
+    (err: unknown) => err instanceof Escalation && err.code === EXIT.BUDGET,
+  );
+
+  assert.equal(state.costUsd, 2);
+});
+
+test('a baseline rotation that succeeds is charged and can trip a ceiling', async () => {
+  // Only a baseline rotation whose *briefing* fails goes uncharged. One that
+  // succeeds takes the ordinary charged path, so the escalation branch in the
+  // wrapper must not be conditional on the rotation having been a measured one.
+  const state = runFor('successful baseline rotation');
+  state.contextRatio = 0.4;
+  state.sessionStarted = true;
+  const cfg = config({
+    claude: { ...DEFAULTS.claude, model: 'sonnet' },
+    budget: { ...DEFAULTS.budget, maxTokens: 1000 },
+  });
+
+  await captureLog(async () => {
+    await assert.rejects(
+      () =>
+        withConcurrentCompaction(state, cfg, () => Promise.resolve('critique'), () =>
+          Promise.resolve(handoffResult(0.01, 12_000)),
+        ),
+      (err: unknown) => err instanceof Escalation && err.code === EXIT.BUDGET,
+    );
+  });
+
+  assert.equal(state.tokensUsed, 12_000);
+});
+
+test('a handoff the run paid for is charged even when its artifact cannot be written', async () => {
+  // The briefing is a record of a rotation that has already happened. Losing
+  // the record is the smaller loss: a throw here would skip the charge, and
+  // under the wrapper it would then be swallowed as an ordinary compaction
+  // failure - a rotated session no ceiling ever saw, which is the exact hole
+  // this change closes.
+  const state = measuredRun('artifact write fails');
+  // A directory occupying the name the briefing is about to be written to, so
+  // that write fails and nothing else does. Breaking `state.dir` instead would
+  // also break `saveState`, which is a different failure.
+  mkdirSync(path.join(state.dir, `handoff-${state.sessionRotations + 1}.md`));
+
+  const { lines } = await captureLog(() =>
+    rotateSession(state, config(), () => Promise.resolve(handoffResult(0.01, 12_000))),
+  );
+
+  assert.equal(state.tokensUsed, 12_000);
+  assert.equal(state.costUsd, 0.01);
+  assert.equal(state.sessionRotations, 1);
+  assert.ok(
+    lines.some((l) => l.includes('rotation still charged')),
+    'the lost briefing is reported rather than passed over',
+  );
 });
 
 // ---- The run that never rotates --------------------------------------------

@@ -169,7 +169,21 @@ export async function rotateSession(
 
   state.handoff = result.text;
   delete state.handoffStale;
-  artifact(state, `handoff-${state.sessionRotations}.md`, result.text);
+  // The write cannot be allowed to cost the run the accounting for a turn it
+  // has already paid for - the same reasoning that moved the critique and
+  // review artifacts inside the callback in `orchestrator.ts`. A throw here
+  // would skip the charge entirely, and under `withConcurrentCompaction` it
+  // would then be swallowed as an ordinary compaction failure, leaving a
+  // rotated session that no ceiling ever saw. The briefing is a record of a
+  // rotation that has already happened; losing the record is the smaller loss,
+  // and `state.handoff` is set above either way, so the next session still gets
+  // it.
+  try {
+    artifact(state, `handoff-${state.sessionRotations}.md`, result.text);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    log.warn(`Could not write handoff-${state.sessionRotations}.md (${message}); rotation still charged.`);
+  }
 
   // Before the charge, not after: the charge can now end the run, and the
   // rotation it would be reporting has already happened - new session id,
@@ -230,9 +244,12 @@ export async function withConcurrentCompaction<T>(
         return;
       }
       // Compaction on a measured session is an optimisation; losing it must not
-      // fail the run. A baseline rotation never lands here - it rotates even
-      // when the briefing fails, because continuing on an unattributable
-      // session is the thing it exists to prevent.
+      // fail the run. A baseline rotation whose *briefing* fails never lands
+      // here either - it rotates anyway and returns, because continuing on an
+      // unattributable session is the thing it exists to prevent. A baseline
+      // rotation that succeeds is charged like any other and can trip either
+      // ceiling, which is why the escalation branch above is not conditional on
+      // the rotation having been a measured one.
       const message = err instanceof Error ? err.message : String(err);
       log.warn(`Compaction failed, continuing on the existing session: ${message}`);
     }),
