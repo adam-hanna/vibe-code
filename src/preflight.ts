@@ -321,7 +321,8 @@ async function preflightCodex(
     const stream = parseProbeStream(result.stdout);
     if (stream.tokens !== null) spend.add(0, stream.tokens.total);
     // The prompt is handed over so an echo of it can be excluded: it names both
-    // sentinels itself, and extractRecord takes the first pair it finds.
+    // sentinels itself, so an echoed prompt is a probe record that was never
+    // probed.
     return selectProbeTranscript(stream.strings, stream.plain, prompt);
   }, cfg.codex.sandbox);
 

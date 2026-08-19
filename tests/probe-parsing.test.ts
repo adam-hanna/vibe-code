@@ -2,6 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseProbeTurn } from '@src/claude.js';
 import { parseProbeStream } from '@src/codex.js';
+// Both adapters use the same sentinel literals, one set each.
+import { extractBlock } from '@src/adapters/claude-adapter.js';
 import {
   BEGIN,
   END,
@@ -150,9 +152,9 @@ function recordFrom(stdout: string, prompt = ''): string | null {
 }
 
 test('an echo of the prompt does not beat the answer, though it holds both sentinels', () => {
-  // renderProbePrompt names BEGIN and END in its own instructions, and
-  // extractRecord takes the FIRST pair it finds - so an echoed prompt would
-  // otherwise be parsed as the probe record and report a runtime nobody probed.
+  // renderProbePrompt names BEGIN and END in its own instructions, so an echo
+  // of it is a whole sentinel pair carrying the template's placeholders. Left
+  // in, it parses as a probe record describing a runtime nobody probed.
   const prompt = renderProbePrompt(CONTRACT);
   assert.ok(prompt.includes(BEGIN) && prompt.includes(END), 'the prompt names both sentinels');
 
@@ -200,6 +202,34 @@ test('a block that only ever appears in a partial is still found', () => {
   assert.equal(recordFrom(stdout), RECORD);
 });
 
+test('two whole blocks in ONE candidate: the later one is the record', () => {
+  // The residual form of the same defect: choosing the right candidate is not
+  // enough while the scan inside it still takes the first pair. Here the model
+  // quoted the template it was given and then answered.
+  const template = [
+    BEGIN,
+    'shell=<the shell you execute commands in>',
+    'tool.node.exit=<exit code>',
+    END,
+  ].join('\n');
+  const stdout = jsonl(agentMessage(`For reference:\n${template}\n\nMy results:\n${BLOCK}`));
+
+  assert.equal(recordFrom(stdout), RECORD);
+});
+
+test('a truncated attempt followed by a whole one in the same candidate', () => {
+  const stdout = jsonl(agentMessage(`${BEGIN}\nshell=truncated\n\nlet me redo that\n${BLOCK}`));
+
+  assert.equal(recordFrom(stdout), RECORD);
+});
+
+test('prose after the record does not hide it', () => {
+  // A trailing BEGIN with no END must not end the backward scan.
+  const stdout = jsonl(agentMessage(`${BLOCK}\n\nThat is the ${BEGIN} block you asked for.`));
+
+  assert.equal(recordFrom(stdout), RECORD);
+});
+
 test('a block split across delta fragments is reassembled, not discarded', () => {
   // A stream that streams its reply is a legitimate stream: no single string
   // holds both sentinels, and dropping the fragments would fail a probe that
@@ -227,6 +257,27 @@ test('a block split across line-wise fragments is reassembled too', () => {
   assert.equal(recordFrom(stdout), RECORD);
 });
 
+test('unrelated key=value prose around the fragments stays out of the record', () => {
+  // parseKeyValueRecord is last-write-wins, so a stray key=value line swept in
+  // from the assistant's own prose would overwrite a probed one. Only the
+  // contiguous run that spans the block is reassembled.
+  const stdout = jsonl(
+    { type: 'item.output_text.delta', delta: 'I will report shell=guessed first.\n' },
+    { type: 'item.output_text.delta', delta: `${BEGIN}\n` },
+    { type: 'item.output_text.delta', delta: 'shell=powershell\n' },
+    { type: 'item.output_text.delta', delta: 'uname=Windows\n' },
+    { type: 'item.output_text.delta', delta: 'tool.node.exit=0\n' },
+    { type: 'item.output_text.delta', delta: END },
+    { type: 'item.output_text.delta', delta: '\nNote: tool.node.exit=127 on my first try.' },
+  );
+
+  const record = recordFrom(stdout) ?? '';
+
+  assert.equal(record, RECORD);
+  assert.ok(!record.includes('guessed'));
+  assert.ok(!record.includes('127'));
+});
+
 test('a stream with no block anywhere yields something extractRecord rejects', () => {
   // Which is what makes probeRuntime retry and then report a probe error, as it
   // does today for a turn that answered without the block.
@@ -244,4 +295,16 @@ test('plain output with a block still works, which is the rollback path', () => 
   const stdout = `here you go\n${BLOCK}\n`;
 
   assert.equal(recordFrom(stdout), RECORD);
+});
+
+test('extraction takes the last whole pair on both agents probe paths', () => {
+  // The same first-match hazard existed on the Claude side, where
+  // renderVerifyPrompt also names both sentinels. Neither adapter reads an
+  // earlier pair now.
+  const twice = `${BEGIN}\nshell=echoed\n${END}\n${BLOCK}`;
+
+  assert.equal(extractRecord(twice), RECORD);
+  assert.equal(extractBlock(twice), RECORD);
+  assert.equal(extractRecord(`no sentinels here`), null);
+  assert.equal(extractBlock(`${BEGIN} but never closed`), null);
 });

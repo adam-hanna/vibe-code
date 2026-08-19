@@ -182,10 +182,45 @@ export function renderProbePrompt(contract: ToolchainContract, insist = false): 
   ].join('\n');
 }
 
-/** Whether `text` holds a whole sentinel pair, which is what `extractRecord` needs. */
-function hasBlock(text: string): boolean {
-  const start = text.indexOf(BEGIN);
-  return start >= 0 && text.indexOf(END, start + 1) > start;
+/**
+ * The LAST whole sentinel pair in `text`, sentinels included, or null.
+ *
+ * Last rather than first, everywhere: the instructions that ask for the block
+ * name both sentinels, and a truncated or superseded attempt precedes the one
+ * that worked - so in any text holding more than one pair, the earlier pair is
+ * the one that is not the answer. Scanning back over `BEGIN`s that never got an
+ * `END` also means a reply that trails off after the record cannot hide it.
+ */
+function lastBlock(text: string): string | null {
+  let start = text.lastIndexOf(BEGIN);
+  while (start >= 0) {
+    const end = text.indexOf(END, start + BEGIN.length);
+    if (end > start) return text.slice(start, end + END.length);
+    if (start === 0) return null;
+    start = text.lastIndexOf(BEGIN, start - 1);
+  }
+  return null;
+}
+
+/**
+ * The block spanning the shortest contiguous run of `fragments` that holds one.
+ *
+ * Contiguous, and only the run: joining every fragment would sweep the
+ * assistant's own prose and any reasoning text in between into the record, and
+ * `parseKeyValueRecord` is last-write-wins, so a stray `key=value` line from
+ * outside the block would overwrite a probed one. The search starts from the
+ * last fragment that opens a block, for the same reason the scan above ends at
+ * the last pair.
+ */
+function contiguousBlock(fragments: readonly string[], joiner: string): string | null {
+  for (let start = fragments.length - 1; start >= 0; start -= 1) {
+    if (!(fragments[start] ?? '').includes(BEGIN)) continue;
+    for (let end = start; end < fragments.length; end += 1) {
+      const block = lastBlock(fragments.slice(start, end + 1).join(joiner));
+      if (block !== null) return block;
+    }
+  }
+  return null;
 }
 
 /** How many `key=value` lines a reassembly's block yields - how whole it is. */
@@ -194,11 +229,11 @@ function recordLines(text: string): number {
   return block.split(/\r?\n/).filter((line) => line.includes('=')).length;
 }
 
-/** The last of `strings` holding a whole block, or null. */
+/** The last whole block among `strings`, taken from the last string holding one. */
 function lastWithBlock(strings: readonly ProbeString[]): string | null {
   for (let i = strings.length - 1; i >= 0; i -= 1) {
-    const value = strings[i]?.value ?? '';
-    if (hasBlock(value)) return value;
+    const block = lastBlock(strings[i]?.value ?? '');
+    if (block !== null) return block;
   }
   return null;
 }
@@ -206,13 +241,13 @@ function lastWithBlock(strings: readonly ProbeString[]): string | null {
 /**
  * The string the probe record should be read out of, from a `--json` stream.
  *
- * Not a concatenation of everything. `extractRecord` takes the FIRST sentinel
- * pair it finds, and `renderProbePrompt` names both sentinels in its own
- * instructions - so an echoed prompt, a `command` string mentioning them, or a
- * truncated streaming partial would beat the model's actual answer and produce
- * a confidently wrong runtime. Candidates are therefore ranked and one is
- * chosen, and where a whole block exists the choice is the LAST one: the answer
- * always follows the instructions that asked for it.
+ * Not a concatenation of everything, and never a whole candidate: what comes
+ * back is the block itself, cut to its last sentinel pair. `renderProbePrompt`
+ * names both sentinels in its own instructions, so an echoed prompt, a
+ * `command` string mentioning them, or a truncated earlier attempt would
+ * otherwise be parsed as the runtime record - and returning a whole candidate
+ * only moved that hazard inside the string, where the first-pair scan would
+ * find the wrong one just the same.
  */
 export function selectProbeTranscript(
   strings: readonly ProbeString[],
@@ -236,8 +271,8 @@ export function selectProbeTranscript(
   if (anywhere !== null) return anywhere;
 
   // No single string holds one, so the stream split the answer across fragments.
-  // Reassembled in arrival order rather than dropped - a stream that sends its
-  // reply in deltas answered the probe, it did not fail it.
+  // Reassembled rather than dropped - a stream that sends its reply in deltas
+  // answered the probe, it did not fail it.
   //
   // Two ways to put the pieces back, because two kinds of fragment occur: a
   // delta is a slice of one text and carries its own newlines, while a
@@ -247,10 +282,10 @@ export function selectProbeTranscript(
   const fragments = candidates.filter((probe) => !probe.meta).map((probe) => probe.value);
   let best: { text: string; lines: number } | null = null;
   for (const joiner of ['', '\n']) {
-    const joined = fragments.join(joiner);
-    if (!hasBlock(joined)) continue;
-    const lines = recordLines(joined);
-    if (best === null || lines > best.lines) best = { text: joined, lines };
+    const run = contiguousBlock(fragments, joiner);
+    if (run === null) continue;
+    const lines = recordLines(run);
+    if (best === null || lines > best.lines) best = { text: run, lines };
   }
   if (best !== null) return best.text;
 
@@ -260,12 +295,18 @@ export function selectProbeTranscript(
   return rest === '' ? plain : rest;
 }
 
-/** Pull the sentinel-delimited block out of the transcript. */
+/**
+ * Pull the sentinel-delimited block out of the transcript.
+ *
+ * The LAST whole pair, not the first. The prompt names both sentinels, and a
+ * model that quotes its instructions, retries after a truncated attempt, or
+ * prints the record twice puts more than one pair in front of this - and in
+ * every one of those cases the earlier pair is the one that is not the answer.
+ * Taking the first parsed an echoed template as a probed runtime.
+ */
 export function extractRecord(stdout: string): string | null {
-  const start = stdout.indexOf(BEGIN);
-  const end = stdout.indexOf(END, start + 1);
-  if (start < 0 || end < 0) return null;
-  return stdout.slice(start + BEGIN.length, end).trim();
+  const block = lastBlock(stdout);
+  return block === null ? null : block.slice(BEGIN.length, block.length - END.length).trim();
 }
 
 export function parseProbeRecord(raw: string, hostCwd: string, sandbox: Sandbox): AgentRuntime {
