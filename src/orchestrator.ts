@@ -87,6 +87,10 @@ const PLAN_TOOLS = ['Read', 'Glob', 'Grep', 'Bash', 'WebSearch', 'WebFetch'] as 
 
 export async function orchestrate(state: RunState, cfg: Config, resume: boolean): Promise<RunState> {
   try {
+    // Before any phase runs. On a fresh run `state.plan` is null and this does
+    // nothing; on a resume it is the one point holding both the stored plan and
+    // the artifact the previous process may have died between writing.
+    reconcileFollowUps(state);
     return await runPhases(state, cfg, resume);
   } finally {
     // A `finally`, not a tail call: the phases below return early at the
@@ -413,28 +417,90 @@ function renderOutstanding(state: RunState, findings: readonly Finding[]): strin
 }
 
 /**
- * Merge this round's deferred findings into the run's list, newest id wins.
+ * What may appear in FOLLOW-UPS.md.
  *
- * Filters on severity as well as on `defer`, even though `parseFindings`
- * already normalises: this helper is exported and callable directly, and the
- * artifact it feeds asserts in prose that everything in it was non-blocking.
- * An invariant a boundary states should be one the boundary keeps.
+ * Written against `unknown` on purpose: `loadRun` casts stored JSON with no
+ * validation, so an entry in `state.deferred` is a `Finding` by assertion only.
+ * Severity is checked as well as `defer`, even though `parseFindings` already
+ * normalises, because the artifact this feeds asserts in prose that everything
+ * in it was non-blocking - and an invariant a boundary states should be one the
+ * boundary keeps. The string fields are checked because an entry missing one
+ * renders `undefined` into a human-facing document.
+ */
+function isDeferrable(f: unknown): f is Finding {
+  if (typeof f !== 'object' || f === null) return false;
+  const r = f as Record<string, unknown>;
+  return (
+    r['defer'] === true &&
+    (r['severity'] === 'P2' || r['severity'] === 'P3') &&
+    typeof r['id'] === 'string' &&
+    r['id'].length > 0 &&
+    typeof r['title'] === 'string' &&
+    typeof r['detail'] === 'string' &&
+    typeof r['suggested_fix'] === 'string'
+  );
+}
+
+/**
+ * The stored list, or null when the field is genuinely absent. Never throws.
+ *
+ * The `unknown` hop is the point: the declared `Finding[]` is an assertion over
+ * stored JSON, and a present non-array - `null`, a string, an object - would
+ * make `.filter` throw inside the code resume calls before it can reconcile
+ * anything. Such a value is dirty rather than absent, so it reads as an empty
+ * list and gets replaced.
+ */
+function storedDeferred(state: RunState): readonly unknown[] | null {
+  const raw: unknown = state.deferred;
+  if (raw === undefined) return null;
+  return Array.isArray(raw) ? (raw as readonly unknown[]) : [];
+}
+
+/**
+ * Merge this round's deferred findings into the run's list, newest id wins,
+ * sanitising what it inherits on the way through.
+ *
+ * The inherited list gets the same predicate as the fresh one: this helper is
+ * exported and callable directly, and stored state has never been validated, so
+ * a blocking or malformed entry that got in once would otherwise survive every
+ * later collection and be rendered under a header claiming the opposite.
+ *
+ * For the same reason a round that defers nothing is no longer a plain early
+ * return - it is the only code that would remove a bad entry, and skipping the
+ * write is how such an entry outlives the run. The write is skipped only when
+ * there is genuinely nothing to add and nothing to fix, which also leaves
+ * `deferred` absent on a run that has never deferred anything.
  *
  * An id a later round re-raises as a blocker is deliberately not pruned.
  * Reconciling a human record against the live blocking set would couple it to
  * the review loop, so the artifact time-qualifies its own claims instead.
  */
 export function collectDeferred(state: RunState, findings: readonly Finding[]): void {
-  const fresh = findings.filter(
-    (f) => f.defer === true && (f.severity === 'P2' || f.severity === 'P3'),
-  );
-  if (fresh.length === 0) return;
+  const fresh = findings.filter(isDeferrable);
+  const stored = storedDeferred(state);
+  const inherited = stored === null ? [] : stored.filter(isDeferrable);
+  // Clean: a well-formed array from which nothing was dropped, and which
+  // already holds the deduped-by-id shape `RunState` documents. Duplicates
+  // count as dirty even though every entry is individually valid - the early
+  // return skips the `Map` merge that is the only thing enforcing that
+  // contract, and `writeFollowUps` filters without deduping, so a stored pair
+  // sharing an id would render the same follow-up twice.
+  const uniqueIds = new Set(inherited.map((f) => f.id)).size;
+  const clean =
+    stored !== null &&
+    Array.isArray(state.deferred) &&
+    inherited.length === stored.length &&
+    uniqueIds === inherited.length;
+
+  if (fresh.length === 0 && (stored === null || clean)) return;
 
   const merged = new Map<string, Finding>();
-  for (const f of state.deferred ?? []) merged.set(f.id, f);
+  for (const f of inherited) merged.set(f.id, f);
   // Later round wins: the same finding restated is usually better stated.
   for (const f of fresh) merged.set(f.id, f);
 
+  // Written even when this leaves the list empty, or replaces a non-array with
+  // one: a rejected entry must not outlive the code that rejected it.
   state.deferred = [...merged.values()];
   saveState(state);
 }
@@ -452,7 +518,14 @@ export function collectDeferred(state: RunState, findings: readonly Finding[]): 
  * critique that would have rewritten the file may never run.
  */
 export function writeFollowUps(state: RunState, plan: Plan): string | null {
-  const deferred = state.deferred ?? [];
+  // Guarded, filtered and deduped here too, not only in `collectDeferred`:
+  // this is the function whose output makes the non-blocking claim, and it is
+  // exported, so it can be reached with stored state no collection has passed
+  // over. Deduping last-wins matches the merge order in `collectDeferred`, so
+  // reaching this directly renders what collecting first would have.
+  const deferred = Array.isArray(state.deferred)
+    ? [...new Map(state.deferred.filter(isDeferrable).map((f) => [f.id, f])).values()]
+    : [];
   // The one place absent and empty are treated alike: neither has anything to
   // report, so neither gets a section.
   const scope = plan.out_of_scope ?? [];
@@ -499,6 +572,28 @@ export function writeFollowUps(state: RunState, plan: Plan): string | null {
       `Raw material for the next issue, not a defect report.\n\n` +
       sections.join('\n'),
   );
+}
+
+/**
+ * Reconcile FOLLOW-UPS.md against the stored plan. Returns the artifact path,
+ * or null when no plan is stored yet or there is nothing to say.
+ *
+ * `runPlan` and `revisePlan` persist the plan and then write the artifact, so a
+ * kill or a filesystem error between the two leaves an artifact describing a
+ * plan that is no longer stored. Nothing rewrote it until the next critique,
+ * which may be rate-limited or may never run. `writeFollowUps` already deletes
+ * on the way down for exactly this reason; this is the same thought applied to
+ * the one place a run starts from stored state.
+ *
+ * The empty collection is deliberate: stored state is unvalidated and the
+ * artifact asserts its own contents were non-blocking, so it is sanitised
+ * before being rendered rather than after.
+ */
+export function reconcileFollowUps(state: RunState): string | null {
+  const plan = state.plan;
+  if (plan === null || plan === undefined) return null;
+  collectDeferred(state, []);
+  return writeFollowUps(state, plan);
 }
 
 // ---------------------------------------------------------------------------
