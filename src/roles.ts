@@ -1,4 +1,6 @@
 import { ANSWERS_SCHEMA, FINDINGS_SCHEMA } from '@src/schemas.js';
+import { SLOTS } from '@src/slots.js';
+import type { SlotName } from '@src/slots.js';
 import type { AgentProvider } from '@src/runtime.js';
 import type { Config, PermissionMode, Sandbox } from '@src/types.js';
 
@@ -7,9 +9,14 @@ export type Access = 'read-only' | 'write';
 
 export type Role = 'planner' | 'implementer' | 'critic' | 'answerer' | 'reviewer';
 
+/**
+ * `slot` is optional because a table that names none still describes something
+ * coherent: one conversation per provider, which is what every table predating
+ * named slots meant. See `slotForRole`.
+ */
 export type RoleSpec =
-  | { provider: 'claude'; access: Access }
-  | { provider: 'codex'; access: Access; schema: object };
+  | { provider: 'claude'; access: Access; slot?: SlotName }
+  | { provider: 'codex'; access: Access; schema: object; slot?: SlotName };
 
 /**
  * The shape of `ROLES`, so the functions below can be handed a different one.
@@ -27,15 +34,52 @@ export type RoleTable = Record<Role, RoleSpec>;
  * config key - making these swappable is its own change.
  *
  * The schema rides on the role rather than being sniffed out of the turn label,
- * which is what the previous `schemaName.startsWith('answers')` check did.
+ * which is what the previous `schemaName.startsWith('answers')` check did. The
+ * slot rides on it for the same reason: which conversation a role talks through
+ * is a fact about the role, not something to re-derive from its provider.
  */
 export const ROLES: Record<Role, RoleSpec> = {
-  planner: { provider: 'claude', access: 'read-only' },
-  implementer: { provider: 'claude', access: 'write' },
-  critic: { provider: 'codex', access: 'read-only', schema: FINDINGS_SCHEMA },
-  answerer: { provider: 'codex', access: 'read-only', schema: ANSWERS_SCHEMA },
-  reviewer: { provider: 'codex', access: 'read-only', schema: FINDINGS_SCHEMA },
+  planner: { provider: 'claude', access: 'read-only', slot: 'main' },
+  implementer: { provider: 'claude', access: 'write', slot: 'main' },
+  critic: { provider: 'codex', access: 'read-only', schema: FINDINGS_SCHEMA, slot: 'judge' },
+  answerer: { provider: 'codex', access: 'read-only', schema: ANSWERS_SCHEMA, slot: 'judge' },
+  reviewer: { provider: 'codex', access: 'read-only', schema: FINDINGS_SCHEMA, slot: 'judge' },
 };
+
+/**
+ * The slot a table that names none means: one conversation per provider, which
+ * is what every table predating named slots described.
+ *
+ * Not the provider-name guessing this file exists to have deleted - it decides
+ * no one's job and answers no question about who does what. It is the fallback
+ * shape for a table that left the field out, and `ROLES` leaves none out.
+ */
+const DEFAULT_SLOT: Readonly<Record<AgentProvider, SlotName>> = {
+  claude: 'main',
+  codex: 'judge',
+};
+
+/**
+ * The conversation this role talks through.
+ *
+ * The pairing is checked, not assumed: dispatch routes by the role's provider
+ * while ids and lifecycle come from the slot, so a mis-seated slot would hand a
+ * client-minted Claude id to `codex exec resume`, or run a Claude turn off a
+ * provider-origin slot that has no id to spawn under. Loud here beats wrong
+ * there, and it cannot fire under `ROLES`, which is a constant this repo owns
+ * and a test pins.
+ */
+export function slotForRole(role: Role, roles: RoleTable = ROLES): SlotName {
+  const spec = roles[role];
+  const slot = spec.slot ?? DEFAULT_SLOT[spec.provider];
+  if (SLOTS[slot].provider !== spec.provider) {
+    throw new Error(
+      `role "${role}" is seated on provider "${spec.provider}" but slot "${slot}" is a ` +
+        `${SLOTS[slot].provider} conversation`,
+    );
+  }
+  return slot;
+}
 
 export function claudePermission(access: Access): PermissionMode {
   return access === 'write' ? 'bypassPermissions' : 'plan';
@@ -94,24 +138,32 @@ export function describedRole(provider: AgentProvider, roles: RoleTable = ROLES)
 }
 
 /**
- * The role whose session `rotateSession` compacts.
+ * The role whose conversation `rotateSession` compacts.
  *
- * There is one session vibe manages - `state.sessionId`, its measurement and
- * its handoff - and it is the one the writing Claude role talks through. Stated
- * as a role so the rule below is about who is being interrupted rather than
- * about a provider's name.
+ * The rotation - its measurement, its handoff, its fresh id - belongs to a
+ * *slot*, and this names the role whose slot that is. Stated as a role so the
+ * rule below is about who is being interrupted rather than about a provider's
+ * name; see `src/slots.ts` for what a slot's lifecycle is, and `rotatingSlot`
+ * for the conversation this resolves to.
  */
 export const ROTATING_ROLE: Role = 'implementer';
+
+/** The conversation `rotateSession` compacts, under whichever table is in force. */
+export function rotatingSlot(roles: RoleTable = ROLES): SlotName {
+  return slotForRole(ROTATING_ROLE, roles);
+}
 
 /**
  * Whether a rotation may run alongside a turn in this role.
  *
- * Only when the agent doing the work is not the agent whose session is being
- * rotated. That was always the rule; it was written as `compactDuringCodex`,
- * which is true of today's table and of nothing else.
+ * Only when the conversation being compacted is not the one the work is being
+ * done through. That was always the rule; it was written as
+ * `compactDuringCodex`, then as a comparison of providers - both true of today's
+ * table and neither the thing being asked. Two roles on one provider but on
+ * different conversations may overlap; two on one conversation may not.
  */
 export function rotatesConcurrentlyWith(workRole: Role, roles: RoleTable = ROLES): boolean {
-  return roles[workRole].provider !== roles[ROTATING_ROLE].provider;
+  return slotForRole(workRole, roles) !== rotatingSlot(roles);
 }
 
 /**

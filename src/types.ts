@@ -443,6 +443,11 @@ export interface RunState {
   dir: string;
   targetDir: string;
   task: string;
+  /**
+   * The Claude conversation's id - `SLOTS.main`'s storage. Minted before the
+   * first turn, so its existence says nothing about whether one ever ran; that
+   * is `sessionStarted`. Read and written through `src/slots.ts`, never here.
+   */
   sessionId: string;
   createdAt: string;
   status: RunStatus;
@@ -482,13 +487,33 @@ export interface RunState {
   /** Question-and-replan cycles spent so far. */
   questionRound: number;
   events: RunEvent[];
+  /**
+   * Whether a turn has ever succeeded on `sessionId` - `SLOTS.main`'s marker,
+   * separate from its id because every slot has both. Read and written through
+   * `src/slots.ts`, never here.
+   */
   sessionStarted: boolean;
   planOnly: boolean;
   answeredQuestions: string[];
   deferredQuestions: DeferredQuestion[];
   sessionRotations: number;
-  /** Codex's own thread id, reused across critique/answer/review turns. */
+  /**
+   * Codex's own thread id, reused across critique/answer/review turns -
+   * `SLOTS.judge`'s storage. Provider-minted, so it is null until a turn has
+   * returned one. Read and written through `src/slots.ts`, never here.
+   */
   codexSessionId: string | null;
+  /**
+   * Whether a Codex turn has ever succeeded on `codexSessionId` - the slot's
+   * `started` marker, separate from its id because every slot has both.
+   *
+   * Optional: a state written before slots were explicit has no field, and for a
+   * provider-minted id its absence is answered by the id itself, which only ever
+   * comes from a successful turn. An explicit `false` outranks a present id, and
+   * a `true` beside a null id is valid - a turn succeeded on a run that is not
+   * carrying the thread. Read and written through `SLOTS.judge`, never here.
+   */
+  codexSessionStarted?: boolean;
   /** Carried into the first turn of a rotated session. */
   handoff: string | null;
   /**
