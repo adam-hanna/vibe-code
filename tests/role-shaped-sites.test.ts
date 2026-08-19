@@ -305,6 +305,39 @@ test('a writing Codex role is probed for what it would actually be given', () =>
   assert.equal(codexProbeSandbox(cfg, SWAPPED), 'workspace-write');
 });
 
+test('the probe is never widened past what a turn is spawned with', () => {
+  // Every Codex role here writes, so every Codex turn is spawned with
+  // `workspace-write` however wide `codex.sandbox` reads. Probing under
+  // danger-full-access would clear tools the run then cannot execute.
+  const writingOnly: RoleTable = {
+    planner: { provider: 'claude', access: 'read-only' },
+    implementer: { provider: 'codex', access: 'write', schema: FINDINGS_SCHEMA },
+    critic: { provider: 'claude', access: 'read-only' },
+    answerer: { provider: 'claude', access: 'read-only' },
+    reviewer: { provider: 'claude', access: 'read-only' },
+  };
+
+  for (const sandbox of ['read-only', 'workspace-write', 'danger-full-access'] as const) {
+    const cfg = config({ codex: { ...DEFAULTS.codex, readRateLimits: false, sandbox } });
+    assert.equal(codexProbeSandbox(cfg, writingOnly), 'workspace-write', `under ${sandbox}`);
+  }
+});
+
+test('a table with no Codex role falls back to what a read-only turn would get', () => {
+  const noCodex: RoleTable = {
+    planner: { provider: 'claude', access: 'read-only' },
+    implementer: { provider: 'claude', access: 'write' },
+    critic: { provider: 'claude', access: 'read-only' },
+    answerer: { provider: 'claude', access: 'read-only' },
+    reviewer: { provider: 'claude', access: 'read-only' },
+  };
+
+  for (const sandbox of ['read-only', 'workspace-write', 'danger-full-access'] as const) {
+    const cfg = config({ codex: { ...DEFAULTS.codex, readRateLimits: false, sandbox } });
+    assert.equal(codexProbeSandbox(cfg, noCodex), sandbox);
+  }
+});
+
 // ---- 5. The toolchain contract ---------------------------------------------
 
 test('the toolchain contract follows the role that needs the tool', () => {

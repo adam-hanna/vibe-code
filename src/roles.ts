@@ -142,15 +142,24 @@ const SANDBOX_RANK: Readonly<Record<Sandbox, number>> = {
  * Codex role writes - so nothing about any current configuration changes - but
  * they are two different statements, and the moment a Codex role holds `write`
  * the raw key would have preflight vouching for a sandbox no turn ever runs in.
+ *
+ * The maximum is taken over the sandboxes turns are *spawned* with and nothing
+ * else. Seeding it with the read-only sandbox would put `cfg.codex.sandbox` back
+ * in the running even where no turn receives it: a table whose only Codex role
+ * writes is spawned with `workspace-write` however `codex.sandbox` reads, and
+ * probing the wider `danger-full-access` would clear tools the run cannot then
+ * execute - preflight passing for a turn that fails.
  */
 export function codexProbeSandbox(cfg: Config, roles: RoleTable = ROLES): Sandbox {
-  let strongest = codexSandbox('read-only', cfg);
+  let strongest: Sandbox | null = null;
   for (const spec of Object.values(roles)) {
     if (spec.provider !== 'codex') continue;
     const sandbox = codexSandbox(spec.access, cfg);
-    if (SANDBOX_RANK[sandbox] > SANDBOX_RANK[strongest]) strongest = sandbox;
+    if (strongest === null || SANDBOX_RANK[sandbox] > SANDBOX_RANK[strongest]) strongest = sandbox;
   }
-  return strongest;
+  // No Codex role at all: nothing is spawned, so the probe falls back to what a
+  // read-only turn would have been given rather than inventing a wider one.
+  return strongest ?? codexSandbox('read-only', cfg);
 }
 
 /** Which providers hold these roles, deduped and in a stable order. */
