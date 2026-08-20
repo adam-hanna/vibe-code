@@ -1,5 +1,5 @@
 import { ANSWERS_SCHEMA, FINDINGS_SCHEMA, PLAN_SCHEMA } from '@src/schemas.js';
-import { SLOTS, slotRotatable } from '@src/slots.js';
+import { SLOTS, slotMeasured, slotRotatable } from '@src/slots.js';
 import type { SlotName } from '@src/slots.js';
 import type { AgentProvider } from '@src/runtime.js';
 import type { Config, PermissionMode, Sandbox } from '@src/types.js';
@@ -467,24 +467,45 @@ export function roleWarnings(cfg: Config, roles: RoleTable = rolesFor(cfg)): str
     );
   }
 
-  // W2: rotation belongs to a slot, and not every slot has one.
+  // W2: rotation belongs to a slot, and not every slot has one. What is true of
+  // such a slot changed once `codex.contextWindow` could be set: the thread is
+  // still uncompactable, but it is no longer unmeasured. A warning that
+  // contradicts the feature beside it teaches users to skip the next one, so the
+  // measurement clause is conditional and the compaction clause is not.
   if (!slotRotatable(rotatingSlot(roles))) {
+    const measured = slotMeasured(cfg, rotatingSlot(roles));
     warnings.push(
       `roles.implementer is ${implementer}, whose conversation has no rotation mechanism. ` +
-        'Session rotation and context compaction are off for this run: nothing measures that ' +
-        'thread and nothing can compact it.',
+        (measured
+          ? 'Session rotation and context compaction are off for this run: that thread is ' +
+            'measured against codex.contextWindow but nothing can compact it.'
+          : 'Session rotation and context compaction are off for this run: nothing measures that ' +
+            'thread and nothing can compact it.'),
     );
   }
 
-  const generativeOnCodex = GENERATIVE_ROLES.filter((role) => roles[role].provider === 'codex');
-  if (generativeOnCodex.length > 0) {
+  const [firstGenerative, ...restGenerative] = GENERATIVE_ROLES.filter(
+    (role) => roles[role].provider === 'codex',
+  );
+  if (firstGenerative !== undefined) {
+    const generativeOnCodex = [firstGenerative, ...restGenerative];
     const named = namePaths(generativeOnCodex);
-    // W3: a persisted Codex thread doing generative work grows unmeasured.
+    // W3: a persisted Codex thread doing generative work grows. Whether anything
+    // *measures* it is now a question about `codex.contextWindow`, so the sentence
+    // this shipped with is only said while it is still true. What never changes is
+    // that nothing can compact the thread.
     if (cfg.codex.persistSession) {
+      // One slot answers for all of them: a table gives a provider one conversation.
+      const measured = slotMeasured(cfg, slotForRole(firstGenerative, roles));
       warnings.push(
-        `${named} run on a persisted Codex thread and nothing measures its context. It grows ` +
-          'across every plan revision, question round and fix round with no threshold and no ' +
-          'handoff.',
+        measured
+          ? `${named} run on a persisted Codex thread. Its context is measured against ` +
+            'codex.contextWindow and warned about above context.compactAboveRatio, but nothing ' +
+            'can compact it: it grows across every plan revision, question round and fix round ' +
+            'with no handoff.'
+          : `${named} run on a persisted Codex thread and nothing measures its context. It grows ` +
+            'across every plan revision, question round and fix round with no threshold and no ' +
+            'handoff.',
       );
     }
     // W4: the dollar ceiling never sees the expensive half of such a run.

@@ -112,7 +112,15 @@ Unknown with a non-zero ratio buys exactly one rotation, to establish a baseline
 
 **Resume persists the flags you give it.** `vibe resume --max-question-rounds 5` used to apply the flag to that process only, so stopping and resuming again without it silently reverted to the default. The effective config is now written back to the run, and a `resume_config` event records which settings the flags actually changed.
 
-**Codex is handled differently.** By default (`codex.persistSession`) every Codex call continues one thread via `codex exec resume`, so the reviewer remembers what it already raised instead of re-deriving it each round. That continuity matters for the oscillation guard: a stateless reviewer re-files a still-unresolved objection under a fresh `id` every round, which reads as progress when it is actually the same complaint. Codex manages that thread's context itself and reports no signal `vibe` could rotate on, so there is no compaction setting for it. `--no-codex-session` makes each turn a fresh one-shot instead.
+**Codex is handled differently.** By default (`codex.persistSession`) every Codex call continues one thread via `codex exec resume`, so the reviewer remembers what it already raised instead of re-deriving it each round. That continuity matters for the oscillation guard: a stateless reviewer re-files a still-unresolved objection under a fresh `id` every round, which reads as progress when it is actually the same complaint. Nothing can compact that thread — `codex exec resume` takes no session-id flag, so there is no rotation to perform — and `--no-codex-session` makes each turn a fresh one-shot instead.
+
+**The Codex thread is measured, but only half of the fraction is obtainable.** The numerator is free: `turn.completed` reports `usage.input_tokens`, and on a resumed thread that is the whole conversation going in rather than the increment, so the last completed turn's prompt size *is* the thread's occupancy. `vibe` records it against the thread id it was measured on, and reports it on the turn's detail line and in the `codex_turn` event.
+
+The denominator is not obtainable. `ThreadTokenUsage.modelContextWindow` exists in exactly one place in the app-server protocol — the `thread/tokenUsage/updated` **push notification**, delivered to a client the app-server is driving a thread for. No request or response returns it, `thread/read` carries no `tokenUsage` at all, and `model/list` has no context-window field of any kind. `vibe` drives Codex with `codex exec`, a separate process that is not an app-server client, so that notification never arrives. (`account/rateLimits/read` works precisely because it is a request with a reply.)
+
+So the window is a setting, `codex.contextWindow` (`--codex-context-window <n>`), and it is **null by default**. Null is not a failure state; it is the truth about a thread whose window `vibe` cannot ask for. Nothing guesses one from the model name — a table mapping a model to a number is a fabricated denominator that goes stale silently, and a made-up context ratio is the same mistake as a made-up dollar figure with a more convincing face. With no window set you get the token count and never a percentage. With one set you get `ctx N%` beside the turn's tokens, and one warning per run once occupancy crosses `context.compactAboveRatio` — the same threshold the Claude side compacts at — saying plainly that nothing can compact this thread. A resumed run says it again: the condition is still true, and repeating one line is cheaper than swallowing it.
+
+A measurement names the thread it was taken on and is only reported while that thread is still the one in use, so a replaced thread has no occupancy until it takes a turn of its own. With `--no-codex-session` there is no thread to carry a measurement between turns, so the figure describes the size of a single judging prompt.
 
 ### Progress during a turn
 
@@ -202,7 +210,8 @@ Drop `vibe.config.json` in the target repo; CLI flags override it. See `vibe.con
               "critic": "codex", "answerer": "codex", "reviewer": "codex" },
   "claude": { "model": "opus", "effort": "medium" },
   "codex":  { "model": "gpt-5.6-luna", "effort": "xhigh", "sandbox": "read-only", "persistSession": true,
-              "readRateLimits": true, "timeoutMs": 2700000, "implementTimeoutMs": 5400000 },
+              "readRateLimits": true, "contextWindow": null, "timeoutMs": 2700000,
+              "implementTimeoutMs": 5400000 },
   "loop":   { "maxPlanRounds": 5, "maxReviewRounds": 5, "maxVerifyRounds": 3,
               "p1Tolerance": 1, "oscillationThreshold": 3 },
   "budget": { "maxCostUsd": 25, "maxTokens": 25000000, "planShare": 0.4,
@@ -226,8 +235,8 @@ The headline swap is a clean split — `{"planner": "codex", "implementer": "cod
 Some tables run with a warning rather than a refusal, and each says what it costs:
 
 - A judging role on the implementer's provider loses review independence, which is most of what this tool buys.
-- An implementer on Codex has no rotation mechanism, so session rotation and context compaction are off for the run.
-- A planner or implementer on a persisted Codex thread grows a context nothing measures.
+- An implementer on Codex has no rotation mechanism, so session rotation and context compaction are off for the run — measured against `codex.contextWindow` if you set one, unmeasured if you have not, and uncompactable either way.
+- A planner or implementer on a persisted Codex thread grows a context that nothing can compact, and that nothing measures either unless `codex.contextWindow` is set.
 - A planner or implementer on Codex puts the expensive half of the run beyond `budget.maxCostUsd`, which is Claude-side only. `budget.maxTokens` still counts both.
 
 `codex.timeoutMs` is the reviewing figure and `codex.implementTimeoutMs` the writing one, chosen by what the role does — the pair `claude` has always had. A provider that holds no enabled role takes no turn: it is still probed, but its findings can only warn, never stop the run.

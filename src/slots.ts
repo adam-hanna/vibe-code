@@ -74,6 +74,28 @@ export interface SlotSpec {
    * another provider behind it - and belongs to the change that builds it.
    */
   reset: ((state: RunState) => void) | null;
+  /**
+   * The last measured occupancy of this conversation, and the denominator this
+   * run can name - or null for a slot whose occupancy is not measured this way.
+   *
+   * `main` has none on purpose: Claude reports a ratio against a window it names
+   * itself, recorded by `recordContextMeasurement`, and a second notion of the
+   * same fact beside it is exactly what this does not build.
+   */
+  occupancy: {
+    /** Tokens, but only while the stored id still names this slot's conversation. */
+    read: (state: RunState) => number | null;
+    /**
+     * Store `tokens` against the conversation `ranOn` - the id the provider said
+     * this turn ran under. Mutates NOTHING unless the tokens are a positive
+     * integer and `ranOn` is a usable id equal to the one this slot holds now: a
+     * measurement that cannot be attributed is not one, and an id this slot is
+     * not using is not this slot's conversation. There is no fallback identity.
+     */
+    record: (state: RunState, tokens: number, ranOn: string | null) => void;
+    /** The denominator this run can name, or null when it cannot. */
+    window: (cfg: Config) => number | null;
+  } | null;
 }
 
 /**
@@ -88,6 +110,19 @@ export interface SlotSpec {
  */
 function asId(raw: string | null | undefined): string | null {
   return raw === undefined || raw === null || raw === '' ? null : raw;
+}
+
+/**
+ * A usable conversation id: a non-empty string, or null for anything else.
+ *
+ * Not `asId`, which is typed for ids this codebase produced. Stored state is
+ * unvalidated JSON (`loadRun` casts it), so the value read back may not be a
+ * string at all, and a measurement compared against a number or an object would
+ * be attributed on the strength of a coincidence. Everything that is not an id
+ * fails closed to null, which matches nothing.
+ */
+function usableId(raw: unknown): string | null {
+  return typeof raw === 'string' && raw !== '' ? raw : null;
 }
 
 export const SLOTS: Record<SlotName, SlotSpec> = {
@@ -110,6 +145,10 @@ export const SLOTS: Record<SlotName, SlotSpec> = {
       state.sessionId = randomUUID();
       state.sessionStarted = false;
     },
+    // Claude reports a ratio against a window it names itself, recorded by
+    // `recordContextMeasurement` and acted on by `shouldRotate`. Measuring it a
+    // second way here would be two answers to one question.
+    occupancy: null,
   },
   /** The Codex thread the critic, answerer and reviewer share. */
   judge: {
@@ -128,6 +167,32 @@ export const SLOTS: Record<SlotName, SlotSpec> = {
     },
     persists: (cfg) => cfg.codex.persistSession,
     reset: null,
+    occupancy: {
+      read: (state) => {
+        const tokens: unknown = state.judgeContextTokens;
+        const on = usableId(state.judgeContextThread);
+        const now = usableId(state.codexSessionId);
+        // Absent is not a match, and neither is an id this slot has left behind.
+        // Both sides have to name the same conversation before a number here says
+        // anything at all.
+        if (now === null || on === null || on !== now) return null;
+        return typeof tokens === 'number' && Number.isInteger(tokens) && tokens > 0 ? tokens : null;
+      },
+      record: (state, tokens, ranOn) => {
+        const now = usableId(state.codexSessionId);
+        const on = usableId(ranOn);
+        // Fail closed and mutate nothing: no id now, no id from the provider, or
+        // two different conversations all mean there is nothing to attribute this
+        // measurement to - and an unattributable measurement is not one. This is
+        // what makes a one-shot run, whose turns the slot never adopts, carry no
+        // cross-turn figure rather than a mislabelled one.
+        if (now === null || on === null || on !== now) return;
+        if (typeof tokens !== 'number' || !Number.isInteger(tokens) || tokens <= 0) return;
+        state.judgeContextTokens = tokens;
+        state.judgeContextThread = now;
+      },
+      window: (cfg) => cfg.codex.contextWindow ?? null,
+    },
   },
 };
 
@@ -203,6 +268,46 @@ export function markSlotStarted(
   const idChanged = carryId && incoming !== null && incoming !== before;
   spec.markStarted(state, incoming, carryId);
   return { idChanged, first };
+}
+
+/**
+ * How much of this slot's CURRENT conversation is occupied, or null when nothing
+ * measured it - which is not zero, and must never be read as zero.
+ */
+export function slotOccupancy(state: RunState, slot: SlotName): number | null {
+  return SLOTS[slot].occupancy?.read(state) ?? null;
+}
+
+/**
+ * Record what a completed turn measured.
+ *
+ * `ranOn` is the conversation id the provider said the turn ran under. It is
+ * required rather than assumed: a run that does not carry the conversation never
+ * adopts that id, so "the id in state" and "the thread this turn spoke to" are
+ * different things, and only their agreement makes a measurement attributable.
+ * A no-op for a slot with no occupancy notion.
+ */
+export function recordSlotOccupancy(
+  state: RunState,
+  slot: SlotName,
+  tokens: number,
+  ranOn: string | null,
+): void {
+  SLOTS[slot].occupancy?.record(state, tokens, ranOn);
+}
+
+/** The window this run can name for the slot's conversation, or null. */
+export function slotContextWindow(cfg: Config, slot: SlotName): number | null {
+  return SLOTS[slot].occupancy?.window(cfg) ?? null;
+}
+
+/**
+ * Whether this run can express this conversation as a fraction: it has an
+ * occupancy notion AND a window to divide by. Read by the role warnings, which
+ * must not claim a thread is unmeasured once it is.
+ */
+export function slotMeasured(cfg: Config, slot: SlotName): boolean {
+  return slotContextWindow(cfg, slot) !== null;
 }
 
 /** Whether this slot has a mechanism for abandoning its conversation. */

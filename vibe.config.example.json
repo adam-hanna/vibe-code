@@ -18,6 +18,7 @@
     "sandbox": "read-only",
     "timeoutMs": 2700000,
     "implementTimeoutMs": 5400000,
+    "contextWindow": null,
     "readRateLimits": true
   },
   "loop": {
