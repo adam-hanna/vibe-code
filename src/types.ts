@@ -414,6 +414,21 @@ export interface FindingsReport {
   findings: Finding[];
 }
 
+/**
+ * A findings report the run has paid for and not yet answered, tagged with the
+ * loop that bought it.
+ *
+ * The tag is what lets one field serve both loops. A run is only ever in one
+ * phase, but a plan-phase remnant left by a crash must be unreadable to the
+ * review loop rather than merely unlikely to be read by it - a critique's
+ * findings handed to the fix turn would be a fix against the wrong artifact.
+ */
+export interface PendingFindings {
+  /** 'plan' from the critic, 'review' from the reviewer. */
+  phase: 'plan' | 'review';
+  findings: Finding[];
+}
+
 export interface Answer {
   question: string;
   answer: string;
@@ -660,6 +675,23 @@ export interface RunState {
   config?: Config;
   plan: Plan | null;
   pendingAnswers: Answer[] | null;
+  /**
+   * Findings the run has paid for that no revision or fix round has yet
+   * answered.
+   *
+   * Written by the critique or review turn itself and cleared by the revision
+   * or fix that consumes them. Both loops are shaped turn -> gate -> guard ->
+   * consume, and the guard throws in the gap: the findings lived only in a
+   * local binding, so a convergence or budget stop discarded them and the
+   * resumed loop re-entered at the turn that bought them. That cost 7.5M tokens
+   * to re-derive an answer the run already had, byte for byte, and appended a
+   * second `RoundRecord` for a plan that had not changed.
+   *
+   * Optional, and absent means "nothing unconsumed": `loadRun` casts stored
+   * JSON with no validation, so a state written before this field existed has
+   * none, and that is precisely what such a run meant.
+   */
+  pendingFindings?: PendingFindings | null;
   extraContext: string | null;
 }
 
