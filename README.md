@@ -112,6 +112,8 @@ Unknown with a non-zero ratio buys exactly one rotation, to establish a baseline
 
 **Resume persists the flags you give it.** `vibe resume --max-question-rounds 5` used to apply the flag to that process only, so stopping and resuming again without it silently reverted to the default. The effective config is now written back to the run, and a `resume_config` event records which settings the flags actually changed.
 
+**A stall keeps the critique it paid for.** When a guard stops a run between buying a critique or review and acting on it, those findings are carried on the run state and consumed by the resume, which revises from them instead of re-deriving them. Without that, the resume re-entered at the turn that bought the findings and paid for the same answer twice — 7.5M tokens, observed twice before it was fixed. So a stalled run resumes one revision further along than it stopped.
+
 **Codex is handled differently.** By default (`codex.persistSession`) every Codex call continues one thread via `codex exec resume`, so the reviewer remembers what it already raised instead of re-deriving it each round. That continuity matters for the oscillation guard: a stateless reviewer re-files a still-unresolved objection under a fresh `id` every round, which reads as progress when it is actually the same complaint. Nothing can compact that thread — `codex exec resume` takes no session-id flag, so there is no rotation to perform — and `--no-codex-session` makes each turn a fresh one-shot instead.
 
 **The Codex thread is measured, but only half of the fraction is obtainable.** The numerator is free: `turn.completed` reports `usage.input_tokens`, and on a resumed thread that is the whole conversation going in rather than the increment, so the last completed turn's prompt size *is* the thread's occupancy. `vibe` records it against the thread id it was measured on, and reports it on the turn's detail line and in the `codex_turn` event.
@@ -169,7 +171,7 @@ Brakes, all independent:
 |---|---|
 | **Round cap** | `maxPlanRounds` / `maxReviewRounds` (default 5 each), plus `maxVerifyRounds` (3) and `maxQuestionRounds` (3). Verification fixes get their own counter because they previously shared one with review, so a run that spent every round on a failing suite had none left for the reviewer and stopped blaming a reviewer that had never run. |
 | **Oscillation guard** | The set of blocking `id`s is fingerprinted each round. The same fingerprint `oscillationThreshold` rounds running (default 3) means nothing new is being produced and the run escalates. Three rather than two: a single repeat is a normal review cycle — the fix shifts the problem and the next round catches the shift. A lone blocker that never changes is this case, not the one below: it is the whole set, so its fingerprint repeats and this guard is what stops it. |
-| **Convergence trend** | Late in the round budget, a finding count that is not trending down stops the run. Only consulted once most of the budget is spent; early churn is left alone. |
+| **Convergence trend** | Late in the round budget, a finding count that is not trending down stops the run. Only consulted once most of the budget is spent; early churn is left alone. A *flat* count is not automatically a stuck one: if no finding survives the whole window — three rounds of two, six different ids — that is work being done, and it buys one window before the guard applies again. A rising count, a persistent core and an alternating set all still stop. |
 | **Persistent finding** | A finding that keeps coming back while the *rest* of the set rotates is **reported, not stopped on**. It used to abort the run after four rounds; a finding in this repo's own history survived six rounds and was cleared on the sixth attempt, in a run that went on to pass 1977/1977 tests. Persistence is not evidence of unfixability, and runaway spend is measured directly by `budget.maxTokens`, which counts both agents. The notice names the finding, says the run is continuing, and says how to carry on past whichever limit does stop it. |
 | **Plan share** | Planning may consume at most `budget.planShare` (0.4) of the ceiling. Planning that will not converge is the most expensive way to fail — it produces nothing, and the overall ceiling only notices once the whole budget is gone. |
 | **Codex rate-limit window** | Before each Codex turn, `vibe` reads `account/rateLimits/read` from `codex app-server` and holds the connection open for the pushed `account/rateLimits/updated` updates. If Codex reports the limit *reached*, the run waits for that window's reset under the same `budget.maxWaitMinutes` cap Claude's limits use. If the fuller window is at or above `budget.codexLimitPercent` (default 95), the run stops resumably rather than starting a turn the window would kill partway through. `app-server` is experimental, so this is strictly optional: if it is missing, fails its handshake, or the account is not logged in, the run continues exactly as before and says so once. `--no-codex-limits` turns it off. |
@@ -191,6 +193,8 @@ code-review-0.json ...     Codex review findings per round
 implementation-report.md   what Claude says it did
 fix-report-1.md ...
 answers-N.json             Codex's answers to blocking questions
+answered-N.md              those answers as the planner received them
+ASSUMED.md                 non-blocking questions the run proceeded on, and the answer it used
 handoff-N.md               briefing carried across each session rotation
 NEEDS-INPUT.md             written when the run stops for you
 OUTSTANDING.md             carried P1s: fixed in a final round, but not re-reviewed
@@ -200,29 +204,55 @@ transcript.log
 codex/                     raw schema and output files
 ```
 
+`FOLLOW-UPS.md` and `ASSUMED.md` are the two worth reading after a clean run. The first is
+what the critic said belongs in a different change; the second is what the planner decided
+without asking you. Both are raw material for the next issue rather than a defect report.
+
 ## Configuration
 
 Drop `vibe.config.json` in the target repo; CLI flags override it. See `vibe.config.example.json`.
+
+Every key below is shown at its default, so this block is a complete statement of the
+defaults rather than a sample — omit any section and you get exactly what is printed here.
 
 ```json
 {
   "roles":  { "planner": "claude", "implementer": "claude",
               "critic": "codex", "answerer": "codex", "reviewer": "codex" },
-  "claude": { "model": "opus", "effort": "medium" },
+  "claude": { "model": "opus", "effort": "medium",
+              "planTimeoutMs": 1800000, "implementTimeoutMs": 5400000 },
   "codex":  { "model": "gpt-5.6-luna", "effort": "xhigh", "sandbox": "read-only", "persistSession": true,
               "readRateLimits": true, "contextWindow": null, "timeoutMs": 2700000,
               "implementTimeoutMs": 5400000 },
   "loop":   { "maxPlanRounds": 5, "maxReviewRounds": 5, "maxVerifyRounds": 3,
-              "p1Tolerance": 1, "oscillationThreshold": 3 },
+              "maxQuestionRounds": 3, "p1Tolerance": 1, "oscillationThreshold": 3,
+              "convergenceWindow": 3 },
   "budget": { "maxCostUsd": 25, "maxTokens": 25000000, "planShare": 0.4,
-              "codexLimitPercent": 95 },
-  "verify": { "enabled": true, "command": null, "runs": 3 },
-  "questions": { "askCodex": true, "escalateOnDefer": true, "escalateOnLowConfidence": true },
+              "codexLimitPercent": 95, "waitOnRateLimit": true, "maxWaitMinutes": 360 },
+  "verify": { "enabled": true, "command": null, "runs": 3, "timeoutMs": 900000 },
+  "questions": { "askCodex": true, "answerNonBlocking": true,
+                 "escalateOnDefer": true, "escalateOnLowConfidence": true },
   "git": { "useBranch": true, "branchPrefix": "vibe/", "commitEachRound": true },
   "context": { "enabled": true, "compactAboveRatio": 0.5, "compactDuringCodex": true },
-  "progress": { "enabled": true, "intervalMs": 30000 }
+  "progress": { "enabled": true, "intervalMs": 30000 },
+  "toolchain": {
+    "git":  { "probe": "git --version", "phases": ["plan", "implement", "review"] },
+    "node": { "probe": "node --version", "minVersion": "20", "phases": ["implement", "review"] },
+    "npm":  { "probe": "npm --version", "phases": ["implement", "review"] }
+  }
 }
 ```
+
+`toolchain` is the contract each agent's environment must satisfy, and it is the one section
+with open-ended keys — add `go`, `cargo` or anything else your project needs and `vibe
+doctor` will probe for it. `phases` says when the tool must be present, and an `agents` array
+which providers are held to it — omitted, every agent is.
+
+`node` and `npm` are the exception: they are the implementer's tools, so `vibe` fills their
+`agents` from whoever holds `roles.implementer`. Move the implementer to Codex and the
+requirement moves with it, rather than being checked against an agent that never builds
+anything. Naming `agents` yourself on either one turns that off and your list is used as
+written.
 
 Binaries can be pinned with `VIBE_CLAUDE_BIN`, `VIBE_CODEX_BIN`, `VIBE_GIT_BIN`.
 
@@ -254,6 +284,17 @@ Some tables run with a warning rather than a refusal, and each says what it cost
 | 6 | An agent's environment fails the toolchain contract |
 
 Suitable for `if vibe run "..."; then ...` in a wrapper script.
+
+## Versions and contributing
+
+`CHANGELOG.md` has the per-release detail, each entry linked to the PR that made it. Semver
+here means: minor for new capability, patch for fixes, major only for a change that breaks an
+existing config or an existing run. No release so far has required a config change.
+
+`AGENTS.md` is the working guide for changing this repo — commands, code style, branch and PR
+conventions, the release checklist, and the list of decisions that are settled. It also
+describes how `vibe` is developed on itself, in git worktrees under `.worktrees/`, which is
+where nearly every change since 1.0.1 came from.
 
 ## Notes and limitations
 

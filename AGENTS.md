@@ -1,0 +1,219 @@
+# AGENTS.md
+
+Working notes for anyone — human or agent — making changes in this repo. `README.md` is for
+people *using* `vibe`; this file is for people *changing* it.
+
+## What this is
+
+A TypeScript CLI that automates the plan → critique → implement → review loop between the
+Claude Code CLI and the Codex CLI. It installs neither; it shells out to both and inherits
+whatever you are already logged into. There is no server, no daemon and no network code of
+its own — every external call is a child process.
+
+## Commands
+
+```bash
+npm install
+npm run build       # tsc && tsc-alias — emits to dist/
+npm run typecheck   # tsc --noEmit, no emit, fastest correctness check
+npm test            # builds first (pretest), then node --test dist/tests/**/*.test.js
+npm run doctor      # builds, then runs `vibe doctor` against this repo
+npm run watch       # tsc --watch
+```
+
+**`npm test` runs the compiled output, not the sources.** `pretest` builds, so a stale `dist/`
+is never what you tested — but if you invoke `node --test` directly, build first or you are
+testing the last change rather than this one.
+
+There is **no linter and no formatter**, and no CI. `npm run typecheck && npm test` before
+every commit is the whole gate, and it is on you to run it. Node 20+ (`engines`).
+
+## Repo map
+
+```
+src/main.ts          bin entry point — the thing package.json points at
+src/cli.ts           argument parsing, the five commands, run summary
+src/orchestrator.ts  the loop: planPhase, reviewPhase, the guards, the prompt dispatch
+src/run.ts           run state, artifacts, convergence maths (assessConvergence et al)
+src/roles.ts         who does what: the role table, refusals, warnings
+src/config.ts        DEFAULTS, config merge, validation
+src/types.ts         shared types, including RunState
+src/prompts.ts       every prompt the agents receive
+src/claude.ts        Claude Code adapter (stream-json)
+src/codex.ts         Codex adapter (codex exec --json)
+src/appserver.ts     Codex app-server JSON-RPC client (rate limits only)
+src/ratelimits.ts    rate-limit windows and the brake
+src/charge.ts        the one seam every token and dollar is charged through
+src/slots.ts         session-slot lifecycle (main = Claude, judge = Codex)
+src/context.ts       context measurement, compaction, session rotation
+src/preflight.ts     toolchain contract enforcement, `vibe doctor`
+src/verify.ts        the verification gate — runs the project's own test command
+src/progress.ts      in-turn heartbeat
+src/schemas.ts       the JSON schemas both CLIs are pinned to
+src/validate.ts      parser vocabulary for model output
+src/proc.ts          child-process plumbing
+src/git.ts           branch and commit operations
+tests/               node:test, one file per concern
+```
+
+`src/orchestrator.ts` is the biggest file by a wide margin and is where most changes land.
+Read the phase you are touching end to end before editing it; the guards interact.
+
+## Code style
+
+These are enforced by `tsconfig.json` (`strict`, plus `noUncheckedIndexedAccess`,
+`exactOptionalPropertyTypes`, `noPropertyAccessFromIndexSignature`, `noUnusedLocals`,
+`verbatimModuleSyntax`) and are not negotiable:
+
+- **No `any` in `src/`.** Use `unknown` and narrow. `src/validate.ts` has the vocabulary.
+- **Internal imports go through `@src/*`**, rewritten to relative paths at build time by
+  `tsc-alias`. No `../../` chains anywhere.
+- **`import type` for type-only imports** — `verbatimModuleSyntax` requires it.
+- **Explicit `.js` extensions** on relative/aliased imports (NodeNext ESM).
+
+Beyond the compiler:
+
+- **Never invent a number.** This is the repo's one recurring rule. An unknown context window
+  stays `null` rather than being guessed from a model name; Codex cost is reported as absent
+  rather than derived from a price table; a missing progress field is omitted rather than
+  filled in. Partial information beats a convincing fabrication, and most of the design notes
+  in `README.md` exist to explain a place this rule was applied.
+- **Comments explain *why*, and cite the run that taught it.** The defaults in
+  `src/config.ts` are the model: each non-obvious number says what was measured to pick it.
+  Do not strip these; they are the institutional memory.
+- **Fail closed.** A measurement that cannot be attributed is not recorded. A guard that
+  cannot read its input treats it as absent, not as zero.
+
+## Tests
+
+`node:test` with `node:assert/strict`. One file per concern, named for the concern rather
+than the module (`convergence.test.ts`, `failure-accounting.test.ts`,
+`preflight-enforcement.test.ts`).
+
+- **Add tests; do not edit existing ones.** A change that needs an existing test rewritten is
+  a behaviour change, and it needs saying out loud in the PR rather than absorbing quietly.
+- **No wall-clock fixtures.** A test that hardcodes an epoch timestamp passes until it
+  doesn't — one in `ratelimits-monitor.test.ts` went off in August 2026 and made `develop`
+  look broken. Compute times relative to now.
+- **No network, no real agent invocations.** `tests/helpers/fake-transport.ts` and
+  `tests/helpers/stub-server.ts` are the injection points.
+
+The phase loop itself is not yet drivable from a test — there is no harness that can run
+`planPhase`/`reviewPhase` with injected agents and git. Until there is, changes to the loop
+get verified with a throwaway script against `dist/`, and the results go in the PR body.
+
+## Branches, commits and pull requests
+
+**`main` is the default branch and only ever receives release merges. `develop` is where
+work integrates.** Branch off `develop`, PR back into `develop`.
+
+```
+feat/<issue>-<slug>     new capability          feat/22-deferred-only-rounds
+fix/<issue>-<slug>      defect                  fix/23-validate-stored-state
+docs/<slug>             documentation only      docs/agents-and-readme
+release/<version>       release into main       release/1.2.0
+vibe/<run-id>           created by vibe itself  vibe/20260820-002345-implement-…
+```
+
+**Never stack a PR on another feature branch.** It was tried once: PR #35 was based on
+`feat/role-table`, its parent merged into `develop` three hours before it did, and the fix
+landed on a branch nobody was running from — `develop` stayed broken and the work had to be
+cherry-picked onto #36. If the work genuinely depends on unmerged work, wait, or target
+`develop` and rebase.
+
+### Closing issues automatically
+
+**GitHub only auto-closes on a merge into the *default* branch, which here is `main`.** A PR
+into `develop` with `Closes #12` in its body closes nothing, ever. So:
+
+- **Per-issue PRs (into `develop`) use `Refs #12`.** It cross-links without making a promise
+  the merge cannot keep.
+- **The release PR (into `main`) does the closing**, and lists every issue the release
+  contains.
+
+**Repeat the keyword before every number.** GitHub parses `Closes #1, #2, #3` as closing
+`#1` and nothing else — the release of 1.1.0 named sixteen issues and closed zero, and all
+nine outstanding ones had to be closed by hand afterwards.
+
+```markdown
+Closes #2, closes #16, closes #18, closes #20, closes #27
+```
+
+Commit messages: imperative mood, describing the behaviour change rather than the edit —
+"Charge what failed turns spend, and enforce before retrying", not "update charge.ts".
+Commits written by `vibe` itself are titled `vibe: implement approved plan`.
+
+## Working in `.worktrees/`
+
+This repo is developed on itself. Each issue gets a git worktree under `.worktrees/`, and
+`vibe` is run inside it — so the tool changing the code is a *published* build, not the
+working tree it is editing.
+
+```bash
+git worktree add .worktrees/issue-22 -b feat/22-deferred-only-rounds develop
+cd .worktrees/issue-22 && npm install && npm run build
+vibe run "$(cat ../../brief.md)" -C .
+```
+
+`.worktrees/` is in `.gitignore` — worktrees live inside the repo and must never be tracked
+by it. So is `.vibe/`, which is where each run's artifacts land inside the worktree:
+`PLAN.md`, every plan revision and critique, `FOLLOW-UPS.md`, `state.json`, `transcript.log`.
+**Those artifacts are the record of why a change is shaped the way it is** — read
+`FOLLOW-UPS.md` from a related run before proposing work, because it usually already says
+whether the idea was considered and declined, and why.
+
+A few things learned the expensive way:
+
+- **Write the brief to a file and pass it in full.** The runs that converged had briefs that
+  stated the decisions already made and said "do not re-derive them". The runs that stalled
+  had briefs that left the design open.
+- **A stall is not a failure.** Exit code 2 writes `NEEDS-INPUT.md`; answer inline under
+  **Your answer:** (a `### ` heading and `> ` blockquote lines — the parser needs both) and
+  `vibe resume <run-id>`, usually with a raised `--max-tokens`.
+- **The run commits to `vibe/<run-id>`, not to your branch.** Point the branch at the run's
+  final commit before opening the PR: `git branch -f feat/22-… <sha>`.
+- **Prune when done**: `git worktree remove .worktrees/issue-22`.
+
+## Releases
+
+1. Branch `release/<version>` off `develop`.
+2. Bump `version` in `package.json`. Semver as stated in `CHANGELOG.md`: minor for new
+   capability, patch for fixes, major only for a change that breaks an existing config or an
+   existing run.
+3. Add the `CHANGELOG.md` section — grouped Added / Fixed / Internal / Upgrading, every entry
+   linking its PR and issue.
+4. PR into `main`, with the `closes` keyword repeated per issue (see above).
+5. Verify from a clean checkout: `npm run typecheck`, `npm test`, `npm pack --dry-run`.
+6. Merge, then tag: `git tag -a v<version> -m "..." && git push origin v<version>`.
+7. `npm publish`. **This needs a real interactive terminal** — the OTP flow hands off to a
+   browser and cannot be driven from a headless shell. A granular automation token in
+   `.npmrc` avoids the prompt.
+8. **Merge `main` back into `develop`.** The release PR is squash-merged, so the version bump
+   and the changelog exist only on `main` until you do. After 1.1.0 this was missed and
+   `develop` sat at version 1.0.1 with no `CHANGELOG.md` — which is the branch the next
+   release would have been cut from.
+
+Anything added to the published package must be listed in `files` in `package.json`;
+`CHANGELOG.md` was nearly shipped missing for exactly this reason.
+
+## Settled decisions — do not re-litigate
+
+Each of these was argued once, at length, and the reasoning is recorded. Reopening them
+needs new evidence, not a fresh opinion.
+
+- **Codex cost is not reported and will not be estimated.** No output mode returns one, and
+  no app-server endpoint returns money. `budget.maxTokens` is the ceiling that covers both
+  agents. See "Notes and limitations" in `README.md`.
+- **The Codex context window is a setting, not a derivation.** `modelContextWindow` exists
+  only on an app-server push notification, and `vibe` drives Codex as a plain child process.
+- **A persisted Codex thread cannot hold a writing role.** `codex exec resume` takes no `-s`
+  flag, so the sandbox silently reverts after the first turn. The config is refused, not
+  repaired.
+- **`/compact` does not work headless.** It is a CLI command, not a model instruction.
+  Compaction is explicit session rotation with a handoff briefing.
+- **Prompts go over stdin, never argv.** Claude's variadic flags swallow positional
+  arguments.
+- **Groundwork ships separately, with no behaviour change.** The role table took four
+  preparatory PRs (#15, #17, #28, #31), each landing with the table still hardcoded so that
+  nothing about a default run changed until the last step. It is the pattern that works here;
+  use it for anything touching the loop.

@@ -18,6 +18,7 @@
     "sandbox": "read-only",
     "timeoutMs": 2700000,
     "implementTimeoutMs": 5400000,
+    "persistSession": true,
     "contextWindow": null,
     "readRateLimits": true
   },
@@ -26,6 +27,7 @@
     "maxReviewRounds": 5,
     "maxVerifyRounds": 3,
     "maxQuestionRounds": 3,
+    "p1Tolerance": 1,
     "oscillationThreshold": 3,
     "convergenceWindow": 3
   },
@@ -33,10 +35,13 @@
     "maxCostUsd": 25,
     "maxTokens": 25000000,
     "planShare": 0.4,
-    "codexLimitPercent": 95
+    "codexLimitPercent": 95,
+    "waitOnRateLimit": true,
+    "maxWaitMinutes": 360
   },
   "questions": {
     "askCodex": true,
+    "answerNonBlocking": true,
     "escalateOnDefer": true,
     "escalateOnLowConfidence": true
   },
