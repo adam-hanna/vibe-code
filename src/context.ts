@@ -6,7 +6,17 @@ import { progressOptions, rememberContextWindow } from '@src/progress.js';
 import { handoffPrompt } from '@src/prompts.js';
 import { rolesFor, rotatesConcurrentlyWith, rotatingSlot } from '@src/roles.js';
 import type { Role, RoleTable } from '@src/roles.js';
-import { ensureSlotId, resetSlot, slotId, slotRotatable, slotStarted } from '@src/slots.js';
+import {
+  ensureSlotId,
+  resetSlot,
+  slotContextWindow,
+  slotId,
+  slotOccupancy,
+  slotRotatable,
+  slotStarted,
+  SLOTS,
+} from '@src/slots.js';
+import type { SlotName } from '@src/slots.js';
 import {
   artifact,
   measuredRatio,
@@ -81,6 +91,107 @@ export function recordTurnContext(
   if (usage === null) return;
   recordContextMeasurement(state, model, usage.ratio, usage.contextWindow);
   rememberContextWindow(model, usage.contextWindow);
+}
+
+/**
+ * What is known about a conversation's occupancy.
+ *
+ * `tokens` is always a real measurement; `ratio` is null whenever this run
+ * cannot name the window it would be a fraction of, and `over` is false with it.
+ * Unknown is never quietly turned into a number - that is the one rule the Codex
+ * side of this exists to keep.
+ */
+export interface ThreadOccupancy {
+  /** Tokens occupying the conversation. */
+  tokens: number;
+  /** Occupancy over the configured window, or null when no window is known. */
+  ratio: number | null;
+  /** At or above `context.compactAboveRatio`. False whenever the ratio is unknown. */
+  over: boolean;
+}
+
+function occupancyOf(tokens: number | null, cfg: Config, slot: SlotName): ThreadOccupancy | null {
+  if (tokens === null || tokens <= 0) return null;
+  const window = slotContextWindow(cfg, slot);
+  const ratio = window === null ? null : tokens / window;
+  // `>=`, matching `shouldRotate`: the threshold means the same thing on both
+  // sides of the run, so a user who moved `compactAboveRatio` moved one line.
+  return { tokens, ratio, over: ratio !== null && ratio >= cfg.context.compactAboveRatio };
+}
+
+/**
+ * What a turn that reported `tokens` prompt tokens says about its conversation,
+ * or null when it reported none.
+ *
+ * Deliberately not a reader of state: what gets displayed is what THIS turn
+ * measured. `codexTurn` accepts a turn that wrote conformant output but emitted
+ * no `turn.completed` usage block, and the figure such a turn leaves standing
+ * describes the previous one - the same reason `claudeDispatch` gates its `ctx`
+ * segment on `result.usage` rather than on the stored ratio.
+ */
+export function turnOccupancy(tokens: number, cfg: Config, slot: SlotName): ThreadOccupancy | null {
+  return occupancyOf(tokens, cfg, slot);
+}
+
+/** What the stored record says about the slot's current conversation, or null. */
+export function storedOccupancy(
+  state: RunState,
+  cfg: Config,
+  slot: SlotName,
+): ThreadOccupancy | null {
+  return occupancyOf(slotOccupancy(state, slot), cfg, slot);
+}
+
+/**
+ * Runs that have already been told their Codex context is large.
+ *
+ * In memory, keyed on the run, and never persisted. A stored flag would be a
+ * second fact to keep in step with the measurement - stale when the thread
+ * changes, and writable for a line that a dead console never printed. A resumed
+ * run saying it again is correct: the condition is still true, and one line is
+ * the whole cost. Keyed per run rather than per process so two runs driven from
+ * one process do not silence each other, the same scoping the progress liveness
+ * fields use.
+ */
+const warnedRuns = new WeakSet<RunState>();
+
+/**
+ * What to say about a conversation over the threshold, or null when there is
+ * nothing to say - including when this run has already said it.
+ *
+ * Touches no persisted state, and does not mark: the caller marks after the line
+ * has actually been emitted, so a warning that never reached the terminal cannot
+ * silence the next turn.
+ */
+export function occupancyWarning(
+  state: RunState,
+  occupancy: ThreadOccupancy,
+  cfg: Config,
+  slot: SlotName,
+): string | null {
+  if (!occupancy.over || occupancy.ratio === null || warnedRuns.has(state)) return null;
+  const window = slotContextWindow(cfg, slot);
+  if (window === null) return null;
+
+  const size = `${(occupancy.ratio * 100).toFixed(0)}% of codex.contextWindow ` +
+    `(${fmtTokens(occupancy.tokens)} / ${fmtTokens(window)} tok)`;
+
+  // A remedy the run has already applied is not a remedy. With persistSession
+  // off there is no thread to start over - every judging turn already starts
+  // empty - so the figure is the size of one prompt and the advice is different.
+  return SLOTS[slot].persists(cfg)
+    ? `codex thread at ${size}. Nothing can compact this thread: \`codex exec resume\` takes no ` +
+        'session-id flag, so vibe cannot rotate it - only a fresh run starts it over. Raise ' +
+        'codex.contextWindow if it is wrong, or use --no-codex-session so each judging turn ' +
+        'starts empty.'
+    : `codex prompt at ${size}. Each judging turn is already its own thread and nothing can ` +
+        'compact one mid-turn, so this is the size of a single prompt. Raise codex.contextWindow ' +
+        'if it is wrong, or reduce what the turn is given.';
+}
+
+/** Remember, for this process only, that this run has been warned. */
+export function markOccupancyWarned(state: RunState): void {
+  warnedRuns.add(state);
 }
 
 /**

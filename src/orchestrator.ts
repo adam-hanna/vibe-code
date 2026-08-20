@@ -17,7 +17,14 @@ import {
   turnTimeoutMs,
 } from '@src/roles.js';
 import type { Access, Role, RoleSpec, RoleTable } from '@src/roles.js';
-import { ensureSlotId, markSlotStarted, slotHasMemory, slotId, slotResumeId } from '@src/slots.js';
+import {
+  ensureSlotId,
+  markSlotStarted,
+  recordSlotOccupancy,
+  slotHasMemory,
+  slotId,
+  slotResumeId,
+} from '@src/slots.js';
 import {
   advancePhase,
   artifact,
@@ -45,10 +52,13 @@ import {
   parsePlan,
 } from '@src/validate.js';
 import {
+  markOccupancyWarned,
+  occupancyWarning,
   withConcurrentCompaction,
   recordTurnContext,
   rotateSession,
   shouldRotate,
+  turnOccupancy,
 } from '@src/context.js';
 import type { ClaudeTurnFn } from '@src/context.js';
 import { progressOptions } from '@src/progress.js';
@@ -1505,17 +1515,52 @@ async function codexDispatch(
     if (first) log.detail(`codex thread ${slotId(state, slot) ?? ''}`);
   }
 
+  // The last completed turn's prompt size IS the conversation's occupancy: on a
+  // resumed thread `input_tokens` is the whole conversation going in, not the
+  // increment (see extractTokens in codex.ts). What is reported comes from this
+  // turn and nothing else - a turn that emitted no `turn.completed` usage block
+  // measured nothing, so it says nothing rather than repeating an older figure.
+  const occupancy = turnOccupancy(tokens.input, cfg, slot);
+  // Stored against the thread the provider says this turn ran on, and only when
+  // that is the conversation this slot holds. A run with codex.persistSession off
+  // never adopts the returned id, so nothing is recorded and the id left behind by
+  // an earlier persisted run keeps describing the thread it actually describes.
+  recordSlotOccupancy(state, slot, tokens.input, sessionId ?? null);
+  const warning = occupancy === null ? null : occupancyWarning(state, occupancy, cfg, slot);
+  // Only where a window was configured. A percentage without a denominator vibe
+  // can name is a fabricated figure with a convincing face, so a run that sets
+  // nothing logs exactly the line it logs today.
+  const ctx = occupancy?.ratio == null ? '' : `, ctx ${(occupancy.ratio * 100).toFixed(0)}%`;
+
   // Counted, but deliberately not costed: there is no USD figure to add, and
   // inventing one would make `costUsd` a number nobody could trace to a source.
   applyCharge(state, cfg, {
     costUsd: null,
     tokens: tokens.total,
-    event: { type: 'codex_turn', data: { label: req.label, tokens: tokens.total } },
+    event: {
+      type: 'codex_turn',
+      data: {
+        label: req.label,
+        tokens: tokens.total,
+        // What THIS turn measured: the numerator always, the ratio only when the
+        // window is known. `costUsd` is absent from this event because Codex
+        // reports no cost at all; the prompt size it does report is not withheld
+        // for want of a denominator.
+        ...(occupancy === null ? {} : { contextTokens: occupancy.tokens }),
+        ...(occupancy?.ratio == null ? {} : { contextRatio: Number(occupancy.ratio.toFixed(3)) }),
+      },
+    },
     describe: () =>
       `${req.label}: ${fmtTokens(tokens.total)} tok, cost not reported ` +
-      `(run ${fmtTokens(state.tokensUsed)} tok / ~$${state.costUsd.toFixed(2)} Claude-side)`,
-    warnings: [],
+      `(run ${fmtTokens(state.tokensUsed)} tok / ~$${state.costUsd.toFixed(2)} Claude-side${ctx})`,
+    warnings: warning === null ? [] : [warning],
   });
+
+  // After the emission, never before: `applyCharge` logs the warnings, and a
+  // marker set ahead of it would silence the next turn on behalf of a line that
+  // never printed. In memory only - a run that dies here warns again, which is
+  // the safe direction for a condition nothing can clear.
+  if (warning !== null) markOccupancyWarned(state);
 
   return { text: raw, structured };
 }

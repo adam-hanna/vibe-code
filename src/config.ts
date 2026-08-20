@@ -37,6 +37,11 @@ export const DEFAULTS: Config = {
     // whoever does it.
     implementTimeoutMs: 90 * 60 * 1000,
     persistSession: true,
+    // Unknown, and honestly so: no request in the app-server protocol returns a
+    // Codex model's window, and `codex exec` is not an app-server client at all.
+    // A run that leaves this null reports the thread's occupancy in tokens and
+    // never as a fraction. See CodexConfig.contextWindow.
+    contextWindow: null,
     readRateLimits: true,
   },
   loop: {
@@ -435,6 +440,15 @@ function validate(cfg: Config): void {
   const limitPercent = cfg.budget.codexLimitPercent;
   if (!Number.isFinite(limitPercent) || limitPercent < 0 || limitPercent > 100) {
     throw new Error('budget.codexLimitPercent must be between 0 (disabled) and 100');
+  }
+  // Null is a value here, not a missing setting: it is what a run says when the
+  // model's window cannot be obtained. Anything else must be a real token count.
+  const codexWindow = cfg.codex.contextWindow;
+  if (codexWindow !== null && (!Number.isInteger(codexWindow) || codexWindow <= 0)) {
+    throw new Error(
+      'codex.contextWindow must be a positive whole number of tokens, or null when the ' +
+        "model's window is unknown",
+    );
   }
   const ratio = cfg.context.compactAboveRatio;
   if (!Number.isFinite(ratio) || ratio <= 0 || ratio >= 1) {

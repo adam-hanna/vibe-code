@@ -37,6 +37,9 @@ Options
   --claude-effort <e>        low|medium|high|xhigh|max (default: medium)
   --codex-model <m>          Default: gpt-5.6-luna
   --codex-effort <e>         Default: xhigh
+  --codex-context-window <n> The Codex model's context window in tokens. Unset by default:
+                             the protocol never reports it for a codex exec thread, so
+                             occupancy is reported in tokens with no ratio until you say
   --max-plan-rounds <n>      Default: 5
   --max-review-rounds <n>    Default: 5
   --max-verify-rounds <n>    Fix rounds for a failing verification (default: 3)
@@ -83,6 +86,7 @@ interface ParsedArgs {
     claudeEffort?: string;
     codexModel?: string;
     codexEffort?: string;
+    codexContextWindow?: number;
     maxPlanRounds?: number;
     maxReviewRounds?: number;
     maxVerifyRounds?: number;
@@ -175,6 +179,7 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       case '--claude-effort': out.flags.claudeEffort = next(); break;
       case '--codex-model': out.flags.codexModel = next(); break;
       case '--codex-effort': out.flags.codexEffort = next(); break;
+      case '--codex-context-window': out.flags.codexContextWindow = nextNum(); break;
       case '--max-plan-rounds': out.flags.maxPlanRounds = nextNum(); break;
       case '--max-review-rounds': out.flags.maxReviewRounds = nextNum(); break;
       case '--max-verify-rounds': out.flags.maxVerifyRounds = nextNum(); break;
@@ -232,6 +237,8 @@ export function buildOverrides(flags: ParsedArgs['flags']): ConfigOverrides {
   if (flags.claudeEffort !== undefined) claude.effort = asEffort(flags.claudeEffort, '--claude-effort');
   if (flags.codexModel !== undefined) codex.model = flags.codexModel;
   if (flags.codexEffort !== undefined) codex.effort = asEffort(flags.codexEffort, '--codex-effort');
+  // Validated in config.ts, so the flag and the config key fail the same way.
+  if (flags.codexContextWindow !== undefined) codex.contextWindow = flags.codexContextWindow;
   if (flags.maxPlanRounds !== undefined) loop.maxPlanRounds = flags.maxPlanRounds;
   if (flags.maxReviewRounds !== undefined) loop.maxReviewRounds = flags.maxReviewRounds;
   if (flags.maxVerifyRounds !== undefined) loop.maxVerifyRounds = flags.maxVerifyRounds;

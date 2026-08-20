@@ -70,6 +70,23 @@ export interface CodexConfig {
    */
   persistSession: boolean;
   /**
+   * The Codex model's context window in tokens, or null when it is unknown.
+   *
+   * Null is not a failure state - it is the truth about a thread whose window
+   * vibe cannot ask for. `ThreadTokenUsage.modelContextWindow` exists only on the
+   * `thread/tokenUsage/updated` push notification, delivered to a client the
+   * app-server is driving a thread for; no request or response returns it,
+   * `thread/read` carries no tokenUsage and `model/list` has no window field. vibe
+   * drives Codex with `codex exec`, which is not an app-server client, so the
+   * notification never arrives - which is why this is a setting and not a probe.
+   *
+   * Nothing guesses one from the model name: a table mapping `gpt-5.6-luna` to a
+   * number is a fabricated denominator that goes stale silently. Set it if you
+   * know it; leave it null and occupancy is reported as a token count with no
+   * ratio, no percentage and no threshold.
+   */
+  contextWindow: number | null;
+  /**
    * Read Codex's rate-limit window from `codex app-server` before each Codex turn.
    *
    * A switch exists because this is a second process model - a persistent
@@ -551,6 +568,31 @@ export interface RunState {
    * carrying the thread. Read and written through `SLOTS.judge`, never here.
    */
   codexSessionStarted?: boolean;
+  /**
+   * Tokens occupying the judge slot's Codex thread as of the last turn that
+   * reported any - `turn.completed`'s `input_tokens`, which on a resumed thread
+   * is the whole conversation going in rather than the increment.
+   *
+   * Meaningless without `judgeContextThread`, and read only through
+   * `src/slots.ts`. Absent means no measurement, which is NOT zero: a thread that
+   * has taken no turn has no occupancy, and reporting one as empty would be the
+   * fabricated figure this whole area exists to refuse.
+   */
+  judgeContextTokens?: number;
+  /**
+   * The Codex thread id the figure above was measured on.
+   *
+   * The whole of the provenance rule, and one comparison: the measurement is
+   * reportable only while this is strictly equal to the slot's id now. A thread
+   * that has been replaced, an id that was never usable, or a state written
+   * without this field leaves nothing to report - and vibe says nothing rather
+   * than attributing a figure to a conversation it does not describe.
+   *
+   * Never null and never empty. There is no "the unnamed conversation" value: a
+   * turn that cannot be attributed to a named thread writes nothing at all, so a
+   * one-shot run simply carries no measurement between turns.
+   */
+  judgeContextThread?: string;
   /** Carried into the first turn of a rotated session. */
   handoff: string | null;
   /**
