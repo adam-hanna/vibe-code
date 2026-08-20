@@ -8,10 +8,22 @@ import { FakeTransport, respondingTransport } from './helpers/fake-transport.js'
 
 const CWD = '/repo';
 
+/** Unix seconds, which is what app-server reports. */
+const futureEpoch = (): number => Math.floor(Date.now() / 1000) + 3600;
+const pastEpoch = (): number => Math.floor(Date.now() / 1000) - 3600;
+
+/**
+ * Relative, not the measured epoch the parse tests keep.
+ *
+ * `stillDescribesNow` refuses to serve a cached reading whose window has since
+ * reset, so a fixture with an absolute reset time silently stops describing a
+ * live window: the recorded 1787196925 fell into the past on 2026-08-20 and
+ * took the cache cases with it, hours after they last passed.
+ */
 const READ_RESULT = {
   rateLimits: {
     limitId: 'codex',
-    primary: { usedPercent: 15, windowDurationMins: 10080, resetsAt: 1787196925 },
+    primary: { usedPercent: 15, windowDurationMins: 10080, resetsAt: futureEpoch() },
     secondary: null,
     planType: 'plus',
   },
@@ -20,10 +32,6 @@ const READ_RESULT = {
 function config(readRateLimits = true): Config {
   return { ...DEFAULTS, codex: { ...DEFAULTS.codex, readRateLimits } };
 }
-
-/** Unix seconds, which is what app-server reports. */
-const futureEpoch = (): number => Math.floor(Date.now() / 1000) + 3600;
-const pastEpoch = (): number => Math.floor(Date.now() / 1000) - 3600;
 
 /** Counts how often the monitor asked for a transport, which is once per connection. */
 function countingFactory(make: () => AppServerTransport): {

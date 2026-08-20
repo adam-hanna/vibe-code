@@ -3,7 +3,14 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import type { ActivityObservation } from '@src/progress.js';
 import { initialSlotFields } from '@src/slots.js';
-import type { Finding, RoundRecord, RunPhase, RunState, RunSummary } from '@src/types.js';
+import type {
+  Finding,
+  PendingFindings,
+  RoundRecord,
+  RunPhase,
+  RunState,
+  RunSummary,
+} from '@src/types.js';
 
 const RUNS_DIR = path.join('.vibe', 'runs');
 
@@ -308,6 +315,11 @@ export function removeArtifact(state: RunState, name: string): boolean {
   return true;
 }
 
+/** Whether an artifact is on disk, for a caller that must not rewrite a good one. */
+export function hasArtifact(state: RunState, name: string): boolean {
+  return existsSync(path.join(state.dir, name));
+}
+
 export function artifactDir(state: RunState, name: string): string {
   const dir = path.join(state.dir, name);
   mkdirSync(dir, { recursive: true });
@@ -370,6 +382,84 @@ export function recordRound(
   ids: readonly string[] = [],
 ): void {
   history.push({ signature, count, ids: [...ids] });
+}
+
+/**
+ * The fields any consumer of a stored finding needs, checked rather than
+ * asserted.
+ *
+ * One predicate for both the follow-ups artifact and the carried findings:
+ * stored state is unvalidated, so "is this object a finding" is a question the
+ * codebase must answer once. `defer` is deliberately not consulted - it is a
+ * fact about what one caller does with a finding, not about its shape.
+ */
+export function hasFindingShape(f: unknown): f is Finding {
+  if (typeof f !== 'object' || f === null) return false;
+  const r = f as Record<string, unknown>;
+  return (
+    (r['severity'] === 'P0' ||
+      r['severity'] === 'P1' ||
+      r['severity'] === 'P2' ||
+      r['severity'] === 'P3') &&
+    typeof r['id'] === 'string' &&
+    r['id'].length > 0 &&
+    typeof r['title'] === 'string' &&
+    typeof r['detail'] === 'string' &&
+    typeof r['suggested_fix'] === 'string'
+  );
+}
+
+/**
+ * Record what a critique or review turn found, before anything can stop the run
+ * between paying for it and using it.
+ */
+export function recordPendingFindings(
+  state: RunState,
+  phase: PendingFindings['phase'],
+  findings: readonly Finding[],
+): void {
+  state.pendingFindings = { phase, findings: [...findings] };
+  saveState(state);
+}
+
+/**
+ * The unconsumed findings this phase may act on, or null when there are none.
+ *
+ * Reads without clearing, which is the whole contract: a revision that fails,
+ * is rate-limited or dies mid-turn must leave them outstanding, or this
+ * mechanism reintroduces the loss it exists to prevent. Clearing is
+ * `clearPendingFindings`, called by whatever consumed them.
+ *
+ * Never throws, and absent, empty and malformed all read as null - the answer a
+ * run recorded before this field existed would have given. The stored value is
+ * an assertion over unvalidated JSON, so a present non-record, a `findings` that
+ * is not an array, or entries that are not findings must not reach a prompt.
+ * The phase tag is checked here rather than by the caller: it is what stops a
+ * plan-phase remnant being handed to the fix turn.
+ */
+export function takePendingFindings(
+  state: RunState,
+  phase: PendingFindings['phase'],
+): Finding[] | null {
+  const raw: unknown = state.pendingFindings;
+  if (typeof raw !== 'object' || raw === null) return null;
+  const r = raw as Record<string, unknown>;
+  if (r['phase'] !== phase) return null;
+  const findings = r['findings'];
+  if (!Array.isArray(findings)) return null;
+  const usable = findings.filter(hasFindingShape);
+  return usable.length > 0 ? usable : null;
+}
+
+/**
+ * Mark the carried findings consumed.
+ *
+ * Written as an explicit null rather than deleted: the run record should say
+ * that this run answered them, not merely fail to mention them.
+ */
+export function clearPendingFindings(state: RunState): void {
+  state.pendingFindings = null;
+  saveState(state);
 }
 
 export interface ConvergenceArgs {
