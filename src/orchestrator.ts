@@ -23,14 +23,19 @@ import {
   artifact,
   artifactDir,
   assessConvergence,
+  clearPendingFindings,
+  hasArtifact,
+  hasFindingShape,
   measuredRatio,
   p1Signature,
   persistenceNotice,
   recordEvent,
+  recordPendingFindings,
   recordRound,
   removeArtifact,
   resumePhase,
   saveState,
+  takePendingFindings,
 } from '@src/run.js';
 import {
   blockers as blockingFindings,
@@ -84,13 +89,27 @@ export {
 } from '@src/charge.js';
 export type { ExitCode, TurnCharge, TurnSpend } from '@src/charge.js';
 
-export async function orchestrate(state: RunState, cfg: Config, resume: boolean): Promise<RunState> {
+export async function orchestrate(
+  state: RunState,
+  cfg: Config,
+  resume: boolean,
+  /**
+   * The same seam `runTurn` has, hoisted to the entry point.
+   *
+   * The loop steps used to name `REAL_AGENTS` themselves, so nothing above the
+   * single-turn dispatch could be driven without spawning a real `claude` and a
+   * real `codex` - which meant the re-entry order of the two loops, the thing
+   * this run's cost actually turns on, was untestable. Defaulted, so every
+   * caller including `RunLoop` in cli.ts is unchanged.
+   */
+  turns: AgentTurns = REAL_AGENTS,
+): Promise<RunState> {
   try {
     // Before any phase runs. On a fresh run `state.plan` is null and this does
     // nothing; on a resume it is the one point holding both the stored plan and
     // the artifact the previous process may have died between writing.
     reconcileFollowUps(state);
-    return await runPhases(state, cfg, resume);
+    return await runPhases(state, cfg, resume, turns);
   } finally {
     // A `finally`, not a tail call: the phases below return early at the
     // "already finished" check and at the plan-only exit, and a persistent
@@ -100,7 +119,12 @@ export async function orchestrate(state: RunState, cfg: Config, resume: boolean)
   }
 }
 
-async function runPhases(state: RunState, cfg: Config, resume: boolean): Promise<RunState> {
+async function runPhases(
+  state: RunState,
+  cfg: Config,
+  resume: boolean,
+  turns: AgentTurns,
+): Promise<RunState> {
   const cwd = state.targetDir;
   // Resolved once and threaded, so no step below can answer "who does this job"
   // from the module default while holding a config that says otherwise.
@@ -121,7 +145,7 @@ async function runPhases(state: RunState, cfg: Config, resume: boolean): Promise
   // than about the task.
   let plan: Plan;
   if (phase === 'planning') {
-    plan = await planPhase(state, cfg, cwd, roles);
+    plan = await planPhase(state, cfg, cwd, roles, turns);
     if (state.planOnly) {
       state.status = 'planned';
       advancePhase(state, 'complete');
@@ -154,7 +178,7 @@ async function runPhases(state: RunState, cfg: Config, resume: boolean): Promise
         cwd,
         label: 'implement',
       },
-      REAL_AGENTS,
+      turns,
       roles,
     );
     artifact(state, 'implementation-report.md', impl.text);
@@ -177,7 +201,7 @@ async function runPhases(state: RunState, cfg: Config, resume: boolean): Promise
   state.status = 'reviewing';
   saveState(state);
 
-  await reviewPhase(state, cfg, cwd, plan, roles);
+  await reviewPhase(state, cfg, cwd, plan, roles, turns);
 
   state.status = 'done';
   advancePhase(state, 'complete');
@@ -190,24 +214,57 @@ async function planPhase(
   cfg: Config,
   cwd: string,
   roles: RoleTable,
+  turns: AgentTurns,
 ): Promise<Plan> {
   let plan: Plan;
   if (state.plan) {
     plan = state.plan;
   } else {
     log.heading('Planning');
-    plan = await runPlan(state, cfg, cwd, roles);
+    plan = await runPlan(state, cfg, cwd, roles, turns);
   }
 
   // Answers supplied by a human in NEEDS-INPUT.md, picked up on resume.
+  //
+  // Deliberately does not clear `pendingFindings`: this revises with `answers`
+  // *instead of* the findings, so it has not answered them, and treating a
+  // human's reply as consuming them would discard work the run paid for. The
+  // loop below consumes them next, which costs a second planner turn on the one
+  // path where both are present.
   if (state.pendingAnswers && state.pendingAnswers.length > 0) {
     for (const a of state.pendingAnswers) markAnswered(state, a.question);
-    plan = await revisePlan(state, cfg, cwd, { answers: state.pendingAnswers }, roles);
+    plan = await revisePlan(state, cfg, cwd, { answers: state.pendingAnswers }, roles, turns);
     state.pendingAnswers = null;
     saveState(state);
   }
 
+  // Only the first iteration can be a re-entry, and only a re-entry is worth
+  // narrating: on every later round the branch below is just where this loop
+  // revises.
+  let firstPass = true;
+
   for (;;) {
+    // Findings a previous process paid for and no revision answered. Consumed
+    // before anything else in the loop, because everything else in the loop
+    // spends: this is the re-entry point a stall leaves behind, and re-entering
+    // at the critique instead is what cost 7.5M tokens to learn nothing.
+    const carried = takePendingFindings(state, 'plan');
+    if (carried !== null) {
+      if (firstPass) {
+        log.info(
+          `Revising against ${carried.length} finding(s) carried across the stop - not re-critiquing.`,
+        );
+      }
+      firstPass = false;
+      // `revisePlan` consumes them itself, on the same state write that persists
+      // the plan answering them - not here, where a second write would reopen a
+      // window between the two. A revision that throws, is rate-limited or dies
+      // mid-flight never reaches that write, so the findings stay outstanding.
+      plan = await revisePlan(state, cfg, cwd, { findings: carried }, roles, turns);
+      continue;
+    }
+    firstPass = false;
+
     // A question already put to Codex never comes back, however the revised plan
     // rephrases it - otherwise an insistent planner loops the run forever.
     const pending = plan.open_questions.filter(
@@ -229,9 +286,10 @@ async function planPhase(
       state.questionRound += 1;
       saveState(state);
 
-      const answers = await resolveQuestions(state, cfg, cwd, pending, plan, roles);
+      const answers = await resolveQuestions(state, cfg, cwd, pending, plan, roles, turns);
       // The answerer may have declined every one; only revise if something came back.
-      plan = answers.length > 0 ? await revisePlan(state, cfg, cwd, { answers }, roles) : plan;
+      plan =
+        answers.length > 0 ? await revisePlan(state, cfg, cwd, { answers }, roles, turns) : plan;
       continue;
     }
 
@@ -245,13 +303,18 @@ async function planPhase(
       state,
       cfg,
       async () => {
-        const found = await runCritique(state, cfg, cwd, plan, roles);
+        const found = await runCritique(state, cfg, cwd, plan, roles, turns);
         artifact(state, `plan-critique-${state.planRound}.json`, found);
         collectDeferred(state, found.findings);
         writeFollowUps(state, plan);
+        // In here for the same reason the artifact is: a budget escalation the
+        // wrapper is holding must not cost the run the findings it just bought.
+        // Cleared again below the moment the gate says there is nothing to
+        // consume.
+        recordPendingFindings(state, 'plan', found.findings);
         return found;
       },
-      undefined,
+      turns.claude,
       'critic',
       roles,
     );
@@ -275,6 +338,10 @@ async function planPhase(
         findings: critique.findings.length,
         carried: decision.tolerated.map((f) => f.id),
       });
+      // An approved plan has nothing outstanding: what the gate tolerated
+      // travels on `state.carried` into implementation, and leaving these set
+      // would have a resume revise a plan the critic just passed.
+      clearPendingFindings(state);
       break;
     }
 
@@ -289,7 +356,11 @@ async function planPhase(
       deadlockMsg: 'the planner and reviewer are deadlocked',
     });
 
-    plan = await revisePlan(state, cfg, cwd, { findings: critique.findings }, roles);
+    // Back to the top rather than revising here: the findings this round bought
+    // are already on `state`, and the consume branch up there is the single
+    // place that answers them - whether they were bought a second ago or by a
+    // process that has since exited. The order of turns is unchanged.
+    continue;
   }
 
   const planFile = artifact(state, 'PLAN.md', P.renderPlanDoc(plan));
@@ -306,8 +377,33 @@ async function reviewPhase(
   cwd: string,
   plan: Plan,
   roles: RoleTable,
+  turns: AgentTurns,
 ): Promise<void> {
+  // As in `planPhase`: only the first iteration can be a re-entry.
+  let firstPass = true;
+
   for (;;) {
+    // Findings a previous process paid for. Before `runGate`, deliberately:
+    // consuming what the run already owns comes before buying anything, and a
+    // full verification run is a purchase. The gate runs on the next iteration,
+    // so the fix is still verified before anything else happens.
+    const carried = takePendingFindings(state, 'review');
+    if (carried !== null) {
+      if (firstPass) {
+        log.info(
+          `Fixing ${carried.length} finding(s) carried across the stop - not re-reviewing.`,
+        );
+      }
+      firstPass = false;
+      await runFixRound(state, cfg, cwd, carried, roles, turns);
+      // No OUTSTANDING.md here, even when these were the final round's
+      // findings: the artifact says the fix ran *and verification still
+      // passed*, and the gate has not run yet. It is written below, on the
+      // other side of it.
+      continue;
+    }
+    firstPass = false;
+
     // Does it run, before asking whether it reads well. A failing suite is an
     // unambiguous P1, and spending a reviewer turn on code that does not
     // execute buys an opinion about the wrong thing.
@@ -336,7 +432,7 @@ async function reviewPhase(
           cwd,
           label: `verify-fix-${state.verifyRound}`,
         },
-        REAL_AGENTS,
+        turns,
         roles,
       );
       artifact(state, `verify-fix-${state.verifyRound}.md`, repair.text);
@@ -348,6 +444,15 @@ async function reviewPhase(
     // Stop here rather than reviewing again: the point of the tolerance is to
     // end the argument, and a fresh review would reopen it.
     if (state.finalFixDone === true) {
+      // The one place the artifact's own claim is true: the fix round is behind
+      // us and `runGate` has just returned clean. Everything the final round
+      // writes is a separate moment - the flags before its turn, the report
+      // after it, the file after that - so a process killed anywhere in there
+      // used to leave a run that finishes clean pointing at a file nobody
+      // wrote. This rewrites it, and only from here, because from anywhere
+      // earlier it would be asserting a fix or a passing suite that had not
+      // happened.
+      recoverOutstanding(state, cwd);
       log.ok('Carried findings addressed and verification still passes.');
       break;
     }
@@ -360,13 +465,17 @@ async function reviewPhase(
       state,
       cfg,
       async () => {
-        const found = await runReview(state, cfg, cwd, plan, roles);
+        const found = await runReview(state, cfg, cwd, plan, roles, turns);
         artifact(state, `code-review-${state.reviewRound}.json`, found);
         collectDeferred(state, found.findings);
         writeFollowUps(state, plan);
+        // In here for the same reason as the artifact, and as in the plan
+        // phase: what the run just paid 15M tokens for must survive a stop
+        // between this turn and the fix that answers it.
+        recordPendingFindings(state, 'review', found.findings);
         return found;
       },
-      undefined,
+      turns.claude,
       'reviewer',
       roles,
     );
@@ -377,6 +486,8 @@ async function reviewPhase(
       if (decision.tolerated.length === 0) {
         log.ok(`Review clean - ${review.findings.length} non-blocking finding(s)`);
         recordEvent(state, 'review_approved', { findings: review.findings.length });
+        // Nothing blocking came back, so there is nothing for a resume to fix.
+        clearPendingFindings(state);
         break;
       }
 
@@ -408,14 +519,22 @@ async function reviewPhase(
           cwd,
           label: `final-fix-${state.reviewRound}`,
         },
-        REAL_AGENTS,
+        turns,
         roles,
       );
       artifact(state, `fix-report-${state.reviewRound}.md`, finalFix.text);
-      await maybeCommit(cfg, cwd, `vibe: address carried review findings (final round)`);
+      // The moment the fix stops being worth buying again, and therefore the
+      // moment to drop the carry: the turn is done and its report is on disk.
+      // Everything after this - the record, three git invocations - can fail
+      // without making a second fix round useful, and the record is not lost by
+      // going first: `recoverOutstanding` rebuilds it from `state.outstanding`
+      // once the gate has passed. Same order as `runFixRound`.
+      clearPendingFindings(state);
 
       const file = artifact(state, 'OUTSTANDING.md', renderOutstanding(state, decision.tolerated));
       log.info(`Carried findings and what was done about them: ${path.relative(cwd, file)}`);
+
+      await maybeCommit(cfg, cwd, `vibe: address carried review findings (final round)`);
       recordEvent(state, 'review_approved', {
         findings: review.findings.length,
         carriedAndFixed: decision.tolerated.map((f) => f.id),
@@ -434,25 +553,84 @@ async function reviewPhase(
       deadlockMsg: 'the fixer and reviewer are deadlocked',
     });
 
-    state.reviewRound += 1;
-    saveState(state);
-
-    log.step(`Fixing ${stoppers.length} blocking finding(s)`);
-    const fix = await runTurn(
-      state,
-      cfg,
-      {
-        role: 'implementer',
-        prompt: P.fixPrompt(review.findings, state.reviewRound),
-        cwd,
-        label: `fix-${state.reviewRound}`,
-      },
-      REAL_AGENTS,
-      roles,
-    );
-    artifact(state, `fix-report-${state.reviewRound}.md`, fix.text);
-    await maybeCommit(cfg, cwd, `vibe: address review round ${state.reviewRound}`);
+    // Back to the top rather than fixing here, for the reason given in
+    // `planPhase`: the findings are on `state`, and the consume branch is the
+    // one place that answers them. Same turn, same label, same order.
+    continue;
   }
+}
+
+/**
+ * One fix round: the turn, its report, and the commit.
+ *
+ * A function rather than the tail of the review loop because the loop now
+ * reaches it from two directions - the round that just bought the findings, and
+ * a resume that inherited them - and a fix round that drifted between the two
+ * would be a fix round the tests cannot pin.
+ */
+async function runFixRound(
+  state: RunState,
+  cfg: Config,
+  cwd: string,
+  findings: readonly Finding[],
+  roles: RoleTable,
+  turns: AgentTurns,
+): Promise<void> {
+  state.reviewRound += 1;
+  saveState(state);
+
+  log.step(`Fixing ${blockingFindings(findings).length} blocking finding(s)`);
+  const fix = await runTurn(
+    state,
+    cfg,
+    {
+      role: 'implementer',
+      prompt: P.fixPrompt(findings, state.reviewRound),
+      cwd,
+      label: `fix-${state.reviewRound}`,
+    },
+    turns,
+    roles,
+  );
+  artifact(state, `fix-report-${state.reviewRound}.md`, fix.text);
+  // Consumed once the turn's report is on disk, and before the commit: a commit
+  // that fails must not buy this turn a second time. Everything before this
+  // point leaves them outstanding, which is what makes a died-mid-turn resume
+  // retry the fix rather than skip it.
+  clearPendingFindings(state);
+  await maybeCommit(cfg, cwd, `vibe: address review round ${state.reviewRound}`);
+}
+
+/**
+ * Rewrite OUTSTANDING.md when the run says a final fix round happened and the
+ * artifact is not there.
+ *
+ * The final round writes its state flags, its fix report and this file at three
+ * different moments, and a process that dies between them leaves a run that
+ * later finishes clean while pointing at a file that does not exist. Recovered
+ * from `state.outstanding` rather than from the carried findings so it holds
+ * however far that sequence got, and skipped when the file is already there so
+ * a good artifact is never rewritten. Stored state is unvalidated, hence the
+ * shape check: this artifact makes claims about what is in it.
+ *
+ * Call it from ONE place, and only that one: after `runGate` has come back
+ * clean, immediately before the completion branch. The document states that the
+ * findings were worked on *and that verification still passed*, so calling it
+ * on entry to the phase, or straight after a fix round, publishes both claims
+ * before either is true - `finalFixDone` is persisted before the final fix turn
+ * even starts, and a suite that fails afterwards would leave the file asserting
+ * the opposite of what happened.
+ */
+function recoverOutstanding(state: RunState, cwd: string): void {
+  if (state.finalFixDone !== true) return;
+  if (hasArtifact(state, 'OUTSTANDING.md')) return;
+  const outstanding = Array.isArray(state.outstanding)
+    ? state.outstanding.filter(hasFindingShape)
+    : [];
+  if (outstanding.length === 0) return;
+
+  const file = artifact(state, 'OUTSTANDING.md', renderOutstanding(state, outstanding));
+  log.info(`Carried findings and what was done about them: ${path.relative(cwd, file)}`);
 }
 
 /** The findings the last fix round addressed without a reviewer confirming it. */
@@ -485,21 +663,13 @@ function renderOutstanding(state: RunState, findings: readonly Finding[]): strin
  * Severity is checked as well as `defer`, even though `parseFindings` already
  * normalises, because the artifact this feeds asserts in prose that everything
  * in it was non-blocking - and an invariant a boundary states should be one the
- * boundary keeps. The string fields are checked because an entry missing one
- * renders `undefined` into a human-facing document.
+ * boundary keeps. The string fields are checked - by `hasFindingShape`, which
+ * the carried findings read through too, so the codebase holds one answer to
+ * "is this stored object a finding" - because an entry missing one renders
+ * `undefined` into a human-facing document.
  */
 function isDeferrable(f: unknown): f is Finding {
-  if (typeof f !== 'object' || f === null) return false;
-  const r = f as Record<string, unknown>;
-  return (
-    r['defer'] === true &&
-    (r['severity'] === 'P2' || r['severity'] === 'P3') &&
-    typeof r['id'] === 'string' &&
-    r['id'].length > 0 &&
-    typeof r['title'] === 'string' &&
-    typeof r['detail'] === 'string' &&
-    typeof r['suggested_fix'] === 'string'
-  );
+  return hasFindingShape(f) && f.defer === true && (f.severity === 'P2' || f.severity === 'P3');
 }
 
 /**
@@ -1191,6 +1361,7 @@ async function runPlan(
   cfg: Config,
   cwd: string,
   roles: RoleTable,
+  turns: AgentTurns,
 ): Promise<Plan> {
   log.step(`${holderLabel('planner', roles)} is planning (read-only)`);
   const outcome = await runTurn(
@@ -1202,7 +1373,7 @@ async function runPlan(
       cwd,
       label: 'plan',
     },
-    REAL_AGENTS,
+    turns,
     roles,
   );
 
@@ -1232,6 +1403,7 @@ async function revisePlan(
   cwd: string,
   args: ReviseArgs,
   roles: RoleTable,
+  turns: AgentTurns,
 ): Promise<Plan> {
   state.planRound += 1;
   saveState(state);
@@ -1254,12 +1426,22 @@ async function revisePlan(
       cwd,
       label: `revise-${state.planRound}`,
     },
-    REAL_AGENTS,
+    turns,
     roles,
   );
 
   const plan = parsePlan(readStructured(outcome));
   state.plan = plan;
+  // Consumed by the same write that persists the plan answering them, which is
+  // the earliest instant at which a second revision would be buying work the
+  // run already has. Two artifact writes follow, and a failure in either used to
+  // leave the findings outstanding beside the revision that answered them.
+  //
+  // Keyed on `args.findings`, so the answers path is untouched: it revises with
+  // `answers` *instead of* the findings, and has therefore consumed nothing.
+  // Assigned rather than routed through `clearPendingFindings` precisely so it
+  // rides on this `saveState` and not a later one.
+  if (args.findings !== undefined) state.pendingFindings = null;
   saveState(state);
   artifact(state, `plan-${state.planRound}.json`, plan);
   // With the new plan persisted, the follow-ups artifact is reconciled against
@@ -1406,6 +1588,7 @@ async function runCritique(
   cwd: string,
   plan: Plan,
   roles: RoleTable,
+  turns: AgentTurns,
 ): Promise<FindingsReport> {
   log.step(`${holderLabel('critic', roles)} is critiquing the plan`);
   const outcome = await runTurn(
@@ -1425,7 +1608,7 @@ async function runCritique(
       cwd,
       label: `critique-${state.planRound}`,
     },
-    REAL_AGENTS,
+    turns,
     roles,
   );
   return parseFindings(readStructured(outcome));
@@ -1437,6 +1620,7 @@ async function runReview(
   cwd: string,
   plan: Plan,
   roles: RoleTable,
+  turns: AgentTurns,
 ): Promise<FindingsReport> {
   log.step(`${holderLabel('reviewer', roles)} is reviewing the implementation`);
   const diff = await git.diffSince(cwd, state.baseSha);
@@ -1460,7 +1644,7 @@ async function runReview(
       cwd,
       label: `review-${state.reviewRound}`,
     },
-    REAL_AGENTS,
+    turns,
     roles,
   );
   return parseFindings(readStructured(outcome));
@@ -1486,6 +1670,7 @@ async function resolveQuestions(
   questions: readonly OpenQuestion[],
   plan: Plan,
   roles: RoleTable,
+  turns: AgentTurns,
 ): Promise<Answer[]> {
   const answerer = holderLabel('answerer', roles);
   const blockingCount = questions.filter((q) => q.blocking).length;
@@ -1512,7 +1697,7 @@ async function resolveQuestions(
       cwd,
       label: `answers-${state.planRound}`,
     },
-    REAL_AGENTS,
+    turns,
     roles,
   );
 
