@@ -462,6 +462,45 @@ export function clearPendingFindings(state: RunState): void {
   saveState(state);
 }
 
+/**
+ * Whether every finding in the window is new to it - no id in more than one
+ * round.
+ *
+ * Judged over the whole window rather than between neighbours, on purpose. An
+ * {a,b} -> {c,d} -> {a,b} oscillation has no *consecutive* overlap and is
+ * genuinely stuck; it fails this test because `a` occurs twice.
+ *
+ * A round with absent or empty ids means "cannot tell", not "no overlap". The
+ * rule read literally is vacuously true for a history that carries no ids at
+ * all, and `state.json` written before `RoundRecord.ids` existed has none - so
+ * taking it literally would switch the trend brake off for every resumed legacy
+ * run. Such a window falls back to the count-only verdict.
+ */
+function windowTurnedOver(recent: readonly RoundRecord[]): boolean {
+  const seen = new Map<string, number>();
+  for (const r of recent) {
+    const ids = r.ids;
+    if (ids === undefined || ids.length === 0) return false;
+    // Deduped per round, so a round that names an id twice is not mistaken for
+    // the same id surviving across rounds.
+    for (const id of new Set(ids)) seen.set(id, (seen.get(id) ?? 0) + 1);
+  }
+  for (const n of seen.values()) if (n > 1) return false;
+  return true;
+}
+
+/** Trailing rounds whose blocking count equals the latest round's. */
+function flatRun(history: readonly RoundRecord[]): number {
+  const target = history[history.length - 1]?.count;
+  if (target === undefined) return 0;
+  let rounds = 0;
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    if (history[i]?.count !== target) break;
+    rounds += 1;
+  }
+  return rounds;
+}
+
 export interface ConvergenceArgs {
   /** Identical P1 set this many rounds running is a hard stop at any point. */
   repeatThreshold: number;
@@ -516,6 +555,29 @@ export function assessConvergence(
   if (!late || !hasWindow) return null;
 
   if (!improved) {
+    // A flat count whose findings turned over completely is not deadlock. The
+    // planning run for issue #2 was stopped at 2 -> 2 -> 2 on three rounds with
+    // zero id overlap - each a narrower restatement of the last - and the round
+    // that followed fell to 1. The repeat arm above already treats identity as
+    // meaningful; this was the one place that information was dropped.
+    //
+    // Bounded on purpose. Turnover buys one window, not the cap: the flat run
+    // must have *started inside* this window, so the excuse can fire at most
+    // once per run of equal counts. It says nothing about a rising count, which
+    // leaves the flat run shorter than the window - 1 -> 1 -> 3 produces
+    // correct, distinct findings while getting further from done, and still
+    // stops here.
+    //
+    // Loosening a brake is worth being nervous about. The blast radius is one
+    // window of rounds the run was already allowed: maxPlanRounds /
+    // maxReviewRounds, `guardPlanBudget` and `budget.maxTokens` all still bind,
+    // so the worst case of being wrong is a run spending what it was budgeted.
+    //
+    // `window > 1` because `convergenceWindow` is only validated as >= 1, and a
+    // one-round window is never `improved` and always flat - without this the
+    // excuse would fire on every late round and disable the brake outright.
+    if (window > 1 && flatRun(history) === window && windowTurnedOver(recent)) return null;
+
     const trail = recent.map((r) => r.count).join(' -> ');
     const left = cap - round;
     return (
