@@ -5,3 +5,6 @@ dist/
 .worktrees/
 *.log
 *.stackdump
+# Per-machine Claude Code state - settings.local.json is the only thing in here.
+# Shared agent config belongs in CLAUDE.md / AGENTS.md, which are tracked.
+.claude/
