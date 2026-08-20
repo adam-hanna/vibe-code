@@ -520,3 +520,98 @@ test('an existing OUTSTANDING.md is never rewritten by the recovery', async () =
 
   assert.equal(readFileSync(file, 'utf8'), 'the original, written by the round that ran');
 });
+
+test('the final fix round consumes its findings and leaves the record behind', async () => {
+  // One P1 is within the default tolerance, so the review passes the gate and
+  // the loop takes its final-fix branch. Every artifact that branch produces,
+  // and nothing outstanding after it: a resume must have no reason to buy the
+  // fix a second time.
+  const state = reviewingRun();
+
+  const calls: string[] = [];
+  await orchestrate(
+    state,
+    config(),
+    true,
+    agents({ claude: () => 'fixed it', codex: () => report([p1('tolerated-one')]) }, calls),
+  );
+
+  assert.deepEqual(calls, ['review-0', 'final-fix-1']);
+  assert.equal(state.pendingFindings, null);
+  assert.equal(state.finalFixDone, true);
+  assert.equal(existsSync(path.join(state.dir, 'fix-report-1.md')), true);
+  assert.match(readFileSync(path.join(state.dir, 'OUTSTANDING.md'), 'utf8'), /tolerated-one/);
+});
+
+test('a half-finished final fix is completed before its record is written', async () => {
+  // `finalFixDone` is persisted *before* the final fix turn, so this state is
+  // what a process killed during that turn leaves: the round is claimed, the
+  // work is not done, and the findings are still outstanding. The artifact says
+  // the findings were addressed and verification still passed, so it must not
+  // appear until both are true.
+  const state = reviewingRun();
+  state.finalFixDone = true;
+  state.outstanding = [p1('carried-one')];
+  state.pendingFindings = { phase: 'review', findings: [p1('carried-one')] };
+
+  const file = path.join(state.dir, 'OUTSTANDING.md');
+  const calls: string[] = [];
+  await orchestrate(
+    state,
+    config(),
+    true,
+    agents(
+      {
+        claude: () => {
+          assert.equal(
+            existsSync(file),
+            false,
+            'the record was published before the fix it describes had run',
+          );
+          return 'fixed it';
+        },
+        codex: () => assert.fail('a finished final round must not be reviewed again'),
+      },
+      calls,
+    ),
+  );
+
+  assert.deepEqual(calls, ['fix-1']);
+  assert.equal(state.pendingFindings, null);
+  assert.equal(existsSync(file), true);
+  assert.match(readFileSync(file, 'utf8'), /carried-one/);
+});
+
+test('a failing verification gate leaves no record claiming it passed', async () => {
+  const state = reviewingRun();
+  state.finalFixDone = true;
+  state.outstanding = [p1('carried-one')];
+  writeFileSync(path.join(state.targetDir, 'gate-fail.mjs'), 'process.exit(1);\n', 'utf8');
+
+  const calls: string[] = [];
+  await assert.rejects(
+    () =>
+      orchestrate(
+        state,
+        config(
+          { maxVerifyRounds: 1 },
+          {
+            verify: {
+              ...DEFAULTS.verify,
+              enabled: true,
+              command: 'node gate-fail.mjs',
+              runs: 1,
+              timeoutMs: 30_000,
+            },
+          },
+        ),
+        true,
+        agents({}, calls),
+      ),
+    Escalation,
+  );
+
+  // The suite does not pass, so nothing may assert that it does.
+  assert.equal(existsSync(path.join(state.dir, 'OUTSTANDING.md')), false);
+  assert.deepEqual(calls, []);
+});

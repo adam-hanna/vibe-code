@@ -378,14 +378,6 @@ async function reviewPhase(
   roles: RoleTable,
   turns: AgentTurns,
 ): Promise<void> {
-  // Before the loop, and before anything can decide to stop: the final fix round
-  // writes three things - the state flags, the fix turn's report, and
-  // OUTSTANDING.md - and a process that dies between them leaves a run that
-  // finishes reporting an artifact that is not there. Recovered from
-  // `state.outstanding` rather than from the carried findings, so it does not
-  // depend on where in that sequence the run died.
-  recoverOutstanding(state, cwd);
-
   // As in `planPhase`: only the first iteration can be a re-entry.
   let firstPass = true;
 
@@ -403,10 +395,10 @@ async function reviewPhase(
       }
       firstPass = false;
       await runFixRound(state, cfg, cwd, carried, roles, turns);
-      // The findings may have been the final round's: that round sets
-      // `finalFixDone` before its turn, so a resume that lands here has to
-      // leave the same record behind it would have.
-      recoverOutstanding(state, cwd);
+      // No OUTSTANDING.md here, even when these were the final round's
+      // findings: the artifact says the fix ran *and verification still
+      // passed*, and the gate has not run yet. It is written below, on the
+      // other side of it.
       continue;
     }
     firstPass = false;
@@ -451,6 +443,15 @@ async function reviewPhase(
     // Stop here rather than reviewing again: the point of the tolerance is to
     // end the argument, and a fresh review would reopen it.
     if (state.finalFixDone === true) {
+      // The one place the artifact's own claim is true: the fix round is behind
+      // us and `runGate` has just returned clean. Everything the final round
+      // writes is a separate moment - the flags before its turn, the report
+      // after it, the file after that - so a process killed anywhere in there
+      // used to leave a run that finishes clean pointing at a file nobody
+      // wrote. This rewrites it, and only from here, because from anywhere
+      // earlier it would be asserting a fix or a passing suite that had not
+      // happened.
+      recoverOutstanding(state, cwd);
       log.ok('Carried findings addressed and verification still passes.');
       break;
     }
@@ -521,16 +522,17 @@ async function reviewPhase(
         roles,
       );
       artifact(state, `fix-report-${state.reviewRound}.md`, finalFix.text);
-      await maybeCommit(cfg, cwd, `vibe: address carried review findings (final round)`);
 
+      // Written before the carry is dropped, and both before the commit: the
+      // fix turn is done and its report is on disk, so nothing after this point
+      // can make it worth buying again, while `maybeCommit` is three git
+      // invocations that can each fail. Clearing after them left a window where
+      // a resume paid for a second fix round doing work already done.
       const file = artifact(state, 'OUTSTANDING.md', renderOutstanding(state, decision.tolerated));
       log.info(`Carried findings and what was done about them: ${path.relative(cwd, file)}`);
-      // Last, after the artifact this round exists to produce. Dropping the
-      // carry any earlier would let a death in between finish a later run
-      // reporting an OUTSTANDING.md that was never written: the state would say
-      // the final fix was done and nothing would be left to trigger a rewrite.
-      // Repeating the fix round is the cheaper of the two failures.
       clearPendingFindings(state);
+
+      await maybeCommit(cfg, cwd, `vibe: address carried review findings (final round)`);
       recordEvent(state, 'review_approved', {
         findings: review.findings.length,
         carriedAndFixed: decision.tolerated.map((f) => f.id),
@@ -608,6 +610,14 @@ async function runFixRound(
  * however far that sequence got, and skipped when the file is already there so
  * a good artifact is never rewritten. Stored state is unvalidated, hence the
  * shape check: this artifact makes claims about what is in it.
+ *
+ * Call it from ONE place, and only that one: after `runGate` has come back
+ * clean, immediately before the completion branch. The document states that the
+ * findings were worked on *and that verification still passed*, so calling it
+ * on entry to the phase, or straight after a fix round, publishes both claims
+ * before either is true - `finalFixDone` is persisted before the final fix turn
+ * even starts, and a suite that fails afterwards would leave the file asserting
+ * the opposite of what happened.
  */
 function recoverOutstanding(state: RunState, cwd: string): void {
   if (state.finalFixDone !== true) return;
