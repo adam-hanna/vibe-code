@@ -163,6 +163,42 @@ test('a late stalled trend says nothing about continuing either', () => {
   assert.ok(logged.slice(0, -1).some((lines) => lines.some((l) => l.includes(STUCK))));
 });
 
+test('a flat count with completely new findings is not escalated', () => {
+  // Issue #2's plan rounds, replayed through the real guard so the ids under
+  // test are the ones `guardProgress` itself records - `blockers.map(f => f.id)`.
+  //
+  // A leading round at 3 makes this reachable without relying on `planRound`
+  // running ahead of the history: `revisePlan` bumps `planRound` on an
+  // answer-revision that records no round, so in the real run the guard saw
+  // three records at round 4. Either way the window it judges is 2 -> 2 -> 2.
+  const rounds = [
+    ['w-1', 'w-2', 'w-3'],
+    ['schema-aware-claude-test-doubles', 'non-object-roles-bypass-validation'],
+    ['no-codex-role-preflight-blocks', 'malformed-role-derivation-before-validation'],
+    ['disabled-role-preflight-enforcement', 'role-scoped-agent-resolution-mutates-shared-config'],
+  ];
+  const history: RoundRecord[] = [];
+
+  rounds.forEach((ids, idx) => {
+    const { thrown } = guardedRound(DEFAULTS, history, ids, {
+      cap: DEFAULTS.loop.maxPlanRounds,
+      round: idx + 1,
+    });
+    assert.equal(thrown, null, `round ${idx + 1} stopped a run that was converging`);
+  });
+
+  assert.deepEqual(history.map((r) => r.count), [3, 2, 2, 2]);
+
+  // One more flat round and the trend rule has its say: turnover buys a window,
+  // not the run.
+  const { thrown } = guardedRound(DEFAULTS, history, ['stored-null-roles-fallback', 'x-9'], {
+    cap: DEFAULTS.loop.maxPlanRounds,
+    round: 5,
+  });
+  assert.ok(thrown instanceof Escalation);
+  assert.match(thrown.message, /has not fallen in 3 rounds \(2 -> 2 -> 2\)/);
+});
+
 test('the round cap still escalates with blockers outstanding', () => {
   const history: RoundRecord[] = [];
 

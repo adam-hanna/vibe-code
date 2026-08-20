@@ -225,3 +225,157 @@ test('the longest trailing streak wins when several ids persist', () => {
 
   assert.deepEqual(persistentStreak(history), { id: 'k-1', rounds: 4 });
 });
+
+/**
+ * The plan rounds from issue #2, verbatim: three rounds at 2, no id in common.
+ *
+ * Each pair was a narrower version of the last - round 3 is round 2 after the
+ * planner fixed the literal case and the critic came back with "you fixed
+ * assignment, but a role can be assigned *and disabled*". The run was stopped
+ * here at plan round 4 of 5 for not falling; answered by hand, round 4 fell to
+ * 1. Total turnover, so the set rule never fires either.
+ */
+const ISSUE_2: readonly (readonly string[])[] = [
+  ['schema-aware-claude-test-doubles', 'non-object-roles-bypass-validation'],
+  ['no-codex-role-preflight-blocks', 'malformed-role-derivation-before-validation'],
+  ['disabled-role-preflight-enforcement', 'role-scoped-agent-resolution-mutates-shared-config'],
+];
+
+/** A round that is not part of the flat run, so the flat run starts in the window. */
+const BEFORE = ['w-1', 'w-2', 'w-3'];
+
+test('a flat count whose findings turned over completely is not deadlock', () => {
+  const history = historyOf(...ISSUE_2);
+
+  // The premises: every id distinct, and every signature distinct - so neither
+  // the set rule nor a persistent core is what is being tested here.
+  assert.equal(new Set(history.flatMap((r) => r.ids ?? [])).size, 6);
+  assert.equal(new Set(history.map((r) => r.signature)).size, 3);
+  assert.deepEqual(history.map((r) => r.count), [2, 2, 2]);
+
+  assert.equal(assessConvergence(history, { ...ARGS, cap: 5, round: 4 }), null);
+  // And with the round that preceded the flat run on the front, which is how
+  // the guard records it when the run reaches the same point one round later.
+  assert.equal(assessConvergence(historyOf(BEFORE, ...ISSUE_2), { ...ARGS, cap: 5, round: 4 }), null);
+});
+
+test('turnover buys one window, not the run', () => {
+  // The flat run has to have started inside the window. One round further on -
+  // still complete turnover, still flat - and the trend rule has its say.
+  const history = historyOf(BEFORE, ...ISSUE_2, ['stored-null-roles-fallback', 'x-9']);
+
+  assert.equal(new Set(history.flatMap((r) => r.ids ?? [])).size, 11);
+  assert.match(
+    assessConvergence(history, { ...ARGS, cap: 5, round: 5 }) ?? '',
+    /has not fallen in 3 rounds \(2 -> 2 -> 2\)/,
+  );
+  // Same shape with no preceding round at all: four flat rounds, all distinct.
+  assert.match(
+    assessConvergence(historyOf(...ISSUE_2, ['y-1', 'y-2']), { ...ARGS, cap: 5, round: 4 }) ?? '',
+    /has not fallen in 3 rounds/,
+  );
+});
+
+test('an alternating blocking set still stops the run', () => {
+  // No overlap between *consecutive* rounds, which is why the rule looks at the
+  // window as a whole: a-1 and a-2 each appear twice in it.
+  assert.match(
+    assessConvergence(historyOf(['a-1', 'a-2'], ['c-1', 'c-2'], ['a-1', 'a-2']), {
+      ...ARGS,
+      cap: 5,
+      round: 4,
+    }) ?? '',
+    /has not fallen in 3 rounds/,
+  );
+
+  const longer = historyOf(['a-1', 'a-2'], ['c-1', 'c-2'], ['a-1', 'a-2'], ['c-1', 'c-2']);
+  assert.match(
+    assessConvergence(longer, { ...ARGS, cap: 12, round: 8 }) ?? '',
+    /has not fallen in 3 rounds/,
+  );
+});
+
+test('a flat count with a surviving core still stops the run', () => {
+  // The companions rotate, so every signature differs and the set rule is not
+  // what fires - the core is.
+  const history = historyOf([STUCK, 'n-1'], [STUCK, 'n-2'], [STUCK, 'n-3']);
+
+  assert.equal(new Set(history.map((r) => r.signature)).size, 3);
+  assert.match(
+    assessConvergence(history, { ...ARGS, cap: 5, round: 4 }) ?? '',
+    /has not fallen in 3 rounds/,
+  );
+});
+
+test('a rising count stops however new the findings are', () => {
+  // 1 -> 1 -> 3: correct, distinct findings, getting further from done. The
+  // rise leaves the flat run shorter than the window, so nothing is excused.
+  const history = historyOf(['p-1'], ['q-1'], ['r-1', 'r-2', 'r-3']);
+
+  assert.match(
+    assessConvergence(history, { ...ARGS, cap: 5, round: 4 }) ?? '',
+    /has not fallen in 3 rounds \(1 -> 1 -> 3\)/,
+  );
+});
+
+test('a history recorded without ids stops exactly as it did before', () => {
+  // Rounds written by a binary that had no RoundRecord.ids. "No id appears
+  // twice" is vacuously true of them, and reading it that way would turn the
+  // brake off for every resumed legacy run.
+  const legacy: RoundRecord[] = [
+    { signature: 'aaa', count: 2 },
+    { signature: 'bbb', count: 2 },
+    { signature: 'ccc', count: 2 },
+  ];
+  const empty: RoundRecord[] = legacy.map((r) => ({ ...r, ids: [] }));
+
+  assert.match(
+    assessConvergence(legacy, { ...ARGS, cap: 5, round: 4 }) ?? '',
+    /has not fallen in 3 rounds/,
+  );
+  assert.match(
+    assessConvergence(empty, { ...ARGS, cap: 5, round: 4 }) ?? '',
+    /has not fallen in 3 rounds/,
+  );
+  // One legacy round in an otherwise complete window is still "cannot tell".
+  const mixed: RoundRecord[] = [{ signature: 'ddd', count: 2 }, ...historyOf(...ISSUE_2).slice(1)];
+  assert.match(
+    assessConvergence(mixed, { ...ARGS, cap: 5, round: 4 }) ?? '',
+    /has not fallen in 3 rounds/,
+  );
+});
+
+test('turnover does not rescue an identical set', () => {
+  // The set rule runs first and is untouched by any of this.
+  assert.match(
+    assessConvergence(historyOf([STUCK, 'g-1'], [STUCK, 'g-1'], [STUCK, 'g-1']), {
+      ...ARGS,
+      cap: 5,
+      round: 4,
+    }) ?? '',
+    /same P1 set came back 3 rounds/,
+  );
+});
+
+test('a one-round convergence window is not excused by turnover', () => {
+  // convergenceWindow is only validated as >= 1. A window of one is never
+  // improved and always flat, so without the guard every late round would be
+  // excused and the brake would be gone.
+  const args = { repeatThreshold: DEFAULTS.loop.oscillationThreshold, window: 1 };
+
+  assert.match(
+    assessConvergence(historyOf(['z-1'], ['z-2'], ['z-3']), { ...args, cap: 5, round: 4 }) ?? '',
+    /has not fallen in 1 rounds/,
+  );
+});
+
+test('an early round and a partial window are untouched', () => {
+  const partial = historyOf(...ISSUE_2).slice(0, 2);
+
+  assert.equal(assessConvergence(partial, { ...ARGS, cap: 5, round: 4 }), null, 'no full window');
+  assert.equal(
+    assessConvergence(historyOf(...ISSUE_2), { ...ARGS, cap: 12, round: 3 }),
+    null,
+    'not late',
+  );
+});
