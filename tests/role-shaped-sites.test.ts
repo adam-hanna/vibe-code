@@ -367,9 +367,9 @@ test('every timeout selected under the default table is identical to today\'s', 
 });
 
 test('timeout selection follows the role, not the provider', () => {
-  // Implementing still gets the long turn once the implementer is Codex - which
-  // Codex's single key cannot express, so it gets the one figure Codex has.
-  assert.equal(turnTimeoutMs('implementer', DEFAULTS, SWAPPED), DEFAULTS.codex.timeoutMs);
+  // Implementing gets the long turn once the implementer is Codex: `codex` now
+  // has the same pair of keys Claude has, so the limitation this pinned is gone.
+  assert.equal(turnTimeoutMs('implementer', DEFAULTS, SWAPPED), DEFAULTS.codex.implementTimeoutMs);
   // And a reviewing Claude gets the reading figure, not the implementing one.
   assert.equal(turnTimeoutMs('reviewer', DEFAULTS, SWAPPED), DEFAULTS.claude.planTimeoutMs);
 });

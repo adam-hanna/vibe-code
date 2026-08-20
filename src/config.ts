@@ -1,6 +1,14 @@
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
-import { providersForRoles } from '@src/roles.js';
+import {
+  DEFAULT_ROLE_PROVIDERS,
+  PROVIDERS as ROLE_PROVIDERS,
+  providersForRoles,
+  ROLE_NAMES,
+  roleRefusals,
+  rolesFor,
+} from '@src/roles.js';
+import type { Role, RoleProviders } from '@src/roles.js';
 import type { AgentProvider, ToolchainContract, ToolRequirement, Phase } from '@src/runtime.js';
 import type { Config, ConfigOverrides, Effort, LoadedConfig, Sandbox } from '@src/types.js';
 
@@ -8,6 +16,9 @@ export const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'ma
 const SANDBOXES: readonly Sandbox[] = ['read-only', 'workspace-write', 'danger-full-access'];
 
 export const DEFAULTS: Config = {
+  // Claude plans and implements, Codex critiques, answers and reviews - the
+  // assignment every run made before this key existed.
+  roles: DEFAULT_ROLE_PROVIDERS,
   claude: {
     // Matches the interactive workflow this tool automates: opus, medium thinking.
     model: 'opus',
@@ -21,6 +32,10 @@ export const DEFAULTS: Config = {
     // Critique and review never need write access.
     sandbox: 'read-only',
     timeoutMs: 45 * 60 * 1000,
+    // The writing figure, for a table that seats the implementer on Codex.
+    // Matches claude.implementTimeoutMs: implementing takes as long as it takes
+    // whoever does it.
+    implementTimeoutMs: 90 * 60 * 1000,
     persistSession: true,
     readRateLimits: true,
   },
@@ -159,9 +174,28 @@ function mergeSection<T extends object>(base: T, override: unknown): T {
   return out;
 }
 
+/**
+ * Merge the role assignment, keeping anything wrong for validation to name.
+ *
+ * Deliberately not `mergeSection`, which treats a malformed override as no
+ * override at all. Swallowing `"roles": null` - or a typo'd role name, which
+ * `mergeSection` would drop because it iterates the *base's* keys - would run
+ * the default table while the user believes Codex is implementing: a different
+ * agent, silently, with no error and no log line. Nothing else in a config can
+ * fail that way, which is why this one section is strict.
+ */
+function mergeRoles(base: RoleProviders, override: unknown): RoleProviders {
+  if (override === undefined) return base;
+  if (!isRecord(override)) return override as RoleProviders;
+  const out: Record<string, unknown> = { ...base };
+  for (const [key, value] of Object.entries(override)) out[key] = value;
+  return out as unknown as RoleProviders;
+}
+
 function mergeConfig(base: Config, override: unknown): Config {
   if (!isRecord(override)) return base;
   return {
+    roles: mergeRoles(base.roles, override['roles']),
     claude: mergeSection(base.claude, override['claude']),
     codex: mergeSection(base.codex, override['codex']),
     loop: mergeSection(base.loop, override['loop']),
@@ -207,11 +241,15 @@ function mergeToolchain(base: ToolchainContract, override: unknown): ToolchainCo
  */
 export function applyOverrides(base: Config, overrides: ConfigOverrides): Config {
   const merged = mergeConfig(mergeConfig(DEFAULTS, base), overrides);
-  validate(merged);
-  return merged;
+  // The table is checked before anything derives from it - see loadConfig.
+  validateRoles(merged.roles);
+  const cfg = resolveRoleScopedAgents(merged, [base, overrides]);
+  validate(cfg);
+  return cfg;
 }
 
 const SECTIONS = [
+  'roles',
   'claude',
   'codex',
   'loop',
@@ -263,11 +301,101 @@ export function loadConfig(targetDir: string, overrides: ConfigOverrides = {}): 
   }
 
   const merged = mergeConfig(mergeConfig(DEFAULTS, fromFile), overrides);
-  validate(merged);
-  return { ...merged, configPath: existsSync(configPath) ? configPath : null };
+  // Order matters. `resolveRoleScopedAgents` reads the table, so a bad role
+  // value checked afterwards would surface as an empty `toolchain.node.agents`
+  // - a toolchain error for what is a `roles` mistake.
+  validateRoles(merged.roles);
+  const cfg = resolveRoleScopedAgents(merged, [fromFile, overrides]);
+  validate(cfg);
+  return { ...cfg, configPath: existsSync(configPath) ? configPath : null };
+}
+
+/**
+ * Which tools are required of whoever holds a role, rather than of a provider
+ * named at import time.
+ *
+ * node and npm are the implementer's: it is the one that builds and runs the
+ * suite. The reviewer reads the diff, and its sandbox is read-only by design.
+ */
+const ROLE_SCOPED_TOOLS: Readonly<Record<string, readonly Role[]>> = {
+  node: ['implementer'],
+  npm: ['implementer'],
+};
+
+/** Whether any layer named `toolchain.<tool>.agents` itself. */
+function pinnedByAnyLayer(layers: readonly unknown[], tool: string): boolean {
+  return layers.some((layer) => {
+    if (!isRecord(layer)) return false;
+    const toolchain = layer['toolchain'];
+    if (!isRecord(toolchain)) return false;
+    const requirement = toolchain[tool];
+    return isRecord(requirement) && requirement['agents'] !== undefined;
+  });
+}
+
+/**
+ * Re-scope the role-derived `agents` for this config. Pure.
+ *
+ * A new map and a NEW `ToolRequirement` for every entry it computes - never a
+ * write into one it was handed. `mergeToolchain` shallow-copies the map and
+ * reuses each nested requirement from its base, so an entry the user did not
+ * override is still the object inside `DEFAULTS`: assigning `agents` into it
+ * would rewrite the module default for the life of the process, and the next
+ * `loadConfig` in the same process would inherit it.
+ *
+ * A layer that named `agents` wins. That keeps a user's own contract, and keeps
+ * a stored `state.config` - which always carries concrete agents - authoritative
+ * on resume.
+ *
+ * Runs after `validateRoles`, so the table is well formed and `agents` is never
+ * resolved to an empty list.
+ */
+function resolveRoleScopedAgents(cfg: Config, layers: readonly unknown[]): Config {
+  const table = rolesFor(cfg);
+  const toolchain: Record<string, ToolRequirement> = { ...cfg.toolchain };
+  for (const [tool, wanted] of Object.entries(ROLE_SCOPED_TOOLS)) {
+    const requirement = toolchain[tool];
+    if (requirement === undefined) continue;
+    if (pinnedByAnyLayer(layers, tool)) continue;
+    toolchain[tool] = { ...requirement, agents: providersForRoles(wanted, table) };
+  }
+  return { ...cfg, toolchain };
+}
+
+/**
+ * The role assignment, checked before anything reads it.
+ *
+ * Separate from `validate` and called first by both entry points, because every
+ * role-derived value - the toolchain scoping, the refusals below, the table
+ * itself - would otherwise report a `roles` mistake as something else.
+ */
+function validateRoles(raw: unknown): void {
+  if (!isRecord(raw)) {
+    throw new Error('roles must be an object mapping role names to "claude" or "codex"');
+  }
+  for (const key of Object.keys(raw)) {
+    if (!ROLE_NAMES.includes(key as Role)) {
+      throw new Error(`roles."${key}" is not a role; expected one of ${ROLE_NAMES.join(', ')}`);
+    }
+  }
+  for (const role of ROLE_NAMES) {
+    const provider = raw[role];
+    if (provider === undefined) throw new Error(`roles.${role} is missing`);
+    if (!ROLE_PROVIDERS.includes(provider as AgentProvider)) {
+      throw new Error(
+        `roles.${role} is ${JSON.stringify(provider)}; expected ${ROLE_PROVIDERS.map((p) => `"${p}"`).join(' or ')}`,
+      );
+    }
+  }
 }
 
 function validate(cfg: Config): void {
+  // First, and again: a caller reaching validate by another route must get the
+  // same answer, and it is a pure check over five keys.
+  validateRoles(cfg.roles);
+  // An assignment that cannot work is a config error, not an environment one -
+  // so `vibe run`, `vibe resume` and `vibe doctor` all refuse it here.
+  for (const message of roleRefusals(cfg)) throw new Error(message);
   if (!EFFORTS.includes(cfg.claude.effort)) {
     throw new Error(`claude.effort must be one of ${EFFORTS.join(', ')}`);
   }
@@ -317,8 +445,10 @@ function validate(cfg: Config): void {
       throw new Error(`claude.${key} must be a positive number`);
     }
   }
-  if (!Number.isFinite(cfg.codex.timeoutMs) || cfg.codex.timeoutMs <= 0) {
-    throw new Error('codex.timeoutMs must be a positive number');
+  for (const key of ['timeoutMs', 'implementTimeoutMs'] as const) {
+    if (!Number.isFinite(cfg.codex[key]) || cfg.codex[key] <= 0) {
+      throw new Error(`codex.${key} must be a positive number`);
+    }
   }
   if (!Number.isFinite(cfg.verify.timeoutMs) || cfg.verify.timeoutMs <= 0) {
     throw new Error('verify.timeoutMs must be a positive number');

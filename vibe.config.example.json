@@ -1,4 +1,11 @@
 {
+  "roles": {
+    "planner": "claude",
+    "implementer": "claude",
+    "critic": "codex",
+    "answerer": "codex",
+    "reviewer": "codex"
+  },
   "claude": {
     "model": "opus",
     "effort": "medium",
@@ -10,6 +17,7 @@
     "effort": "xhigh",
     "sandbox": "read-only",
     "timeoutMs": 2700000,
+    "implementTimeoutMs": 5400000,
     "readRateLimits": true
   },
   "loop": {

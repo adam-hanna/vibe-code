@@ -4,7 +4,7 @@ import type { ClaudeTurnOptions } from '@src/claude.js';
 import * as log from '@src/log.js';
 import { progressOptions, rememberContextWindow } from '@src/progress.js';
 import { handoffPrompt } from '@src/prompts.js';
-import { ROLES, rotatesConcurrentlyWith, rotatingSlot } from '@src/roles.js';
+import { rolesFor, rotatesConcurrentlyWith, rotatingSlot } from '@src/roles.js';
 import type { Role, RoleTable } from '@src/roles.js';
 import { ensureSlotId, resetSlot, slotId, slotRotatable, slotStarted } from '@src/slots.js';
 import {
@@ -36,7 +36,7 @@ import type { ClaudeTurnResult, Config, ContextUsage, RunState } from '@src/type
  * below refuses to rotate a slot that cannot be reset rather than half-doing it.
  */
 
-export function shouldRotate(state: RunState, cfg: Config, roles: RoleTable = ROLES): boolean {
+export function shouldRotate(state: RunState, cfg: Config, roles: RoleTable = rolesFor(cfg)): boolean {
   if (!cfg.context.enabled) return false;
 
   const slot = rotatingSlot(roles);
@@ -101,7 +101,7 @@ export async function rotateSession(
   state: RunState,
   cfg: Config,
   turn: ClaudeTurnFn = claudeTurn,
-  roles: RoleTable = ROLES,
+  roles: RoleTable = rolesFor(cfg),
 ): Promise<void> {
   const slot = rotatingSlot(roles);
   // Before anything is spent. `shouldRotate` already refuses such a slot, so
@@ -285,7 +285,7 @@ export async function withConcurrentCompaction<T>(
   /** Who is doing the concurrent work. Defaulted so the existing callers and
    * their tests keep their four-argument shape; both real call sites pass it. */
   workRole: Role = 'reviewer',
-  roles: RoleTable = ROLES,
+  roles: RoleTable = rolesFor(cfg),
 ): Promise<T> {
   if (
     !cfg.context.compactDuringCodex ||

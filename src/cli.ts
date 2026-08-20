@@ -4,6 +4,7 @@ import { applyOverrides, configDiff, EFFORTS, loadConfig } from '@src/config.js'
 import { artifact, createRun, listRuns, loadRun, recordEvent, saveState } from '@src/run.js';
 import { Escalation, EXIT, orchestrate, writeEscalation } from '@src/orchestrator.js';
 import type { ExitCode } from '@src/orchestrator.js';
+import { DEFAULT_ROLE_PROVIDERS, ROLE_NAMES, roleWarnings } from '@src/roles.js';
 import { claudeBin, setSessionArgs } from '@src/claude.js';
 import { codexBin } from '@src/codex.js';
 // The accounting seam, from the leaf it lives in: orchestrator.js re-exports
@@ -479,6 +480,23 @@ export type PreflightGate = (state: RunState, cfg: Config) => Promise<ExitCode |
  */
 export type RunLoop = (state: RunState, cfg: Config, resume: boolean) => Promise<unknown>;
 
+/**
+ * The role assignment, and what is worth saying about it - once per invocation,
+ * before anything is spent.
+ *
+ * Here rather than in `cmdRun` so a resume reports the table it is continuing
+ * on. Silent under the default assignment: `roleWarnings` is empty and the line
+ * would say only what every run before this key existed already did. Refusals
+ * never reach this - `loadConfig`/`resumeConfig` threw long before.
+ */
+function reportRoles(cfg: Config): void {
+  const changed = ROLE_NAMES.filter((role) => cfg.roles[role] !== DEFAULT_ROLE_PROVIDERS[role]);
+  if (changed.length > 0) {
+    log.info(`Roles:   ${ROLE_NAMES.map((role) => `${role}=${cfg.roles[role]}`).join(' ')}`);
+  }
+  for (const warning of roleWarnings(cfg)) log.warn(warning);
+}
+
 export async function execute(
   state: RunState,
   cfg: Config,
@@ -488,6 +506,8 @@ export async function execute(
   loop: RunLoop = orchestrate,
 ): Promise<ExitCode> {
   const started = Date.now();
+
+  reportRoles(cfg);
 
   try {
     // Inside the try, not above it: preflight now charges what its probes spent,

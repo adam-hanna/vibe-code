@@ -198,9 +198,11 @@ Drop `vibe.config.json` in the target repo; CLI flags override it. See `vibe.con
 
 ```json
 {
+  "roles":  { "planner": "claude", "implementer": "claude",
+              "critic": "codex", "answerer": "codex", "reviewer": "codex" },
   "claude": { "model": "opus", "effort": "medium" },
   "codex":  { "model": "gpt-5.6-luna", "effort": "xhigh", "sandbox": "read-only", "persistSession": true,
-              "readRateLimits": true },
+              "readRateLimits": true, "timeoutMs": 2700000, "implementTimeoutMs": 5400000 },
   "loop":   { "maxPlanRounds": 5, "maxReviewRounds": 5, "maxVerifyRounds": 3,
               "p1Tolerance": 1, "oscillationThreshold": 3 },
   "budget": { "maxCostUsd": 25, "maxTokens": 25000000, "planShare": 0.4,
@@ -214,6 +216,21 @@ Drop `vibe.config.json` in the target repo; CLI flags override it. See `vibe.con
 ```
 
 Binaries can be pinned with `VIBE_CLAUDE_BIN`, `VIBE_CODEX_BIN`, `VIBE_GIT_BIN`.
+
+### Who does what
+
+`roles` decides which agent holds each job. Omit it and you get the assignment above, which is what every run did before the key existed; name only the roles you want to move and the rest fill in. The value is a provider — `claude` or `codex` — and nothing else: whether a role may write, what schema its turn returns, and which conversation it talks through are facts about the *job*, not choices. An unknown role name, a provider that is not one of the two, and a `roles` that is not an object are all config errors.
+
+The headline swap is a clean split — `{"planner": "codex", "implementer": "codex", "critic": "claude", "answerer": "claude", "reviewer": "claude"}` — and needs `codex.persistSession: false` (`--no-codex-session`). That pairing is refused rather than repaired: `codex exec resume` takes no `-s` flag, so a writing Codex role on a persisted thread can write on its first turn and silently reverts to read-only on every one after.
+
+Some tables run with a warning rather than a refusal, and each says what it costs:
+
+- A judging role on the implementer's provider loses review independence, which is most of what this tool buys.
+- An implementer on Codex has no rotation mechanism, so session rotation and context compaction are off for the run.
+- A planner or implementer on a persisted Codex thread grows a context nothing measures.
+- A planner or implementer on Codex puts the expensive half of the run beyond `budget.maxCostUsd`, which is Claude-side only. `budget.maxTokens` still counts both.
+
+`codex.timeoutMs` is the reviewing figure and `codex.implementTimeoutMs` the writing one, chosen by what the role does — the pair `claude` has always had. A provider that holds no enabled role takes no turn: it is still probed, but its findings can only warn, never stop the run.
 
 ## Exit codes
 

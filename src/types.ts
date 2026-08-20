@@ -1,3 +1,4 @@
+import type { RoleProviders } from '@src/roles.js';
 import type { EnvironmentFacts, ToolchainContract } from '@src/runtime.js';
 
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
@@ -50,7 +51,19 @@ export interface CodexConfig {
   model: string;
   effort: Effort;
   sandbox: Sandbox;
+  /**
+   * How long a *reading* Codex turn gets - critique, answers, review.
+   *
+   * Provider-named for history; what it means is the reviewing figure, which is
+   * the only kind of Codex turn a default run makes.
+   */
   timeoutMs: number;
+  /**
+   * How long a *writing* Codex turn gets, for a table that seats the implementer
+   * on Codex. Implementing takes longer than reviewing whoever does it, which is
+   * why Claude has had this pair since before roles were configurable.
+   */
+  implementTimeoutMs: number;
   /**
    * Keep one Codex thread for the whole run via `codex exec resume`, so the
    * reviewer remembers what it already raised instead of re-deriving it.
@@ -281,6 +294,15 @@ export interface ProgressConfig {
 }
 
 export interface Config {
+  /**
+   * Which agent holds each role on this run.
+   *
+   * The only choice a run makes about the role table: `access`, the output
+   * schema and the conversation slot are facts about the job, not user
+   * settings. Absent - a config stored before this key existed - means the
+   * default assignment, which is what every run before it did.
+   */
+  roles: RoleProviders;
   claude: ClaudeConfig;
   codex: CodexConfig;
   loop: LoopConfig;
