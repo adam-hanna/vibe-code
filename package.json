@@ -1,6 +1,6 @@
 {
   "name": "@adam-hanna/vibe-code",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "publishConfig": {
     "access": "public"
   },
@@ -33,6 +33,7 @@
   "files": [
     "dist/src",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "scripts": {
