@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DEFAULTS } from '@src/config.js';
@@ -229,6 +229,32 @@ test('a resumed plan run revises against the carried findings instead of re-crit
   assert.equal(state.planRound, 1);
   // What the revision was asked about, not what the critic re-derived.
   assert.equal(state.plan?.plan_md, '# revised');
+});
+
+test('the revision consumes the findings on the same write that persists the plan', async () => {
+  // A revision persists the plan and then writes two artifacts. Both can fail,
+  // and a failure used to leave the findings outstanding beside the revision
+  // that had already answered them - buying a second revision on resume.
+  // Failure is provoked portably: `writeFileSync` cannot write a path that is
+  // already a directory.
+  const { state } = await stalledPlan();
+  mkdirSync(path.join(state.dir, 'plan-1.json'));
+
+  await assert.rejects(() =>
+    orchestrate(
+      state,
+      config({ maxPlanRounds: 5 }),
+      true,
+      agents({ claude: () => planFixture({ plan_md: '# revised' }) }, []),
+    ),
+  );
+
+  assert.equal(state.pendingFindings, null, 'the revision that ran must have consumed them');
+  const stored = JSON.parse(readFileSync(path.join(state.dir, 'state.json'), 'utf8')) as RunState;
+  // Both facts in one persisted state: the plan that answers the findings, and
+  // the findings marked answered.
+  assert.equal(stored.plan?.plan_md, '# revised');
+  assert.equal(stored.pendingFindings, null);
 });
 
 test('a resumed plan run records no second round for a plan it has not revised', async () => {
@@ -490,11 +516,34 @@ test('a review run that does not stall records and consumes nothing new', async 
   assert.equal(state.pendingFindings, null);
 });
 
+test('the final fix consumes its findings before the record it writes next', async () => {
+  // The carry must be gone the instant the fix turn's own report is on disk:
+  // everything after that - the record, three git invocations - can fail
+  // without making a second fix round worth buying. The record is not lost by
+  // going second; the recovery below rebuilds it.
+  const state = reviewingRun();
+  mkdirSync(path.join(state.dir, 'OUTSTANDING.md'));
+
+  await assert.rejects(() =>
+    orchestrate(
+      state,
+      config(),
+      true,
+      agents({ claude: () => 'fixed it', codex: () => report([p1('tolerated-one')]) }, []),
+    ),
+  );
+
+  assert.equal(state.pendingFindings, null, 'the fix that ran must have consumed them');
+  assert.equal(existsSync(path.join(state.dir, 'fix-report-1.md')), true);
+  const stored = JSON.parse(readFileSync(path.join(state.dir, 'state.json'), 'utf8')) as RunState;
+  assert.equal(stored.pendingFindings, null);
+});
+
 test('OUTSTANDING.md is rewritten when the final fix round left without it', async () => {
-  // What a process killed between the final fix turn and its artifact leaves
-  // behind: the state says the round happened, and the file it promises is not
-  // there. Nothing used to rewrite it, and the run finished clean pointing at a
-  // missing file.
+  // What a process killed between the final fix turn and its record leaves
+  // behind: the fix is done and paid for, the carry is rightly gone, and the
+  // file the run promises is not there. Nothing used to rewrite it, and the run
+  // finished clean pointing at a missing file.
   const state = reviewingRun();
   state.finalFixDone = true;
   state.outstanding = [p1('carried-one')];

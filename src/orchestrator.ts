@@ -256,10 +256,11 @@ async function planPhase(
         );
       }
       firstPass = false;
+      // `revisePlan` consumes them itself, on the same state write that persists
+      // the plan answering them - not here, where a second write would reopen a
+      // window between the two. A revision that throws, is rate-limited or dies
+      // mid-flight never reaches that write, so the findings stay outstanding.
       plan = await revisePlan(state, cfg, cwd, { findings: carried }, roles, turns);
-      // After the turn, never before it: a revision that throws, is rate-limited
-      // or dies mid-flight must leave them outstanding for the next resume.
-      clearPendingFindings(state);
       continue;
     }
     firstPass = false;
@@ -522,15 +523,16 @@ async function reviewPhase(
         roles,
       );
       artifact(state, `fix-report-${state.reviewRound}.md`, finalFix.text);
+      // The moment the fix stops being worth buying again, and therefore the
+      // moment to drop the carry: the turn is done and its report is on disk.
+      // Everything after this - the record, three git invocations - can fail
+      // without making a second fix round useful, and the record is not lost by
+      // going first: `recoverOutstanding` rebuilds it from `state.outstanding`
+      // once the gate has passed. Same order as `runFixRound`.
+      clearPendingFindings(state);
 
-      // Written before the carry is dropped, and both before the commit: the
-      // fix turn is done and its report is on disk, so nothing after this point
-      // can make it worth buying again, while `maybeCommit` is three git
-      // invocations that can each fail. Clearing after them left a window where
-      // a resume paid for a second fix round doing work already done.
       const file = artifact(state, 'OUTSTANDING.md', renderOutstanding(state, decision.tolerated));
       log.info(`Carried findings and what was done about them: ${path.relative(cwd, file)}`);
-      clearPendingFindings(state);
 
       await maybeCommit(cfg, cwd, `vibe: address carried review findings (final round)`);
       recordEvent(state, 'review_approved', {
@@ -1430,6 +1432,16 @@ async function revisePlan(
 
   const plan = parsePlan(readStructured(outcome));
   state.plan = plan;
+  // Consumed by the same write that persists the plan answering them, which is
+  // the earliest instant at which a second revision would be buying work the
+  // run already has. Two artifact writes follow, and a failure in either used to
+  // leave the findings outstanding beside the revision that answered them.
+  //
+  // Keyed on `args.findings`, so the answers path is untouched: it revises with
+  // `answers` *instead of* the findings, and has therefore consumed nothing.
+  // Assigned rather than routed through `clearPendingFindings` precisely so it
+  // rides on this `saveState` and not a later one.
+  if (args.findings !== undefined) state.pendingFindings = null;
   saveState(state);
   artifact(state, `plan-${state.planRound}.json`, plan);
   // With the new plan persisted, the follow-ups artifact is reconciled against
