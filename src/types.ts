@@ -1,3 +1,4 @@
+import type { RoleProviders } from '@src/roles.js';
 import type { EnvironmentFacts, ToolchainContract } from '@src/runtime.js';
 
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
@@ -50,12 +51,76 @@ export interface CodexConfig {
   model: string;
   effort: Effort;
   sandbox: Sandbox;
+  /**
+   * How long a *reading* Codex turn gets - critique, answers, review.
+   *
+   * Provider-named for history; what it means is the reviewing figure, which is
+   * the only kind of Codex turn a default run makes.
+   */
   timeoutMs: number;
+  /**
+   * How long a *writing* Codex turn gets, for a table that seats the implementer
+   * on Codex. Implementing takes longer than reviewing whoever does it, which is
+   * why Claude has had this pair since before roles were configurable.
+   */
+  implementTimeoutMs: number;
   /**
    * Keep one Codex thread for the whole run via `codex exec resume`, so the
    * reviewer remembers what it already raised instead of re-deriving it.
    */
   persistSession: boolean;
+  /**
+   * The Codex model's context window in tokens, or null when it is unknown.
+   *
+   * Null is not a failure state - it is the truth about a thread whose window
+   * vibe cannot ask for. `ThreadTokenUsage.modelContextWindow` exists only on the
+   * `thread/tokenUsage/updated` push notification, delivered to a client the
+   * app-server is driving a thread for; no request or response returns it,
+   * `thread/read` carries no tokenUsage and `model/list` has no window field. vibe
+   * drives Codex with `codex exec`, which is not an app-server client, so the
+   * notification never arrives - which is why this is a setting and not a probe.
+   *
+   * Nothing guesses one from the model name: a table mapping `gpt-5.6-luna` to a
+   * number is a fabricated denominator that goes stale silently. Set it if you
+   * know it; leave it null and occupancy is reported as a token count with no
+   * ratio, no percentage and no threshold.
+   */
+  contextWindow: number | null;
+  /**
+   * Read Codex's rate-limit window from `codex app-server` before each Codex turn.
+   *
+   * A switch exists because this is a second process model - a persistent
+   * JSON-RPC connection alongside the one-shot `codex exec` spawns - against an
+   * interface OpenAI marks experimental. Turning it off restores exactly the
+   * behaviour of every release before it: the signal is never required.
+   */
+  readRateLimits: boolean;
+}
+
+/**
+ * The Codex rate-limit window as last read, persisted with the run.
+ *
+ * Plain primitives only: state.json is round-tripped through `JSON.parse`, so a
+ * `Date` would come back as a string and compare unequal to itself.
+ */
+export interface CodexRateLimitRecord {
+  /** Which of the two windows the numbers below describe. */
+  window: 'primary' | 'secondary';
+  /**
+   * True only when the server itself named this window in `rateLimitReachedType`.
+   *
+   * False means vibe picked the fuller of the two, which is a different claim -
+   * a reached type naming a window this version does not recognise lands here,
+   * and reporting that window's reset as if the server had named it would be a
+   * fabricated reset time in the one place a user acts on it.
+   */
+  windowFromServer: boolean;
+  usedPercent: number;
+  windowDurationMins: number | null;
+  resetsAt: string | null;
+  reachedType: string | null;
+  planType: string | null;
+  capturedAt: string;
 }
 
 /** What one review round produced: which blocking findings, and how many. */
@@ -68,9 +133,12 @@ export interface RoundRecord {
    *
    * Kept alongside the fingerprint because the fingerprint only matches an
    * *identical* set. One finding that survives every round while its companions
-   * rotate produces a different fingerprint each time and slips through - which
-   * is exactly what a defect the fixer cannot fix looks like. Optional so runs
-   * recorded before this field loaded still parse.
+   * rotate produces a different fingerprint each time and slips through, so the
+   * ids are what makes such a finding *reportable* - see `persistenceNotice`.
+   * It is reported rather than stopped on: one finding in this project's own
+   * history survived rounds 3 through 8 and was cleared at round 9, in a run
+   * that then passed 1977/1977 tests. Optional so runs recorded before this
+   * field loaded still parse.
    */
   ids?: string[];
 }
@@ -159,6 +227,17 @@ export interface BudgetConfig {
   /** Cap on a single wait, so a run cannot hang for a weekly-cap reset. */
   maxWaitMinutes: number;
   /**
+   * Stop the run before a Codex turn once Codex's fuller rate-limit window is
+   * this full, as a percentage. 0 disables.
+   *
+   * A whole-run brake, not per-turn metering: `usedPercent` is an integer
+   * percent of a rolling window - 10080 minutes, a week, on the account this
+   * was measured against - so it does not move measurably for a single turn.
+   * What it can do is stop a long unattended run before it starts work that
+   * will die partway through, which is the failure this exists for.
+   */
+  codexLimitPercent: number;
+  /**
    * Share of the ceiling the planning phase may consume before stopping.
    *
    * Planning that will not converge is the most expensive way for a run to
@@ -225,7 +304,22 @@ export interface VerifyConfig {
   runs: number;
 }
 
+export interface ProgressConfig {
+  enabled: boolean;
+  /** Minimum gap between heartbeat lines, and the tick interval for a silent turn. */
+  intervalMs: number;
+}
+
 export interface Config {
+  /**
+   * Which agent holds each role on this run.
+   *
+   * The only choice a run makes about the role table: `access`, the output
+   * schema and the conversation slot are facts about the job, not user
+   * settings. Absent - a config stored before this key existed - means the
+   * default assignment, which is what every run before it did.
+   */
+  roles: RoleProviders;
   claude: ClaudeConfig;
   codex: CodexConfig;
   loop: LoopConfig;
@@ -241,6 +335,15 @@ export interface Config {
    * implementation that failed its own suite most of the time.
    */
   verify: VerifyConfig;
+  /**
+   * In-turn progress output.
+   *
+   * A turn is a single long-running CLI invocation, so without this the
+   * terminal prints one line and then nothing for up to ninety minutes - a
+   * healthy run being indistinguishable from a hung one is how a user ends up
+   * killing work that was nearly finished.
+   */
+  progress: ProgressConfig;
   /**
    * Tools each agent must be able to *run*, declared up front.
    *
@@ -275,10 +378,31 @@ export interface OpenQuestion {
   blocking: boolean;
 }
 
+/** A boundary the plan drew deliberately: real work it is not doing, and why. */
+export interface OutOfScopeItem {
+  item: string;
+  why: string;
+}
+
 export interface Plan {
   plan_md: string;
   assumptions: Assumption[];
   open_questions: OpenQuestion[];
+  /**
+   * What the plan is deliberately not doing.
+   *
+   * Absent and empty are different facts and must stay different. `undefined`
+   * means no boundary was ever recorded - a plan stored before this field
+   * existed. `[]` means the planner considered the question and claims the
+   * change has no interesting edges. Collapsing the two with `?? []` would make
+   * a legacy plan assert something it never said, so only `writeFollowUps` does
+   * it, where both cases legitimately contribute nothing.
+   *
+   * Optional in TypeScript, required in `PLAN_SCHEMA`: the schema governs fresh
+   * model output, while `loadRun` casts stored JSON with no validation and must
+   * keep loading runs recorded before this existed.
+   */
+  out_of_scope?: OutOfScopeItem[];
 }
 
 export interface Finding {
@@ -287,11 +411,38 @@ export interface Finding {
   title: string;
   detail: string;
   suggested_fix: string;
+  /**
+   * Real, worth doing, and belongs in separate work rather than in this change.
+   *
+   * The third option the loop previously lacked: without it a legitimate
+   * finding outside the change can only be absorbed or argued away, and a good
+   * planner absorbs - which grows the plan, which grows the critique surface.
+   *
+   * A deferred finding is by definition non-blocking, so it is P2 or P3 and
+   * never P0 or P1; `parseFindings` enforces that on read. Optional in
+   * TypeScript because a report stored before this field existed has none.
+   */
+  defer?: boolean;
 }
 
 export interface FindingsReport {
   verdict: Verdict;
   summary: string;
+  findings: Finding[];
+}
+
+/**
+ * A findings report the run has paid for and not yet answered, tagged with the
+ * loop that bought it.
+ *
+ * The tag is what lets one field serve both loops. A run is only ever in one
+ * phase, but a plan-phase remnant left by a crash must be unreadable to the
+ * review loop rather than merely unlikely to be read by it - a critique's
+ * findings handed to the fix turn would be a fix against the wrong artifact.
+ */
+export interface PendingFindings {
+  /** 'plan' from the critic, 'review' from the reviewer. */
+  phase: 'plan' | 'review';
   findings: Finding[];
 }
 
@@ -346,6 +497,11 @@ export interface RunState {
   dir: string;
   targetDir: string;
   task: string;
+  /**
+   * The Claude conversation's id - `SLOTS.main`'s storage. Minted before the
+   * first turn, so its existence says nothing about whether one ever ran; that
+   * is `sessionStarted`. Read and written through `src/slots.ts`, never here.
+   */
   sessionId: string;
   createdAt: string;
   status: RunStatus;
@@ -367,6 +523,12 @@ export interface RunState {
    * Optional so runs recorded before Codex usage was read still load.
    */
   codexTokens?: number;
+  /**
+   * Codex's rate-limit window as last read from app-server, so the summary can
+   * report it. Optional: it is absent whenever app-server is unavailable, which
+   * is a normal outcome rather than an error.
+   */
+  codexRateLimit?: CodexRateLimitRecord | null;
   rateLimitWaits: number;
   baseSha: string | null;
   branch: string | null;
@@ -379,16 +541,142 @@ export interface RunState {
   /** Question-and-replan cycles spent so far. */
   questionRound: number;
   events: RunEvent[];
+  /**
+   * Whether a turn has ever succeeded on `sessionId` - `SLOTS.main`'s marker,
+   * separate from its id because every slot has both. Read and written through
+   * `src/slots.ts`, never here.
+   */
   sessionStarted: boolean;
   planOnly: boolean;
   answeredQuestions: string[];
   deferredQuestions: DeferredQuestion[];
   sessionRotations: number;
-  /** Codex's own thread id, reused across critique/answer/review turns. */
+  /**
+   * Codex's own thread id, reused across critique/answer/review turns -
+   * `SLOTS.judge`'s storage. Provider-minted, so it is null until a turn has
+   * returned one. Read and written through `src/slots.ts`, never here.
+   */
   codexSessionId: string | null;
+  /**
+   * Whether a Codex turn has ever succeeded on `codexSessionId` - the slot's
+   * `started` marker, separate from its id because every slot has both.
+   *
+   * Optional: a state written before slots were explicit has no field, and for a
+   * provider-minted id its absence is answered by the id itself, which only ever
+   * comes from a successful turn. An explicit `false` outranks a present id, and
+   * a `true` beside a null id is valid - a turn succeeded on a run that is not
+   * carrying the thread. Read and written through `SLOTS.judge`, never here.
+   */
+  codexSessionStarted?: boolean;
+  /**
+   * Tokens occupying the judge slot's Codex thread as of the last turn that
+   * reported any - `turn.completed`'s `input_tokens`, which on a resumed thread
+   * is the whole conversation going in rather than the increment.
+   *
+   * Meaningless without `judgeContextThread`, and read only through
+   * `src/slots.ts`. Absent means no measurement, which is NOT zero: a thread that
+   * has taken no turn has no occupancy, and reporting one as empty would be the
+   * fabricated figure this whole area exists to refuse.
+   */
+  judgeContextTokens?: number;
+  /**
+   * The Codex thread id the figure above was measured on.
+   *
+   * The whole of the provenance rule, and one comparison: the measurement is
+   * reportable only while this is strictly equal to the slot's id now. A thread
+   * that has been replaced, an id that was never usable, or a state written
+   * without this field leaves nothing to report - and vibe says nothing rather
+   * than attributing a figure to a conversation it does not describe.
+   *
+   * Never null and never empty. There is no "the unnamed conversation" value: a
+   * turn that cannot be attributed to a named thread writes nothing at all, so a
+   * one-shot run simply carries no measurement between turns.
+   */
+  judgeContextThread?: string;
   /** Carried into the first turn of a rotated session. */
   handoff: string | null;
+  /**
+   * The briefing describes an earlier point in the run, not the session that
+   * just ended.
+   *
+   * Set when a rotation completed without a new briefing - the baseline
+   * rotation for an unattributable measurement abandons the old session whether
+   * or not it could be summarised. The previous briefing is still worth
+   * carrying, but handing it over as "what you knew" would deny the work done
+   * since it was written. Optional so runs recorded before this load.
+   */
+  handoffStale?: boolean;
+  /**
+   * Occupancy of the current Claude session, as a fraction of `contextModel`'s
+   * window. Zero means nothing has been measured on this session yet, which is
+   * the state a rotation leaves behind - not evidence that the session is empty
+   * under some other model.
+   */
   contextRatio: number;
+  /**
+   * Provenance tag: the Claude model the stored measurements describe.
+   *
+   * Set by a completed turn under that model, and by the rotation reset that
+   * tags the incoming model before anything has been measured on it. A ratio is
+   * a fraction of one model's window: a run measured at 40% of a 1M window and
+   * resumed with `--claude-model` onto a 200k one is really at 200%, and reading
+   * the stored number deferred compaction past the turn that overflowed. Absent
+   * means the measurement cannot be attributed - not that it is valid.
+   * `state.config` cannot stand in for it: resume overrides were applied to a
+   * local config for most of this tool's history, so a stored config may name a
+   * model no turn ever ran under.
+   */
+  contextModel?: string;
+  /**
+   * Window, in tokens, of `contextModel` - metadata about the model rather than
+   * about the session, and read only by the `ctx%` display.
+   *
+   * Present with a zero `contextRatio` is a valid state: a rotation's handoff
+   * turn measures a window while its occupancy, which belongs to the session
+   * being abandoned, is discarded.
+   */
+  contextWindow?: number;
+  /**
+   * When the most recently started *running* turn began.
+   *
+   * The boundary marker for `lastOutputAt`: it is what distinguishes "quiet
+   * because the turn started three seconds ago" from "quiet for twenty minutes".
+   *
+   * "Most recently started" rather than "the" turn because a rotation overlapped
+   * with a Codex turn makes two turns live at once. Both this and `lastOutputAt`
+   * are recomputed across the live turns on every observation, so when the
+   * rotation finishes they fall back to the Codex turn that is still running -
+   * they can move backwards, and must, or a finished turn's output reads as the
+   * live one's progress. Between turns they keep the last turn's values until
+   * the next turn's boundary rebases them, which is what makes the end-of-turn
+   * flush worth doing. Maintained only while progress is enabled.
+   */
+  turnStartedAt?: string;
+  /**
+   * When vibe last observed any of its turns making progress - from a child's
+   * stdout OR from its own heartbeat tick.
+   *
+   * The field a watcher in another shell should read: it answers "is this run
+   * still being worked", which previously took `Get-Process` plus a guess. It
+   * deliberately advances during a silent reasoning block, because a turn that
+   * emits no events for twelve minutes is still a healthy turn.
+   *
+   * Monotonic, and the one of the three that is about the run rather than about
+   * a turn: it stays readable between turns, when the other two describe a turn
+   * that has ended.
+   */
+  lastActivityAt?: string;
+  /**
+   * The exact time of the last line a running turn wrote. Flushed at the end of
+   * a turn whose output the adapter accepted, so it is never left behind by the
+   * write throttle and never records a rejected turn as a completed one.
+   * Distinct from `lastActivityAt` on purpose: this is the one that goes quiet,
+   * so the pair separates "thinking" from "gone".
+   *
+   * Absent means no running turn has spoken yet - the turn boundary clears it,
+   * unless another turn is still running and has.
+   */
+  lastOutputAt?: string;
   /**
    * P1s the plan critique raised that were carried into implementation rather
    * than argued out in prose. Stated in the implementation prompt.
@@ -400,6 +688,16 @@ export interface RunState {
    * re-reviewed and so nothing has confirmed they are gone.
    */
   outstanding?: Finding[];
+  /**
+   * Findings the critic or the reviewer marked `defer`: real work that belongs
+   * in separate effort, collected across every plan-critique and code-review
+   * round and deduped by id.
+   *
+   * Distinct from `deferredQuestions`, which is about questions Codex declined.
+   * Purely a record: `FOLLOW-UPS.md` is rendered from it and nothing in the loop
+   * reads it, because a deferred finding is P2/P3 and already non-blocking.
+   */
+  deferred?: Finding[];
   /**
    * The final fix round has run. Stops the review loop reopening the argument
    * the tolerance just settled, and survives resume so a restart does not
@@ -419,6 +717,23 @@ export interface RunState {
   config?: Config;
   plan: Plan | null;
   pendingAnswers: Answer[] | null;
+  /**
+   * Findings the run has paid for that no revision or fix round has yet
+   * answered.
+   *
+   * Written by the critique or review turn itself and cleared by the revision
+   * or fix that consumes them. Both loops are shaped turn -> gate -> guard ->
+   * consume, and the guard throws in the gap: the findings lived only in a
+   * local binding, so a convergence or budget stop discarded them and the
+   * resumed loop re-entered at the turn that bought them. That cost 7.5M tokens
+   * to re-derive an answer the run already had, byte for byte, and appended a
+   * second `RoundRecord` for a plan that had not changed.
+   *
+   * Optional, and absent means "nothing unconsumed": `loadRun` casts stored
+   * JSON with no validation, so a state written before this field existed has
+   * none, and that is precisely what such a run meant.
+   */
+  pendingFindings?: PendingFindings | null;
   extraContext: string | null;
 }
 

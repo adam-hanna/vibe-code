@@ -1,5 +1,9 @@
+import { attachSpend } from '@src/charge.js';
 import { resolveBin, run } from '@src/proc.js';
-import { detail } from '@src/log.js';
+import type { RunFn } from '@src/proc.js';
+import { detail, warn } from '@src/log.js';
+import { createHeartbeat, parseClaudeLine, withHeartbeat } from '@src/progress.js';
+import type { ProgressOptions } from '@src/progress.js';
 import type { ClaudeTurnResult, ContextUsage, Effort, PermissionMode, TokenUsage } from '@src/types.js';
 
 let cachedBin: string | null = null;
@@ -45,6 +49,8 @@ export interface ClaudeTurnOptions {
   jsonSchema?: object | undefined;
   tools?: readonly string[] | undefined;
   timeoutMs: number;
+  /** Live progress. Omitted disables it entirely, which is what preflight wants. */
+  progress?: ProgressOptions | undefined;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -62,8 +68,23 @@ function num(v: unknown): number {
  * first call; later turns pass `resume: true` with the same id. Permission mode
  * is per-invocation, which is how a read-only plan session becomes a
  * bypassPermissions implementation session without losing the plan from context.
+ *
+ * **What counts as a failed turn.** The `result` envelope, not the exit status:
+ * no stdout, no result event, or a result the CLI itself marks as an error. A
+ * non-zero exit alongside a complete successful envelope means teardown failed
+ * after the work was done - and the envelope is where the cost and usage the run
+ * depends on live - so it is warned about and accepted rather than throwing away
+ * a turn that has already been paid for. Deterministic tools are judged the
+ * other way round; see git.ts and verify.ts.
+ *
+ * `exec` is injected so the adapter's boundary with the heartbeat can be tested
+ * without spawning a real agent, as `rotateSession` and `ClaudeProbeExecutor`
+ * already are.
  */
-export async function claudeTurn(options: ClaudeTurnOptions): Promise<ClaudeTurnResult> {
+export async function claudeTurn(
+  options: ClaudeTurnOptions,
+  exec: RunFn = run,
+): Promise<ClaudeTurnResult> {
   const { prompt, sessionId, resume, permissionMode, model, effort, cwd, jsonSchema, tools, timeoutMs } =
     options;
 
@@ -85,43 +106,72 @@ export async function claudeTurn(options: ClaudeTurnOptions): Promise<ClaudeTurn
 
   detail(`claude ${args.filter((a) => !a.startsWith('{')).join(' ')}`);
 
-  const { code, stdout, stderr } = await run(claudeBin(), args, { input: prompt, cwd, timeoutMs });
+  const heartbeat = options.progress
+    ? createHeartbeat({ ...options.progress, parse: parseClaudeLine, unit: 'tool use' })
+    : null;
+  // Validation runs inside the heartbeat's work, not after it: the end-of-turn
+  // flush is a claim that the turn completed, and while only `run()` was wrapped
+  // a turn whose output failed every check below still persisted as one that
+  // had.
+  return withHeartbeat(heartbeat, async () => {
+    const { code, stdout, stderr } = await exec(claudeBin(), args, {
+      input: prompt,
+      cwd,
+      timeoutMs,
+      ...(heartbeat === null ? {} : { onLine: heartbeat.onLine }),
+    });
 
-  if (!stdout.trim()) {
-    throw new Error(`claude produced no output (exit ${code}). stderr:\n${stderr.slice(-2000)}`);
-  }
+    if (!stdout.trim()) {
+      throw new Error(`claude produced no output (exit ${code}). stderr:\n${stderr.slice(-2000)}`);
+    }
 
-  const { result: parsed, lastAssistantUsage } = parseStream(stdout);
-  if (!parsed) {
-    throw new Error(
-      `claude emitted no result event (exit ${code}):\n${stdout.slice(-2000)}`,
-    );
-  }
+    const { result: parsed, lastAssistantUsage } = parseStream(stdout);
+    if (!parsed) {
+      throw new Error(
+        `claude emitted no result event (exit ${code}):\n${stdout.slice(-2000)}`,
+      );
+    }
 
-  if (parsed['is_error'] === true || parsed['subtype'] !== 'success') {
-    const subtype = typeof parsed['subtype'] === 'string' ? parsed['subtype'] : 'unknown';
-    const status = parsed['api_error_status'];
-    const result = parsed['result'];
-    const detail = `${String(status ?? '')} ${String(result ?? '')}`.trim();
+    if (parsed['is_error'] === true || parsed['subtype'] !== 'success') {
+      const subtype = typeof parsed['subtype'] === 'string' ? parsed['subtype'] : 'unknown';
+      const status = parsed['api_error_status'];
+      const result = parsed['result'];
+      const detail = `${String(status ?? '')} ${String(result ?? '')}`.trim();
 
-    const limit = detectRateLimit(`${detail}\n${stderr}`);
-    if (limit) throw limit;
+      // What the turn spent before it failed, read from the same envelope the
+      // success path costs a completed turn from. The figure is in hand at the
+      // throw site; carrying it out is what lets the dispatch layer charge a
+      // failure through `applyCharge` instead of losing it. Attached to the
+      // error rather than changing what is thrown: both of these must still
+      // reach their existing handlers as the types they already are.
+      const spent = { costUsd: num(parsed['total_cost_usd']), tokens: extractTokens(parsed).total };
 
-    throw new Error(`claude turn failed (${subtype}): ${detail}`);
-  }
+      const limit = detectRateLimit(`${detail}\n${stderr}`);
+      if (limit) throw attachSpend(limit, spent);
 
-  const denialsRaw = parsed['permission_denials'];
-  const text = typeof parsed['result'] === 'string' ? parsed['result'] : '';
+      throw attachSpend(new Error(`claude turn failed (${subtype}): ${detail}`), spent);
+    }
 
-  return {
-    text,
-    costUsd: num(parsed['total_cost_usd']),
-    sessionId: typeof parsed['session_id'] === 'string' ? parsed['session_id'] : sessionId,
-    denials: Array.isArray(denialsRaw) ? denialsRaw : [],
-    numTurns: num(parsed['num_turns']),
-    usage: extractUsage(parsed, lastAssistantUsage),
-    tokens: extractTokens(parsed),
-  };
+    const denialsRaw = parsed['permission_denials'];
+    const text = typeof parsed['result'] === 'string' ? parsed['result'] : '';
+
+    if (code !== 0) {
+      // Logged, not thrown: see the exit-status note above. Worth saying out
+      // loud so that if it ever becomes routine, it is visible in the run log
+      // rather than being mistaken for an oversight.
+      warn(`claude exited ${String(code)} but returned a complete successful result; accepting it.`);
+    }
+
+    return {
+      text,
+      costUsd: num(parsed['total_cost_usd']),
+      sessionId: typeof parsed['session_id'] === 'string' ? parsed['session_id'] : sessionId,
+      denials: Array.isArray(denialsRaw) ? denialsRaw : [],
+      numTurns: num(parsed['num_turns']),
+      usage: extractUsage(parsed, lastAssistantUsage),
+      tokens: extractTokens(parsed),
+    };
+  });
 }
 
 /**
@@ -224,6 +274,40 @@ function parseStream(stdout: string): StreamParse {
     }
   }
   return { result, lastAssistantUsage };
+}
+
+/** What one probe turn reported, beside the text a plain `-p` run would print. */
+export interface ProbeTurnOutput {
+  /** The result event's text; the raw stdout when the stream had no result event. */
+  text: string;
+  /** Null when nothing reported usage - there is then nothing to charge. */
+  usage: { costUsd: number; tokens: TokenUsage } | null;
+}
+
+/**
+ * A probe turn's text and what it spent.
+ *
+ * Preflight runs its probes through `run()` directly rather than `claudeTurn`,
+ * because a probe's verdict comes from the artifacts its hook wrote, not from
+ * the envelope. This reads the same `--output-format stream-json` stream
+ * `claudeTurn` reads, so the probe can report what it cost without a second
+ * parser - and returns the result event's text, so the adapter reading the turn
+ * sees the same single final message a plain `-p` run printed.
+ *
+ * Deliberately does not throw on `is_error` or a failed subtype, which is the
+ * one place this file's "what counts as a failed turn" rule is knowingly not
+ * applied: a turn that failed after spending has still spent, and the caller
+ * needs the figure more than it needs the verdict.
+ */
+export function parseProbeTurn(stdout: string): ProbeTurnOutput {
+  const { result } = parseStream(stdout);
+  if (result === null) return { text: stdout, usage: null };
+
+  const text = typeof result['result'] === 'string' ? result['result'] : stdout;
+  return {
+    text,
+    usage: { costUsd: num(result['total_cost_usd']), tokens: extractTokens(result) },
+  };
 }
 
 /**

@@ -1,12 +1,18 @@
 import { readFileSync, existsSync, renameSync } from 'node:fs';
 import path from 'node:path';
-import { applyOverrides, EFFORTS, loadConfig } from '@src/config.js';
+import { applyOverrides, configDiff, EFFORTS, loadConfig } from '@src/config.js';
 import { artifact, createRun, listRuns, loadRun, recordEvent, saveState } from '@src/run.js';
 import { Escalation, EXIT, orchestrate, writeEscalation } from '@src/orchestrator.js';
 import type { ExitCode } from '@src/orchestrator.js';
+import { DEFAULT_ROLE_PROVIDERS, ROLE_NAMES, roleWarnings } from '@src/roles.js';
 import { claudeBin, setSessionArgs } from '@src/claude.js';
 import { codexBin } from '@src/codex.js';
-import { preflight } from '@src/preflight.js';
+// The accounting seam, from the leaf it lives in: orchestrator.js re-exports
+// applyCharge but not fmtTokens, and charge.js imports nothing that imports this.
+import { applyCharge, fmtTokens } from '@src/charge.js';
+import { preflight, REAL_PROBES } from '@src/preflight.js';
+import type { PreflightProbes, PreflightReport } from '@src/preflight.js';
+import { closeCodexRateLimits, describeLimits, readCodexRateLimits } from '@src/ratelimits.js';
 import { detectCommand } from '@src/verify.js';
 import type { AgentPreflight } from '@src/preflight.js';
 import * as git from '@src/git.js';
@@ -31,6 +37,9 @@ Options
   --claude-effort <e>        low|medium|high|xhigh|max (default: medium)
   --codex-model <m>          Default: gpt-5.6-luna
   --codex-effort <e>         Default: xhigh
+  --codex-context-window <n> The Codex model's context window in tokens. Unset by default:
+                             the protocol never reports it for a codex exec thread, so
+                             occupancy is reported in tokens with no ratio until you say
   --max-plan-rounds <n>      Default: 5
   --max-review-rounds <n>    Default: 5
   --max-verify-rounds <n>    Fix rounds for a failing verification (default: 3)
@@ -46,8 +55,13 @@ Options
   --max-tokens <n>           Cumulative token ceiling across both agents - the only ceiling
                              that bounds Codex work (default: 25,000,000; 0 = off)
   --no-wait-on-limit         Exit on a rate limit instead of waiting for the reset
+  --codex-limit-percent <n>  Stop before a Codex turn once Codex's rate-limit window is
+                             this full (default: 95; 0 = off)
+  --no-codex-limits          Do not read Codex's rate-limit window from codex app-server
   --compact-above <ratio>    Rotate the Claude session above this context share (default: 0.5)
   --no-compact               Never rotate the session
+  --progress-interval <sec>  Heartbeat cadence during a turn (default: 30)
+  --no-progress              Do not emit the in-turn progress heartbeat
   --no-branch                Do not create an isolated branch
   --no-codex-answers         Escalate every blocking question straight to you
   --blocking-questions-only  Only send Codex the questions marked blocking
@@ -72,6 +86,7 @@ interface ParsedArgs {
     claudeEffort?: string;
     codexModel?: string;
     codexEffort?: string;
+    codexContextWindow?: number;
     maxPlanRounds?: number;
     maxReviewRounds?: number;
     maxVerifyRounds?: number;
@@ -80,8 +95,12 @@ interface ParsedArgs {
     budget?: number;
     maxTokens?: number;
     noWaitOnLimit?: boolean;
+    codexLimitPercent?: number;
+    noCodexLimits?: boolean;
     compactAbove?: number;
     noCompact?: boolean;
+    progressInterval?: number;
+    noProgress?: boolean;
     noBranch?: boolean;
     noCodexAnswers?: boolean;
     noCodexSession?: boolean;
@@ -128,7 +147,8 @@ export async function main(argv: readonly string[]): Promise<ExitCode> {
   }
 }
 
-function parseArgs(args: readonly string[]): ParsedArgs {
+/** Exported for the flag tests: the whole flag contract without running main(). */
+export function parseArgs(args: readonly string[]): ParsedArgs {
   const out: ParsedArgs = { positional: [], flags: {} };
 
   for (let i = 0; i < args.length; i++) {
@@ -159,6 +179,7 @@ function parseArgs(args: readonly string[]): ParsedArgs {
       case '--claude-effort': out.flags.claudeEffort = next(); break;
       case '--codex-model': out.flags.codexModel = next(); break;
       case '--codex-effort': out.flags.codexEffort = next(); break;
+      case '--codex-context-window': out.flags.codexContextWindow = nextNum(); break;
       case '--max-plan-rounds': out.flags.maxPlanRounds = nextNum(); break;
       case '--max-review-rounds': out.flags.maxReviewRounds = nextNum(); break;
       case '--max-verify-rounds': out.flags.maxVerifyRounds = nextNum(); break;
@@ -167,8 +188,12 @@ function parseArgs(args: readonly string[]): ParsedArgs {
       case '--budget': out.flags.budget = nextNum(); break;
       case '--max-tokens': out.flags.maxTokens = nextNum(); break;
       case '--no-wait-on-limit': out.flags.noWaitOnLimit = true; break;
+      case '--codex-limit-percent': out.flags.codexLimitPercent = nextNum(); break;
+      case '--no-codex-limits': out.flags.noCodexLimits = true; break;
       case '--compact-above': out.flags.compactAbove = nextNum(); break;
       case '--no-compact': out.flags.noCompact = true; break;
+      case '--progress-interval': out.flags.progressInterval = nextNum(); break;
+      case '--no-progress': out.flags.noProgress = true; break;
       case '--no-branch': out.flags.noBranch = true; break;
       case '--no-codex-answers': out.flags.noCodexAnswers = true; break;
       case '--no-codex-session': out.flags.noCodexSession = true; break;
@@ -196,7 +221,8 @@ function asEffort(value: string, flagName: string): Effort {
   return value as Effort;
 }
 
-function buildOverrides(flags: ParsedArgs['flags']): ConfigOverrides {
+/** Exported for the flag tests, alongside parseArgs. */
+export function buildOverrides(flags: ParsedArgs['flags']): ConfigOverrides {
   const claude: Partial<Config['claude']> = {};
   const codex: Partial<Config['codex']> = {};
   const loop: Partial<Config['loop']> = {};
@@ -205,11 +231,14 @@ function buildOverrides(flags: ParsedArgs['flags']): ConfigOverrides {
   const questions: Partial<Config['questions']> = {};
   const context: Partial<Config['context']> = {};
   const verify: Partial<Config['verify']> = {};
+  const progress: Partial<Config['progress']> = {};
 
   if (flags.claudeModel !== undefined) claude.model = flags.claudeModel;
   if (flags.claudeEffort !== undefined) claude.effort = asEffort(flags.claudeEffort, '--claude-effort');
   if (flags.codexModel !== undefined) codex.model = flags.codexModel;
   if (flags.codexEffort !== undefined) codex.effort = asEffort(flags.codexEffort, '--codex-effort');
+  // Validated in config.ts, so the flag and the config key fail the same way.
+  if (flags.codexContextWindow !== undefined) codex.contextWindow = flags.codexContextWindow;
   if (flags.maxPlanRounds !== undefined) loop.maxPlanRounds = flags.maxPlanRounds;
   if (flags.maxReviewRounds !== undefined) loop.maxReviewRounds = flags.maxReviewRounds;
   if (flags.maxVerifyRounds !== undefined) loop.maxVerifyRounds = flags.maxVerifyRounds;
@@ -218,8 +247,11 @@ function buildOverrides(flags: ParsedArgs['flags']): ConfigOverrides {
   if (flags.budget !== undefined) budget.maxCostUsd = flags.budget;
   if (flags.maxTokens !== undefined) budget.maxTokens = flags.maxTokens;
   if (flags.noWaitOnLimit) budget.waitOnRateLimit = false;
+  if (flags.codexLimitPercent !== undefined) budget.codexLimitPercent = flags.codexLimitPercent;
+  if (flags.noCodexLimits) codex.readRateLimits = false;
   if (flags.compactAbove !== undefined) context.compactAboveRatio = flags.compactAbove;
   if (flags.noCompact) context.enabled = false;
+  if (flags.noProgress) progress.enabled = false;
   if (flags.noBranch) gitCfg.useBranch = false;
   if (flags.noCodexAnswers) questions.askCodex = false;
   if (flags.noCodexSession) codex.persistSession = false;
@@ -233,8 +265,10 @@ function buildOverrides(flags: ParsedArgs['flags']): ConfigOverrides {
   if (flags.implementTimeout !== undefined) claude.implementTimeoutMs = flags.implementTimeout * 60_000;
   if (flags.codexTimeout !== undefined) codex.timeoutMs = flags.codexTimeout * 60_000;
   if (flags.verifyTimeout !== undefined) verify.timeoutMs = flags.verifyTimeout * 60_000;
+  // Seconds here rather than minutes: a heartbeat cadence is on that scale.
+  if (flags.progressInterval !== undefined) progress.intervalMs = flags.progressInterval * 1000;
 
-  return { claude, codex, loop, budget, git: gitCfg, questions, context, verify };
+  return { claude, codex, loop, budget, git: gitCfg, questions, context, verify, progress };
 }
 
 async function cmdRun(args: readonly string[], planOnly: boolean): Promise<ExitCode> {
@@ -290,7 +324,14 @@ async function cmdRun(args: readonly string[], planOnly: boolean): Promise<ExitC
     );
   }
   log.info(
-    `Limits:  ${cfg.budget.waitOnRateLimit ? `wait up to ${cfg.budget.maxWaitMinutes} min for a rate-limit reset` : 'exit on rate limit'}`,
+    `Limits:  ${cfg.budget.waitOnRateLimit ? `wait up to ${cfg.budget.maxWaitMinutes} min for a rate-limit reset` : 'exit on rate limit'}` +
+      `${
+        cfg.codex.readRateLimits
+          ? cfg.budget.codexLimitPercent > 0
+            ? `, stop above ${cfg.budget.codexLimitPercent}% of Codex's window`
+            : ', Codex window read but no threshold'
+          : ', Codex window not read'
+      }`,
   );
   log.info(
     `Compact: ${cfg.context.enabled ? `above ${(cfg.context.compactAboveRatio * 100).toFixed(0)}% context` : 'disabled'}`,
@@ -305,6 +346,46 @@ async function cmdRun(args: readonly string[], planOnly: boolean): Promise<ExitC
   }
 
   return execute(state, cfg, false, flags.skipProbe === true);
+}
+
+/**
+ * The config a resume runs on, written back onto the run.
+ *
+ * The run's own settings are the base, so a resumed run continues on the model
+ * and effort it started with; flags given now still win. What was missing is
+ * the write-back: overrides were applied to a local config and never persisted,
+ * so a run resumed with `--max-question-rounds 5` reverted to 3 the next time
+ * it was resumed without the flag. That is the same silent-revert bug
+ * `state.config` exists to prevent, one command later, and it applied to every
+ * flag rather than just the model.
+ *
+ * Exported for the resume tests: `cmdResume` goes on to spawn agents.
+ */
+export function resumeConfig(targetDir: string, state: RunState, flags: ParsedArgs['flags']): Config {
+  const stored = state.config;
+  const overrides = buildOverrides(flags);
+  // What this resume would have run on with no flags at all. Compared against
+  // the effective config so the event below records the user's change, and not
+  // the defaults applyOverrides fills in for keys an older vibe never stored.
+  const base = stored === undefined ? loadConfig(targetDir) : applyOverrides(stored, {});
+  const cfg =
+    stored === undefined
+      ? loadConfig(targetDir, overrides)
+      : applyOverrides(stored, overrides);
+
+  // state.config holds only the latest snapshot, so on its own it cannot say
+  // when a setting changed or what it was before. The resume line printed by
+  // cmdResume is no substitute: it names the Claude model and effort only, and
+  // is emitted before the transcript is attached.
+  //
+  // Computed before the config is assigned, and written by a single state write
+  // either way: a save between the two would leave a window in which the new
+  // settings are persisted and the record of the change is not.
+  const changed = configDiff(base, cfg);
+  state.config = cfg;
+  if (changed.length > 0) recordEvent(state, 'resume_config', { changed });
+  else saveState(state);
+  return cfg;
 }
 
 async function cmdResume(args: readonly string[]): Promise<ExitCode> {
@@ -322,13 +403,8 @@ async function cmdResume(args: readonly string[]): Promise<ExitCode> {
   }
 
   const state = loadRun(targetDir, id);
-  // The run's own settings are the base, so a resumed run continues on the
-  // model and effort it started with. Flags given now still win.
   const stored = state.config;
-  const cfg =
-    stored === undefined
-      ? loadConfig(targetDir, buildOverrides(flags))
-      : applyOverrides(stored, buildOverrides(flags));
+  const cfg = resumeConfig(targetDir, state, flags);
   if (stored !== undefined) {
     log.detail(`resuming with the run's settings: claude ${cfg.claude.model}/${cfg.claude.effort}`);
   }
@@ -402,21 +478,54 @@ export function parseHumanAnswers(md: string): Answer[] {
   return answers;
 }
 
-async function execute(
+/** The preflight gate, injected so its escalation path is testable without spawning. */
+export type PreflightGate = (state: RunState, cfg: Config) => Promise<ExitCode | null>;
+
+/**
+ * The loop itself, injected alongside the gate for the same reason: a test that
+ * pins what happens *before* the first turn must be able to prove no turn ran.
+ */
+export type RunLoop = (state: RunState, cfg: Config, resume: boolean) => Promise<unknown>;
+
+/**
+ * The role assignment, and what is worth saying about it - once per invocation,
+ * before anything is spent.
+ *
+ * Here rather than in `cmdRun` so a resume reports the table it is continuing
+ * on. Silent under the default assignment: `roleWarnings` is empty and the line
+ * would say only what every run before this key existed already did. Refusals
+ * never reach this - `loadConfig`/`resumeConfig` threw long before.
+ */
+function reportRoles(cfg: Config): void {
+  const changed = ROLE_NAMES.filter((role) => cfg.roles[role] !== DEFAULT_ROLE_PROVIDERS[role]);
+  if (changed.length > 0) {
+    log.info(`Roles:   ${ROLE_NAMES.map((role) => `${role}=${cfg.roles[role]}`).join(' ')}`);
+  }
+  for (const warning of roleWarnings(cfg)) log.warn(warning);
+}
+
+export async function execute(
   state: RunState,
   cfg: Config,
   resume: boolean,
   skipProbe = false,
+  preflightGate: PreflightGate = runPreflight,
+  loop: RunLoop = orchestrate,
 ): Promise<ExitCode> {
   const started = Date.now();
 
-  if (!skipProbe) {
-    const gate = await runPreflight(state, cfg);
-    if (gate !== null) return gate;
-  }
+  reportRoles(cfg);
 
   try {
-    await orchestrate(state, cfg, resume);
+    // Inside the try, not above it: preflight now charges what its probes spent,
+    // so it can raise the same budget Escalation a turn can, and that belongs in
+    // the one handler that reports an escalation rather than escaping uncaught.
+    if (!skipProbe) {
+      const gate = await preflightGate(state, cfg);
+      if (gate !== null) return gate;
+    }
+
+    await loop(state, cfg, resume);
     log.heading('Done');
     // Never claim a spotless finish when a P1 was carried. The tolerance lets a
     // run complete with findings outstanding; reporting that as "zero P1s"
@@ -442,7 +551,8 @@ async function execute(
   } catch (err) {
     if (err instanceof Escalation) {
       state.status = err.code === EXIT.NEEDS_HUMAN ? 'needs-input' : 'stalled';
-      saveState(state);
+      // recordEvent persists, so the status and the event that explains it land
+      // in one write rather than two.
       recordEvent(state, 'escalation', { code: err.code, message: err.message });
       const file = writeEscalation(state, err);
       log.heading('Stopped for input');
@@ -453,7 +563,6 @@ async function execute(
       return err.code;
     }
     state.status = 'error';
-    saveState(state);
     recordEvent(state, 'error', { message: err instanceof Error ? err.message : String(err) });
     log.heading('Failed');
     log.fail(err instanceof Error ? (err.stack ?? err.message) : String(err));
@@ -503,13 +612,17 @@ function environmentFacts(
  * first planning token: the failure this replaces cost 35 minutes and surfaced
  * as a plan-stage P1 from the reviewer rather than as an environment error.
  */
-async function runPreflight(state: RunState, cfg: Config): Promise<ExitCode | null> {
+export async function runPreflight(
+  state: RunState,
+  cfg: Config,
+  probes: PreflightProbes = REAL_PROBES,
+): Promise<ExitCode | null> {
   const phases: Phase[] = state.planOnly ? ['plan'] : ['plan', 'implement', 'review'];
   log.heading('Preflight');
 
   let report: Awaited<ReturnType<typeof preflight>>;
   try {
-    report = await preflight(state.targetDir, cfg, phases, state.dir);
+    report = await preflight(state.targetDir, cfg, phases, state.dir, probes);
   } catch (err) {
     log.fail(`environment probe failed: ${err instanceof Error ? err.message : String(err)}`);
     return EXIT.PREFLIGHT;
@@ -536,19 +649,91 @@ async function runPreflight(state: RunState, cfg: Config): Promise<ExitCode | nu
     // Hand both agents what was actually observed, so neither has to guess at
     // the other's environment from its own.
     state.environment = environmentFacts(report, cfg, state.targetDir);
-    saveState(state);
     if (repairArgs.length > 0) log.info('Environment repair will be applied to every Claude turn');
     log.ok('Toolchain contract satisfied');
     recordEvent(state, 'preflight-ok', { repairArgs: repairArgs.length > 0 });
-    return null;
+  } else {
+    for (const reason of report.blockingReasons) log.fail(reason);
+    state.status = 'error';
+    recordEvent(state, 'preflight-failed', { reasons: report.blockingReasons });
+    log.info('Fix the environment, or re-run with --skip-probe to proceed anyway.');
   }
 
-  for (const reason of report.blockingReasons) log.fail(reason);
-  state.status = 'error';
-  saveState(state);
-  recordEvent(state, 'preflight-failed', { reasons: report.blockingReasons });
-  log.info('Fix the environment, or re-run with --skip-probe to proceed anyway.');
-  return EXIT.PREFLIGHT;
+  // Charged after the verdict has been logged and recorded, so the run record
+  // shows what preflight found before it shows the ceiling that stopped it.
+  try {
+    chargePreflight(state, cfg, report);
+  } catch (err) {
+    // A ceiling the probes themselves crossed. On the proceeding path this is
+    // the point of charging here - the run stops before the first planning turn
+    // rather than after paying for it - so it is rethrown for execute()'s
+    // escalation handler. On the blocked path the run is already ending on the
+    // environment fault, which is the more actionable report of the two, and
+    // every charge and event has already landed by the time this throws.
+    if (report.ok || !(err instanceof Escalation)) throw err;
+  }
+
+  return report.ok ? null : EXIT.PREFLIGHT;
+}
+
+/**
+ * What preflight's probes spent, through the same seam a turn pays through.
+ *
+ * Here rather than inside `preflight` because `vibe doctor` probes with no
+ * `RunState` at all: preflight reports, the run path charges. A probe that
+ * reported nothing is charged nothing - a skipped, failed or timed-out probe
+ * has no figure, and an invented one would put a number in the run's totals
+ * that nobody could trace to a source.
+ *
+ * Both probes have already run and returned by the time this is called, so a
+ * ceiling crossed by the first charge must not cost the second its place in the
+ * totals and the event log. The escalation is held and raised once everything
+ * reported has been recorded - the same reasoning `withConcurrentCompaction`
+ * records for work that has already been paid for.
+ */
+export function chargePreflight(state: RunState, cfg: Config, report: PreflightReport): void {
+  let held: Escalation | null = null;
+
+  for (const [provider, result] of [
+    ['claude', report.claude],
+    ['codex', report.codex],
+  ] as const) {
+    const usage = result.usage;
+    if (usage === null || usage === undefined) continue;
+
+    try {
+      applyCharge(state, cfg, {
+        // Straight through the existing routing: Claude reports a cost, Codex
+        // reports none, so Codex's tokens land in codexTokens exactly as a Codex
+        // turn's do. No second rule.
+        costUsd: usage.costUsd,
+        tokens: usage.tokens,
+        event: {
+          type: 'preflight_probe',
+          data: {
+            provider,
+            tokens: usage.tokens,
+            costUsd: usage.costUsd,
+            turns: usage.turns,
+          },
+        },
+        describe: () =>
+          `preflight ${provider}: ${fmtTokens(usage.tokens)} tok` +
+          (usage.costUsd === null ? '' : `, ~$${usage.costUsd.toFixed(3)}`) +
+          ` (run ${fmtTokens(state.tokensUsed)} tok / ~$${state.costUsd.toFixed(2)})`,
+        warnings: [],
+      });
+    } catch (err) {
+      // Held, not rethrown here. Anything that is not a ceiling is a real fault
+      // and still propagates immediately. The latest escalation is the one
+      // raised: its message quotes the running total at the moment it was built,
+      // and a later charge only makes that figure more complete.
+      if (!(err instanceof Escalation)) throw err;
+      held = err;
+    }
+  }
+
+  if (held !== null) throw held;
 }
 
 /**
@@ -591,6 +776,24 @@ function summary(state: RunState, started: number): void {
       `(~$${state.costUsd.toFixed(2)} API-equivalent)`,
   );
   if (codex > 0) log.info(`          Codex  ${codex.toLocaleString()} tok (cost not reported)`);
+  const limit = state.codexRateLimit;
+  if (limit) {
+    const window =
+      limit.windowDurationMins === null
+        ? `${limit.window} window`
+        : `${limit.window} window (${limit.windowDurationMins} min)`;
+    const reset = limit.resetsAt === null ? '' : `, resets ${new Date(limit.resetsAt).toLocaleString()}`;
+    log.info(`Codex:    ${limit.usedPercent}% of its ${window} used${reset}`);
+    // A window vibe picked is a different claim from one the server named, and
+    // reporting the fuller window's reset as the reported one would be a made-up
+    // time in the field a user acts on.
+    if (limit.reachedType !== null && !limit.windowFromServer) {
+      log.warn(
+        `          Codex reported its limit reached as "${limit.reachedType}", which names no ` +
+          'window vibe recognises - the figures above are the fullest window, not that one.',
+      );
+    }
+  }
   if (state.rateLimitWaits > 0) log.info(`Waits:    ${state.rateLimitWaits} rate-limit pause(s)`);
   log.info(`Rounds:   ${state.planRound} plan revision(s), ${state.reviewRound} fix round(s)`);
   if (state.sessionRotations > 0) log.info(`Compacted: ${state.sessionRotations} time(s)`);
@@ -697,6 +900,24 @@ async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
   } catch (err) {
     log.fail(`config: ${err instanceof Error ? err.message : String(err)}`);
     bad++;
+  }
+
+  // Deliberately outside `check()`, which counts a throw against the exit code:
+  // app-server is experimental and absent on older Codex builds, and a machine
+  // without it is not a broken environment.
+  try {
+    const cfg = loadConfig(targetDir);
+    const limits = await readCodexRateLimits(cfg, targetDir);
+    if (limits === null) {
+      log.info('codex rate limits: not available (codex app-server did not answer)');
+    } else {
+      log.ok(`codex rate limits: ${describeLimits(limits)}`);
+    }
+  } catch (err) {
+    log.detail(`codex rate limits: ${err instanceof Error ? err.message : String(err)}`);
+  } finally {
+    // Otherwise the persistent child keeps `vibe doctor` from exiting.
+    closeCodexRateLimits();
   }
 
   if (await git.isRepo(targetDir)) {

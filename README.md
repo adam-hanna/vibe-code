@@ -106,7 +106,42 @@ Two properties worth noting. It never interrupts a turn — rotation happens at 
 
 If compaction fails for any reason the run continues on the existing session — it is an optimisation, never a failure mode.
 
-**Codex is handled differently.** By default (`codex.persistSession`) every Codex call continues one thread via `codex exec resume`, so the reviewer remembers what it already raised instead of re-deriving it each round. That continuity matters for the oscillation guard: a stateless reviewer re-files a still-unresolved objection under a fresh `id` every round, which reads as progress when it is actually the same complaint. Codex manages that thread's context itself and reports no signal `vibe` could rotate on, so there is no compaction setting for it. `--no-codex-session` makes each turn a fresh one-shot instead.
+**A ratio only means something under the model that measured it.** It is a fraction of *that model's* window, so `state.contextRatio` is stored with `contextModel` and `contextWindow` alongside it. When the stored measurement cannot be shown to describe the model now in use — a resume with `--claude-model`, or a run recorded before this existed — it is treated as **unknown**, not as a number. That matters in one direction in particular: 40% of a 1M window is 200% of a 200k one, and read as a number it sits below the threshold, so compaction was deferred past the turn that overflowed.
+
+Unknown with a non-zero ratio buys exactly one rotation, to establish a baseline the new model can be measured against; the fresh session is tagged with the current model, so it is not asked for again. A run that has never recorded a ratio has no evidence of an accumulated session and rotates nothing. The baseline's handoff is requested from the model that grew the conversation where that is known, and if it fails the run still rotates to a fresh session — continuing on a session nothing can vouch for is the thing being avoided. A fresh session is seeded with the current plan of record whether or not a briefing was produced, and a briefing that survives a failed rotation is labelled as coming from earlier in the run rather than presented as the session it replaced.
+
+**Resume persists the flags you give it.** `vibe resume --max-question-rounds 5` used to apply the flag to that process only, so stopping and resuming again without it silently reverted to the default. The effective config is now written back to the run, and a `resume_config` event records which settings the flags actually changed.
+
+**Codex is handled differently.** By default (`codex.persistSession`) every Codex call continues one thread via `codex exec resume`, so the reviewer remembers what it already raised instead of re-deriving it each round. That continuity matters for the oscillation guard: a stateless reviewer re-files a still-unresolved objection under a fresh `id` every round, which reads as progress when it is actually the same complaint. Nothing can compact that thread — `codex exec resume` takes no session-id flag, so there is no rotation to perform — and `--no-codex-session` makes each turn a fresh one-shot instead.
+
+**The Codex thread is measured, but only half of the fraction is obtainable.** The numerator is free: `turn.completed` reports `usage.input_tokens`, and on a resumed thread that is the whole conversation going in rather than the increment, so the last completed turn's prompt size *is* the thread's occupancy. `vibe` records it against the thread id it was measured on, and reports it on the turn's detail line and in the `codex_turn` event.
+
+The denominator is not obtainable. `ThreadTokenUsage.modelContextWindow` exists in exactly one place in the app-server protocol — the `thread/tokenUsage/updated` **push notification**, delivered to a client the app-server is driving a thread for. No request or response returns it, `thread/read` carries no `tokenUsage` at all, and `model/list` has no context-window field of any kind. `vibe` drives Codex with `codex exec`, a separate process that is not an app-server client, so that notification never arrives. (`account/rateLimits/read` works precisely because it is a request with a reply.)
+
+So the window is a setting, `codex.contextWindow` (`--codex-context-window <n>`), and it is **null by default**. Null is not a failure state; it is the truth about a thread whose window `vibe` cannot ask for. Nothing guesses one from the model name — a table mapping a model to a number is a fabricated denominator that goes stale silently, and a made-up context ratio is the same mistake as a made-up dollar figure with a more convincing face. With no window set you get the token count and never a percentage. With one set you get `ctx N%` beside the turn's tokens, and one warning per run once occupancy crosses `context.compactAboveRatio` — the same threshold the Claude side compacts at — saying plainly that nothing can compact this thread. A resumed run says it again: the condition is still true, and repeating one line is cheaper than swallowing it.
+
+A measurement names the thread it was taken on and is only reported while that thread is still the one in use, so a replaced thread has no occupancy until it takes a turn of its own. With `--no-codex-session` there is no thread to carry a measurement between turns, so the figure describes the size of a single judging prompt.
+
+### Progress during a turn
+
+A planning or implementation turn is a **single** long-running `claude -p` invocation, so a run that printed one line and then nothing for thirty minutes was indistinguishable from a hung one — confirming the first real dogfood run was healthy took `Get-Process` plus reading `state.json`. A user who cannot tell working from hung eventually kills a healthy run, and killing mid-turn throws away everything that turn has paid for.
+
+Both CLIs already stream events as work happens (`--output-format stream-json --verbose`, `codex exec --json`); that stream was simply discarded until the process exited. `vibe` now consumes it live and emits at most one dim line every `progress.intervalMs` (default 30s):
+
+```
+plan: 4m12s · 23 tool uses · Read src/orchestrator.ts · 340k tok · ctx 31%
+review: 2m03s · 14 events · command_execution
+```
+
+Every segment except elapsed time is omitted when the stream did not supply it, which is why the sparser Codex line is shorter — partial information beats an invented number. `ctx%` needs a context window, which only a *completed* turn reports — an ordinary turn or a session-rotation turn, whichever comes first — so it appears from the second Claude turn of a process onward, or from the first on a resumed run whose stored window was measured under the same model, and is omitted entirely after a `--claude-model` change until a turn under the new model has measured one. The heartbeat is also driven by a timer, not only by arriving events, because a long silent reasoning block emits nothing at all and silence was the whole problem.
+
+It is a plain appended line, never a repainting one: runs are expected to be unattended and piped to a log. The same clock writes `lastActivityAt` into `state.json` — advancing even through silence, since vibe is still watching the turn — alongside `lastOutputAt`, the last line the agent actually wrote. The pair separates "thinking" from "gone" without inspecting the process table.
+
+**`turnStartedAt` and `lastOutputAt` describe the turn running now, not the run.** A turn boundary rebases them and clears `lastOutputAt`; without that, a turn that died before its first line left the previous turn's timestamps in place and a watcher read a finished turn's pulse as current work. `lastOutputAt` is flushed at the end of a turn only when the adapter *accepted* that turn's output — for these CLIs that means a complete `result` envelope or a schema-conformant output file, not a zero exit status, since a bad exit beside a good payload is teardown failing after the work was done, and it is logged rather than throwing the turn away.
+
+Compaction can overlap a rotation turn with a Codex turn, so two turns are occasionally live. Both fields are then recomputed across the live turns on every observation: `turnStartedAt` is the most recently started one, `lastOutputAt` the most recent line from either, and when the rotation finishes they fall back to the Codex turn still running rather than leaving a completed turn's output standing as the live turn's progress. `lastActivityAt` is the exception and only advances — it is about the run, so it stays readable between turns, when the other two still describe the turn that just ended. All three are maintained only while progress is enabled.
+
+`--no-progress` turns the output off; `--progress-interval <sec>` changes the cadence. No compaction or rotation behaviour changes.
 
 ## The verification gate
 
@@ -133,9 +168,11 @@ Brakes, all independent:
 | Brake | Behaviour |
 |---|---|
 | **Round cap** | `maxPlanRounds` / `maxReviewRounds` (default 5 each), plus `maxVerifyRounds` (3) and `maxQuestionRounds` (3). Verification fixes get their own counter because they previously shared one with review, so a run that spent every round on a failing suite had none left for the reviewer and stopped blaming a reviewer that had never run. |
-| **Oscillation guard** | The set of blocking `id`s is fingerprinted each round. The same fingerprint `oscillationThreshold` rounds running (default 3) means nothing new is being produced and the run escalates. Three rather than two: a single repeat is a normal review cycle — the fix shifts the problem and the next round catches the shift. |
+| **Oscillation guard** | The set of blocking `id`s is fingerprinted each round. The same fingerprint `oscillationThreshold` rounds running (default 3) means nothing new is being produced and the run escalates. Three rather than two: a single repeat is a normal review cycle — the fix shifts the problem and the next round catches the shift. A lone blocker that never changes is this case, not the one below: it is the whole set, so its fingerprint repeats and this guard is what stops it. |
 | **Convergence trend** | Late in the round budget, a finding count that is not trending down stops the run. Only consulted once most of the budget is spent; early churn is left alone. |
+| **Persistent finding** | A finding that keeps coming back while the *rest* of the set rotates is **reported, not stopped on**. It used to abort the run after four rounds; a finding in this repo's own history survived six rounds and was cleared on the sixth attempt, in a run that went on to pass 1977/1977 tests. Persistence is not evidence of unfixability, and runaway spend is measured directly by `budget.maxTokens`, which counts both agents. The notice names the finding, says the run is continuing, and says how to carry on past whichever limit does stop it. |
 | **Plan share** | Planning may consume at most `budget.planShare` (0.4) of the ceiling. Planning that will not converge is the most expensive way to fail — it produces nothing, and the overall ceiling only notices once the whole budget is gone. |
+| **Codex rate-limit window** | Before each Codex turn, `vibe` reads `account/rateLimits/read` from `codex app-server` and holds the connection open for the pushed `account/rateLimits/updated` updates. If Codex reports the limit *reached*, the run waits for that window's reset under the same `budget.maxWaitMinutes` cap Claude's limits use. If the fuller window is at or above `budget.codexLimitPercent` (default 95), the run stops resumably rather than starting a turn the window would kill partway through. `app-server` is experimental, so this is strictly optional: if it is missing, fails its handshake, or the account is not logged in, the run continues exactly as before and says so once. `--no-codex-limits` turns it off. |
 | **Budget ceiling** | Two figures, with different coverage. Claude reports `total_cost_usd` per turn and the run aborts past `budget.maxCostUsd` — **Claude only**, since Codex reports no cost in any output mode. Tokens are counted for **both** agents (Codex reports usage on its `turn.completed` event) and abort past `budget.maxTokens` (default 25M). That makes `maxTokens` the ceiling that sees the whole run; `vibe` warns at startup if you disable it with `0`. |
 
 ## Safety
@@ -157,7 +194,8 @@ answers-N.json             Codex's answers to blocking questions
 handoff-N.md               briefing carried across each session rotation
 NEEDS-INPUT.md             written when the run stops for you
 OUTSTANDING.md             carried P1s: fixed in a final round, but not re-reviewed
-state.json                 resumable state, tokens, cost, event log
+FOLLOW-UPS.md              deferred findings and the plan's declared out-of-scope work
+state.json                 resumable state, tokens, cost, event log, turnStartedAt/lastActivityAt/lastOutputAt
 transcript.log
 codex/                     raw schema and output files
 ```
@@ -168,19 +206,40 @@ Drop `vibe.config.json` in the target repo; CLI flags override it. See `vibe.con
 
 ```json
 {
+  "roles":  { "planner": "claude", "implementer": "claude",
+              "critic": "codex", "answerer": "codex", "reviewer": "codex" },
   "claude": { "model": "opus", "effort": "medium" },
-  "codex":  { "model": "gpt-5.6-luna", "effort": "xhigh", "sandbox": "read-only", "persistSession": true },
+  "codex":  { "model": "gpt-5.6-luna", "effort": "xhigh", "sandbox": "read-only", "persistSession": true,
+              "readRateLimits": true, "contextWindow": null, "timeoutMs": 2700000,
+              "implementTimeoutMs": 5400000 },
   "loop":   { "maxPlanRounds": 5, "maxReviewRounds": 5, "maxVerifyRounds": 3,
               "p1Tolerance": 1, "oscillationThreshold": 3 },
-  "budget": { "maxCostUsd": 25, "maxTokens": 25000000, "planShare": 0.4 },
+  "budget": { "maxCostUsd": 25, "maxTokens": 25000000, "planShare": 0.4,
+              "codexLimitPercent": 95 },
   "verify": { "enabled": true, "command": null, "runs": 3 },
   "questions": { "askCodex": true, "escalateOnDefer": true, "escalateOnLowConfidence": true },
   "git": { "useBranch": true, "branchPrefix": "vibe/", "commitEachRound": true },
-  "context": { "enabled": true, "compactAboveRatio": 0.5, "compactDuringCodex": true }
+  "context": { "enabled": true, "compactAboveRatio": 0.5, "compactDuringCodex": true },
+  "progress": { "enabled": true, "intervalMs": 30000 }
 }
 ```
 
 Binaries can be pinned with `VIBE_CLAUDE_BIN`, `VIBE_CODEX_BIN`, `VIBE_GIT_BIN`.
+
+### Who does what
+
+`roles` decides which agent holds each job. Omit it and you get the assignment above, which is what every run did before the key existed; name only the roles you want to move and the rest fill in. The value is a provider — `claude` or `codex` — and nothing else: whether a role may write, what schema its turn returns, and which conversation it talks through are facts about the *job*, not choices. An unknown role name, a provider that is not one of the two, and a `roles` that is not an object are all config errors.
+
+The headline swap is a clean split — `{"planner": "codex", "implementer": "codex", "critic": "claude", "answerer": "claude", "reviewer": "claude"}` — and needs `codex.persistSession: false` (`--no-codex-session`). That pairing is refused rather than repaired: `codex exec resume` takes no `-s` flag, so a writing Codex role on a persisted thread can write on its first turn and silently reverts to read-only on every one after.
+
+Some tables run with a warning rather than a refusal, and each says what it costs:
+
+- A judging role on the implementer's provider loses review independence, which is most of what this tool buys.
+- An implementer on Codex has no rotation mechanism, so session rotation and context compaction are off for the run — measured against `codex.contextWindow` if you set one, unmeasured if you have not, and uncompactable either way.
+- A planner or implementer on a persisted Codex thread grows a context that nothing can compact, and that nothing measures either unless `codex.contextWindow` is set.
+- A planner or implementer on Codex puts the expensive half of the run beyond `budget.maxCostUsd`, which is Claude-side only. `budget.maxTokens` still counts both.
+
+`codex.timeoutMs` is the reviewing figure and `codex.implementTimeoutMs` the writing one, chosen by what the role does — the pair `claude` has always had. A provider that holds no enabled role takes no turn: it is still probed, but its findings can only warn, never stop the run.
 
 ## Exit codes
 
@@ -191,6 +250,8 @@ Binaries can be pinned with `VIBE_CLAUDE_BIN`, `VIBE_CODEX_BIN`, `VIBE_GIT_BIN`.
 | 2 | Needs your input (see `NEEDS-INPUT.md`) |
 | 3 | No convergence — round cap or oscillation guard tripped |
 | 4 | Budget exceeded |
+| 5 | Rate limited — Claude's window, or Codex's above `budget.codexLimitPercent`. Resume once it resets |
+| 6 | An agent's environment fails the toolchain contract |
 
 Suitable for `if vibe run "..."; then ...` in a wrapper script.
 
@@ -199,6 +260,8 @@ Suitable for `if vibe run "..."; then ...` in a wrapper script.
 - **Codex tokens are counted; Codex cost is not.** The Codex CLI reports token usage (via `codex exec --json`, on `turn.completed`) but no cost figure in any output mode. So `budget.maxCostUsd` caps the Claude side only, and deriving a dollar figure for Codex would mean hardcoding a price table for models that get renamed faster than it could be maintained — a fabricated number in the field the ceiling is enforced against. `budget.maxTokens` (default 25M) is the brake that covers both agents; the run summary reports the two token totals separately for the same reason.
 
   Nor is there an account-level cost API to fall back on. `codex app-server` (experimental JSON-RPC over stdio) exposes `account/usage/read` and `account/rateLimits/read`, but neither returns money: usage is lifetime and *daily* token buckets, account-wide, so it cannot be attributed to one run; rate limits are an integer `usedPercent` of a rolling window. A ChatGPT-auth account has a `credits.balance`, but it does not move when subscription-metered work is done — measured before and after a real turn — so it is not a per-turn cost signal either. Subscription Codex work is metered in window percentage, not dollars, and there is no figure to convert.
+
+  What `vibe` *does* read from `app-server` is the rate limit itself, which is a different thing from cost and is the brake that actually stops long unattended runs on a subscription: `usedPercent`, its window length, its reset, and whether the limit is currently reached. That is a coarse whole-run signal, not per-turn metering — on the account this was measured against the primary window is 10080 minutes (a week), so a single turn does not move the integer percent at all. It is checked before each Codex turn and reported in the run summary. See the rate-limit brake above.
 
   One accounting detail if you extend the adapter: Codex nests its usage the OpenAI way — `cached_input_tokens` is a *subset* of `input_tokens`, and `reasoning_output_tokens` a subset of `output_tokens`. Claude's envelope nests neither. So `codex.ts` totals two fields where `claude.ts` totals four; summing all four on the Codex side counts the same prompt twice.
 - **Prompts go over stdin, never argv.** Claude's variadic flags (`--tools`, `--allowedTools`) will otherwise swallow a positional prompt argument. If you extend the adapters, keep it that way.

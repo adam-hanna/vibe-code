@@ -1,5 +1,14 @@
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
+import {
+  DEFAULT_ROLE_PROVIDERS,
+  PROVIDERS as ROLE_PROVIDERS,
+  providersForRoles,
+  ROLE_NAMES,
+  roleRefusals,
+  rolesFor,
+} from '@src/roles.js';
+import type { Role, RoleProviders } from '@src/roles.js';
 import type { AgentProvider, ToolchainContract, ToolRequirement, Phase } from '@src/runtime.js';
 import type { Config, ConfigOverrides, Effort, LoadedConfig, Sandbox } from '@src/types.js';
 
@@ -7,6 +16,9 @@ export const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'ma
 const SANDBOXES: readonly Sandbox[] = ['read-only', 'workspace-write', 'danger-full-access'];
 
 export const DEFAULTS: Config = {
+  // Claude plans and implements, Codex critiques, answers and reviews - the
+  // assignment every run made before this key existed.
+  roles: DEFAULT_ROLE_PROVIDERS,
   claude: {
     // Matches the interactive workflow this tool automates: opus, medium thinking.
     model: 'opus',
@@ -20,7 +32,17 @@ export const DEFAULTS: Config = {
     // Critique and review never need write access.
     sandbox: 'read-only',
     timeoutMs: 45 * 60 * 1000,
+    // The writing figure, for a table that seats the implementer on Codex.
+    // Matches claude.implementTimeoutMs: implementing takes as long as it takes
+    // whoever does it.
+    implementTimeoutMs: 90 * 60 * 1000,
     persistSession: true,
+    // Unknown, and honestly so: no request in the app-server protocol returns a
+    // Codex model's window, and `codex exec` is not an app-server client at all.
+    // A run that leaves this null reports the thread's occupancy in tokens and
+    // never as a fraction. See CodexConfig.contextWindow.
+    contextWindow: null,
+    readRateLimits: true,
   },
   loop: {
     maxPlanRounds: 5,
@@ -68,6 +90,12 @@ export const DEFAULTS: Config = {
     maxTokens: 25_000_000,
     waitOnRateLimit: true,
     maxWaitMinutes: 360,
+    // 95, not 100: the point is to stop *before* starting an expensive turn that
+    // the window will kill partway through, and a turn cannot be un-started. It
+    // is deliberately high enough not to fire on a healthy account - the cost of
+    // a false stop is one `vibe resume`, but the cost of firing early on every
+    // run would be a brake nobody keeps switched on. 0 disables.
+    codexLimitPercent: 95,
     // Planning gets at most 40% of the ceiling. A plan that has eaten more
     // than that has not left enough to implement and review what it describes,
     // and the round counter alone will not notice - the run that motivated
@@ -104,17 +132,35 @@ export const DEFAULTS: Config = {
     // three catch 87%. The cost is linear and small; the false pass is not.
     runs: 3,
   },
+  progress: {
+    enabled: true,
+    // 30s. A line every 30 seconds in a log file is cheap; one line per stream
+    // event is not - a single implementation turn runs 28 agentic iterations
+    // and emits thousands.
+    intervalMs: 30_000,
+  },
   toolchain: {
     // Deliberately minimal. `git` is needed in every phase because vibe commits
     // per round; node and npm only matter once something is being built or
     // verified, so a documentation change is not blocked by a missing runtime.
     //
-    // node and npm are required of Claude only. Codex reads the diff rather
-    // than running it, and its sandbox is read-only by design - demanding a
-    // runtime of the reviewer would fail preflight on a correct setup.
+    // node and npm are required of the implementer only - it is the one that
+    // builds and runs the suite. The reviewer reads the diff rather than
+    // running it, and its sandbox is read-only by design, so demanding a
+    // runtime of it would fail preflight on a correct setup. The rule is about
+    // the role, so it is asked of the role table rather than spelled as a
+    // provider name that happens to hold it today.
     git: { probe: 'git --version', phases: ['plan', 'implement', 'review'] },
-    node: { probe: 'node --version', phases: ['implement', 'review'], agents: ['claude'] },
-    npm: { probe: 'npm --version', phases: ['implement', 'review'], agents: ['claude'] },
+    node: {
+      probe: 'node --version',
+      phases: ['implement', 'review'],
+      agents: providersForRoles(['implementer']),
+    },
+    npm: {
+      probe: 'npm --version',
+      phases: ['implement', 'review'],
+      agents: providersForRoles(['implementer']),
+    },
   },
 };
 
@@ -133,9 +179,28 @@ function mergeSection<T extends object>(base: T, override: unknown): T {
   return out;
 }
 
+/**
+ * Merge the role assignment, keeping anything wrong for validation to name.
+ *
+ * Deliberately not `mergeSection`, which treats a malformed override as no
+ * override at all. Swallowing `"roles": null` - or a typo'd role name, which
+ * `mergeSection` would drop because it iterates the *base's* keys - would run
+ * the default table while the user believes Codex is implementing: a different
+ * agent, silently, with no error and no log line. Nothing else in a config can
+ * fail that way, which is why this one section is strict.
+ */
+function mergeRoles(base: RoleProviders, override: unknown): RoleProviders {
+  if (override === undefined) return base;
+  if (!isRecord(override)) return override as RoleProviders;
+  const out: Record<string, unknown> = { ...base };
+  for (const [key, value] of Object.entries(override)) out[key] = value;
+  return out as unknown as RoleProviders;
+}
+
 function mergeConfig(base: Config, override: unknown): Config {
   if (!isRecord(override)) return base;
   return {
+    roles: mergeRoles(base.roles, override['roles']),
     claude: mergeSection(base.claude, override['claude']),
     codex: mergeSection(base.codex, override['codex']),
     loop: mergeSection(base.loop, override['loop']),
@@ -144,6 +209,7 @@ function mergeConfig(base: Config, override: unknown): Config {
     git: mergeSection(base.git, override['git']),
     context: mergeSection(base.context, override['context']),
     verify: mergeSection(base.verify, override['verify']),
+    progress: mergeSection(base.progress, override['progress']),
     toolchain: mergeToolchain(base.toolchain, override['toolchain']),
   };
 }
@@ -169,11 +235,60 @@ function mergeToolchain(base: ToolchainContract, override: unknown): ToolchainCo
  *
  * Used on resume, where the base is the config the run started with rather
  * than freshly-loaded defaults.
+ *
+ * DEFAULTS go underneath that base rather than being skipped. `mergeSection`
+ * iterates the *base's* keys, so a config persisted by an older vibe is missing
+ * every setting added since - and a resume of such a run failed validation
+ * outright on the first required key that did not exist yet. Layering fills only
+ * the absent keys: every stored value still beats the default, and the flags
+ * given now still beat both. This is not specific to any one setting; without
+ * it, the next key added breaks resume for every run already on disk.
  */
 export function applyOverrides(base: Config, overrides: ConfigOverrides): Config {
-  const merged = mergeConfig(base, overrides);
-  validate(merged);
-  return merged;
+  const merged = mergeConfig(mergeConfig(DEFAULTS, base), overrides);
+  // The table is checked before anything derives from it - see loadConfig.
+  validateRoles(merged.roles);
+  const cfg = resolveRoleScopedAgents(merged, [base, overrides]);
+  validate(cfg);
+  return cfg;
+}
+
+const SECTIONS = [
+  'roles',
+  'claude',
+  'codex',
+  'loop',
+  'budget',
+  'questions',
+  'git',
+  'context',
+  'verify',
+  'progress',
+] as const;
+
+/**
+ * Dotted paths whose values differ: ['claude.model', 'loop.maxQuestionRounds'].
+ *
+ * Only resolved configs are compared, so `LoadedConfig.configPath` and anything
+ * else describing where a setting came from never appears - the question this
+ * answers is what the run will now behave like, not how it was sourced.
+ *
+ * Compared as JSON because `verify.command` is nullable and toolchain entries
+ * are objects. Both sides come out of `mergeConfig`, which builds keys in a
+ * fixed order, so key order cannot produce a false difference.
+ */
+export function configDiff(before: Config, after: Config): string[] {
+  const changed: string[] = [];
+  for (const section of SECTIONS) {
+    const b = before[section] as unknown as Record<string, unknown>;
+    const a = after[section] as unknown as Record<string, unknown>;
+    for (const key of new Set([...Object.keys(b), ...Object.keys(a)])) {
+      if (JSON.stringify(b[key]) !== JSON.stringify(a[key])) changed.push(`${section}.${key}`);
+    }
+  }
+  // Open-ended keys, so compared whole rather than per tool.
+  if (JSON.stringify(before.toolchain) !== JSON.stringify(after.toolchain)) changed.push('toolchain');
+  return changed.sort();
 }
 
 /** Precedence: defaults < vibe.config.json in the target repo < CLI flags. */
@@ -191,11 +306,101 @@ export function loadConfig(targetDir: string, overrides: ConfigOverrides = {}): 
   }
 
   const merged = mergeConfig(mergeConfig(DEFAULTS, fromFile), overrides);
-  validate(merged);
-  return { ...merged, configPath: existsSync(configPath) ? configPath : null };
+  // Order matters. `resolveRoleScopedAgents` reads the table, so a bad role
+  // value checked afterwards would surface as an empty `toolchain.node.agents`
+  // - a toolchain error for what is a `roles` mistake.
+  validateRoles(merged.roles);
+  const cfg = resolveRoleScopedAgents(merged, [fromFile, overrides]);
+  validate(cfg);
+  return { ...cfg, configPath: existsSync(configPath) ? configPath : null };
+}
+
+/**
+ * Which tools are required of whoever holds a role, rather than of a provider
+ * named at import time.
+ *
+ * node and npm are the implementer's: it is the one that builds and runs the
+ * suite. The reviewer reads the diff, and its sandbox is read-only by design.
+ */
+const ROLE_SCOPED_TOOLS: Readonly<Record<string, readonly Role[]>> = {
+  node: ['implementer'],
+  npm: ['implementer'],
+};
+
+/** Whether any layer named `toolchain.<tool>.agents` itself. */
+function pinnedByAnyLayer(layers: readonly unknown[], tool: string): boolean {
+  return layers.some((layer) => {
+    if (!isRecord(layer)) return false;
+    const toolchain = layer['toolchain'];
+    if (!isRecord(toolchain)) return false;
+    const requirement = toolchain[tool];
+    return isRecord(requirement) && requirement['agents'] !== undefined;
+  });
+}
+
+/**
+ * Re-scope the role-derived `agents` for this config. Pure.
+ *
+ * A new map and a NEW `ToolRequirement` for every entry it computes - never a
+ * write into one it was handed. `mergeToolchain` shallow-copies the map and
+ * reuses each nested requirement from its base, so an entry the user did not
+ * override is still the object inside `DEFAULTS`: assigning `agents` into it
+ * would rewrite the module default for the life of the process, and the next
+ * `loadConfig` in the same process would inherit it.
+ *
+ * A layer that named `agents` wins. That keeps a user's own contract, and keeps
+ * a stored `state.config` - which always carries concrete agents - authoritative
+ * on resume.
+ *
+ * Runs after `validateRoles`, so the table is well formed and `agents` is never
+ * resolved to an empty list.
+ */
+function resolveRoleScopedAgents(cfg: Config, layers: readonly unknown[]): Config {
+  const table = rolesFor(cfg);
+  const toolchain: Record<string, ToolRequirement> = { ...cfg.toolchain };
+  for (const [tool, wanted] of Object.entries(ROLE_SCOPED_TOOLS)) {
+    const requirement = toolchain[tool];
+    if (requirement === undefined) continue;
+    if (pinnedByAnyLayer(layers, tool)) continue;
+    toolchain[tool] = { ...requirement, agents: providersForRoles(wanted, table) };
+  }
+  return { ...cfg, toolchain };
+}
+
+/**
+ * The role assignment, checked before anything reads it.
+ *
+ * Separate from `validate` and called first by both entry points, because every
+ * role-derived value - the toolchain scoping, the refusals below, the table
+ * itself - would otherwise report a `roles` mistake as something else.
+ */
+function validateRoles(raw: unknown): void {
+  if (!isRecord(raw)) {
+    throw new Error('roles must be an object mapping role names to "claude" or "codex"');
+  }
+  for (const key of Object.keys(raw)) {
+    if (!ROLE_NAMES.includes(key as Role)) {
+      throw new Error(`roles."${key}" is not a role; expected one of ${ROLE_NAMES.join(', ')}`);
+    }
+  }
+  for (const role of ROLE_NAMES) {
+    const provider = raw[role];
+    if (provider === undefined) throw new Error(`roles.${role} is missing`);
+    if (!ROLE_PROVIDERS.includes(provider as AgentProvider)) {
+      throw new Error(
+        `roles.${role} is ${JSON.stringify(provider)}; expected ${ROLE_PROVIDERS.map((p) => `"${p}"`).join(' or ')}`,
+      );
+    }
+  }
 }
 
 function validate(cfg: Config): void {
+  // First, and again: a caller reaching validate by another route must get the
+  // same answer, and it is a pure check over five keys.
+  validateRoles(cfg.roles);
+  // An assignment that cannot work is a config error, not an environment one -
+  // so `vibe run`, `vibe resume` and `vibe doctor` all refuse it here.
+  for (const message of roleRefusals(cfg)) throw new Error(message);
   if (!EFFORTS.includes(cfg.claude.effort)) {
     throw new Error(`claude.effort must be one of ${EFFORTS.join(', ')}`);
   }
@@ -232,6 +437,19 @@ function validate(cfg: Config): void {
   if (!Number.isFinite(cfg.budget.maxWaitMinutes) || cfg.budget.maxWaitMinutes <= 0) {
     throw new Error('budget.maxWaitMinutes must be a positive number');
   }
+  const limitPercent = cfg.budget.codexLimitPercent;
+  if (!Number.isFinite(limitPercent) || limitPercent < 0 || limitPercent > 100) {
+    throw new Error('budget.codexLimitPercent must be between 0 (disabled) and 100');
+  }
+  // Null is a value here, not a missing setting: it is what a run says when the
+  // model's window cannot be obtained. Anything else must be a real token count.
+  const codexWindow = cfg.codex.contextWindow;
+  if (codexWindow !== null && (!Number.isInteger(codexWindow) || codexWindow <= 0)) {
+    throw new Error(
+      'codex.contextWindow must be a positive whole number of tokens, or null when the ' +
+        "model's window is unknown",
+    );
+  }
   const ratio = cfg.context.compactAboveRatio;
   if (!Number.isFinite(ratio) || ratio <= 0 || ratio >= 1) {
     throw new Error('context.compactAboveRatio must be between 0 and 1 (exclusive)');
@@ -241,8 +459,10 @@ function validate(cfg: Config): void {
       throw new Error(`claude.${key} must be a positive number`);
     }
   }
-  if (!Number.isFinite(cfg.codex.timeoutMs) || cfg.codex.timeoutMs <= 0) {
-    throw new Error('codex.timeoutMs must be a positive number');
+  for (const key of ['timeoutMs', 'implementTimeoutMs'] as const) {
+    if (!Number.isFinite(cfg.codex[key]) || cfg.codex[key] <= 0) {
+      throw new Error(`codex.${key} must be a positive number`);
+    }
   }
   if (!Number.isFinite(cfg.verify.timeoutMs) || cfg.verify.timeoutMs <= 0) {
     throw new Error('verify.timeoutMs must be a positive number');
@@ -252,6 +472,12 @@ function validate(cfg: Config): void {
   }
   if (cfg.verify.command !== null && typeof cfg.verify.command !== 'string') {
     throw new Error('verify.command must be a command string or null to auto-detect');
+  }
+  // A floor rather than "positive": the heartbeat also drives a state write, and
+  // a sub-second cadence would rewrite state.json continuously for a line
+  // nobody can read that fast.
+  if (!Number.isFinite(cfg.progress.intervalMs) || cfg.progress.intervalMs < 1000) {
+    throw new Error('progress.intervalMs must be at least 1000ms');
   }
   validateToolchain(cfg.toolchain);
 }

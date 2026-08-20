@@ -105,6 +105,13 @@ export interface RunOptions {
   input?: string | undefined;
   cwd?: string | undefined;
   timeoutMs?: number | undefined;
+  /**
+   * Called with each complete stdout line as it arrives, and never after the
+   * returned promise settles. Buffering is unchanged: `stdout` is still
+   * returned in full. A throwing hook is swallowed - this is a progress
+   * signal, and losing it must never cost the turn.
+   */
+  onLine?: ((line: string) => void) | undefined;
 }
 
 export interface RunResult {
@@ -112,6 +119,16 @@ export interface RunResult {
   stdout: string;
   stderr: string;
 }
+
+/**
+ * The shape of `run`, so an adapter can take it as an injected dependency and
+ * be driven by a test without spawning an agent.
+ */
+export type RunFn = (
+  bin: string,
+  args: readonly string[],
+  options?: RunOptions,
+) => Promise<RunResult>;
 
 /**
  * Run a command, feeding `input` on stdin. Never uses a shell unless forced to
@@ -122,7 +139,7 @@ export interface RunResult {
  * positional prompt argument.
  */
 export function run(bin: string, args: readonly string[], options: RunOptions = {}): Promise<RunResult> {
-  const { input, cwd, timeoutMs } = options;
+  const { input, cwd, timeoutMs, onLine } = options;
 
   return new Promise<RunResult>((resolve, reject) => {
     const needsShell = isWin && /\.(cmd|bat)$/i.test(bin);
@@ -135,13 +152,43 @@ export function run(bin: string, args: readonly string[], options: RunOptions = 
 
     let stdout = '';
     let stderr = '';
+    let pending = '';
     let timer: NodeJS.Timeout | null = null;
     let settled = false;
+
+    // Gated on `settled`, not just on the close path: a timed-out child is
+    // killed *after* the promise has rejected, and both its final `data` and
+    // its `close` would otherwise deliver progress for a turn the caller has
+    // already given up on. One helper, so there is no second place to forget
+    // the guard.
+    const emitLine = (line: string): void => {
+      if (settled || onLine === undefined || line === '') return;
+      try {
+        onLine(line);
+      } catch {
+        // A progress hook must never take down a run.
+      }
+    };
+    const drain = (final: boolean): void => {
+      let idx = pending.indexOf('\n');
+      while (idx >= 0) {
+        emitLine(pending.slice(0, idx).replace(/\r$/, ''));
+        pending = pending.slice(idx + 1);
+        idx = pending.indexOf('\n');
+      }
+      if (final && pending !== '') {
+        emitLine(pending);
+        pending = '';
+      }
+    };
 
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', (d: string) => {
       stdout += d;
+      if (onLine === undefined) return;
+      pending += d;
+      drain(false);
     });
     child.stderr.on('data', (d: string) => {
       stderr += d;
@@ -154,6 +201,17 @@ export function run(bin: string, args: readonly string[], options: RunOptions = 
       fn();
     };
 
+    // The accumulated `stdout` dies with this closure, and that is deliberate.
+    // A timed-out turn's usage is not a number worth charging: Codex reports
+    // usage only on `turn.completed`, which a killed turn never emits, so there
+    // is literally nothing to recover; and Claude's timed-out stream has no
+    // `result` envelope, leaving only the per-message `usage` blocks that
+    // claude.ts's `extractUsage` already documents as unsummable - their cache
+    // reads repeat the whole prompt per request. Either figure would put a
+    // number in `state.tokensUsed` that nobody could trace to a source, against
+    // a ceiling that stops runs. Carrying the partial output out would also
+    // change this boundary for git, verify and the app-server, which do not
+    // want it.
     if (timeoutMs !== undefined) {
       timer = setTimeout(() => {
         child.kill('SIGKILL');
@@ -162,7 +220,13 @@ export function run(bin: string, args: readonly string[], options: RunOptions = 
     }
 
     child.on('error', (err: Error) => settle(() => reject(err)));
-    child.on('close', (code: number | null) => settle(() => resolve({ code, stdout, stderr })));
+    child.on('close', (code: number | null) => {
+      // Before `settle`: a single-line output with no trailing newline must
+      // still reach the hook, while on the timeout path `settled` is already
+      // true and this emits nothing.
+      drain(true);
+      settle(() => resolve({ code, stdout, stderr }));
+    });
 
     if (input !== undefined) child.stdin.write(input, 'utf8');
     child.stdin.end();

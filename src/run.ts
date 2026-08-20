@@ -1,7 +1,16 @@
-import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
-import { randomUUID, createHash } from 'node:crypto';
-import type { Finding, RoundRecord, RunPhase, RunState, RunSummary } from '@src/types.js';
+import { createHash } from 'node:crypto';
+import type { ActivityObservation } from '@src/progress.js';
+import { initialSlotFields } from '@src/slots.js';
+import type {
+  Finding,
+  PendingFindings,
+  RoundRecord,
+  RunPhase,
+  RunState,
+  RunSummary,
+} from '@src/types.js';
 
 const RUNS_DIR = path.join('.vibe', 'runs');
 
@@ -52,7 +61,9 @@ export function createRun(targetDir: string, task: string, planOnly: boolean): R
     dir,
     targetDir,
     task,
-    sessionId: randomUUID(),
+    // Every managed conversation's starting state, stated where the lifecycle
+    // is rather than as three literals here.
+    ...initialSlotFields(),
     createdAt: new Date().toISOString(),
     status: 'planning',
     phase: 'planning',
@@ -68,12 +79,10 @@ export function createRun(targetDir: string, task: string, planOnly: boolean): R
     verifyRound: 0,
     questionRound: 0,
     events: [],
-    sessionStarted: false,
     planOnly,
     answeredQuestions: [],
     deferredQuestions: [],
     sessionRotations: 0,
-    codexSessionId: null,
     handoff: null,
     contextRatio: 0,
     plan: null,
@@ -154,8 +163,129 @@ export function resumePhase(state: RunState): RunPhase {
   }
 }
 
+/**
+ * The stored context ratio, but only when it provably describes `model`.
+ *
+ * null is "unknown", which is a different claim from a number: the measurement
+ * is a fraction of the measuring model's window, so under any other model it
+ * describes nothing. Callers must decide what unknown means rather than falling
+ * back to the raw field.
+ */
+export function measuredRatio(state: RunState, model: string): number | null {
+  return state.contextModel === model ? state.contextRatio : null;
+}
+
+/** The stored context window, only when it provably describes `model`. */
+export function measuredWindow(state: RunState, model: string): number | undefined {
+  return state.contextModel === model ? state.contextWindow : undefined;
+}
+
+/**
+ * The window alone, for a turn whose ratio describes a session being abandoned.
+ *
+ * A rotation's handoff turn measures a real window but its occupancy belongs to
+ * the conversation being discarded, so only the window survives. Guarded on
+ * `contextModel` because the handoff may have run under the outgoing model: a
+ * window that model measured says nothing about the incoming one, and storing it
+ * anyway is the misattribution `resetContextMeasurement` exists to prevent.
+ */
+export function recordMeasuredWindow(state: RunState, model: string, contextWindow: number): void {
+  if (contextWindow > 0 && state.contextModel === model) state.contextWindow = contextWindow;
+}
+
+/** Record a measurement together with the model that produced it. */
+export function recordContextMeasurement(
+  state: RunState,
+  model: string,
+  ratio: number,
+  contextWindow: number,
+): void {
+  state.contextModel = model;
+  state.contextRatio = ratio;
+  state.contextWindow = contextWindow;
+}
+
+/**
+ * A fresh session under `model`: nothing has been measured on it yet.
+ *
+ * Ratio and window are different kinds of fact, and the reset treats them
+ * differently. The ratio is occupancy of the session just abandoned, so it goes
+ * to zero. The window is metadata about `model` itself, and it is deleted here
+ * because a rotation may be the very point at which the model changed -
+ * reporting the outgoing model's window against the incoming one is the same
+ * unattributed number this exists to remove. A same-model measurement may put it
+ * back afterwards via `recordMeasuredWindow`, which is why a zero ratio beside a
+ * present window is a valid state. Tagging the reset with `model` is also what
+ * stops an unknown-provenance rotation asking for another rotation at the next
+ * turn boundary.
+ */
+export function resetContextMeasurement(state: RunState, model: string): void {
+  state.contextModel = model;
+  state.contextRatio = 0;
+  delete state.contextWindow;
+}
+
 export function saveState(state: RunState): void {
   writeFileSync(path.join(state.dir, 'state.json'), JSON.stringify(state, null, 2), 'utf8');
+}
+
+/**
+ * How often a heartbeat may rewrite state.json. The file carries the whole
+ * event log, so a turn emitting thousands of stream events must not write it
+ * per event. The end-of-turn flush is exempt: it is the only chance to persist
+ * a line that arrived inside the window.
+ */
+const ACTIVITY_WRITE_MS = 5_000;
+
+/** Boundary sources, which say something the write throttle must not swallow. */
+const UNTHROTTLED: readonly ActivityObservation['source'][] = ['start', 'end', 'final'];
+
+/**
+ * Record that the current turn is alive, for a watcher reading state.json from
+ * another shell rather than from the process table.
+ *
+ * `turnStartedAt` and `lastOutputAt` describe the turn - or, under
+ * `withConcurrentCompaction`, the two turns - vibe is running right now, never
+ * the run as a whole. They are therefore written from the observation exactly as
+ * given, including downwards: the heartbeat layer recomputes them across the
+ * live turns, and a turn ending has to take its output time with it. Two earlier
+ * versions of this got it wrong in opposite directions - one left the previous
+ * turn's pulse in place for a turn that died before speaking, the other left a
+ * finished rotation's last line standing while the Codex turn it overlapped was
+ * still running.
+ *
+ * `lastActivityAt` is the exception, and is monotonic: "when vibe last observed
+ * anything at all" is a fact about the run, and it is what remains readable
+ * between turns, when the other two are describing nothing.
+ */
+export function markActivity(state: RunState, observation: ActivityObservation): void {
+  const previous = state.lastActivityAt === undefined ? NaN : Date.parse(state.lastActivityAt);
+  const at = observation.at.getTime();
+
+  if (
+    !UNTHROTTLED.includes(observation.source) &&
+    Number.isFinite(previous) &&
+    at - previous < ACTIVITY_WRITE_MS
+  ) {
+    return;
+  }
+
+  if (!Number.isFinite(previous) || at > previous) {
+    state.lastActivityAt = observation.at.toISOString();
+  }
+  // Taken from the observation, not the clock: a skipped write delays the value
+  // without ever making it claim a child was quieter than it was.
+  if (observation.lastLineAt === null) {
+    delete state.lastOutputAt;
+  } else {
+    state.lastOutputAt = observation.lastLineAt.toISOString();
+  }
+  if (observation.turnStartedAt === null) {
+    delete state.turnStartedAt;
+  } else {
+    state.turnStartedAt = observation.turnStartedAt.toISOString();
+  }
+  saveState(state);
 }
 
 export function recordEvent(state: RunState, type: string, data: Record<string, unknown> = {}): void {
@@ -168,6 +298,26 @@ export function artifact(state: RunState, name: string, content: string | object
   const body = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
   writeFileSync(file, body, 'utf8');
   return file;
+}
+
+/**
+ * Delete an artifact that no longer describes the run. True if one was there.
+ *
+ * The counterpart to `artifact` for a file that is rewritten as the run
+ * proceeds: FOLLOW-UPS.md is regenerated from the current plan, and a plan
+ * revision that drops its last out-of-scope item has to be able to take the
+ * file with it. A stale artifact contradicting PLAN.md is worse than none.
+ */
+export function removeArtifact(state: RunState, name: string): boolean {
+  const file = path.join(state.dir, name);
+  if (!existsSync(file)) return false;
+  rmSync(file);
+  return true;
+}
+
+/** Whether an artifact is on disk, for a caller that must not rewrite a good one. */
+export function hasArtifact(state: RunState, name: string): boolean {
+  return existsSync(path.join(state.dir, name));
 }
 
 export function artifactDir(state: RunState, name: string): string {
@@ -234,6 +384,123 @@ export function recordRound(
   history.push({ signature, count, ids: [...ids] });
 }
 
+/**
+ * The fields any consumer of a stored finding needs, checked rather than
+ * asserted.
+ *
+ * One predicate for both the follow-ups artifact and the carried findings:
+ * stored state is unvalidated, so "is this object a finding" is a question the
+ * codebase must answer once. `defer` is deliberately not consulted - it is a
+ * fact about what one caller does with a finding, not about its shape.
+ */
+export function hasFindingShape(f: unknown): f is Finding {
+  if (typeof f !== 'object' || f === null) return false;
+  const r = f as Record<string, unknown>;
+  return (
+    (r['severity'] === 'P0' ||
+      r['severity'] === 'P1' ||
+      r['severity'] === 'P2' ||
+      r['severity'] === 'P3') &&
+    typeof r['id'] === 'string' &&
+    r['id'].length > 0 &&
+    typeof r['title'] === 'string' &&
+    typeof r['detail'] === 'string' &&
+    typeof r['suggested_fix'] === 'string'
+  );
+}
+
+/**
+ * Record what a critique or review turn found, before anything can stop the run
+ * between paying for it and using it.
+ */
+export function recordPendingFindings(
+  state: RunState,
+  phase: PendingFindings['phase'],
+  findings: readonly Finding[],
+): void {
+  state.pendingFindings = { phase, findings: [...findings] };
+  saveState(state);
+}
+
+/**
+ * The unconsumed findings this phase may act on, or null when there are none.
+ *
+ * Reads without clearing, which is the whole contract: a revision that fails,
+ * is rate-limited or dies mid-turn must leave them outstanding, or this
+ * mechanism reintroduces the loss it exists to prevent. Clearing is
+ * `clearPendingFindings`, called by whatever consumed them.
+ *
+ * Never throws, and absent, empty and malformed all read as null - the answer a
+ * run recorded before this field existed would have given. The stored value is
+ * an assertion over unvalidated JSON, so a present non-record, a `findings` that
+ * is not an array, or entries that are not findings must not reach a prompt.
+ * The phase tag is checked here rather than by the caller: it is what stops a
+ * plan-phase remnant being handed to the fix turn.
+ */
+export function takePendingFindings(
+  state: RunState,
+  phase: PendingFindings['phase'],
+): Finding[] | null {
+  const raw: unknown = state.pendingFindings;
+  if (typeof raw !== 'object' || raw === null) return null;
+  const r = raw as Record<string, unknown>;
+  if (r['phase'] !== phase) return null;
+  const findings = r['findings'];
+  if (!Array.isArray(findings)) return null;
+  const usable = findings.filter(hasFindingShape);
+  return usable.length > 0 ? usable : null;
+}
+
+/**
+ * Mark the carried findings consumed.
+ *
+ * Written as an explicit null rather than deleted: the run record should say
+ * that this run answered them, not merely fail to mention them.
+ */
+export function clearPendingFindings(state: RunState): void {
+  state.pendingFindings = null;
+  saveState(state);
+}
+
+/**
+ * Whether every finding in the window is new to it - no id in more than one
+ * round.
+ *
+ * Judged over the whole window rather than between neighbours, on purpose. An
+ * {a,b} -> {c,d} -> {a,b} oscillation has no *consecutive* overlap and is
+ * genuinely stuck; it fails this test because `a` occurs twice.
+ *
+ * A round with absent or empty ids means "cannot tell", not "no overlap". The
+ * rule read literally is vacuously true for a history that carries no ids at
+ * all, and `state.json` written before `RoundRecord.ids` existed has none - so
+ * taking it literally would switch the trend brake off for every resumed legacy
+ * run. Such a window falls back to the count-only verdict.
+ */
+function windowTurnedOver(recent: readonly RoundRecord[]): boolean {
+  const seen = new Map<string, number>();
+  for (const r of recent) {
+    const ids = r.ids;
+    if (ids === undefined || ids.length === 0) return false;
+    // Deduped per round, so a round that names an id twice is not mistaken for
+    // the same id surviving across rounds.
+    for (const id of new Set(ids)) seen.set(id, (seen.get(id) ?? 0) + 1);
+  }
+  for (const n of seen.values()) if (n > 1) return false;
+  return true;
+}
+
+/** Trailing rounds whose blocking count equals the latest round's. */
+function flatRun(history: readonly RoundRecord[]): number {
+  const target = history[history.length - 1]?.count;
+  if (target === undefined) return 0;
+  let rounds = 0;
+  for (let i = history.length - 1; i >= 0; i -= 1) {
+    if (history[i]?.count !== target) break;
+    rounds += 1;
+  }
+  return rounds;
+}
+
 export interface ConvergenceArgs {
   /** Identical P1 set this many rounds running is a hard stop at any point. */
   repeatThreshold: number;
@@ -275,30 +542,11 @@ export function assessConvergence(
   const improved =
     hasWindow && recent.some((r, idx) => idx > 0 && r.count < (recent[idx - 1]?.count ?? r.count));
 
-  // One finding the fixer cannot fix, whatever else changes around it.
-  //
-  // The fingerprint above only catches an *identical* set. A defect that
-  // survives every round while its companions rotate produces a new
-  // fingerprint each time and never trips it.
-  //
-  // Judged on persistence alone, deliberately. An earlier version also required
-  // the total count to have stalled, which sounded prudent and was useless: on
-  // the run that motivated this, one id survived six consecutive fix attempts
-  // while the count wobbled 2 -> 4 -> 3, so every window contained a decrease
-  // and the rule could never fire. The count and a single defect are separate
-  // axes - findings falling elsewhere says nothing about the one that keeps
-  // coming back.
-  //
-  // One round longer than the set rule, because a single repeated id is weaker
-  // evidence per round than an identical set.
-  const persistWindow = repeatThreshold + 1;
-  const persisted = history.slice(-persistWindow);
-  if (persisted.length === persistWindow) {
-    const stuck = persistentId(persisted);
-    if (stuck !== null) {
-      return `"${stuck}" has come back ${persistWindow} rounds running; the fixer cannot resolve it`;
-    }
-  }
+  // A single id surviving many rounds *while its companions rotate* is NOT a
+  // stop condition - see `persistenceNotice`, which reports it instead. It used
+  // to abort the run here, and the picomatch reimplementation disproved the
+  // premise. An unchanging singleton set is a different case and still stops:
+  // it repeats its signature, so the set rule above catches it.
 
   // Trend: engaged near the cap, or once the run is simply long. Findings may
   // be new every round and still be going nowhere - a run that went 1 -> 1 -> 3
@@ -307,6 +555,29 @@ export function assessConvergence(
   if (!late || !hasWindow) return null;
 
   if (!improved) {
+    // A flat count whose findings turned over completely is not deadlock. The
+    // planning run for issue #2 was stopped at 2 -> 2 -> 2 on three rounds with
+    // zero id overlap - each a narrower restatement of the last - and the round
+    // that followed fell to 1. The repeat arm above already treats identity as
+    // meaningful; this was the one place that information was dropped.
+    //
+    // Bounded on purpose. Turnover buys one window, not the cap: the flat run
+    // must have *started inside* this window, so the excuse can fire at most
+    // once per run of equal counts. It says nothing about a rising count, which
+    // leaves the flat run shorter than the window - 1 -> 1 -> 3 produces
+    // correct, distinct findings while getting further from done, and still
+    // stops here.
+    //
+    // Loosening a brake is worth being nervous about. The blast radius is one
+    // window of rounds the run was already allowed: maxPlanRounds /
+    // maxReviewRounds, `guardPlanBudget` and `budget.maxTokens` all still bind,
+    // so the worst case of being wrong is a run spending what it was budgeted.
+    //
+    // `window > 1` because `convergenceWindow` is only validated as >= 1, and a
+    // one-round window is never `improved` and always flat - without this the
+    // excuse would fire on every late round and disable the brake outright.
+    if (window > 1 && flatRun(history) === window && windowTurnedOver(recent)) return null;
+
     const trail = recent.map((r) => r.count).join(' -> ');
     const left = cap - round;
     return (
@@ -318,12 +589,84 @@ export function assessConvergence(
   return null;
 }
 
-/** An id present in every round of the window, or null. */
-function persistentId(recent: readonly RoundRecord[]): string | null {
-  const first = recent[0]?.ids;
-  if (first === undefined || first.length === 0) return null;
-  for (const id of first) {
-    if (recent.every((r) => r.ids?.includes(id) === true)) return id;
+/**
+ * The id with the longest unbroken run of presence ending at the last round.
+ *
+ * Trailing streaks only: an id that persisted for five rounds and was then
+ * cleared is not what anyone needs telling about.
+ */
+export function persistentStreak(
+  history: readonly RoundRecord[],
+): { id: string; rounds: number } | null {
+  const last = history[history.length - 1]?.ids;
+  if (last === undefined || last.length === 0) return null;
+
+  let best: { id: string; rounds: number } | null = null;
+  for (const id of last) {
+    let rounds = 0;
+    for (let i = history.length - 1; i >= 0; i -= 1) {
+      if (history[i]?.ids?.includes(id) !== true) break;
+      rounds += 1;
+    }
+    if (best === null || rounds > best.rounds) best = { id, rounds };
   }
-  return null;
+  return best;
+}
+
+export interface PersistenceNoticeArgs {
+  /** Rounds of unbroken persistence before the run says anything. */
+  minRounds: number;
+  /**
+   * The phase round cap, already worded, e.g. "maxReviewRounds (12)". This is
+   * the one limit that can be stated exactly: it bounds the loop, and nothing
+   * makes the loop run longer.
+   */
+  capLimit: string;
+  /**
+   * Armed whole-run budget ceilings, already worded. Deliberately NOT a
+   * complete list of what can stop the run - planShare, maxQuestionRounds and
+   * the rate-limit exits can all stop it sooner - so the wording built from
+   * this offers examples, never an enumeration. May be empty.
+   */
+  ceilings: readonly string[];
+}
+
+/**
+ * What to tell the user about a long-lived finding, or null when there is
+ * nothing to say.
+ *
+ * This used to be a stop: a finding that came back `oscillationThreshold + 1`
+ * rounds running ended the run, on the claim that the fixer could not resolve
+ * it. The picomatch reimplementation disproved the claim -
+ * `regex-group-prefix-not-literalized` was present in rounds 3 through 8 and
+ * was cleared on the sixth attempt at round 9, in a run that went on to pass
+ * 1977/1977 tests. Persistence measures how long something has taken, not
+ * whether it can be done, and the thing the stop was really proxying for -
+ * runaway spend - is now measured directly by `budget.maxTokens`, which counts
+ * both agents.
+ *
+ * It only ever describes a survivor amid rotating companions. An id that is the
+ * whole blocking set repeats its signature and is stopped earlier by the set
+ * rule in `assessConvergence`.
+ *
+ * The wording hedges about which brake will stop the run because several of
+ * them - `budget.planShare`, `maxQuestionRounds`, the rate-limit exits - are
+ * outside what this function is told, and naming one of them as *the* limit
+ * would send the user to raise the wrong setting.
+ */
+export function persistenceNotice(
+  history: readonly RoundRecord[],
+  args: PersistenceNoticeArgs,
+): string | null {
+  const streak = persistentStreak(history);
+  if (streak === null || streak.rounds < args.minRounds) return null;
+
+  const examples = args.ceilings.length > 0 ? ` - ${args.ceilings.join(', ')} -` : '';
+  return (
+    `"${streak.id}" has been blocking for ${streak.rounds} rounds running - continuing, ` +
+    'since a finding coming back is not evidence it cannot be fixed. ' +
+    `This loop runs to ${args.capLimit} at the latest and can stop sooner on a ` +
+    `budget ceiling${examples} or another brake. Whichever limit stops the run, ` +
+    "raise it and 'vibe resume <run-id>' to carry on."
+  );
 }

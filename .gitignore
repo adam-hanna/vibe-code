@@ -1,5 +1,7 @@
 node_modules/
 dist/
 .vibe/
+# Worktrees live inside the repo, so they must never be tracked by it.
+.worktrees/
 *.log
 *.stackdump

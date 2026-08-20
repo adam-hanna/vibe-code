@@ -1,20 +1,48 @@
 import path from 'node:path';
+import { applyCharge, chargeFailure, enforceCeilings, Escalation, EXIT, fmtTokens } from '@src/charge.js';
 import { claudeTurn, parseStructured, RateLimitError } from '@src/claude.js';
 import { codexTurn } from '@src/codex.js';
+import type { CodexTurnOptions, CodexTurnResult } from '@src/codex.js';
 import * as git from '@src/git.js';
 import * as log from '@src/log.js';
 import * as P from '@src/prompts.js';
-import { ANSWERS_SCHEMA, FINDINGS_SCHEMA, PLAN_SCHEMA } from '@src/schemas.js';
+import {
+  claudePermission,
+  codexSandbox,
+  GENERATIVE_ROLES,
+  holderLabel,
+  roleEnabled,
+  rolesFor,
+  slotForRole,
+  turnTimeoutMs,
+} from '@src/roles.js';
+import type { Access, Role, RoleSpec, RoleTable } from '@src/roles.js';
+import {
+  ensureSlotId,
+  markSlotStarted,
+  recordSlotOccupancy,
+  slotHasMemory,
+  slotId,
+  slotResumeId,
+} from '@src/slots.js';
 import {
   advancePhase,
   artifact,
   artifactDir,
   assessConvergence,
+  clearPendingFindings,
+  hasArtifact,
+  hasFindingShape,
+  measuredRatio,
   p1Signature,
+  persistenceNotice,
   recordEvent,
+  recordPendingFindings,
   recordRound,
+  removeArtifact,
   resumePhase,
   saveState,
+  takePendingFindings,
 } from '@src/run.js';
 import {
   blockers as blockingFindings,
@@ -23,7 +51,25 @@ import {
   parseFindings,
   parsePlan,
 } from '@src/validate.js';
-import { withConcurrentCompaction, rotateSession, shouldRotate } from '@src/context.js';
+import {
+  markOccupancyWarned,
+  occupancyWarning,
+  withConcurrentCompaction,
+  recordTurnContext,
+  rotateSession,
+  shouldRotate,
+  turnOccupancy,
+} from '@src/context.js';
+import type { ClaudeTurnFn } from '@src/context.js';
+import { progressOptions } from '@src/progress.js';
+import {
+  closeCodexRateLimits,
+  decideCodexLimit,
+  describeLimits,
+  invalidateCodexRateLimits,
+  readCodexRateLimits,
+  recordLimits,
+} from '@src/ratelimits.js';
 import { describeFailure, runVerification } from '@src/verify.js';
 import type {
   Answer,
@@ -31,42 +77,68 @@ import type {
   Finding,
   FindingsReport,
   OpenQuestion,
-  PermissionMode,
   RoundRecord,
   Plan,
   RunState,
 } from '@src/types.js';
 
-export const EXIT = {
-  OK: 0,
-  ERROR: 1,
-  NEEDS_HUMAN: 2,
-  NO_CONVERGENCE: 3,
-  BUDGET: 4,
-  RATE_LIMITED: 5,
-  /** The agents' execution environments do not satisfy the toolchain contract. */
-  PREFLIGHT: 6,
-} as const;
+// The accounting vocabulary lives in @src/charge.js, a leaf: the session
+// rotation in @src/context.js has to charge through the same `applyCharge` this
+// module's adapters use, and this module already imports context.js - so
+// leaving it here would be a cycle. Re-exported so callers and tests keep one
+// import site.
+export {
+  applyCharge,
+  attachSpend,
+  chargeFailure,
+  enforceCeilings,
+  Escalation,
+  EXIT,
+  spendOf,
+  takeSpend,
+} from '@src/charge.js';
+export type { ExitCode, TurnCharge, TurnSpend } from '@src/charge.js';
 
-export type ExitCode = (typeof EXIT)[keyof typeof EXIT];
-
-export class Escalation extends Error {
-  constructor(
-    readonly code: ExitCode,
-    message: string,
-    readonly questions: OpenQuestion[] | null = null,
-    readonly findings: Finding[] | null = null,
-  ) {
-    super(message);
-    this.name = 'Escalation';
+export async function orchestrate(
+  state: RunState,
+  cfg: Config,
+  resume: boolean,
+  /**
+   * The same seam `runTurn` has, hoisted to the entry point.
+   *
+   * The loop steps used to name `REAL_AGENTS` themselves, so nothing above the
+   * single-turn dispatch could be driven without spawning a real `claude` and a
+   * real `codex` - which meant the re-entry order of the two loops, the thing
+   * this run's cost actually turns on, was untestable. Defaulted, so every
+   * caller including `RunLoop` in cli.ts is unchanged.
+   */
+  turns: AgentTurns = REAL_AGENTS,
+): Promise<RunState> {
+  try {
+    // Before any phase runs. On a fresh run `state.plan` is null and this does
+    // nothing; on a resume it is the one point holding both the stored plan and
+    // the artifact the previous process may have died between writing.
+    reconcileFollowUps(state);
+    return await runPhases(state, cfg, resume, turns);
+  } finally {
+    // A `finally`, not a tail call: the phases below return early at the
+    // "already finished" check and at the plan-only exit, and a persistent
+    // app-server child left running would outlive the run on exactly those
+    // paths.
+    closeCodexRateLimits();
   }
 }
 
-/** Read-only toolset for planning turns, alongside plan mode itself. */
-const PLAN_TOOLS = ['Read', 'Glob', 'Grep', 'Bash', 'WebSearch', 'WebFetch'] as const;
-
-export async function orchestrate(state: RunState, cfg: Config, resume: boolean): Promise<RunState> {
+async function runPhases(
+  state: RunState,
+  cfg: Config,
+  resume: boolean,
+  turns: AgentTurns,
+): Promise<RunState> {
   const cwd = state.targetDir;
+  // Resolved once and threaded, so no step below can answer "who does this job"
+  // from the module default while holding a config that says otherwise.
+  const roles = rolesFor(cfg);
 
   if (!resume) await prepareGit(state, cfg, cwd);
 
@@ -83,7 +155,7 @@ export async function orchestrate(state: RunState, cfg: Config, resume: boolean)
   // than about the task.
   let plan: Plan;
   if (phase === 'planning') {
-    plan = await planPhase(state, cfg, cwd);
+    plan = await planPhase(state, cfg, cwd, roles, turns);
     if (state.planOnly) {
       state.status = 'planned';
       advancePhase(state, 'complete');
@@ -107,14 +179,19 @@ export async function orchestrate(state: RunState, cfg: Config, resume: boolean)
     saveState(state);
 
     log.heading('Implementing');
-    const impl = await claudeStep(state, cfg, {
-      prompt: P.implementPrompt(plan.plan_md, state.carried ?? []),
-      cwd,
-      permissionMode: 'bypassPermissions',
-      timeoutMs: cfg.claude.implementTimeoutMs,
-      label: 'implement',
-    });
-    artifact(state, 'implementation-report.md', impl);
+    const impl = await runTurn(
+      state,
+      cfg,
+      {
+        role: 'implementer',
+        prompt: P.implementPrompt(plan.plan_md, state.carried ?? []),
+        cwd,
+        label: 'implement',
+      },
+      turns,
+      roles,
+    );
+    artifact(state, 'implementation-report.md', impl.text);
 
     // Advanced before the commit, not after. The implementation turn is the
     // single most expensive step in a run, and a failure while committing it
@@ -134,32 +211,70 @@ export async function orchestrate(state: RunState, cfg: Config, resume: boolean)
   state.status = 'reviewing';
   saveState(state);
 
-  await reviewPhase(state, cfg, cwd, plan);
+  await reviewPhase(state, cfg, cwd, plan, roles, turns);
 
   state.status = 'done';
   advancePhase(state, 'complete');
   return state;
 }
 
-/** Plan, resolve questions, and critique until Codex raises no P1s. */
-async function planPhase(state: RunState, cfg: Config, cwd: string): Promise<Plan> {
+/** Plan, resolve questions, and critique until the critic raises no P1s. */
+async function planPhase(
+  state: RunState,
+  cfg: Config,
+  cwd: string,
+  roles: RoleTable,
+  turns: AgentTurns,
+): Promise<Plan> {
   let plan: Plan;
   if (state.plan) {
     plan = state.plan;
   } else {
     log.heading('Planning');
-    plan = await runPlan(state, cfg, cwd);
+    plan = await runPlan(state, cfg, cwd, roles, turns);
   }
 
   // Answers supplied by a human in NEEDS-INPUT.md, picked up on resume.
+  //
+  // Deliberately does not clear `pendingFindings`: this revises with `answers`
+  // *instead of* the findings, so it has not answered them, and treating a
+  // human's reply as consuming them would discard work the run paid for. The
+  // loop below consumes them next, which costs a second planner turn on the one
+  // path where both are present.
   if (state.pendingAnswers && state.pendingAnswers.length > 0) {
     for (const a of state.pendingAnswers) markAnswered(state, a.question);
-    plan = await revisePlan(state, cfg, cwd, { answers: state.pendingAnswers });
+    plan = await revisePlan(state, cfg, cwd, { answers: state.pendingAnswers }, roles, turns);
     state.pendingAnswers = null;
     saveState(state);
   }
 
+  // Only the first iteration can be a re-entry, and only a re-entry is worth
+  // narrating: on every later round the branch below is just where this loop
+  // revises.
+  let firstPass = true;
+
   for (;;) {
+    // Findings a previous process paid for and no revision answered. Consumed
+    // before anything else in the loop, because everything else in the loop
+    // spends: this is the re-entry point a stall leaves behind, and re-entering
+    // at the critique instead is what cost 7.5M tokens to learn nothing.
+    const carried = takePendingFindings(state, 'plan');
+    if (carried !== null) {
+      if (firstPass) {
+        log.info(
+          `Revising against ${carried.length} finding(s) carried across the stop - not re-critiquing.`,
+        );
+      }
+      firstPass = false;
+      // `revisePlan` consumes them itself, on the same state write that persists
+      // the plan answering them - not here, where a second write would reopen a
+      // window between the two. A revision that throws, is rate-limited or dies
+      // mid-flight never reaches that write, so the findings stay outstanding.
+      plan = await revisePlan(state, cfg, cwd, { findings: carried }, roles, turns);
+      continue;
+    }
+    firstPass = false;
+
     // A question already put to Codex never comes back, however the revised plan
     // rephrases it - otherwise an insistent planner loops the run forever.
     const pending = plan.open_questions.filter(
@@ -181,15 +296,38 @@ async function planPhase(state: RunState, cfg: Config, cwd: string): Promise<Pla
       state.questionRound += 1;
       saveState(state);
 
-      const answers = await resolveQuestions(state, cfg, cwd, pending, plan);
-      // Codex may have declined every one; only revise if something came back.
-      plan = answers.length > 0 ? await revisePlan(state, cfg, cwd, { answers }) : plan;
+      const answers = await resolveQuestions(state, cfg, cwd, pending, plan, roles, turns);
+      // The answerer may have declined every one; only revise if something came back.
+      plan =
+        answers.length > 0 ? await revisePlan(state, cfg, cwd, { answers }, roles, turns) : plan;
       continue;
     }
 
     log.heading(`Plan critique (round ${state.planRound + 1})`);
-    const critique = await withConcurrentCompaction(state, cfg, () => runCritique(state, cfg, cwd, plan));
-    artifact(state, `plan-critique-${state.planRound}.json`, critique);
+    // The record of the turn is written by the callback, not after the wrapper
+    // returns: a concurrent rotation can now raise a budget escalation, and
+    // `withConcurrentCompaction` surfaces it once `work` has resolved. Anything
+    // left outside the callback would be skipped for a critique the run has
+    // already paid for.
+    const critique = await withConcurrentCompaction(
+      state,
+      cfg,
+      async () => {
+        const found = await runCritique(state, cfg, cwd, plan, roles, turns);
+        artifact(state, `plan-critique-${state.planRound}.json`, found);
+        collectDeferred(state, found.findings);
+        writeFollowUps(state, plan);
+        // In here for the same reason the artifact is: a budget escalation the
+        // wrapper is holding must not cost the run the findings it just bought.
+        // Cleared again below the moment the gate says there is nothing to
+        // consume.
+        recordPendingFindings(state, 'plan', found.findings);
+        return found;
+      },
+      turns.claude,
+      'critic',
+      roles,
+    );
 
     const decision = gate(critique.findings, cfg.loop.p1Tolerance);
     const stoppers = blockingFindings(critique.findings);
@@ -210,6 +348,10 @@ async function planPhase(state: RunState, cfg: Config, cwd: string): Promise<Pla
         findings: critique.findings.length,
         carried: decision.tolerated.map((f) => f.id),
       });
+      // An approved plan has nothing outstanding: what the gate tolerated
+      // travels on `state.carried` into implementation, and leaving these set
+      // would have a resume revise a plan the critic just passed.
+      clearPendingFindings(state);
       break;
     }
 
@@ -224,17 +366,54 @@ async function planPhase(state: RunState, cfg: Config, cwd: string): Promise<Pla
       deadlockMsg: 'the planner and reviewer are deadlocked',
     });
 
-    plan = await revisePlan(state, cfg, cwd, { findings: critique.findings });
+    // Back to the top rather than revising here: the findings this round bought
+    // are already on `state`, and the consume branch up there is the single
+    // place that answers them - whether they were bought a second ago or by a
+    // process that has since exited. The order of turns is unchanged.
+    continue;
   }
 
-  const planFile = artifact(state, 'PLAN.md', plan.plan_md);
+  const planFile = artifact(state, 'PLAN.md', P.renderPlanDoc(plan));
   log.info(`Plan: ${path.relative(cwd, planFile)}`);
+  const followUps = writeFollowUps(state, plan);
+  if (followUps !== null) log.info(`Follow-ups: ${path.relative(cwd, followUps)}`);
   return plan;
 }
 
 /** Verify, then review, fixing each until both are clean. */
-async function reviewPhase(state: RunState, cfg: Config, cwd: string, plan: Plan): Promise<void> {
+async function reviewPhase(
+  state: RunState,
+  cfg: Config,
+  cwd: string,
+  plan: Plan,
+  roles: RoleTable,
+  turns: AgentTurns,
+): Promise<void> {
+  // As in `planPhase`: only the first iteration can be a re-entry.
+  let firstPass = true;
+
   for (;;) {
+    // Findings a previous process paid for. Before `runGate`, deliberately:
+    // consuming what the run already owns comes before buying anything, and a
+    // full verification run is a purchase. The gate runs on the next iteration,
+    // so the fix is still verified before anything else happens.
+    const carried = takePendingFindings(state, 'review');
+    if (carried !== null) {
+      if (firstPass) {
+        log.info(
+          `Fixing ${carried.length} finding(s) carried across the stop - not re-reviewing.`,
+        );
+      }
+      firstPass = false;
+      await runFixRound(state, cfg, cwd, carried, roles, turns);
+      // No OUTSTANDING.md here, even when these were the final round's
+      // findings: the artifact says the fix ran *and verification still
+      // passed*, and the gate has not run yet. It is written below, on the
+      // other side of it.
+      continue;
+    }
+    firstPass = false;
+
     // Does it run, before asking whether it reads well. A failing suite is an
     // unambiguous P1, and spending a reviewer turn on code that does not
     // execute buys an opinion about the wrong thing.
@@ -254,14 +433,19 @@ async function reviewPhase(state: RunState, cfg: Config, cwd: string, plan: Plan
       saveState(state);
 
       log.step('Fixing the verification failure');
-      const repair = await claudeStep(state, cfg, {
-        prompt: P.fixPrompt([verified], state.verifyRound),
-        cwd,
-        permissionMode: 'bypassPermissions',
-        timeoutMs: cfg.claude.implementTimeoutMs,
-        label: `verify-fix-${state.verifyRound}`,
-      });
-      artifact(state, `verify-fix-${state.verifyRound}.md`, repair);
+      const repair = await runTurn(
+        state,
+        cfg,
+        {
+          role: 'implementer',
+          prompt: P.fixPrompt([verified], state.verifyRound),
+          cwd,
+          label: `verify-fix-${state.verifyRound}`,
+        },
+        turns,
+        roles,
+      );
+      artifact(state, `verify-fix-${state.verifyRound}.md`, repair.text);
       await maybeCommit(cfg, cwd, `vibe: fix verification failure (round ${state.verifyRound})`);
       continue;
     }
@@ -270,13 +454,41 @@ async function reviewPhase(state: RunState, cfg: Config, cwd: string, plan: Plan
     // Stop here rather than reviewing again: the point of the tolerance is to
     // end the argument, and a fresh review would reopen it.
     if (state.finalFixDone === true) {
+      // The one place the artifact's own claim is true: the fix round is behind
+      // us and `runGate` has just returned clean. Everything the final round
+      // writes is a separate moment - the flags before its turn, the report
+      // after it, the file after that - so a process killed anywhere in there
+      // used to leave a run that finishes clean pointing at a file nobody
+      // wrote. This rewrites it, and only from here, because from anywhere
+      // earlier it would be asserting a fix or a passing suite that had not
+      // happened.
+      recoverOutstanding(state, cwd);
       log.ok('Carried findings addressed and verification still passes.');
       break;
     }
 
     log.heading(`Code review (round ${state.reviewRound + 1})`);
-    const review = await withConcurrentCompaction(state, cfg, () => runReview(state, cfg, cwd, plan));
-    artifact(state, `code-review-${state.reviewRound}.json`, review);
+    // Inside the callback, for the reason given at the critique call site: a
+    // held budget escalation must not cost the run the record of the review it
+    // paid for.
+    const review = await withConcurrentCompaction(
+      state,
+      cfg,
+      async () => {
+        const found = await runReview(state, cfg, cwd, plan, roles, turns);
+        artifact(state, `code-review-${state.reviewRound}.json`, found);
+        collectDeferred(state, found.findings);
+        writeFollowUps(state, plan);
+        // In here for the same reason as the artifact, and as in the plan
+        // phase: what the run just paid 15M tokens for must survive a stop
+        // between this turn and the fix that answers it.
+        recordPendingFindings(state, 'review', found.findings);
+        return found;
+      },
+      turns.claude,
+      'reviewer',
+      roles,
+    );
 
     const decision = gate(review.findings, cfg.loop.p1Tolerance);
     const stoppers = blockingFindings(review.findings);
@@ -284,6 +496,8 @@ async function reviewPhase(state: RunState, cfg: Config, cwd: string, plan: Plan
       if (decision.tolerated.length === 0) {
         log.ok(`Review clean - ${review.findings.length} non-blocking finding(s)`);
         recordEvent(state, 'review_approved', { findings: review.findings.length });
+        // Nothing blocking came back, so there is nothing for a resume to fix.
+        clearPendingFindings(state);
         break;
       }
 
@@ -306,18 +520,31 @@ async function reviewPhase(state: RunState, cfg: Config, cwd: string, plan: Plan
       );
       for (const f of decision.tolerated) log.info(`  ~ ${f.title}`);
 
-      const finalFix = await claudeStep(state, cfg, {
-        prompt: P.fixPrompt(review.findings, state.reviewRound),
-        cwd,
-        permissionMode: 'bypassPermissions',
-        timeoutMs: cfg.claude.implementTimeoutMs,
-        label: `final-fix-${state.reviewRound}`,
-      });
-      artifact(state, `fix-report-${state.reviewRound}.md`, finalFix);
-      await maybeCommit(cfg, cwd, `vibe: address carried review findings (final round)`);
+      const finalFix = await runTurn(
+        state,
+        cfg,
+        {
+          role: 'implementer',
+          prompt: P.fixPrompt(review.findings, state.reviewRound),
+          cwd,
+          label: `final-fix-${state.reviewRound}`,
+        },
+        turns,
+        roles,
+      );
+      artifact(state, `fix-report-${state.reviewRound}.md`, finalFix.text);
+      // The moment the fix stops being worth buying again, and therefore the
+      // moment to drop the carry: the turn is done and its report is on disk.
+      // Everything after this - the record, three git invocations - can fail
+      // without making a second fix round useful, and the record is not lost by
+      // going first: `recoverOutstanding` rebuilds it from `state.outstanding`
+      // once the gate has passed. Same order as `runFixRound`.
+      clearPendingFindings(state);
 
       const file = artifact(state, 'OUTSTANDING.md', renderOutstanding(state, decision.tolerated));
       log.info(`Carried findings and what was done about them: ${path.relative(cwd, file)}`);
+
+      await maybeCommit(cfg, cwd, `vibe: address carried review findings (final round)`);
       recordEvent(state, 'review_approved', {
         findings: review.findings.length,
         carriedAndFixed: decision.tolerated.map((f) => f.id),
@@ -336,20 +563,84 @@ async function reviewPhase(state: RunState, cfg: Config, cwd: string, plan: Plan
       deadlockMsg: 'the fixer and reviewer are deadlocked',
     });
 
-    state.reviewRound += 1;
-    saveState(state);
-
-    log.step(`Fixing ${stoppers.length} blocking finding(s)`);
-    const fix = await claudeStep(state, cfg, {
-      prompt: P.fixPrompt(review.findings, state.reviewRound),
-      cwd,
-      permissionMode: 'bypassPermissions',
-      timeoutMs: cfg.claude.implementTimeoutMs,
-      label: `fix-${state.reviewRound}`,
-    });
-    artifact(state, `fix-report-${state.reviewRound}.md`, fix);
-    await maybeCommit(cfg, cwd, `vibe: address review round ${state.reviewRound}`);
+    // Back to the top rather than fixing here, for the reason given in
+    // `planPhase`: the findings are on `state`, and the consume branch is the
+    // one place that answers them. Same turn, same label, same order.
+    continue;
   }
+}
+
+/**
+ * One fix round: the turn, its report, and the commit.
+ *
+ * A function rather than the tail of the review loop because the loop now
+ * reaches it from two directions - the round that just bought the findings, and
+ * a resume that inherited them - and a fix round that drifted between the two
+ * would be a fix round the tests cannot pin.
+ */
+async function runFixRound(
+  state: RunState,
+  cfg: Config,
+  cwd: string,
+  findings: readonly Finding[],
+  roles: RoleTable,
+  turns: AgentTurns,
+): Promise<void> {
+  state.reviewRound += 1;
+  saveState(state);
+
+  log.step(`Fixing ${blockingFindings(findings).length} blocking finding(s)`);
+  const fix = await runTurn(
+    state,
+    cfg,
+    {
+      role: 'implementer',
+      prompt: P.fixPrompt(findings, state.reviewRound),
+      cwd,
+      label: `fix-${state.reviewRound}`,
+    },
+    turns,
+    roles,
+  );
+  artifact(state, `fix-report-${state.reviewRound}.md`, fix.text);
+  // Consumed once the turn's report is on disk, and before the commit: a commit
+  // that fails must not buy this turn a second time. Everything before this
+  // point leaves them outstanding, which is what makes a died-mid-turn resume
+  // retry the fix rather than skip it.
+  clearPendingFindings(state);
+  await maybeCommit(cfg, cwd, `vibe: address review round ${state.reviewRound}`);
+}
+
+/**
+ * Rewrite OUTSTANDING.md when the run says a final fix round happened and the
+ * artifact is not there.
+ *
+ * The final round writes its state flags, its fix report and this file at three
+ * different moments, and a process that dies between them leaves a run that
+ * later finishes clean while pointing at a file that does not exist. Recovered
+ * from `state.outstanding` rather than from the carried findings so it holds
+ * however far that sequence got, and skipped when the file is already there so
+ * a good artifact is never rewritten. Stored state is unvalidated, hence the
+ * shape check: this artifact makes claims about what is in it.
+ *
+ * Call it from ONE place, and only that one: after `runGate` has come back
+ * clean, immediately before the completion branch. The document states that the
+ * findings were worked on *and that verification still passed*, so calling it
+ * on entry to the phase, or straight after a fix round, publishes both claims
+ * before either is true - `finalFixDone` is persisted before the final fix turn
+ * even starts, and a suite that fails afterwards would leave the file asserting
+ * the opposite of what happened.
+ */
+function recoverOutstanding(state: RunState, cwd: string): void {
+  if (state.finalFixDone !== true) return;
+  if (hasArtifact(state, 'OUTSTANDING.md')) return;
+  const outstanding = Array.isArray(state.outstanding)
+    ? state.outstanding.filter(hasFindingShape)
+    : [];
+  if (outstanding.length === 0) return;
+
+  const file = artifact(state, 'OUTSTANDING.md', renderOutstanding(state, outstanding));
+  log.info(`Carried findings and what was done about them: ${path.relative(cwd, file)}`);
 }
 
 /** The findings the last fix round addressed without a reviewer confirming it. */
@@ -372,6 +663,178 @@ function renderOutstanding(state: RunState, findings: readonly Finding[]): strin
     `at the cost of runs that cannot converge.\n\n` +
     body
   );
+}
+
+/**
+ * What may appear in FOLLOW-UPS.md.
+ *
+ * Written against `unknown` on purpose: `loadRun` casts stored JSON with no
+ * validation, so an entry in `state.deferred` is a `Finding` by assertion only.
+ * Severity is checked as well as `defer`, even though `parseFindings` already
+ * normalises, because the artifact this feeds asserts in prose that everything
+ * in it was non-blocking - and an invariant a boundary states should be one the
+ * boundary keeps. The string fields are checked - by `hasFindingShape`, which
+ * the carried findings read through too, so the codebase holds one answer to
+ * "is this stored object a finding" - because an entry missing one renders
+ * `undefined` into a human-facing document.
+ */
+function isDeferrable(f: unknown): f is Finding {
+  return hasFindingShape(f) && f.defer === true && (f.severity === 'P2' || f.severity === 'P3');
+}
+
+/**
+ * The stored list, or null when the field is genuinely absent. Never throws.
+ *
+ * The `unknown` hop is the point: the declared `Finding[]` is an assertion over
+ * stored JSON, and a present non-array - `null`, a string, an object - would
+ * make `.filter` throw inside the code resume calls before it can reconcile
+ * anything. Such a value is dirty rather than absent, so it reads as an empty
+ * list and gets replaced.
+ */
+function storedDeferred(state: RunState): readonly unknown[] | null {
+  const raw: unknown = state.deferred;
+  if (raw === undefined) return null;
+  return Array.isArray(raw) ? (raw as readonly unknown[]) : [];
+}
+
+/**
+ * Merge this round's deferred findings into the run's list, newest id wins,
+ * sanitising what it inherits on the way through.
+ *
+ * The inherited list gets the same predicate as the fresh one: this helper is
+ * exported and callable directly, and stored state has never been validated, so
+ * a blocking or malformed entry that got in once would otherwise survive every
+ * later collection and be rendered under a header claiming the opposite.
+ *
+ * For the same reason a round that defers nothing is no longer a plain early
+ * return - it is the only code that would remove a bad entry, and skipping the
+ * write is how such an entry outlives the run. The write is skipped only when
+ * there is genuinely nothing to add and nothing to fix, which also leaves
+ * `deferred` absent on a run that has never deferred anything.
+ *
+ * An id a later round re-raises as a blocker is deliberately not pruned.
+ * Reconciling a human record against the live blocking set would couple it to
+ * the review loop, so the artifact time-qualifies its own claims instead.
+ */
+export function collectDeferred(state: RunState, findings: readonly Finding[]): void {
+  const fresh = findings.filter(isDeferrable);
+  const stored = storedDeferred(state);
+  const inherited = stored === null ? [] : stored.filter(isDeferrable);
+  // Clean: a well-formed array from which nothing was dropped, and which
+  // already holds the deduped-by-id shape `RunState` documents. Duplicates
+  // count as dirty even though every entry is individually valid - the early
+  // return skips the `Map` merge that is the only thing enforcing that
+  // contract, and `writeFollowUps` filters without deduping, so a stored pair
+  // sharing an id would render the same follow-up twice.
+  const uniqueIds = new Set(inherited.map((f) => f.id)).size;
+  const clean =
+    stored !== null &&
+    Array.isArray(state.deferred) &&
+    inherited.length === stored.length &&
+    uniqueIds === inherited.length;
+
+  if (fresh.length === 0 && (stored === null || clean)) return;
+
+  const merged = new Map<string, Finding>();
+  for (const f of inherited) merged.set(f.id, f);
+  // Later round wins: the same finding restated is usually better stated.
+  for (const f of fresh) merged.set(f.id, f);
+
+  // Written even when this leaves the list empty, or replaces a non-array with
+  // one: a rejected entry must not outlive the code that rejected it.
+  state.deferred = [...merged.values()];
+  saveState(state);
+}
+
+/**
+ * Write FOLLOW-UPS.md, or return null when there is nothing to say - deleting a
+ * stale one an earlier round wrote.
+ *
+ * Called after every plan write and every review round rather than once at the
+ * end. Every stall this project has had produced findings that survived only
+ * because a human copied them out by hand, and a run can stop at a budget
+ * ceiling, a rate limit or a guard long before any tidy finish. Deleting on the
+ * way down matters for the same reason: a revision that drops its last
+ * out-of-scope item persists a plan the old artifact contradicts, and the next
+ * critique that would have rewritten the file may never run.
+ */
+export function writeFollowUps(state: RunState, plan: Plan): string | null {
+  // Guarded, filtered and deduped here too, not only in `collectDeferred`:
+  // this is the function whose output makes the non-blocking claim, and it is
+  // exported, so it can be reached with stored state no collection has passed
+  // over. Deduping last-wins matches the merge order in `collectDeferred`, so
+  // reaching this directly renders what collecting first would have.
+  const deferred = Array.isArray(state.deferred)
+    ? [...new Map(state.deferred.filter(isDeferrable).map((f) => [f.id, f])).values()]
+    : [];
+  // The one place absent and empty are treated alike: neither has anything to
+  // report, so neither gets a section.
+  const scope = plan.out_of_scope ?? [];
+
+  if (deferred.length === 0 && scope.length === 0) {
+    removeArtifact(state, 'FOLLOW-UPS.md');
+    return null;
+  }
+
+  const sections: string[] = [];
+  if (scope.length > 0) {
+    sections.push(
+      '## Declared out of scope by the plan\n\n' +
+        scope.map((s) => `### ${s.item}\n\n${s.why}\n`).join('\n'),
+    );
+  }
+  if (deferred.length > 0) {
+    sections.push(
+      '## Deferred by review\n\n' +
+        deferred
+          .map(
+            (f) =>
+              `### ${f.title} \`${f.id}\`\n\n*Severity when deferred:* ${f.severity}\n\n` +
+              `${f.detail}\n\n*Suggested fix:* ${f.suggested_fix}\n`,
+          )
+          .join('\n'),
+    );
+  }
+
+  return artifact(
+    state,
+    'FOLLOW-UPS.md',
+    `# Follow-ups\n\n` +
+      `**Run:** \`${state.id}\`\n` +
+      `**Task:** ${state.task}\n\n` +
+      `Work this run identified and deliberately did not do, as of the latest round.\n\n` +
+      `Each finding below was **non-blocking at the moment it was deferred** - P2 or P3, ` +
+      `below both the reviewer's APPROVE rule and the loop gate, which stops only on a P0 ` +
+      `or on more P1s than \`loop.p1Tolerance\`. A later round may have re-raised the same ` +
+      `id at a blocking severity; the severity shown is the one it carried when it was ` +
+      `deferred, so check the \`plan-critique-*.json\` and \`code-review-*.json\` artifacts ` +
+      `before assuming an item is still just a follow-up. The out-of-scope list is the ` +
+      `plan's own stated boundary.\n\n` +
+      `Raw material for the next issue, not a defect report.\n\n` +
+      sections.join('\n'),
+  );
+}
+
+/**
+ * Reconcile FOLLOW-UPS.md against the stored plan. Returns the artifact path,
+ * or null when no plan is stored yet or there is nothing to say.
+ *
+ * `runPlan` and `revisePlan` persist the plan and then write the artifact, so a
+ * kill or a filesystem error between the two leaves an artifact describing a
+ * plan that is no longer stored. Nothing rewrote it until the next critique,
+ * which may be rate-limited or may never run. `writeFollowUps` already deletes
+ * on the way down for exactly this reason; this is the same thought applied to
+ * the one place a run starts from stored state.
+ *
+ * The empty collection is deliberate: stored state is unvalidated and the
+ * artifact asserts its own contents were non-blocking, so it is sanitised
+ * before being rendered rather than after.
+ */
+export function reconcileFollowUps(state: RunState): string | null {
+  const plan = state.plan;
+  if (plan === null || plan === undefined) return null;
+  collectDeferred(state, []);
+  return writeFollowUps(state, plan);
 }
 
 // ---------------------------------------------------------------------------
@@ -416,7 +879,39 @@ export function guardPlanBudget(state: RunState, cfg: Config, blockers: readonly
   );
 }
 
-function guardProgress(
+/**
+ * The whole-run budget ceilings that are currently armed, worded for a user.
+ *
+ * NOT a list of everything that can stop a run: budget.planShare stops the plan
+ * loop before this guard is reached, maxQuestionRounds bounds the question
+ * cycle, and a rate-limit or maxWaitMinutes exit can end any turn. Callers must
+ * present these as examples. maxTokens is omitted when 0 disables it - naming a
+ * ceiling that is not enforced would send the user to raise the wrong setting.
+ * maxCostUsd is always armed (validation forbids <= 0) but is Claude-side only,
+ * which the wording says so it does not overstate coverage.
+ */
+export function budgetCeilings(cfg: Config): string[] {
+  const ceilings = [`budget.maxCostUsd ($${cfg.budget.maxCostUsd}, Claude only)`];
+  if (cfg.budget.maxTokens > 0) ceilings.push(`budget.maxTokens (${fmtTokens(cfg.budget.maxTokens)})`);
+  return ceilings;
+}
+
+/** The persistence line for this round, or null when there is nothing to report. */
+export function persistenceWarning(
+  cfg: Config,
+  history: readonly RoundRecord[],
+  args: { cap: number; capName: string },
+): string | null {
+  return persistenceNotice(history, {
+    // The threshold that used to end the run now only speaks.
+    minRounds: cfg.loop.oscillationThreshold + 1,
+    capLimit: `${args.capName} (${args.cap})`,
+    ceilings: budgetCeilings(cfg),
+  });
+}
+
+/** Exported for tests: appends to `history`, may log, and may throw `Escalation`. */
+export function guardProgress(
   cfg: Config,
   history: RoundRecord[],
   all: readonly Finding[],
@@ -452,6 +947,13 @@ function guardProgress(
       [...blockers],
     );
   }
+
+  // Last, deliberately: the notice tells the user the run is continuing, which
+  // is only true once every stop above has declined to fire. Emitted earlier it
+  // said "continuing" on the same round the cap or the trend guard ended the
+  // run.
+  const notice = persistenceWarning(cfg, history, { cap, capName });
+  if (notice !== null) log.warn(notice);
 }
 
 async function prepareGit(state: RunState, cfg: Config, cwd: string): Promise<void> {
@@ -478,17 +980,6 @@ async function maybeCommit(cfg: Config, cwd: string, message: string): Promise<v
   if (sha) log.ok(`Committed ${sha}`);
 }
 
-interface ClaudeStepArgs {
-  prompt: string;
-  cwd: string;
-  permissionMode: PermissionMode;
-  timeoutMs: number;
-  label: string;
-  jsonSchema?: object | undefined;
-  tools?: readonly string[] | undefined;
-}
-
-/** Wraps a Claude turn with session rotation, cost accounting and the budget ceiling. */
 /**
  * Run the project's verification command.
  *
@@ -553,84 +1044,247 @@ async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Findi
   };
 }
 
-async function claudeStep(state: RunState, cfg: Config, args: ClaudeStepArgs): Promise<string> {
-  // A rotation that could not be overlapped with Codex work happens here, at a
-  // turn boundary - never mid-turn.
-  if (shouldRotate(state, cfg)) await rotateSession(state, cfg);
+// ---------------------------------------------------------------------------
+// The agent seam.
+//
+// One dispatch taking a role and routing it to a provider, replacing the two
+// parallel `claudeStep` / `runCodex` paths. The providers disagree about how to
+// say "this turn may write" - Claude spells it `--permission-mode`, Codex spells
+// it `-s` - so the role carries the intent and each adapter translates it.
+// ---------------------------------------------------------------------------
 
-  const resume = state.sessionStarted;
-  const prompt =
-    !resume && state.handoff
-      ? P.handoffContext(state.handoff, state.plan?.plan_md ?? null) + args.prompt
-      : args.prompt;
+/**
+ * Injectable for the seam tests, which must not spawn a real `codex`.
+ *
+ * Mirrors `ClaudeTurnFn` in context.ts, which is declared beside its own
+ * injection point for the same reason. One convention, not two.
+ */
+export type CodexTurnFn = (options: CodexTurnOptions) => Promise<CodexTurnResult>;
 
-  const result = await withRateLimitRetry(state, cfg, args.label, () =>
-    claudeTurn({
-      prompt,
-      sessionId: state.sessionId,
-      resume,
-      permissionMode: args.permissionMode,
-      model: cfg.claude.model,
-      effort: cfg.claude.effort,
-      cwd: args.cwd,
-      jsonSchema: args.jsonSchema,
-      tools: args.tools,
-      timeoutMs: args.timeoutMs,
-    }),
-  );
+export interface AgentTurns {
+  claude: ClaudeTurnFn;
+  codex: CodexTurnFn;
+}
 
-  state.sessionStarted = true;
-  state.costUsd = Number((state.costUsd + result.costUsd).toFixed(4));
-  state.tokensUsed += result.tokens.total;
-  if (result.usage) state.contextRatio = result.usage.ratio;
+/** What a run actually dispatches to. Tests substitute fakes for both. */
+export const REAL_AGENTS: AgentTurns = { claude: claudeTurn, codex: codexTurn };
 
-  recordEvent(state, 'claude_turn', {
-    label: args.label,
-    costUsd: result.costUsd,
-    tokens: result.tokens.total,
-    turns: result.numTurns,
-    contextRatio: Number(state.contextRatio.toFixed(3)),
-  });
+// The role vocabulary lives in @src/roles.js, and the slot lifecycle in
+// @src/slots.js - both leaves, for the same reason: preflight needs the Access
+// notion to decide what to enforce, and importing this module would pull the
+// whole run loop - claude, codex, git, context, ratelimits, verify - into `vibe
+// doctor`'s probe path. Re-exported so the seam's callers and tests keep one
+// import site; leaf modules import them directly, which is what keeps the
+// dependency pointing one way.
+export {
+  claudePermission,
+  codexProbeSandbox,
+  codexSandbox,
+  DEFAULT_ROLE_PROVIDERS,
+  describedRole,
+  enabledRolesFor,
+  GENERATIVE_ROLES,
+  holderLabel,
+  providerAccess,
+  providersForRoles,
+  READ_ONLY_TOOLS,
+  roleEnabled,
+  roleRefusals,
+  ROLES,
+  rolesFor,
+  roleWarnings,
+  ROTATING_ROLE,
+  rotatesConcurrentlyWith,
+  rotatingSlot,
+  slotForRole,
+  tableFor,
+  turnTimeoutMs,
+} from '@src/roles.js';
+export type { Access, Role, RoleProviders, RoleSpec, RoleTable } from '@src/roles.js';
+export {
+  SLOTS,
+  slotHasMemory,
+  slotId,
+  slotResumeId,
+  slotRotatable,
+  slotStarted,
+} from '@src/slots.js';
+export type { IdOrigin, SlotName, SlotSpec } from '@src/slots.js';
 
-  const ctx = result.usage ? `, ctx ${(result.usage.ratio * 100).toFixed(0)}%` : '';
-  log.detail(
-    `${args.label}: ${fmtTokens(result.tokens.total)} tok, ~$${result.costUsd.toFixed(3)} ` +
-      `(run ${fmtTokens(state.tokensUsed)} tok / ~$${state.costUsd.toFixed(2)}${ctx})`,
-  );
+export interface TurnRequest {
+  role: Role;
+  prompt: string;
+  cwd: string;
+  /** The retry label, the progress label, and - for Codex - the output name. */
+  label: string;
+  /**
+   * Omitted at every call site in this file: how long a turn gets is a property
+   * of the role, and `turnTimeoutMs` reads it off the same table this dispatch
+   * does. Still accepted, for a caller that has a reason of its own.
+   */
+  timeoutMs?: number | undefined;
+  /** Claude only: the response schema the turn is constrained to. */
+  jsonSchema?: object | undefined;
+  /** Claude only: the tools the turn may use. */
+  tools?: readonly string[] | undefined;
+}
 
-  if (result.denials.length > 0) log.warn(`${result.denials.length} permission denial(s) in ${args.label}`);
-
-  enforceTokenCeiling(state, cfg);
-  if (state.costUsd > cfg.budget.maxCostUsd) {
-    throw new Escalation(
-      EXIT.BUDGET,
-      `Work ceiling reached: ~$${state.costUsd.toFixed(2)} API-equivalent > $${cfg.budget.maxCostUsd}. ` +
-        'On a subscription this is a volume brake, not a bill. Raise budget.maxCostUsd to continue.',
-    );
-  }
-  return result.text;
+export interface TurnOutcome {
+  /** Claude: the result text. Codex: the raw last-message file. */
+  text: string;
+  /** Codex: its parsed structured output. Null for Claude, and for a turn with no schema. */
+  structured: unknown;
 }
 
 /**
- * The one ceiling both agents answer to.
+ * The turn's structured result, for a caller that needs one.
  *
- * Shared rather than duplicated per adapter because the Codex side has no cost
- * figure to fall back on: if this check were only wired into the Claude path,
- * a run whose expensive work sat with Codex would have no working brake at all.
+ * Codex parses its own output file, so `structured` is already there; Claude's
+ * arrives as text under `--json-schema`. Reading it here rather than at the seam
+ * keeps the parse where the caller knows what the text was for - and keeps a
+ * turn whose text is not JSON a *successful turn* that a caller then rejects,
+ * which is exactly what `parsePlan(parseStructured(text))` has always done.
  */
-function enforceTokenCeiling(state: RunState, cfg: Config): void {
-  if (cfg.budget.maxTokens <= 0 || state.tokensUsed <= cfg.budget.maxTokens) return;
-  throw new Escalation(
-    EXIT.BUDGET,
-    `Token ceiling exceeded: ${fmtTokens(state.tokensUsed)} > ${fmtTokens(cfg.budget.maxTokens)}. ` +
-      'Raise budget.maxTokens to continue.',
+export function readStructured(outcome: TurnOutcome): unknown {
+  return outcome.structured ?? parseStructured(outcome.text);
+}
+
+/** A request with the role's own timeout already resolved onto it. */
+type DispatchRequest = TurnRequest & { timeoutMs: number };
+
+/** One turn by whichever provider this role belongs to. */
+export function runTurn(
+  state: RunState,
+  cfg: Config,
+  req: TurnRequest,
+  turns: AgentTurns = REAL_AGENTS,
+  /**
+   * The same seam as `turns`, for the table rather than the providers. Defaulted
+   * from the config rather than to `ROLES`: a config is in hand here, and
+   * resolving the module constant instead would ignore the run's own assignment.
+   */
+  roles: RoleTable = rolesFor(cfg),
+): Promise<TurnOutcome> {
+  const spec = roles[req.role];
+  const dispatch: DispatchRequest = {
+    ...req,
+    timeoutMs: req.timeoutMs ?? turnTimeoutMs(req.role, cfg, roles),
+    // The schema and the tool list are the role's, and the request still wins
+    // for a caller with a reason of its own. Both ride on the role for the same
+    // reason the timeout does: they are facts about the job, and a Claude critic
+    // needs the schema its Codex twin was always given.
+    jsonSchema: req.jsonSchema ?? spec.schema,
+    tools: req.tools ?? spec.tools,
+  };
+  // Returned, not awaited: `runTurn` adds no continuation of its own between a
+  // provider finishing and its charge being applied. See `applyCharge`.
+  // The table rather than a resolved slot: `claudeDispatch` needs two of them -
+  // the conversation its own turn talks through, and the one it may compact
+  // first - and resolving the second against the module default while the first
+  // came from an injected table is how the two fall out of step.
+  return spec.provider === 'claude'
+    ? claudeDispatch(state, cfg, dispatch, spec.access, roles, turns.claude)
+    : codexDispatch(state, cfg, dispatch, spec, roles, turns.codex);
+}
+
+/**
+ * What a turn is told when its conversation carries nothing.
+ *
+ * Not conditional on there being a briefing: a rotation that could not summarise
+ * the outgoing session still starts a fresh one, and the plan of record has to
+ * travel with it either way - `revisePlanPrompt` and the fix prompts all assume
+ * the plan is already in the conversation. The full plan document, not
+ * `plan_md`: the boundary the plan drew is part of the plan of record, and a
+ * session rehydrated without it can revise the plan into a different one without
+ * ever being told it had a boundary.
+ *
+ * Shared by both dispatch paths, and scoped to the generative roles. A Codex
+ * implementer must run with `--no-codex-session` (config refuses the pair), so
+ * it has no thread memory at all - without this it would be asked to fix code
+ * against a plan it cannot see. A judging role is excluded: its prompts restate
+ * the plan themselves and take an explicit `hasMemory`, so today's first Codex
+ * critique turn is unchanged, as is every Claude turn under the default table -
+ * where Claude holds exactly the two generative roles.
+ */
+function freshConversationPrefix(state: RunState, role: Role, hasMemory: boolean): string {
+  if (hasMemory || !GENERATIVE_ROLES.includes(role)) return '';
+  return P.handoffContext(
+    state.handoff,
+    state.plan === null ? null : P.renderPlanDoc(state.plan),
+    state.handoffStale === true,
   );
 }
 
-function fmtTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
-  return String(n);
+async function claudeDispatch(
+  state: RunState,
+  cfg: Config,
+  req: DispatchRequest,
+  access: Access,
+  roles: RoleTable,
+  turn: ClaudeTurnFn,
+): Promise<TurnOutcome> {
+  const slot = slotForRole(req.role, roles);
+
+  // A rotation that could not be overlapped with Codex work happens here, at a
+  // turn boundary - never mid-turn.
+  if (shouldRotate(state, cfg, roles)) await rotateSession(state, cfg, turn, roles);
+
+  const resume = slotHasMemory(state, cfg, slot);
+  const prompt = freshConversationPrefix(state, req.role, resume) + req.prompt;
+
+  const result = await withRateLimitRetry(state, cfg, req.label, 'claude', () =>
+    turn({
+      prompt,
+      sessionId: ensureSlotId(state, slot),
+      resume,
+      permissionMode: claudePermission(access),
+      model: cfg.claude.model,
+      effort: cfg.claude.effort,
+      cwd: req.cwd,
+      jsonSchema: req.jsonSchema,
+      tools: req.tools,
+      timeoutMs: req.timeoutMs,
+      progress: progressOptions(state, cfg, req.label),
+    }),
+  );
+
+  // The slot's marker, not its id: this turn returning is the only evidence
+  // that the conversation exists at all.
+  markSlotStarted(state, cfg, slot, result.sessionId);
+  // Tagged with the model that produced it: the ratio is a fraction of this
+  // model's window and means nothing under another one. Through the shared seam
+  // so the rotation turn in context.ts cannot drift out of step with this one.
+  recordTurnContext(state, cfg.claude.model, result.usage);
+
+  const measured = measuredRatio(state, cfg.claude.model);
+  const ctx = result.usage ? `, ctx ${(result.usage.ratio * 100).toFixed(0)}%` : '';
+  applyCharge(state, cfg, {
+    costUsd: result.costUsd,
+    tokens: result.tokens.total,
+    event: {
+      type: 'claude_turn',
+      data: {
+        label: req.label,
+        costUsd: result.costUsd,
+        tokens: result.tokens.total,
+        turns: result.numTurns,
+        // null rather than the stored figure when this turn reported no usage
+        // and the last measurement belongs to another model: the event log is
+        // the record of what a run did, and a ratio against the wrong window is
+        // not it.
+        contextRatio: measured === null ? null : Number(measured.toFixed(3)),
+      },
+    },
+    describe: () =>
+      `${req.label}: ${fmtTokens(result.tokens.total)} tok, ~$${result.costUsd.toFixed(3)} ` +
+      `(run ${fmtTokens(state.tokensUsed)} tok / ~$${state.costUsd.toFixed(2)}${ctx})`,
+    warnings:
+      result.denials.length > 0
+        ? [`${result.denials.length} permission denial(s) in ${req.label}`]
+        : [],
+  });
+
+  return { text: result.text, structured: null };
 }
 
 /**
@@ -645,13 +1299,29 @@ async function withRateLimitRetry<T>(
   state: RunState,
   cfg: Config,
   label: string,
+  provider: 'claude' | 'codex',
   work: () => Promise<T>,
 ): Promise<T> {
   for (;;) {
     try {
       return await work();
     } catch (err) {
+      // What this attempt spent, whether or not it is retryable, and per attempt
+      // rather than per turn: a turn that burns tokens, fails, waits and burns
+      // them again used to have nothing consulted between the two. Any ceiling
+      // the charge crosses is held rather than thrown - it must not displace
+      // `err`, which has to reach cli.ts as the type it already is - and the
+      // totals it updated are what the check below reads.
+      chargeFailure(state, cfg, err, { label, provider });
+
       if (!(err instanceof RateLimitError)) throw err;
+
+      // Before the wait, not after it, and this is the one place a failed turn's
+      // charge is allowed to end the run: a run already over its ceiling must
+      // not sit out a reset and then spend again. Cost is Claude-only here for
+      // the reason applyCharge records - `state.costUsd` can rise during a Codex
+      // turn from a concurrent rotation.
+      enforceCeilings(state, cfg, provider === 'claude');
 
       const waitMs = plannedWait(err, cfg);
       const minutes = Math.ceil(waitMs / 60_000);
@@ -696,22 +1366,36 @@ function describeReset(err: RateLimitError): string {
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-async function runPlan(state: RunState, cfg: Config, cwd: string): Promise<Plan> {
-  log.step('Claude is planning (read-only)');
-  const text = await claudeStep(state, cfg, {
-    prompt: P.planPrompt(state.task, state.extraContext, state.environment),
-    cwd,
-    permissionMode: 'plan',
-    tools: PLAN_TOOLS,
-    jsonSchema: PLAN_SCHEMA,
-    timeoutMs: cfg.claude.planTimeoutMs,
-    label: 'plan',
-  });
+async function runPlan(
+  state: RunState,
+  cfg: Config,
+  cwd: string,
+  roles: RoleTable,
+  turns: AgentTurns,
+): Promise<Plan> {
+  log.step(`${holderLabel('planner', roles)} is planning (read-only)`);
+  const outcome = await runTurn(
+    state,
+    cfg,
+    {
+      role: 'planner',
+      prompt: P.planPrompt(state.task, state.extraContext, state.environment, roles),
+      cwd,
+      label: 'plan',
+    },
+    turns,
+    roles,
+  );
 
-  const plan = parsePlan(parseStructured(text));
+  const plan = parsePlan(readStructured(outcome));
   state.plan = plan;
   saveState(state);
   artifact(state, `plan-${state.planRound}.json`, plan);
+  // Reconciled here, not only at the round boundaries: this and `revisePlan`
+  // are the only places `state.plan` is persisted, and an artifact that
+  // disagrees with the stored plan is exactly what a run dying before the next
+  // critique would leave behind.
+  writeFollowUps(state, plan);
   log.ok(
     `Plan drafted - ${plan.assumptions.length} assumption(s), ${plan.open_questions.length} open question(s)`,
   );
@@ -723,29 +1407,57 @@ interface ReviseArgs {
   answers?: readonly Answer[] | undefined;
 }
 
-async function revisePlan(state: RunState, cfg: Config, cwd: string, args: ReviseArgs): Promise<Plan> {
+async function revisePlan(
+  state: RunState,
+  cfg: Config,
+  cwd: string,
+  args: ReviseArgs,
+  roles: RoleTable,
+  turns: AgentTurns,
+): Promise<Plan> {
   state.planRound += 1;
   saveState(state);
-  log.step(`Claude is revising the plan (round ${state.planRound})`);
+  log.step(`${holderLabel('planner', roles)} is revising the plan (round ${state.planRound})`);
 
-  const text = await claudeStep(state, cfg, {
-    prompt: P.revisePlanPrompt({
-      findings: args.findings,
-      answers: args.answers,
-      round: state.planRound,
-    }),
-    cwd,
-    permissionMode: 'plan',
-    tools: PLAN_TOOLS,
-    jsonSchema: PLAN_SCHEMA,
-    timeoutMs: cfg.claude.planTimeoutMs,
-    label: `revise-${state.planRound}`,
-  });
+  const outcome = await runTurn(
+    state,
+    cfg,
+    {
+      role: 'planner',
+      prompt: P.revisePlanPrompt({
+        findings: args.findings,
+        answers: args.answers,
+        // The plan of record's boundary, restated: a revision returns the whole
+        // plan, and a session rotated concurrently with the critique would
+        // otherwise re-derive `out_of_scope` from nothing.
+        outOfScope: state.plan?.out_of_scope,
+        round: state.planRound,
+      }),
+      cwd,
+      label: `revise-${state.planRound}`,
+    },
+    turns,
+    roles,
+  );
 
-  const plan = parsePlan(parseStructured(text));
+  const plan = parsePlan(readStructured(outcome));
   state.plan = plan;
+  // Consumed by the same write that persists the plan answering them, which is
+  // the earliest instant at which a second revision would be buying work the
+  // run already has. Two artifact writes follow, and a failure in either used to
+  // leave the findings outstanding beside the revision that answered them.
+  //
+  // Keyed on `args.findings`, so the answers path is untouched: it revises with
+  // `answers` *instead of* the findings, and has therefore consumed nothing.
+  // Assigned rather than routed through `clearPendingFindings` precisely so it
+  // rides on this `saveState` and not a later one.
+  if (args.findings !== undefined) state.pendingFindings = null;
   saveState(state);
   artifact(state, `plan-${state.planRound}.json`, plan);
+  // With the new plan persisted, the follow-ups artifact is reconciled against
+  // it immediately - including deleting it when this revision dropped the last
+  // out-of-scope item and nothing has been deferred.
+  writeFollowUps(state, plan);
   return plan;
 }
 
@@ -755,49 +1467,164 @@ async function revisePlan(state: RunState, cfg: Config, cwd: string, args: Revis
  * a still-unresolved issue under a fresh id each round, which reads as progress
  * when it is actually the same objection.
  */
-async function runCodex(
+async function codexDispatch(
   state: RunState,
   cfg: Config,
-  cwd: string,
-  args: { prompt: string; schemaName: string },
-): Promise<unknown> {
-  const { structured, sessionId, tokens } = await codexTurn({
-    prompt: args.prompt,
-    schema: args.schemaName.startsWith('answers') ? ANSWERS_SCHEMA : FINDINGS_SCHEMA,
-    schemaName: args.schemaName,
-    artifactDir: artifactDir(state, 'codex'),
-    model: cfg.codex.model,
-    effort: cfg.codex.effort,
-    sandbox: cfg.codex.sandbox,
-    cwd,
-    timeoutMs: cfg.codex.timeoutMs,
-    sessionId: cfg.codex.persistSession ? state.codexSessionId : null,
-  });
+  req: DispatchRequest,
+  spec: Pick<RoleSpec, 'access' | 'schema'>,
+  roles: RoleTable,
+  turn: CodexTurnFn,
+): Promise<TurnOutcome> {
+  const slot = slotForRole(req.role, roles);
+  const prompt = freshConversationPrefix(state, req.role, slotHasMemory(state, cfg, slot)) + req.prompt;
 
-  if (cfg.codex.persistSession && sessionId && sessionId !== state.codexSessionId) {
-    const isFirst = state.codexSessionId === null;
-    state.codexSessionId = sessionId;
+  // Through the same retry the Claude turns use, so a Codex rate limit gets the
+  // wait, the maxWaitMinutes cap and the resumable exit that already exist
+  // rather than a second implementation of all three.
+  const { structured, raw, sessionId, tokens } = await withRateLimitRetry(
+    state,
+    cfg,
+    req.label,
+    'codex',
+    async () => {
+      await checkCodexLimits(state, cfg, req.cwd, req.label);
+      return turn({
+        prompt,
+        schema: spec.schema,
+        schemaName: req.label,
+        artifactDir: artifactDir(state, 'codex'),
+        model: cfg.codex.model,
+        effort: cfg.codex.effort,
+        sandbox: codexSandbox(spec.access, cfg),
+        cwd: req.cwd,
+        timeoutMs: req.timeoutMs,
+        sessionId: slotResumeId(state, cfg, slot),
+        progress: progressOptions(state, cfg, req.label),
+      });
+    },
+  );
+
+  // The marker is set whatever the run does with the id: a turn either succeeded
+  // or it did not. `idChanged` is false when this run is not carrying the
+  // thread, when the provider named no usable id, and when it named the one
+  // already stored - so the write and the line below happen exactly where they
+  // always did.
+  const { idChanged, first } = markSlotStarted(state, cfg, slot, sessionId ?? null);
+  if (idChanged) {
     saveState(state);
-    if (isFirst) log.detail(`codex thread ${sessionId}`);
+    if (first) log.detail(`codex thread ${slotId(state, slot) ?? ''}`);
   }
+
+  // The last completed turn's prompt size IS the conversation's occupancy: on a
+  // resumed thread `input_tokens` is the whole conversation going in, not the
+  // increment (see extractTokens in codex.ts). What is reported comes from this
+  // turn and nothing else - a turn that emitted no `turn.completed` usage block
+  // measured nothing, so it says nothing rather than repeating an older figure.
+  const occupancy = turnOccupancy(tokens.input, cfg, slot);
+  // Stored against the thread the provider says this turn ran on, and only when
+  // that is the conversation this slot holds. A run with codex.persistSession off
+  // never adopts the returned id, so nothing is recorded and the id left behind by
+  // an earlier persisted run keeps describing the thread it actually describes.
+  recordSlotOccupancy(state, slot, tokens.input, sessionId ?? null);
+  const warning = occupancy === null ? null : occupancyWarning(state, occupancy, cfg, slot);
+  // Only where a window was configured. A percentage without a denominator vibe
+  // can name is a fabricated figure with a convincing face, so a run that sets
+  // nothing logs exactly the line it logs today.
+  const ctx = occupancy?.ratio == null ? '' : `, ctx ${(occupancy.ratio * 100).toFixed(0)}%`;
 
   // Counted, but deliberately not costed: there is no USD figure to add, and
   // inventing one would make `costUsd` a number nobody could trace to a source.
-  state.tokensUsed += tokens.total;
-  state.codexTokens = (state.codexTokens ?? 0) + tokens.total;
-  recordEvent(state, 'codex_turn', { label: args.schemaName, tokens: tokens.total });
-  log.detail(
-    `${args.schemaName}: ${fmtTokens(tokens.total)} tok, cost not reported ` +
-      `(run ${fmtTokens(state.tokensUsed)} tok / ~$${state.costUsd.toFixed(2)} Claude-side)`,
-  );
-  saveState(state);
-  enforceTokenCeiling(state, cfg);
+  applyCharge(state, cfg, {
+    costUsd: null,
+    tokens: tokens.total,
+    event: {
+      type: 'codex_turn',
+      data: {
+        label: req.label,
+        tokens: tokens.total,
+        // What THIS turn measured: the numerator always, the ratio only when the
+        // window is known. `costUsd` is absent from this event because Codex
+        // reports no cost at all; the prompt size it does report is not withheld
+        // for want of a denominator.
+        ...(occupancy === null ? {} : { contextTokens: occupancy.tokens }),
+        ...(occupancy?.ratio == null ? {} : { contextRatio: Number(occupancy.ratio.toFixed(3)) }),
+      },
+    },
+    describe: () =>
+      `${req.label}: ${fmtTokens(tokens.total)} tok, cost not reported ` +
+      `(run ${fmtTokens(state.tokensUsed)} tok / ~$${state.costUsd.toFixed(2)} Claude-side${ctx})`,
+    warnings: warning === null ? [] : [warning],
+  });
 
-  return structured;
+  // After the emission, never before: `applyCharge` logs the warnings, and a
+  // marker set ahead of it would silence the next turn on behalf of a line that
+  // never printed. In memory only - a run that dies here warns again, which is
+  // the safe direction for a condition nothing can clear.
+  if (warning !== null) markOccupancyWarned(state);
+
+  return { text: raw, structured };
 }
 
-function codexHasMemory(state: RunState, cfg: Config): boolean {
-  return cfg.codex.persistSession && state.codexSessionId !== null;
+/**
+ * Read Codex's rate-limit window before spending a turn against it.
+ *
+ * The Codex side previously had no equivalent of the Claude rate-limit brake at
+ * all: on a subscription the window, not cost, is what ends a long unattended
+ * run, and a turn started against an exhausted window dies partway through
+ * having spent the tokens anyway. Every failure to read is a no-op - the signal
+ * is optional and `readCodexRateLimits` never throws.
+ */
+async function checkCodexLimits(
+  state: RunState,
+  cfg: Config,
+  cwd: string,
+  label: string,
+): Promise<void> {
+  const limits = await readCodexRateLimits(cfg, cwd);
+  if (limits === null) return;
+
+  const decision = decideCodexLimit(limits, cfg.budget.codexLimitPercent);
+  // recordLimits does the fallback rather than this call site: `wait` carries no
+  // window when the server named a reached type this version does not know, and
+  // `proceed` carries none at all.
+  const chosen = decision.action === 'proceed' ? null : decision.window;
+  state.codexRateLimit = recordLimits(limits, chosen);
+  recordEvent(state, 'codex_rate_limit', {
+    label,
+    action: decision.action,
+    usedPercent: limits.usedPercent,
+    reachedType: limits.reachedType,
+  });
+  log.detail(describeLimits(limits));
+
+  if (decision.action === 'wait') {
+    // The cached reading must not survive the wait. budget.maxWaitMinutes may
+    // legally be under a minute, and plannedWait's no-reset branch honours it,
+    // so a retry inside the snapshot TTL would keep re-reading the same
+    // "reached" answer and never see the window clear.
+    invalidateCodexRateLimits();
+    throw new RateLimitError(decision.reason, decision.resetsAt);
+  }
+  if (decision.action === 'stop') {
+    saveState(state);
+    throw new Escalation(EXIT.RATE_LIMITED, decision.reason);
+  }
+}
+
+/**
+ * Whether the conversation this role talks through already carries the run.
+ *
+ * The `roles` parameter is defaulted rather than absent so this cannot become a
+ * second site that ignores an injected table; the two call sites are top-level
+ * loop steps, which are never handed one.
+ */
+function roleHasMemory(
+  state: RunState,
+  cfg: Config,
+  role: Role,
+  roles: RoleTable = rolesFor(cfg),
+): boolean {
+  return slotHasMemory(state, cfg, slotForRole(role, roles));
 }
 
 async function runCritique(
@@ -805,19 +1632,31 @@ async function runCritique(
   cfg: Config,
   cwd: string,
   plan: Plan,
+  roles: RoleTable,
+  turns: AgentTurns,
 ): Promise<FindingsReport> {
-  log.step('Codex is critiquing the plan');
-  const structured = await runCodex(state, cfg, cwd, {
-    prompt: P.critiquePrompt(
-      plan.plan_md,
-      plan.assumptions,
-      state.planRound + 1,
-      codexHasMemory(state, cfg),
-      state.environment,
-    ),
-    schemaName: `critique-${state.planRound}`,
-  });
-  return parseFindings(structured);
+  log.step(`${holderLabel('critic', roles)} is critiquing the plan`);
+  const outcome = await runTurn(
+    state,
+    cfg,
+    {
+      role: 'critic',
+      prompt: P.critiquePrompt(
+        plan.plan_md,
+        plan.assumptions,
+        plan.out_of_scope,
+        state.planRound + 1,
+        roleHasMemory(state, cfg, 'critic', roles),
+        state.environment,
+        roles,
+      ),
+      cwd,
+      label: `critique-${state.planRound}`,
+    },
+    turns,
+    roles,
+  );
+  return parseFindings(readStructured(outcome));
 }
 
 async function runReview(
@@ -825,23 +1664,35 @@ async function runReview(
   cfg: Config,
   cwd: string,
   plan: Plan,
+  roles: RoleTable,
+  turns: AgentTurns,
 ): Promise<FindingsReport> {
-  log.step('Codex is reviewing the implementation');
+  log.step(`${holderLabel('reviewer', roles)} is reviewing the implementation`);
   const diff = await git.diffSince(cwd, state.baseSha);
   const files = await git.changedFiles(cwd, state.baseSha);
 
-  const structured = await runCodex(state, cfg, cwd, {
-    prompt: P.reviewPrompt(
-      diff,
-      files,
-      plan.plan_md,
-      state.reviewRound + 1,
-      codexHasMemory(state, cfg),
-      state.environment,
-    ),
-    schemaName: `review-${state.reviewRound}`,
-  });
-  return parseFindings(structured);
+  const outcome = await runTurn(
+    state,
+    cfg,
+    {
+      role: 'reviewer',
+      prompt: P.reviewPrompt(
+        diff,
+        files,
+        plan.plan_md,
+        plan.out_of_scope,
+        state.reviewRound + 1,
+        roleHasMemory(state, cfg, 'reviewer', roles),
+        state.environment,
+        roles,
+      ),
+      cwd,
+      label: `review-${state.reviewRound}`,
+    },
+    turns,
+    roles,
+  );
+  return parseFindings(readStructured(outcome));
 }
 
 /**
@@ -863,26 +1714,39 @@ async function resolveQuestions(
   cwd: string,
   questions: readonly OpenQuestion[],
   plan: Plan,
+  roles: RoleTable,
+  turns: AgentTurns,
 ): Promise<Answer[]> {
+  const answerer = holderLabel('answerer', roles);
   const blockingCount = questions.filter((q) => q.blocking).length;
   log.heading(
     `${questions.length} open question(s) - ${blockingCount} blocking, ${questions.length - blockingCount} advisory`,
   );
   for (const q of questions) log.info(`- [${q.kind}${q.blocking ? ', blocking' : ''}] ${q.question}`);
 
-  if (!cfg.questions.askCodex) {
+  // Asked of the role, not of the provider: the key is provider-named for
+  // history, but what it gates is whether the answerer takes a turn at all.
+  if (!roleEnabled('answerer', cfg)) {
     const blockers = questions.filter((q) => q.blocking);
     if (blockers.length === 0) return [];
     throw new Escalation(EXIT.NEEDS_HUMAN, 'Blocking questions need answers.', [...blockers]);
   }
 
-  log.step('Codex is answering');
-  const structured = await runCodex(state, cfg, cwd, {
-    prompt: P.answerPrompt(questions, plan.plan_md),
-    schemaName: `answers-${state.planRound}`,
-  });
+  log.step(`${answerer} is answering`);
+  const outcome = await runTurn(
+    state,
+    cfg,
+    {
+      role: 'answerer',
+      prompt: P.answerPrompt(questions, plan.plan_md),
+      cwd,
+      label: `answers-${state.planRound}`,
+    },
+    turns,
+    roles,
+  );
 
-  const { answers } = parseAnswers(structured);
+  const { answers } = parseAnswers(readStructured(outcome));
   artifact(state, `answers-${state.planRound}.json`, answers);
 
   // Every question asked is marked answered regardless of outcome, so a
@@ -902,7 +1766,7 @@ async function resolveQuestions(
   const refusedAdvisory = questions.filter((q) => !q.blocking && refused.some((a) => matches(q, a)));
 
   for (const q of refusedAdvisory) {
-    const reason = refused.find((a) => matches(q, a))?.rationale ?? 'Codex declined to answer.';
+    const reason = refused.find((a) => matches(q, a))?.rationale ?? `${answerer} declined to answer.`;
     state.deferredQuestions.push({
       question: q.question,
       kind: q.kind,
@@ -917,12 +1781,12 @@ async function resolveQuestions(
   if (refusedBlocking.length > 0) {
     throw new Escalation(
       EXIT.NEEDS_HUMAN,
-      `${refusedBlocking.length} blocking question(s) need you - Codex declined to guess at product intent.`,
+      `${refusedBlocking.length} blocking question(s) need you - ${answerer} declined to guess at product intent.`,
       refusedBlocking,
     );
   }
 
-  log.ok(`Codex answered ${usable.length} of ${questions.length} question(s)`);
+  log.ok(`${answerer} answered ${usable.length} of ${questions.length} question(s)`);
   return usable;
 }
 

@@ -1,7 +1,11 @@
-import { writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { writeFileSync, readFileSync, existsSync, renameSync, rmSync } from 'node:fs';
 import path from 'node:path';
+import { attachSpend } from '@src/charge.js';
 import { resolveBin, run } from '@src/proc.js';
-import { detail } from '@src/log.js';
+import type { RunFn } from '@src/proc.js';
+import { detail, warn } from '@src/log.js';
+import { createHeartbeat, parseCodexLine, withHeartbeat } from '@src/progress.js';
+import type { ProgressOptions } from '@src/progress.js';
 import type { Effort, Sandbox, TokenUsage } from '@src/types.js';
 
 let cachedBin: string | null = null;
@@ -32,7 +36,13 @@ export function codexBin(): string {
 
 export interface CodexTurnOptions {
   prompt: string;
-  schema: object;
+  /**
+   * The shape the final message must take, or omitted for a turn whose product
+   * is the working tree rather than a verdict - an implementing Codex role.
+   * `-o` (`--output-last-message`) is what writes the file either way;
+   * `--output-schema` only constrains what goes in it.
+   */
+  schema?: object | undefined;
   schemaName: string;
   artifactDir: string;
   model: string;
@@ -42,9 +52,12 @@ export interface CodexTurnOptions {
   timeoutMs: number;
   /** Existing Codex thread to continue. Null starts a new one. */
   sessionId?: string | null | undefined;
+  /** Live progress. Omitted disables it entirely, which is what preflight wants. */
+  progress?: ProgressOptions | undefined;
 }
 
 export interface CodexTurnResult {
+  /** The parsed output, or null for a turn that was given no schema. */
   structured: unknown;
   raw: string;
   /** Thread id for this turn, to be passed back on the next call. */
@@ -71,6 +84,13 @@ interface CodexEvents {
   tokens: TokenUsage;
   /** Message from a `turn.failed` or top-level `error` event, for diagnostics. */
   failure: string | null;
+  /**
+   * A `turn.failed` event: Codex's own verdict on the turn, as distinct from a
+   * top-level `error`, which it also emits for conditions it goes on to recover
+   * from. Only the verdict fails the turn - treating every `error` as fatal
+   * would fail turns that completed.
+   */
+  failed: boolean;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -113,7 +133,7 @@ function extractTokens(usage: Record<string, unknown>): TokenUsage {
  * and losing a token count is not worth losing the work for.
  */
 function parseEvents(stdout: string): CodexEvents {
-  const out: CodexEvents = { threadId: null, tokens: ZERO_TOKENS, failure: null };
+  const out: CodexEvents = { threadId: null, tokens: ZERO_TOKENS, failure: null, failed: false };
 
   for (const line of stdout.split(/\r?\n/)) {
     const trimmed = line.trim();
@@ -135,9 +155,145 @@ function parseEvents(stdout: string): CodexEvents {
       const err = event['error'];
       const message = isRecord(err) ? err['message'] : event['message'];
       if (typeof message === 'string') out.failure = message;
+      if (event['type'] === 'turn.failed') out.failed = true;
     }
   }
   return out;
+}
+
+/** One string seen in the event stream, with what the stream said about it. */
+export interface ProbeString {
+  value: string;
+  /** From a streaming partial (`item.updated`, a `*.delta` type) - a prefix, not a result. */
+  partial: boolean;
+  /**
+   * An envelope field or a tool's input: it describes the turn rather than
+   * answering it, so it is never the probe record.
+   */
+  meta: boolean;
+}
+
+export interface CodexProbeStream {
+  /** Every string in the stream, in the order it arrived. */
+  strings: readonly ProbeString[];
+  /** Null when no `turn.completed` usage block was seen. */
+  tokens: TokenUsage | null;
+  /** Lines that were not JSON at all - what plain `exec` would have printed. */
+  plain: string;
+}
+
+/**
+ * Keys whose strings describe the turn or feed a tool, rather than answering.
+ *
+ * Two groups, and both matter. The envelope names (`type`, `id`, ...) would
+ * otherwise be spliced between the fragments of a streamed reply, corrupting
+ * the very record the reassembly exists to recover. The input names (`command`,
+ * `prompt`, ...) are what vibe or the model sent, and the probe prompt names
+ * both sentinels itself, so a command echoing them must not pass as the answer.
+ */
+const META_KEYS: ReadonlySet<string> = new Set([
+  // Envelope.
+  'type',
+  'id',
+  'item_id',
+  'thread_id',
+  'turn_id',
+  'role',
+  'status',
+  'model',
+  // Input.
+  'command',
+  'input',
+  'prompt',
+  'instructions',
+  'arguments',
+  'argv',
+  'cwd',
+]);
+
+/**
+ * Read a probe turn's `--json` stream: its token usage, and every string in it.
+ *
+ * Deliberately sentinel-agnostic, and deliberately keyed off nothing but the
+ * event `type` prefix: this module knows the wire format, not what the probe is
+ * looking for. Choosing which of these strings holds the probe record is
+ * `selectProbeTranscript`'s job, in the adapter that owns the sentinels. Keying
+ * this off `item.completed` or `agent_message` would couple token accounting to
+ * item names that cannot be verified without a live Codex.
+ */
+export function parseProbeStream(stdout: string): CodexProbeStream {
+  const strings: ProbeString[] = [];
+  const plain: string[] = [];
+  let tokens: TokenUsage | null = null;
+
+  for (const line of stdout.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed === '') continue;
+
+    let event: unknown = null;
+    if (trimmed.startsWith('{')) {
+      try {
+        event = JSON.parse(trimmed);
+      } catch {
+        event = null;
+      }
+    }
+    if (!isRecord(event)) {
+      plain.push(line);
+      continue;
+    }
+
+    const type = typeof event['type'] === 'string' ? event['type'] : '';
+    if (type === 'turn.completed' && isRecord(event['usage'])) {
+      tokens = extractTokens(event['usage']);
+      continue;
+    }
+    collectStrings(event, type === 'item.updated' || type.endsWith('.delta'), false, strings);
+  }
+
+  return { strings, tokens, plain: plain.join('\n') };
+}
+
+/**
+ * Every string under `value`, in order, carrying down what the event said about it.
+ *
+ * `meta` is inherited rather than tested per level: the elements of a `command`
+ * array are as much input as the array itself.
+ */
+function collectStrings(
+  value: unknown,
+  partial: boolean,
+  meta: boolean,
+  out: ProbeString[],
+): void {
+  if (typeof value === 'string') {
+    if (value !== '') out.push({ value, partial, meta });
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectStrings(item, partial, meta, out);
+    return;
+  }
+  if (!isRecord(value)) return;
+  for (const [key, nested] of Object.entries(value)) {
+    collectStrings(nested, partial, meta || META_KEYS.has(key), out);
+  }
+}
+
+/**
+ * Clear `file`, keeping its content at `keepAt` if there was any.
+ *
+ * The removal is what matters and must happen either way: if the rename fails -
+ * a locked file, a directory that has gone away - the file is deleted instead,
+ * because leaving it would let the next turn mistake it for its own output.
+ */
+function supersede(file: string, keepAt: string): void {
+  if (!existsSync(file)) return;
+  try {
+    renameSync(file, keepAt);
+  } catch {
+    rmSync(file, { force: true });
+  }
 }
 
 /**
@@ -149,14 +305,43 @@ function parseEvents(stdout: string): CodexEvents {
  * When `sessionId` is supplied the turn continues that thread via
  * `codex exec resume`, so the reviewer keeps everything it already worked out
  * about this repo and knows which findings it has already raised.
+ *
+ * **What counts as a failed turn.** A `turn.failed` verdict, or no parseable
+ * structured output written by this child. Not the exit status: a non-zero exit
+ * alongside a schema-conformant output file means teardown failed after the work
+ * was done, so it is warned about and accepted rather than discarding a turn
+ * that has already been paid for. Deterministic tools are judged the other way
+ * round; see git.ts and verify.ts.
+ *
+ * `exec` is injected so the adapter's boundary with the heartbeat can be tested
+ * without spawning a real agent, as `rotateSession` and `ClaudeProbeExecutor`
+ * already are.
  */
-export async function codexTurn(options: CodexTurnOptions): Promise<CodexTurnResult> {
+export async function codexTurn(
+  options: CodexTurnOptions,
+  exec: RunFn = run,
+): Promise<CodexTurnResult> {
   const { prompt, schema, schemaName, artifactDir, model, effort, sandbox, cwd, timeoutMs, sessionId } =
     options;
 
   const schemaFile = path.join(artifactDir, `${schemaName}.schema.json`);
   const outFile = path.join(artifactDir, `${schemaName}.out.json`);
-  writeFileSync(schemaFile, JSON.stringify(schema, null, 2), 'utf8');
+  // No schema, no schema file: a writing role's product is the tree, and its
+  // final message is a report. Writing an empty one would leave an artifact
+  // claiming a contract this turn was never held to.
+  if (schema !== undefined) writeFileSync(schemaFile, JSON.stringify(schema, null, 2), 'utf8');
+  // Moved aside before the child runs, because the name is derived from the
+  // round (`review-2`) and withRateLimitRetry re-runs the same turn under the
+  // same name. Left in place, a retry whose child wrote nothing found the
+  // previous attempt's file, parsed it, and reported a superseded result as this
+  // turn's - a failed turn passing as a successful one by way of the filesystem.
+  //
+  // Renamed rather than deleted: nothing else persists a rejected turn's raw
+  // output (runCodex keeps only the parsed structure), so deleting it would make
+  // the attempt that went wrong the one attempt with no evidence left. One slot,
+  // overwritten by the next supersede - the point is diagnosing the last
+  // failure, not keeping a history.
+  supersede(outFile, path.join(artifactDir, `${schemaName}.superseded.json`));
 
   // `resume` accepts neither -C nor -s: it takes its working directory from the
   // spawned process cwd, and its sandbox defaults to read-only. It does NOT
@@ -165,6 +350,11 @@ export async function codexTurn(options: CodexTurnOptions): Promise<CodexTurnRes
   // `--json` turns stdout into JSONL, which is the only way Codex reports token
   // usage. It does not change what lands in `outFile`, so the result path is
   // unaffected; it is accepted by both `exec` and `exec resume`.
+  // Only when there is a schema to enforce. `-o` is `--output-last-message` and
+  // stands alone, so a schema-less turn still writes its final message to the
+  // same file - which is what the result path reads either way.
+  const schemaArgs = schema === undefined ? [] : ['--output-schema', schemaFile];
+
   const args: string[] = sessionId
     ? [
         'exec', 'resume', sessionId,
@@ -172,7 +362,7 @@ export async function codexTurn(options: CodexTurnOptions): Promise<CodexTurnRes
         '-m', model,
         '-c', `model_reasoning_effort="${effort}"`,
         '--skip-git-repo-check',
-        '--output-schema', schemaFile,
+        ...schemaArgs,
         '-o', outFile,
         '-',
       ]
@@ -184,40 +374,89 @@ export async function codexTurn(options: CodexTurnOptions): Promise<CodexTurnRes
         '-s', sandbox,
         '--skip-git-repo-check',
         '-C', cwd,
-        '--output-schema', schemaFile,
+        ...schemaArgs,
         '-o', outFile,
         '-',
       ];
 
   detail(`codex ${sessionId ? 'resume' : 'exec'} -m ${model} (${effort}) -> ${schemaName}`);
 
-  const { code, stdout, stderr } = await run(codexBin(), args, { input: prompt, cwd, timeoutMs });
+  const heartbeat = options.progress
+    ? createHeartbeat({ ...options.progress, parse: parseCodexLine, unit: 'event' })
+    : null;
+  // Validation runs inside the heartbeat's work, not after it: the end-of-turn
+  // flush is a claim that the turn completed, and while only `run()` was wrapped
+  // a turn that wrote no usable output still persisted as one that had.
+  return withHeartbeat(heartbeat, async () => {
+    const { code, stdout, stderr } = await exec(codexBin(), args, {
+      input: prompt,
+      cwd,
+      timeoutMs,
+      ...(heartbeat === null ? {} : { onLine: heartbeat.onLine }),
+    });
 
-  const events = parseEvents(stdout);
-  const returnedSession = events.threadId ?? SESSION_ID_RE.exec(stderr)?.[1] ?? sessionId ?? null;
+    const events = parseEvents(stdout);
+    const returnedSession = events.threadId ?? SESSION_ID_RE.exec(stderr)?.[1] ?? sessionId ?? null;
 
-  if (!existsSync(outFile)) {
-    // `turn.failed` states the actual cause (a bad model name, a refused
-    // request); the raw streams are the fallback when it does not.
-    const cause = events.failure === null ? '' : `\ncodex reported: ${events.failure}`;
-    throw new Error(
-      `codex wrote no structured output (exit ${code}).${cause}\n` +
-        `stderr:\n${stderr.slice(-2000)}\nstdout:\n${stdout.slice(-1000)}`,
-    );
-  }
+    // What the turn spent before it failed. `parseEvents` has already read the
+    // `turn.completed` usage block by this point, so every throw below can carry
+    // it out and let the dispatch layer charge the failure through the shared
+    // accounting rather than losing it. `costUsd` is null, not zero: Codex
+    // reports no cost, and that is the distinction `applyCharge` routes on.
+    // Where no `turn.completed` was seen this is ZERO_TOKENS, and `attachSpend`
+    // records nothing at all for it: a turn that reported no usage and one that
+    // reported none worth charging are the same answer to the only question the
+    // accounting asks, so `spendOf` says null for both.
+    const spent = { costUsd: null, tokens: events.tokens.total };
 
-  // Always read as UTF-8: Codex emits smart quotes and em dashes that mangle
-  // under the Windows ANSI codepage.
-  const raw = readFileSync(outFile, 'utf8');
-  try {
-    return {
-      structured: JSON.parse(raw) as unknown,
-      raw,
-      sessionId: returnedSession,
-      tokens: events.tokens,
-    };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`codex output was not valid JSON: ${message}\n${raw.slice(0, 1500)}`);
-  }
+    if (!existsSync(outFile)) {
+      // `turn.failed` states the actual cause (a bad model name, a refused
+      // request); the raw streams are the fallback when it does not.
+      const cause = events.failure === null ? '' : `\ncodex reported: ${events.failure}`;
+      throw attachSpend(
+        new Error(
+          `codex wrote no structured output (exit ${code}).${cause}\n` +
+            `stderr:\n${stderr.slice(-2000)}\nstdout:\n${stdout.slice(-1000)}`,
+        ),
+        spent,
+      );
+    }
+
+    if (events.failed) {
+      // Checked even though a file exists. `turn.failed` is Codex's own verdict,
+      // and a file beside it is either a partial write or an artifact of an
+      // earlier phase of the same turn; accepting it would hand the loop a
+      // result the agent said was not one.
+      throw attachSpend(
+        new Error(`codex reported the turn failed (exit ${code}): ${events.failure ?? 'no detail'}`),
+        spent,
+      );
+    }
+
+    // Always read as UTF-8: Codex emits smart quotes and em dashes that mangle
+    // under the Windows ANSI codepage.
+    const raw = readFileSync(outFile, 'utf8');
+    // Parsed only where a schema was asked for. A writing turn's last message is
+    // a report in prose, and demanding JSON of it would fail a turn that did
+    // exactly what it was told - the same distinction `structured: null` states.
+    let structured: unknown = null;
+    if (schema !== undefined) {
+      try {
+        structured = JSON.parse(raw) as unknown;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        throw attachSpend(
+          new Error(`codex output was not valid JSON: ${message}\n${raw.slice(0, 1500)}`),
+          spent,
+        );
+      }
+    }
+
+    if (code !== 0) {
+      // Logged, not thrown: see the exit-status note above.
+      warn(`codex exited ${String(code)} but wrote schema-conformant output; accepting it.`);
+    }
+
+    return { structured, raw, sessionId: returnedSession, tokens: events.tokens };
+  });
 }
