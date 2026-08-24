@@ -184,7 +184,15 @@ async function runPhases(
       cfg,
       {
         role: 'implementer',
-        prompt: P.implementPrompt(plan.plan_md, state.carried ?? []),
+        // Re-filtered rather than trusted, as `writeFollowUps` re-filters:
+        // `validateStoredState` checks a stored finding's shape but not its
+        // severity or its `defer`, and the section this feeds asserts in prose
+        // that everything in it was agreed non-blocking.
+        prompt: P.implementPrompt(
+          plan.plan_md,
+          state.carried ?? [],
+          (state.declined ?? []).filter(isDeferrable),
+        ),
         cwd,
         label: 'implement',
       },
@@ -344,9 +352,18 @@ async function planPhase(
       } else {
         log.ok(`Plan approved - ${critique.findings.length} non-blocking finding(s)`);
       }
+      // The one round whose findings reach nobody otherwise: a revising round
+      // hands its deferrals to the planner through `pendingFindings`, and this
+      // one is about to clear them. Recorded, not acted on - `defer` decides
+      // what a later prompt is told, never whether a turn happens. Assigned
+      // unconditionally so an approving round that declined nothing cannot
+      // leave an earlier round's value standing, and written on the same state
+      // save that clears the pending findings below.
+      state.declined = critique.findings.filter(isDeferrable);
       recordEvent(state, 'plan_approved', {
         findings: critique.findings.length,
         carried: decision.tolerated.map((f) => f.id),
+        declined: state.declined.map((f) => f.id),
       });
       // An approved plan has nothing outstanding: what the gate tolerated
       // travels on `state.carried` into implementation, and leaving these set
