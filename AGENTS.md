@@ -98,9 +98,16 @@ than the module (`convergence.test.ts`, `failure-accounting.test.ts`,
 - **No network, no real agent invocations.** `tests/helpers/fake-transport.ts` and
   `tests/helpers/stub-server.ts` are the injection points.
 
-The phase loop itself is not yet drivable from a test — there is no harness that can run
-`planPhase`/`reviewPhase` with injected agents and git. Until there is, changes to the loop
-get verified with a throwaway script against `dist/`, and the results go in the PR body.
+The phase loop **is** drivable from a test: `tests/helpers/loop-harness.ts` runs `orchestrate`
+end to end with injected agents that record every turn's label in order, a run state in a
+temp directory, a real `git` repo it can commit to, and a `verify.command` the case controls
+— so the verification gate, the carried-P1 final round, the per-round commits and the
+question/escalation/resume path are all reachable. `full-loop.test.ts`,
+`verification-gate.test.ts`, `final-fix-round.test.ts`, `question-escalation.test.ts` and
+`pending-findings.test.ts` are the callers; start from whichever is closest to the phase you
+are changing. Git and verification are deliberately real, not seams — see the harness header
+for why. Anything it still cannot reach (a rate-limit wait, a session rotation) gets a
+throwaway script against `dist/`, with the results in the PR body.
 
 ## Branches, commits and pull requests
 
