@@ -385,10 +385,17 @@ export function implementPrompt(
   // posture, and the same basename-only reference to the artifact - it lives in
   // the run directory, and a path stated here would be one the code does not
   // produce.
+  //
+  // It allows the plan to name a declined finding rather than denying it can.
+  // `revisePlanPrompt` asks the planner to record deferred work under
+  // `out_of_scope` and `renderPlanDoc` prints that boundary, so an earlier
+  // round's deferral may well appear in the plan the implementer is reading;
+  // saying the plan "may not mention them" invited that to be read as a
+  // prohibition, contradicting a boundary the plan legitimately states.
   const notDoing =
     declined.length === 0
       ? ''
-      : `\n## Declined by the reviewer - not work for this change\n\nThe reviewer marked these **deferred**: real, and agreed to belong in separate effort rather than in this change. They are recorded in FOLLOW-UPS.md. Unlike anything listed above, these are work to **not** do - the plan may not mention them at all, so do not fold them in as you implement. If you think one has to be fixed inside this change, say so in your report rather than fixing it silently.\n\n${declined
+      : `\n## Declined by the reviewer - not work for this change\n\nThe reviewer marked these **deferred**: real, and agreed to belong in separate effort rather than in this change. They are recorded in FOLLOW-UPS.md. Unlike anything listed above, these are work to **not** do. The plan may name one under its out-of-scope boundary or may not mention it at all; either way, do not treat it as in-scope work and do not fold it in as you implement. If you think one has to be fixed inside this change, say so in your report rather than fixing it silently.\n\n${declined
           .map(findingBullet)
           .join('\n')}\n`;
 

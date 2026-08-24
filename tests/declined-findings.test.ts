@@ -60,8 +60,14 @@ interface Driven {
  * file is about; the writing turns still touch the tree so the per-round
  * commits are not vacuous.
  */
-async function drive(findings: readonly Finding[], loop = {}): Promise<Driven> {
+async function drive(
+  findings: readonly Finding[],
+  loop = {},
+  /** Mutate the run state before the loop sees it, to stand it up mid-history. */
+  seed?: (state: RunState) => void,
+): Promise<Driven> {
   const state = fullRun();
+  seed?.(state);
   const calls: string[] = [];
   const prompts = new Map<string, string>();
 
@@ -121,6 +127,29 @@ test('the approving round records its deferrals on the run state and in the even
 
 // ---- what the implementer is told ------------------------------------------
 
+test('an approving round with no deferrals clears what an earlier one recorded', async () => {
+  // The assignment is unconditional on purpose, and nothing else pins that:
+  // making it conditional on a non-empty list passes every other case here,
+  // while leaking a stale finding into the implementation prompt as work the
+  // reviewer never declined this time round.
+  //
+  // The stale value is reachable across a resume that re-enters planning, so
+  // it is seeded rather than manufactured through a second live round.
+  const stale = findingFixture({ id: 'stale-from-before', severity: 'P2', defer: true });
+  const { state, prompts } = await drive([], {}, (s) => {
+    s.declined = [stale];
+  });
+
+  assert.deepEqual(state.declined, [], 'the approving round owns the field outright');
+  const approved = state.events.filter((e) => e.type === 'plan_approved');
+  assert.deepEqual(approved[0]?.['declined'], []);
+
+  const prompt = prompts.get('implement');
+  assert.ok(prompt !== undefined);
+  assert.ok(!prompt.includes('stale-from-before'), 'the earlier round must not speak for this one');
+  assert.ok(!prompt.includes(DECLINED_HEADING));
+});
+
 test('the declined finding reaches the implementation prompt in its own section', async () => {
   const prompt = implementPromptOf(await drive([DECLINED]));
 
@@ -159,6 +188,41 @@ test('an empty declined list changes not one byte of the prompt', () => {
   const md = planFixture().plan_md;
   assert.equal(implementPrompt(md, [], []), implementPrompt(md));
   assert.equal(implementPrompt(md, [p1('carried-one')], []), implementPrompt(md, [p1('carried-one')]));
+});
+
+test('the carried section still renders exactly what it rendered before this change', () => {
+  // The case above compares the new renderer to itself, so it cannot see a
+  // drift introduced by lifting `findingBullet` out of the inline map - both
+  // sides would drift together. This is the missing half: the literal is the
+  // output of the pre-change build at 37c6fc2, captured by rendering it.
+  //
+  // Acceptance criterion 4 is about the prompt a no-deferral run produces, and
+  // a prompt is the model's input - a moved byte is a changed input.
+  const before =
+    '## Known open issues with this plan\n\n' +
+    'The reviewer raised these and they were **not** resolved before implementation, ' +
+    'because they are the kind of question that is settled by running the code rather ' +
+    'than by more discussion. Treat them as work items: resolve each one as you ' +
+    'implement, and say in your report what you did about it.\n\n' +
+    '- **A carried title** `carried-one`\n' +
+    '  A carried detail.\n' +
+    '  *Suggested fix:* A carried fix.\n';
+
+  const carried: Finding = {
+    id: 'carried-one',
+    severity: 'P1',
+    title: 'A carried title',
+    detail: 'A carried detail.',
+    suggested_fix: 'A carried fix.',
+    defer: false,
+  };
+  const rendered = implementPrompt('PLAN_BODY', [carried]);
+
+  assert.equal(rendered.slice(rendered.indexOf(CARRIED_HEADING)), before);
+  // And the whole prompt, not just the section, so the header sentence and the
+  // plan body are pinned too.
+  assert.ok(rendered.startsWith('The plan below has been reviewed. 1 open issue(s)'));
+  assert.ok(rendered.includes('PLAN_BODY'));
 });
 
 // ---- across a stop ----------------------------------------------------------
