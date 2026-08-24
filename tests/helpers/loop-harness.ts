@@ -29,10 +29,16 @@ import type {
  * #34, so the expensive, non-deterministic half of a run is already injectable.
  * What was missing was somewhere to keep the *other* half: the neutered config,
  * the temp-directory run state, the git repo, and a verification command a test
- * controls. Two files had built all four independently, and because neither was
- * testing them, both switched `verify`, `context` and `git.commitEachRound` off
- * - which left the verification gate, the carried-P1 final round, the commits
- * and the question/escalation/resume path unreachable from any test.
+ * controls. Two files had built all four independently.
+ *
+ * Not all of it was unreachable before. `pending-findings.test.ts` already drove
+ * a real marker-file `verify.command` in two of its cases, so a *passing* gate
+ * and a gate that fails once were covered. What no test could reach was the
+ * verification failure feeding the fix loop and its own round cap, the
+ * unlaunchable-command escalation, the carried-P1 final round, the per-round
+ * commits, and the question/escalation/resume path - because the shared config
+ * builder in both files switched `verify`, `context` and `git.commitEachRound`
+ * off and only individual cases opted back in.
  *
  * Git and verification are deliberately real. The turn seam covers the part
  * that costs money and cannot be relied on to repeat; a temp directory and a
@@ -430,11 +436,26 @@ export function answerNeedsInput(
   const filled = raw.replace(/\*\*Your answer:\*\*\n\n> /g, () => {
     const question = questions[index] ?? '';
     index += 1;
-    return `**Your answer:**\n\n> ${answer(question)}`;
+    // Every line carries its own "> ". `parseHumanAnswers` reads blockquote
+    // lines, so a multiline answer written under a single marker keeps its
+    // first line and silently loses the rest - and a case asserting on a
+    // multi-sentence answer would be asserting on a truncation.
+    const quoted = answer(question).split('\n').join('\n> ');
+    return `**Your answer:**\n\n> ${quoted}`;
   });
   writeFileSync(file, filled, 'utf8');
 
   const answers = parseHumanAnswers(filled);
+  // `cmdResume` refuses at src/cli.ts:428 - it returns EXIT.NEEDS_HUMAN before
+  // touching the state or retiring the file, so an unanswered escalation stays
+  // answerable. Mirroring that matters more here than it looks: a harness that
+  // saved and renamed anyway would let a case resume against no answers at all
+  // and still read as though it had exercised the path.
+  if (answers.length === 0) {
+    throw new Error(
+      'answerNeedsInput parsed no answers - NEEDS-INPUT.md is left in place, as cmdResume leaves it',
+    );
+  }
   state.pendingAnswers = answers;
   saveState(state);
   renameSync(file, path.join(state.dir, `answered-${state.planRound}.md`));

@@ -54,9 +54,13 @@ test('a failing command becomes a P0 that the fix loop answers', async () => {
   assert.equal(existsSync(path.join(state.dir, 'verify-failure-0.txt')), true);
   assert.equal(existsSync(path.join(state.dir, 'verify-fix-1.md')), true);
 
-  const kinds = state.events.map((e) => e.type);
-  assert.ok(kinds.includes('verify_failed'));
-  assert.ok(kinds.includes('verify_passed'));
+  // Order, not just presence. The failure has to precede the proof of the fix,
+  // and two `includes` checks are satisfied by the reverse sequence just as
+  // happily - which would be a gate that passed and then started failing.
+  const gate = state.events
+    .map((e) => e.type)
+    .filter((type) => type === 'verify_failed' || type === 'verify_passed');
+  assert.deepEqual(gate, ['verify_failed', 'verify_passed']);
   // Twice: the run that failed, and the one that proved the fix.
   assert.equal(verifyRuns(state), 2);
 });

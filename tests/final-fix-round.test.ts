@@ -21,7 +21,7 @@ import {
  * fix round that is committed and re-verified, and deliberately not re-reviewed.
  *
  * `pending-findings.test.ts` already pins the artifacts this round writes and
- * the order it writes them in. What it cannot see - because it runs with
+ * the order it writes them in. What it cannot see - because those cases run with
  * `verify` and `git.commitEachRound` off - is the other half of the contract:
  * the fix is committed like any other round, and the loop goes back to the top
  * once so the gate can prove the fix broke nothing. Both are what makes
