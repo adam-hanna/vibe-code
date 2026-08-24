@@ -399,8 +399,9 @@ export interface Plan {
    * it, where both cases legitimately contribute nothing.
    *
    * Optional in TypeScript, required in `PLAN_SCHEMA`: the schema governs fresh
-   * model output, while `loadRun` casts stored JSON with no validation and must
-   * keep loading runs recorded before this existed.
+   * model output, while `validateStoredState` reads stored JSON tolerantly and
+   * must keep loading runs recorded before this existed - which is why it
+   * preserves an absent `out_of_scope` rather than filling one in.
    */
   out_of_scope?: OutOfScopeItem[];
 }
@@ -729,9 +730,11 @@ export interface RunState {
    * to re-derive an answer the run already had, byte for byte, and appended a
    * second `RoundRecord` for a plan that had not changed.
    *
-   * Optional, and absent means "nothing unconsumed": `loadRun` casts stored
-   * JSON with no validation, so a state written before this field existed has
-   * none, and that is precisely what such a run meant.
+   * Optional, and absent means "nothing unconsumed": a state written before this
+   * field existed has none, and that is precisely what such a run meant. An
+   * explicit `null` is the ordinary post-consumption value `clearPendingFindings`
+   * writes, and `validateStoredState` keeps it as it is - it is healthy, not
+   * damage.
    */
   pendingFindings?: PendingFindings | null;
   extraContext: string | null;
@@ -741,5 +744,12 @@ export interface RunSummary {
   id: string;
   status: string;
   task: string;
-  costUsd: number;
+  /**
+   * Null when the file could not be read, or held something that is not a cost.
+   *
+   * Not zero: `$0.00` asserts that an unreadable run cost nothing, which is the
+   * fabricated figure this codebase refuses everywhere else - an unknown Codex
+   * cost is reported as absent, an unknown context window stays null.
+   */
+  costUsd: number | null;
 }

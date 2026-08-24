@@ -117,8 +117,10 @@ const DEFAULT_SLOT: Readonly<Record<AgentProvider, SlotName>> = {
  *
  * Loud about a provider it does not recognise rather than indexing
  * `DEFAULT_SLOT` with garbage. Config validation normally makes that
- * unreachable, but `loadRun` casts a stored `state.config` with no validation at
- * all, and an error naming the role beats a crash three frames away.
+ * unreachable, but `state.config` is the one field `validateStoredState`
+ * deliberately passes through unchecked - `applyOverrides` validates it on the
+ * path that uses it - and an error naming the role beats a crash three frames
+ * away.
  */
 export function tableFor(providers: RoleProviders): RoleTable {
   if (!isRecord(providers)) {

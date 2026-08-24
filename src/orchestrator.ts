@@ -32,7 +32,6 @@ import {
   assessConvergence,
   clearPendingFindings,
   hasArtifact,
-  hasFindingShape,
   measuredRatio,
   p1Signature,
   persistenceNotice,
@@ -44,6 +43,7 @@ import {
   saveState,
   takePendingFindings,
 } from '@src/run.js';
+import { hasFindingShape } from '@src/stored.js';
 import {
   blockers as blockingFindings,
   gate,
@@ -620,8 +620,9 @@ async function runFixRound(
  * later finishes clean while pointing at a file that does not exist. Recovered
  * from `state.outstanding` rather than from the carried findings so it holds
  * however far that sequence got, and skipped when the file is already there so
- * a good artifact is never rewritten. Stored state is unvalidated, hence the
- * shape check: this artifact makes claims about what is in it.
+ * a good artifact is never rewritten. `validateStoredState` now owns that
+ * invariant on the way in; the shape check remains as defence in depth, because
+ * this artifact makes claims about what is in it.
  *
  * Call it from ONE place, and only that one: after `runGate` has come back
  * clean, immediately before the completion branch. The document states that the
@@ -668,8 +669,9 @@ function renderOutstanding(state: RunState, findings: readonly Finding[]): strin
 /**
  * What may appear in FOLLOW-UPS.md.
  *
- * Written against `unknown` on purpose: `loadRun` casts stored JSON with no
- * validation, so an entry in `state.deferred` is a `Finding` by assertion only.
+ * Written against `unknown` on purpose. `validateStoredState` now owns this
+ * invariant on the way in; the check remains as defence in depth, since the
+ * field is also appended to mid-run from parsed model output.
  * Severity is checked as well as `defer`, even though `parseFindings` already
  * normalises, because the artifact this feeds asserts in prose that everything
  * in it was non-blocking - and an invariant a boundary states should be one the
@@ -685,11 +687,11 @@ function isDeferrable(f: unknown): f is Finding {
 /**
  * The stored list, or null when the field is genuinely absent. Never throws.
  *
- * The `unknown` hop is the point: the declared `Finding[]` is an assertion over
- * stored JSON, and a present non-array - `null`, a string, an object - would
- * make `.filter` throw inside the code resume calls before it can reconcile
- * anything. Such a value is dirty rather than absent, so it reads as an empty
- * list and gets replaced.
+ * The `unknown` hop is defence in depth, kept now that `validateStoredState`
+ * owns the invariant on the way in: a present non-array - `null`, a string, an
+ * object - would make `.filter` throw inside the code resume calls before it can
+ * reconcile anything. Such a value is dirty rather than absent, so it reads as
+ * an empty list and gets replaced.
  */
 function storedDeferred(state: RunState): readonly unknown[] | null {
   const raw: unknown = state.deferred;
@@ -826,9 +828,10 @@ export function writeFollowUps(state: RunState, plan: Plan): string | null {
  * on the way down for exactly this reason; this is the same thought applied to
  * the one place a run starts from stored state.
  *
- * The empty collection is deliberate: stored state is unvalidated and the
- * artifact asserts its own contents were non-blocking, so it is sanitised
- * before being rendered rather than after.
+ * The empty collection is deliberate: the artifact asserts its own contents were
+ * non-blocking, so it is sanitised before being rendered rather than after.
+ * `validateStoredState` now owns the same invariant on the way in; this stays as
+ * defence in depth.
  */
 export function reconcileFollowUps(state: RunState): string | null {
   const plan = state.plan;

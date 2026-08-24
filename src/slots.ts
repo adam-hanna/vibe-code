@@ -115,11 +115,12 @@ function asId(raw: string | null | undefined): string | null {
 /**
  * A usable conversation id: a non-empty string, or null for anything else.
  *
- * Not `asId`, which is typed for ids this codebase produced. Stored state is
- * unvalidated JSON (`loadRun` casts it), so the value read back may not be a
- * string at all, and a measurement compared against a number or an object would
- * be attributed on the strength of a coincidence. Everything that is not an id
- * fails closed to null, which matches nothing.
+ * Not `asId`, which is typed for ids this codebase produced. `validateStoredState`
+ * now owns this invariant on the way in; the check remains as defence in depth,
+ * because a measurement compared against a number or an object would be
+ * attributed on the strength of a coincidence, and these fields are also written
+ * mid-run from provider output. Everything that is not an id fails closed to
+ * null, which matches nothing.
  */
 function usableId(raw: unknown): string | null {
   return typeof raw === 'string' && raw !== '' ? raw : null;
