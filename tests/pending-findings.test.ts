@@ -1,22 +1,24 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { DEFAULTS } from '@src/config.js';
-import { Escalation, EXIT, orchestrate } from '@src/orchestrator.js';
-import type { AgentTurns } from '@src/orchestrator.js';
-import { createRun, takePendingFindings } from '@src/run.js';
-import type {
-  ClaudeTurnResult,
-  Config,
-  Finding,
-  LoopConfig,
-  Plan,
-  RunState,
-  TokenUsage,
-} from '@src/types.js';
+import { Escalation, orchestrate } from '@src/orchestrator.js';
+import { takePendingFindings } from '@src/run.js';
+import type { RunState } from '@src/types.js';
+import {
+  agents,
+  BLOCKING,
+  config,
+  onceThenApprove,
+  p1,
+  planFixture,
+  report,
+  freshRun as harnessFreshRun,
+  reviewingRun as harnessReviewingRun,
+  stalledPlan,
+  stalledReview,
+} from './helpers/loop-harness.js';
 
 /**
  * What a stalled run does with the findings it has already paid for.
@@ -31,164 +33,21 @@ import type {
  * is spawned - the agents are injected through `orchestrate`'s seam, and
  * `codex.readRateLimits` is off so the rate-limit probe returns before it would
  * connect to an app-server.
- */
-
-// ---- fixtures --------------------------------------------------------------
-
-function tokens(total: number): TokenUsage {
-  return { input: total, output: 0, cacheRead: 0, cacheCreation: 0, total };
-}
-
-function planFixture(over: Partial<Plan> = {}): Plan {
-  return {
-    plan_md: '# the plan\n\nDo the thing.',
-    assumptions: [],
-    open_questions: [],
-    out_of_scope: [],
-    ...over,
-  };
-}
-
-function p1(id: string): Finding {
-  return {
-    id,
-    severity: 'P1',
-    title: `Finding ${id}`,
-    detail: 'Detail.',
-    suggested_fix: 'Fix it.',
-  };
-}
-
-/** What the critic or the reviewer returns. Two P1s beat the default tolerance of one. */
-function report(findings: readonly Finding[]): object {
-  return {
-    verdict: findings.length > 0 ? 'REVISE' : 'APPROVE',
-    summary: 'summary',
-    findings: [...findings],
-  };
-}
-
-const BLOCKING = [p1('finding-one'), p1('finding-two')];
-
-/**
- * Progress is *enabled*, unlike the other seam tests: `ProgressOptions` is the
- * only place a turn's label reaches a provider on the Claude side, and every
- * case here is an assertion about which labelled turn ran first. Nothing in the
- * progress machinery runs - it lives inside the real adapters, which these
- * cases replace.
- */
-function config(loop: Partial<LoopConfig> = {}, over: Partial<Config> = {}): Config {
-  return {
-    ...DEFAULTS,
-    codex: { ...DEFAULTS.codex, readRateLimits: false },
-    context: { ...DEFAULTS.context, enabled: false },
-    progress: { ...DEFAULTS.progress, enabled: true, intervalMs: 60_000 },
-    verify: { ...DEFAULTS.verify, enabled: false },
-    git: { ...DEFAULTS.git, commitEachRound: false },
-    // The plan-budget guard is not what these cases are about; the round cap is.
-    budget: { ...DEFAULTS.budget, planShare: 0 },
-    loop: { ...DEFAULTS.loop, ...loop },
-    ...over,
-  };
-}
-
-interface Handlers {
-  /** Claude's turn: an object is returned as JSON, a string as raw text. */
-  claude?: (label: string) => unknown;
-  /** Codex's turn: the structured findings report. */
-  codex?: (label: string) => unknown;
-}
-
-/**
- * Both providers, recording the label of every turn in order.
  *
- * The order *is* the assertion in almost every case below: a resumed loop that
- * revises before it critiques is the fix, and one that critiques first is the
- * defect.
+ * The fixtures all live in `helpers/loop-harness.ts` now, including the two
+ * stall drivers below, which the harness owns because the new gate, commit and
+ * question suites re-enter from the same stalls.
  */
-function agents(handlers: Handlers, calls: string[]): AgentTurns {
-  return {
-    claude: (options): Promise<ClaudeTurnResult> => {
-      const label = options.progress?.label ?? '(unlabelled)';
-      calls.push(label);
-      const produced = handlers.claude?.(label) ?? 'claude said so';
-      return Promise.resolve({
-        text: typeof produced === 'string' ? produced : JSON.stringify(produced),
-        costUsd: 0.01,
-        sessionId: options.sessionId,
-        denials: [],
-        numTurns: 1,
-        usage: null,
-        tokens: tokens(1000),
-      });
-    },
-    codex: (options) => {
-      calls.push(options.schemaName);
-      const structured = handlers.codex?.(options.schemaName) ?? report([]);
-      return Promise.resolve({
-        structured,
-        raw: JSON.stringify(structured),
-        sessionId: 'thread-1',
-        tokens: tokens(500),
-      });
-    },
-  };
-}
+
+const RUN = { prefix: 'vibe-pending-', task: 'pending findings' } as const;
 
 function freshRun(): RunState {
-  return createRun(mkdtempSync(path.join(tmpdir(), 'vibe-pending-')), 'pending findings', true);
+  return harnessFreshRun({ ...RUN, planOnly: true });
 }
 
 /** A run parked at the review phase, in a repo `git diff` can be asked about. */
 function reviewingRun(): RunState {
-  const state = createRun(mkdtempSync(path.join(tmpdir(), 'vibe-pending-')), 'pending findings', false);
-  execFileSync('git', ['init', '-q'], { cwd: state.targetDir });
-  state.plan = planFixture();
-  state.phase = 'reviewing';
-  state.baseSha = null;
-  return state;
-}
-
-/**
- * A plan run stopped at the round cap with two P1s outstanding.
- *
- * The cap is the cheapest deterministic stall: `guardProgress` records its
- * `RoundRecord` and *then* throws, which is the exact shape of the defect.
- */
-async function stalledPlan(): Promise<{ state: RunState; calls: string[] }> {
-  const state = freshRun();
-  state.plan = planFixture();
-  const calls: string[] = [];
-  const turns = agents({ codex: () => report(BLOCKING) }, calls);
-
-  await assert.rejects(
-    () => orchestrate(state, config({ maxPlanRounds: 1 }), true, turns),
-    (err: unknown) => err instanceof Escalation && err.code === EXIT.NO_CONVERGENCE,
-  );
-  return { state, calls };
-}
-
-/** A review run stopped at the round cap with two P1s outstanding. */
-async function stalledReview(): Promise<{ state: RunState; calls: string[] }> {
-  const state = reviewingRun();
-  const calls: string[] = [];
-  const turns = agents({ codex: () => report(BLOCKING) }, calls);
-
-  await assert.rejects(
-    () => orchestrate(state, config({ maxReviewRounds: 1 }), true, turns),
-    (err: unknown) => err instanceof Escalation && err.code === EXIT.NO_CONVERGENCE,
-  );
-  return { state, calls };
-}
-
-/** A critic that fails the case if it is asked twice. */
-function onceThenApprove(calledTwice: () => never): (label: string) => unknown {
-  let calls = 0;
-  return () => {
-    calls += 1;
-    if (calls > 1) calledTwice();
-    return report([]);
-  };
+  return harnessReviewingRun({ ...RUN });
 }
 
 // ---- the plan phase --------------------------------------------------------
