@@ -1,0 +1,429 @@
+{
+  "id": "20260819-233804-implement-github-issue-33-the-trend-arm-",
+  "dir": "C:\\Users\\Adam\\Documents\\apps\\vibe-code\\.worktrees\\issue-33\\.vibe\\runs\\20260819-233804-implement-github-issue-33-the-trend-arm-",
+  "targetDir": "C:\\Users\\Adam\\Documents\\apps\\vibe-code\\.worktrees\\issue-33",
+  "task": "Implement GitHub issue #33: the trend arm of assessConvergence stops a run when the blocking-finding count has not fallen, even when the findings have completely turned over - which is convergence, not deadlock. The attached brief is authoritative - read it in full. Its decisions are already made; do not re-derive them.",
+  "sessionId": "47a6419b-facf-4c64-b139-a83f64913d89",
+  "sessionStarted": true,
+  "codexSessionId": "01a01de9-8314-79e0-a5ce-5c7a64f64040",
+  "createdAt": "2026-08-20T06:38:04.780Z",
+  "status": "done",
+  "phase": "complete",
+  "planRound": 1,
+  "reviewRound": 0,
+  "costUsd": 4.1036,
+  "tokensUsed": 6294809,
+  "rateLimitWaits": 0,
+  "baseSha": "4f34d98b92dc650cce4093c778a00942c6263dae",
+  "branch": "vibe/20260819-233804-implement-github-issue-33-the-trend-arm-",
+  "p1Rounds": [],
+  "verifyRounds": [],
+  "verifyRound": 0,
+  "questionRound": 1,
+  "events": [
+    {
+      "at": "2026-08-20T06:39:11.969Z",
+      "type": "preflight-ok",
+      "repairArgs": false
+    },
+    {
+      "at": "2026-08-20T06:39:11.970Z",
+      "type": "preflight_probe",
+      "provider": "claude",
+      "tokens": 10313,
+      "costUsd": 0.020735999999999997,
+      "turns": 1
+    },
+    {
+      "at": "2026-08-20T06:39:11.971Z",
+      "type": "preflight_probe",
+      "provider": "codex",
+      "tokens": 50906,
+      "costUsd": null,
+      "turns": 1
+    },
+    {
+      "at": "2026-08-20T06:43:56.589Z",
+      "type": "claude_turn",
+      "label": "plan",
+      "costUsd": 1.184142,
+      "tokens": 304861,
+      "turns": 15,
+      "contextRatio": 0.051
+    },
+    {
+      "at": "2026-08-20T06:43:57.588Z",
+      "type": "codex_rate_limit",
+      "label": "answers-0",
+      "action": "proceed",
+      "usedPercent": 0,
+      "reachedType": null
+    },
+    {
+      "at": "2026-08-20T06:46:19.520Z",
+      "type": "codex_turn",
+      "label": "answers-0",
+      "tokens": 337565
+    },
+    {
+      "at": "2026-08-20T06:47:49.564Z",
+      "type": "claude_turn",
+      "label": "revise-1",
+      "costUsd": 0.34184950000000003,
+      "tokens": 69323,
+      "turns": 2,
+      "contextRatio": 0.06
+    },
+    {
+      "at": "2026-08-20T06:47:49.922Z",
+      "type": "codex_rate_limit",
+      "label": "critique-1",
+      "action": "proceed",
+      "usedPercent": 1,
+      "reachedType": null
+    },
+    {
+      "at": "2026-08-20T06:53:48.394Z",
+      "type": "codex_turn",
+      "label": "critique-1",
+      "tokens": 1009904
+    },
+    {
+      "at": "2026-08-20T06:53:48.407Z",
+      "type": "plan_approved",
+      "findings": 2,
+      "carried": [
+        "unreachable-turnover-regression-fixture"
+      ]
+    },
+    {
+      "at": "2026-08-20T06:58:10.893Z",
+      "type": "claude_turn",
+      "label": "implement",
+      "costUsd": 2.5570040000000005,
+      "tokens": 2508967,
+      "turns": 22,
+      "contextRatio": 0.12
+    },
+    {
+      "at": "2026-08-20T06:58:32.499Z",
+      "type": "verify_passed",
+      "command": "npm test",
+      "runs": 3
+    },
+    {
+      "at": "2026-08-20T06:58:33.143Z",
+      "type": "codex_rate_limit",
+      "label": "review-0",
+      "action": "proceed",
+      "usedPercent": 1,
+      "reachedType": null
+    },
+    {
+      "at": "2026-08-20T07:01:26.928Z",
+      "type": "codex_turn",
+      "label": "review-0",
+      "tokens": 2002970
+    },
+    {
+      "at": "2026-08-20T07:01:26.941Z",
+      "type": "review_approved",
+      "findings": 0
+    }
+  ],
+  "planOnly": false,
+  "answeredQuestions": [
+    "the brief s literal rule within the trend window if no finding id appears in more than one round a flat count is not evidence of being stuck makes the existing test tests convergence test ts 144 fail it is 8 rounds flat at 2 with 16 distinct ids add a bound flat run must be exactly one window long or implement the literal rule and edit that test",
+    "should the excuse be reported to the user e g the count held at 2 but every finding is new continuing rather than being silent",
+    "guardprogress computes the repeat arm signature from all findings but the ids from blockers only src orchestrator ts 911 916 so the two arms are keyed on different sets should the turnover check use blocker ids as stored or be aligned with the signature"
+  ],
+  "deferredQuestions": [
+    {
+      "question": "The brief's literal rule ('within the trend window, if no finding id appears in more than one round, a flat count is not evidence of being stuck') makes the existing test `tests/convergence.test.ts:144` fail — it is 8 rounds flat at 2 with 16 distinct ids. Add a bound (flat run must be exactly one window long), or implement the literal rule and edit that test?",
+      "kind": "product",
+      "recommended": "Add the flat-run bound. It keeps the 'no test edited' early-warning intact, bounds the loosening to one window, and is defensible on its own: turnover buys a run one window, not the cap.",
+      "reason": "The codebase establishes both behaviors but cannot determine which product contract should take precedence."
+    },
+    {
+      "question": "Should the excuse be reported to the user — e.g. 'the count held at 2 but every finding is new; continuing' — rather than being silent?",
+      "kind": "product",
+      "recommended": "Silent for this change. Decision 4 keeps `assessConvergence` pure, and a notice would require a signature change or duplicated logic in the orchestrator. Worth a follow-up issue.",
+      "reason": "`assessConvergence` currently returns only a stop reason or null, while `guardProgress` logs existing persistence notices separately. A turnover-specific message would require either a richer verdict or duplicated detection logic, making this an observability/product choice."
+    }
+  ],
+  "sessionRotations": 0,
+  "handoff": null,
+  "contextRatio": 0.120092,
+  "plan": {
+    "plan_md": "> Note: the plan file could not be written — the `Write` tool is disabled in this session. The full plan is below and is self-contained.\n\n# Teach the trend guard to see finding turnover (issue #33)\n\n## Context\n\n`assessConvergence` (`src/run.ts:483`) has two arms. The **repeat arm** (`src/run.ts:489-499`) compares `p1Signature` — a hash of the sorted P0/P1 ids — and stops when the identical set comes back `oscillationThreshold` rounds running. The **trend arm** (`src/run.ts:501-527`) reads only `RoundRecord.count` and stops when no round in the window has a strictly lower count than its predecessor.\n\nThe trend arm ignores the ids that `recordRound` (`src/run.ts:378`) already stores in the same record. That stopped the planning run for issue #2 at plan round 4 of 5 — `the P1 count has not fallen in 3 rounds (2 -> 2 -> 2)` — on a history whose three rounds had **zero id overlap with each other**, each round a narrower restatement of the last. Round 4, run by hand, fell to 1. The run was converging the whole time.\n\nIntended outcome: a flat count whose findings turned over completely is no longer read as deadlock, while every genuinely stuck shape stops exactly as it does today.\n\n## The rule\n\nWithin the trend window, a flat count is excused — the run continues — only when **both** hold:\n\n1. **Total turnover.** No finding id appears in more than one round of the window. Deliberately over the whole window, not between consecutive rounds: an `{a,b} -> {c,d} -> {a,b}` oscillation has no consecutive overlap and *is* stuck, and it fails this test because `a` occurs twice in any three-round window.\n2. **The flat run is exactly one window long.** The trailing run of rounds sharing the latest round's count is exactly `window` rounds — i.e. the round before the window had a different count, or the window is the whole history.\n\nCondition 2 is a deviation from the brief's single-sentence rule, and it is **required** by the hard constraint that no existing test changes. `tests/convergence.test.ts:144` (`a late count that will not fall still stops the run`) is eight rounds flat at 2 with sixteen pairwise-distinct ids: condition 1 on its own would stop that test stopping the run, and the test would have to be edited.\n\nCondition 2 also carries the argument on its own terms: **turnover buys a run one window, not the whole cap.** It is computed from `RoundRecord.count`, adds no config key, and makes the loosening bounded and deterministic — the excuse can fire at most once per run of equal counts.\n\nCondition 2 is also what keeps case 1 (`1 -> 1 -> 3`) stopping: a rising last round makes the trailing flat run 1, not 3, so the excuse never engages and today's verdict is untouched.\n\n### Which ids the check reads\n\nThe stored blocker ids, exactly as `RoundRecord.ids` holds them — no change to what `guardProgress` records. `guardProgress` (`src/orchestrator.ts:911-916`) passes `p1Signature(all)` for the signature and `blockers.map((f) => f.id)` for the ids, but this is not a mismatch worth correcting here: `p1Signature` filters to P0/P1 (`src/run.ts:335-344`) and the `blockers` helper in `src/validate.ts` selects the same severities, so non-blocking findings are already excluded from both. Widening `recordRound`'s ids to all findings would make turnover *and* `persistenceNotice` inspect P2/P3 items and would change existing semantics on the reporting path. The trend arm is a statement about the **blocking** count, so blocking ids are the matching population.\n\n### What still stops, and why\n\n| Case | Stopped by |\n| --- | --- |\n| `1 -> 1 -> 3`, all ids distinct | flat run is 1 ≠ window → trend arm, unchanged |\n| Flat count, one id surviving the window | that id occurs 3 times → no turnover |\n| `{a,b} -> {c,d} -> {a,b}` and longer cycles | `a`, `b` occur twice → no turnover |\n| Identical set 3 rounds running | repeat arm, untouched |\n| Records with absent/empty `ids` (legacy `state.json`) | treated as \"cannot tell\" → no turnover |\n| Long flat run with turnover (8 rounds at 2) | flat run 8 ≠ window |\n| Verification loop (`id: 'verification-failing'`, `src/orchestrator.ts:1024`) | one stable id that is the whole set → repeat arm |\n\n## File-by-file changes\n\n### 1. `src/run.ts` — two module-private helpers, placed immediately above `assessConvergence`\n\n```ts\n/**\n * Whether every finding in the window is new to it - no id in more than one\n * round.\n *\n * Over the whole window rather than between neighbours, so an {a,b} -> {c,d} ->\n * {a,b} oscillation - which has no consecutive overlap and is genuinely stuck -\n * fails it.\n *\n * A round with absent or empty ids means \"cannot tell\", not \"no overlap\": a\n * state.json written before RoundRecord.ids existed has none, and reading the\n * rule literally there would be vacuously true and would switch the trend brake\n * off for every resumed legacy run.\n */\nfunction windowTurnedOver(recent: readonly RoundRecord[]): boolean {\n  const seen = new Map<string, number>();\n  for (const r of recent) {\n    const ids = r.ids;\n    if (ids === undefined || ids.length === 0) return false;\n    // Deduped per round, so a round that repeats an id within itself is not\n    // mistaken for the same id surviving across rounds.\n    for (const id of new Set(ids)) seen.set(id, (seen.get(id) ?? 0) + 1);\n  }\n  for (const n of seen.values()) if (n > 1) return false;\n  return true;\n}\n\n/** Trailing rounds whose blocking count equals the latest round's. */\nfunction flatRun(history: readonly RoundRecord[]): number {\n  const target = history[history.length - 1]?.count;\n  if (target === undefined) return 0;\n  let rounds = 0;\n  for (let i = history.length - 1; i >= 0; i -= 1) {\n    if (history[i]?.count !== target) break;\n    rounds += 1;\n  }\n  return rounds;\n}\n```\n\n`persistentStreak` (`src/run.ts:536`) is deliberately **not** reused here, despite the brief's preference: it measures only the trailing streak of an id present in the **last** round, so it reports 1 for `{a,b} -> {c,d} -> {a,b}` and would let a real oscillation through. `windowTurnedOver` subsumes everything `persistentStreak` would have contributed to this decision. `persistentStreak` and `persistenceNotice` are left exactly as they are for the warning path.\n\n### 2. `src/run.ts` — the trend arm of `assessConvergence` (`src/run.ts:518-525`)\n\nAdd a guard ahead of the existing return, keeping the message construction byte-for-byte:\n\n```ts\n  if (!improved) {\n    // A flat count whose findings turned over completely is not deadlock: the\n    // planning run for #2 was stopped at 2 -> 2 -> 2 on three rounds with zero\n    // id overlap, each a narrower restatement of the last, and the round that\n    // followed fell to 1. The repeat arm above already treats identity as\n    // meaningful; this is the one place that information was dropped.\n    //\n    // Bounded on purpose. Turnover buys one window, not the cap: the flat run\n    // must have started inside this window, so the excuse fires at most once\n    // per run of equal counts. It says nothing about a rising count, which\n    // leaves the flat run shorter than the window and stops exactly as before.\n    //\n    // Loosening a brake is worth being nervous about; the blast radius is one\n    // window of rounds the run was already allowed. maxPlanRounds /\n    // maxReviewRounds, guardPlanBudget and budget.maxTokens all still bind.\n    if (window > 1 && flatRun(history) === window && windowTurnedOver(recent)) return null;\n\n    const trail = recent.map((r) => r.count).join(' -> ');\n    const left = cap - round;\n    return (\n      `the P1 count has not fallen in ${window} rounds (${trail})` +\n      (left > 0 ? ` with ${left} round(s) left` : '')\n    );\n  }\n```\n\nThe `window > 1` clause exists because `loop.convergenceWindow` is validated only as `>= 1` (`src/config.ts:408-418`): at `window: 1`, `improved` is always false and `flatRun >= 1` always, so a single round with ids would excuse every late round and disable the brake outright.\n\nNothing else in `assessConvergence` moves: it still takes a history plus `ConvergenceArgs`, returns a reason or null, touches no `RunState`, config or logging, and stays in `run.ts`. `p1Signature`, the repeat arm, `LATE_ROUND_FRACTION`, `TREND_FLOOR`, `late` and `hasWindow` are untouched, so a run that never reaches the trend arm is unaffected.\n\nBoth loops get the change for free: `guardProgress` (`src/orchestrator.ts:904`) is the only caller and is shared by `planPhase` (`src/orchestrator.ts:352`), the verification loop (`:415`) and `reviewPhase` (`:549`).\n\n### 3. `tests/convergence.test.ts` — append tests, edit none\n\nReuse the file's existing `findings`, `historyOf` and `ARGS` helpers and the `STUCK` constant. `cap: 5, round: 4` reproduces the real trigger exactly (`Math.ceil(5 * 0.75) === 4`).\n\n```ts\n/** The plan rounds from issue #2, verbatim - three rounds at 2, no id in common. */\nconst ISSUE_2: readonly (readonly string[])[] = [\n  ['schema-aware-claude-test-doubles', 'non-object-roles-bypass-validation'],\n  ['no-codex-role-preflight-blocks', 'malformed-role-derivation-before-validation'],\n  ['disabled-role-preflight-enforcement', 'role-scoped-agent-resolution-mutates-shared-config'],\n];\n```\n\n1. `'a flat count with completely new findings each round is not deadlock'` — `assessConvergence(historyOf(...ISSUE_2), { ...ARGS, cap: 5, round: 4 })` is `null`. Also assert the fixture's premise: `new Set(history.flatMap((r) => r.ids ?? [])).size === 6` and `new Set(history.map((r) => r.signature)).size === 3`.\n2. `'an alternating blocking set still stops the run'` — `historyOf(['a-1','a-2'], ['c-1','c-2'], ['a-1','a-2'])` at `cap: 5, round: 4` matches `/has not fallen in 3 rounds/`; and the longer cycle `['a-1','a-2'], ['c-1','c-2'], ['a-1','a-2'], ['c-1','c-2']` at `cap: 12, round: 8` likewise.\n3. `'a flat count with a surviving core still stops the run'` — `historyOf([STUCK,'n-1'], [STUCK,'n-2'], [STUCK,'n-3'])` at `cap: 5, round: 4` matches `/has not fallen in 3 rounds/`.\n4. `'a rising count stops however new the findings are'` — `historyOf(['p-1'], ['q-1'], ['r-1','r-2','r-3'])` at `cap: 5, round: 4` matches `/has not fallen in 3 rounds/` and contains the trail `1 -> 1 -> 3`.\n5. `'a history recorded without ids stops exactly as it did before'` — literal records `[{signature:'aaa',count:2},{signature:'bbb',count:2},{signature:'ccc',count:2}]` (distinct signatures, so the repeat arm is provably not what fires) at `cap: 5, round: 4` matches `/has not fallen in 3 rounds/`; repeat the assertion with `ids: []` on each record.\n6. `'turnover buys one window, not the run'` — six rounds at 2 with twelve pairwise-distinct ids, `cap: 12, round: 8`, matches `/has not fallen in 3 rounds/`. This pins condition 2 directly and documents why `tests/convergence.test.ts:144` still passes.\n7. `'an early round and a partial window are untouched'` — `historyOf(...ISSUE_2).slice(0, 2)` at `cap: 5, round: 2` is `null`; the full `ISSUE_2` history at `cap: 12, round: 3` is `null` (not late).\n8. `'turnover does not rescue an identical set'` — `historyOf([STUCK,'g-1'], [STUCK,'g-1'], [STUCK,'g-1'])` at `cap: 5, round: 4` still matches `/same P1 set came back 3 rounds/`.\n\n### 4. `tests/guard-progress.test.ts` — append one test, edit none\n\n`'the issue-2 plan rounds are never escalated'`: replay `ISSUE_2` plus a fourth round `['stored-null-roles-fallback']` through the file's existing `guardedRound(DEFAULTS, history, ids, { cap: 5, round: idx + 1 })`, asserting `thrown === null` on every round. This proves the fix reaches a real loop through `guardProgress`, which both `planPhase` and `reviewPhase` call, and that the recorded ids the guard itself produces (`blockers.map((f) => f.id)`) are what the turnover check reads.\n\n## Order of work\n\n1. Add `windowTurnedOver` and `flatRun` to `src/run.ts`.\n2. Change the trend arm. Do 1 and 2 in the same edit — `noUnusedLocals` is on, so unused helpers fail `tsc`.\n3. Add the `tests/convergence.test.ts` tests (depends on 1–2).\n4. Add the `tests/guard-progress.test.ts` test (depends on 1–2).\n\n## Verification\n\n- `npm run typecheck` — `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes` and `noUnusedLocals` are on; index access in `flatRun` must go through `?.` and `r.ids` must be narrowed rather than asserted.\n- `npm test` (`pretest` runs `npm run build`, then `node --test \"dist/tests/**/*.test.js\"`). Requirements: **all 407 pre-existing tests pass with no edits**, the new tests pass, and the suite is green 3 consecutive times (vibe runs this itself).\n- While iterating: `npm run build && node --test dist/tests/convergence.test.js dist/tests/guard-progress.test.js`.\n- `git diff --stat -- tests/` must show additions only; no line removed from an existing test.\n\n## Edge cases and failure modes\n\n- **Legacy state on resume.** `state.json` written before `RoundRecord.ids` existed has records with no ids; `windowTurnedOver` returns false, so the brake behaves exactly as today. Test 5.\n- **Duplicate id within one round.** Deduped with `new Set(ids)` before counting, so it cannot masquerade as survival across rounds.\n- **Count 0.** `guardProgress` is only reached with blockers outstanding, but a 0-count record carries empty ids and falls to \"cannot tell\" — it stops as today.\n- **`convergenceWindow: 1`.** Excluded explicitly by `window > 1`; without it the excuse would fire on every late round.\n- **Verification loop.** Its synthetic finding has the stable id `verification-failing` and is the whole set, so its signature repeats and the repeat arm stops it at `oscillationThreshold` rounds before the trend arm is reached. Covered by the existing test at `tests/guard-progress.test.ts:91`, which must keep passing untouched.\n- **Failure mode if the rule is too loose.** A stuck run burns at most one extra window of rounds; `maxPlanRounds`/`maxReviewRounds`, `guardPlanBudget` and `budget.maxTokens` all still bind. That bound is stated in the comment where the rule lives.\n\n## Rollback\n\nOne `if` and two pure helpers in `src/run.ts`, plus additive tests. No state format change, no config key, nothing new persisted. Reverting the commit restores today's behaviour exactly; no migration is needed because `RoundRecord` is unchanged.\n",
+    "assumptions": [
+      {
+        "assumption": "The rule needs a second condition — the trailing flat run must be exactly `window` rounds long — beyond the brief's stated \"no id appears in more than one round\".",
+        "why": "The brief's literal rule breaks an existing test: `tests/convergence.test.ts:144` ('a late count that will not fall still stops the run') is 8 rounds flat at count 2 with 16 pairwise-distinct ids, i.e. total turnover over the window, and it asserts the run stops. The brief's hard constraints say all 407 tests pass unchanged and no test may be modified, and it explicitly permits a better formulation provided it uses only what `RoundRecord` stores and adds no config key. 'Turnover buys one window, not the cap' satisfies all of that and bounds the loosening.",
+        "blast_radius": "If the reviewer prefers the brief's literal rule, drop `flatRun(history) === window` from the condition and edit `tests/convergence.test.ts:144` so its history is shorter or has an overlapping id. Roughly a 3-line source change plus one test edit; the helpers, the ids fallback and every new test survive."
+      },
+      {
+        "assumption": "`persistentStreak` is not reused for the turnover check, despite the brief preferring reuse.",
+        "why": "`persistentStreak` only measures ids present in the *last* round and only trailing streaks, so it returns 1 for `{a,b} -> {c,d} -> {a,b}` and cannot detect the alternating case the brief requires to keep stopping. An occurrence count over the window is strictly stronger and subsumes it.",
+        "blast_radius": "If reuse is mandated, `persistentStreak` would have to be combined with a separate non-adjacent-overlap check — more code than `windowTurnedOver`, same behaviour. Local to one helper."
+      },
+      {
+        "assumption": "'No usable ids' is checked per record: any round in the window with absent or empty `ids` disables the excuse for the whole window, rather than only ignoring that round.",
+        "why": "The brief's decision 1 says absent/empty ids must mean 'cannot tell - stop as today'. A partially-legacy window cannot support a claim about turnover across it.",
+        "blast_radius": "A resumed run whose window straddles the upgrade keeps today's behaviour for one window. If a more permissive reading is wanted, change one `return false` to `continue` — one line — but then a legacy window is silently excused."
+      },
+      {
+        "assumption": "The excuse is silent: `assessConvergence` returns `null` with no log line telling the user 'count flat but findings turned over - continuing'.",
+        "why": "Decision 4 says the function stays pure and does no logging, and adding a notice would mean a new return shape or a second orchestrator-side computation. The existing `persistenceNotice` path already carries the reporting burden.",
+        "blast_radius": "If a notice is wanted, `guardProgress` in `src/orchestrator.ts` would need to recompute the condition or `assessConvergence` would need a richer return type — a signature change touching its one caller and the convergence tests."
+      },
+      {
+        "assumption": "Adding a `window > 1` clause is in scope, even though 'when the trend arm engages' is out of scope.",
+        "why": "At `convergenceWindow: 1` (which config validation permits — `>= 1`) the new excuse would fire on every late round and disable the brake outright. That is a defect introduced by this change, not a pre-existing tuning question.",
+        "blast_radius": "One clause. If a reviewer considers it scope creep, deleting it leaves the brake disabled for anyone who sets `convergenceWindow: 1`."
+      },
+      {
+        "assumption": "The issue-2 finding ids quoted in the brief's table are used verbatim as the test fixture.",
+        "why": "It makes the regression test self-documenting against the run that proved the defect, matching how `PICOMATCH` is used in the existing tests.",
+        "blast_radius": "Cosmetic — rename the ids if the reviewer prefers synthetic ones."
+      },
+      {
+        "assumption": "No change is needed anywhere outside `src/run.ts` and the two test files — in particular `RoundRecord`, `recordRound`, `p1Signature` and `guardProgress` are untouched.",
+        "why": "`recordRound` already stores blocking ids at every call site and `guardProgress` is the single shared caller, so both loops inherit the fix. Confirmed by the answered question: the turnover check reads the stored blocker ids as-is.",
+        "blast_radius": "If a call site is found that records rounds without ids, those runs silently keep today's behaviour; the fix would be at that call site, not in `assessConvergence`."
+      }
+    ],
+    "open_questions": [
+      {
+        "question": "The brief's literal rule ('within the trend window, if no finding id appears in more than one round, a flat count is not evidence of being stuck') makes the existing test `tests/convergence.test.ts:144` fail — it is 8 rounds flat at 2 with 16 distinct ids. Add a bound (flat run must be exactly one window long), or implement the literal rule and edit that test?",
+        "options": [
+          "Add the flat-run bound; no test changes (recommended)",
+          "Implement the literal rule and edit tests/convergence.test.ts:144",
+          "Implement the literal rule and delete that test as superseded"
+        ],
+        "recommended": "Add the flat-run bound. It keeps the 'no test edited' early-warning intact, bounds the loosening to one window, and is defensible on its own: turnover buys a run one window, not the cap.",
+        "kind": "product",
+        "blocking": false
+      },
+      {
+        "question": "Should the excuse be reported to the user — e.g. 'the count held at 2 but every finding is new; continuing' — rather than being silent?",
+        "options": [
+          "Silent (recommended)",
+          "Log a line from guardProgress",
+          "Return a structured verdict from assessConvergence so the caller can speak"
+        ],
+        "recommended": "Silent for this change. Decision 4 keeps `assessConvergence` pure, and a notice would require a signature change or duplicated logic in the orchestrator. Worth a follow-up issue.",
+        "kind": "product",
+        "blocking": false
+      }
+    ],
+    "out_of_scope": [
+      {
+        "item": "The repeat arm and `p1Signature` in `assessConvergence`.",
+        "why": "They already treat finding identity as meaningful and give the correct verdict on every case in the brief; the defect is that the trend arm drops that information."
+      },
+      {
+        "item": "`persistenceNotice` wording, and whether a persistent id should warn more loudly.",
+        "why": "It is the reporting path, not the stopping path. This change only alters what the trend arm concludes."
+      },
+      {
+        "item": "`LATE_ROUND_FRACTION`, `TREND_FLOOR`, `maxPlanRounds`/`maxReviewRounds`/`maxVerifyRounds` and every budget ceiling.",
+        "why": "They govern *when* the trend arm engages and how long a run may last. This change alters only what it concludes once engaged — and those ceilings are the safety argument for altering it at all."
+      },
+      {
+        "item": "Adding a config key for turnover tolerance.",
+        "why": "The brief rules it out: the loop already has five knobs, and a correct rule beats a sixth."
+      },
+      {
+        "item": "Validation of stored `RunState` / `RoundRecord` shape (issue #23).",
+        "why": "The turnover check defends itself against absent or empty `ids` locally; general stored-state validation is a separate change with a much wider surface."
+      },
+      {
+        "item": "Deferred-only critique rounds (#22) and anything about `pendingFindings` (#32).",
+        "why": "Separate issues, already landed or tracked; this change leaves both untouched."
+      },
+      {
+        "item": "Emitting a user-facing line when the excuse fires.",
+        "why": "`assessConvergence` must stay pure and logging-free per the brief; reporting would need a signature change and belongs in a follow-up."
+      },
+      {
+        "item": "Aligning what `guardProgress` records: the signature comes from `all` findings and the ids from `blockers` only (`src/orchestrator.ts:911-916`).",
+        "why": "Settled as deliberate — `p1Signature` and the `blockers` helper both select P0/P1, so the two populations already agree in practice. Widening `recordRound`'s ids to all findings would change `persistenceNotice`'s semantics too, which is a separate change on the reporting path."
+      },
+      {
+        "item": "Tightening `loop.convergenceWindow` validation in `src/config.ts` to reject 1.",
+        "why": "This change defends itself locally with a `window > 1` clause. Whether a one-round convergence window should be configurable at all is a config-surface question, and changing validation could reject an existing user's `vibe.config.json` on upgrade."
+      }
+    ]
+  },
+  "pendingAnswers": null,
+  "extraContext": "Teach the trend guard to see finding turnover. GitHub issue #33.\n\n## The defect, with the run that proves it\n\n`assessConvergence` in `src/run.ts:393` stops a run when the blocking-finding count has not\nfallen across the window, whatever the findings are. It stopped the planning run for #2 at plan\nround 4 of 5:\n\n```\n! Stopping early: the P1 count has not fallen in 3 rounds (2 -> 2 -> 2) with 1 round(s) left\n  - the planner and reviewer are deadlocked.\n```\n\nHere is what those rounds actually contained, from that run's own `plan-critique-*.json`:\n\n| round | blocking findings |\n| --- | --- |\n| 1 | `schema-aware-claude-test-doubles`, `non-object-roles-bypass-validation` |\n| 2 | `no-codex-role-preflight-blocks`, `malformed-role-derivation-before-validation` |\n| 3 | `disabled-role-preflight-enforcement`, `role-scoped-agent-resolution-mutates-shared-config` |\n| 4 | `stored-null-roles-fallback` |\n\n**Zero id overlap between any two rounds.** Each pair was a narrower version of the last - round 3\nis round 2 after the planner fixed the literal case and the critic came back with \"you fixed\nassignment, but a role can be assigned *and disabled*\". And round 4, which only happened because\nthe findings were answered by hand, **fell to 1**. The run was converging the whole time.\n\n## Where it is\n\nTwo arms, and they disagree about whether identity matters:\n\n- **Repeat arm** (`:401-409`) compares `p1Signature`, a hash of the sorted P0/P1 ids. Correctly\n  silent here: the signature changed every round. **Do not touch this arm.**\n- **Trend arm** (`:411-435`) reads only `r.count`. `improved` is true only if some round in the\n  window has a strictly lower count than its predecessor, so `2 -> 2 -> 2` fires - with the ids\n  sitting unread in the same `RoundRecord` (`recordRound` stores them at `:372`).\n\n## This was a considered decision. Engage with it.\n\nThe comment at `:422-424` says so:\n\n> Findings may be new every round and still be going nowhere - a run that went 1 -> 1 -> 3\n> produced correct, distinct findings while getting further from done.\n\nThat premise is right and the counter-example is real. It justifies ignoring identity when the\ncount **rises**. It does not justify ignoring it when the count is **flat**, and it cannot\ndistinguish `1 -> 1 -> 3` from `2 -> 2 -> 2` with total turnover - which are opposite situations.\nThe repeat arm already encodes the belief that turnover is meaningful; the trend arm is the one\nplace that information is dropped.\n\n## The rule\n\n**Within the trend window, if no finding id appears in more than one round, a flat count is not\nevidence of being stuck.**\n\nOver the whole window, deliberately - not between consecutive rounds. An A/B/A/B oscillation has\nno consecutive overlap and *is* genuinely stuck; it fails this test because `a` appears twice in\nany three-round window.\n\nIf you can find a better formulation, take it - but it must give the right answer on all five\ncases below, and it must use what `RoundRecord` already stores. No new config key: the loop\nalready has `oscillationThreshold`, `convergenceWindow`, `p1Tolerance` and two round caps, and a\nfifth knob for this is a worse answer than a correct rule.\n\n## What must still stop\n\n1. **A rising count**, whatever the ids do. `1 -> 1 -> 3` keeps today's verdict exactly.\n2. **A flat count with a persistent core** - the same finding surviving while its companions\n   rotate. Note `persistenceNotice` and `longestStreak` already compute trailing id survival for\n   the warning path, so the signal exists and is tested; prefer reusing it to writing a second one.\n3. **An alternating set** - `{a,b} -> {c,d} -> {a,b}` and longer cycles.\n4. **An identical set three rounds running** - the repeat arm, unchanged.\n5. **A history whose records carry no ids.** See below; this is the one that can silently disable\n   the brake.\n\n## Decisions already made\n\n**1. A record with no usable ids falls back to today's behaviour.** `recordRound` defaults `ids`\nto `[]`, and a `state.json` written by an older binary may have records with none. \"No id appears\nin more than one round\" is *vacuously true* for such a history, so a naive implementation would\nturn the brake off for every resumed legacy run. Absent or empty ids must mean \"cannot tell -\nstop as today\". Say so in a comment; it is not obvious from the rule.\n\n**2. The blast radius is bounded, and that is the safety argument.** Loosening a brake is worth\nbeing nervous about. It is survivable here because `maxPlanRounds` / `maxReviewRounds`,\n`guardPlanBudget` and `budget.maxTokens` all still bind - the worst case of being wrong is that a\nrun uses the rounds it was already allowed. State that reasoning where the rule lives.\n\n**3. Both loops get it.** `guardProgress` is shared by `planPhase` and `reviewPhase`; the review\nloop is the more expensive one to stop wrongly.\n\n**4. `assessConvergence` stays pure and stays in `run.ts`.** It takes a history and its args and\nreturns a reason or null. Do not reach for `RunState`, config or logging inside it.\n\n## Hard constraints\n\n**A run that is genuinely stuck is stopped exactly as it is today**, and the five cases above are\nthe definition of that.\n\n**The existing 407 tests pass unchanged.** A test that has to be edited is a signal that\nbehaviour moved, and it is the only early warning available.\n\n**Nothing changes for a run that never reaches the trend arm** - not late enough, window not full,\nor `improved` already true.\n\n## Out of scope - put these in your `out_of_scope`\n\n- **The repeat arm and `p1Signature`.** They are correct.\n- **`persistenceNotice`'s wording**, and whether a persistent id should warn more loudly.\n- **The round caps, `LATE_ROUND_FRACTION`, `TREND_FLOOR`, and every budget ceiling.** When the\n  trend arm *engages* is not this change; what it concludes once engaged is.\n- Stored-state validation (#23), deferred-only critique rounds (#22).\n- Anything about `pendingFindings` (#32, just landed) beyond leaving it alone.\n\n## Tests\n\nAdd tests; modify none.\n\n- The real history above - three rounds at 2 with pairwise-disjoint ids - does not stop the run.\n- `{a,b} -> {c,d} -> {a,b}` does stop it.\n- A flat count with one id surviving all three rounds does stop it.\n- `1 -> 1 -> 3` with entirely distinct ids does stop it.\n- The same set three rounds running still stops it, via the repeat arm.\n- A history whose records have empty `ids` stops exactly as it does today.\n- A run below the late threshold, or with a partial window, is untouched.\n",
+  "config": {
+    "roles": {
+      "planner": "claude",
+      "implementer": "claude",
+      "critic": "codex",
+      "answerer": "codex",
+      "reviewer": "codex"
+    },
+    "claude": {
+      "model": "opus",
+      "effort": "medium",
+      "planTimeoutMs": 1800000,
+      "implementTimeoutMs": 5400000
+    },
+    "codex": {
+      "model": "gpt-5.6-luna",
+      "effort": "xhigh",
+      "sandbox": "read-only",
+      "timeoutMs": 2700000,
+      "implementTimeoutMs": 5400000,
+      "persistSession": true,
+      "readRateLimits": true
+    },
+    "loop": {
+      "maxPlanRounds": 5,
+      "maxReviewRounds": 5,
+      "maxVerifyRounds": 3,
+      "maxQuestionRounds": 3,
+      "p1Tolerance": 1,
+      "oscillationThreshold": 3,
+      "convergenceWindow": 3
+    },
+    "budget": {
+      "maxCostUsd": 50,
+      "maxTokens": 50000000,
+      "waitOnRateLimit": true,
+      "maxWaitMinutes": 360,
+      "codexLimitPercent": 95,
+      "planShare": 0.4
+    },
+    "questions": {
+      "askCodex": true,
+      "answerNonBlocking": true,
+      "escalateOnDefer": true,
+      "escalateOnLowConfidence": true
+    },
+    "git": {
+      "useBranch": true,
+      "branchPrefix": "vibe/",
+      "commitEachRound": true
+    },
+    "context": {
+      "enabled": true,
+      "compactAboveRatio": 0.5,
+      "compactDuringCodex": true
+    },
+    "verify": {
+      "enabled": true,
+      "command": null,
+      "timeoutMs": 900000,
+      "runs": 3
+    },
+    "progress": {
+      "enabled": true,
+      "intervalMs": 30000
+    },
+    "toolchain": {
+      "git": {
+        "probe": "git --version",
+        "phases": [
+          "plan",
+          "implement",
+          "review"
+        ]
+      },
+      "node": {
+        "probe": "node --version",
+        "phases": [
+          "implement",
+          "review"
+        ],
+        "agents": [
+          "claude"
+        ]
+      },
+      "npm": {
+        "probe": "npm --version",
+        "phases": [
+          "implement",
+          "review"
+        ],
+        "agents": [
+          "claude"
+        ]
+      }
+    },
+    "configPath": null
+  },
+  "environment": {
+    "agents": [
+      {
+        "provider": "claude",
+        "shell": "bash",
+        "pathStyle": "msys",
+        "repaired": false,
+        "tools": [
+          {
+            "name": "git",
+            "available": true,
+            "version": "git version 2.31.1.windows.1"
+          },
+          {
+            "name": "node",
+            "available": true,
+            "version": "v24.18.0"
+          },
+          {
+            "name": "npm",
+            "available": true,
+            "version": "11.16.0"
+          }
+        ]
+      },
+      {
+        "provider": "codex",
+        "shell": "powershell",
+        "pathStyle": "win32",
+        "repaired": true,
+        "tools": [
+          {
+            "name": "git",
+            "available": true,
+            "version": "git version 2.31.1"
+          }
+        ]
+      }
+    ],
+    "verifyCommand": "npm test",
+    "verifyRuns": 3
+  },
+  "codexTokens": 3401345,
+  "lastActivityAt": "2026-08-20T07:01:26.927Z",
+  "turnStartedAt": "2026-08-20T06:58:33.146Z",
+  "contextModel": "opus",
+  "contextWindow": 1000000,
+  "codexRateLimit": {
+    "window": "primary",
+    "windowFromServer": false,
+    "usedPercent": 1,
+    "windowDurationMins": 10080,
+    "resetsAt": "2026-08-27T03:45:07.000Z",
+    "reachedType": null,
+    "planType": "plus",
+    "capturedAt": "2026-08-20T06:58:33.143Z"
+  },
+  "codexSessionStarted": true,
+  "pendingFindings": null,
+  "carried": [
+    {
+      "id": "unreachable-turnover-regression-fixture",
+      "severity": "P1",
+      "title": "The guard-progress test does not exercise the turnover exemption",
+      "detail": "`guardProgress` appends the current round at `src/orchestrator.ts:911-916` before calling `assessConvergence` at lines 918-923. Therefore the convergence test's three-record history evaluated with `round: 4` is not a state reachable through the sole production caller. The proposed guard test then adds a fourth round with count 1, producing counts `2 -> 2 -> 2 -> 1`; `improved` is already true, so the current implementation would return null and the test passes even without this change. The stated issue-2 history likewise does not reproduce the claimed stop under the current call order. This leaves the actual production behavior unverified and may mean the proposed bound does not fix the reported trigger.",
+      "suggested_fix": "Add a reachable guard test such as counts `1 -> 2 -> 2 -> 2` with pairwise-disjoint IDs at `cap: 5, round: 4`; the current implementation should stop while the proposed turnover logic should continue. Reconcile the issue-2 history and round numbering with the actual record-before-assess order before implementation.",
+      "defer": false
+    }
+  ],
+  "lastOutputAt": "2026-08-20T07:01:26.031Z"
+}

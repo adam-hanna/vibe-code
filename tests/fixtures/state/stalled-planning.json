@@ -1,0 +1,505 @@
+{
+  "id": "20260819-122206-implement-github-issue-2-make-the-agent-",
+  "dir": "C:\\Users\\Adam\\Documents\\apps\\vibe-code\\.worktrees\\issue-2-config\\.vibe\\runs\\20260819-122206-implement-github-issue-2-make-the-agent-",
+  "targetDir": "C:\\Users\\Adam\\Documents\\apps\\vibe-code\\.worktrees\\issue-2-config",
+  "task": "Implement GitHub issue #2: make the agent roles configurable so Codex can plan and implement while Claude reviews. The full brief is in the context file; READ IT FIRST. This issue has stalled twice - 61.4M tokens over 5 plan revisions, then 16.4M over 2, neither reaching implementation - and every blocker found both times has since shipped: the dispatch seam (#14), preflight enforcement keyed off Access (#17), token accounting (#16 via #24/#25/#26), and six role-shaped sites (#27 via #28, which shipped RoleTable, describedRole, rotatesConcurrentlyWith, roleEnabled, codexProbeSandbox, providersForRoles and turnTimeoutMs, each already taking a roles: RoleTable = ROLES parameter). The plumbing is done and this change is supposed to be small; if you find yourself editing prompts, preflight enforcement, accounting or the six sites #27 fixed, stop, because re-opening finished work is what made the previous two plans unaffordable. Seven items remain. (1) ROLES comes from a roles config section naming the provider for each of the five roles, defaulting to exactly today's assignment; access stays structural and is NOT configurable, because a planner is read-only and an implementer writes from what the phase is rather than who does it. (2) providerAccess at src/roles.ts:57-63 still iterates the module constant directly while every other helper takes a table - preflight reads it and #17 exists so there is exactly one notion of write capability, so it must follow the configured table; this is the smallest and most important item. (3) Schema and tools must ride on the role for both providers: RoleSpec carries schema only on the Codex branch and TurnRequest.jsonSchema/.tools are marked Claude-only and passed per call site, yet a Codex planner needs PLAN_SCHEMA and a Claude critic needs FINDINGS_SCHEMA and a toolset, and claudeTurn already accepts jsonSchema while parseStructured already exists. (4) Session identity, the open design question this issue has always owned: createRun initialises only the generative state.sessionId, src/context.ts binds rotation, contextRatio, compaction and the handoff to it as THE Claude session, and ROTATING_ROLE names implementer as whose session that is - so decide explicitly what a judging Claude talks through and write down the reasoning. (5) A writing Codex cannot keep its session because codex exec resume takes no -s flag, so a non-default sandbox applies only to the first turn and resumed turns silently revert to read-only; my recommendation is to REFUSE implementer codex with codex.persistSession true at config validation naming the exact fix, rather than silently forcing it or shipping a run that half-works, but say why in the plan if you disagree. (6) Add the per-phase Codex timeout #27 deliberately left, since this is the change that legitimately adds config surface and a writing Codex implementer needs the implementing timeout rather than 45 minutes. (7) Two startup warnings, only on a non-default assignment: that maxCostUsd and budget.planShare bound almost nothing once generative work sits with the agent reporting no cost - measured, 58.3M of this issue's first stalled run's 61.4M tokens were Codex - and that an implementing Codex has nothing watching its context. Context management for a long Codex session is explicitly OUT OF SCOPE and is how the first attempt died: warn and defer, and file it rather than building it. Also out of scope: making maxCostUsd work for Codex, changing what any ceiling means, renaming questions.askCodex or context.compactDuringCodex (#27 settled this), re-deriving anything from #14/#16/#17/#27, prompt content beyond what a role table requires, stored-state validation (#23) and deferred-only rounds (#22). Hard constraints: the default configuration must be byte-for-byte unchanged and the existing 339 tests must pass unchanged; there must be ONE role table, built once from config and passed, with no second module-level constant that some sites still read, because shipping another one would undo #27. Add tests and modify none.",
+  "sessionId": "a1829d68-d212-4b50-983c-6c41137a433b",
+  "createdAt": "2026-08-19T19:22:06.811Z",
+  "status": "stalled",
+  "phase": "planning",
+  "planRound": 3,
+  "reviewRound": 0,
+  "costUsd": 9.3809,
+  "tokensUsed": 28355891,
+  "rateLimitWaits": 0,
+  "baseSha": null,
+  "branch": null,
+  "p1Rounds": [
+    {
+      "signature": "27a17ce324f3",
+      "count": 2,
+      "ids": [
+        "codex-generative-judge-session-collision",
+        "toolchain-resume-override-loss"
+      ]
+    }
+  ],
+  "verifyRounds": [],
+  "verifyRound": 0,
+  "questionRound": 2,
+  "events": [
+    {
+      "at": "2026-08-19T19:23:08.271Z",
+      "type": "preflight-ok",
+      "repairArgs": false
+    },
+    {
+      "at": "2026-08-19T19:23:08.272Z",
+      "type": "preflight_probe",
+      "provider": "claude",
+      "tokens": 10321,
+      "costUsd": 0.0102405,
+      "turns": 1
+    },
+    {
+      "at": "2026-08-19T19:23:08.273Z",
+      "type": "preflight_probe",
+      "provider": "codex",
+      "tokens": 50449,
+      "costUsd": null,
+      "turns": 1
+    },
+    {
+      "at": "2026-08-19T19:34:20.772Z",
+      "type": "claude_turn",
+      "label": "plan",
+      "costUsd": 4.047556999999999,
+      "tokens": 2299906,
+      "turns": 26,
+      "contextRatio": 0.165
+    },
+    {
+      "at": "2026-08-19T19:34:21.497Z",
+      "type": "codex_rate_limit",
+      "label": "answers-0",
+      "action": "proceed",
+      "usedPercent": 37,
+      "reachedType": null
+    },
+    {
+      "at": "2026-08-19T19:37:24.465Z",
+      "type": "codex_turn",
+      "label": "answers-0",
+      "tokens": 954481
+    },
+    {
+      "at": "2026-08-19T19:37:25.111Z",
+      "type": "escalation",
+      "code": 2,
+      "message": "1 blocking question(s) need you - Codex declined to guess at product intent."
+    },
+    {
+      "at": "2026-08-19T19:39:36.716Z",
+      "type": "preflight-ok",
+      "repairArgs": false
+    },
+    {
+      "at": "2026-08-19T19:39:36.717Z",
+      "type": "preflight_probe",
+      "provider": "claude",
+      "tokens": 10313,
+      "costUsd": 0.0012363,
+      "turns": 1
+    },
+    {
+      "at": "2026-08-19T19:39:36.719Z",
+      "type": "preflight_probe",
+      "provider": "codex",
+      "tokens": 51692,
+      "costUsd": null,
+      "turns": 1
+    },
+    {
+      "at": "2026-08-19T19:44:09.006Z",
+      "type": "claude_turn",
+      "label": "revise-1",
+      "costUsd": 1.482618,
+      "tokens": 1146687,
+      "turns": 7,
+      "contextRatio": 0.193
+    },
+    {
+      "at": "2026-08-19T19:44:09.967Z",
+      "type": "codex_rate_limit",
+      "label": "critique-1",
+      "action": "proceed",
+      "usedPercent": 37,
+      "reachedType": null
+    },
+    {
+      "at": "2026-08-19T19:56:30.274Z",
+      "type": "codex_turn",
+      "label": "critique-1",
+      "tokens": 5241209
+    },
+    {
+      "at": "2026-08-19T20:04:07.850Z",
+      "type": "claude_turn",
+      "label": "revise-2",
+      "costUsd": 2.4950355,
+      "tokens": 2283470,
+      "turns": 11,
+      "contextRatio": 0.234
+    },
+    {
+      "at": "2026-08-19T20:04:08.222Z",
+      "type": "codex_rate_limit",
+      "label": "answers-2",
+      "action": "proceed",
+      "usedPercent": 38,
+      "reachedType": null
+    },
+    {
+      "at": "2026-08-19T20:05:11.543Z",
+      "type": "codex_turn",
+      "label": "answers-2",
+      "tokens": 5449755
+    },
+    {
+      "at": "2026-08-19T20:08:40.128Z",
+      "type": "claude_turn",
+      "label": "revise-3",
+      "costUsd": 1.344278,
+      "tokens": 1295963,
+      "turns": 6,
+      "contextRatio": 0.256
+    },
+    {
+      "at": "2026-08-19T20:08:40.603Z",
+      "type": "codex_rate_limit",
+      "label": "critique-3",
+      "action": "proceed",
+      "usedPercent": 38,
+      "reachedType": null
+    },
+    {
+      "at": "2026-08-19T20:22:51.802Z",
+      "type": "codex_turn",
+      "label": "critique-3",
+      "tokens": 9561645
+    },
+    {
+      "at": "2026-08-19T20:22:52.535Z",
+      "type": "escalation",
+      "code": 4,
+      "message": "Planning has used 28.4M of the 40.0M token ceiling (40% cap) with 2 P1(s) still open, and has not reached implementation. Narrow the task or raise budget.planShare."
+    }
+  ],
+  "sessionStarted": true,
+  "planOnly": false,
+  "answeredQuestions": [
+    "what should a judging claude talk through its own persisted session state judgesessionid a fresh one shot session per turn or the existing state sessionid",
+    "codex implementtimeoutms cannot default to 90 minutes without editing tests role shaped sites test ts 372 which asserts a writing codex under defaults gets codex timeoutms which constraint gives the frozen test or shipping the real implementing timeout by default",
+    "should the default toolchain entries agents be re derived from the configured roles so node npm are demanded of a codex implementer or left pinned to claude as defaults computes them at module load",
+    "is refusing implementer codex codex persistsession true at config validation the right severity versus warning and proceeding or silently forcing persistsession false",
+    "should an assignment that puts both a generative and a judging role on the same provider be supported two conversations for that provider or rejected at validation",
+    "should the default toolchain entries agents be re derived from the configured roles or left as the user stored value in all cases",
+    "is refusing implementer codex codex persistsession true at config validation the right severity versus warning and proceeding or silently forcing the key off",
+    "should an assignment that puts both a generative and a judging role on the same provider be supported two conversations for that provider or rejected at validation technical advisory",
+    "should the default toolchain entries agents be re derived from the configured roles or left as the user stored value in all cases technical advisory",
+    "is refusing implementer codex codex persistsession true at config validation the right severity versus warning and proceeding or silently forcing the key off product advisory"
+  ],
+  "deferredQuestions": [
+    {
+      "question": "Is refusing `implementer: 'codex'` + `codex.persistSession: true` at config validation the right severity, versus warning and proceeding, or silently forcing `persistSession: false`?",
+      "kind": "product",
+      "recommended": "Refuse. Proceeding ships a run whose implementer can write on turn one and silently cannot afterwards; forcing changes a memory setting the user chose without telling them.",
+      "reason": "`src/codex.ts` sends `-s` only for a new `codex exec`; its `exec resume` command omits `-s` and defaults to read-only. Therefore warning and proceeding permits the first writing turn but makes resumed turns read-only, while silently forcing the setting overrides an explicit user choice. The incompatibility is clear from the code, but the preferred product behavior for that invalid combination is not."
+    }
+  ],
+  "sessionRotations": 0,
+  "codexSessionId": "01a01b84-792e-7a82-9577-36c011e8ac33",
+  "handoff": null,
+  "contextRatio": 0.256204,
+  "plan": {
+    "plan_md": "# Issue #2 - configurable agent roles (revision 3)\n\n## Context\n\n`src/roles.ts` hardcodes who does what: Claude plans and implements, Codex critiques, answers and reviews. #14 (dispatch seam), #16 (accounting), #17 (preflight keyed off `Access`) and #27/#28 (six role-shaped sites, `RoleTable` threaded as a parameter) already shipped every piece of plumbing this needs. What is left is to build the table from config, close the places that still cannot express a swapped assignment (`providerAccess`, schema/tools, a writing Codex's timeout, session identity), and warn about the two things a swap silently breaks.\n\nGoal: `vibe.config.json` can say `\"roles\": { \"planner\": \"codex\", \"implementer\": \"codex\", \"critic\": \"claude\", ... }` and the run does exactly that.\n\n### The invariant, stated precisely\n\n**A default run behaves identically: same providers, sandboxes, permission modes, prompts, session handling, timeouts and preflight verdicts, and the same sequence of spawned command lines.** Two things are *not* claimed, because they are not true:\n\n- **`state.json` gains fields.** `cmdRun` persists the effective config, so a new default run's `state.config` now carries `roles` and `codex.implementTimeoutMs`. That is an additive persisted-config migration, accepted deliberately and tested (test 10): a config stored by an older vibe still resumes, and one stored by this vibe carries the new keys. `judgeSessionId` and the new Codex generative slot stay *absent* on a default run because nothing creates them - a fact about the assignment, not an argument about byte equality.\n- **One existing assertion changes**, sanctioned and named below (`tests/role-shaped-sites.test.ts:372`). It is about a *swapped* table, not a default run. Every other test must pass unedited; if a second one needs touching, stop and report rather than widening the exception.\n\n## Settled decisions (confirmed, not open)\n\n- **Mixed kinds on one provider are supported**, with per-kind session slots. A Codex planner and a Codex critic get separate threads; the default assignment is unchanged. This is the fix for the collision review round 2 found, and it is a requirement rather than a proposal.\n- **Role-derived `agents` are re-derived**, but only for `node` and `npm`, only where the entry is otherwise the default one, and only through the provenance-aware pass described below - custom tools such as `go` and explicit user toolchain entries are never touched.\n- **`codex.implementTimeoutMs` defaults to 90 minutes**, and the single sanctioned test edit below is the anticipated cost of closing #27's deferred limitation.\n\n## Response to review round 2\n\n- **[P1] `codex-generative-judge-session-collision` - accepted and fixed at the cause.** Revision 1 split the Claude sessions and left `state.codexSessionId` serving every Codex role, so `planner: codex` + `critic: codex` had the critic resume the planner's thread. The fix is the general rule applied symmetrically to both providers: **one conversation per (provider, session kind)**, four slots, with dispatch and `judgeHasMemory` both routed through a single `sessionSlot(provider, kind)` accessor. Test 9 is the partial-assignment test the reviewer asked for.\n  *Same class, checked elsewhere:* every other piece of per-conversation state was audited for the same \"one field serving two jobs\" defect. `sessionStarted`, `contextRatio`, `contextModel`, `contextWindow`, `handoff`, `handoffStale` and `sessionRotations` all belong to the Claude generative slot and are now written only by that branch (they were already Claude-only, but nothing stopped a judging Claude turn from touching them - now something does). `codexRateLimit`, `turnStartedAt` and `lastOutputAt` are per-run or per-turn, not per-conversation: correct as they are. That audit surfaced a second instance of the same class the review did not name: with a Codex generative role and `persistSession: false`, `revisePlanPrompt` would reach a fresh thread with no plan in it. Fixed by promoting the existing \"not resuming -> prefix `handoffContext`\" rule from `claudeDispatch` to any generative turn on either provider (test 12).\n- **[P1] `toolchain-resume-override-loss` - accepted and fixed at the cause.** The revision-1 \"rebuild the base from `defaultToolchain`\" would have dropped a stored custom tool; `tests/config.test.ts`'s \"a toolchain entry the run added is kept when defaults are layered under it\" pins `go` surviving `applyOverrides(stored, {})`. Merging is now left exactly as it is, and a separate provenance-aware pass refreshes only `agents`, only on `node`/`npm`, only when the entry is otherwise the default one, and never over a tool named in *this* invocation's overrides. Stored configs are the base rather than an override, so a resume re-derives instead of preserving stale agents. Test 11 covers custom tool + role change together.\n  *Same class, checked elsewhere:* `mergeSection` for the other sections replaces scalars only and has no open-ended keys, so it has no equivalent provenance problem; `configDiff` compares whole toolchains and is unaffected; `SECTIONS` gaining `roles` was checked against `tests/config.test.ts`'s three `configDiff` assertions, which compare equal configs or a named key and stay green.\n- **[P2] `toolchain-test-uses-rejected-config` - accepted.** Every new fixture goes through one `rolesCfg()` helper that sets `codex.persistSession: false` whenever the built table gives a Codex role write access, and runs the result through `applyOverrides` so the fixture is a *validated* config rather than a literal that could never load. That closes the same trap for tests 2, 3, 4, 6, 7 and 12, not just test 11.\n- **[P2] `session-test-misses-generative-claude` - accepted.** The full swap cannot exercise a Claude generative turn. Two partial assignments were added: `MIXED_CLAUDE` (Claude planner + Claude critic, test 8) and `MIXED_CODEX` (Codex planner + Codex critic, test 9).\n- **[P2] `default-state-json-not-byte-for-byte` - accepted.** The invariant is restated above as runtime behaviour plus an explicitly accepted, tested additive config migration. The absence of `judgeSessionId` is no longer offered as evidence of byte equality.\n- **[P2] `codex-turn-overrides-ignored` - accepted.** Codex dispatch now uses `req.jsonSchema ?? spec.schema ?? REPORT_SCHEMA`, and `TurnRequest.tools` is documented as Claude-only with the reason (`CodexTurnOptions` has no tool list; Codex tools are governed by its sandbox).\n  *Same class, checked elsewhere:* the other `TurnRequest` fields were checked for provider asymmetry - `timeoutMs`, `prompt`, `cwd` and `label` are all honoured by both branches (`label` doubles as Codex's output filename, already documented).\n\n## Design decisions\n\n**One table, derived from config.** `rolesFor(cfg)` in `roles.ts` builds the `RoleTable` from `cfg.roles` and memoises it in a `WeakMap<Config, RoleTable>`, so one config object has exactly one table. Every helper #27 shipped keeps its `roles: RoleTable = ...` parameter; the ones that already take a `Config` change their *default* from `ROLES` to `rolesFor(cfg)` (TypeScript allows a parameter default to reference an earlier parameter). `ROLES` stays exported and equal to what the default config produces - the fallback for helpers with no config in hand, and the bootstrap for `DEFAULTS.toolchain`. No production path selects it: every production path either passes `rolesFor(cfg)` or has a cfg-derived default.\n\n**`access` is structural.** Config names a provider per role and nothing else. Access, schema and tools come from a per-role constant.\n\n### Session identity: one conversation per (provider, kind)\n\n> **A run keeps at most one conversation per (provider, session kind) pair.** `sessionKind(role)` is `generative` for `planner` and `implementer` - the roles that build the artefact under construction - and `judging` for `critic`, `answerer` and `reviewer`, which render a verdict on something handed to them in the prompt. A conversation is never shared across kinds, because a judge that resumes the maker's thread is judging its own conversation, and that is exactly the independence the second opinion exists to buy.\n\n| provider | kind | state field | today |\n|---|---|---|---|\n| claude | generative | `state.sessionId` | the session `context.ts` measures, rotates, compacts, hands off; `ROTATING_ROLE = 'implementer'` names whose it is |\n| claude | judging | `state.judgeSessionId` (new) | never created under the default table |\n| codex | judging | `state.codexSessionId` | today's Codex thread - critic, answerer and reviewer are all judging, so its meaning is unchanged |\n| codex | generative | `state.codexGenerativeSessionId` (new) | never created under the default table |\n\n`state.codexSessionId` keeps its name for the reason `questions.askCodex` keeps its: renaming touches every stored `state.config` and every run on disk. Its doc comment now says what it is - the *judging* Codex thread.\n\nOnly the Claude generative slot is measured, rotated and compacted; the other three are plain conversations. `state.sessionStarted`, `contextRatio`, `contextModel`, `contextWindow`, `handoff`, `handoffStale` and `sessionRotations` belong to that slot alone, and no judging turn touches any of them.\n\nWhy persist a judging conversation at all rather than one-shot per turn: `codexDispatch`'s own comment records it - a stateless reviewer re-derives a still-unresolved objection under a fresh id each round, which reads as progress to the oscillation guard. Why the Claude judging slot is not gated on `codex.persistSession`: item 5 forces that key off whenever the implementer is Codex, so gating would silently cost a Claude reviewer its memory because of a Codex sandbox limitation.\n\n**Continuity for a generative role that cannot resume.** `revisePlanPrompt` and the fix prompts assume the plan of record is already in the conversation. `claudeDispatch` already handles the fresh-session case by prefixing `P.handoffContext(handoff, renderPlanDoc(plan), stale)`. That rule is promoted to apply to *any* generative turn that is not resuming an existing session, on either provider - otherwise a Codex planner running with `codex.persistSession: false` (which item 5 forces in the headline configuration) would be asked to revise a plan it has never seen. Under the default table this is byte-for-byte today's behaviour, because the only generative provider is Claude and the condition is the one `claudeDispatch` already evaluates.\n\n**A writing Codex cannot keep its session (item 5).** `codex exec resume` takes no `-s`, so `codexSandbox('write', cfg) === 'workspace-write'` applies to turn one and resumed turns silently revert to read-only. Rejected at config validation, naming the fix. Silently forcing `persistSession: false` changes a setting the user chose; warning and proceeding ships a run that writes once and then cannot.\n\n**A writing Codex gets the implementing timeout (item 6).** `codex.implementTimeoutMs` is a real key defaulting to 90 minutes, mirroring `claude.implementTimeoutMs`. Read only for a Codex role holding `write`, which the default table does not have.\n\n## The single sanctioned test edit\n\n`tests/role-shaped-sites.test.ts`, in *\"timeout selection follows the role, not the provider\"* (line ~369-375). Old:\n\n```ts\n  // Implementing still gets the long turn once the implementer is Codex - which\n  // Codex's single key cannot express, so it gets the one figure Codex has.\n  assert.equal(turnTimeoutMs('implementer', DEFAULTS, SWAPPED), DEFAULTS.codex.timeoutMs);\n```\n\nNew:\n\n```ts\n  // Implementing gets the long turn once the implementer is Codex. #27 left this\n  // as the reviewing figure and said why: expressing it needs a new key, which is\n  // a config surface. That key now exists.\n  assert.equal(turnTimeoutMs('implementer', DEFAULTS, SWAPPED), DEFAULTS.codex.implementTimeoutMs);\n```\n\nExpected value moves from 2_700_000 to 5_400_000. Everything else in that file is untouched, including line 365's \"every timeout selected under the default table is identical to today's\", the pin proving no default run moved. `grep -rn \"codex.timeoutMs\" tests/` returns exactly this one site.\n\n## File-by-file changes\n\n### 1. `src/roles.ts` - the table, built from config\n\n- `export type RolesConfig = Record<Role, AgentProvider>` and `export const DEFAULT_ROLES: RolesConfig` = today's assignment (planner/implementer `claude`, critic/answerer/reviewer `codex`). Lives here, not in `types.ts`, so `config.ts` can import it with no runtime cycle.\n- Widen `RoleSpec` to `{ provider: AgentProvider; access: Access; schema?: object; tools?: readonly string[] }`. Every table literal in the existing tests still typechecks.\n- `ROLE_SHAPE: Record<Role, {access; schema?; tools?}>` - the provider-independent half: planner read-only/`PLAN_SCHEMA`/`READ_ONLY_TOOLS`; implementer write/none/none (all tools); critic and reviewer read-only/`FINDINGS_SCHEMA`/`READ_ONLY_TOOLS`; answerer read-only/`ANSWERS_SCHEMA`/`READ_ONLY_TOOLS`. `READ_ONLY_TOOLS` is `PLAN_TOOLS` moved here verbatim from `orchestrator.ts:79`.\n- `rolesFrom(providers)` - per key, the configured provider when it is `claude` or `codex`, else the default. Deliberately tolerant: `loadRun` casts stored JSON with no validation, and several existing tests hand-build `Config` objects with no `roles` section.\n- `rolesFor(cfg: Config): RoleTable` - `WeakMap<Config, RoleTable>` over `rolesFrom(cfg.roles)`.\n- `export const ROLES: RoleTable = rolesFrom(DEFAULT_ROLES)`, doc comment rewritten: the table the default config produces and the fallback for helpers with no config, not a second source of truth.\n- `isDefaultAssignment(cfg): boolean`, used by the startup warnings.\n- `export function sessionKind(role: Role): 'generative' | 'judging'` - planner/implementer generative, the rest judging.\n- **Item 2:** `providerAccess(provider, cfg)` iterates `rolesFor(cfg)` instead of `Object.values(ROLES)`. The sandbox clause below it is untouched.\n- **Item 6:** `turnTimeoutMs`'s Codex branch becomes `spec.access === 'write' ? cfg.codex.implementTimeoutMs : cfg.codex.timeoutMs`; its doc comment loses the \"Codex still has a single timeoutMs\" caveat.\n- Unchanged: `claudePermission`, `codexSandbox`, `describedRole`, `DESCRIBED_BY`, `ROTATING_ROLE`, `rotatesConcurrentlyWith`, `roleEnabled`, `codexProbeSandbox`, `providersForRoles`. The two taking a `Config` change their table default to `rolesFor(cfg)`.\n\n### 2. `src/schemas.ts`\n\nAdd `REPORT_SCHEMA` - an object with a single required `report` string. `codexTurn` requires an `--output-schema` and the implementer role carries none, because it produces prose. Only reachable when a Codex role holds a schemaless role.\n\n### 3. `src/types.ts`\n\n- `CodexConfig`: add `implementTimeoutMs: number` - how long a *writing* Codex turn gets; `timeoutMs` is the reviewing figure, and which one a role reads follows its access, exactly as the two `claude.*` keys already do.\n- `Config`: add `roles: RolesConfig` (type-only import from `@src/roles.js`), commented: roles choose the provider; access is structural and not configurable.\n- `RunState`:\n  - `judgeSessionId?: string | null` - the Claude judging conversation.\n  - `codexGenerativeSessionId?: string | null` - the Codex generative thread.\n  - `codexSessionId` comment updated: the Codex **judging** thread; the name is history, like `questions.askCodex`.\n  - `sessionId` comment updated: the Claude **generative** conversation, the only one measured, rotated and handed off.\n  Both new fields are optional so older runs load, and neither is initialised by `createRun`: absent means no conversation of that kind has happened.\n\n### 4. `src/config.ts`\n\n- `DEFAULTS.roles = { ...DEFAULT_ROLES }`.\n- `DEFAULTS.codex.implementTimeoutMs = 90 * 60 * 1000` - the same 90 minutes `claude.implementTimeoutMs` gets, because the figure belongs to implementing rather than to an agent; unread under the default table.\n- Extract the toolchain literal into `defaultToolchain(roles: RoleTable)`, with node/npm using `providersForRoles(['implementer'], roles)`; `DEFAULTS.toolchain = defaultToolchain(ROLES)`, so `DEFAULTS.toolchain['node'].agents` is still `['claude']`.\n- `SECTIONS` gains `'roles'`, so `configDiff` reports `roles.implementer`.\n- `validate` gains: each `cfg.roles[role]` must be `claude` or `codex`; `codex.implementTimeoutMs` must be a positive number, beside the existing `codex.timeoutMs` check; and **item 5** - any role with `provider: 'codex'` and `access: 'write'` while `codex.persistSession` is true throws, naming the fix (`codex.persistSession: false`, or `--no-codex-session`) and the reason (`codex exec resume` takes no `-s`, so workspace-write would apply to the first turn only). Derived from the built table, so it stays true if another role ever holds write.\n\n#### Role-derived toolchain agents, provenance-aware\n\nMerging itself is **unchanged**: `mergeToolchain` still copies the base and lets an overriding entry replace a whole tool, so a stored custom tool such as `go` survives `applyOverrides` - `tests/config.test.ts`'s \"a toolchain entry the run added is kept when defaults are layered under it\" pins exactly that.\n\nA single post-merge pass refreshes only what the roles derive:\n\n```ts\nwithRoleDerivedAgents(toolchain, roles, explicit: ReadonlySet<string>)\n```\n\n- `ROLE_DERIVED_TOOLS = ['node', 'npm']` - the only entries whose `agents` `defaultToolchain` computes from the table.\n- An entry is refreshed only when its `probe`, `phases` and `minVersion` are deep-equal to `defaultToolchain(ROLES)`'s entry for that tool - i.e. it is the default entry and only its `agents` is in question.\n- `explicit` is the union of the *override* objects merged in this call: the config file's plus the CLI's for `loadConfig`, the `overrides` argument for `applyOverrides`. A stored config is the **base**, not an override, so a resume re-derives from the stored roles - unchanged roles give the same value, changed roles are corrected. A hand-written `toolchain.node` in the user's config file is explicit and is left exactly as written.\n- Custom tools are never in `ROLE_DERIVED_TOOLS` and are never touched.\n\nWhy this matters: `DEFAULTS.toolchain` computes `agents` at module load against the default table. Left alone, a Codex implementer would have node and npm demanded of the read-only Claude (warn-only under #17) and never checked on the agent that actually builds - reintroducing the 35-minute failure preflight exists to prevent.\n\n### 5. `src/orchestrator.ts` - the seam\n\n- Delete the local `PLAN_TOOLS`; import `READ_ONLY_TOOLS` from roles.\n- `runTurn(state, cfg, req, turns = REAL_AGENTS, roles: RoleTable = rolesFor(cfg))`.\n- `TurnRequest`:\n  - `jsonSchema` - \"The response schema for this turn, overriding the role's. Honoured by **both** providers: Claude sends it as `--json-schema`, Codex as `--output-schema`.\"\n  - `tools` - stays explicitly **Claude only**: `CodexTurnOptions` has no tool list and Codex's tools are governed by its sandbox, so there is nothing to pass. The comment says so rather than implying a symmetry that does not exist.\n- `runPlan` and `revisePlan` stop passing `tools`/`jsonSchema` - the planner role carries both, and they are the same constants, so the command line is identical.\n- **One session accessor, used by both dispatches**, so the four slots live in one place instead of `state.x ?? randomUUID()` spread across two providers:\n  ```ts\n  type Slot = 'sessionId' | 'judgeSessionId' | 'codexSessionId' | 'codexGenerativeSessionId';\n  function sessionSlot(provider: AgentProvider, kind: 'generative' | 'judging'): Slot\n  ```\n- `claudeDispatch(state, cfg, req, spec, turn)`:\n  - `const kind = sessionKind(req.role)`.\n  - Generative: today's code, unchanged - `shouldRotate`/`rotateSession`, `state.sessionId`, `state.sessionStarted`, the `handoffContext` prefix when not resuming, `recordTurnContext`, `measuredRatio` in the event.\n  - Judging: `started = typeof state.judgeSessionId === 'string'`; `sid = started ? state.judgeSessionId : randomUUID()`; assign and `saveState`; `resume: started`; prompt sent as-is (critique, answer and review prompts are self-contained); no rotation, no `recordTurnContext`, no `sessionStarted` write; the `claude_turn` event carries `session: 'judge'` and `contextRatio: null`.\n  - `jsonSchema: req.jsonSchema ?? spec.schema`, `tools: req.tools ?? spec.tools`.\n  - Returns `{ text, structured }` where `structured` is `parseStructured(result.text)` when a schema was sent and `null` otherwise - computed *after* `applyCharge`, in a `try/catch` yielding `null`, so a malformed reply cannot cost the run the accounting for a turn it paid for and `runPlan`'s own `parsePlan(parseStructured(text))` still produces today's error message.\n- `codexDispatch(state, cfg, req, spec, turn)`:\n  - `schema: req.jsonSchema ?? spec.schema ?? REPORT_SCHEMA` - the request-level override is honoured, matching the Claude branch and the `TurnRequest` doc.\n  - Reads and writes the slot for `sessionKind(req.role)`, not `codexSessionId` unconditionally: `sessionId: cfg.codex.persistSession ? state[slot] : null`, and the returned thread id is stored back into the same slot. This is the fix for the `planner: codex` + `critic: codex` collision. `log.detail('codex thread ...')` names the kind.\n  - For a schemaless role, return the parsed `report` string as `text` (falling back to `raw`), so `implementation-report.md` stays prose.\n  - Charging, rate limits and the retry wrapper are unchanged.\n- **Generative continuity, both providers.** The \"not resuming -> prefix `P.handoffContext(state.handoff, renderPlanDoc(state.plan), state.handoffStale)`\" rule moves out of `claudeDispatch` into the shared dispatch preparation and applies to any generative turn whose slot is empty (or whose provider has session persistence switched off). Under the default table the condition and the result are exactly today's.\n- `codexHasMemory` becomes `judgeHasMemory(state, cfg, roles)`: look up the judging role's provider, then ask that provider's judging slot - Codex: `cfg.codex.persistSession && state.codexSessionId !== null` (today's answer); Claude: `state.judgeSessionId != null`. Feeds the existing `hasMemory` argument of `critiquePrompt`/`reviewPrompt`.\n- Pass the table where a helper needs one: `withConcurrentCompaction(..., 'critic'|'reviewer', rolesFor(cfg))`; `P.planPrompt(..., rolesFor(cfg))`, `P.critiquePrompt(..., rolesFor(cfg))`, `P.reviewPrompt(..., rolesFor(cfg))`.\n- The four `log.step` lines that name a provider (\"Claude is planning (read-only)\", \"Codex is critiquing the plan\", \"Codex is reviewing the implementation\", \"Codex is answering\") take it from `roles[role].provider`.\n\n### 6. `src/context.ts`\n\n`withConcurrentCompaction`'s `roles: RoleTable = ROLES` default becomes `rolesFor(cfg)`. Nothing else. Rotation still owns `state.sessionId` alone, which is now explicitly the Claude generative conversation, and `rotatesConcurrentlyWith` keeps its provider comparison: with a Codex implementer and a Codex critic it returns false, so no rotation is attempted beside that work - conservative and correct, since there is no Claude generative session to rotate in that assignment.\n\n### 7. `src/prompts.ts`\n\n`planPrompt`, `critiquePrompt` and `reviewPrompt` each gain a trailing `roles: RoleTable = ROLES` parameter, forwarded to the existing `environmentBlock(environment, audience, roles)` call. Existing callers and prompt tests keep their arity. No prompt text changes.\n\n### 8. `src/preflight.ts`\n\nNo edit. `providerAccess(..., cfg)` (lines 110-111) and `codexProbeSandbox(cfg)` (line 307) follow the configured table for free once item 2 lands, because both derive from `cfg`. That is item 2's payoff: #17's enforcement follows the roles.\n\n### 9. `src/cli.ts` - the two warnings (item 7)\n\n`export function warnRoleAssignment(cfg: Config): void`, called at the top of `execute()` so it covers `run` and `resume`. Returns immediately when `isDefaultAssignment(cfg)`. Exactly two warnings:\n\n1. When a generative role (planner or implementer) is not Claude: *budget.maxCostUsd and budget.planShare are computed from Claude's reported cost, and Codex reports none - with the generative work on Codex they bound almost nothing. Measured on this issue's own stalled run: 58.3M of 61.4M tokens were Codex. budget.maxTokens (&lt;value&gt;) covers both agents and is unaffected.*\n2. When the implementer is Codex: *Nothing watches an implementing Codex's context: rotation and compaction in context.ts key off Claude's reported prompt tokens, and a resumed Codex thread has no equivalent signal wired up. A long implementation may exhaust its window with no compaction.*\n\nNo new CLI flags.\n\n### 10. Docs\n\n- `vibe.config.example.json`: the `roles` block at today's assignment, and `\"implementTimeoutMs\": 5400000` under `codex`.\n- `README.md`: a short `roles` subsection - the five roles, that access is structural, one conversation per (provider, kind), the `implementer: codex` + `persistSession` refusal, the Codex implementing timeout, and the two warnings.\n\n## Order of work\n\n1. `roles.ts` (+ `REPORT_SCHEMA`) and `types.ts`.\n2. `config.ts` - defaults, `defaultToolchain`, `withRoleDerivedAgents`, validation.\n3. `orchestrator.ts` - dispatch, the session slots, generative continuity, schema/tools from the role.\n4. `context.ts` and `prompts.ts` plumbing.\n5. `cli.ts` warnings.\n6. The sanctioned assertion edit, in the same commit as step 1.\n7. Docs.\n8. New tests.\n\nSteps 1-2 gate 3-5. Steps 7 and 8 are independent.\n\n## Tests - `tests/roles-config.test.ts`, one new file\n\nFakes only; follow `tests/role-shaped-sites.test.ts`'s `recorder()` / `captureLog()` pattern. **Every fixture that puts a Codex role in a writing position must set `codex.persistSession: false`**, or validation rejects it (item 5) - so the file defines its assignments through one helper that does it and runs the result through `applyOverrides`, making every fixture a validated config rather than a literal that could never load:\n\n```ts\nfunction rolesCfg(roles: Partial<RolesConfig>, over: Partial<Config> = {}): Config\n```\n\nThree assignments are used throughout:\n\n- `FULL_SWAP` - planner/implementer Codex, critic/answerer/reviewer Claude.\n- `MIXED_CLAUDE` - planner and implementer Claude, critic Claude, answerer and reviewer Codex. A Claude generative *and* a Claude judging role at once.\n- `MIXED_CODEX` - planner Codex, implementer Claude, critic Codex, answerer and reviewer Codex. A Codex generative *and* a Codex judging role at once.\n\n1. **Default table.** `deepEqual(rolesFor(loadConfig(tmpRepo)), ROLES)` and `deepEqual(rolesFor(DEFAULTS), ROLES)`; `DEFAULTS.toolchain.node.agents` is still `['claude']`.\n2. **A swap routes through the production entry point.** With `FULL_SWAP`, call `runTurn(state, cfg, request(role), fakes)` with **no table argument** for all five roles; each lands on the configured provider, the Claude calls carry `permissionMode: 'plan'`, the Codex implementer call carries `sandbox: 'workspace-write'`.\n3. **Schema and tools ride on the role.** `FULL_SWAP`: the Codex planner got `schema === PLAN_SCHEMA`; the Claude critic got `jsonSchema === FINDINGS_SCHEMA` and `tools` deep-equal to `READ_ONLY_TOOLS`; the Claude answerer got `ANSWERS_SCHEMA`; the Claude critic's `TurnOutcome.structured` is the parsed object, so `parseFindings` works unchanged. Under `DEFAULTS` the Claude planner still receives `PLAN_SCHEMA` and those same tools. A request-level `jsonSchema` override reaches **both** providers, and a Codex role with no schema is given `REPORT_SCHEMA`.\n4. **`providerAccess` and preflight follow the table.** `FULL_SWAP`: `providerAccess('codex', cfg) === 'write'`, `providerAccess('claude', cfg) === 'read-only'`; the reverse under `DEFAULTS`. Then `preflight()` with injected probes (fixture shape from `tests/preflight-enforcement.test.ts`) reporting the same violation for both agents: the swap moves it from `warnings` to `blockingReasons`.\n5. **Item 5 refusal.** `loadConfig`/`applyOverrides` with `roles.implementer: 'codex'` and `codex.persistSession: true` throws, matching `/codex\\.persistSession/` and `/--no-codex-session/`; with `false` it loads.\n6. **Writing-Codex timeout.** `FULL_SWAP`: `turnTimeoutMs('implementer', cfg)` is `cfg.codex.implementTimeoutMs` (90 min by default, and a configured 80-minute value is honoured) while critic and reviewer stay on `codex.timeoutMs`; a dispatched Codex implementer turn carries the implementing figure; and under `DEFAULTS` all five roles' timeouts are exactly today's.\n7. **Warnings.** `warnRoleAssignment` under a captured console emits both lines on `FULL_SWAP`, only the cost line when just a generative role moved, and nothing at all under `DEFAULTS` or under a table that moves only a judging role.\n8. **Claude generative and Claude judging are different conversations.** `MIXED_CLAUDE`: a planner turn, then two critic turns. The planner turn uses `state.sessionId`; the critic turns use a different id, `resume:false` then `resume:true` on the same `state.judgeSessionId`; `state.sessionId` is unchanged by the critic turns; `state.sessionStarted` and `state.contextRatio` move only for the planner turn. Under `DEFAULTS`, `judgeSessionId` is never created.\n9. **Codex generative and Codex judging are different threads.** `MIXED_CODEX` with `codex.persistSession: true`: a planner turn then a critic turn, the fake returning a distinct thread id per call. The critic turn was sent `sessionId: null` (it has no judging thread yet) rather than the planner's thread; `state.codexGenerativeSessionId` and `state.codexSessionId` end up different; a second planner turn resumes the generative thread, not the critic's.\n10. **Persisted config migration.** A config stored without `roles` or `codex.implementTimeoutMs` (built the way `tests/config.test.ts`'s `preFeatureStoredConfig` builds one) resumes through `applyOverrides` with today's assignment and the 90-minute key; a config stored *with* a swapped `roles` resumes on that swap.\n11. **Toolchain follows the implementer, and keeps what it inherited.**\n    - `loadConfig` with `roles.implementer: 'codex'` **and** `codex.persistSession: false` yields `toolchain.node.agents === ['codex']`.\n    - A user-written `toolchain.node` in the config file is left exactly as written.\n    - `applyOverrides(storedWithCustomGo, {})` still has `go` - the property `tests/config.test.ts` pins, restated against a swapped assignment.\n    - `applyOverrides(storedWithSwappedRoles, {})` re-derives `toolchain.node.agents` from the stored roles rather than leaving a stale `['claude']`.\n12. **Generative continuity without a session.** With `FULL_SWAP` (so `persistSession` is false and the planner is Codex) and a `state.plan` present, a revise turn's prompt contains the rendered plan document - the `handoffContext` prefix - while under `DEFAULTS` a resuming Claude turn's prompt is `req.prompt` verbatim, exactly as today.\n\n## Verification\n\n```\nnpm run typecheck\nnpm test\nnpm test && npm test && npm test    # vibe's own three-consecutive-runs rule\ngit diff --stat -- tests/           # one existing file, one assertion + comment\ngit diff -- tests/role-shaped-sites.test.ts\n```\n\nManual smoke, nothing spawned: in a scratch repo with a swapped `vibe.config.json`, `node dist/src/main.js doctor --skip-probe` prints the config summary; `vibe run \"x\" --skip-probe` prints both warnings; with `persistSession` left true it fails with the item 5 message.\n\n## Edge cases, failure modes, rollback\n\n- **No Claude role at all.** `state.sessionId` is created and never used; `shouldRotate` stays false because `sessionStarted` is never set.\n- **No Codex role.** `codexProbeSandbox` already falls back to `codexSandbox('read-only', cfg)` (#27). Preflight still probes both agents.\n- **A Codex generative role with `persistSession: false`.** Every generative turn starts fresh, and the `handoffContext` prefix carries the plan of record into it. That is the headline configuration; test 12 covers it.\n- **Legacy stored state and hand-built `Config` fixtures with no `roles`.** `rolesFrom` fills per key from `DEFAULT_ROLES`, so old runs and the existing tests' `{...DEFAULTS, codex:{...}}` literals resolve to today's table.\n- **A stored config with no `codex.implementTimeoutMs`.** `applyOverrides` layers `DEFAULTS` underneath for exactly this reason; the resumed run picks up 90 minutes and, having no writing Codex role, never reads it.\n- **A user who hand-wrote `toolchain.node.agents` while leaving the rest of the entry at the default.** On a *resume* that value is re-derived from the roles rather than preserved. Narrow and deliberate: it is the one field the roles determine. A custom `probe`, `phases` or `minVersion` takes the entry out of the derived set entirely.\n- **Resume that changes the assignment.** Roles cannot change on resume through flags (there are none), only by hand-editing a stored config. Stale slots from the other assignment are simply not read; reconciling them is #23's territory.\n- **WeakMap identity.** A caller that spreads a config gets a fresh table - correct, just not shared. Nothing mutates a live `Config`.\n- **Rollback.** Everything is additive behind a config section defaulting to today's values; reverting restores the constant table and the old assertion. The riskiest edit is the session slotting: backed out alone, both new slots disappear and each provider keeps one conversation - today's behaviour, wrong only for assignments that mix kinds on one provider.\n",
+    "assumptions": [
+      {
+        "assumption": "`state.codexSessionId` keeps its name and now means the Codex **judging** thread, with a new `codexGenerativeSessionId` beside it, rather than introducing a neutrally-named pair.",
+        "why": "Per-kind slots are settled; what is still a judgement call is the naming. Renaming would touch every run on disk and every stored `state.config`, which is the same argument #27 used for `questions.askCodex`.",
+        "blast_radius": "If reviewers want symmetry (`codexJudgeSessionId` + `codexGenerativeSessionId`), add a read-time migration for stored runs and update every reference - a #23-shaped change rather than a rename."
+      },
+      {
+        "assumption": "A generative turn that is not resuming gets the `handoffContext` prefix on either provider, not just Claude.",
+        "why": "`revisePlanPrompt` and the fix prompts assume the plan is in the conversation. In the headline configuration item 5 forces `persistSession: false`, so a Codex planner would otherwise revise a plan it has never been shown. The condition and result are identical to today's under the default table.",
+        "blast_radius": "If this is judged to be prompt-content work, remove it - and the headline configuration cannot revise a plan, so item 5's refusal would have to widen to forbid a Codex generative role entirely."
+      },
+      {
+        "assumption": "`explicit` provenance is defined as \"named in the override objects merged during this call\", so a stored config counts as base and is re-derived, while a config-file entry is preserved.",
+        "why": "It is the only provenance signal that exists at merge time, and it produces the two behaviours that matter: a user's hand-written tool entry survives, and a resume cannot carry stale role-derived agents.",
+        "blast_radius": "If provenance must survive into storage, `state.config` needs a marker field - a stored-shape change that belongs with #23."
+      },
+      {
+        "assumption": "A hand-written `toolchain.node` whose only difference from the default is `agents` will be re-derived on resume rather than preserved.",
+        "why": "Once stored it is indistinguishable from the derived value, and the derived answer is the one the run needs. Any other customisation (probe, phases, minVersion) removes the entry from the derived set.",
+        "blast_radius": "One predicate in `withRoleDerivedAgents` if the rule should be stricter; test 11 gains a case."
+      },
+      {
+        "assumption": "The invariant is runtime behaviour of a default run, plus an accepted additive change to persisted `state.config` (`roles`, `codex.implementTimeoutMs`).",
+        "why": "`cmdRun` persists the effective config, so any new default key lands in new `state.json` files. Claiming byte equality there would be false; the migration is made explicit and tested instead.",
+        "blast_radius": "Any consumer diffing `state.json` between versions sees two added keys. `applyOverrides` already layers defaults under a stored config, so older runs resume unaffected."
+      },
+      {
+        "assumption": "`TurnRequest.jsonSchema` is honoured by both providers while `TurnRequest.tools` stays Claude-only.",
+        "why": "Codex has an `--output-schema` to map a schema onto and no tool-list flag at all; pretending otherwise would be a contract nothing can keep.",
+        "blast_radius": "None functionally; a Codex tool policy would be a `CodexTurnOptions` change, not a `TurnRequest` one."
+      },
+      {
+        "assumption": "\"One role table, built once from config and passed\" is satisfied by the memoised `rolesFor(cfg)` rather than by threading a `RoleTable` argument through the run loop.",
+        "why": "`cfg` is already threaded everywhere the table is needed, and three of the helpers already take a `Config`. A parallel argument through `orchestrate` and every call site is a much larger diff for the same guarantee.",
+        "blast_radius": "If an explicit parameter is required, ten orchestrator functions plus `execute` gain a `roles` parameter. Mechanical, no test rewrites."
+      },
+      {
+        "assumption": "`ROLES` survives as a module constant, used only as the default argument of helpers with no `cfg` and as the `DEFAULTS.toolchain` bootstrap.",
+        "why": "Frozen tests import it and call those helpers with no table; removing it would force edits beyond the one sanctioned line. Every production caller passes `rolesFor(cfg)`.",
+        "blast_radius": "If \"no second module-level constant\" is read literally, `ROLES` goes and several frozen tests change with it - a second exception this plan may not grant on its own."
+      },
+      {
+        "assumption": "`state.sessionId` belongs to both generative Claude roles (planner and implementer), not to `ROTATING_ROLE` alone.",
+        "why": "Under the default table they share one Claude session today and must keep sharing it - the revise and fix prompts depend on it. Splitting per role would change the default run.",
+        "blast_radius": "If the rule should be per role, the planner needs its own slot and the plan-to-implement handoff must be re-established through `handoffContext` - a default-run change the invariant forbids."
+      },
+      {
+        "assumption": "The Claude judging conversation persists across turns and is not gated by `codex.persistSession`.",
+        "why": "Continuity is what makes the oscillation guard meaningful; gating on a Codex key would silently disable a Claude reviewer's memory whenever item 5 forces that key off.",
+        "blast_radius": "If one \"judge memory\" switch is wanted, wire `judgeHasMemory` and the resume flag to that key: ~5 lines plus test 8."
+      },
+      {
+        "assumption": "`RoleSpec` becomes a single shape with optional `schema`/`tools` rather than a provider-discriminated union.",
+        "why": "The frozen tests build table literals both with and without `schema` on both providers; a stricter union rejects them at compile time and would force more test edits.",
+        "blast_radius": "Loses the compile-time guarantee that a Codex spec has a schema; recovered at runtime by the `?? REPORT_SCHEMA` fallback."
+      },
+      {
+        "assumption": "A schemaless Codex role gets `REPORT_SCHEMA` and its `report` field is unwrapped as the turn's `text`.",
+        "why": "`codexTurn` requires an output schema, and without unwrapping, `implementation-report.md` becomes a JSON blob.",
+        "blast_radius": "One constant in `schemas.ts` plus three lines in `codexDispatch` if a different envelope is wanted."
+      },
+      {
+        "assumption": "`codex.implementTimeoutMs` defaults to 90 minutes, mirroring `claude.implementTimeoutMs`.",
+        "why": "The figure is a property of implementing rather than of the agent, and the repo already asserts 90 minutes is what an implementation turn needs.",
+        "blast_radius": "One constant plus the sanctioned test edit's expected value and `vibe.config.example.json`."
+      },
+      {
+        "assumption": "Renaming the provider inside four `log.step` strings counts as plumbing, not prompt content.",
+        "why": "They are transcript lines, not model input, and a swapped run that narrates the wrong agent is misleading.",
+        "blast_radius": "Revert four interpolations if a reviewer counts them as out of scope."
+      },
+      {
+        "assumption": "No new CLI flags: `roles` and `codex.implementTimeoutMs` are config-file only.",
+        "why": "The brief prefers none, and the new timeout has a correct default, so nothing needs a flag to be usable.",
+        "blast_radius": "Adding `--codex-implement-timeout <min>` later is ~4 lines plus a USAGE line and one flag test."
+      },
+      {
+        "assumption": "The warnings live at the top of `execute()`, covering both `run` and `resume`.",
+        "why": "A resumed run spends as much as a fresh one, and `execute` is already exported and injectable, so the path is testable without spawning.",
+        "blast_radius": "Move to `cmdRun`/`cmdResume` if judged run-start-only; test 7 targets the exported helper either way."
+      }
+    ],
+    "open_questions": [
+      {
+        "question": "Is refusing `implementer: 'codex'` + `codex.persistSession: true` at config validation the right severity, versus warning and proceeding, or silently forcing the key off?",
+        "options": [
+          "Refuse at validation, naming the fix (recommended)",
+          "Warn and proceed",
+          "Silently force persistSession: false"
+        ],
+        "recommended": "Refuse. Proceeding ships a run whose implementer can write on turn one and silently cannot afterwards; forcing changes a memory setting the user chose without telling them. Note the coupling: because the refusal forces the key off, a Codex generative role in the headline configuration always starts each turn fresh, which is why the `handoffContext` prefix is extended to generative turns on both providers.",
+        "kind": "product",
+        "blocking": false
+      }
+    ],
+    "out_of_scope": [
+      {
+        "item": "Context management for a long Codex session - reading `ThreadTokenUsage.modelContextWindow` from the app-server protocol and wiring rotation/compaction for a resumed Codex thread.",
+        "why": "This is how the first attempt died. `src/context.ts` is Claude-shaped end to end: rotation, `contextRatio`, compaction and the handoff all key off Claude's reported prompt tokens. Warning 2 tells the user it is absent; the route (`src/appserver.ts` already speaks the protocol) is filed as a follow-up issue rather than built here."
+      },
+      {
+        "item": "Making `budget.maxCostUsd` cover Codex.",
+        "why": "Codex reports no cost in any output mode; there is no figure to read, and deriving one would put a fabricated number in the field a ceiling is enforced against. `budget.maxTokens` already covers both agents. Warning 1 states the gap."
+      },
+      {
+        "item": "Changing what any ceiling means, or adding ceilings.",
+        "why": "Settled by #16/#24/#25/#26. This change only reports how the existing ceilings' coverage shifts under a non-default assignment."
+      },
+      {
+        "item": "Renaming `questions.askCodex`, `context.compactDuringCodex`, or `state.codexSessionId`.",
+        "why": "#27 settled the first two: what they gate is role-shaped, what they are called is history. The same argument now covers `state.codexSessionId`, which this change re-documents as the Codex judging thread rather than renaming - a rename would touch every stored run on disk."
+      },
+      {
+        "item": "Re-deriving or re-opening anything from #14 (dispatch seam), #16 (accounting), #17 (preflight enforcement) or #27/#28 (the six role-shaped sites).",
+        "why": "All shipped and already parameterised by a `RoleTable`. This change feeds them a configured table; `src/preflight.ts` is not edited at all. The one exception is deliberate and named: #27's `turnTimeoutMs` explicitly deferred the Codex implement/review split to this change, and closing it is item 6."
+      },
+      {
+        "item": "Prompt text beyond passing the role table into `environmentBlock`, telling the critic/reviewer truthfully whether it has memory, and reusing the existing `handoffContext` prefix for a generative turn with no session to resume.",
+        "why": "Prompt content is its own change. These three are the minimum a configurable table requires: without them a swapped run labels each agent by the wrong role, asserts a continuity that does not exist, and asks a fresh Codex thread to revise a plan it has never seen. None of them changes any prompt's wording."
+      },
+      {
+        "item": "A CLI flag surface for roles (`--roles`, `--implementer`) or for the new `codex.implementTimeoutMs`.",
+        "why": "The brief asks for no new flags; a five-key assignment belongs in the config file, and the new timeout has a correct default, so nothing needs a flag to be usable. Adding one later is additive."
+      },
+      {
+        "item": "Migrating or reconciling session slots when a resume changes the assignment mid-run (a stored `judgeSessionId` when the critic is now Codex, or a stored `codexGenerativeSessionId` when the planner is now Claude).",
+        "why": "Stale slots are simply not read by the new assignment - no corruption. Roles cannot even change on resume except by hand-editing a stored config, and validating stored state against the current config is #23."
+      },
+      {
+        "item": "Stored-state validation (#23) and deferred-only critique rounds (#22).",
+        "why": "Separate issues with their own scope; neither is required for a role table to be configurable."
+      },
+      {
+        "item": "Context management for the new judging-Claude conversation or the new generative-Codex thread (rotation, compaction, occupancy measurement).",
+        "why": "Same reason as the Codex implementer case, and the same follow-up. Only `state.sessionId` is measured and rotated; adding a second or third rotation path would re-open `src/context.ts`, which this change touches by exactly one default parameter."
+      },
+      {
+        "item": "Any further edit to the existing test suite beyond the single sanctioned assertion at `tests/role-shaped-sites.test.ts:372`.",
+        "why": "A second edit would mean a default path moved, which is the invariant this change exists to protect. If one becomes necessary, the work stops and reports rather than widening the exception."
+      },
+      {
+        "item": "Reworking `rotatesConcurrentlyWith` so a mixed assignment can still overlap compaction with concurrent work.",
+        "why": "It is one of the six sites #28 shipped, and its provider comparison degrades safely: where the judging and rotating roles share a provider it declines to compact, which costs an optimisation and risks nothing. Making it kind-aware is a #27-shaped follow-up, not part of making roles configurable."
+      },
+      {
+        "item": "Provenance metadata in the stored config (marking which toolchain entries a user wrote versus which vibe derived).",
+        "why": "The merge-time `explicit` set answers every case this change needs. Persisting provenance would change the `state.config` shape and only matters for a user who hand-writes an `agents` list identical to the derived one - a stored-state concern that belongs with #23."
+      }
+    ]
+  },
+  "pendingAnswers": null,
+  "extraContext": "Make the agent roles configurable. GitHub issue #2, third attempt.\n\n## Read this first\n\nThis issue has stalled twice - 61.4M tokens over 5 plan revisions, then 16.4M over 2, neither\nreaching implementation. Every blocker found both times has since been extracted and shipped:\n\n- **#14** - the dispatch seam. `runTurn`, `TurnRequest`, `AgentTurns` all exist.\n- **#17** - preflight enforcement keyed off `Access`, via `providerAccess`.\n- **#16** - token accounting, all three steps (#24, #25, #26).\n- **#27** - six sites that inferred a role from a provider name now ask the table (#28). That\n  one shipped `RoleTable`, `describedRole`, `rotatesConcurrentlyWith`, `roleEnabled`,\n  `codexProbeSandbox`, `providersForRoles` and `turnTimeoutMs`, each already taking a\n  `roles: RoleTable = ROLES` parameter.\n\n**The plumbing is done. This change is supposed to be small.** If you find yourself editing\nprompts, preflight enforcement, accounting, or the six sites #27 fixed, stop - you are\nre-opening finished work, and that is exactly what made the previous two plans unaffordable.\n\n## What is left\n\n**1. `ROLES` comes from config.** A `roles` section naming the provider for each of the five\nroles, defaulting to exactly today's assignment. Everything downstream already accepts a table.\n\n**`access` is structural and is NOT configurable.** A planner is read-only and an implementer\nwrites because of what the phase *is*, not because of who does it. Roles choose the provider;\nthey do not choose permissions.\n\n**2. `providerAccess` still reads the module constant.** `src/roles.ts:57-63` iterates\n`Object.values(ROLES)` directly while every other helper #27 added takes a table. Preflight\nreads it, and #17 exists so there is exactly one notion of write capability - so it has to\nfollow the configured table too. This is the smallest and most important item here.\n\n**3. Schema and tools have to ride on the role for both providers.** `RoleSpec` carries\n`schema` only on the Codex branch, and `TurnRequest.jsonSchema` / `.tools` are commented\n\"Claude only\" and passed per call site. A Codex planner needs `PLAN_SCHEMA`; a Claude critic\nneeds `FINDINGS_SCHEMA` and a toolset. `claudeTurn` already accepts `jsonSchema` and\n`parseStructured` already exists, so both directions are reachable - what is missing is that\nthe role, not the call site, should say which schema and which tools.\n\n**4. Session identity.** The open design question this issue has always owned, quoted from its\nown comment:\n\n> a Claude reviewer has no defined way to obtain its first session id, since `createRun` only\n> initialises the generative `state.sessionId`.\n\n`src/context.ts` binds rotation, `contextRatio`, compaction and the handoff to `state.sessionId`\nas *the* Claude session, and `ROTATING_ROLE` names `implementer` as whose session that is.\n`state.codexSessionId` is separate and is set from the thread id a turn returns. Decide\nexplicitly what a judging Claude talks through and write down the reasoning. A wrong answer\nhere is one conversation quietly serving two different jobs.\n\n**5. A writing Codex cannot keep its session.** `codex exec resume` takes no `-s` flag, so a\nnon-default sandbox applies only to the first turn and resumed turns silently revert to\nread-only. `codexSandbox` already returns `workspace-write` for `access: 'write'`, so a Codex\nimplementer would write on turn one and then quietly stop being able to.\n\nRecommendation: **refuse the combination at config validation**, naming the exact fix\n(`codex.persistSession: false`, or `--no-codex-session`). Silently forcing it changes a memory\nsetting the user chose; warning and proceeding ships a run that half-works. Say why in the plan\nif you disagree, but do not leave it undetected.\n\n**6. A per-phase Codex timeout.** #27 left this deliberately, with the limitation stated in\n`turnTimeoutMs`: which key is read follows the role's access, but Codex has one `timeoutMs`, so\na writing Codex role gets the reviewing figure. This is the change that legitimately adds config\nsurface, so close it here - a writing Codex implementer needs the implementing timeout, not 45\nminutes.\n\n**7. Two warnings, at startup, only when the assignment is non-default.**\n\n- `maxCostUsd` is Claude-only because Codex reports no cost, and `budget.planShare` is a\n  fraction of that same figure. With generative work on Codex they bound almost nothing.\n  Measured on this issue's first stalled run: **58.3M of 61.4M tokens were Codex**, and Claude's\n  3.1M was about $17 against a $25 ceiling. `maxTokens` still covers both and is unaffected.\n- An implementing Codex has nothing watching its context (see below).\n\nA user swapping roles should learn both of these from vibe, not from a surprise.\n\n## Explicitly out of scope - put these in your `out_of_scope`\n\n- **Context management for a long Codex session.** `src/context.ts` is Claude-shaped: rotation\n  and compaction key off Claude's reported prompt tokens, and Codex's `exec resume` thread has\n  no equivalent signal wired up. **This is how the first attempt died.** Warn (item 7) and defer.\n  `ThreadTokenUsage.modelContextWindow` in the app-server protocol is the likely route, and\n  `src/appserver.ts` already speaks that protocol - file it rather than building it.\n- Making `maxCostUsd` work for Codex. There is no cost figure to read.\n- Changing what any ceiling means, or adding ceilings.\n- Renaming `questions.askCodex` or `context.compactDuringCodex`. #27 settled this: what they\n  gate is role-shaped, what they are called is history, and a rename touches every stored\n  `state.config` and every user's config file.\n- Re-deriving anything from #14, #16, #17 or #27.\n- Prompt content beyond what a role table requires.\n- Stored-state validation (#23), deferred-only critique rounds (#22).\n\n## Hard constraints\n\n**The default configuration must be byte-for-byte unchanged** - same providers, sandboxes,\npermission modes, session handling, timeouts, preflight verdicts and prompts. **The existing 339\ntests must pass unchanged.** A test that has to be edited is a signal that behaviour moved.\n\n**One role table.** Build it once from config and pass it; do not leave a second module-level\nconstant that some sites still read. That is the defect item 2 describes, and shipping another\none would undo #27.\n\n**No new CLI flags** beyond what item 6 requires, and prefer none.\n\n## Tests\n\nAdd tests; modify none.\n\n- The default `roles` config produces exactly today's table.\n- A swapped assignment dispatches each role to the configured provider with the correct\n  `Access`, through injected fakes.\n- A Codex planner is given `PLAN_SCHEMA`; a Claude critic is given `FINDINGS_SCHEMA` and tools.\n- `providerAccess` follows the configured table, and preflight's #17 enforcement follows it.\n- `implementer: 'codex'` with `codex.persistSession: true` is rejected, naming the fix.\n- A writing Codex gets the implementing timeout, not the reviewing one.\n- Both warnings fire on a swapped assignment and on neither default run.\n- A judging Claude gets a session id, and whatever you decided in item 4 is pinned by a test\n  that says what the rule is.\n",
+  "config": {
+    "claude": {
+      "model": "opus",
+      "effort": "medium",
+      "planTimeoutMs": 1800000,
+      "implementTimeoutMs": 5400000
+    },
+    "codex": {
+      "model": "gpt-5.6-luna",
+      "effort": "xhigh",
+      "sandbox": "read-only",
+      "timeoutMs": 2700000,
+      "persistSession": true,
+      "readRateLimits": true
+    },
+    "loop": {
+      "maxPlanRounds": 10,
+      "maxReviewRounds": 30,
+      "maxVerifyRounds": 3,
+      "maxQuestionRounds": 5,
+      "p1Tolerance": 1,
+      "oscillationThreshold": 3,
+      "convergenceWindow": 3
+    },
+    "budget": {
+      "maxCostUsd": 40,
+      "maxTokens": 40000000,
+      "waitOnRateLimit": true,
+      "maxWaitMinutes": 360,
+      "codexLimitPercent": 95,
+      "planShare": 0.4
+    },
+    "questions": {
+      "askCodex": true,
+      "answerNonBlocking": true,
+      "escalateOnDefer": true,
+      "escalateOnLowConfidence": true
+    },
+    "git": {
+      "useBranch": false,
+      "branchPrefix": "vibe/",
+      "commitEachRound": true
+    },
+    "context": {
+      "enabled": true,
+      "compactAboveRatio": 0.5,
+      "compactDuringCodex": true
+    },
+    "verify": {
+      "enabled": true,
+      "command": null,
+      "timeoutMs": 900000,
+      "runs": 3
+    },
+    "progress": {
+      "enabled": true,
+      "intervalMs": 30000
+    },
+    "toolchain": {
+      "git": {
+        "probe": "git --version",
+        "phases": [
+          "plan",
+          "implement",
+          "review"
+        ]
+      },
+      "node": {
+        "probe": "node --version",
+        "phases": [
+          "implement",
+          "review"
+        ],
+        "agents": [
+          "claude"
+        ]
+      },
+      "npm": {
+        "probe": "npm --version",
+        "phases": [
+          "implement",
+          "review"
+        ],
+        "agents": [
+          "claude"
+        ]
+      }
+    }
+  },
+  "environment": {
+    "agents": [
+      {
+        "provider": "claude",
+        "shell": "bash",
+        "pathStyle": "msys",
+        "repaired": false,
+        "tools": [
+          {
+            "name": "git",
+            "available": true,
+            "version": "git version 2.31.1.windows.1"
+          },
+          {
+            "name": "node",
+            "available": true,
+            "version": "v24.18.0"
+          },
+          {
+            "name": "npm",
+            "available": true,
+            "version": "11.16.0"
+          }
+        ]
+      },
+      {
+        "provider": "codex",
+        "shell": "powershell",
+        "pathStyle": "win32",
+        "repaired": true,
+        "tools": [
+          {
+            "name": "git",
+            "available": true,
+            "version": "git version 2.31.1"
+          }
+        ]
+      }
+    ],
+    "verifyCommand": "npm test",
+    "verifyRuns": 3
+  },
+  "codexTokens": 21309231,
+  "lastActivityAt": "2026-08-19T20:22:51.801Z",
+  "turnStartedAt": "2026-08-19T20:08:40.607Z",
+  "contextModel": "opus",
+  "contextWindow": 1000000,
+  "codexRateLimit": {
+    "window": "primary",
+    "windowFromServer": false,
+    "usedPercent": 38,
+    "windowDurationMins": 10080,
+    "resetsAt": "2026-08-20T03:35:25.000Z",
+    "reachedType": null,
+    "planType": "plus",
+    "capturedAt": "2026-08-19T20:08:40.602Z"
+  },
+  "lastOutputAt": "2026-08-19T20:22:50.952Z"
+}

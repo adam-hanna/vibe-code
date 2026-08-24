@@ -812,7 +812,9 @@ function cmdList(args: readonly string[]): ExitCode {
   }
   log.heading(`Runs in ${targetDir}`);
   for (const r of runs) {
-    console.log(`  ${r.id.padEnd(52)} ${r.status.padEnd(12)} $${r.costUsd.toFixed(2)}`);
+    // A cost that could not be read prints as unknown rather than as money.
+    const cost = r.costUsd === null ? '     ?' : `$${r.costUsd.toFixed(2)}`;
+    console.log(`  ${r.id.padEnd(52)} ${r.status.padEnd(12)} ${cost}`);
     console.log(log.dim(`    ${r.task}`));
   }
   return EXIT.OK;

@@ -1,8 +1,16 @@
 import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
+import * as log from '@src/log.js';
 import type { ActivityObservation } from '@src/progress.js';
 import { initialSlotFields } from '@src/slots.js';
+import {
+  assertUsableRunId,
+  hasFindingShape,
+  parseStoredState,
+  summariseStored,
+  validateStoredState,
+} from '@src/stored.js';
 import type {
   Finding,
   PendingFindings,
@@ -93,18 +101,62 @@ export function createRun(targetDir: string, task: string, planOnly: boolean): R
   return state;
 }
 
+/**
+ * A stored run, checked rather than asserted - see `src/stored.ts` for the
+ * repair-or-refuse rule this enforces.
+ *
+ * The order is load-bearing. The id is constrained before it becomes a path, so
+ * a traversal attempt never opens a file; parsing and validation are pure and
+ * throw before anything is written, so a refused state file is left
+ * byte-for-byte unchanged; and only once the state is known good are the
+ * repairs recorded, which is the first write this function makes.
+ */
 export function loadRun(targetDir: string, id: string): RunState {
-  const dir = path.join(targetDir, RUNS_DIR, id);
+  const root = path.join(targetDir, RUNS_DIR);
+  assertUsableRunId(id, root);
+  const dir = path.join(root, id);
   const file = path.join(dir, 'state.json');
   if (!existsSync(file)) throw new Error(`No run "${id}" under ${RUNS_DIR}`);
 
-  const parsed = JSON.parse(readFileSync(file, 'utf8')) as RunState;
+  const parsed = parseStoredState(readFileSync(file, 'utf8'), id, dir);
+  const { state: checked, repairs } = validateStoredState(parsed, id, dir);
   // Also on resume: a run created before this existed still needs the guard.
   ensureVibeIgnored(targetDir);
-  // Paths are re-derived so a run directory stays valid if the repo moves.
-  return { ...parsed, dir, targetDir };
+  // Paths are re-derived so a run directory stays valid if the repo moves. They
+  // are the two fields the validator does not decide, and the only two it does
+  // not carry, so they are supplied here rather than asserted there.
+  const state: RunState = { ...checked, dir, targetDir };
+
+  // Recorded, not merely applied: a repair the user cannot see is one they
+  // cannot judge, and `recordEvent` persists the repaired state that the resume
+  // is about to run on. This is an audit entry, not a migration.
+  for (const repair of repairs) {
+    recordEvent(state, 'state_repaired', {
+      field: repair.field,
+      found: repair.found,
+      replacedWith: repair.replacedWith,
+      droppedCount: repair.droppedCount,
+      droppedPaths: repair.droppedPaths,
+    });
+  }
+  if (repairs.length > 0) {
+    log.warn(
+      `state.json for ${id} had ${repairs.length} unusable field(s) - ` +
+        `${repairs.map((r) => r.field).join(', ')}. Each was replaced with the empty value its ` +
+        'type implies and recorded in the run\'s event log; nothing else was changed.',
+    );
+  }
+  return state;
 }
 
+/**
+ * What `vibe list` shows. Never throws, and never writes.
+ *
+ * A run whose state.json cannot be read at all lists as unreadable with no cost
+ * figure: `$0.00` would assert that an unreadable run cost nothing, which is the
+ * invented number this codebase refuses everywhere else. One corrupt run must
+ * not take out the listing of every healthy one beside it.
+ */
 export function listRuns(targetDir: string): RunSummary[] {
   const root = path.join(targetDir, RUNS_DIR);
   if (!existsSync(root)) return [];
@@ -115,15 +167,10 @@ export function listRuns(targetDir: string): RunSummary[] {
     .reverse()
     .map((d): RunSummary => {
       try {
-        const s = JSON.parse(readFileSync(path.join(root, d, 'state.json'), 'utf8')) as Partial<RunState>;
-        return {
-          id: d,
-          status: s.status ?? 'unknown',
-          task: s.task ?? '',
-          costUsd: typeof s.costUsd === 'number' ? s.costUsd : 0,
-        };
+        const raw: unknown = JSON.parse(readFileSync(path.join(root, d, 'state.json'), 'utf8'));
+        return summariseStored(raw, d);
       } catch {
-        return { id: d, status: 'unreadable', task: '', costUsd: 0 };
+        return { id: d, status: 'unreadable', task: '', costUsd: null };
       }
     });
 }
@@ -385,31 +432,6 @@ export function recordRound(
 }
 
 /**
- * The fields any consumer of a stored finding needs, checked rather than
- * asserted.
- *
- * One predicate for both the follow-ups artifact and the carried findings:
- * stored state is unvalidated, so "is this object a finding" is a question the
- * codebase must answer once. `defer` is deliberately not consulted - it is a
- * fact about what one caller does with a finding, not about its shape.
- */
-export function hasFindingShape(f: unknown): f is Finding {
-  if (typeof f !== 'object' || f === null) return false;
-  const r = f as Record<string, unknown>;
-  return (
-    (r['severity'] === 'P0' ||
-      r['severity'] === 'P1' ||
-      r['severity'] === 'P2' ||
-      r['severity'] === 'P3') &&
-    typeof r['id'] === 'string' &&
-    r['id'].length > 0 &&
-    typeof r['title'] === 'string' &&
-    typeof r['detail'] === 'string' &&
-    typeof r['suggested_fix'] === 'string'
-  );
-}
-
-/**
  * Record what a critique or review turn found, before anything can stop the run
  * between paying for it and using it.
  */
@@ -431,11 +453,12 @@ export function recordPendingFindings(
  * `clearPendingFindings`, called by whatever consumed them.
  *
  * Never throws, and absent, empty and malformed all read as null - the answer a
- * run recorded before this field existed would have given. The stored value is
- * an assertion over unvalidated JSON, so a present non-record, a `findings` that
- * is not an array, or entries that are not findings must not reach a prompt.
- * The phase tag is checked here rather than by the caller: it is what stops a
- * plan-phase remnant being handed to the fix turn.
+ * run recorded before this field existed would have given. `validateStoredState`
+ * now owns that invariant on the way in; this check remains as defence in depth,
+ * because the field is also written mid-run and a present non-record, a
+ * `findings` that is not an array, or entries that are not findings must never
+ * reach a prompt. The phase tag is checked here rather than by the caller: it is
+ * what stops a plan-phase remnant being handed to the fix turn.
  */
 export function takePendingFindings(
   state: RunState,
