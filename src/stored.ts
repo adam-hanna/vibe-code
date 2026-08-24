@@ -628,7 +628,15 @@ const roundReader =
       ctx.repairs.replaced(`${at}.ids`, rawIds, 'nothing');
       return { signature, count };
     }
-    return { signature, count, ids: rawIds.filter(isString) };
+    const ids: string[] = [];
+    rawIds.forEach((id, i) => {
+      // Recorded, not filtered. A dropped id changes what `windowTurnedOver`
+      // sees, so a repair the user cannot see is one they cannot judge - the
+      // same rule the array-level drops already follow.
+      if (isString(id)) ids.push(id);
+      else ctx.repairs.dropped(`${at}.ids`, `${at}.ids[${i}]`);
+    });
+    return { signature, count, ids };
   };
 
 function readDeferredQuestion(entry: unknown): DeferredQuestion | null {
@@ -691,27 +699,45 @@ function readAssumption(entry: unknown): Assumption | null {
   };
 }
 
-/** `formatQuestion` reads `q.options.length`, and `normalize` lowercases `q.question`. */
-function readOpenQuestion(entry: unknown): OpenQuestion | null {
-  if (!isRecord(entry)) return null;
-  const kind = enumOf(entry['kind'], KINDS);
-  if (
-    kind === null ||
-    !isString(entry['question']) ||
-    !isString(entry['recommended']) ||
-    !isBool(entry['blocking'])
-  ) {
-    return null;
-  }
-  const rawOptions = entry['options'];
-  return {
-    question: entry['question'],
-    options: Array.isArray(rawOptions) ? rawOptions.filter(isString) : [],
-    recommended: entry['recommended'],
-    kind,
-    blocking: entry['blocking'],
+/**
+ * `formatQuestion` reads `q.options.length`, and `normalize` lowercases
+ * `q.question`.
+ *
+ * Curried over the context for the same reason `roundReader` is: a discarded
+ * option changes what the user is shown to choose between, so it is recorded
+ * rather than filtered away.
+ */
+const openQuestionReader =
+  (ctx: ReadContext) =>
+  (entry: unknown, at: string): OpenQuestion | null => {
+    if (!isRecord(entry)) return null;
+    const kind = enumOf(entry['kind'], KINDS);
+    if (
+      kind === null ||
+      !isString(entry['question']) ||
+      !isString(entry['recommended']) ||
+      !isBool(entry['blocking'])
+    ) {
+      return null;
+    }
+    const rawOptions = entry['options'];
+    const options: string[] = [];
+    if (Array.isArray(rawOptions)) {
+      rawOptions.forEach((option, i) => {
+        if (isString(option)) options.push(option);
+        else ctx.repairs.dropped(`${at}.options`, `${at}.options[${i}]`);
+      });
+    } else if (rawOptions !== undefined) {
+      ctx.repairs.replaced(`${at}.options`, rawOptions, 'an empty list');
+    }
+    return {
+      question: entry['question'],
+      options,
+      recommended: entry['recommended'],
+      kind,
+      blocking: entry['blocking'],
+    };
   };
-}
 
 function readOutOfScope(entry: unknown): OutOfScopeItem | null {
   if (!isRecord(entry)) return null;
@@ -738,7 +764,7 @@ function readPlan(raw: unknown, ctx: ReadContext): Plan | null {
     'plan.open_questions',
     raw['open_questions'],
     ctx,
-    readOpenQuestion,
+    openQuestionReader(ctx),
   );
   const plan: Plan = {
     plan_md: raw['plan_md'],
@@ -790,7 +816,11 @@ function readTool(entry: unknown): AgentEnvironmentFacts['tools'][number] | null
  * observations about the world, so a `provider` of "other" would state something
  * untrue rather than merely be unrecognised.
  */
-function readAgent(entry: unknown): AgentEnvironmentFacts | null {
+function readAgent(
+  entry: unknown,
+  ctx: ReadContext,
+  at: string,
+): AgentEnvironmentFacts | null {
   if (!isRecord(entry)) return null;
   const provider = enumOf(entry['provider'], PROVIDERS);
   const shell = enumOf(entry['shell'], SHELLS);
@@ -798,10 +828,13 @@ function readAgent(entry: unknown): AgentEnvironmentFacts | null {
   if (provider === null || shell === null || pathStyle === null) return null;
   if (!isBool(entry['repaired']) || !Array.isArray(entry['tools'])) return null;
   const tools: AgentEnvironmentFacts['tools'] = [];
-  for (const raw of entry['tools']) {
+  entry['tools'].forEach((raw, i) => {
     const tool = readTool(raw);
-    if (tool !== null) tools.push(tool);
-  }
+    // A dropped tool is a claim about the environment quietly withdrawn, so it
+    // is recorded like every other discard rather than filtered away.
+    if (tool === null) ctx.repairs.dropped('environment', `${at}.tools[${i}]`);
+    else tools.push(tool);
+  });
   return { provider, shell, pathStyle, repaired: entry['repaired'], tools };
 }
 
@@ -821,8 +854,9 @@ function readEnvironment(
   }
   const agents: AgentEnvironmentFacts[] = [];
   raw['agents'].forEach((entry, i) => {
-    const agent = readAgent(entry);
-    if (agent === null) ctx.repairs.dropped('environment', `environment.agents[${i}]`);
+    const at = `environment.agents[${i}]`;
+    const agent = readAgent(entry, ctx, at);
+    if (agent === null) ctx.repairs.dropped('environment', at);
     else agents.push(agent);
   });
   return { agents, verifyCommand: raw['verifyCommand'], verifyRuns: raw['verifyRuns'] };
