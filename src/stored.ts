@@ -3,8 +3,10 @@ import type { AgentEnvironmentFacts, EnvironmentFacts } from '@src/runtime.js';
 import type { AgentProvider, AgentShell } from '@src/runtime.js';
 import type { PathStyle } from '@src/pathstyle.js';
 import type {
+  AcceptanceCriterion,
   Answer,
   Assumption,
+  CheckKind,
   CodexRateLimitRecord,
   Confidence,
   DeferredQuestion,
@@ -185,6 +187,12 @@ const CONFIDENCES = {
   medium: 'medium',
   low: 'low',
 } satisfies Record<Confidence, Confidence>;
+
+const CHECKS = {
+  command: 'command',
+  inspection: 'inspection',
+  qa: 'qa',
+} satisfies Record<CheckKind, CheckKind>;
 
 const PROVIDERS = {
   claude: 'claude',
@@ -745,13 +753,33 @@ function readOutOfScope(entry: unknown): OutOfScopeItem | null {
   return { item: entry['item'], why: entry['why'] };
 }
 
+function readAcceptanceCriterion(entry: unknown): AcceptanceCriterion | null {
+  if (!isRecord(entry)) return null;
+  const check = enumOf(entry['check'], CHECKS);
+  if (
+    check === null ||
+    !isString(entry['id']) ||
+    !isString(entry['criterion']) ||
+    !isString(entry['how'])
+  ) {
+    return null;
+  }
+  return { id: entry['id'], criterion: entry['criterion'], check, how: entry['how'] };
+}
+
 /**
  * A stored plan, or null when there is nothing usable.
  *
  * `out_of_scope` absent and `out_of_scope: []` are different facts - the first
  * is a plan recorded before the field existed, the second a planner claiming no
  * interesting edges - and `formatOutOfScope` prints different text for each, so
- * absence is preserved rather than filled in.
+ * absence is preserved rather than filled in. `acceptance_criteria` is read the
+ * same way and for the same reason: absent is a plan that predates the bar,
+ * empty is a planner claiming done-ness is unobservable, and only the planner
+ * gets to make the second claim.
+ *
+ * The two are independent - a plan can carry either, both or neither - so each
+ * is added only when it was stored.
  */
 function readPlan(raw: unknown, ctx: ReadContext): Plan | null {
   if (raw === null) return null;
@@ -771,11 +799,23 @@ function readPlan(raw: unknown, ctx: ReadContext): Plan | null {
     assumptions,
     open_questions: openQuestions,
   };
-  if (raw['out_of_scope'] === undefined) return plan;
-  return {
-    ...plan,
-    out_of_scope: repairedArray('plan.out_of_scope', raw['out_of_scope'], ctx, readOutOfScope),
-  };
+  if (raw['out_of_scope'] !== undefined) {
+    plan.out_of_scope = repairedArray(
+      'plan.out_of_scope',
+      raw['out_of_scope'],
+      ctx,
+      readOutOfScope,
+    );
+  }
+  if (raw['acceptance_criteria'] !== undefined) {
+    plan.acceptance_criteria = repairedArray(
+      'plan.acceptance_criteria',
+      raw['acceptance_criteria'],
+      ctx,
+      readAcceptanceCriterion,
+    );
+  }
+  return plan;
 }
 
 /**
@@ -1025,6 +1065,10 @@ const READERS = {
     raw === undefined ? undefined : repairedArray('carried', raw, ctx, readFinding),
   declined: (raw, ctx) =>
     raw === undefined ? undefined : repairedArray('declined', raw, ctx, readFinding),
+  acceptanceCriteria: (raw, ctx) =>
+    raw === undefined
+      ? undefined
+      : repairedArray('acceptanceCriteria', raw, ctx, readAcceptanceCriterion),
   outstanding: (raw, ctx) =>
     raw === undefined ? undefined : repairedArray('outstanding', raw, ctx, readFinding),
   deferred: (raw, ctx) =>

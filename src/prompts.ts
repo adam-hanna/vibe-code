@@ -2,6 +2,7 @@ import { describedRole, ROLES } from '@src/roles.js';
 import type { RoleTable } from '@src/roles.js';
 import type { EnvironmentFacts } from '@src/runtime.js';
 import type {
+  AcceptanceCriterion,
   Answer,
   Assumption,
   Finding,
@@ -178,14 +179,76 @@ If the boundary itself is wrong - ${what} cannot work without the thing it exclu
 }
 
 /**
- * The plan as a standalone document: the prose plus the boundary it drew.
+ * The plan's definition of done, rendered.
+ *
+ * Three states, for the reason `formatOutOfScope` has three: absent is a plan
+ * recorded before the bar existed, empty is a planner claiming done-ness here
+ * is unobservable, and printing the second where the first is true invents a
+ * claim. Nothing here executes a criterion - `check` says how one *would* be
+ * checked, and that is all it does.
+ */
+function formatAcceptanceCriteria(items: readonly AcceptanceCriterion[] | undefined): string {
+  if (items === undefined) {
+    return '(this plan predates the acceptance-criteria field - no bar was recorded)';
+  }
+  if (items.length === 0) {
+    return '(the planner recorded no criteria - a claim that done-ness here is unobservable)';
+  }
+  return items
+    .map((c, i) => `${i + 1}. **${c.criterion}** \`${c.id}\`\n   - Check (${c.check}): ${c.how}`)
+    .join('\n');
+}
+
+/**
+ * The bar as the implementer is told it - two states, not three.
+ *
+ * The one consumer that renders nothing rather than a claim when there is no
+ * bar. A run whose plan carries no criteria must produce the implementation
+ * prompt it produced before this field existed, byte for byte, and before this
+ * field existed there was no section here at all. The critic is the component
+ * that gets told an empty bar is a claim, because the critic is the one whose
+ * job is to attack it.
+ *
+ * Shared with the rehydration prefix below, so a rotated implementer session is
+ * handed exactly the section the direct prompt would have handed it.
+ */
+function implementerCriteria(items: readonly AcceptanceCriterion[] | undefined): string {
+  if (items === undefined || items.length === 0) return '';
+  return `\n## Acceptance criteria - the bar this change must clear\n\nThese were approved with the plan. They are the conditions your work has to satisfy, and what a reviewer may cite by \`id\` when something is missing. Nothing here runs them: treat them as the definition of done you are building against, and if one turns out to be impossible or wrong, say so in your report rather than quietly working to a lower bar.\n\n${formatAcceptanceCriteria(items)}\n`;
+}
+
+/** What a rotated or resumed *implementer* session must be told the bar is. */
+export interface FrozenBar {
+  /**
+   * The gate-pass snapshot. It wins over `plan.acceptance_criteria`, which can
+   * have moved since - by a later write, by an in-place edit, or by `readPlan`
+   * repairing an unusable plan away entirely.
+   */
+  acceptanceCriteria: readonly AcceptanceCriterion[] | undefined;
+}
+
+/**
+ * The plan as a standalone document: the prose, the boundary it drew, and the
+ * bar it set.
  *
  * `plan_md` alone is not the plan of record any more. Used for the PLAN.md
  * artifact and for the rehydration prefix a rotated session starts from, so a
- * fresh session cannot lose the boundary the previous one stated.
+ * fresh session cannot lose the boundary or the bar the previous one stated.
+ *
+ * `frozen` switches the acceptance section to the implementer's view: the
+ * approved snapshot rather than the plan's own copy, under the two-state rule
+ * `implementPrompt` follows. Without it - the PLAN.md artifact, and a rotated
+ * *planner*, which is still revising the plan and must see what it wrote - the
+ * plan's own three-state field is rendered. A rotated implementer given the
+ * plan's copy would be reading a bar the gate never approved, beside a direct
+ * prompt carrying the one it did.
  */
-export function renderPlanDoc(plan: Plan): string {
-  return `${plan.plan_md}\n\n## Out of scope\n\n${formatOutOfScope(plan.out_of_scope)}\n`;
+export function renderPlanDoc(plan: Plan, frozen?: FrozenBar): string {
+  const criteria =
+    frozen === undefined
+      ? `\n## Acceptance criteria\n\n${formatAcceptanceCriteria(plan.acceptance_criteria)}\n`
+      : implementerCriteria(frozen.acceptanceCriteria);
+  return `${plan.plan_md}\n\n## Out of scope\n\n${formatOutOfScope(plan.out_of_scope)}\n${criteria}`;
 }
 
 export function planPrompt(
@@ -231,6 +294,12 @@ export function critiquePrompt(
   hasMemory: boolean,
   environment?: EnvironmentFacts | null,
   roles: RoleTable = ROLES,
+  /**
+   * Appended rather than placed beside `outOfScope`, where it belongs
+   * conceptually: every existing caller passes these positionally, and an
+   * inserted parameter would silently reinterpret one of them.
+   */
+  acceptanceCriteria?: readonly AcceptanceCriterion[] | undefined,
 ): string {
   return `You are a senior engineer reviewing an implementation plan before any code is written. Be adversarial: your job is to find what is wrong with it, not to praise it.${
     round > 1 ? continuityNote(round, hasMemory, 'plan') : ''
@@ -256,6 +325,14 @@ Reserve your objections for what genuinely cannot be discovered by building the 
 Give each finding a stable kebab-case \`id\` so it can be tracked across rounds.
 
 ${scopeGuidance(outOfScope, 'plan')}
+
+## Acceptance criteria
+
+${formatAcceptanceCriteria(acceptanceCriteria)}
+
+This is the plan's own definition of done, and it is yours to attack. Two questions, both worth findings: are these the *right* conditions, and are they *sufficient* - would a change satisfying every one of them still leave the task undone? A criterion nobody could agree on the outcome of, one whose \`check\` cannot actually establish it, and a bar that omits the thing this change exists for are each a defect in the plan at its true severity. An empty bar is a claim like any other: if done-ness here is observable, say so and say how.
+
+Nothing executes a criterion in this run, so do not raise findings about running them. Cite one by its \`id\` where it makes a finding concrete.
 
 ${REVIEW_BREADTH}
 
@@ -308,10 +385,25 @@ export interface RevisePlanArgs {
    * from nothing and silently drop a boundary the run had already settled.
    */
   outOfScope?: readonly OutOfScopeItem[] | undefined;
+  /**
+   * The bar the current plan set, restated every round for exactly the reason
+   * the boundary is: a revision returns the *complete* plan, and a session
+   * rotated concurrently with the critique would otherwise re-derive
+   * `acceptance_criteria` from nothing and quietly drop a bar the run had
+   * already settled. This is also the anti-shedding guard inside the plan
+   * phase, where the critic is still watching.
+   */
+  acceptanceCriteria?: readonly AcceptanceCriterion[] | undefined;
   round: number;
 }
 
-export function revisePlanPrompt({ findings, answers, outOfScope, round }: RevisePlanArgs): string {
+export function revisePlanPrompt({
+  findings,
+  answers,
+  outOfScope,
+  acceptanceCriteria,
+  round,
+}: RevisePlanArgs): string {
   const parts: string[] = [`Revise your plan. This is revision round ${round}.`];
 
   if (findings && findings.length > 0) {
@@ -339,6 +431,12 @@ Fold these into the plan and drop the corresponding open questions.`);
 ${formatOutOfScope(outOfScope)}
 
 \`out_of_scope\` is the whole boundary, not a delta: restate every item that still holds. Dropping one is a deliberate decision to take that work on - if you drop it, say so in the plan and explain why. Adding one is how you decline a finding that is real and worth doing but belongs in separate work.`);
+
+  parts.push(`## The bar your current plan set
+
+${formatAcceptanceCriteria(acceptanceCriteria)}
+
+\`acceptance_criteria\` is the whole bar, not a delta: restate every criterion that still holds. Dropping one lowers the bar - if you drop it, say so in the plan and explain why it was never the right condition. Adding one is how a revision answers a finding that the plan's definition of done was incomplete.`);
 
   parts.push(
     'Return the **complete revised plan**, not a diff or a summary of changes - the plan is consumed standalone by the implementer. Keep `assumptions` current: remove any that were resolved, add any the revision introduced.',
@@ -373,6 +471,12 @@ export function implementPrompt(
    * that was declined.
    */
   declined: readonly Finding[] = [],
+  /**
+   * The gate-pass snapshot, never `plan.acceptance_criteria`. Rendered as its
+   * own section beside the plan rather than among the findings: it is the bar,
+   * not open work.
+   */
+  acceptanceCriteria: readonly AcceptanceCriterion[] | undefined = [],
 ): string {
   const known =
     carried.length === 0
@@ -413,7 +517,7 @@ When you are done, report concisely: what you changed, what you verified and how
 ## The approved plan
 
 ${planMd}
-${known}${notDoing}`;
+${implementerCriteria(acceptanceCriteria)}${known}${notDoing}`;
 }
 
 export function reviewPrompt(
@@ -425,6 +529,8 @@ export function reviewPrompt(
   hasMemory: boolean,
   environment?: EnvironmentFacts | null,
   roles: RoleTable = ROLES,
+  /** The gate-pass snapshot, appended for the reason `critiquePrompt`'s is. */
+  acceptanceCriteria?: readonly AcceptanceCriterion[] | undefined,
 ): string {
   return `You are reviewing a code change against the plan it was meant to implement.${
     round > 1 ? continuityNote(round, hasMemory, 'change') : ''
@@ -452,6 +558,14 @@ Do not wave through a real defect. Reserve P1 for defects you can name a concret
 Give each finding a stable kebab-case \`id\`.
 
 ${scopeGuidance(outOfScope, 'change')}
+
+## Acceptance criteria
+
+${formatAcceptanceCriteria(acceptanceCriteria)}
+
+This is the bar the plan was approved against - the conditions the change claimed would show it worked. Check the change against it as well as against the plan's prose: a criterion the change does not meet is a finding at its true severity, and naming the criterion's \`id\` in the finding is what makes it concrete.
+
+There is no per-criterion verdict to report and no field to set. Your findings and their severities are the only signal this loop reads, exactly as before; the criteria are something a finding may cite, not a second scoreboard.
 
 ${REVIEW_BREADTH}
 

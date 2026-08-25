@@ -8,7 +8,7 @@
 export const PLAN_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['plan_md', 'assumptions', 'open_questions', 'out_of_scope'],
+  required: ['plan_md', 'assumptions', 'open_questions', 'out_of_scope', 'acceptance_criteria'],
   properties: {
     plan_md: {
       type: 'string',
@@ -52,6 +52,46 @@ export const PLAN_SCHEMA = {
         properties: {
           item: { type: 'string', description: 'The work you are not doing.' },
           why: { type: 'string', description: 'Why it is separable from this change.' },
+        },
+      },
+    },
+    acceptance_criteria: {
+      type: 'array',
+      description:
+        'How anyone can tell this change worked: the observable conditions that make it done. ' +
+        'State each so that two people would agree whether it holds - a criterion nobody can ' +
+        'check is not one. An empty array is legal, but it is a claim that done-ness here is ' +
+        'unobservable, so make it only when that is true. When you revise a plan, restate the ' +
+        'bar in full: this field is the whole bar, not a delta.',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['id', 'criterion', 'check', 'how'],
+        properties: {
+          id: {
+            type: 'string',
+            description:
+              'Stable kebab-case slug, unique within the plan, e.g. "resumes-without-repair". ' +
+              'A finding cites this rather than quoting the criterion.',
+          },
+          criterion: {
+            type: 'string',
+            description: 'The observable condition, stated so that two people would agree whether it holds.',
+          },
+          check: {
+            // Typed and enumerated for the reason `defer` is: with
+            // `additionalProperties: false` a required property carrying no
+            // `type` still accepts a number, and nothing downstream would say so.
+            type: 'string',
+            enum: ['command', 'inspection', 'qa'],
+            description:
+              'How it is checked: a command to run, something to inspect, or a named QA ' +
+              'scenario. Descriptive - nothing here runs it.',
+          },
+          how: {
+            type: 'string',
+            description: 'The command to run, what to inspect, or the named scenario.',
+          },
         },
       },
     },

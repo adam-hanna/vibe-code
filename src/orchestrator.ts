@@ -192,6 +192,9 @@ async function runPhases(
           plan.plan_md,
           state.carried ?? [],
           (state.declined ?? []).filter(isDeferrable),
+          // The snapshot, never `plan.acceptance_criteria`: a criterion the
+          // critic never saw is not an approved criterion.
+          state.acceptanceCriteria,
         ),
         cwd,
         label: 'implement',
@@ -360,10 +363,28 @@ async function planPhase(
       // leave an earlier round's value standing, and written on the same state
       // save that clears the pending findings below.
       state.declined = critique.findings.filter(isDeferrable);
+      // The bar, frozen at the instant it was approved. A copy, not a view:
+      // replacing `state.plan` is not the only way its criteria can move - the
+      // array and each criterion are mutable, and anything later holding the
+      // same objects would edit an approved bar in place. Every field of a
+      // criterion is a primitive, so a spread per entry is a full clone.
+      //
+      // `undefined` is preserved rather than collapsed to `[]`: a plan stored
+      // before this field existed never stated a bar, and inventing an empty
+      // one would put a claim in its mouth. Assigned unconditionally for the
+      // reason `declined` is - an approving round must not leave an earlier
+      // round's bar standing - and on the same state save.
+      state.acceptanceCriteria = plan.acceptance_criteria?.map((c) => ({ ...c }));
       recordEvent(state, 'plan_approved', {
         findings: critique.findings.length,
         carried: decision.tolerated.map((f) => f.id),
         declined: state.declined.map((f) => f.id),
+        // Present only when a bar was recorded. `?? []` here would log an
+        // explicit empty bar for a legacy plan that never claimed one, which is
+        // the absent-as-empty collapse the rest of this field refuses.
+        ...(state.acceptanceCriteria === undefined
+          ? {}
+          : { criteria: state.acceptanceCriteria.map((c) => c.id) }),
       });
       // An approved plan has nothing outstanding: what the gate tolerated
       // travels on `state.carried` into implementation, and leaving these set
@@ -1228,11 +1249,27 @@ export function runTurn(
  */
 function freshConversationPrefix(state: RunState, role: Role, hasMemory: boolean): string {
   if (hasMemory || !GENERATIVE_ROLES.includes(role)) return '';
-  return P.handoffContext(
-    state.handoff,
-    state.plan === null ? null : P.renderPlanDoc(state.plan),
-    state.handoffStale === true,
-  );
+  return P.handoffContext(state.handoff, planOfRecord(state, role), state.handoffStale === true);
+}
+
+/**
+ * The plan of record as a given role must read it.
+ *
+ * The acceptance bar is the one part that differs by reader, so the *same*
+ * rendering cannot serve both generative roles. The planner is still revising
+ * the plan and must see the plan's own three-state field - what it wrote, or
+ * that it wrote nothing. The implementer is bound by the frozen snapshot, and
+ * `implementPrompt` already hands it exactly that: rehydrating from
+ * `state.plan` would put a bar the gate never approved - a later write, an
+ * in-place edit, or the legacy claim the direct prompt suppresses - directly
+ * above the approved one in the same turn, and a rotated implementer would be
+ * reading two different definitions of done.
+ */
+function planOfRecord(state: RunState, role: Role): string | null {
+  if (state.plan === null) return null;
+  return role === 'implementer'
+    ? P.renderPlanDoc(state.plan, { acceptanceCriteria: state.acceptanceCriteria })
+    : P.renderPlanDoc(state.plan);
 }
 
 async function claudeDispatch(
@@ -1451,6 +1488,9 @@ async function revisePlan(
         // plan, and a session rotated concurrently with the critique would
         // otherwise re-derive `out_of_scope` from nothing.
         outOfScope: state.plan?.out_of_scope,
+        // And the bar, for the same reason: a revision returns the whole plan,
+        // so a bar it is not shown is a bar it re-derives or drops.
+        acceptanceCriteria: state.plan?.acceptance_criteria,
         round: state.planRound,
       }),
       cwd,
@@ -1669,6 +1709,9 @@ async function runCritique(
         roleHasMemory(state, cfg, 'critic', roles),
         state.environment,
         roles,
+        // The plan's own bar, not a snapshot: this runs before the gate, and
+        // the critic is what decides whether the bar is any good.
+        plan.acceptance_criteria,
       ),
       cwd,
       label: `critique-${state.planRound}`,
@@ -1705,6 +1748,10 @@ async function runReview(
         roleHasMemory(state, cfg, 'reviewer', roles),
         state.environment,
         roles,
+        // The snapshot, and deliberately not `?? []`: the reviewer's rendering
+        // is three-state, so collapsing an absent bar to an empty one would
+        // have a legacy run claim done-ness is unobservable.
+        state.acceptanceCriteria,
       ),
       cwd,
       label: `review-${state.reviewRound}`,

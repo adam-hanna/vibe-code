@@ -384,6 +384,29 @@ export interface OutOfScopeItem {
   why: string;
 }
 
+/**
+ * How a criterion says it can be checked.
+ *
+ * Descriptive, not dispatched on: nothing in the loop reads this to decide what
+ * to run, and nothing may. It exists so the critic can argue about whether a
+ * criterion is checkable the way it claims to be.
+ */
+export type CheckKind = 'command' | 'inspection' | 'qa';
+
+/** One observable condition that says whether the change is done. */
+export interface AcceptanceCriterion {
+  /**
+   * Stable kebab-case slug. Like a finding's id and for the same reason:
+   * something must be able to refer to one without quoting it.
+   */
+  id: string;
+  /** The condition, stated so that two people would agree whether it holds. */
+  criterion: string;
+  check: CheckKind;
+  /** The command to run, what to inspect, or the named scenario. */
+  how: string;
+}
+
 export interface Plan {
   plan_md: string;
   assumptions: Assumption[];
@@ -404,6 +427,20 @@ export interface Plan {
    * preserves an absent `out_of_scope` rather than filling one in.
    */
   out_of_scope?: OutOfScopeItem[];
+  /**
+   * How anyone can tell this change worked.
+   *
+   * Absent and empty are different facts here too. `undefined` means no bar was
+   * ever recorded - a plan stored before this field existed. `[]` means the
+   * planner considered the question and claims done-ness here is unobservable,
+   * which is a claim the critic can attack.
+   *
+   * Optional in TypeScript, required in `PLAN_SCHEMA`, for the reason
+   * `out_of_scope` is: the schema governs fresh model output, while
+   * `validateStoredState` reads stored JSON tolerantly and must keep loading
+   * runs recorded before this existed.
+   */
+  acceptance_criteria?: AcceptanceCriterion[];
 }
 
 export interface Finding {
@@ -696,6 +733,22 @@ export interface RunState {
    * Optional, so state written before this existed loads unchanged.
    */
   declined?: Finding[];
+  /**
+   * The acceptance bar the critique round that *approved* the plan saw.
+   *
+   * A copy, not a view of `state.plan`. The plan can be replaced by a later
+   * write, mutated in place by anything holding the same objects, or replaced
+   * with `null` by `readPlan` when a stored one is unusable - and none of that
+   * may move a bar the critic already passed. Where the two disagree the
+   * snapshot wins: a criterion the critic never saw is not an approved
+   * criterion.
+   *
+   * Assigned unconditionally at the gate, including as `undefined` for a legacy
+   * plan that never stated a bar - inventing `[]` there would put a claim in
+   * its mouth, and a conditional assignment would leave an earlier round's bar
+   * standing. Optional, so state written before this existed loads unchanged.
+   */
+  acceptanceCriteria?: AcceptanceCriterion[] | undefined;
   /**
    * P1s the review carried, within `loop.p1Tolerance`. A final fix round
    * addresses them and OUTSTANDING.md records them, because that round is not
