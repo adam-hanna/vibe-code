@@ -2,6 +2,18 @@ import type { RoleProviders } from '@src/roles.js';
 import type { EnvironmentFacts, ToolchainContract } from '@src/runtime.js';
 
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+/**
+ * The efforts either provider accepts, as a list.
+ *
+ * Here rather than in `src/config.ts`, which is where it used to live and which
+ * still exports it: `src/roles.ts` has to check a role's own effort (#46) and
+ * cannot import config, because config imports the role table's runtime values.
+ * A closed enum is the whole reason effort is the one provider setting a role may
+ * name - it is checkable before a turn is spawned, and a model string is not.
+ */
+export const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+
 /**
  * P0 exists because P1s are now survivable.
  *
@@ -318,12 +330,13 @@ export interface ProgressConfig {
 
 export interface Config {
   /**
-   * Which agent holds each role on this run.
+   * Which agent holds each role on this run, and what effort it runs at.
    *
-   * The only choice a run makes about the role table: `access`, the output
-   * schema and the conversation slot are facts about the job, not user
-   * settings. Absent - a config stored before this key existed - means the
-   * default assignment, which is what every run before it did.
+   * The two choices a run makes about the role table - a provider per role, and
+   * optionally that role's own effort (#46): `access`, the output schema and the
+   * conversation slot are facts about the job, not user settings. Absent - a
+   * config stored before this key existed - means the default assignment, which
+   * is what every run before it did.
    */
   roles: RoleProviders;
   claude: ClaudeConfig;

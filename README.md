@@ -260,7 +260,20 @@ Binaries can be pinned with `VIBE_CLAUDE_BIN`, `VIBE_CODEX_BIN`, `VIBE_GIT_BIN`.
 
 ### Who does what
 
-`roles` decides which agent holds each job. Omit it and you get the assignment above, which is what every run did before the key existed; name only the roles you want to move and the rest fill in. The value is a provider — `claude` or `codex` — and nothing else: whether a role may write, what schema its turn returns, and which conversation it talks through are facts about the *job*, not choices. There are three conversations, and which one a role gets follows from its provider and its job: everything on Claude shares Claude's session; a Codex reviewer holds the reviewer's thread, and every other Codex role the plan-side judge's. An unknown role name, a provider that is not one of the two, and a `roles` that is not an object are all config errors.
+`roles` decides which agent holds each job. Omit it and you get the assignment above, which is what every run did before the key existed; name only the roles you want to move and the rest fill in. A role's value takes two forms: a provider name — `"reviewer": "codex"` — or an object naming the provider and, optionally, that role's own reasoning effort:
+
+```jsonc
+{
+  "roles": {
+    "critic":   "codex",                                 // the string form, unchanged
+    "reviewer": { "provider": "codex", "effort": "max" } // its own effort, and only its own
+  }
+}
+```
+
+**Effort is the only setting a role may name**, and `claude.effort`/`codex.effort` remain the figure every other role on that provider runs at. It is the only one because a closed enum can be checked before a turn is spawned, and a model string cannot: `preflight` is an environment contract check rather than a model validator, so a per-role `model` would be accepted on trust and fail at turn time. A `model` key inside a role object is therefore refused, not ignored. Everything else is a fact about the *job*, not a choice — whether a role may write, what schema its turn returns, and which conversation it talks through. There are three conversations, and which one a role gets follows from its provider and its job: everything on Claude shares Claude's session; a Codex reviewer holds the reviewer's thread, and every other Codex role the plan-side judge's.
+
+`provider` is required in the object form. A role's value is replaced *wholesale* when configs are layered, so a defaulted provider would let a later `{"effort": "max"}` hand a role you had moved to Claude back to Codex silently — the one thing this section is strict to prevent. Config errors: an unknown role name, a `roles` that is not an object, a provider that is not one of the two, an object with no `provider`, a `model` key, any other unknown key inside a role object, and an effort outside `low|medium|high|xhigh|max`. Each names the role, and the key where there is one.
 
 The headline swap is a clean split — `{"planner": "codex", "implementer": "codex", "critic": "claude", "answerer": "claude", "reviewer": "claude"}` — and needs `codex.persistSession: false` (`--no-codex-session`). That pairing is refused rather than repaired: `codex exec resume` takes no `-s` flag, so a writing Codex role on a persisted thread can write on its first turn and silently reverts to read-only on every one after.
 

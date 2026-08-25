@@ -9,6 +9,7 @@ import * as P from '@src/prompts.js';
 import {
   claudePermission,
   codexSandbox,
+  effortFor,
   GENERATIVE_ROLES,
   holderLabel,
   roleEnabled,
@@ -1123,6 +1124,7 @@ export {
   codexSandbox,
   DEFAULT_ROLE_PROVIDERS,
   describedRole,
+  effortFor,
   enabledRolesFor,
   GENERATIVE_ROLES,
   holderLabel,
@@ -1141,7 +1143,15 @@ export {
   tableFor,
   turnTimeoutMs,
 } from '@src/roles.js';
-export type { Access, Role, RoleProviders, RoleSpec, RoleTable } from '@src/roles.js';
+export type {
+  Access,
+  Role,
+  RoleProviders,
+  RoleSetting,
+  RoleSpec,
+  RoleTable,
+  RoleValue,
+} from '@src/roles.js';
 export {
   SLOTS,
   slotHasMemory,
@@ -1296,7 +1306,10 @@ async function claudeDispatch(
       resume,
       permissionMode: claudePermission(access),
       model: cfg.claude.model,
-      effort: cfg.claude.effort,
+      // The role's, falling back to the provider's - which is what every role on
+      // a string value still gets. The model above stays provider-level, so the
+      // context measurement below still names the model that produced it.
+      effort: effortFor(req.role, cfg, roles),
       cwd: req.cwd,
       jsonSchema: req.jsonSchema,
       tools: req.tools,
@@ -1560,7 +1573,11 @@ async function codexDispatch(
         schemaName: req.label,
         artifactDir: artifactDir(state, 'codex'),
         model: cfg.codex.model,
-        effort: cfg.codex.effort,
+        // As on the Claude side: the role's effort where it named one, and this
+        // provider's otherwise. Two Codex roles can now differ, which is the
+        // whole of #46 - the reviewer's thread and the judge's are already
+        // separate conversations, and they no longer have to think alike.
+        effort: effortFor(req.role, cfg, roles),
         sandbox: codexSandbox(spec.access, cfg),
         cwd: req.cwd,
         timeoutMs: req.timeoutMs,
