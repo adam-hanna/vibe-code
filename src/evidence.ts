@@ -12,13 +12,22 @@ import { readEvidenceEntry } from '@src/validate.js';
  * check that the claim names a real place. That is the whole of the guarantee,
  * and README.md says so in the same words.
  *
- * Why it exists: a blocking finding used to be able to cite nothing at all. The
- * #44 reviewer ran **zero** `command_execution` events and still produced P1s
- * that forced a fix round - an assertion about code nobody had read, costing
- * the same as one somebody had. A P0 or P1 with no evidence entry that passes
- * its check is downgraded to P2 before anything reads its severity: it stops
- * forcing a round, it stays in the artifact, and the downgrade is recorded with
- * its reason (#48).
+ * Why it exists: a blocking finding used to be able to cite nothing at all.
+ * #44's reviewer emitted two or three stream items across seven minutes, every
+ * sampled one an `agent_message` - it ran nothing - and its single P1 claimed
+ * `noUnusedLocals` would reject a rest-destructured binding. It does not, and
+ * `tsc --noEmit` says so in four seconds. Inside `p1Tolerance`, so it did not
+ * block; it bought a final fix round that edited working code to satisfy a
+ * false premise, in a round that is by design not re-reviewed.
+ *
+ * (Stated as item counts, not as "zero `command_execution` events": the
+ * heartbeat counts every `item.started` AND `item.completed` and reports only
+ * the *last* item's type, so it cannot count commands. #66 is where that signal
+ * gets made precise, and this module deliberately does not depend on it.)
+ *
+ * A P0 or P1 with no evidence entry that passes its check is downgraded to P2
+ * before anything reads its severity: it stops forcing a round, it stays in the
+ * artifact, and the downgrade is recorded with its reason (#48).
  *
  * Absent evidence and broken evidence are deliberately the same case. One rule,
  * not two, because `parseFindings` is tolerant by design and making it throw on
