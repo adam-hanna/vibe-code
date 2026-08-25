@@ -147,13 +147,49 @@ Compaction can overlap a rotation turn with a Codex turn, so two turns are occas
 
 `--no-progress` turns the output off; `--progress-interval <sec>` changes the cadence. No compaction or rotation behaviour changes.
 
-## The verification gate
+## The verification gates
 
 The loop used to terminate on "the reviewer found no P1s", which is a statement about reading, not about working. It once declared success over an implementation that failed its own test suite most of the time.
 
-So `vibe` runs the project's test command itself, rather than believing a report about it. `verify.command` auto-detects (`npm test` where a `test` script exists) and a failure is filed as a **P0** finding with a stable id, which puts it through the same fix loop as anything else — bounded by `maxVerifyRounds`, and visible to the oscillation guard.
+So `vibe` runs the project's own commands itself, rather than believing a report about them. `verify.command` auto-detects (`npm test` where a `test` script exists) and a failure is filed as a **P0** finding with a stable id, which puts it through the same fix loop as anything else — bounded by `maxVerifyRounds`, and visible to the oscillation guard.
 
 It runs the command **`verify.runs` times (default 3)**, and this is not paranoia. The first run to reach implementation shipped a concurrency fix that failed roughly half its executions; the implementer ran it once, saw green, and reported success entirely truthfully. A single execution cannot distinguish working code from a race that happened to win.
+
+### Named gates
+
+One command can only fail one way. `verify.gates` names as many as the project needs, in the order they run:
+
+```jsonc
+"verify": {
+  "enabled": true,
+  "gates": [
+    { "name": "typecheck", "command": "npm run typecheck", "runs": 1 },
+    { "name": "test",      "command": "npm test",          "runs": 3 },
+    { "name": "qa",        "command": null, "runs": 1, "timeoutMs": 1800000, "required": false }
+  ]
+}
+```
+
+`runs` and `timeoutMs` default to `verify.runs` and `verify.timeoutMs`; `required` defaults to true; `command` is a **required key that may hold null**, so "there is deliberately nothing to run here" cannot be spelled by forgetting to write it. Each gate files its failure as `${name}-failing`, which is what lets the oscillation guard tell a typecheck that keeps failing from a test suite that keeps failing.
+
+**Ordering.** A **failure stops the sequence** — the fixer gets one problem, and running a suite against code that does not typecheck buys an opinion about the wrong thing. An **unavailable gate does not** stop it: a `typecheck` gate nobody configured must not prevent `test` from running.
+
+**Four states, and where each one lands:**
+
+| State | When | Event | Exit |
+|---|---|---|---|
+| **verified** | ran, passed `runs` times | `verify_passed` | 0 |
+| **failed** | ran, exited non-zero | `verify_failed` | P0 → the fix loop |
+| **unavailable** | enabled, no command | `verify_unavailable` | **7** if `required`, else 0 |
+| **disabled** | `verify.enabled: false` | `verify_disabled` | 0 |
+
+Whatever the exit code, a gate that did not run is named in the `Done` block at the end of the run, saying which gates cost the exit code and which do not. A `log.warn` forty minutes earlier is not a contract; the end of the run is where a human reads.
+
+`verify.command` and `verify.gates` together are refused — two keys naming what to run is an ambiguity, and `--verify-command` sets one of them, so the flag is refused alongside a gate list rather than being silently ignored. `gates: []` is refused too (`enabled: false` is how you turn verification off). A **blank command string is refused** at both spellings: an empty command reached the shell, exited 0, and was reported as a pass.
+
+**Compatibility.** Absent `gates` synthesizes exactly one gate named `verification`, from `verify.command`/`runs`/`timeoutMs` — so its finding id is still `verification-failing` and nothing about an existing config changes. But a project with **no `test` script and no configured command** now exits **7 instead of 0**: that gate was never passing, it was never running, and 0 has always been documented to mean verification passed.
+
+Auto-detection belongs to that legacy gate alone. A listed gate with `command: null` is unavailable and nothing is guessed — a gate named `qa` that silently ran `npm test` because the project happens to have one would report QA as passing when no QA ran.
 
 **What it is actually for.** In practice the implementer self-verifies inside its own turn — the implementation prompt tells it to run the build, lint and tests as it goes — so across sixteen verification runs on five fixtures, including a from-scratch 1416-line glob parser, the gate has passed every time on first entry. It is a regression guard and a liar-detector, not a discovery mechanism. That is the correct thing for it to be, and the reason to keep it is precisely that it is cheap when the implementer was honest.
 
@@ -231,7 +267,7 @@ defaults rather than a sample — omit any section and you get exactly what is p
               "convergenceWindow": 3 },
   "budget": { "maxCostUsd": 25, "maxTokens": 25000000, "planShare": 0.4,
               "codexLimitPercent": 95, "waitOnRateLimit": true, "maxWaitMinutes": 360 },
-  "verify": { "enabled": true, "command": null, "runs": 3, "timeoutMs": 900000 },
+  "verify": { "enabled": true, "command": null, "runs": 3, "timeoutMs": 900000, "gates": null },
   "questions": { "askCodex": true, "answerNonBlocking": true,
                  "escalateOnDefer": true, "escalateOnLowConfidence": true },
   "git": { "useBranch": true, "branchPrefix": "vibe/", "commitEachRound": true },
@@ -290,13 +326,14 @@ Some tables run with a warning rather than a refusal, and each says what it cost
 
 | Code | Meaning |
 |---|---|
-| 0 | Done — both phases cleared, verification passes. Any P1 carried under `p1Tolerance` was fixed in a final round and listed in `OUTSTANDING.md` |
+| 0 | Done. For `vibe run`: both phases cleared and every **required** verification gate passed — an optional gate with no command is reported as unavailable and does not affect this code. For `vibe plan`: the plan cleared critique; no verification runs. Any P1 carried under `p1Tolerance` was fixed in a final round and listed in `OUTSTANDING.md` |
 | 1 | Error |
 | 2 | Needs your input (see `NEEDS-INPUT.md`) |
 | 3 | No convergence — round cap or oscillation guard tripped |
 | 4 | Budget exceeded |
 | 5 | Rate limited — Claude's window, or Codex's above `budget.codexLimitPercent`. Resume once it resets |
 | 6 | An agent's environment fails the toolchain contract |
+| 7 | Unverified — the run finished, but a required verification gate never ran (no command configured). The work, its artifacts and its commits are all there; the evidence that it runs is not |
 
 Suitable for `if vibe run "..."; then ...` in a wrapper script.
 

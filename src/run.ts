@@ -13,6 +13,7 @@ import {
 } from '@src/stored.js';
 import type {
   Finding,
+  GateOutcome,
   PendingFindings,
   RoundRecord,
   RunPhase,
@@ -371,6 +372,131 @@ export function artifactDir(state: RunState, name: string): string {
   const dir = path.join(state.dir, name);
   mkdirSync(dir, { recursive: true });
   return dir;
+}
+
+/**
+ * An artifact's text, or null when there is nothing readable there.
+ *
+ * Null rather than a throw for a directory of that name or an unreadable file:
+ * the one caller asks "does this file say what I wrote", and anything it cannot
+ * read is not a file it wrote (see `finaliseOutstanding` in orchestrator.ts).
+ */
+export function artifactText(state: RunState, name: string): string | null {
+  const file = path.join(state.dir, name);
+  try {
+    return readFileSync(file, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Gates that were enabled and could not run, in list order.
+ *
+ * One source for both the report line and the exit rule, so the human contract
+ * and the machine one cannot drift (#47).
+ */
+export function unavailableGates(state: RunState): readonly GateOutcome[] {
+  return (state.gateOutcomes ?? []).filter((o) => o.status === 'unavailable');
+}
+
+/**
+ * Required gates that could not run. Empty when the run is verified, when the
+ * only unavailable gates were optional, or when verification is off.
+ *
+ * This is what `EXIT.UNVERIFIED` is keyed to: an optional unavailable gate and a
+ * disabled section are both stated configurations, and only a *required* gate
+ * that never ran is the hole #47 closes.
+ */
+export function unverifiedGates(state: RunState): string[] {
+  return unavailableGates(state)
+    .filter((o) => o.required)
+    .map((o) => o.name);
+}
+
+/**
+ * Why this run may not exit 0, or null when it may.
+ *
+ * The exit rule, and deliberately NOT "are there unavailable required gates" -
+ * that question answers "no" for a record that says nothing at all. A present
+ * but empty `gateOutcomes` is what `validateStoredState` leaves behind when the
+ * stored list could not be read, and reading it as "every gate passed" turns a
+ * corrupt state into a clean bill of health. Nothing in the run ever writes an
+ * empty list: `runGate` records one outcome per resolved gate, and
+ * `resolveGates` always returns at least one gate.
+ *
+ * ABSENT is still a pass, and must stay one: it means no gate has run, which is
+ * a plan-only run or a state written before #47 existed. That is the legacy
+ * contract, and it is a different fact from "a record exists and says nothing".
+ */
+export function verificationIncomplete(state: RunState): string | null {
+  const outcomes = state.gateOutcomes;
+  if (outcomes === undefined) return null;
+  if (outcomes.length === 0) {
+    return 'no gate outcomes were recorded, so nothing shows the gates ran';
+  }
+  // Fail closed on a failure too. A completing run cannot carry one - the loop
+  // is on the far side of a clean gate - so this only fires for a state that
+  // says something no healthy run produces.
+  const failed = outcomes.filter((o) => o.status === 'failed').map((o) => o.name);
+  if (failed.length > 0) return `gate(s) ${quoted(failed)} did not pass`;
+
+  const required = unverifiedGates(state);
+  if (required.length > 0) {
+    return `required gate(s) ${quoted(required)} could not run`;
+  }
+  return null;
+}
+
+const quoted = (names: readonly string[]): string => names.map((n) => `\`${n}\``).join(', ');
+
+/**
+ * How the last pass over the gates may be described in a completion claim.
+ *
+ * Null ONLY when every gate ran and passed - then the caller says what it always
+ * said. Anything else gets a correction, including the two states that do not
+ * cost the exit code: a run that logs, prints and writes "verification still
+ * passed" while a gate never ran is making a claim nobody checked, and that was
+ * true of three separate sentences before #47.
+ */
+export function verificationCaveat(state: RunState): string | null {
+  const outcomes = state.gateOutcomes;
+  // Absent means no gate has run at all. Reachable only from a caller writing
+  // before the gate; a completed run has been through `runGate` at least once.
+  if (outcomes === undefined) return 'verification has not run';
+
+  // A record that exists and says nothing. Nothing in the run writes one - it is
+  // what a stored list that could not be read is repaired to - so it is reported
+  // as the absence of evidence it is, rather than as an empty set of problems.
+  if (outcomes.length === 0) {
+    return 'no gate outcomes were recorded, so nothing shows the gates ran';
+  }
+
+  // Checked first, and the reason it is here at all: a run does not COMPLETE
+  // over a failed gate, but it can stop over one - at `maxVerifyRounds`, or on a
+  // ceiling - and whatever was written before the gate ran must not be left
+  // describing a pass. Ordered ahead of the others because a gate that ran and
+  // failed is the most specific thing that can be said about the pass.
+  const failed = outcomes.filter((o) => o.status === 'failed').map((o) => o.name);
+  if (failed.length > 0) {
+    return `gate(s) ${quoted(failed)} did not pass`;
+  }
+
+  const unavailable = outcomes.filter((o) => o.status === 'unavailable');
+  const required = unavailable.filter((o) => o.required).map((o) => o.name);
+  if (required.length > 0) {
+    return `required gate(s) ${quoted(required)} could not run, so verification is incomplete`;
+  }
+  if (unavailable.length > 0) {
+    return (
+      `every required gate passed; optional gate(s) ${quoted(unavailable.map((o) => o.name))} ` +
+      'had no command and did not run'
+    );
+  }
+  if (outcomes.length > 0 && outcomes.every((o) => o.status === 'disabled')) {
+    return 'verification is disabled, so nothing was executed';
+  }
+  return null;
 }
 
 /**

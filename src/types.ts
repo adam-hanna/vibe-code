@@ -305,6 +305,38 @@ export interface ContextConfig {
   enabled: boolean;
 }
 
+/**
+ * One named check the run must pass before the reviewer is asked for an opinion.
+ *
+ * The name is not decoration: it becomes the finding id (`${name}-failing`), so
+ * the oscillation guard can tell a typecheck that keeps failing from a test
+ * suite that keeps failing - which it could not do while every failure was
+ * filed under one id (#47, problem 2).
+ */
+export interface VerifyGate {
+  /** Kebab-case, unique in the list. It becomes a finding id, so it must be stable. */
+  name: string;
+  /**
+   * Null means the gate is unavailable - enabled, but with nothing to run.
+   *
+   * A required key that may hold null, for the reason `provider` is required
+   * inside a role object (#46): a key that must be written cannot be forgotten
+   * into a default, and "I meant to configure this" must not read as "there is
+   * deliberately nothing here".
+   */
+  command: string | null;
+  /** Defaults to `verify.runs`. */
+  runs?: number;
+  /** Defaults to `verify.timeoutMs`. */
+  timeoutMs?: number;
+  /**
+   * Defaults to true. False says only: if this gate has no command, that is a
+   * deliberate configuration and not a hole. A gate that RUNS and fails always
+   * blocks, whatever this says.
+   */
+  required?: boolean;
+}
+
 export interface VerifyConfig {
   enabled: boolean;
   /** Shell command to run. Null auto-detects (`npm test` when a test script exists). */
@@ -320,6 +352,17 @@ export interface VerifyConfig {
    * distinguish working code from a race that happened to win.
    */
   runs: number;
+  /**
+   * The gates, in the order they run.
+   *
+   * Null means not configured: one gate named `verification` is synthesized from
+   * `command`, `runs` and `timeoutMs`, so a config written before this key
+   * existed behaves exactly as it did - including its finding id (#47).
+   * `command` and `gates` together are refused: two keys naming what to run is
+   * the ambiguity. `runs` and `timeoutMs` are NOT in conflict - they are the
+   * per-gate defaults a gate may override.
+   */
+  gates: VerifyGate[] | null;
 }
 
 export interface ProgressConfig {
@@ -543,6 +586,22 @@ export interface ClaudeTurnResult {
   tokens: TokenUsage;
 }
 
+/**
+ * What one gate did on the most recent pass.
+ *
+ * `required` is stored here rather than re-read from config so the exit rule is
+ * a pure function of state: a summary written from `state.json` must not need
+ * the config that produced it (#47).
+ */
+export interface GateOutcome {
+  name: string;
+  status: 'passed' | 'failed' | 'unavailable' | 'disabled';
+  command: string | null;
+  /** Executions actually performed. Zero for unavailable and disabled. */
+  runs: number;
+  required: boolean;
+}
+
 export interface RunEvent {
   at: string;
   type: string;
@@ -595,6 +654,15 @@ export interface RunState {
   verifyRounds: RoundRecord[];
   /** Verification-fix rounds spent so far. */
   verifyRound: number;
+  /**
+   * The most recent pass over the gates.
+   *
+   * Absent means no gate has run - a plan-only run, or a run that stopped before
+   * the gate. Never repaired into `[]`, which would mean "gates ran and there
+   * were none" and is a state nothing produces (#47, and #44's rule about
+   * absence).
+   */
+  gateOutcomes?: GateOutcome[] | undefined;
   /** Question-and-replan cycles spent so far. */
   questionRound: number;
   events: RunEvent[];

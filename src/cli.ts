@@ -1,7 +1,17 @@
 import { readFileSync, existsSync, renameSync } from 'node:fs';
 import path from 'node:path';
 import { applyOverrides, configDiff, EFFORTS, loadConfig } from '@src/config.js';
-import { artifact, createRun, listRuns, loadRun, recordEvent, saveState } from '@src/run.js';
+import {
+  artifact,
+  createRun,
+  listRuns,
+  loadRun,
+  recordEvent,
+  saveState,
+  unavailableGates,
+  verificationCaveat,
+  verificationIncomplete,
+} from '@src/run.js';
 import { Escalation, EXIT, orchestrate, writeEscalation } from '@src/orchestrator.js';
 import type { ExitCode } from '@src/orchestrator.js';
 import {
@@ -19,7 +29,7 @@ import { applyCharge, fmtTokens } from '@src/charge.js';
 import { preflight, REAL_PROBES } from '@src/preflight.js';
 import type { PreflightProbes, PreflightReport } from '@src/preflight.js';
 import { closeCodexRateLimits, describeLimits, readCodexRateLimits } from '@src/ratelimits.js';
-import { detectCommand } from '@src/verify.js';
+import { resolveGates } from '@src/verify.js';
 import type { AgentPreflight } from '@src/preflight.js';
 import * as git from '@src/git.js';
 import * as log from '@src/log.js';
@@ -72,15 +82,19 @@ Options
   --no-codex-answers         Escalate every blocking question straight to you
   --blocking-questions-only  Only send Codex the questions marked blocking
   --no-codex-session         Run each Codex turn as a fresh one-shot (no memory)
-  --verify-command <cmd>     Verification command (default: auto-detect, e.g. npm test)
+  --verify-command <cmd>     Verification command (default: auto-detect, e.g. npm test).
+                             Refused when verify.gates is configured - put the command in
+                             a gate instead of naming what to run twice
   --verify-runs <n>          Times it must pass (default: 3; catches races)
-  --no-verify                Do not run the verification gate
+  --no-verify                Do not run the verification gates
   --skip-probe               Skip the agent environment preflight
   -h, --help
 
 Exit codes
-  0 done   1 error   2 needs your input   3 no convergence   4 ceiling hit
-  5 rate limited   6 agent environment fails the toolchain contract
+  0 done (plan approved, or every required gate passed)   1 error
+  2 needs your input   3 no convergence   4 ceiling hit   5 rate limited
+  6 agent environment fails the toolchain contract
+  7 unverified - the run finished but a required gate never ran
 `;
 
 interface ParsedArgs {
@@ -556,22 +570,47 @@ export async function execute(
     // would contradict the OUTSTANDING.md written moments earlier, and a
     // summary a user cannot trust is worse than no summary.
     const left = state.outstanding ?? [];
+    const caveat = verificationCaveat(state);
+    // The exit rule, not the list of named gates: a record that says nothing at
+    // all names nothing, and "no unavailable gates" is the wrong answer to give
+    // for it. See `verificationIncomplete`.
+    const incomplete = verificationIncomplete(state);
     if (left.length > 0) {
       log.warn(
         `Finished after a final fix round for ${left.length} carried P1(s): ` +
-          `${left.map((f) => f.id).join(', ')}. Verification passed, but that round was not ` +
+          `${left.map((f) => f.id).join(', ')}. ` +
+          `${caveat === null ? 'Verification passed' : `But ${caveat}`}, and that round was not ` +
           're-reviewed - see OUTSTANDING.md.',
       );
-    } else {
+    } else if (state.finalFixDone === true && state.outstanding !== undefined) {
+      // The same shape of problem as the gate record, found while checking for
+      // its twins: `outstanding` is also repaired to an empty list on a state
+      // that could not be read, and an empty one here prints "zero P1s" over a
+      // run that carried some. `finalFixDone` is an independent witness - a
+      // healthy run sets it in the same breath as a NON-empty `outstanding`
+      // (src/orchestrator.ts) - so the two disagreeing means the record is
+      // damaged, not that the review was spotless. Absent `outstanding` is left
+      // alone: that is a state written before the field existed.
+      log.warn(
+        'Finished after a final fix round, but the record of what it carried is empty - ' +
+          'state.json was repaired on load. See OUTSTANDING.md for what was actually carried.',
+      );
+    } else if (incomplete === null) {
       log.ok(
         state.planOnly
           ? 'Plan cleared critique with zero P1s. Not implemented (plan-only run).'
           : 'Plan and implementation both cleared review with zero P1s.',
       );
     }
+    // Here rather than in `summary()`, and here rather than only in a log line
+    // emitted forty minutes ago: the run may exit 0 with a gate that never ran,
+    // so the exit code cannot carry it and the end of the run is the only place
+    // a human reliably reads. `summary()` is spend, rounds, branch and rate
+    // limits; this is a statement about what the run did and did not establish.
+    reportGates(state);
     reportDeferred(state);
     summary(state, started);
-    return EXIT.OK;
+    return incomplete === null ? EXIT.OK : EXIT.UNVERIFIED;
   } catch (err) {
     if (err instanceof Escalation) {
       state.status = err.code === EXIT.NEEDS_HUMAN ? 'needs-input' : 'stalled';
@@ -622,10 +661,21 @@ function environmentFacts(
     });
   }
 
+  const gates = cfg.verify.enabled ? resolveGates(cfg.verify, targetDir) : [];
+  // The first gate that actually has something to run. `verifyCommand` and
+  // `verifyRuns` are KEPT rather than replaced by the gate list: `readEnvironment`
+  // (src/stored.ts) drops a record lacking that pair, so a run recorded by 1.1.0
+  // would lose its whole environment section on resume if they went away.
+  const first = gates.find((g) => g.command !== null);
   return {
     agents,
-    verifyCommand: cfg.verify.enabled ? (cfg.verify.command ?? detectCommand(targetDir)) : null,
-    verifyRuns: cfg.verify.runs,
+    verifyCommand: first?.command ?? null,
+    verifyRuns: first?.runs ?? cfg.verify.runs,
+    ...(gates.length > 0
+      ? {
+          verifyGates: gates.map((g) => ({ name: g.name, command: g.command, runs: g.runs })),
+        }
+      : {}),
   };
 }
 
@@ -758,6 +808,58 @@ export function chargePreflight(state: RunState, cfg: Config, report: PreflightR
   }
 
   if (held !== null) throw held;
+}
+
+/**
+ * Gates that never ran, said at the end of the run.
+ *
+ * Same shape of problem as the carried-P1 warning above it: a run can finish
+ * with something a reader has to know about, and the exit code cannot carry the
+ * optional half of it because an optional unavailable gate is a stated
+ * configuration and stays at 0. A `log.warn` during the loop is not the human
+ * contract - it scrolls past forty minutes before the end - so the outcome is
+ * repeated here, naming which gates cost the exit code and which do not (#47).
+ *
+ * Silent when every gate ran, and on a plan-only run, which never reaches a
+ * gate at all.
+ */
+function reportGates(state: RunState): void {
+  const unavailable = unavailableGates(state);
+  if (unavailable.length === 0) {
+    // A run can be unverified with no gate to name: a stored record that could
+    // not be read is repaired to an empty list, and the exit code moves without
+    // anything above having said why. Silence here would be the same "exit code
+    // says one thing, summary says another" this function exists to prevent.
+    const incomplete = verificationIncomplete(state);
+    if (incomplete !== null) {
+      log.warn(
+        `Verification incomplete: ${incomplete} - the run exits ${EXIT.UNVERIFIED}. ` +
+          'Check `gateOutcomes` in state.json and the run log.',
+      );
+    }
+    return;
+  }
+
+  const named = (o: { name: string }): string => `\`${o.name}\``;
+  const required = unavailable.filter((o) => o.required);
+  const optional = unavailable.filter((o) => !o.required);
+
+  const parts: string[] = ['Verification incomplete.'];
+  if (required.length > 0) {
+    parts.push(
+      `${required.map(named).join(', ')} could not run (no command configured), and ` +
+        `${required.length === 1 ? 'that gate is' : 'those gates are'} required - the run ` +
+        `exits ${EXIT.UNVERIFIED}.`,
+    );
+  }
+  if (optional.length > 0) {
+    parts.push(
+      `${optional.map(named).join(', ')} also did not run, and ` +
+        `${optional.length === 1 ? 'is optional' : 'are optional'}, so ` +
+        `${required.length > 0 ? 'they do not add to' : 'this does not affect'} the exit code.`,
+    );
+  }
+  log.warn(parts.join(' '));
 }
 
 /**
@@ -914,12 +1016,23 @@ async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
         `${cfg.context.compactDuringCodex ? ' (overlapped with Codex)' : ''}`,
     );
     if (cfg.verify.enabled) {
-      const cmd = cfg.verify.command ?? detectCommand(targetDir);
-      log.info(
-        cmd === null
-          ? '  verify: enabled but no command configured or detected - runs will not be gated'
-          : `  verify: ${cmd} (must pass ${cfg.verify.runs}x)`,
-      );
+      // One line per gate, and each says whether it will cost the exit code.
+      // "runs will not be gated" was the old wording for a state that also
+      // exited 0, which is exactly the ambiguity #47 removes.
+      for (const gate of resolveGates(cfg.verify, targetDir)) {
+        if (gate.command !== null) {
+          log.info(`  verify: ${gate.name} - ${gate.command} (must pass ${gate.runs}x)`);
+        } else if (gate.required) {
+          log.warn(
+            `  verify: ${gate.name} - no command configured; this gate will not run ` +
+              `(REQUIRED - the run will exit ${EXIT.UNVERIFIED})`,
+          );
+        } else {
+          log.info(
+            `  verify: ${gate.name} - no command configured; this gate will not run (optional)`,
+          );
+        }
+      }
     } else {
       log.info('  verify: off - the loop will not check that the code runs');
     }
