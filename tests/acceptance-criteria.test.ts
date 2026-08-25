@@ -100,8 +100,8 @@ test('a non-array acceptance_criteria is rejected', () => {
 });
 
 test('a criterion missing its id is rejected', () => {
-  const { id: _id, ...rest } = CRITERION;
-  assert.throws(() => parsePlan({ ...FRESH, acceptance_criteria: [rest] }), ShapeError);
+  const withoutId = { criterion: CRITERION.criterion, check: CRITERION.check, how: CRITERION.how };
+  assert.throws(() => parsePlan({ ...FRESH, acceptance_criteria: [withoutId] }), ShapeError);
 });
 
 test('a criterion whose check is not one of the three is rejected', () => {
