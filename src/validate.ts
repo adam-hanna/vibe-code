@@ -86,40 +86,58 @@ function stringList(obj: Record<string, unknown>, key: string): string[] {
 const EVIDENCE_KINDS: readonly EvidenceKind[] = ['code', 'artifact', 'absence', 'external'];
 
 /**
- * Evidence, read as tolerantly as `defer` is and for a sharper reason.
+ * One citation, or null when the entry is not one.
  *
- * The schema marks the field required; this parser cannot afford to. Throwing
- * here would destroy a whole round's output - 3M tokens on the #47 review -
- * because one finding in ten omitted a field. So a malformed entry is dropped
- * and a missing field is left missing, and `groundFindings` treats "cited
- * nothing" and "cited something that does not resolve" as the same case: the
- * finding is downgraded, never deleted (#48).
+ * The codebase's single answer to "is this stored object a citation", the way
+ * `hasFindingShape` is its single answer to "is this stored object a finding" -
+ * and for the same reason. `evidence` is never validated on the way into
+ * state.json (deliberately: a bad citation must not delete a finding from
+ * FOLLOW-UPS.md), so every consumer meets raw `unknown` and each one has to ask
+ * this question. Asking it in two places is how they come to disagree.
+ *
+ * What each consumer *does* with a null is its own business: `parseFindings`
+ * and the prompt renderers drop it, `groundFindings` counts it as a citation
+ * that did not resolve.
  *
  * Every optional field is written with a conditional spread rather than a
  * possibly-`undefined` value, because `exactOptionalPropertyTypes` makes those
  * different types - and because an explicit `path: undefined` would serialise
  * into state.json as a key that was never cited.
  */
-function readEvidence(raw: unknown): Evidence[] {
-  if (!Array.isArray(raw)) return [];
-  const out: Evidence[] = [];
-  for (const entry of raw) {
-    if (!isRecord(entry)) continue;
-    const kind = entry['kind'];
-    if (typeof kind !== 'string' || !(EVIDENCE_KINDS as readonly string[]).includes(kind)) continue;
-    const path = entry['path'];
-    const line = entry['line'];
-    const excerpt = entry['excerpt'];
-    const ref = entry['ref'];
-    out.push({
-      kind: kind as EvidenceKind,
-      ...(typeof path === 'string' ? { path } : {}),
-      ...(typeof line === 'number' && Number.isInteger(line) ? { line } : {}),
-      ...(typeof excerpt === 'string' ? { excerpt } : {}),
-      ...(typeof ref === 'string' ? { ref } : {}),
-    });
+export function readEvidenceEntry(raw: unknown): Evidence | null {
+  if (!isRecord(raw)) return null;
+  const kind = raw['kind'];
+  if (typeof kind !== 'string' || !(EVIDENCE_KINDS as readonly string[]).includes(kind)) {
+    return null;
   }
-  return out;
+  const path = raw['path'];
+  const line = raw['line'];
+  const excerpt = raw['excerpt'];
+  const ref = raw['ref'];
+  return {
+    kind: kind as EvidenceKind,
+    ...(typeof path === 'string' ? { path } : {}),
+    ...(typeof line === 'number' && Number.isInteger(line) ? { line } : {}),
+    ...(typeof excerpt === 'string' ? { excerpt } : {}),
+    ...(typeof ref === 'string' ? { ref } : {}),
+  };
+}
+
+/**
+ * Every usable citation in a value that claims to be a list of them.
+ *
+ * Tolerant like `defer` and for a sharper reason: the schema marks `evidence`
+ * required, and this parser cannot afford to. Throwing would destroy a whole
+ * round's output - 3M tokens on the #47 review - because one finding in ten
+ * omitted a field. A non-array reads as none, a malformed entry is dropped, and
+ * `groundFindings` then treats "cited nothing" and "cited something that does
+ * not resolve" as the same case: the finding is downgraded, never deleted (#48).
+ */
+export function readEvidence(raw: unknown): Evidence[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((entry): Evidence | null => readEvidenceEntry(entry))
+    .filter((e): e is Evidence => e !== null);
 }
 
 const SEVERITIES: readonly Severity[] = ['P0', 'P1', 'P2', 'P3'];

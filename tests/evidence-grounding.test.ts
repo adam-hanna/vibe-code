@@ -384,6 +384,95 @@ test('every downgraded finding is returned, and only those', () => {
   );
 });
 
+// ---- evidence nothing has validated -----------------------------------------
+
+/**
+ * `hasFindingShape` deliberately does not check `evidence`, so a stored finding
+ * can carry anything at all under that key and still be loaded, carried and
+ * rendered. Every consumer therefore meets raw `unknown`, and none of them may
+ * throw on it: the finding survives, the citation does not.
+ */
+const JUNK: readonly unknown[] = [
+  {},
+  { evidence: null },
+  { evidence: 'src/run.ts' },
+  { evidence: {} },
+  { evidence: [null] },
+  { evidence: [undefined] },
+  { evidence: ['src/run.ts'] },
+  { evidence: [{ kind: 'invented' }] },
+  { evidence: [{ kind: 'code', path: 42 }] },
+];
+// Deliberately not in that list: `{kind: 'code', path: 'src.ts', line: 'three'}`
+// names a real file, so the unusable `line` is dropped and the citation still
+// resolves on the path. That case has its own test below.
+
+test('unusable stored evidence downgrades a blocker instead of throwing', () => {
+  const t = tree();
+  for (const junk of JUNK) {
+    const f = { ...finding(), ...(junk as object) } as Finding;
+    const r = ground(t, f);
+    assert.equal(r.severity, 'P2', `${JSON.stringify(junk)} must not stay blocking`);
+    assert.equal(r.from, 'P1');
+  }
+});
+
+test('an unusable entry beside a good one still leaves the finding blocking', () => {
+  const t = tree();
+  const f = {
+    ...finding(),
+    evidence: [null, { kind: 'code', path: 'src.ts' }],
+  } as unknown as Finding;
+  assert.equal(ground(t, f).severity, 'P1');
+});
+
+test('an unusable citation is kept exactly as stored, not erased', () => {
+  const t = tree();
+  const f = { ...finding(), evidence: [null] } as unknown as Finding;
+  // Erasing it would take the record of what was claimed with it. The renderers
+  // refuse to print it; the artifact still says it was there.
+  assert.deepEqual(ground(t, f).out.evidence, [null]);
+});
+
+test('a line that is not an integer is dropped, not rounded and not fatal', () => {
+  const t = tree();
+  // Neither `3.5` nor `'3'` is a line number, and neither may be coerced into a
+  // claim the model did not make. The rest of the citation is untouched: the
+  // file is real, so the entry still resolves on it - tolerant in the direction
+  // that cannot cause a false downgrade.
+  assert.equal(check(t, { kind: 'code', path: 'src.ts', line: 3.5 }), null);
+  assert.equal(
+    checkEvidence(
+      { kind: 'code', path: 'src.ts', line: '3' } as unknown as Evidence,
+      t.cwd,
+      t.runDir,
+      null,
+    ),
+    null,
+  );
+  // And a bad line on a path that is not real still fails on the path.
+  assert.notEqual(check(t, { kind: 'code', path: 'nope.ts', line: 3.5 }), null);
+});
+
+// ---- a repository at a filesystem root --------------------------------------
+
+test('a repo at a filesystem root does not reject its own children', () => {
+  const t = tree();
+  // `/` and `C:\` already end in a separator, so a containment prefix built as
+  // `base + path.sep` looks for `//` or `C:\\` and matches nothing real.
+  const root = path.parse(t.cwd).root;
+  const inside = path.relative(root, path.join(t.cwd, 'src.ts'));
+  assert.equal(checkEvidence({ kind: 'code', path: inside }, root, root, null), null);
+  assert.equal(
+    checkEvidence({ kind: 'code', path: path.join(t.cwd, 'src.ts') }, root, root, null),
+    null,
+  );
+  // Climbing out of a root goes nowhere - there is nothing above it - so this
+  // resolves back inside and fails on existence instead. Either way it does not
+  // pass, and either way nothing outside the root was read.
+  assert.notEqual(checkEvidence({ kind: 'code', path: '../nope.ts' }, root, root, null), null);
+});
+
 test('a downgrade keeps everything else about the finding', () => {
   const t = tree();
   const r = ground(t, finding({ id: 'kept', title: 'Kept', detail: 'Why.', defer: false }));

@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fromAgentPath } from '@src/pathstyle.js';
 import type { PathStyle } from '@src/pathstyle.js';
 import type { Evidence, Finding, FindingsReport, Severity } from '@src/types.js';
+import { readEvidenceEntry } from '@src/validate.js';
 
 /**
  * Is a finding grounded - does it point at something that exists?
@@ -78,7 +79,12 @@ function resolveInside(root: string, cited: string, style: PathStyle | null): Re
   const native = style === null ? cited : fromAgentPath(cited, style);
   const base = path.resolve(root);
   const absolute = path.resolve(base, native);
-  if (absolute !== base && !absolute.startsWith(base + path.sep)) return NOT_RESOLVED;
+  // The separator is appended only when `base` does not already end in one. A
+  // repo at a filesystem root - `/` on POSIX, `C:\` on Windows - resolves to a
+  // base that already does, and `base + path.sep` would then look for `//` or
+  // `C:\\` and reject every real child of it.
+  const prefix = base.endsWith(path.sep) ? base : base + path.sep;
+  if (absolute !== base && !absolute.startsWith(prefix)) return NOT_RESOLVED;
   const relative = path.relative(base, absolute).split(path.sep).join('/');
   return { absolute, relative: relative === '' ? '.' : relative };
 }
@@ -112,11 +118,20 @@ interface Inspection {
 }
 
 function inspect(
-  e: Evidence,
+  raw: unknown,
   cwd: string,
   runDir: string,
   style: PathStyle | null,
 ): Inspection {
+  // Written against `unknown` for the reason `isDeferrable` is: `evidence` is
+  // never validated on the way into state.json, and this function is exported
+  // through `checkEvidence`, so it can be handed a stored `[null]` or an entry
+  // naming a kind that does not exist. Unusable is not the same as absent, and
+  // it is certainly not the same as passing - it is a citation that did not
+  // resolve, counted like any other.
+  const e = readEvidenceEntry(raw);
+  if (e === null) return { reason: 'an unreadable citation' };
+
   if (e.kind === 'external') {
     // The one kind that touches no filesystem. Nothing here can check another
     // tool's CLI or a spec, and pretending otherwise would be inventing a
@@ -205,6 +220,11 @@ export function checkEvidence(
   return inspect(e, cwd, runDir, style).reason;
 }
 
+/** The citations a finding offered, however unusable, without assuming a list. */
+function citedBy(f: Finding): unknown[] {
+  return Array.isArray(f.evidence) ? f.evidence : [];
+}
+
 /**
  * Downgrade every blocking finding that cites nothing that resolves, and
  * canonicalise the citations that do.
@@ -232,12 +252,23 @@ export function groundFindings(
   const downgraded: Finding[] = [];
 
   const findings = report.findings.map((f) => {
-    const entries = f.evidence ?? [];
+    const entries = citedBy(f);
     const seen = entries.map((e) => inspect(e, cwd, runDir, style));
-    const evidence = entries.map((e, i) => {
+    // Rewritten, never rebuilt: an entry comes back as it was given unless it
+    // resolved to a different path. A malformed one is left exactly as it is -
+    // erasing it here would take the record of what was claimed with it, and
+    // the renderers already refuse to print one. `canonical` is set only for an
+    // entry that parsed *and* resolved, so the spread below is over a record.
+    const rewritten = entries.map((e, i) => {
       const canonical = seen[i]?.canonical;
-      return canonical === undefined || canonical === e.path ? e : { ...e, path: canonical };
+      if (canonical === undefined) return e;
+      const entry = e as Record<string, unknown>;
+      return canonical === entry['path'] ? e : { ...entry, path: canonical };
     });
+    // The one cast, and the same one `readFinding` makes: what was stored is
+    // carried through unvalidated, because refusing it would delete a finding
+    // over a bad citation.
+    const evidence = rewritten as Evidence[];
     const cited = evidence.length > 0 ? { evidence } : {};
 
     // Severity is read after this, never before: the gate, the guards and the

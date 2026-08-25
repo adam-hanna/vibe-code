@@ -55,6 +55,7 @@ import {
   parseAnswers,
   parseFindings,
   parsePlan,
+  readEvidence,
 } from '@src/validate.js';
 import {
   markOccupancyWarned,
@@ -1948,7 +1949,10 @@ function groundAndRecord(
       reason: d.reason,
       // The kinds it *offered*, which is the fact a human reads this for: a
       // blocker that rested only on `external` is visible for what it was.
-      kinds: [...new Set((f.evidence ?? []).map((e) => e.kind))],
+      // Read through the same tolerant reader as everything else that meets an
+      // unvalidated `evidence`, so an unusable entry is absent from the list
+      // rather than an exception in the middle of recording the downgrade.
+      kinds: [...new Set(readEvidence(f.evidence).map((e) => e.kind))],
     });
   }
   return report;

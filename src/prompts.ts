@@ -1,5 +1,6 @@
 import { describedRole, ROLES } from '@src/roles.js';
 import { EVIDENCE_RULE } from '@src/schemas.js';
+import { readEvidence } from '@src/validate.js';
 import type { RoleTable } from '@src/roles.js';
 import type { EnvironmentFacts } from '@src/runtime.js';
 import type {
@@ -731,7 +732,11 @@ const DEFERRED_MARK =
  *
  * Malformed entries are dropped **here** rather than in `hasFindingShape`: a
  * bad citation must not delete a finding from FOLLOW-UPS.md or OUTSTANDING.md,
- * so the rendering is what refuses it, not the shape check (#48).
+ * so the rendering is what refuses it, not the shape check (#48). And dropped
+ * through `readEvidence`, not by hand, because this renderer meets stored state
+ * that nothing has validated - a resumed run's `carried`, `outstanding` or
+ * `pendingFindings` can hold `evidence: {}` or `[null]`, either of which would
+ * throw here and take down the prompt the run was about to buy.
  *
  * The paths are repo-relative because `groundFindings` rewrote the resolved
  * ones to that form. It matters here specifically: with the default table the
@@ -740,7 +745,7 @@ const DEFERRED_MARK =
  * shell can open. Repo-relative is the one form true for both.
  */
 function citation(f: Finding, indent: string): string {
-  const parts = (f.evidence ?? [])
+  const parts = readEvidence(f.evidence)
     .map((e) => {
       if (e.kind === 'external') {
         const ref = typeof e.ref === 'string' ? e.ref.trim() : '';

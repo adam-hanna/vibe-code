@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { orchestrate, writeFollowUps } from '@src/orchestrator.js';
+import { fixPrompt, implementPrompt } from '@src/prompts.js';
 import { toAgentPath } from '@src/pathstyle.js';
 import { loadRun, saveState } from '@src/run.js';
 import { hasFindingShape } from '@src/stored.js';
@@ -277,6 +278,69 @@ test('a deferred P2 with a broken citation still reaches FOLLOW-UPS.md', async (
   assert.match(followUps, /separate-work/);
   assert.doesNotMatch(followUps, /undefined/);
   assert.equal(eventsOf(state, 'finding_downgraded').length, 0);
+});
+
+/**
+ * The prompt renderers meet stored findings, and stored `evidence` is validated
+ * by nobody: `hasFindingShape` checks the five fields a consumer needs and
+ * returns the entry as it found it, deliberately, so that a bad citation cannot
+ * delete a finding from FOLLOW-UPS.md or OUTSTANDING.md. A resumed run can
+ * therefore carry `evidence: {}` or `[null]` straight into the prompt it is
+ * about to buy - and a renderer that assumed a list of objects would throw
+ * there, losing the turn rather than the citation.
+ */
+const UNRENDERABLE: readonly unknown[] = [
+  null,
+  {},
+  'src/run.ts',
+  [null],
+  ['src/run.ts'],
+  [{ kind: 'invented', path: 'src/run.ts' }],
+  [{ kind: 'code' }],
+  [{ kind: 'code', path: '   ' }],
+  [{ kind: 'external' }],
+  [{ kind: 'code', path: 12 }],
+];
+
+test('unrenderable stored evidence drops the citation, not the finding or the turn', () => {
+  for (const evidence of UNRENDERABLE) {
+    const f = {
+      id: 'carried-one',
+      severity: 'P1',
+      title: 'A carried title',
+      detail: 'A carried detail.',
+      suggested_fix: 'A carried fix.',
+      defer: false,
+      evidence,
+    } as unknown as Finding;
+    const label = JSON.stringify(evidence) ?? 'undefined';
+
+    for (const rendered of [implementPrompt('PLAN', [f]), fixPrompt([f], 1)]) {
+      // The finding is intact...
+      assert.match(rendered, /carried-one/, label);
+      assert.match(rendered, /A carried fix\./, label);
+      // ...and nothing was said about where to look, because nothing usable was
+      // said about where to look.
+      assert.doesNotMatch(rendered, /\*Cited:\*/, label);
+      assert.doesNotMatch(rendered, /undefined/, label);
+      assert.doesNotMatch(rendered, /\[object Object\]/, label);
+    }
+  }
+});
+
+test('a usable citation beside an unusable one is still rendered', () => {
+  const f = {
+    id: 'carried-one',
+    severity: 'P1',
+    title: 'A carried title',
+    detail: 'A carried detail.',
+    suggested_fix: 'A carried fix.',
+    defer: false,
+    evidence: [null, { kind: 'code', path: 'src/run.ts', line: 12 }, { kind: 'nope' }],
+  } as unknown as Finding;
+
+  assert.match(fixPrompt([f], 1), /\*Cited:\* `src\/run\.ts:12`/);
+  assert.match(implementPrompt('PLAN', [f]), /\*Cited:\* `src\/run\.ts:12`/);
 });
 
 test('a stored finding with no evidence survives the readers and renders cleanly', () => {
