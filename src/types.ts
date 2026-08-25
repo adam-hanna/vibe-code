@@ -65,8 +65,14 @@ export interface CodexConfig {
    */
   implementTimeoutMs: number;
   /**
-   * Keep one Codex thread for the whole run via `codex exec resume`, so the
-   * reviewer remembers what it already raised instead of re-deriving it.
+   * Carry each Codex conversation across the run via `codex exec resume`, so a
+   * judging agent remembers what it already raised instead of re-deriving it.
+   *
+   * One switch, every Codex conversation - not one thread. Since #45 the
+   * plan-side judge (critic and answerer) and the reviewer hold *separate*
+   * threads, so that neither forms its judgement inside the other's; this key
+   * says whether either is carried at all, and off means every judging turn is
+   * one-shot.
    */
   persistSession: boolean;
   /**
@@ -590,9 +596,15 @@ export interface RunState {
   deferredQuestions: DeferredQuestion[];
   sessionRotations: number;
   /**
-   * Codex's own thread id, reused across critique/answer/review turns -
-   * `SLOTS.judge`'s storage. Provider-minted, so it is null until a turn has
-   * returned one. Read and written through `src/slots.ts`, never here.
+   * The plan-side judge's Codex thread id, reused across critique and answer
+   * turns - `SLOTS.judge`'s storage. Provider-minted, so it is null until a turn
+   * has returned one. Read and written through `src/slots.ts`, never here.
+   *
+   * Provider-named for history, and deliberately not renamed by #45: it is one
+   * of two Codex threads now, but renaming it would be a stored-state migration
+   * where this comment does the job. A state written before that change keeps
+   * naming the thread this field has always named - the critique conversation -
+   * and the reviewer, which used to share it, simply starts fresh.
    */
   codexSessionId: string | null;
   /**
@@ -631,6 +643,44 @@ export interface RunState {
    * one-shot run simply carries no measurement between turns.
    */
   judgeContextThread?: string;
+  /**
+   * The reviewer's own Codex thread id - `SLOTS.review`'s storage, and the whole
+   * of #45: the agent that reviews the code must not be the conversation that
+   * argued the plan into shape and approved it.
+   *
+   * Optional and never null, unlike `codexSessionId`. Absent is the correct
+   * reading for a conversation that has never run, it is what every state
+   * written before this field presents, and only a successful turn ever produces
+   * an id to store. Read and written through `SLOTS.review`, never here.
+   */
+  reviewSessionId?: string;
+  /**
+   * Whether a Codex turn has ever succeeded on `reviewSessionId` - the slot's
+   * `started` marker, separate from its id because every slot has both.
+   *
+   * No state has ever carried a review thread, so this has no legacy reading to
+   * answer for and the marker is the only evidence a turn happened here. See
+   * `SLOTS.review.started`, which is why it is not inferred from the id the way
+   * `codexSessionStarted`'s absence is.
+   */
+  reviewSessionStarted?: boolean;
+  /**
+   * Tokens occupying the review slot's Codex thread as of the last turn that
+   * reported any, exactly as `judgeContextTokens` is for the judge's.
+   *
+   * Meaningless without `reviewContextThread`, and read only through
+   * `src/slots.ts`. Absent means no measurement, which is NOT zero.
+   */
+  reviewContextTokens?: number;
+  /**
+   * The Codex thread id the figure above was measured on.
+   *
+   * Same provenance rule as `judgeContextThread`, and separately stored for the
+   * same reason the threads are separate: a figure measured on the reviewer's
+   * conversation must never be readable as the judge's, and a turn on one
+   * conversation must not disturb the other's record.
+   */
+  reviewContextThread?: string;
   /** Carried into the first turn of a rotated session. */
   handoff: string | null;
   /**

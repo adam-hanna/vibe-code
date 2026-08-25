@@ -37,7 +37,7 @@ import type { Config, RunState } from '@src/types.js';
  * half of one convention and half of the other.
  */
 
-export type SlotName = 'main' | 'judge';
+export type SlotName = 'main' | 'judge' | 'review';
 
 /**
  * Who mints the id.
@@ -151,7 +151,21 @@ export const SLOTS: Record<SlotName, SlotSpec> = {
     // second way here would be two answers to one question.
     occupancy: null,
   },
-  /** The Codex thread the critic, answerer and reviewer share. */
+  /**
+   * The plan-side judge's Codex thread: the critic, and the answerer with it.
+   *
+   * The reviewer used to be here too, which meant the agent reviewing the code
+   * was the conversation that had argued the plan into shape and approved it.
+   * `review` below is the answer to that (#45); the answerer stays here on
+   * purpose, because answering the planner's blocking questions is plan-side
+   * work and the conversation that has argued about the plan is the right one to
+   * answer questions about it.
+   *
+   * `codexSessionId`, `codexSessionStarted`, `judgeContextTokens` and
+   * `judgeContextThread` keep their provider-shaped names. Renaming a slot is
+   * cosmetic; renaming those is a stored-state migration, and this comment does
+   * the job.
+   */
   judge: {
     provider: 'codex',
     origin: 'provider',
@@ -192,6 +206,62 @@ export const SLOTS: Record<SlotName, SlotSpec> = {
         state.judgeContextTokens = tokens;
         state.judgeContextThread = now;
       },
+      window: (cfg) => cfg.codex.contextWindow ?? null,
+    },
+  },
+  /**
+   * The reviewer's own Codex thread, so the code review is not formed inside the
+   * conversation that approved the plan.
+   *
+   * Everything here mirrors `judge` except the storage and the `started` rule:
+   * the two conversations are the same *kind* of thing, held with the same
+   * provider under the same `codex.persistSession`, and what makes them
+   * independent is that neither can read the other's id. There is no ordering
+   * between them and no handoff: a reviewer that inherited a briefing from the
+   * critique would be the defect wearing a different mechanism.
+   */
+  review: {
+    provider: 'codex',
+    origin: 'provider',
+    id: (state) => asId(state.reviewSessionId),
+    // No `?? id !== null` fallback, unlike `judge`. That fallback IS the legacy
+    // reading for a field older states wrote without a marker beside it; nothing
+    // has ever written this one, so absent means never run and the marker is the
+    // only evidence a turn happened here.
+    started: (state) => state.reviewSessionStarted === true,
+    markStarted: (state, returnedId, carryId) => {
+      state.reviewSessionStarted = true;
+      if (carryId && returnedId !== null) state.reviewSessionId = returnedId;
+    },
+    persists: (cfg) => cfg.codex.persistSession,
+    // Still nothing that rotates a Codex thread (#30): `codex exec resume` takes
+    // no session-id flag, and a second slot is not the place to invent one.
+    reset: null,
+    occupancy: {
+      read: (state) => {
+        const tokens: unknown = state.reviewContextTokens;
+        const on = usableId(state.reviewContextThread);
+        const now = usableId(state.reviewSessionId);
+        // The judge's rule, against this slot's own fields: both sides have to
+        // name the same conversation before a number here says anything. Keyed
+        // to this thread and no other, so a figure measured here can never be
+        // read as the judge's however the two runs interleave.
+        if (now === null || on === null || on !== now) return null;
+        return typeof tokens === 'number' && Number.isInteger(tokens) && tokens > 0 ? tokens : null;
+      },
+      record: (state, tokens, ranOn) => {
+        const now = usableId(state.reviewSessionId);
+        const on = usableId(ranOn);
+        // Fail closed and mutate nothing, exactly as the judge does: an
+        // unattributable measurement is not one. Writing only this slot's fields
+        // is what makes a turn here leave the judge's figure standing.
+        if (now === null || on === null || on !== now) return;
+        if (typeof tokens !== 'number' || !Number.isInteger(tokens) || tokens <= 0) return;
+        state.reviewContextTokens = tokens;
+        state.reviewContextThread = now;
+      },
+      // The same setting for both Codex conversations: `codex.contextWindow` is
+      // a fact about the model, and both threads run the same one.
       window: (cfg) => cfg.codex.contextWindow ?? null,
     },
   },
@@ -331,6 +401,10 @@ export function resetSlot(state: RunState, slot: SlotName): void {
  * `codexSessionStarted` is deliberately absent rather than `false`: absent is
  * the correct reading for a slot that has never run, and it is the same state a
  * run recorded before this module presents.
+ *
+ * The `review` slot's fields are absent for the same reason, and all four of
+ * them: a fresh run and a run recorded before that conversation existed present
+ * the identical fact, which is that nothing has ever run there.
  */
 export function initialSlotFields(): Pick<
   RunState,

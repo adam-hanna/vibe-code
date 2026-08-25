@@ -4,7 +4,12 @@ import { applyOverrides, configDiff, EFFORTS, loadConfig } from '@src/config.js'
 import { artifact, createRun, listRuns, loadRun, recordEvent, saveState } from '@src/run.js';
 import { Escalation, EXIT, orchestrate, writeEscalation } from '@src/orchestrator.js';
 import type { ExitCode } from '@src/orchestrator.js';
-import { DEFAULT_ROLE_PROVIDERS, ROLE_NAMES, roleWarnings } from '@src/roles.js';
+import {
+  codexConversations,
+  DEFAULT_ROLE_PROVIDERS,
+  ROLE_NAMES,
+  roleWarnings,
+} from '@src/roles.js';
 import { claudeBin, setSessionArgs } from '@src/claude.js';
 import { codexBin } from '@src/codex.js';
 // The accounting seam, from the leaf it lives in: orchestrator.js re-exports
@@ -306,9 +311,13 @@ async function cmdRun(args: readonly string[], planOnly: boolean): Promise<ExitC
   log.heading(`Run ${state.id}`);
   log.info(`Repo:    ${targetDir}`);
   log.info(`Claude:  ${cfg.claude.model} / ${cfg.claude.effort}`);
+  // The thread count is read off the table rather than stated: since #45 the
+  // reviewer holds its own Codex conversation, so a default persisted run
+  // carries two and "single thread" would be a false summary of it.
+  const threads = codexConversations(cfg);
   log.info(
     `Codex:   ${cfg.codex.model} / ${cfg.codex.effort}` +
-      `${cfg.codex.persistSession ? ' (single thread)' : ' (one-shot per turn)'}`,
+      `${cfg.codex.persistSession ? ` (${threads} thread${threads === 1 ? '' : 's'}, carried across turns)` : ' (one-shot per turn)'}`,
   );
   log.info(
     `Ceiling: ~$${cfg.budget.maxCostUsd} API-equivalent, Claude only` +

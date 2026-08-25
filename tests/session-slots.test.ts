@@ -340,7 +340,11 @@ test('the Codex thread is adopted from a successful turn and continued', async (
   assert.equal(rec.codexCalls[0]?.sessionId, null);
   assert.equal(slotId(state, 'judge'), 'thread-9');
 
-  await captureLog(() => runTurn(state, cfg, request('reviewer'), rec.turns));
+  // The answerer, not the reviewer: this case is about the judge slot adopting
+  // an id and continuing it, and since #45 the reviewer holds a different
+  // conversation. `judge-independence.test.ts` asserts the reviewer's side, and
+  // that these two never resume one another.
+  await captureLog(() => runTurn(state, cfg, request('answerer'), rec.turns));
   assert.equal(rec.codexCalls[1]?.sessionId, 'thread-9');
 });
 
@@ -476,7 +480,11 @@ test('only a conversation vibe names can be re-minted', () => {
   }
 });
 
-test('a table that names no slot means one conversation per provider', () => {
+// Retitled by #45: "one conversation per provider" stopped being what a table
+// that names no slot means - the fallback is each role's default conversation,
+// and the reviewer's is not the critic's. The assertions are unchanged, and the
+// reviewer's own fallback is asserted in `judge-independence.test.ts`.
+test('a table that names no slot falls back to each role default conversation', () => {
   const unnamed: RoleTable = {
     planner: { provider: 'claude', access: 'read-only' },
     implementer: { provider: 'claude', access: 'write' },
