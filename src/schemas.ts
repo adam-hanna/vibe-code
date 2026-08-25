@@ -214,12 +214,24 @@ export const FINDINGS_SCHEMA = {
             items: {
               type: 'object',
               additionalProperties: false,
-              // Only `kind` is required. The rest is per-kind - `path` for the
-              // three filesystem kinds, `ref` for `external` - which needs
-              // `oneOf`, and a schema either CLI rejects would kill every turn.
-              // The runtime enforces it instead, where a miss costs one entry
-              // rather than the whole report.
-              required: ['kind'],
+              // EVERY key, not just `kind`, and the optional ones are nullable
+              // instead. OpenAI structured outputs refuse an object with
+              // `additionalProperties: false` whose `required` does not cover
+              // all of `properties` - so `required: ['kind']` was a 400 on
+              // `text.format.schema` before the model was ever reached, killing
+              // every critique and every review on develop (#68).
+              //
+              // Which CLI is asked matters: Claude accepted the same schema
+              // through `--json-schema` in the run that died, so the planner was
+              // fine and only Codex's `--output-schema` refused it. The two do
+              // not enforce the same subset, and the invariant test over these
+              // schemas is what now holds the line offline.
+              //
+              // Per-kind requirements - `path` for the three filesystem kinds,
+              // `ref` for `external` - are still NOT expressed here. That needs
+              // `oneOf`, and the runtime enforces it instead, where a miss costs
+              // one citation rather than the whole report (#48).
+              required: ['kind', 'path', 'line', 'excerpt', 'ref'],
               properties: {
                 kind: {
                   type: 'string',
@@ -230,30 +242,31 @@ export const FINDINGS_SCHEMA = {
                     'not at all.',
                 },
                 path: {
-                  type: 'string',
+                  type: ['string', 'null'],
                   description:
                     'Repo-relative, e.g. "src/run.ts". For `artifact`, the basename of a run ' +
                     'artifact ("PLAN.md", "code-review-0.json"). For `absence`, a file or a ' +
-                    'directory. Required for `code`, `artifact` and `absence`.',
+                    'directory. Required for `code`, `artifact` and `absence`; null for ' +
+                    '`external`.',
                 },
                 line: {
-                  type: 'integer',
+                  type: ['integer', 'null'],
                   description:
-                    'Optional, `code` only. Must be a real line of the file. Not required to ' +
-                    'be where an `excerpt` appears.',
+                    'Optional, `code` only - null otherwise. Must be a real line of the file. ' +
+                    'Not required to be where an `excerpt` appears.',
                 },
                 excerpt: {
-                  type: 'string',
+                  type: ['string', 'null'],
                   description:
-                    'Optional, `code` only. Must appear somewhere in the file; whitespace is ' +
-                    'normalised before comparing, so re-indenting is safe. Quote it exactly ' +
-                    'otherwise - a paraphrase does not resolve.',
+                    'Optional, `code` only - null otherwise. Must appear somewhere in the ' +
+                    'file; whitespace is normalised before comparing, so re-indenting is safe. ' +
+                    'Quote it exactly otherwise - a paraphrase does not resolve.',
                 },
                 ref: {
-                  type: 'string',
+                  type: ['string', 'null'],
                   description:
                     '`external` only: the URL, spec, or tool documentation being relied on. ' +
-                    'Required for `external`.',
+                    'Required for `external`; null for the other kinds.',
                 },
               },
             },
