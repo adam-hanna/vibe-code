@@ -53,11 +53,17 @@ test('a well-formed record survives the round trip intact', () => {
   assert.equal(state.gateOutcomes?.[1]?.required, false);
 });
 
-test('a malformed list is repaired to empty, and a malformed entry only drops itself', () => {
+test('a malformed list is repaired to empty, which is no evidence rather than no problems', () => {
   const { state, repairs } = read({ ...widest(), gateOutcomes: 'nonsense' });
   assert.deepEqual(state.gateOutcomes, []);
   assert.deepEqual(repairs.map((r) => r.field), ['gateOutcomes']);
+});
 
+test('one unreadable entry discards the whole gate record', () => {
+  // Unlike every other repaired list in this file, which is history: this one is
+  // evidence the exit code is computed from. A three-gate record whose two
+  // failures were dropped as malformed reads exactly like a one-gate run that
+  // passed, and would exit 0 saying so.
   const partial = read({
     ...widest(),
     gateOutcomes: [
@@ -68,10 +74,11 @@ test('a malformed list is repaired to empty, and a malformed entry only drops it
       { name: 'lint', status: 'sideways', command: 'npm run lint', runs: 1, required: true },
     ],
   });
-  assert.deepEqual(partial.state.gateOutcomes?.map((o) => o.name), ['test']);
-  // One entry per field, counting what it discarded - the repair log's shape.
+
+  assert.deepEqual(partial.state.gateOutcomes, []);
   assert.deepEqual(partial.repairs.map((r) => r.field), ['gateOutcomes']);
-  assert.equal(partial.repairs[0]?.droppedCount, 2);
+  // Said out loud, per the repair log's contract, rather than silently.
+  assert.match(partial.repairs[0]?.replacedWith ?? '', /partial gate record/);
 });
 
 test('a stored environment without verifyGates keeps its facts and invents no list', () => {

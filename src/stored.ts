@@ -874,6 +874,44 @@ function readGateOutcome(entry: unknown): GateOutcome | null {
   };
 }
 
+/**
+ * The gate record: all of it, or none of it.
+ *
+ * The one list in this file that is NOT repaired element by element, and the
+ * reason is what the value is used for. Every other repaired array is a log -
+ * dropping a damaged entry costs a line of history. This one is evidence, read
+ * by the exit rule: a list of three gates whose two failures were dropped as
+ * malformed looks exactly like a run where one gate passed and there was nothing
+ * else to run, and it would exit 0 saying so.
+ *
+ * So a single unreadable entry discards the whole list, which `run.ts` reads as
+ * "no gate outcomes were recorded" - incomplete, not clean. Absent still means
+ * no gate ran, which is a different and legitimate fact (#47, #44).
+ */
+function readGateOutcomes(raw: unknown, ctx: ReadContext): GateOutcome[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) {
+    ctx.repairs.replaced('gateOutcomes', raw, 'an empty list, which reads as no evidence');
+    return [];
+  }
+
+  const outcomes: GateOutcome[] = [];
+  for (const [i, entry] of raw.entries()) {
+    const outcome = readGateOutcome(entry);
+    if (outcome === null) {
+      ctx.repairs.dropped('gateOutcomes', `gateOutcomes[${i}]`);
+      ctx.repairs.replaced(
+        'gateOutcomes',
+        raw,
+        'an empty list: a partial gate record cannot be told from a complete one',
+      );
+      return [];
+    }
+    outcomes.push(outcome);
+  }
+  return outcomes;
+}
+
 function readTool(entry: unknown): AgentEnvironmentFacts['tools'][number] | null {
   if (!isRecord(entry)) return null;
   const version = entry['version'];
@@ -1138,11 +1176,10 @@ const READERS = {
   finalFixDone: (raw, ctx) => optionalBool('finalFixDone', raw, ctx),
   environment: (raw, ctx) => readEnvironment(raw, ctx),
   // Absent stays absent, never repaired into `[]`: absence means no gate has run
-  // (a plan-only run, or one that stopped before the gate), while `[]` would mean
-  // gates ran and there were none - a state nothing produces, and one the exit
-  // rule would read as "verified" (#47).
-  gateOutcomes: (raw, ctx) =>
-    raw === undefined ? undefined : repairedArray('gateOutcomes', raw, ctx, readGateOutcome),
+  // (a plan-only run, or one that stopped before the gate), while `[]` is what a
+  // record that could not be read is repaired to - and `run.ts` reads that as
+  // "no evidence", never as "nothing went wrong" (#47).
+  gateOutcomes: (raw, ctx) => readGateOutcomes(raw, ctx),
   carried: (raw, ctx) =>
     raw === undefined ? undefined : repairedArray('carried', raw, ctx, readFinding),
   declined: (raw, ctx) =>

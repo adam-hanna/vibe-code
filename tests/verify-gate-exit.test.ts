@@ -209,6 +209,83 @@ test('a disabled section is distinguishable from an unavailable gate, and exits 
   assert.equal(lines.some((l) => l.includes('Verification incomplete')), false);
 });
 
+test('a gate record that says nothing is unverified, not verified', async () => {
+  // What `validateStoredState` leaves behind when the stored `gateOutcomes`
+  // could not be read: present, and empty. Nothing in a run writes that -
+  // `runGate` records one outcome per resolved gate, and there is always at
+  // least one - so reading it as "no gates had problems" turns a corrupt state
+  // into a clean bill of health, complete with exit 0.
+  const state = reviewingRun({ prefix: 'vibe-exit-', task: 'empty record', commit: true });
+
+  const { result: code, lines } = await captureLog(() =>
+    execute(
+      state,
+      config(),
+      true,
+      true,
+      () => Promise.resolve(null),
+      (s) => {
+        s.gateOutcomes = [];
+        return Promise.resolve();
+      },
+    ),
+  );
+
+  assert.equal(code, EXIT.UNVERIFIED);
+  // And it is said, not just returned: nothing above may claim a clean finish.
+  assert.deepEqual(claims(lines), []);
+  assert.equal(lines.some((l) => l.includes('cleared review with zero P1s')), false);
+  const line = lines.find((l) => l.includes('Verification incomplete'));
+  assert.ok(line !== undefined, 'the exit code moved with nothing above explaining it');
+  assert.match(line, /no gate outcomes were recorded/);
+});
+
+test('an empty gate record beside a carried P1 claims no pass either', async () => {
+  const state = reviewingRun({ prefix: 'vibe-exit-', task: 'empty + carried', commit: true });
+  state.outstanding = [p1('tolerated-one')];
+
+  const { result: code, lines } = await captureLog(() =>
+    execute(
+      state,
+      config(),
+      true,
+      true,
+      () => Promise.resolve(null),
+      (s) => {
+        s.gateOutcomes = [];
+        return Promise.resolve();
+      },
+    ),
+  );
+
+  assert.equal(code, EXIT.UNVERIFIED);
+  assert.deepEqual(claims(lines), []);
+  assert.ok(lines.some((l) => l.includes('no gate outcomes were recorded')));
+});
+
+test('an emptied carried-P1 record does not print as a spotless review', async () => {
+  // The gate record's twin: `outstanding` is repaired to an empty list too, and
+  // an empty one used to read as "zero P1s" over a run that carried some.
+  // `finalFixDone` is the independent witness that a final round happened.
+  const state = reviewingRun({ prefix: 'vibe-exit-', task: 'emptied carry', commit: true });
+  state.finalFixDone = true;
+  state.outstanding = [];
+
+  const { lines } = await captureLog(() =>
+    execute(
+      state,
+      config({}, gated([{ name: 'test', command: gateScript(state, 'test') }])),
+      true,
+      true,
+      () => Promise.resolve(null),
+      (s, c, r) => orchestrate(s, c, r, agents({ codex: () => report([]) }, [])),
+    ),
+  );
+
+  assert.equal(lines.some((l) => l.includes('cleared review with zero P1s')), false);
+  assert.ok(lines.some((l) => l.includes('state.json was repaired on load')));
+});
+
 test('a plan-only run exits 0 with no gate outcomes at all', async () => {
   const state = freshRun({ prefix: 'vibe-exit-', task: 'plan only', planOnly: true, git: true });
 

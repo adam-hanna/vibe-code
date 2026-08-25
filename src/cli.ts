@@ -9,8 +9,8 @@ import {
   recordEvent,
   saveState,
   unavailableGates,
-  unverifiedGates,
   verificationCaveat,
+  verificationIncomplete,
 } from '@src/run.js';
 import { Escalation, EXIT, orchestrate, writeEscalation } from '@src/orchestrator.js';
 import type { ExitCode } from '@src/orchestrator.js';
@@ -571,7 +571,10 @@ export async function execute(
     // summary a user cannot trust is worse than no summary.
     const left = state.outstanding ?? [];
     const caveat = verificationCaveat(state);
-    const unverified = unverifiedGates(state);
+    // The exit rule, not the list of named gates: a record that says nothing at
+    // all names nothing, and "no unavailable gates" is the wrong answer to give
+    // for it. See `verificationIncomplete`.
+    const incomplete = verificationIncomplete(state);
     if (left.length > 0) {
       log.warn(
         `Finished after a final fix round for ${left.length} carried P1(s): ` +
@@ -579,7 +582,20 @@ export async function execute(
           `${caveat === null ? 'Verification passed' : `But ${caveat}`}, and that round was not ` +
           're-reviewed - see OUTSTANDING.md.',
       );
-    } else if (unverified.length === 0) {
+    } else if (state.finalFixDone === true && state.outstanding !== undefined) {
+      // The same shape of problem as the gate record, found while checking for
+      // its twins: `outstanding` is also repaired to an empty list on a state
+      // that could not be read, and an empty one here prints "zero P1s" over a
+      // run that carried some. `finalFixDone` is an independent witness - a
+      // healthy run sets it in the same breath as a NON-empty `outstanding`
+      // (src/orchestrator.ts) - so the two disagreeing means the record is
+      // damaged, not that the review was spotless. Absent `outstanding` is left
+      // alone: that is a state written before the field existed.
+      log.warn(
+        'Finished after a final fix round, but the record of what it carried is empty - ' +
+          'state.json was repaired on load. See OUTSTANDING.md for what was actually carried.',
+      );
+    } else if (incomplete === null) {
       log.ok(
         state.planOnly
           ? 'Plan cleared critique with zero P1s. Not implemented (plan-only run).'
@@ -594,7 +610,7 @@ export async function execute(
     reportGates(state);
     reportDeferred(state);
     summary(state, started);
-    return unverified.length > 0 ? EXIT.UNVERIFIED : EXIT.OK;
+    return incomplete === null ? EXIT.OK : EXIT.UNVERIFIED;
   } catch (err) {
     if (err instanceof Escalation) {
       state.status = err.code === EXIT.NEEDS_HUMAN ? 'needs-input' : 'stalled';
@@ -809,7 +825,20 @@ export function chargePreflight(state: RunState, cfg: Config, report: PreflightR
  */
 function reportGates(state: RunState): void {
   const unavailable = unavailableGates(state);
-  if (unavailable.length === 0) return;
+  if (unavailable.length === 0) {
+    // A run can be unverified with no gate to name: a stored record that could
+    // not be read is repaired to an empty list, and the exit code moves without
+    // anything above having said why. Silence here would be the same "exit code
+    // says one thing, summary says another" this function exists to prevent.
+    const incomplete = verificationIncomplete(state);
+    if (incomplete !== null) {
+      log.warn(
+        `Verification incomplete: ${incomplete} - the run exits ${EXIT.UNVERIFIED}. ` +
+          'Check `gateOutcomes` in state.json and the run log.',
+      );
+    }
+    return;
+  }
 
   const named = (o: { name: string }): string => `\`${o.name}\``;
   const required = unavailable.filter((o) => o.required);
