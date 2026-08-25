@@ -19,6 +19,7 @@ import {
   tableFor,
 } from '@src/roles.js';
 import { createRun, loadRun } from '@src/run.js';
+import { validateStoredState } from '@src/stored.js';
 import type { ClaudeTurnResult, Config, RunState, TokenUsage } from '@src/types.js';
 import {
   agents,
@@ -266,11 +267,16 @@ test('a Claude role naming its own effort leaves the other Claude role alone', a
 
 // ---- 4-7. Every malformed form is a config error that says what is wrong ----
 
+/** A repo directory holding this `vibe.config.json`, written from raw text. */
+function repoWithText(json: string): string {
+  const dir = mkdtempSync(path.join(tmpdir(), 'vibe-effort-cfg-'));
+  writeFileSync(path.join(dir, 'vibe.config.json'), json, 'utf8');
+  return dir;
+}
+
 /** A repo directory holding this `vibe.config.json`. */
 function repoWith(contents: unknown): string {
-  const dir = mkdtempSync(path.join(tmpdir(), 'vibe-effort-cfg-'));
-  writeFileSync(path.join(dir, 'vibe.config.json'), JSON.stringify(contents), 'utf8');
-  return dir;
+  return repoWithText(JSON.stringify(contents));
 }
 
 /**
@@ -325,6 +331,17 @@ test('an unknown key inside a role object is a config error naming the key', () 
   );
 });
 
+test('a model beside another unknown key still gets the model message, either order', () => {
+  // One scan over `Object.keys` would answer whichever key JSON put first, so a
+  // user reaching for a per-role model could be told about `sandbox` instead.
+  for (const value of [
+    { provider: 'codex', model: 'o3', sandbox: 'x' },
+    { provider: 'codex', sandbox: 'x', model: 'o3' },
+  ]) {
+    bothPathsReject('reviewer', value, /roles\.reviewer\.model/, /not supported/);
+  }
+});
+
 test('a role object with no provider is a config error saying provider is required', () => {
   bothPathsReject('reviewer', { effort: 'max' }, /roles\.reviewer/, /provider is required/);
 });
@@ -333,6 +350,62 @@ test('a role value that is neither a provider nor an object still names the role
   for (const bad of [null, 5, [], 'gemini']) {
     bothPathsReject('reviewer', bad, /roles\.reviewer/);
   }
+});
+
+// ---- A reserved key is not a way past validation ---------------------------
+
+/**
+ * `__proto__` in a config file, and why these cases exist.
+ *
+ * `JSON.parse` gives `__proto__` as an own enumerable key, but `out[key] = value`
+ * does not: it invokes the prototype setter, creating nothing enumerable. Every
+ * validator here iterates own keys, so a merge that assigned would leave the
+ * unknown-role-name check with nothing to see - the config silently ignored, the
+ * defaults run, and the user told nothing. Written as raw JSON text on purpose: a
+ * `{__proto__: ...}` object literal in this file would set the prototype rather
+ * than reproduce what a config file contains.
+ */
+test('a reserved role key is rejected by name rather than swallowed by the merge', () => {
+  const json = '{"roles":{"__proto__":{"reviewer":{"provider":"codex","effort":"max"}}}}';
+
+  assert.throws(() => loadConfig(repoWithText(json)), /roles\."__proto__"/);
+  assert.throws(
+    () => applyOverrides(JSON.parse(json) as Config, {}),
+    /roles\."__proto__"/,
+    'the resume path has to refuse it too',
+  );
+
+  // And the ordinary bad-name message still fires for an ordinary bad name.
+  assert.throws(() => loadConfig(repoWith({ roles: { plannr: 'codex' } })), /roles\."plannr"/);
+});
+
+test('a reserved tool name survives the toolchain merge instead of vanishing', () => {
+  // `toolchain` is the one open-ended section, so the same assignment hid an
+  // entry there too. It is a legal tool name to write, so what this pins is that
+  // it is *seen*: either honoured or refused, never dropped in silence.
+  const cfg = loadConfig(
+    repoWithText('{"toolchain":{"__proto__":{"probe":"echo hi","phases":["plan"]}}}'),
+  );
+  assert.equal(Object.keys(cfg.toolchain).includes('__proto__'), true);
+
+  assert.throws(
+    () => loadConfig(repoWithText('{"toolchain":{"__proto__":{"probe":"","phases":["plan"]}}}')),
+    /toolchain\.__proto__\.probe/,
+  );
+});
+
+test('an unknown state field named __proto__ is carried through, not dropped', () => {
+  // The same assignment, in the passthrough that exists so a state written by a
+  // newer vibe is not corrupted by an older one reading it.
+  const state = createRun(mkdtempSync(path.join(tmpdir(), 'vibe-effort-proto-')), 'proto', true);
+  const file = path.join(state.dir, 'state.json');
+  const raw = readFileSync(file, 'utf8').replace(/^\{/, '{"__proto__":{"kept":true},');
+  const { state: validated, repairs } = validateStoredState(JSON.parse(raw), state.id, state.dir);
+
+  assert.deepEqual(repairs, [], 'an unknown field is not damage');
+  const carried = validated as unknown as Record<string, unknown>;
+  assert.equal(Object.keys(carried).includes('__proto__'), true, 'the field survived the read');
+  assert.deepEqual(Object.getOwnPropertyDescriptor(carried, '__proto__')?.value, { kept: true });
 });
 
 // ---- 8. Nothing written before this change moves ----------------------------

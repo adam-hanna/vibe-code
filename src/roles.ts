@@ -121,8 +121,14 @@ export type RoleValue = AgentProvider | RoleSetting;
 /**
  * The `roles` section as a user writes it: a provider name per role, or an
  * object naming the provider and, optionally, that role's own effort. Keeps the
- * name it shipped with in #2 - every stored `state.config` and every config file
- * on disk uses the string form, which is unchanged.
+ * name it shipped with in #2.
+ *
+ * Either form can be *persisted*, not just written: `cmdRun` stores the
+ * effective config, so a `state.config` written by this version carries whichever
+ * form the run used, and a resume reads it back through the same `roleSetting`.
+ * The string form is what every config predating #46 contains, and it is
+ * unchanged - which is the compatibility claim, rather than any claim that
+ * strings are all that is on disk.
  */
 export type RoleProviders = Record<Role, RoleValue>;
 
@@ -223,18 +229,22 @@ export function roleSetting(role: Role, value: unknown): RoleSetting {
   }
   if (!isRecord(value)) throw expectedRoleValue(role, value);
 
+  // Asked before the scan below, not inside it: `model` gets a message of its own
+  // and must get it whenever it is present, and a single loop would report
+  // whichever bad key JSON happened to put first - `{"sandbox": ..., "model":
+  // ...}` would answer a per-role-model attempt with "unknown key sandbox".
+  // Refused rather than ignored, because a role naming a model its provider's
+  // section does not is a real request, and silently dropping a setting a user
+  // wrote is the failure this section is strict to prevent. The shape can grow
+  // `model` once the probe question it raises is answered; until then this is the
+  // honest answer.
+  if (Object.prototype.hasOwnProperty.call(value, 'model')) {
+    throw new Error(
+      `roles.${role}.model is not supported: a role runs on its provider's model. Set ` +
+        `claude.model or codex.model instead.`,
+    );
+  }
   for (const key of Object.keys(value)) {
-    // Named separately from the other unknown keys, and refused rather than
-    // ignored: a role naming a model its provider's section does not is a real
-    // request, and silently dropping a setting a user wrote is the failure this
-    // section is strict to prevent. The shape can grow `model` once the probe
-    // question it raises is answered; until then this is the honest answer.
-    if (key === 'model') {
-      throw new Error(
-        `roles.${role}.model is not supported: a role runs on its provider's model. Set ` +
-          `claude.model or codex.model instead.`,
-      );
-    }
     if (!ROLE_OBJECT_KEYS.includes(key)) {
       throw new Error(
         `roles.${role} has unknown key "${key}"; a role object takes ` +

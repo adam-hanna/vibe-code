@@ -9,6 +9,7 @@ import {
   rolesFor,
 } from '@src/roles.js';
 import type { Role, RoleProviders } from '@src/roles.js';
+import { setOwn } from '@src/runtime.js';
 import type { AgentProvider, ToolchainContract, ToolRequirement, Phase } from '@src/runtime.js';
 import { EFFORTS } from '@src/types.js';
 import type { Config, ConfigOverrides, LoadedConfig, Sandbox } from '@src/types.js';
@@ -206,7 +207,12 @@ function mergeRoles(base: RoleProviders, override: unknown): RoleProviders {
   if (override === undefined) return base;
   if (!isRecord(override)) return override as RoleProviders;
   const out: Record<string, unknown> = { ...base };
-  for (const [key, value] of Object.entries(override)) out[key] = value;
+  // `setOwn`, not `out[key] = value`: `{"roles": {"__proto__": {...}}}` parses to
+  // an own `__proto__` key, and assigning it would invoke the prototype setter -
+  // creating nothing enumerable, so `validateRoles` would never see the bad role
+  // name and would accept the defaults while the user believed they had moved a
+  // role. The swallow this section exists to prevent, by another route.
+  for (const [key, value] of Object.entries(override)) setOwn(out, key, value);
   return out as unknown as RoleProviders;
 }
 
@@ -238,7 +244,10 @@ function mergeToolchain(base: ToolchainContract, override: unknown): ToolchainCo
   if (!isRecord(override)) return base;
   const out: Record<string, ToolRequirement> = { ...base };
   for (const [tool, requirement] of Object.entries(override)) {
-    if (isRecord(requirement)) out[tool] = requirement as unknown as ToolRequirement;
+    // Through `setOwn` for the same reason `mergeRoles` is: the keys here are the
+    // user's own tool names, so `__proto__` is reachable, and a swallowed entry
+    // would skip `validateToolchain` instead of being reported by name.
+    if (isRecord(requirement)) setOwn(out, tool, requirement as unknown as ToolRequirement);
   }
   return out;
 }

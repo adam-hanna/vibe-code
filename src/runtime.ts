@@ -112,7 +112,11 @@ export function contractForAgent(
   const out: Record<string, ToolRequirement> = {};
   for (const [tool, requirement] of Object.entries(contract)) {
     if (requirement.agents === undefined || requirement.agents.includes(provider)) {
-      out[tool] = requirement;
+      // Tool names are the user's, and `toolchain` is the one open-ended section
+      // (a project may require `go`, `cargo`, anything) - so a name that is a
+      // reserved property goes through `setOwn`, or narrowing a contract would
+      // quietly drop the tool rather than narrow to it.
+      setOwn(out, tool, requirement);
     }
   }
   return out;
@@ -236,6 +240,25 @@ export function parseKeyValueRecord(raw: string): Map<string, string> {
   return record;
 }
 
+/**
+ * Set a key that came from outside, as an own enumerable property.
+ *
+ * `out[key] = value` is not that when the key is `__proto__`: the assignment
+ * invokes the prototype setter, so nothing enumerable is created and the object's
+ * prototype is replaced instead. Every consumer that iterates own keys - which is
+ * every validator in this repo - then never sees the field, so a setting a user
+ * wrote is silently ignored and a check that would have refused it never runs.
+ * Found in `mergeRoles`, where `{"roles": {"__proto__": ...}}` from a config file
+ * bypassed the unknown-role-name check entirely.
+ *
+ * Only needed where the key is not one of ours. A loop over a repo-owned constant
+ * - `mergeSection` over the base's keys, `envFromRecord` over `ENV_ALLOWLIST` -
+ * cannot be handed the name in the first place.
+ */
+export function setOwn<T>(target: Record<string, T>, key: string, value: T): void {
+  Object.defineProperty(target, key, { value, enumerable: true, writable: true, configurable: true });
+}
+
 /** Build tool resolutions from `tool.<name>.{exit,out,which}` triples. */
 export function toolsFromRecord(record: ReadonlyMap<string, string>): Record<string, ToolResolution> {
   const tools: Record<string, ToolResolution> = {};
@@ -252,7 +275,9 @@ export function toolsFromRecord(record: ReadonlyMap<string, string>): Record<str
     // `exit=0` with an empty version for a tool a previous run of the same
     // probe had correctly reported as missing.
     const succeeded = exitCode === 0 && output !== '';
-    tools[name] = {
+    // `setOwn`, because `name` came out of a probe's own output: it matches
+    // `[^.]+`, which `__proto__` satisfies.
+    setOwn(tools, name, {
       available: succeeded,
       executable: which === '' ? null : which,
       version: succeeded ? output : null,
@@ -262,7 +287,7 @@ export function toolsFromRecord(record: ReadonlyMap<string, string>): Record<str
         : exitCode === 0
           ? 'reported success but produced no output; treating as unverified'
           : output,
-    };
+    });
   }
   return tools;
 }
