@@ -126,6 +126,9 @@ test('a valid out_of_scope round-trips', () => {
     assumptions: [],
     open_questions: [],
     out_of_scope: [ITEM],
+    // Added by #44: `parsePlan` is now strict about `acceptance_criteria` too,
+    // so a fresh plan omitting it is refused. The assertion below is unchanged.
+    acceptance_criteria: [],
   });
   assert.deepEqual(parsed.out_of_scope, [ITEM]);
 });

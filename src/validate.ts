@@ -1,7 +1,9 @@
 import type {
+  AcceptanceCriterion,
   Answer,
   AnswersReport,
   Assumption,
+  CheckKind,
   Confidence,
   Finding,
   FindingsReport,
@@ -83,6 +85,7 @@ const SEVERITIES: readonly Severity[] = ['P0', 'P1', 'P2', 'P3'];
 const VERDICTS: readonly Verdict[] = ['APPROVE', 'REVISE'];
 const KINDS: readonly QuestionKind[] = ['technical', 'product'];
 const CONFIDENCES: readonly Confidence[] = ['high', 'medium', 'low'];
+const CHECKS: readonly CheckKind[] = ['command', 'inspection', 'qa'];
 
 export function parsePlan(raw: unknown): Plan {
   const o = record(raw, 'plan', raw);
@@ -118,11 +121,32 @@ export function parsePlan(raw: unknown): Plan {
     };
   });
 
+  // Strict for the same reason, and it is the same argument one field along: a
+  // plan that omitted this would be a plan with no definition of done, and the
+  // critic would have nothing to attack but the approach. Tolerance belongs in
+  // `readPlan`, which is the reader that meets state written before this field
+  // existed.
+  const acceptanceCriteria: AcceptanceCriterion[] = arr(
+    o,
+    'acceptance_criteria',
+    'plan',
+    raw,
+  ).map((c, i) => {
+    const r = record(c, `plan.acceptance_criteria[${i}]`, raw);
+    return {
+      id: str(r, 'id', `plan.acceptance_criteria[${i}]`, raw),
+      criterion: str(r, 'criterion', `plan.acceptance_criteria[${i}]`, raw),
+      check: oneOf(r, 'check', CHECKS, `plan.acceptance_criteria[${i}]`, raw),
+      how: str(r, 'how', `plan.acceptance_criteria[${i}]`, raw),
+    };
+  });
+
   return {
     plan_md: str(o, 'plan_md', 'plan', raw),
     assumptions,
     open_questions: openQuestions,
     out_of_scope: outOfScope,
+    acceptance_criteria: acceptanceCriteria,
   };
 }
 

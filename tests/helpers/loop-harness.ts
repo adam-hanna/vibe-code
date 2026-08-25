@@ -63,6 +63,10 @@ export function planFixture(over: Partial<Plan> = {}): Plan {
     assumptions: [],
     open_questions: [],
     out_of_scope: [],
+    // Both strict fields carry an explicit empty claim: this fixture is fed
+    // back through `parsePlan` by every case that drives the loop, and that
+    // parser refuses a plan missing either.
+    acceptance_criteria: [],
     ...over,
   };
 }
