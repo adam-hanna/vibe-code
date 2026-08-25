@@ -1023,6 +1023,8 @@ const READERS = {
   environment: (raw, ctx) => readEnvironment(raw, ctx),
   carried: (raw, ctx) =>
     raw === undefined ? undefined : repairedArray('carried', raw, ctx, readFinding),
+  declined: (raw, ctx) =>
+    raw === undefined ? undefined : repairedArray('declined', raw, ctx, readFinding),
   outstanding: (raw, ctx) =>
     raw === undefined ? undefined : repairedArray('outstanding', raw, ctx, readFinding),
   deferred: (raw, ctx) =>

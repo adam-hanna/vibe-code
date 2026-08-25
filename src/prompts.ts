@@ -348,12 +348,55 @@ ${formatOutOfScope(outOfScope)}
   return parts.join('\n\n');
 }
 
-export function implementPrompt(planMd: string, carried: readonly Finding[] = []): string {
+/**
+ * One bullet, shared by the two lists `implementPrompt` renders.
+ *
+ * Extracted rather than duplicated: the carried and the declined sections say
+ * opposite things about the same shape, and a renderer that drifted between
+ * them would make the two blocks look like different kinds of thing.
+ */
+function findingBullet(f: Finding): string {
+  return `- **${f.title}** \`${f.id}\`\n  ${f.detail}\n  *Suggested fix:* ${f.suggested_fix}`;
+}
+
+export function implementPrompt(
+  planMd: string,
+  carried: readonly Finding[] = [],
+  /**
+   * What the critique round that *approved* the plan declined.
+   *
+   * The opposite instruction to `carried`, and the reason this parameter
+   * exists at all: a revising round tells the planner what was deferred
+   * through `revisePlanPrompt`, but the round that passes the gate has its
+   * findings cleared, so without this the implementer never learns the critic
+   * drew a boundary the plan may not state - and can implement the very thing
+   * that was declined.
+   */
+  declined: readonly Finding[] = [],
+): string {
   const known =
     carried.length === 0
       ? ''
       : `\n## Known open issues with this plan\n\nThe reviewer raised these and they were **not** resolved before implementation, because they are the kind of question that is settled by running the code rather than by more discussion. Treat them as work items: resolve each one as you implement, and say in your report what you did about it.\n\n${carried
-          .map((f) => `- **${f.title}** \`${f.id}\`\n  ${f.detail}\n  *Suggested fix:* ${f.suggested_fix}`)
+          .map(findingBullet)
+          .join('\n')}\n`;
+
+  // Wording follows the fixer half of `deferralNote`: same instruction, same
+  // posture, and the same basename-only reference to the artifact - it lives in
+  // the run directory, and a path stated here would be one the code does not
+  // produce.
+  //
+  // It allows the plan to name a declined finding rather than denying it can.
+  // `revisePlanPrompt` asks the planner to record deferred work under
+  // `out_of_scope` and `renderPlanDoc` prints that boundary, so an earlier
+  // round's deferral may well appear in the plan the implementer is reading;
+  // saying the plan "may not mention them" invited that to be read as a
+  // prohibition, contradicting a boundary the plan legitimately states.
+  const notDoing =
+    declined.length === 0
+      ? ''
+      : `\n## Declined by the reviewer - not work for this change\n\nThe reviewer marked these **deferred**: real, and agreed to belong in separate effort rather than in this change. They are recorded in FOLLOW-UPS.md. Unlike anything listed above, these are work to **not** do. The plan may name one under its out-of-scope boundary or may not mention it at all; either way, do not treat it as in-scope work and do not fold it in as you implement. If you think one has to be fixed inside this change, say so in your report rather than fixing it silently.\n\n${declined
+          .map(findingBullet)
           .join('\n')}\n`;
 
   return `The plan below has been reviewed.${carried.length > 0 ? ` ${carried.length} open issue(s) are listed after it and are yours to resolve.` : ' It is cleared of all blocking issues.'} Implement it now.
@@ -370,7 +413,7 @@ When you are done, report concisely: what you changed, what you verified and how
 ## The approved plan
 
 ${planMd}
-${known}`;
+${known}${notDoing}`;
 }
 
 export function reviewPrompt(

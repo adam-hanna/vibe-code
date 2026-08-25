@@ -684,6 +684,19 @@ export interface RunState {
    */
   carried?: Finding[];
   /**
+   * Findings the approving plan-critique round marked `defer`. Stated to the
+   * implementer as work *not* to do.
+   *
+   * The mirror image of `carried`, and the one round whose deferrals reach
+   * nobody otherwise: a revising round already hands its findings to the
+   * planner through `pendingFindings`, but the round that passes the gate
+   * clears them and breaks. Plan phase only - a review that approves has no
+   * later turn to tell, and FOLLOW-UPS.md is the whole of that record.
+   *
+   * Optional, so state written before this existed loads unchanged.
+   */
+  declined?: Finding[];
+  /**
    * P1s the review carried, within `loop.p1Tolerance`. A final fix round
    * addresses them and OUTSTANDING.md records them, because that round is not
    * re-reviewed and so nothing has confirmed they are gone.
