@@ -4,7 +4,7 @@
     "implementer": "claude",
     "critic": "codex",
     "answerer": "codex",
-    "reviewer": { "provider": "codex", "effort": "max" }
+    "reviewer": "codex"
   },
   "claude": {
     "model": "opus",
