@@ -1,4 +1,5 @@
 import { describedRole, ROLES } from '@src/roles.js';
+import { EVIDENCE_RULE } from '@src/schemas.js';
 import type { RoleTable } from '@src/roles.js';
 import type { EnvironmentFacts } from '@src/runtime.js';
 import type {
@@ -340,6 +341,10 @@ Reserve your objections for what genuinely cannot be discovered by building the 
 
 Give each finding a stable kebab-case \`id\` so it can be tracked across rounds.
 
+## Evidence
+
+${EVIDENCE_RULE}
+
 ${scopeGuidance(outOfScope, 'plan')}
 
 ## Acceptance criteria
@@ -470,7 +475,7 @@ ${formatAcceptanceCriteria(acceptanceCriteria)}
  * them would make the two blocks look like different kinds of thing.
  */
 function findingBullet(f: Finding): string {
-  return `- **${f.title}** \`${f.id}\`\n  ${f.detail}\n  *Suggested fix:* ${f.suggested_fix}`;
+  return `- **${f.title}** \`${f.id}\`\n  ${f.detail}\n  *Suggested fix:* ${f.suggested_fix}${citation(f, '\n  ')}`;
 }
 
 export function implementPrompt(
@@ -572,6 +577,10 @@ The loop may carry a small number of P1s forward and settle them against the tes
 Do not wave through a real defect. Reserve P1 for defects you can name a concrete failure case for, and prefer P1 over P0 for anything a test run could settle.
 
 Give each finding a stable kebab-case \`id\`.
+
+## Evidence
+
+${EVIDENCE_RULE}
 
 ${scopeGuidance(outOfScope, 'change')}
 
@@ -711,11 +720,47 @@ Two things follow. If a finding of yours is **still unresolved**, re-raise it wi
 const DEFERRED_MARK =
   '**Deferred by the reviewer** - real, and agreed to belong in separate work rather than in this change.';
 
+/**
+ * Where the finding says to look, rendered for whoever has to act on it.
+ *
+ * Empty when there is nothing cited, and that is load-bearing: a finding
+ * recorded before this field existed, and the gate's own synthesized P0 before
+ * it was given evidence, must render byte-for-byte as they did, or every prompt
+ * in the run changes shape for nothing. Same `=== true`-style caution as
+ * `DEFERRED_MARK`, one field along.
+ *
+ * Malformed entries are dropped **here** rather than in `hasFindingShape`: a
+ * bad citation must not delete a finding from FOLLOW-UPS.md or OUTSTANDING.md,
+ * so the rendering is what refuses it, not the shape check (#48).
+ *
+ * The paths are repo-relative because `groundFindings` rewrote the resolved
+ * ones to that form. It matters here specifically: with the default table the
+ * reviewer is Codex in PowerShell and the fixer is Claude in Git Bash, so the
+ * `C:\...` a citation may legitimately arrive as is not a path the reader's
+ * shell can open. Repo-relative is the one form true for both.
+ */
+function citation(f: Finding, indent: string): string {
+  const parts = (f.evidence ?? [])
+    .map((e) => {
+      if (e.kind === 'external') {
+        const ref = typeof e.ref === 'string' ? e.ref.trim() : '';
+        return ref === '' ? null : `external: ${ref}`;
+      }
+      const at = typeof e.path === 'string' ? e.path.trim() : '';
+      if (at === '') return null;
+      const where = `\`${at}${e.kind === 'code' && typeof e.line === 'number' ? `:${e.line}` : ''}\``;
+      return e.kind === 'absence' ? `missing from ${where}` : where;
+    })
+    .filter((p): p is string => p !== null);
+
+  return parts.length === 0 ? '' : `${indent}*Cited:* ${parts.join(', ')}`;
+}
+
 function formatFinding(f: Finding): string {
   return `### [${f.severity}] ${f.title}  \`${f.id}\`
 ${f.detail}
 
-*Suggested fix:* ${f.suggested_fix}${f.defer === true ? `\n\n${DEFERRED_MARK}` : ''}`;
+*Suggested fix:* ${f.suggested_fix}${citation(f, '\n')}${f.defer === true ? `\n\n${DEFERRED_MARK}` : ''}`;
 }
 
 /**

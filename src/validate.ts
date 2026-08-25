@@ -5,6 +5,8 @@ import type {
   Assumption,
   CheckKind,
   Confidence,
+  Evidence,
+  EvidenceKind,
   Finding,
   FindingsReport,
   OpenQuestion,
@@ -79,6 +81,45 @@ function stringList(obj: Record<string, unknown>, key: string): string[] {
   const v = obj[key];
   if (!Array.isArray(v)) return [];
   return v.filter((x): x is string => typeof x === 'string');
+}
+
+const EVIDENCE_KINDS: readonly EvidenceKind[] = ['code', 'artifact', 'absence', 'external'];
+
+/**
+ * Evidence, read as tolerantly as `defer` is and for a sharper reason.
+ *
+ * The schema marks the field required; this parser cannot afford to. Throwing
+ * here would destroy a whole round's output - 3M tokens on the #47 review -
+ * because one finding in ten omitted a field. So a malformed entry is dropped
+ * and a missing field is left missing, and `groundFindings` treats "cited
+ * nothing" and "cited something that does not resolve" as the same case: the
+ * finding is downgraded, never deleted (#48).
+ *
+ * Every optional field is written with a conditional spread rather than a
+ * possibly-`undefined` value, because `exactOptionalPropertyTypes` makes those
+ * different types - and because an explicit `path: undefined` would serialise
+ * into state.json as a key that was never cited.
+ */
+function readEvidence(raw: unknown): Evidence[] {
+  if (!Array.isArray(raw)) return [];
+  const out: Evidence[] = [];
+  for (const entry of raw) {
+    if (!isRecord(entry)) continue;
+    const kind = entry['kind'];
+    if (typeof kind !== 'string' || !(EVIDENCE_KINDS as readonly string[]).includes(kind)) continue;
+    const path = entry['path'];
+    const line = entry['line'];
+    const excerpt = entry['excerpt'];
+    const ref = entry['ref'];
+    out.push({
+      kind: kind as EvidenceKind,
+      ...(typeof path === 'string' ? { path } : {}),
+      ...(typeof line === 'number' && Number.isInteger(line) ? { line } : {}),
+      ...(typeof excerpt === 'string' ? { excerpt } : {}),
+      ...(typeof ref === 'string' ? { ref } : {}),
+    });
+  }
+  return out;
 }
 
 const SEVERITIES: readonly Severity[] = ['P0', 'P1', 'P2', 'P3'];
@@ -167,6 +208,11 @@ export function parseFindings(raw: unknown): FindingsReport {
     // true on our side of the wire. Both defaults only ever make a finding more
     // blocking, and `gate` reads severity alone, so no control flow changes.
     const defer = r['defer'] === true && severity !== 'P0' && severity !== 'P1';
+    // Absent rather than `[]` when nothing usable came back: "cited nothing" is
+    // what actually happened, and an empty list would assert the model offered
+    // a list. Both read the same downstream - `groundFindings` downgrades a
+    // blocker either way - but only one of them is true.
+    const evidence = readEvidence(r['evidence']);
     return {
       id,
       severity,
@@ -174,6 +220,7 @@ export function parseFindings(raw: unknown): FindingsReport {
       detail: str(r, 'detail', `report.findings[${i}]`, raw),
       suggested_fix: str(r, 'suggested_fix', `report.findings[${i}]`, raw),
       defer,
+      ...(evidence.length > 0 ? { evidence } : {}),
     };
   });
 

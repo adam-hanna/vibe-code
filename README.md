@@ -201,6 +201,25 @@ A phase moves on when there are **no P0s and at most `loop.p1Tolerance` P1s** (d
 
 The tolerance exists because demanding a spotless verdict is unmeetable on hard work: a plan for a 1416-line parser went eight rounds and $24 without reaching implementation, every finding legitimate and every one of them answerable in 400ms by the 1977-test suite nobody had run yet. **P0 is the level the tolerance cannot swallow** — it is for findings that make the work unshippable, and it blocks on its own no matter how few there are. A failing verification is filed as a P0 for exactly that reason.
 
+### A finding has to cite something
+
+A blocking finding used to be able to point at nothing. One review round raised P1s having executed **zero** commands — assertions about code nobody had read, each of them bought a fix round at the same price as a finding somebody had checked.
+
+So every finding carries `evidence`: at least one entry saying which kind of claim it is making, and where.
+
+| kind | cites | checked against |
+|---|---|---|
+| `code` | a file, optionally a `line` and an `excerpt` | the repo: the file exists, the line is inside it, the excerpt appears in it |
+| `artifact` | the basename of a run artifact — `PLAN.md`, `code-review-0.json` | the run directory |
+| `absence` | the file **or directory** a thing is missing from | the repo: only that the place exists |
+| `external` | a URL, a spec, another tool's behaviour | nothing |
+
+A **P0 or P1 with no entry that resolves is downgraded to P2** before anything reads its severity. It stops forcing a round; it is kept in the round's artifact with the reason recorded on it, warned about as it happens, and logged as a `finding_downgraded` event naming the original severity and the kinds it offered. Downgraded, not deleted — the finding may well be right.
+
+A citation is read in the *reporting agent's* own path convention (Codex reports `C:\...` from PowerShell while Claude reports `/c/...` from Git Bash, on the same machine) and must land inside the repo, or inside the run directory for an `artifact`; a resolved path is rewritten repo-relative, because the agent that reads the finding next is not the one that wrote it. `external` is an escape hatch and that is deliberate: nothing here can check another tool's CLI, and making the kind unusable would suppress exactly the findings this is meant to keep. What the taxonomy buys is that the claim has to *say* what it is, so "this P1 rested only on an unverifiable external claim" is visible.
+
+The check is `existsSync`, a line count and a substring: no tokens, no second opinion. **It checks that a finding is grounded, not that it is correct.**
+
 A carried P1 is not dropped. In the plan phase it is written into the implementation prompt as a known open issue. In the review phase it gets one final fix round, which is committed and re-verified but deliberately **not** re-reviewed — a fresh review could raise something new and reopen the argument the tolerance just settled. So those findings are worked on but unconfirmed, and `OUTSTANDING.md` says so rather than calling them unfixed.
 
 Brakes, all independent:

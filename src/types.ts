@@ -505,12 +505,69 @@ export interface Plan {
   acceptance_criteria?: AcceptanceCriterion[];
 }
 
+/**
+ * What kind of claim a citation is making - and, therefore, what can be checked
+ * about it.
+ *
+ * Three of the four are checkable and one is not, which is the whole design.
+ * `code` is "this line does X"; `artifact` is "the plan does not say what
+ * happens on resume"; `absence` is "no test covers the carried-P1 path", and
+ * cites the place the thing is missing *from*, so a directory is legitimate;
+ * `external` is "`codex exec resume` takes no `-s` flag", where nothing here
+ * can check another tool's CLI and pretending otherwise would be inventing a
+ * verdict.
+ *
+ * `external` is an escape hatch and that is accepted deliberately: a model that
+ * wants to keep a blocking severity can always pick it. What the taxonomy buys
+ * is that it must *say* which kind of claim it is making, and the
+ * `finding_downgraded` event names the kinds each finding offered - so "this P1
+ * rested only on an unverifiable external claim" is a fact a human can see
+ * (#48).
+ */
+export type EvidenceKind = 'code' | 'artifact' | 'absence' | 'external';
+
+/**
+ * One place a finding points at. Checked by `src/evidence.ts`, never here.
+ *
+ * Every field but `kind` is optional in TypeScript because the requirement is
+ * per-kind - `path` for the three filesystem kinds, `ref` for `external` - and
+ * expressing that in the schema needs `oneOf`, whose handling by both CLIs is
+ * unverified. A missing field costs the entry, never the report.
+ */
+export interface Evidence {
+  kind: EvidenceKind;
+  path?: string;
+  line?: number;
+  excerpt?: string;
+  ref?: string;
+}
+
 export interface Finding {
   id: string;
   severity: Severity;
   title: string;
   detail: string;
   suggested_fix: string;
+  /**
+   * Where this finding says to look. At least one entry, per the schema.
+   *
+   * A blocking finding with no entry that resolves is downgraded to P2 before
+   * anything reads its severity (#48): a reviewer that ran no commands could
+   * previously halt a run over a claim it could not point at. Optional in
+   * TypeScript for the reason `defer` is - a report stored before this field
+   * existed has none - and absent rather than `[]` when the model cited
+   * nothing, because absent is what actually happened.
+   */
+  evidence?: Evidence[];
+  /**
+   * Set when a blocking finding was downgraded for citing nothing that
+   * resolves.
+   *
+   * On the finding itself, not only in the event log: a downgrade that appeared
+   * in a log line alone would be invisible by the time anyone read the round's
+   * artifact.
+   */
+  downgraded?: { from: Severity; reason: string };
   /**
    * Real, worth doing, and belongs in separate work rather than in this change.
    *
