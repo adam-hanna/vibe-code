@@ -13,6 +13,7 @@ import type {
   Answer,
   ClaudeTurnResult,
   Config,
+  Evidence,
   Finding,
   LoopConfig,
   OpenQuestion,
@@ -71,6 +72,21 @@ export function planFixture(over: Partial<Plan> = {}): Plan {
   };
 }
 
+/**
+ * A citation that resolves anywhere, so a fixture P1 stays a P1.
+ *
+ * Since #48 a blocking finding whose evidence does not resolve is downgraded to
+ * P2 inside `runCritique`/`runReview`, which is exactly the path these fixtures
+ * are driven down - so an uncited `p1()` would silently stop blocking and every
+ * case here asserting a fix round would be asserting nothing. `external` is the
+ * one kind that touches no filesystem, so it holds in each of the temp
+ * directories this harness mints without any of them having to contain a file.
+ *
+ * A case that is *about* grounding builds its own findings rather than reaching
+ * for these: see `tests/uncited-findings.test.ts`.
+ */
+export const CITED: readonly Evidence[] = [{ kind: 'external', ref: 'harness fixture' }];
+
 export function p1(id: string): Finding {
   return {
     id,
@@ -78,6 +94,7 @@ export function p1(id: string): Finding {
     title: `Finding ${id}`,
     detail: 'Detail.',
     suggested_fix: 'Fix it.',
+    evidence: [...CITED],
   };
 }
 
@@ -89,6 +106,7 @@ export function findingFixture(over: Partial<Finding> = {}): Finding {
     title: 'Some finding',
     detail: 'Detail.',
     suggested_fix: 'Fix it.',
+    evidence: [...CITED],
     ...over,
   };
 }

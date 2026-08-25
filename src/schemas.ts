@@ -124,6 +124,34 @@ export const PLAN_SCHEMA = {
   },
 } as const satisfies object;
 
+/**
+ * The evidence taxonomy and its consequence, in one place.
+ *
+ * Exported because `critiquePrompt` and `reviewPrompt` state the same rule, and
+ * a model told the rule in two different wordings has to guess which one the
+ * code implements. The consequence is stated as plainly as the rule: a model
+ * told the cost complies, one told only the rule guesses (#48).
+ */
+export const EVIDENCE_RULE =
+  'Every finding must cite something. Each entry names one kind of claim:\n' +
+  '- `code` - this line does X. Needs `path` (a file); may add `line` and `excerpt`. ' +
+  'Checked against the repository: the file must exist, `line` must be inside it, and ' +
+  '`excerpt` must appear somewhere in it.\n' +
+  '- `artifact` - the plan does not say what happens on resume. Needs `path`, the basename ' +
+  'of a run artifact such as `PLAN.md` or `code-review-0.json`. Checked against the run ' +
+  'directory.\n' +
+  '- `absence` - no test covers this path. Needs `path`, naming the file **or directory** ' +
+  'the thing is missing from. Only that the place exists is checked.\n' +
+  '- `external` - a fact about another tool, a spec, or a URL that nothing here can check. ' +
+  'Needs `ref`. Nothing is checked.\n\n' +
+  'A path must name something inside the repository - or, for `artifact`, inside the run ' +
+  'directory. Cite as many places as you like: the finding stands if **any one** entry ' +
+  'resolves.\n\n' +
+  'A P0 or P1 whose evidence does not resolve is downgraded to P2 and stops blocking. It is ' +
+  'kept, not deleted, and the downgrade is recorded with the kinds it offered. So cite the ' +
+  'place you actually looked: an unresolvable citation costs the finding its severity, and ' +
+  '`external` on a claim you could have pointed at in the code is visible for what it is.';
+
 /** Shared shape for both plan critique and post-implementation code review. */
 export const FINDINGS_SCHEMA = {
   type: 'object',
@@ -141,7 +169,7 @@ export const FINDINGS_SCHEMA = {
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['id', 'severity', 'title', 'detail', 'suggested_fix', 'defer'],
+        required: ['id', 'severity', 'title', 'detail', 'suggested_fix', 'defer', 'evidence'],
         properties: {
           id: {
             type: 'string',
@@ -178,6 +206,57 @@ export const FINDINGS_SCHEMA = {
               'be P2 or P3, never P0 or P1. That is deliberate - choosing to defer costs the ' +
               'same honesty as choosing a severity does. If the work has to happen inside this ' +
               'change for it to be correct, do not defer it; raise it at its true severity.',
+          },
+          evidence: {
+            type: 'array',
+            minItems: 1,
+            description: EVIDENCE_RULE,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              // Only `kind` is required. The rest is per-kind - `path` for the
+              // three filesystem kinds, `ref` for `external` - which needs
+              // `oneOf`, and a schema either CLI rejects would kill every turn.
+              // The runtime enforces it instead, where a miss costs one entry
+              // rather than the whole report.
+              required: ['kind'],
+              properties: {
+                kind: {
+                  type: 'string',
+                  enum: ['code', 'artifact', 'absence', 'external'],
+                  description:
+                    'Which kind of claim this citation makes. `code` and `absence` are checked ' +
+                    'against the repository, `artifact` against the run directory, `external` ' +
+                    'not at all.',
+                },
+                path: {
+                  type: 'string',
+                  description:
+                    'Repo-relative, e.g. "src/run.ts". For `artifact`, the basename of a run ' +
+                    'artifact ("PLAN.md", "code-review-0.json"). For `absence`, a file or a ' +
+                    'directory. Required for `code`, `artifact` and `absence`.',
+                },
+                line: {
+                  type: 'integer',
+                  description:
+                    'Optional, `code` only. Must be a real line of the file. Not required to ' +
+                    'be where an `excerpt` appears.',
+                },
+                excerpt: {
+                  type: 'string',
+                  description:
+                    'Optional, `code` only. Must appear somewhere in the file; whitespace is ' +
+                    'normalised before comparing, so re-indenting is safe. Quote it exactly ' +
+                    'otherwise - a paraphrase does not resolve.',
+                },
+                ref: {
+                  type: 'string',
+                  description:
+                    '`external` only: the URL, spec, or tool documentation being relied on. ' +
+                    'Required for `external`.',
+                },
+              },
+            },
           },
         },
       },

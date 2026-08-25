@@ -3,8 +3,10 @@ import { applyCharge, chargeFailure, enforceCeilings, Escalation, EXIT, fmtToken
 import { claudeTurn, parseStructured, RateLimitError } from '@src/claude.js';
 import { codexTurn } from '@src/codex.js';
 import type { CodexTurnOptions, CodexTurnResult } from '@src/codex.js';
+import { groundFindings } from '@src/evidence.js';
 import * as git from '@src/git.js';
 import * as log from '@src/log.js';
+import type { PathStyle } from '@src/pathstyle.js';
 import * as P from '@src/prompts.js';
 import {
   claudePermission,
@@ -53,6 +55,7 @@ import {
   parseAnswers,
   parseFindings,
   parsePlan,
+  readEvidence,
 } from '@src/validate.js';
 import {
   markOccupancyWarned,
@@ -1254,6 +1257,11 @@ async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Findi
       // shipped past it would be reporting success over a failing suite.
       severity: 'P0',
       title: `${result.name}: ${result.command} does not pass`,
+      // Constructed in code, not parsed from a model, so it never passes
+      // through the grounding seam and can never be downgraded. Cited anyway,
+      // and at the file written one line above: the artifact is uniform, and
+      // the fixer is pointed at the output it has to read (#48).
+      evidence: [{ kind: 'artifact', path: `verify-failure-${state.reviewRound}.txt` }],
       detail: describeFailure(result),
       suggested_fix:
         `Make the ${result.name} gate's command pass. If it fails only sometimes, the defect ` +
@@ -1890,6 +1898,66 @@ function roleHasMemory(
   return slotHasMemory(state, cfg, slotForRole(role, roles));
 }
 
+/**
+ * The path convention the *reporting* agent's shell uses, or null when this run
+ * has no probe to say.
+ *
+ * A citation comes back in the agent's own convention - `/c/repo/src/run.ts`
+ * from Claude's Git Bash, `C:\repo\src\run.ts` from Codex's PowerShell - and
+ * grounding has to open the file. Read from the role table rather than from the
+ * provider name, so a config that seats the reviewer on Claude is asked about
+ * Claude.
+ */
+function pathStyleFor(state: RunState, role: Role, roles: RoleTable): PathStyle | null {
+  const provider = roles[role].provider;
+  return state.environment?.agents.find((a) => a.provider === provider)?.pathStyle ?? null;
+}
+
+/**
+ * The grounding seam: one place, both findings-producing turns.
+ *
+ * Here rather than at the call sites, because everything that reads a severity
+ * happens after this - the artifact, `collectDeferred`, `recordPendingFindings`
+ * and the gate - and a downgrade that landed later would be a downgrade a
+ * resume could not see.
+ *
+ * `log.warn` as well as the event: this is the run telling the user that a
+ * reviewer asserted something it could not point at, which is worth seeing at
+ * the time and not only in a file (#48).
+ */
+function groundAndRecord(
+  state: RunState,
+  cwd: string,
+  role: Role,
+  roles: RoleTable,
+  found: FindingsReport,
+): FindingsReport {
+  const { report, downgraded } = groundFindings(
+    found,
+    cwd,
+    state.dir,
+    pathStyleFor(state, role, roles),
+  );
+  for (const f of downgraded) {
+    // Set by construction in `groundFindings`; narrowed rather than asserted.
+    const d = f.downgraded;
+    if (d === undefined) continue;
+    log.warn(`Downgraded ${f.id} from ${d.from} to P2 - ${d.reason}`);
+    recordEvent(state, 'finding_downgraded', {
+      id: f.id,
+      from: d.from,
+      reason: d.reason,
+      // The kinds it *offered*, which is the fact a human reads this for: a
+      // blocker that rested only on `external` is visible for what it was.
+      // Read through the same tolerant reader as everything else that meets an
+      // unvalidated `evidence`, so an unusable entry is absent from the list
+      // rather than an exception in the middle of recording the downgrade.
+      kinds: [...new Set(readEvidence(f.evidence).map((e) => e.kind))],
+    });
+  }
+  return report;
+}
+
 async function runCritique(
   state: RunState,
   cfg: Config,
@@ -1922,7 +1990,7 @@ async function runCritique(
     turns,
     roles,
   );
-  return parseFindings(readStructured(outcome));
+  return groundAndRecord(state, cwd, 'critic', roles, parseFindings(readStructured(outcome)));
 }
 
 async function runReview(
@@ -1962,7 +2030,7 @@ async function runReview(
     turns,
     roles,
   );
-  return parseFindings(readStructured(outcome));
+  return groundAndRecord(state, cwd, 'reviewer', roles, parseFindings(readStructured(outcome)));
 }
 
 /**
