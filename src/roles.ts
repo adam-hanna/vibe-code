@@ -2,7 +2,8 @@ import { ANSWERS_SCHEMA, FINDINGS_SCHEMA, PLAN_SCHEMA } from '@src/schemas.js';
 import { SLOTS, slotMeasured, slotRotatable } from '@src/slots.js';
 import type { SlotName } from '@src/slots.js';
 import type { AgentProvider } from '@src/runtime.js';
-import type { Config, PermissionMode, Sandbox } from '@src/types.js';
+import { EFFORTS } from '@src/types.js';
+import type { Config, Effort, PermissionMode, Sandbox } from '@src/types.js';
 
 /** Whether a turn may change the working tree. The one place that intent is stated. */
 export type Access = 'read-only' | 'write';
@@ -18,7 +19,13 @@ export const ROLE_NAMES: readonly Role[] = [
   'reviewer',
 ];
 
-/** The providers a role may be seated on. The config surface accepts these and nothing else. */
+/**
+ * The providers a role may be seated on.
+ *
+ * The whole of the provider choice: a role's configured value is one of these
+ * names, or an object naming one of them (see `RoleValue`). Nothing else is a
+ * provider, on either form.
+ */
 export const PROVIDERS: readonly AgentProvider[] = ['claude', 'codex'];
 
 /**
@@ -42,6 +49,13 @@ export interface RoleSpec {
   schema?: object | undefined;
   tools?: readonly string[] | undefined;
   slot?: SlotName | undefined;
+  /**
+   * The effort this role named for itself, and absent when it named none -
+   * which means its provider's `claude.effort`/`codex.effort`, as every role
+   * meant before this key existed. Absent rather than pre-resolved on purpose:
+   * a table cannot then claim an override nobody wrote. See `effortFor`.
+   */
+  effort?: Effort | undefined;
 }
 
 /**
@@ -67,8 +81,8 @@ export const READ_ONLY_TOOLS: readonly string[] = [
  *
  * `access`, `schema` and the tool list are facts about the work: a reviewer is
  * read-only and returns findings whoever holds it, and an implementer writes.
- * They are deliberately not a config surface - the only choice a run makes is
- * which provider sits in each seat.
+ * They are deliberately not a config surface - the choices a run makes are which
+ * provider sits in each seat and, optionally, what effort that seat runs at.
  */
 const JOBS: Readonly<
   Record<Role, { access: Access; schema?: object; tools?: readonly string[] }>
@@ -80,15 +94,53 @@ const JOBS: Readonly<
   reviewer: { access: 'read-only', schema: FINDINGS_SCHEMA, tools: READ_ONLY_TOOLS },
 };
 
-/** The config surface: one provider per role, and nothing else. */
-export type RoleProviders = Record<Role, AgentProvider>;
+/**
+ * What a role may say about itself beyond who holds it.
+ *
+ * `provider` is required, and deliberately not optional-with-a-fallback: a
+ * role's value is replaced *wholesale* on merge (see `mergeRoles`), so a legal
+ * `{"effort": "max"}` would silently restore the default agent for a role an
+ * earlier config had moved - a different agent, with no error and no log line.
+ */
+export interface RoleSetting {
+  provider: AgentProvider;
+  /**
+   * The one provider-level setting a role may override. Model deliberately is
+   * not: an effort is a closed enum and is fully checked before a turn is
+   * spawned, while a model string has no config-time check available - the
+   * preflight probe is an environment contract check rather than a model
+   * validator, and already runs on `PROBE_MODEL` whatever `claude.model` says.
+   * A `model` key inside a role object is refused, not ignored (#46).
+   */
+  effort?: Effort | undefined;
+}
+
+/** The config surface for one role: who holds it, optionally with what it overrides. */
+export type RoleValue = AgentProvider | RoleSetting;
+
+/**
+ * The `roles` section as a user writes it: a provider name per role, or an
+ * object naming the provider and, optionally, that role's own effort. Keeps the
+ * name it shipped with in #2.
+ *
+ * Either form can be *persisted*, not just written: `cmdRun` stores the
+ * effective config, so a `state.config` written by this version carries whichever
+ * form the run used, and a resume reads it back through the same `roleSetting`.
+ * The string form is what every config predating #46 contains, and it is
+ * unchanged - which is the compatibility claim, rather than any claim that
+ * strings are all that is on disk.
+ */
+export type RoleProviders = Record<Role, RoleValue>;
 
 /**
  * Who does what when a run says nothing: Claude plans and implements, Codex
  * critiques, answers and reviews. A run with no `roles` key behaves exactly as
  * every run before this key existed.
+ *
+ * Typed as providers rather than as `RoleProviders`: the default names no
+ * effort, and saying so in the type keeps it that way.
  */
-export const DEFAULT_ROLE_PROVIDERS: RoleProviders = {
+export const DEFAULT_ROLE_PROVIDERS: Record<Role, AgentProvider> = {
   planner: 'claude',
   implementer: 'claude',
   critic: 'codex',
@@ -144,27 +196,117 @@ function defaultSlot(role: Role, provider: AgentProvider): SlotName {
   return provider === 'claude' ? 'main' : CODEX_SLOT[role];
 }
 
+/** The keys a role object may carry. Anything else is a mistake worth naming. */
+const ROLE_OBJECT_KEYS: readonly string[] = ['provider', 'effort'];
+
+/** What a role's configured value has to say to be one, worded for a user. */
+function expectedRoleValue(role: Role, value: unknown): Error {
+  return new Error(
+    `roles.${role} is ${JSON.stringify(value) ?? String(value)}; expected ` +
+      `${PROVIDERS.map((p) => `"${p}"`).join(' or ')}, or an object naming a provider and ` +
+      `optionally an effort`,
+  );
+}
+
+/**
+ * One role's configured value, read once and checked completely.
+ *
+ * The only place a `roles.<role>` value is interpreted, so config validation and
+ * the table build cannot disagree about what is legal - `validateRoles` in
+ * src/config.ts calls this to check, and `tableFor` calls it to use. That matters
+ * for the same reason `tableFor` has always checked its input: `state.config` is
+ * the one field `validateStoredState` deliberately passes through unchecked, so
+ * `rolesFor` can reach a value nothing has validated.
+ *
+ * Unknown keys are reported before a missing provider on purpose. `{"model":
+ * "..."}` is a user reaching for a per-role model, and answering that with "no
+ * provider" sends them the wrong way.
+ */
+export function roleSetting(role: Role, value: unknown): RoleSetting {
+  if (typeof value === 'string') {
+    if (!PROVIDERS.includes(value as AgentProvider)) throw expectedRoleValue(role, value);
+    return { provider: value as AgentProvider };
+  }
+  if (!isRecord(value)) throw expectedRoleValue(role, value);
+
+  // Asked before the scan below, not inside it: `model` gets a message of its own
+  // and must get it whenever it is present, and a single loop would report
+  // whichever bad key JSON happened to put first - `{"sandbox": ..., "model":
+  // ...}` would answer a per-role-model attempt with "unknown key sandbox".
+  // Refused rather than ignored, because a role naming a model its provider's
+  // section does not is a real request, and silently dropping a setting a user
+  // wrote is the failure this section is strict to prevent. The shape can grow
+  // `model` once the probe question it raises is answered; until then this is the
+  // honest answer.
+  if (Object.prototype.hasOwnProperty.call(value, 'model')) {
+    throw new Error(
+      `roles.${role}.model is not supported: a role runs on its provider's model. Set ` +
+        `claude.model or codex.model instead.`,
+    );
+  }
+  for (const key of Object.keys(value)) {
+    if (!ROLE_OBJECT_KEYS.includes(key)) {
+      throw new Error(
+        `roles.${role} has unknown key "${key}"; a role object takes ` +
+          `${ROLE_OBJECT_KEYS.join(' and ')}`,
+      );
+    }
+  }
+
+  const provider = value['provider'];
+  if (provider === undefined) {
+    throw new Error(
+      `roles.${role} is an object with no provider. provider is required so that adding an ` +
+        `effort cannot silently move a role back to the default agent.`,
+    );
+  }
+  if (typeof provider !== 'string' || !PROVIDERS.includes(provider as AgentProvider)) {
+    throw expectedRoleValue(role, provider);
+  }
+
+  const effort = value['effort'];
+  if (effort === undefined) return { provider: provider as AgentProvider };
+  if (typeof effort !== 'string' || !EFFORTS.includes(effort as Effort)) {
+    throw new Error(
+      `roles.${role}.effort is ${JSON.stringify(effort) ?? String(effort)}; must be one of ` +
+        `${EFFORTS.join(', ')}`,
+    );
+  }
+  return { provider: provider as AgentProvider, effort: effort as Effort };
+}
+
 /**
  * Join an assignment with the jobs to make a table.
  *
- * Loud about a provider it does not recognise rather than indexing
- * `DEFAULT_SLOT` with garbage. Config validation normally makes that
- * unreachable, but `state.config` is the one field `validateStoredState`
- * deliberately passes through unchecked - `applyOverrides` validates it on the
- * path that uses it - and an error naming the role beats a crash three frames
- * away.
+ * Loud about a value it does not recognise - a provider that is not one of the
+ * two, an effort outside the enum, a key a role object does not take - rather
+ * than indexing `DEFAULT_SLOT` with garbage or handing `--effort turbo` to a
+ * provider. Config validation normally makes that unreachable, but
+ * `state.config` is the one field `validateStoredState` deliberately passes
+ * through unchecked - `applyOverrides` validates it on the path that uses it -
+ * and an error naming the role beats a crash three frames away. The reading
+ * itself is `roleSetting`'s, so this cannot drift from what config accepts.
  */
 export function tableFor(providers: RoleProviders): RoleTable {
   if (!isRecord(providers)) {
-    throw new Error('roles must be an object mapping role names to "claude" or "codex"');
+    throw new Error(
+      'roles must be an object mapping role names to "claude" or "codex", or to an object ' +
+        'naming a provider and optionally an effort',
+    );
   }
   const table = {} as RoleTable;
   for (const role of ROLE_NAMES) {
-    const provider = providers[role];
-    if (!PROVIDERS.includes(provider)) {
-      throw new Error(`roles.${role} is ${JSON.stringify(provider)}; expected "claude" or "codex"`);
-    }
-    table[role] = { ...JOBS[role], provider, slot: defaultSlot(role, provider) };
+    const setting = roleSetting(role, providers[role]);
+    table[role] = {
+      ...JOBS[role],
+      provider: setting.provider,
+      slot: defaultSlot(role, setting.provider),
+      // Spread rather than assigned: a role that named no effort must have no
+      // `effort` key at all, not one holding undefined. The absent key is what
+      // says "this role means its provider's", and `exactOptionalPropertyTypes`
+      // keeps the two distinguishable.
+      ...(setting.effort === undefined ? {} : { effort: setting.effort }),
+    };
   }
   return table;
 }
@@ -423,6 +565,24 @@ export function turnTimeoutMs(role: Role, cfg: Config, roles: RoleTable = rolesF
     return spec.access === 'write' ? cfg.claude.implementTimeoutMs : cfg.claude.planTimeoutMs;
   }
   return spec.access === 'write' ? cfg.codex.implementTimeoutMs : cfg.codex.timeoutMs;
+}
+
+/**
+ * The reasoning effort a turn in this role runs at.
+ *
+ * The role's own if it named one, and its provider's otherwise - which is what
+ * every run before this key existed did, and what every role on a string value
+ * still does. `claude.effort` and `codex.effort` are still the setting for the
+ * seat rather than being replaced by this: two roles on one provider could not
+ * differ before, which is the whole of #46, and one that names nothing has not
+ * asked to.
+ *
+ * Model is deliberately not resolved here. It stays provider-level, so context
+ * measurement and session rotation keep naming the model they name today.
+ */
+export function effortFor(role: Role, cfg: Config, roles: RoleTable = rolesFor(cfg)): Effort {
+  const spec = roles[role];
+  return spec.effort ?? cfg[spec.provider].effort;
 }
 
 /** What a log line calls each agent. */

@@ -8,6 +8,7 @@ import {
   codexConversations,
   DEFAULT_ROLE_PROVIDERS,
   ROLE_NAMES,
+  rolesFor,
   roleWarnings,
 } from '@src/roles.js';
 import { claudeBin, setSessionArgs } from '@src/claude.js';
@@ -503,12 +504,26 @@ export type RunLoop = (state: RunState, cfg: Config, resume: boolean) => Promise
  * Here rather than in `cmdRun` so a resume reports the table it is continuing
  * on. Silent under the default assignment: `roleWarnings` is empty and the line
  * would say only what every run before this key existed already did. Refusals
- * never reach this - `loadConfig`/`resumeConfig` threw long before.
+ * never reach this - `loadConfig`/`resumeConfig` threw long before, which is
+ * also why `rolesFor` cannot throw here.
+ *
+ * Compared and printed through the table rather than off the raw value, because
+ * a role's value may be an object (#46): `!==` would call every role changed and
+ * template interpolation would print `[object Object]`.
  */
 function reportRoles(cfg: Config): void {
-  const changed = ROLE_NAMES.filter((role) => cfg.roles[role] !== DEFAULT_ROLE_PROVIDERS[role]);
+  const table = rolesFor(cfg);
+  const changed = ROLE_NAMES.filter(
+    (role) => JSON.stringify(cfg.roles[role]) !== JSON.stringify(DEFAULT_ROLE_PROVIDERS[role]),
+  );
   if (changed.length > 0) {
-    log.info(`Roles:   ${ROLE_NAMES.map((role) => `${role}=${cfg.roles[role]}`).join(' ')}`);
+    const named = ROLE_NAMES.map((role) => {
+      const spec = table[role];
+      // Only where the role named an effort of its own. Printing the provider's
+      // against every role would read as five overrides where there are none.
+      return `${role}=${spec.provider}${spec.effort === undefined ? '' : `/${spec.effort}`}`;
+    });
+    log.info(`Roles:   ${named.join(' ')}`);
   }
   for (const warning of roleWarnings(cfg)) log.warn(warning);
 }

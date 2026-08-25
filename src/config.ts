@@ -2,17 +2,25 @@ import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import {
   DEFAULT_ROLE_PROVIDERS,
-  PROVIDERS as ROLE_PROVIDERS,
   providersForRoles,
   ROLE_NAMES,
   roleRefusals,
+  roleSetting,
   rolesFor,
 } from '@src/roles.js';
 import type { Role, RoleProviders } from '@src/roles.js';
+import { setOwn } from '@src/runtime.js';
 import type { AgentProvider, ToolchainContract, ToolRequirement, Phase } from '@src/runtime.js';
-import type { Config, ConfigOverrides, Effort, LoadedConfig, Sandbox } from '@src/types.js';
+import { EFFORTS } from '@src/types.js';
+import type { Config, ConfigOverrides, LoadedConfig, Sandbox } from '@src/types.js';
 
-export const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+/**
+ * Re-exported, not redeclared: the list moved to `src/types.ts` so `src/roles.ts`
+ * can check a role's own effort without importing this module (#46). Every caller
+ * that already imports it from here is unaffected.
+ */
+export { EFFORTS };
+
 const SANDBOXES: readonly Sandbox[] = ['read-only', 'workspace-write', 'danger-full-access'];
 
 export const DEFAULTS: Config = {
@@ -188,12 +196,23 @@ function mergeSection<T extends object>(base: T, override: unknown): T {
  * the default table while the user believes Codex is implementing: a different
  * agent, silently, with no error and no log line. Nothing else in a config can
  * fail that way, which is why this one section is strict.
+ *
+ * A role's value may now be an object - `{provider, effort}` (#46) - and it is
+ * still replaced *wholesale*, key by key, exactly as a string was. That is why
+ * `provider` is required inside the object: a deep merge, or a defaulted
+ * provider, would let `{"effort": "max"}` written on top of an earlier
+ * `"claude"` hand the role back to Codex without saying so.
  */
 function mergeRoles(base: RoleProviders, override: unknown): RoleProviders {
   if (override === undefined) return base;
   if (!isRecord(override)) return override as RoleProviders;
   const out: Record<string, unknown> = { ...base };
-  for (const [key, value] of Object.entries(override)) out[key] = value;
+  // `setOwn`, not `out[key] = value`: `{"roles": {"__proto__": {...}}}` parses to
+  // an own `__proto__` key, and assigning it would invoke the prototype setter -
+  // creating nothing enumerable, so `validateRoles` would never see the bad role
+  // name and would accept the defaults while the user believed they had moved a
+  // role. The swallow this section exists to prevent, by another route.
+  for (const [key, value] of Object.entries(override)) setOwn(out, key, value);
   return out as unknown as RoleProviders;
 }
 
@@ -225,7 +244,10 @@ function mergeToolchain(base: ToolchainContract, override: unknown): ToolchainCo
   if (!isRecord(override)) return base;
   const out: Record<string, ToolRequirement> = { ...base };
   for (const [tool, requirement] of Object.entries(override)) {
-    if (isRecord(requirement)) out[tool] = requirement as unknown as ToolRequirement;
+    // Through `setOwn` for the same reason `mergeRoles` is: the keys here are the
+    // user's own tool names, so `__proto__` is reachable, and a swallowed entry
+    // would skip `validateToolchain` instead of being reported by name.
+    if (isRecord(requirement)) setOwn(out, tool, requirement as unknown as ToolRequirement);
   }
   return out;
 }
@@ -376,7 +398,10 @@ function resolveRoleScopedAgents(cfg: Config, layers: readonly unknown[]): Confi
  */
 function validateRoles(raw: unknown): void {
   if (!isRecord(raw)) {
-    throw new Error('roles must be an object mapping role names to "claude" or "codex"');
+    throw new Error(
+      'roles must be an object mapping role names to "claude" or "codex", or to an object ' +
+        'naming a provider and optionally an effort',
+    );
   }
   for (const key of Object.keys(raw)) {
     if (!ROLE_NAMES.includes(key as Role)) {
@@ -384,13 +409,11 @@ function validateRoles(raw: unknown): void {
     }
   }
   for (const role of ROLE_NAMES) {
-    const provider = raw[role];
-    if (provider === undefined) throw new Error(`roles.${role} is missing`);
-    if (!ROLE_PROVIDERS.includes(provider as AgentProvider)) {
-      throw new Error(
-        `roles.${role} is ${JSON.stringify(provider)}; expected ${ROLE_PROVIDERS.map((p) => `"${p}"`).join(' or ')}`,
-      );
-    }
+    if (raw[role] === undefined) throw new Error(`roles.${role} is missing`);
+    // Through the one reader, so what a config accepts and what `tableFor`
+    // accepts are the same statement rather than two that have to be kept in
+    // step. It throws, naming the role and what is wrong with it.
+    roleSetting(role, raw[role]);
   }
 }
 

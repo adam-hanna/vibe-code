@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { setOwn } from '@src/runtime.js';
 import type { AgentEnvironmentFacts, EnvironmentFacts } from '@src/runtime.js';
 import type { AgentProvider, AgentShell } from '@src/runtime.js';
 import type { PathStyle } from '@src/pathstyle.js';
@@ -1129,7 +1130,12 @@ export function validateStoredState(
   const ctx: ReadContext = { id, dir, repairs: new RepairLog() };
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(raw)) {
-    if (!KNOWN_KEYS.has(key) && !REDERIVED_KEYS.has(key)) out[key] = value;
+    // `setOwn`: a field this version has never heard of is carried through
+    // *untouched*, and `out[key] = value` is not that for `__proto__` - the
+    // assignment invokes the prototype setter, so the field would be dropped on
+    // the next save rather than preserved, which is the corruption this loop
+    // exists to avoid.
+    if (!KNOWN_KEYS.has(key) && !REDERIVED_KEYS.has(key)) setOwn(out, key, value);
   }
   for (const key of Object.keys(FIELDS) as StoredKey[]) {
     const value = readField(key, raw, ctx);
