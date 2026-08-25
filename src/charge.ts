@@ -25,6 +25,14 @@ export const EXIT = {
   RATE_LIMITED: 5,
   /** The agents' execution environments do not satisfy the toolchain contract. */
   PREFLIGHT: 6,
+  /**
+   * The loop finished and a required verification gate never ran.
+   *
+   * Not an error and not a stall: the work is done, reviewed and committed, and
+   * its artifacts are worth having. What is missing is the evidence that it
+   * runs, and 0 has always been documented to mean verification passed (#47).
+   */
+  UNVERIFIED: 7,
 } as const;
 
 export type ExitCode = (typeof EXIT)[keyof typeof EXIT];

@@ -350,8 +350,21 @@ export interface AgentEnvironmentFacts {
  */
 export interface EnvironmentFacts {
   agents: AgentEnvironmentFacts[];
+  /**
+   * The first gate that has a command, and how many times it must pass.
+   *
+   * Kept beside `verifyGates` rather than replaced by it: `readEnvironment`
+   * refuses a record without this pair, so dropping it would make every run
+   * recorded before #47 lose its environment facts on resume.
+   */
   verifyCommand: string | null;
   verifyRuns: number;
+  /**
+   * Every gate, when the run has them. Absent for a record written before #47,
+   * which is why the prompt still renders the single-command sentence when it
+   * is not there.
+   */
+  verifyGates?: readonly { name: string; command: string | null; runs: number }[] | undefined;
 }
 
 export interface ProbeContext {

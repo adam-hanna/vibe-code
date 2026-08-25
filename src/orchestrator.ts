@@ -30,6 +30,7 @@ import {
   advancePhase,
   artifact,
   artifactDir,
+  artifactText,
   assessConvergence,
   clearPendingFindings,
   hasArtifact,
@@ -43,6 +44,7 @@ import {
   resumePhase,
   saveState,
   takePendingFindings,
+  verificationCaveat,
 } from '@src/run.js';
 import { hasFindingShape } from '@src/stored.js';
 import {
@@ -71,12 +73,13 @@ import {
   readCodexRateLimits,
   recordLimits,
 } from '@src/ratelimits.js';
-import { describeFailure, runVerification } from '@src/verify.js';
+import { describeFailure, resolveGates, runGateCommand } from '@src/verify.js';
 import type {
   Answer,
   Config,
   Finding,
   FindingsReport,
+  GateOutcome,
   OpenQuestion,
   RoundRecord,
   Plan,
@@ -458,6 +461,11 @@ async function reviewPhase(
     // execute buys an opinion about the wrong thing.
     const verified = await runGate(state, cfg, cwd);
     if (verified !== null) {
+      // Before `guardProgress`, which can stop the run at its cap: a record this
+      // process published before the gate ran must describe the gate's verdict
+      // by the time anything can throw past it, or the run stops leaving a file
+      // saying verification has not run when it has, and failed (#47).
+      settlePendingOutstanding(state);
       // Its own counter and its own history: making the suite pass and
       // satisfying the reviewer are separate problems that converge
       // separately, and sharing a budget starved whichever came second.
@@ -501,8 +509,14 @@ async function reviewPhase(
       // wrote. This rewrites it, and only from here, because from anywhere
       // earlier it would be asserting a fix or a passing suite that had not
       // happened.
-      recoverOutstanding(state, cwd);
-      log.ok('Carried findings addressed and verification still passes.');
+      finaliseOutstanding(state, cwd);
+      // The claim is only made when the gates support it. A required gate that
+      // never ran, an optional one, or a disabled section each get said out loud
+      // instead: the run may still finish, but not while asserting a pass
+      // nobody observed (#47).
+      const caveat = verificationCaveat(state);
+      if (caveat === null) log.ok('Carried findings addressed and verification still passes.');
+      else log.warn(`Carried findings addressed, but ${caveat}.`);
       break;
     }
 
@@ -580,7 +594,14 @@ async function reviewPhase(
       // once the gate has passed. Same order as `runFixRound`.
       clearPendingFindings(state);
 
-      const file = artifact(state, 'OUTSTANDING.md', renderOutstanding(state, decision.tolerated));
+      // Written `pending`: the gate has not run yet at this point in the loop,
+      // so the file cannot say how it went. `finaliseOutstanding` rewrites it
+      // from the completion branch once it has.
+      const file = artifact(
+        state,
+        'OUTSTANDING.md',
+        renderOutstanding(state, decision.tolerated, 'pending'),
+      );
       log.info(`Carried findings and what was done about them: ${path.relative(cwd, file)}`);
 
       await maybeCommit(cfg, cwd, `vibe: address carried review findings (final round)`);
@@ -679,24 +700,104 @@ function recoverOutstanding(state: RunState, cwd: string): void {
     : [];
   if (outstanding.length === 0) return;
 
-  const file = artifact(state, 'OUTSTANDING.md', renderOutstanding(state, outstanding));
+  const file = artifact(state, 'OUTSTANDING.md', renderOutstanding(state, outstanding, 'settled'));
   log.info(`Carried findings and what was done about them: ${path.relative(cwd, file)}`);
 }
 
-/** The findings the last fix round addressed without a reviewer confirming it. */
-function renderOutstanding(state: RunState, findings: readonly Finding[]): string {
+/**
+ * The marker that says "vibe wrote this file, and may bring it up to date".
+ *
+ * On disk, not in memory, and in EVERY form the document takes rather than only
+ * the pre-gate one. A process-local flag answers the question only for the
+ * process that wrote the file: kill a run between the final fix and the gate,
+ * resume it, and the resumed process knows nothing - `recoverOutstanding` finds
+ * a file, skips it, and the run finishes clean while the artifact still says
+ * verification has not run.
+ *
+ * It is ownership rather than pending-ness because the document settles more
+ * than once: a gate can fail, be fixed, and pass, and each of those is a
+ * different true sentence. A marker consumed by the first rewrite would freeze
+ * the file at the failure. What the marker still protects is the rule
+ * `recoverOutstanding` has always kept - an OUTSTANDING.md vibe did not write is
+ * never touched.
+ */
+const OUTSTANDING_OWNED = '<!-- vibe:outstanding -->';
+
+/**
+ * Rewrite vibe's own OUTSTANDING.md to whatever the gates have just said. True
+ * when there was one to correct.
+ *
+ * Called from BOTH sides of the gate's verdict, not only from completion. A run
+ * does not finish over a failing gate, but it can stop over one - at
+ * `maxVerifyRounds`, or on a ceiling - and the file published before the gate
+ * ran would otherwise sit there saying verification has not run when it has, and
+ * failed. `verificationCaveat` names the failing gate in that case.
+ */
+function settlePendingOutstanding(state: RunState): boolean {
+  if (state.finalFixDone !== true) return false;
+  const existing = artifactText(state, 'OUTSTANDING.md');
+  if (existing === null || !existing.includes(OUTSTANDING_OWNED)) return false;
+
+  const outstanding = Array.isArray(state.outstanding)
+    ? state.outstanding.filter(hasFindingShape)
+    : [];
+  if (outstanding.length === 0) return false;
+  artifact(state, 'OUTSTANDING.md', renderOutstanding(state, outstanding, 'settled'));
+  return true;
+}
+
+/**
+ * Settle the pre-gate OUTSTANDING.md at the end of a completing run.
+ *
+ * Falls back to `recoverOutstanding` when there is no pending file of ours,
+ * which is the case a process killed before publishing anything leaves.
+ */
+function finaliseOutstanding(state: RunState, cwd: string): void {
+  if (state.finalFixDone !== true) return;
+  if (!settlePendingOutstanding(state)) recoverOutstanding(state, cwd);
+}
+
+/**
+ * The findings the last fix round addressed without a reviewer confirming it.
+ *
+ * `stage` is which of the two moments this is being written at, because the
+ * document's claim about verification is only true at one of them (#47). The
+ * tolerance sentences are identical either way: what changes is the clause about
+ * the gate, which used to assert a pass from a call site that ran *before* the
+ * gate did - and stayed wrong afterwards when a gate turned out to be
+ * unavailable or disabled.
+ */
+function renderOutstanding(
+  state: RunState,
+  findings: readonly Finding[],
+  stage: 'pending' | 'settled',
+): string {
   const body = findings
     .map(
       (f) =>
         `## ${f.title} \`${f.id}\`\n\n${f.detail}\n\n*Suggested fix:* ${f.suggested_fix}\n`,
     )
     .join('\n');
+
+  const caveat = verificationCaveat(state);
+  const verification =
+    stage === 'pending'
+      ? 'A final fix round addressed them. **Verification has not run yet at the time of ' +
+        'writing**; the run only completes if the gates come back clean, and this file is ' +
+        'rewritten with the outcome'
+      : caveat === null
+        ? 'A final fix round addressed them and verification still passed'
+        : `A final fix round addressed them, but ${caveat}`;
+
   return (
     `# Carried findings\n\n` +
+    // In every form, not just the pre-gate one: it says vibe wrote this file and
+    // may bring it up to date, which stays true after the first rewrite.
+    `${OUTSTANDING_OWNED}\n\n` +
     `**Run:** \`${state.id}\`\n` +
     `**Task:** ${state.task}\n\n` +
     `The last review raised ${findings.length} P1 finding(s), within \`loop.p1Tolerance\`. ` +
-    `A final fix round addressed them and verification still passed, but that round was ` +
+    `${verification}, but that round was ` +
     `deliberately **not reviewed again** - re-reviewing would reopen the loop the tolerance ` +
     `exists to close. So these were worked on, and nobody has confirmed they are gone.\n\n` +
     `Worth a human eye. Set \`loop.p1Tolerance\` to 0 to require a spotless review instead, ` +
@@ -1023,67 +1124,146 @@ async function maybeCommit(cfg: Config, cwd: string, message: string): Promise<v
 }
 
 /**
- * Run the project's verification command.
+ * Run the project's verification gates, in order.
  *
- * Returns a P0 finding when it fails, or null when the code is good to review.
- * The finding is shaped like any other so it flows through the existing fix
- * loop, oscillation detection and round caps rather than needing its own.
+ * Returns a P0 finding for the FIRST gate that fails, or null when the code is
+ * good to review. The finding is shaped like any other so it flows through the
+ * existing fix loop, oscillation detection and round caps rather than needing
+ * its own.
+ *
+ * Three rules that are easy to get backwards (#47):
+ *
+ * - A failure STOPS the sequence. Later gates are not run: the fixer is given
+ *   one problem, and running a suite against code that does not typecheck buys
+ *   an opinion about the wrong thing.
+ * - An unavailable gate does NOT stop it. A `typecheck` gate nobody configured
+ *   must not prevent `test` from running.
+ * - `state.gateOutcomes` is RESET each call, so it always describes the most
+ *   recent pass rather than accumulating history across fix rounds. Gates behind
+ *   a failure get no entry at all: the vocabulary is what was observed.
  */
 async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Finding | null> {
-  if (!cfg.verify.enabled) return null;
+  const gates = resolveGates(cfg.verify, cwd);
+  const outcomes: GateOutcome[] = [];
+  state.gateOutcomes = outcomes;
 
-  log.step('Verifying');
-  const result = await runVerification(cwd, cfg.verify, cfg.toolchain);
-
-  if (result.skipped !== null) {
-    // Say so rather than letting silence read as a pass.
-    log.warn(`Verification skipped: ${result.skipped}`);
-    recordEvent(state, 'verify_skipped', { reason: result.skipped });
+  if (!cfg.verify.enabled) {
+    // Recorded rather than silent. "Verification is off" and "no gate ever ran"
+    // are different facts, and before this the disabled path wrote nothing at
+    // all - so a reader could not tell them apart.
+    for (const gate of gates) {
+      outcomes.push({
+        name: gate.name,
+        status: 'disabled',
+        command: gate.command,
+        runs: 0,
+        required: gate.required,
+      });
+    }
+    recordEvent(state, 'verify_disabled', { gates: gates.map((g) => g.name) });
+    saveState(state);
     return null;
   }
 
-  if (result.ok) {
-    log.ok(`Verification passed: ${result.command} (${result.runs}x)`);
-    recordEvent(state, 'verify_passed', { command: result.command, runs: result.runs });
-    return null;
-  }
+  for (const gate of gates) {
+    log.step(`Verifying: ${gate.name}`);
+    const result = await runGateCommand(cwd, gate, cfg.toolchain);
 
-  // A command that never started cannot be fixed by editing source. Stopping
-  // here costs one message; the alternative was observed burning two fix
-  // rounds asking an agent to repair a mistyped command path.
-  if (result.unlaunchable !== null) {
-    artifact(state, `verify-unlaunchable-${state.reviewRound}.txt`, result.output);
-    throw new Escalation(
-      EXIT.PREFLIGHT,
-      `The verification command could not run: ${result.unlaunchable}.\n` +
-        `Command: ${result.command}\n` +
-        'This is a configuration problem, not a defect in the code. Fix ' +
-        '--verify-command (or verify.command), then resume.',
+    if (result.unavailable !== null) {
+      // Say so rather than letting silence read as a pass - and carry on to the
+      // next gate, which may well have a command.
+      log.warn(`Gate ${gate.name} unavailable: ${result.unavailable}`);
+      // Pushed before the event, which persists: the outcome and the event that
+      // explains it then land in one write rather than two.
+      outcomes.push({
+        name: gate.name,
+        status: 'unavailable',
+        command: null,
+        runs: 0,
+        required: gate.required,
+      });
+      recordEvent(state, 'verify_unavailable', {
+        gate: gate.name,
+        reason: result.unavailable,
+        required: gate.required,
+      });
+      continue;
+    }
+
+    // A command that never started cannot be fixed by editing source. Stopping
+    // here costs one message; the alternative was observed burning two fix
+    // rounds asking an agent to repair a mistyped command path.
+    if (result.unlaunchable !== null) {
+      artifact(state, `verify-unlaunchable-${state.reviewRound}.txt`, result.output);
+      saveState(state);
+      throw new Escalation(
+        EXIT.PREFLIGHT,
+        `The ${gate.name} gate's command could not run: ${result.unlaunchable}.\n` +
+          `Command: ${result.command}\n` +
+          'This is a configuration problem, not a defect in the code. Fix ' +
+          `${cfg.verify.gates === null ? '--verify-command (or verify.command)' : `the ${gate.name} gate's command in verify.gates`}` +
+          ', then resume.',
+      );
+    }
+
+    if (result.ok) {
+      log.ok(`Gate ${gate.name} passed: ${result.command} (${result.runs}x)`);
+      outcomes.push({
+        name: gate.name,
+        status: 'passed',
+        command: result.command,
+        runs: result.runs,
+        required: gate.required,
+      });
+      recordEvent(state, 'verify_passed', {
+        gate: gate.name,
+        command: result.command,
+        runs: result.runs,
+      });
+      continue;
+    }
+
+    log.warn(
+      `Gate ${gate.name} failed: ${result.command} (attempt ${result.failedRun} of ${result.runs})`,
     );
+    outcomes.push({
+      name: gate.name,
+      status: 'failed',
+      command: result.command,
+      runs: result.runs,
+      required: gate.required,
+    });
+    recordEvent(state, 'verify_failed', {
+      gate: gate.name,
+      command: result.command,
+      failedRun: result.failedRun,
+      exitCode: result.exitCode,
+    });
+    artifact(state, `verify-failure-${state.reviewRound}.txt`, result.output);
+
+    return {
+      // A stable id, and one PER GATE: an identical failure across rounds is what
+      // oscillation detection needs to see to conclude the fixer is not making
+      // progress, and a typecheck failure alternating with a test failure is
+      // progress it could not see while both were filed as one id. A legacy
+      // config synthesizes the gate named `verification`, so this is still
+      // `verification-failing` for it - unchanged, with no special case.
+      id: `${result.name}-failing`,
+      // P0, so `loop.p1Tolerance` can never carry it. Every other finding is an
+      // opinion about the code; this one is the code not working, and a run that
+      // shipped past it would be reporting success over a failing suite.
+      severity: 'P0',
+      title: `${result.name}: ${result.command} does not pass`,
+      detail: describeFailure(result),
+      suggested_fix:
+        `Make the ${result.name} gate's command pass. If it fails only sometimes, the defect ` +
+        'is a race - fix the underlying synchronisation rather than retrying or loosening ' +
+        'the test.',
+    };
   }
 
-  log.warn(`Verification failed: ${result.command} (attempt ${result.failedRun} of ${result.runs})`);
-  recordEvent(state, 'verify_failed', {
-    command: result.command,
-    failedRun: result.failedRun,
-    exitCode: result.exitCode,
-  });
-  artifact(state, `verify-failure-${state.reviewRound}.txt`, result.output);
-
-  return {
-    // A stable id: an identical failure across rounds is what oscillation
-    // detection needs to see to conclude the fixer is not making progress.
-    id: 'verification-failing',
-    // P0, so `loop.p1Tolerance` can never carry it. Every other finding is an
-    // opinion about the code; this one is the code not working, and a run that
-    // shipped past it would be reporting success over a failing suite.
-    severity: 'P0',
-    title: `${result.command} does not pass`,
-    detail: describeFailure(result),
-    suggested_fix:
-      'Make the verification command pass. If it fails only sometimes, the defect is a race - ' +
-      'fix the underlying synchronisation rather than retrying or loosening the test.',
-  };
+  saveState(state);
+  return null;
 }
 
 // ---------------------------------------------------------------------------

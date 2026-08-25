@@ -63,7 +63,8 @@
     "enabled": true,
     "command": null,
     "timeoutMs": 900000,
-    "runs": 3
+    "runs": 3,
+    "gates": null
   },
   "toolchain": {
     "git": { "probe": "git --version", "phases": ["plan", "implement", "review"] },

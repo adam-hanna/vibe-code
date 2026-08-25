@@ -52,10 +52,26 @@ export function environmentBlock(
     return `- **${agent.provider}**${does}: ${agent.shell}, ${agent.pathStyle} paths - ${tools || 'no tools contracted'}${repaired}`;
   });
 
+  // With a gate list the single-command sentence is false - it names one command
+  // where there are three, and says nothing about the ones that will not run. A
+  // false statement in a prompt is worse than a vague one, so the gates are
+  // listed when the facts carry them and the original sentence stands, verbatim,
+  // when they do not (a record written before #47, or a run with one gate).
+  const gates = facts.verifyGates ?? [];
   const verification =
-    facts.verifyCommand === null
-      ? '\nNo verification command is configured, so nothing will execute this change automatically.'
-      : `\nVerification: vibe will run \`${facts.verifyCommand}\` itself - not an agent - and it must pass ${facts.verifyRuns} consecutive times before the change is accepted.`;
+    gates.length > 0
+      ? '\nVerification: vibe runs these itself - not an agent - and they must pass before ' +
+        'the change is accepted:\n' +
+        gates
+          .map((g) =>
+            g.command === null
+              ? `- \`${g.name}\`: no command configured; this gate will not run`
+              : `- \`${g.name}\`: \`${g.command}\`, ${g.runs} consecutive time(s)`,
+          )
+          .join('\n')
+      : facts.verifyCommand === null
+        ? '\nNo verification command is configured, so nothing will execute this change automatically.'
+        : `\nVerification: vibe will run \`${facts.verifyCommand}\` itself - not an agent - and it must pass ${facts.verifyRuns} consecutive times before the change is accepted.`;
 
   const caution =
     audience === 'reviewer'

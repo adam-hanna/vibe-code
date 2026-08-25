@@ -12,7 +12,13 @@ import type { Role, RoleProviders } from '@src/roles.js';
 import { setOwn } from '@src/runtime.js';
 import type { AgentProvider, ToolchainContract, ToolRequirement, Phase } from '@src/runtime.js';
 import { EFFORTS } from '@src/types.js';
-import type { Config, ConfigOverrides, LoadedConfig, Sandbox } from '@src/types.js';
+import type {
+  Config,
+  ConfigOverrides,
+  LoadedConfig,
+  Sandbox,
+  VerifyConfig,
+} from '@src/types.js';
 
 /**
  * Re-exported, not redeclared: the list moved to `src/types.ts` so `src/roles.ts`
@@ -139,6 +145,11 @@ export const DEFAULTS: Config = {
     // sample called it green twice in a row. At p=0.5 one run catches 50%,
     // three catch 87%. The cost is linear and small; the false pass is not.
     runs: 3,
+    // Null, not `[{name: 'verification', ...}]`. The synthesized legacy gate is
+    // built in `resolveGates`, so the default here stays the shape every config
+    // written before #47 has - and anything that spreads `DEFAULTS.verify` and
+    // sets `command` keeps producing a legacy config rather than an illegal one.
+    gates: null,
   },
   progress: {
     enabled: true,
@@ -487,15 +498,7 @@ function validate(cfg: Config): void {
       throw new Error(`codex.${key} must be a positive number`);
     }
   }
-  if (!Number.isFinite(cfg.verify.timeoutMs) || cfg.verify.timeoutMs <= 0) {
-    throw new Error('verify.timeoutMs must be a positive number');
-  }
-  if (!Number.isInteger(cfg.verify.runs) || cfg.verify.runs < 1) {
-    throw new Error('verify.runs must be a positive integer');
-  }
-  if (cfg.verify.command !== null && typeof cfg.verify.command !== 'string') {
-    throw new Error('verify.command must be a command string or null to auto-detect');
-  }
+  validateVerify(cfg.verify);
   // A floor rather than "positive": the heartbeat also drives a state write, and
   // a sub-second cadence would rewrite state.json continuously for a line
   // nobody can read that fast.
@@ -507,6 +510,118 @@ function validate(cfg: Config): void {
 
 const PHASES: readonly Phase[] = ['plan', 'implement', 'review'];
 const PROVIDERS: readonly AgentProvider[] = ['claude', 'codex'];
+
+/** A gate name has to survive being a finding id, so it is kept to one alphabet. */
+const GATE_NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
+const GATE_KEYS = ['name', 'command', 'runs', 'timeoutMs', 'required'] as const;
+
+/**
+ * The verification section, including the gate list.
+ *
+ * A blank command is refused rather than ignored (#47). An empty string reached
+ * the shell, exited 0, and was reported as a *pass* - the false green this whole
+ * change exists to remove - so the typo is named instead of being run.
+ */
+function validateVerify(verify: VerifyConfig): void {
+  if (!Number.isFinite(verify.timeoutMs) || verify.timeoutMs <= 0) {
+    throw new Error('verify.timeoutMs must be a positive number');
+  }
+  if (!Number.isInteger(verify.runs) || verify.runs < 1) {
+    throw new Error('verify.runs must be a positive integer');
+  }
+  if (verify.command !== null && (typeof verify.command !== 'string' || verify.command.trim() === '')) {
+    throw new Error(
+      'verify.command must be a non-empty command string, or null to auto-detect',
+    );
+  }
+
+  const gates: unknown = verify.gates;
+  if (gates === null || gates === undefined) return;
+
+  // Two keys naming what to run is the ambiguity, and `--verify-command` sets
+  // one of them - so the flag hits this refusal too, deliberately. Silently
+  // ignoring a setting the user wrote is the swallow `mergeRoles` above exists
+  // to prevent.
+  if (verify.command !== null) {
+    throw new Error(
+      'verify.command and verify.gates both name what to run; put the command in a gate ' +
+        'and remove verify.command (--verify-command sets it too)',
+    );
+  }
+  if (!Array.isArray(gates)) throw new Error('verify.gates must be a list of gates, or null');
+  // Three states where two will do - absent, empty, populated - would invent an
+  // ambiguity nobody needs. Absent means "the legacy gate"; off is `enabled`.
+  if (gates.length === 0) {
+    throw new Error(
+      'verify.gates must name at least one gate; set verify.enabled to false to turn ' +
+        'verification off',
+    );
+  }
+
+  const seen = new Set<string>();
+  gates.forEach((entry: unknown, i) => {
+    const where = `verify.gates[${i}]`;
+    if (!isRecord(entry)) throw new Error(`${where} must be an object with a name and a command`);
+
+    // Asked before the field checks, as `roleSetting` does: `{"artifacts": [...]}`
+    // is a real request out of #47's own example, and answering it with "gate has
+    // no command" would send the reader the wrong way.
+    if (Object.prototype.hasOwnProperty.call(entry, 'artifacts')) {
+      throw new Error(
+        `${where}.artifacts is not supported: gate artifacts are not implemented. The gate ` +
+          'list ships without them (#47); copying project-controlled paths into the run ' +
+          'directory waits on #53.',
+      );
+    }
+    for (const key of Object.keys(entry)) {
+      if (!(GATE_KEYS as readonly string[]).includes(key)) {
+        throw new Error(
+          `${where} has an unknown key "${key}"; expected ${GATE_KEYS.join(', ')}`,
+        );
+      }
+    }
+
+    const name = entry['name'];
+    if (typeof name !== 'string' || !GATE_NAME_RE.test(name)) {
+      throw new Error(
+        `${where}.name must be kebab-case - lowercase letters, digits and hyphens, starting ` +
+          'with a letter or digit. It becomes a finding id, so it has to be one.',
+      );
+    }
+    if (seen.has(name)) {
+      throw new Error(`${where}.name "${name}" is used twice; gate names must be unique`);
+    }
+    seen.add(name);
+
+    // Required *key*, not a required value: a gate that means "nothing to run
+    // here" has to say so, because a forgotten key must not read as a decision.
+    if (!Object.prototype.hasOwnProperty.call(entry, 'command')) {
+      throw new Error(
+        `${where}.command is required; write null when the gate has no command`,
+      );
+    }
+    const command = entry['command'];
+    if (command !== null && (typeof command !== 'string' || command.trim() === '')) {
+      throw new Error(
+        `${where}.command must be a non-empty command string, or null when the gate has no ` +
+          'command (it is then unavailable, which is not a pass)',
+      );
+    }
+
+    const runs = entry['runs'];
+    if (runs !== undefined && (!Number.isInteger(runs) || (runs as number) < 1)) {
+      throw new Error(`${where}.runs must be a positive integer`);
+    }
+    const timeoutMs = entry['timeoutMs'];
+    if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || (timeoutMs as number) <= 0)) {
+      throw new Error(`${where}.timeoutMs must be a positive number`);
+    }
+    const required = entry['required'];
+    if (required !== undefined && typeof required !== 'boolean') {
+      throw new Error(`${where}.required must be true or false`);
+    }
+  });
+}
 
 function validateToolchain(toolchain: ToolchainContract): void {
   for (const [tool, requirement] of Object.entries(toolchain)) {

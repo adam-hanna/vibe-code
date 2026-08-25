@@ -47,7 +47,7 @@ src/charge.ts        the one seam every token and dollar is charged through
 src/slots.ts         session-slot lifecycle (main = Claude, judge + review = Codex)
 src/context.ts       context measurement, compaction, session rotation
 src/preflight.ts     toolchain contract enforcement, `vibe doctor`
-src/verify.ts        the verification gate — runs the project's own test command
+src/verify.ts        the verification gates — resolves the list, runs each command
 src/progress.ts      in-turn heartbeat
 src/schemas.ts       the JSON schemas both CLIs are pinned to
 src/validate.ts      parser vocabulary for model output

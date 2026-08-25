@@ -12,6 +12,7 @@ import type {
   Confidence,
   DeferredQuestion,
   Finding,
+  GateOutcome,
   OpenQuestion,
   OutOfScopeItem,
   PendingFindings,
@@ -841,6 +842,38 @@ function readPendingFindings(
   };
 }
 
+// Member-to-member, like the tables above: a status gaining a member becomes a
+// build error here rather than a value that silently fails to read back.
+const GATE_STATUSES = {
+  passed: 'passed',
+  failed: 'failed',
+  unavailable: 'unavailable',
+  disabled: 'disabled',
+} satisfies Record<GateOutcome['status'], GateOutcome['status']>;
+
+/**
+ * One gate's outcome, or null.
+ *
+ * `status` and `required` are checked strictly because the exit code is computed
+ * from them: a record whose `required` cannot be read must not be guessed into
+ * `false`, which would turn an unverified run into a clean one.
+ */
+function readGateOutcome(entry: unknown): GateOutcome | null {
+  if (!isRecord(entry)) return null;
+  const status = enumOf(entry['status'], GATE_STATUSES);
+  const command = entry['command'];
+  if (status === null || !isString(entry['name'])) return null;
+  if (!(command === null || isString(command))) return null;
+  if (!isCounter(entry['runs']) || !isBool(entry['required'])) return null;
+  return {
+    name: entry['name'],
+    status,
+    command,
+    runs: entry['runs'],
+    required: entry['required'],
+  };
+}
+
 function readTool(entry: unknown): AgentEnvironmentFacts['tools'][number] | null {
   if (!isRecord(entry)) return null;
   const version = entry['version'];
@@ -900,7 +933,41 @@ function readEnvironment(
     if (agent === null) ctx.repairs.dropped('environment', at);
     else agents.push(agent);
   });
-  return { agents, verifyCommand: raw['verifyCommand'], verifyRuns: raw['verifyRuns'] };
+  const facts: EnvironmentFacts = {
+    agents,
+    verifyCommand: raw['verifyCommand'],
+    verifyRuns: raw['verifyRuns'],
+  };
+
+  // Tolerant, and absence-preserving: a record written before #47 has no gate
+  // list, and inventing an empty one would tell the prompt "there are gates, and
+  // there are none of them". A malformed list is dropped rather than taking the
+  // whole environment section with it, because the pair above still states the
+  // truth this file has always stated.
+  const gates = raw['verifyGates'];
+  if (gates !== undefined) {
+    if (!Array.isArray(gates)) {
+      ctx.repairs.dropped('environment', 'environment.verifyGates');
+    } else {
+      const read: { name: string; command: string | null; runs: number }[] = [];
+      gates.forEach((entry, i) => {
+        const at = `environment.verifyGates[${i}]`;
+        if (
+          !isRecord(entry) ||
+          !isString(entry['name']) ||
+          !(entry['command'] === null || isString(entry['command'])) ||
+          !isPositiveInt(entry['runs'])
+        ) {
+          ctx.repairs.dropped('environment', at);
+          return;
+        }
+        read.push({ name: entry['name'], command: entry['command'], runs: entry['runs'] });
+      });
+      if (read.length > 0) facts.verifyGates = read;
+    }
+  }
+
+  return facts;
 }
 
 /**
@@ -1070,6 +1137,12 @@ const READERS = {
   lastOutputAt: (raw, ctx) => optionalTimestamp('lastOutputAt', raw, ctx),
   finalFixDone: (raw, ctx) => optionalBool('finalFixDone', raw, ctx),
   environment: (raw, ctx) => readEnvironment(raw, ctx),
+  // Absent stays absent, never repaired into `[]`: absence means no gate has run
+  // (a plan-only run, or one that stopped before the gate), while `[]` would mean
+  // gates ran and there were none - a state nothing produces, and one the exit
+  // rule would read as "verified" (#47).
+  gateOutcomes: (raw, ctx) =>
+    raw === undefined ? undefined : repairedArray('gateOutcomes', raw, ctx, readGateOutcome),
   carried: (raw, ctx) =>
     raw === undefined ? undefined : repairedArray('carried', raw, ctx, readFinding),
   declined: (raw, ctx) =>

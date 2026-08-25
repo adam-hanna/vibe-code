@@ -426,6 +426,58 @@ export function unlaunchableVerify(): Partial<Config> {
   };
 }
 
+/**
+ * One gate's command, controlled per gate rather than per run.
+ *
+ * `verifying()` above writes the single command a pre-#47 config names; this
+ * writes one script and one log per gate NAME, so a case can watch `typecheck`
+ * fail while `test` never runs - which is the whole point of an ordered list.
+ * Same shape of script for the same reasons: relative, no spaces, and a marker
+ * file rather than a stub, so "did this gate execute" is an observation.
+ */
+export function gateScript(
+  state: RunState,
+  name: string,
+  options: { failures?: number; failRuns?: readonly number[] } = {},
+): string {
+  const script = `vibe-gate-${name}.mjs`;
+  const logFile = `vibe-gate-${name}-runs.txt`;
+  const failing =
+    options.failRuns ?? Array.from({ length: options.failures ?? 0 }, (_unused, i) => i + 1);
+  writeFileSync(
+    path.join(state.targetDir, script),
+    "import { appendFileSync, readFileSync } from 'node:fs';\n" +
+      `const log = ${JSON.stringify(logFile)};\n` +
+      "appendFileSync(log, 'ran\\n');\n" +
+      "const runs = readFileSync(log, 'utf8').split('\\n').filter(Boolean).length;\n" +
+      `process.exit(${JSON.stringify([...failing])}.includes(runs) ? 1 : 0);\n`,
+    'utf8',
+  );
+  return `node ${script}`;
+}
+
+/** How many times the command `gateScript` wrote for this gate has run. */
+export function gateRuns(state: RunState, name: string): number {
+  const log = path.join(state.targetDir, `vibe-gate-${name}-runs.txt`);
+  if (!existsSync(log)) return 0;
+  return readFileSync(log, 'utf8').split('\n').filter(Boolean).length;
+}
+
+/**
+ * A `package.json` with a real `test` script in the target tree.
+ *
+ * For the cases that have to prove auto-detection did NOT happen: without a
+ * detectable command in the tree, "the gate stayed unavailable" is satisfied by
+ * an implementation that would have detected one had it been there.
+ */
+export function withTestScript(state: RunState): void {
+  writeFileSync(
+    path.join(state.targetDir, 'package.json'),
+    JSON.stringify({ name: 'harness-target', scripts: { test: 'node --version' } }, null, 2),
+    'utf8',
+  );
+}
+
 // ---- stopping and resuming -------------------------------------------------
 
 /** What cli.ts does with an `Escalation`: the human-facing handoff. */
