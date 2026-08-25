@@ -1522,10 +1522,16 @@ async function revisePlan(
 }
 
 /**
- * Every Codex call goes through here so the run keeps a single Codex thread.
- * Continuity matters for the oscillation guard: a stateless reviewer re-derives
- * a still-unresolved issue under a fresh id each round, which reads as progress
- * when it is actually the same objection.
+ * Every Codex call goes through here, so each Codex conversation is continued by
+ * the turns that belong to it and by no others.
+ *
+ * Which conversation that is comes from the role's slot and nothing else, which
+ * is what lets the critic and the reviewer hold separate threads (#45) without a
+ * branch here. Continuity within a conversation matters for the oscillation
+ * guard: a stateless reviewer re-derives a still-unresolved issue under a fresh
+ * id each round, which reads as progress when it is actually the same objection.
+ * Continuity *between* the two would be the defect - a reviewer that remembers
+ * approving the plan is not reviewing the code independently of it.
  */
 async function codexDispatch(
   state: RunState,

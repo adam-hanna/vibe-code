@@ -31,8 +31,10 @@ export const PROVIDERS: readonly AgentProvider[] = ['claude', 'codex'];
  * not a promise about what came back, which is why nothing parses at the seam.
  *
  * `slot` is optional because a table that names none still describes something
- * coherent: one conversation per provider, which is what every table predating
- * named slots meant. See `slotForRole`.
+ * coherent: each role's default conversation, which is what every table
+ * predating named slots meant. That used to be one conversation per provider and
+ * is now per role - the reviewer's Codex conversation is not the critic's. See
+ * `slotForRole`.
  */
 export interface RoleSpec {
   provider: AgentProvider;
@@ -99,18 +101,48 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 }
 
 /**
- * The slot a table that names none means: one conversation per provider, which
- * is what every table predating named slots described.
+ * Which Codex conversation each job talks through.
+ *
+ * Per role, because one slot per provider stopped being able to state the truth
+ * (#45): the reviewer must not form its judgement inside the conversation that
+ * approved the plan, so it holds its own thread and every other Codex-seated
+ * role keeps the one they have always had.
+ */
+const CODEX_SLOT: Readonly<Record<Role, SlotName>> = {
+  // A writing role on Codex is refused outright while `codex.persistSession` is
+  // on (see `roleRefusals`) and is one-shot without it, so it carries nothing
+  // either way. It stays on `judge` so nothing about such a table changes here.
+  planner: 'judge',
+  implementer: 'judge',
+  critic: 'judge',
+  // Deliberately `judge`, not `review`. Answering the planner's blocking
+  // questions is plan-side work, and the conversation that has argued about the
+  // plan is the right one to answer questions about it. Under the rule below it
+  // would otherwise read as an oversight.
+  answerer: 'judge',
+  // The one role that changes conversation, and the whole of #45.
+  reviewer: 'review',
+};
+
+/**
+ * The slot a table that names none means.
  *
  * Not the provider-name guessing this file exists to have deleted - it decides
  * no one's job and answers no question about who does what. It is the fallback
  * shape for a table that left the field out, and every table `tableFor` builds
  * names one.
+ *
+ * It used to be `Record<AgentProvider, SlotName>` - one conversation per
+ * provider - which is what every table predating named slots described and what
+ * two Codex conversations can no longer be expressed in. A table that names no
+ * slot now means "the default conversation for this job", which is the same
+ * answer for every role but the reviewer.
  */
-const DEFAULT_SLOT: Readonly<Record<AgentProvider, SlotName>> = {
-  claude: 'main',
-  codex: 'judge',
-};
+function defaultSlot(role: Role, provider: AgentProvider): SlotName {
+  // Claude has exactly one conversation, whatever the job: `main` is the session
+  // rotation compacts, and there is no second Claude thread to be on.
+  return provider === 'claude' ? 'main' : CODEX_SLOT[role];
+}
 
 /**
  * Join an assignment with the jobs to make a table.
@@ -132,7 +164,7 @@ export function tableFor(providers: RoleProviders): RoleTable {
     if (!PROVIDERS.includes(provider)) {
       throw new Error(`roles.${role} is ${JSON.stringify(provider)}; expected "claude" or "codex"`);
     }
-    table[role] = { ...JOBS[role], provider, slot: DEFAULT_SLOT[provider] };
+    table[role] = { ...JOBS[role], provider, slot: defaultSlot(role, provider) };
   }
   return table;
 }
@@ -168,7 +200,7 @@ export const ROLES: RoleTable = tableFor(DEFAULT_ROLE_PROVIDERS);
  */
 export function slotForRole(role: Role, roles: RoleTable = ROLES): SlotName {
   const spec = roles[role];
-  const slot = spec.slot ?? DEFAULT_SLOT[spec.provider];
+  const slot = spec.slot ?? defaultSlot(role, spec.provider);
   if (SLOTS[slot].provider !== spec.provider) {
     throw new Error(
       `role "${role}" is seated on provider "${spec.provider}" but slot "${slot}" is a ` +
@@ -350,6 +382,23 @@ export function codexProbeSandbox(cfg: Config, roles: RoleTable = rolesFor(cfg))
   return strongest ?? codexSandbox('read-only', cfg);
 }
 
+/**
+ * How many distinct Codex conversations this run actually holds.
+ *
+ * Derived from the table, never from a constant: `codex.persistSession` used to
+ * mean "one thread for the whole run", and since #45 it means "each Codex
+ * conversation is carried" - two of them under the default assignment, because
+ * the reviewer no longer judges the code from inside the conversation that
+ * approved the plan. A summary line that still said *single thread* would be a
+ * false statement about what the run is doing.
+ *
+ * Counted over the roles that take a turn, so a table whose only Codex role is
+ * switched off reports none rather than describing a conversation nothing opens.
+ */
+export function codexConversations(cfg: Config, roles: RoleTable = rolesFor(cfg)): number {
+  return new Set(enabledRolesFor('codex', cfg, roles).map((role) => slotForRole(role, roles))).size;
+}
+
 /** Which providers hold these roles, deduped and in a stable order. */
 export function providersForRoles(
   wanted: readonly Role[],
@@ -452,12 +501,20 @@ export function roleWarnings(cfg: Config, roles: RoleTable = rolesFor(cfg)): str
     (role) => roles[role].provider === implementer,
   );
   if (firstShared !== undefined) {
-    const named = namePaths([firstShared, ...restShared]);
+    const shared = [firstShared, ...restShared];
+    const named = namePaths(shared);
     // Whether they share a *conversation* is a different fact from sharing a
     // provider, and claiming memory a one-shot thread does not have would be a
-    // false statement in the one place a user acts on it. One slot answers for
-    // all of them: a table gives a provider one conversation.
-    const persists = SLOTS[slotForRole(firstShared, roles)].persists(cfg);
+    // false statement in the one place a user acts on it. Asked of each role
+    // rather than of the first: a provider no longer has one conversation (#45),
+    // so "does any of them sit in the implementer's conversation, and is that
+    // conversation carried" is now two questions this has to actually ask. Every
+    // table that runs today answers exactly as it did - a Codex implementer
+    // needs `persistSession` off before `roleRefusals` will let it run at all.
+    const implementerSlot = slotForRole('implementer', roles);
+    const persists =
+      shared.some((role) => slotForRole(role, roles) === implementerSlot) &&
+      SLOTS[implementerSlot].persists(cfg);
     warnings.push(
       persists
         ? `${named} share the implementer's ${implementer} conversation, so the judge remembers ` +
@@ -497,8 +554,14 @@ export function roleWarnings(cfg: Config, roles: RoleTable = rolesFor(cfg)): str
     // this shipped with is only said while it is still true. What never changes is
     // that nothing can compact the thread.
     if (cfg.codex.persistSession) {
-      // One slot answers for all of them: a table gives a provider one conversation.
-      const measured = slotMeasured(cfg, slotForRole(firstGenerative, roles));
+      // Asked of every named role, not of the first. What is still true is that
+      // each Codex conversation is measured against the same setting -
+      // `codex.contextWindow` is a fact about the model - so the answer is the
+      // same for all of them; what is no longer true is that a provider has one
+      // conversation to ask about (#45), and a warning must not rest on it.
+      const measured = generativeOnCodex.every((role) =>
+        slotMeasured(cfg, slotForRole(role, roles)),
+      );
       warnings.push(
         measured
           ? `${named} run on a persisted Codex thread. Its context is measured against ` +

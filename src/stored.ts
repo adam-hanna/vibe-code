@@ -1053,6 +1053,14 @@ const READERS = {
   judgeContextTokens: (raw, ctx) =>
     optionalNumber('judgeContextTokens', raw, ctx, isPositiveInt),
   judgeContextThread: (raw, ctx) => optionalString('judgeContextThread', raw, ctx),
+  // The review slot's four. Optional every one, so a state written before that
+  // conversation existed loads with no repair at all: absent is what a slot that
+  // has never run looks like, and there is nothing here to migrate into.
+  reviewSessionId: (raw, ctx) => optionalString('reviewSessionId', raw, ctx),
+  reviewSessionStarted: (raw, ctx) => optionalBool('reviewSessionStarted', raw, ctx),
+  reviewContextTokens: (raw, ctx) =>
+    optionalNumber('reviewContextTokens', raw, ctx, isPositiveInt),
+  reviewContextThread: (raw, ctx) => optionalString('reviewContextThread', raw, ctx),
   handoffStale: (raw, ctx) => optionalBool('handoffStale', raw, ctx),
   contextModel: (raw, ctx) => optionalString('contextModel', raw, ctx),
   contextWindow: (raw, ctx) => optionalNumber('contextWindow', raw, ctx, isPositive),

@@ -146,6 +146,18 @@ export interface Handlers {
   claude?: (label: string, options: ClaudeTurnOptions) => unknown;
   /** Codex's turn: the structured report. */
   codex?: (label: string, options: CodexTurnOptions) => unknown;
+  /**
+   * The thread id this Codex turn ran on. Defaults to `'thread-1'` for every
+   * turn, which is what the fake returned before there was more than one Codex
+   * conversation to name.
+   *
+   * Since #45 the plan-side judge and the reviewer hold separate threads, and a
+   * fake that names them both `thread-1` cannot show the difference between two
+   * conversations and one: every resume id would match whichever slot was asked.
+   * Returning a different id per family is what makes "the reviewer was never
+   * handed the critique's id" an assertion rather than a coincidence.
+   */
+  codexSessionId?: (label: string, options: CodexTurnOptions) => string | null;
 }
 
 /**
@@ -181,7 +193,12 @@ export function agents(handlers: Handlers, calls: string[]): AgentTurns {
       return Promise.resolve({
         structured,
         raw: JSON.stringify(structured),
-        sessionId: 'thread-1',
+        // Not `?? 'thread-1'`: a handler that returns null is saying this turn
+        // named no thread, which is a different fact from having no handler.
+        sessionId:
+          handlers.codexSessionId === undefined
+            ? 'thread-1'
+            : handlers.codexSessionId(options.schemaName, options),
         tokens: tokens(500),
       });
     },
