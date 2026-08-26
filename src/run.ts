@@ -4,9 +4,11 @@ import { createHash } from 'node:crypto';
 import * as log from '@src/log.js';
 import type { ActivityObservation } from '@src/progress.js';
 import { initialSlotFields } from '@src/slots.js';
+import { checkStoredConsistency } from '@src/consistency.js';
 import {
   assertUsableRunId,
   hasFindingShape,
+  isRecord,
   parseStoredState,
   summariseStored,
   validateStoredState,
@@ -121,12 +123,34 @@ export function loadRun(targetDir: string, id: string): RunState {
 
   const parsed = parseStoredState(readFileSync(file, 'utf8'), id, dir);
   const { state: checked, repairs } = validateStoredState(parsed, id, dir);
-  // Also on resume: a run created before this existed still needs the guard.
-  ensureVibeIgnored(targetDir);
+
   // Paths are re-derived so a run directory stays valid if the repo moves. They
   // are the two fields the validator does not decide, and the only two it does
   // not carry, so they are supplied here rather than asserted there.
+  //
+  // Built before `ensureVibeIgnored` rather than after it, which is a move from
+  // where this line used to sit: it is a pure object spread, and the cross-field
+  // pass below needs a whole `RunState` to hand `resumePhase`. Nothing between
+  // here and there writes anything.
   const state: RunState = { ...checked, dir, targetDir };
+
+  // The cross-field pass, before `ensureVibeIgnored`, which is this function's
+  // first write of any kind: `checkStoredConsistency` can refuse, and its
+  // message promises that no file has been rewritten (#54).
+  //
+  // The RAW phase is handed over rather than the validated one because they can
+  // differ: a `phase` this version does not recognise is dropped by the reader
+  // as a repair, so `state.phase` is absent while the file on disk still holds
+  // the value the user would see in it. A refusal has to name what is actually
+  // there, not what survived the reader.
+  const normalisation = checkStoredConsistency(
+    state,
+    resumePhase(state),
+    isRecord(parsed) ? parsed['phase'] : undefined,
+  );
+
+  // Also on resume: a run created before this existed still needs the guard.
+  ensureVibeIgnored(targetDir);
 
   // Recorded, not merely applied: a repair the user cannot see is one they
   // cannot judge, and `recordEvent` persists the repaired state that the resume
@@ -145,6 +169,39 @@ export function loadRun(targetDir: string, id: string): RunState {
       `state.json for ${id} had ${repairs.length} unusable field(s) - ` +
         `${repairs.map((r) => r.field).join(', ')}. Each was replaced with the empty value its ` +
         'type implies and recorded in the run\'s event log; nothing else was changed.',
+    );
+  }
+
+  // Its own event type and its own wording, deliberately not folded into the
+  // repair loop above. A repair replaces an unusable value with the empty one
+  // its type implies; this replaces a perfectly valid phase with a different
+  // valid phase, because of what the other two fields say. Reported as a repair
+  // it would claim something untrue about both the cause and the remedy (#54).
+  //
+  // Recorded only when the phase actually moves. Rule B's predicate reads
+  // `status`, which is never rewritten, so it keeps matching on every later load
+  // of the same run - warning each time is right, but appending an identical
+  // event each time would grow the log without adding a fact.
+  if (normalisation !== null) {
+    const moved = state.phase !== normalisation.phase;
+    state.phase = normalisation.phase;
+    if (moved) {
+      recordEvent(state, 'state_normalised', {
+        rule: normalisation.rule,
+        storedPhase: normalisation.storedPhase ?? null,
+        resolvedPhase: normalisation.resolvedPhase,
+        status: normalisation.status,
+        planOnly: normalisation.planOnly,
+        phase: normalisation.phase,
+        why: normalisation.why,
+      });
+    }
+    log.warn(
+      `state.json for ${id} says status "${normalisation.status}" with ` +
+        `planOnly ${String(normalisation.planOnly)}, which would have resumed at the ` +
+        `${normalisation.resolvedPhase} phase - ${normalisation.why}. Resuming from ` +
+        `${normalisation.phase} instead, which repeats work rather than skipping it. ` +
+        'Nothing else was changed.',
     );
   }
   return state;

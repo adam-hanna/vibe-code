@@ -252,24 +252,39 @@ test('an unrecognised status refuses, and lists the ones this version knows', ()
   assert.match(message, /planning, implementing, reviewing, planned, done/);
 });
 
-test('every legal status loads', () => {
-  const statuses: RunStatus[] = [
-    'planning',
-    'implementing',
-    'reviewing',
-    'planned',
-    'done',
-    'needs-input',
-    'stalled',
-    'error',
+test('every legal status loads, beside a planOnly that permits it', () => {
+  // Was one loop over all eight statuses. It could be, while `status` was
+  // validated alone - but `fresh()` builds PLAN-ONLY runs, and since #54 three
+  // of those eight triples are ones no writer can produce: only the plan-only
+  // exit writes 'planned', and only the path past it writes 'implementing',
+  // 'reviewing' and 'done'. So there is no single `planOnly` under which all
+  // eight are legal, and asserting otherwise asserted the defect.
+  //
+  // Split rather than narrowed, so the original claim survives in full: every
+  // value of the enum is still accepted by the reader, each beside the
+  // `planOnly` its own writer runs under, and the two lists still union to all
+  // eight. The phase stays 'planning' from `createRun` throughout, so nothing
+  // here resolves to 'complete' and rule C never enters into it.
+  const byPlanOnly: [boolean, RunStatus[]][] = [
+    [false, ['planning', 'implementing', 'reviewing', 'done', 'needs-input', 'stalled', 'error']],
+    [true, ['planning', 'planned', 'needs-input', 'stalled', 'error']],
   ];
-  for (const status of statuses) {
-    const loaded = load((raw) => {
-      raw['status'] = status;
-    });
-    assert.equal(loaded.status, status);
-    assert.deepEqual(repairs(loaded), []);
+
+  const seen = new Set<RunStatus>();
+  for (const [planOnly, statuses] of byPlanOnly) {
+    for (const status of statuses) {
+      const loaded = load((raw) => {
+        raw['status'] = status;
+        raw['planOnly'] = planOnly;
+      });
+      assert.equal(loaded.status, status);
+      assert.equal(loaded.planOnly, planOnly);
+      assert.deepEqual(repairs(loaded), [], `${status}/planOnly=${planOnly} produces no repair`);
+      assert.equal(loaded.phase, 'planning', `${status} keeps the phase it was stored with`);
+      seen.add(status);
+    }
   }
+  assert.equal(seen.size, 8, 'between them the two lists still cover every legal status');
 });
 
 // ---- records are repaired ---------------------------------------------------
@@ -435,25 +450,47 @@ test('an absent optional is never corruption', () => {
 // ---- per-field only: no cross-field rule ships here (#54) --------------------
 
 test('a phase this version does not know is dropped, and status inference takes over', () => {
+  // `planOnly: false` added by #54, and it is the fixture that moved, not the
+  // claim. `fresh()` builds plan-only runs, and status 'implementing' is written
+  // only past the plan-only exit - so this used to describe a triple no writer
+  // produces, and is now refused as one. The behaviour under test is the reader
+  // dropping an unrecognised phase and `resumePhase` falling back to the status,
+  // which is unchanged and is what the assertions below still check.
   const loaded = load((raw) => {
     raw['phase'] = 'banana';
     raw['status'] = 'implementing';
+    raw['planOnly'] = false;
   });
   assert.equal('phase' in loaded, false);
   assert.deepEqual(repairs(loaded), ['phase']);
   assert.equal(resumePhase(loaded), 'implementing');
 });
 
-test('a recognised phase is trusted whatever status and planOnly hold - see #54', () => {
+test('a TERMINAL status is trusted beside any phase, complete included - see #54', () => {
   // Regression guard for a rule that was proposed twice and refuted twice. A
   // failed preflight sets status 'error' without touching the phase, so
   // error+complete is writer-generated: "repairing" it would make resumePhase
   // infer planning and re-run finished work.
+  //
+  // Narrowed by #54, and this is the substantive edit that change makes to an
+  // existing test. The list used to hold five triples under the title "trusted
+  // whatever status and planOnly hold". Three of those five were not
+  // counterexamples to the refuted rule at all - they were the states #54 was
+  // filed to catch:
+  //
+  //   ['planning', 'complete',     false]  no writer leaves a completed phase here
+  //   ['planned',  'complete',     false]  only the plan-only exit writes 'planned'
+  //   ['planning', 'implementing', true ]  a plan-only run cannot reach implementing
+  //
+  // The guard was right about what it was defending and over-general about how.
+  // What actually refutes the rejected rule is a TERMINAL status beside a
+  // phase - `cli.ts` writes those without touching the phase - and that is what
+  // the two surviving rows are and what the title now says. The three removed
+  // rows are not untested: `tests/state-consistency.test.ts` asserts the exact
+  // rule each one trips and the message it produces, which is strictly more than
+  // "it loads clean" ever said.
   const pairs: [string, string, boolean][] = [
     ['error', 'complete', false],
-    ['planning', 'complete', false],
-    ['planned', 'complete', false],
-    ['planning', 'implementing', true],
     ['stalled', 'complete', true],
   ];
   for (const [status, phase, planOnly] of pairs) {

@@ -10,40 +10,26 @@ import type { RunPhase, RunStatus } from '@src/types.js';
  * *triple* of them can say is a different question, and this module is the only
  * place it is asked.
  *
- * ## NOTHING CALLS THIS YET, and what it would take
+ * ## Where it runs
  *
- * This ships as groundwork, with no behaviour change - the pattern AGENTS.md
- * calls "Groundwork ships separately". The intended call site is `loadRun`
- * (`src/run.ts`), immediately after `validateStoredState` and *before*
- * `ensureVibeIgnored`, which is that function's first write:
+ * `loadRun` (`src/run.ts`), after `validateStoredState` and *before*
+ * `ensureVibeIgnored`, which is that function's first write of any kind. The
+ * resume path is the only place these three fields decide anything: `loadRun`
+ * has exactly one production caller, `cmdResume` in `src/cli.ts`. `listRuns`
+ * reads through `summariseStored` and only prints, so it is deliberately not
+ * covered.
  *
- * ```ts
- * const state: RunState = { ...checked, dir, targetDir };
- * const normalisation = checkStoredConsistency(state, resumePhase(state), rawPhase);
- * ensureVibeIgnored(targetDir);
- * ...
- * if (normalisation !== null) {
- *   const moved = state.phase !== normalisation.phase;
- *   state.phase = normalisation.phase;
- *   if (moved) recordEvent(state, 'state_normalised', { ...normalisation });
- *   log.warn(...);   // its own event type and wording: this is not a repair
- * }
- * ```
- *
- * It is not wired because wiring it makes three existing cases in
- * `tests/stored-state.test.ts` fail. `fresh()` there builds PLAN-ONLY runs, and
- * `every legal status loads` then sets an implementing, reviewing or done
- * status; `a phase this version does not know is dropped` does the same; and
- * `a recognised phase is trusted whatever status and planOnly hold` asserts
- * three triples that rules B, C and A respectively act on. Each of the three
- * asserts that a contradictory triple loads CLEAN, which is precisely the claim
- * this module exists to withdraw - so they cannot survive the rules, and there
- * is no arrangement of the rules that leaves them standing while `loadRun`
- * enforces them.
- *
- * Editing them needs an exception to AGENTS.md's "**Add tests; do not edit
- * existing ones**", which only the repository owner can grant. It has not been
- * granted, so the wiring is left out rather than the rules weakened.
+ * Three cases in `tests/stored-state.test.ts` had to be narrowed to wire it,
+ * which is worth knowing about before touching them again. `fresh()` there
+ * builds PLAN-ONLY runs, so two of the three were fixtures that had drifted -
+ * they set an implementing, reviewing or done status on a plan-only run, which
+ * F4 says no writer produces - and they were fixed by naming the `planOnly` the
+ * status actually belongs to. The third, `a recognised phase is trusted whatever
+ * status and planOnly hold`, was a real over-generalisation: it guarded the
+ * twice-refuted rule with five triples, of which only two were counterexamples
+ * to it and three were the states #54 was filed to catch. It is narrowed to the
+ * two and renamed for what it defends. None of the three lost coverage -
+ * `tests/state-consistency.test.ts` asserts the rule each removed triple trips.
  *
  * **Pure, like `stored.ts`.** It reads, decides, and either throws or returns.
  * That is what makes "no file has been rewritten" in the refusal below literally

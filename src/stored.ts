@@ -76,13 +76,13 @@ import type {
  *    never rewritten - while rule C matches once, because the phase it writes
  *    makes its own predicate false.
  *
- *    **That module is not yet called from anywhere.** It ships as groundwork,
- *    with no behaviour change: wiring it into `loadRun` makes three existing
- *    cases in `tests/stored-state.test.ts` fail, because they assert that
- *    contradictory triples load clean, and editing them needs an exception to
- *    AGENTS.md's "add tests; do not edit existing ones" that only the
- *    repository owner can grant. See the header of `src/consistency.ts`. The
- *    `codexTokens <= tokensUsed` share still has NO rule anywhere: it is a
+ *    `loadRun` applies it, after this validator and before its first write, so
+ *    a refusal there can promise that nothing was rewritten for the same reason
+ *    a refusal here can. Three cases in `tests/stored-state.test.ts` had to be
+ *    narrowed for it: each asserted a contradictory triple loads clean, which
+ *    is the claim the module exists to withdraw - see that file's comments and
+ *    the PR for which was which. The `codexTokens <= tokensUsed` share still
+ *    has NO rule anywhere: it is a
  *    reporting concern rather than a resume one, since nothing in `runPhases`
  *    branches on either field while `summary()` (`src/cli.ts`) renders
  *    `tokensUsed - codexTokens` and would print a negative Claude share.
@@ -112,7 +112,14 @@ import type {
 
 // ---- primitives -------------------------------------------------------------
 
-function isRecord(v: unknown): v is Record<string, unknown> {
+/**
+ * Exported for `loadRun`, which reads one raw field back out of the parsed JSON
+ * to hand to the cross-field pass. One narrowing predicate for the whole
+ * codebase rather than a type assertion at the one call site that needs it - the
+ * assertions in this file are enumerated in the header, and a second copy of
+ * this question would have to join them (#54).
+ */
+export function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
