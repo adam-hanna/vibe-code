@@ -37,6 +37,7 @@ src/orchestrator.ts  the loop: planPhase, reviewPhase, the guards, the prompt di
 src/run.ts           run state, artifacts, convergence maths (assessConvergence et al)
 src/roles.ts         who does what: the role table, refusals, warnings
 src/config.ts        DEFAULTS, config merge, validation
+src/consistency.ts   cross-field rules over status/phase/planOnly, applied by loadRun
 src/types.ts         shared types, including RunState
 src/prompts.ts       every prompt the agents receive
 src/claude.ts        Claude Code adapter (stream-json)
@@ -90,8 +91,21 @@ Beyond the compiler:
 than the module (`convergence.test.ts`, `failure-accounting.test.ts`,
 `preflight-enforcement.test.ts`).
 
-- **Add tests; do not edit existing ones.** A change that needs an existing test rewritten is
-  a behaviour change, and it needs saying out loud in the PR rather than absorbing quietly.
+- **Prefer adding tests. Editing an existing one is allowed, but never to make it pass.**
+  When a test breaks, the failure is evidence and the first job is to find out what of. There
+  are only two answers and they need opposite responses:
+
+  1. **The change broke something.** The test is right and the code is wrong. Fix the code.
+  2. **The test's claim is no longer the contract.** The behaviour genuinely moved, or - as in
+     #54 - the test asserted more than the thing it was guarding and part of what it pinned was
+     the defect. Then rewrite it, keeping every part of the claim that still holds.
+
+  Deciding which of the two it is *is* the work. A test edited into green without that
+  investigation destroys the one signal that would have caught the regression, and it does it
+  silently. So: say in the PR which existing tests you changed, which of the two cases each was,
+  and what evidence settled it. If coverage moves to another file, say where. Never delete a
+  case because it is inconvenient; if it is genuinely wrong, the reason it was ever written is
+  worth understanding before it goes.
 - **No wall-clock fixtures.** A test that hardcodes an epoch timestamp passes until it
   doesn't — one in `ratelimits-monitor.test.ts` went off in August 2026 and made `develop`
   look broken. Compute times relative to now.
