@@ -1,7 +1,16 @@
-import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync } from 'node:fs';
+import {
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  existsSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+} from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import * as log from '@src/log.js';
+import { livenessOf } from '@src/lock.js';
 import type { ActivityObservation } from '@src/progress.js';
 import { initialSlotFields } from '@src/slots.js';
 import { checkStoredConsistency } from '@src/consistency.js';
@@ -16,6 +25,7 @@ import {
 import type {
   Finding,
   GateOutcome,
+  InFlightTurn,
   PendingFindings,
   RoundRecord,
   RunPhase,
@@ -61,11 +71,52 @@ export function ensureVibeIgnored(targetDir: string): void {
   if (!existsSync(file)) writeFileSync(file, '*\n', 'utf8');
 }
 
-export function createRun(targetDir: string, task: string, planOnly: boolean): RunState {
+/** A run directory that exists, before any state has been written into it. */
+export interface AllocatedRun {
+  id: string;
+  dir: string;
+}
+
+/**
+ * Make the run directory, and write nothing into it.
+ *
+ * Split out of `createRun` so `vibe run` can take the run's lock *before* the
+ * first state write (#77). The old order created a state, then saved the
+ * effective config, then saved the extra context, so a kill in either gap left a
+ * loadable state.json with no config and no context - and a resume then silently
+ * fell back to current defaults and dropped the context file the user passed.
+ * Atomic writes cannot help with that: each write was whole, and the run was
+ * still wrong. Allocation and initialisation are separate acts because only one
+ * of them has to be inside the lock.
+ */
+export function allocateRun(targetDir: string, task: string): AllocatedRun {
   const id = `${stamp()}-${slugify(task)}`;
   const dir = path.join(targetDir, RUNS_DIR, id);
   mkdirSync(dir, { recursive: true });
   ensureVibeIgnored(targetDir);
+  return { id, dir };
+}
+
+/**
+ * Everything the first state write must already carry.
+ *
+ * `config` and `extraContext` are here rather than saved afterwards for the
+ * reason `allocateRun` states: a run whose first persisted state is missing them
+ * is a run that resumes on the wrong settings.
+ */
+export interface RunInit {
+  allocated?: AllocatedRun | undefined;
+  config?: RunState['config'] | undefined;
+  extraContext?: string | null | undefined;
+}
+
+export function createRun(
+  targetDir: string,
+  task: string,
+  planOnly: boolean,
+  init: RunInit = {},
+): RunState {
+  const { id, dir } = init.allocated ?? allocateRun(targetDir, task);
 
   const state: RunState = {
     id,
@@ -98,7 +149,9 @@ export function createRun(targetDir: string, task: string, planOnly: boolean): R
     contextRatio: 0,
     plan: null,
     pendingAnswers: null,
-    extraContext: null,
+    // Assigned before the single save below, never after it: see `RunInit`.
+    extraContext: init.extraContext ?? null,
+    ...(init.config === undefined ? {} : { config: init.config }),
   };
   saveState(state);
   return state;
@@ -265,12 +318,22 @@ export function listRuns(targetDir: string, opts: ListRunsOptions = {}): RunSumm
   if (opts.limit !== undefined) ids = ids.slice(0, Math.max(0, opts.limit));
 
   return ids.map((d): RunSummary => {
+    const dir = path.join(root, d);
+    let raw: unknown;
+    let summary: RunSummary;
     try {
-      const raw: unknown = JSON.parse(readFileSync(path.join(root, d, 'state.json'), 'utf8'));
-      return summariseStored(raw, d);
+      raw = JSON.parse(readFileSync(path.join(dir, 'state.json'), 'utf8'));
+      summary = summariseStored(raw, d);
     } catch {
-      return { id: d, status: 'unreadable', task: '', costUsd: null };
+      summary = { id: d, status: 'unreadable', task: '', costUsd: null };
     }
+    // Outside the parse, so an unreadable state.json still gets a verdict: the
+    // lock is a separate file, and "this run cannot be read" and "nobody is
+    // working on it" are answers to different questions (#77). `livenessOf`
+    // never throws and never writes, which is what lets it sit on this path at
+    // all - `listRuns` promises both, and the planner's index depends on it.
+    summary.liveness = livenessOf(dir, raw).liveness;
+    return summary;
   });
 }
 
@@ -371,8 +434,76 @@ export function resetContextMeasurement(state: RunState, model: string): void {
   delete state.contextWindow;
 }
 
+/**
+ * How many times a rename may be retried, and how long to pause between tries.
+ *
+ * Windows only, in practice: `renameSync` over an open file fails with EPERM or
+ * EBUSY while a reader holds it, where the truncate-then-write this replaced
+ * would have succeeded. `listRuns` and any watching shell open state.json for a
+ * few milliseconds at a time, so a short bounded wait clears it. Deliberately
+ * small: this is a sharing violation, not a lock, and anything longer would be a
+ * mutex nobody asked for.
+ */
+const RENAME_RETRIES = 3;
+const RENAME_PAUSE_MS = 5;
+
+/** A synchronous pause. `saveState` has no await to give and must not grow one. */
+function pause(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function isSharingViolation(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  return code === 'EPERM' || code === 'EACCES' || code === 'EBUSY';
+}
+
+/**
+ * Persist the run, whole or not at all.
+ *
+ * Write-temp-then-rename, because this file is rewritten every five seconds for
+ * the whole run (`ACTIVITY_WRITE_MS`) and a real one reaches ~96KB: a process
+ * killed inside the old truncate-then-write left a half-written state.json, and
+ * the run could only be resumed by hand (#77). `renameSync` over a file on the
+ * same volume is atomic, so a reader sees either the previous state or this one.
+ *
+ * The temp name carries the pid so that two processes writing the same run
+ * cannot corrupt each other through a shared `state.json.tmp`. The run lock is a
+ * refusal, not a mutex, and `--force` can put two writers here deliberately.
+ *
+ * **`fsync` is deliberately out of scope.** Rename gives the process-kill
+ * guarantee this was built for. Surviving a power loss additionally needs the
+ * file *and its directory* fsynced, and directory fsync is not available on
+ * Windows - claiming a durability that is not there is worse than not claiming
+ * it. Only state.json is written this way; `artifact()` is written a handful of
+ * times per run, not every five seconds.
+ *
+ * Still throws whatever the write throws: `chargeFailure` has a `catch` that
+ * depends on it.
+ */
 export function saveState(state: RunState): void {
-  writeFileSync(path.join(state.dir, 'state.json'), JSON.stringify(state, null, 2), 'utf8');
+  const file = path.join(state.dir, 'state.json');
+  const tmp = path.join(state.dir, `state.json.${process.pid}.tmp`);
+  try {
+    writeFileSync(tmp, JSON.stringify(state, null, 2), 'utf8');
+    for (let attempt = 0; ; attempt++) {
+      try {
+        renameSync(tmp, file);
+        return;
+      } catch (err: unknown) {
+        if (attempt >= RENAME_RETRIES - 1 || !isSharingViolation(err)) throw err;
+        pause(RENAME_PAUSE_MS);
+      }
+    }
+  } catch (err: unknown) {
+    // The temp file is this process's litter and must not outlive the failure.
+    // Its own removal failing is not worth reporting over the real error.
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      // Nothing to do, and nothing this can usefully say.
+    }
+    throw err;
+  }
 }
 
 /**
@@ -384,7 +515,38 @@ export function saveState(state: RunState): void {
 const ACTIVITY_WRITE_MS = 5_000;
 
 /** Boundary sources, which say something the write throttle must not swallow. */
-const UNTHROTTLED: readonly ActivityObservation['source'][] = ['start', 'end', 'final'];
+const UNTHROTTLED: readonly ActivityObservation['source'][] = ['start', 'end', 'final', 'failed'];
+
+/**
+ * Fold what the live turns have spent into the run's in-flight record.
+ *
+ * Upsert only: an entry is replaced by its own turn's later figure and removed
+ * by nothing here. Removal belongs to the accounting - `applyCharge`,
+ * `chargeFailure`, recovery, forced release - which is what makes a surviving
+ * entry mean "the process died before its accounting ran" (#77). A heartbeat
+ * that dropped entries would be a second rule about when an entry ends, and the
+ * whole design has one.
+ *
+ * Keyed by label plus provider, which is unique among live turns: the only
+ * concurrency is `withConcurrentCompaction`, pairing Claude `compact` with a
+ * Codex critique or review, so the pair differs on both axes.
+ */
+function mergeInFlight(state: RunState, turns: readonly InFlightTurn[]): void {
+  if (turns.length === 0) return;
+  const list = state.inFlight ?? [];
+  for (const turn of turns) {
+    const existing = list.find((e) => e.label === turn.label && e.provider === turn.provider);
+    if (existing === undefined) {
+      list.push({ ...turn });
+      continue;
+    }
+    // Replaced, never added: the figure is this turn's running total, not a
+    // delta, so summing would multiply what the turn actually spent.
+    if (turn.tokens === undefined) delete existing.tokens;
+    else existing.tokens = turn.tokens;
+  }
+  state.inFlight = list;
+}
 
 /**
  * Record that the current turn is alive, for a watcher reading state.json from
@@ -403,6 +565,11 @@ const UNTHROTTLED: readonly ActivityObservation['source'][] = ['start', 'end', '
  * `lastActivityAt` is the exception, and is monotonic: "when vibe last observed
  * anything at all" is a fact about the run, and it is what remains readable
  * between turns, when the other two are describing nothing.
+ *
+ * `observation.turns` rides the same write rather than opening a second cadence
+ * (#77): the in-flight amounts are persisted exactly as often as the timestamps
+ * already are, plus the two exemptions the throttle now makes - `'failed'`, and
+ * the first observation on which a turn's figure becomes non-zero.
  */
 export function markActivity(state: RunState, observation: ActivityObservation): void {
   const previous = state.lastActivityAt === undefined ? NaN : Date.parse(state.lastActivityAt);
@@ -410,14 +577,26 @@ export function markActivity(state: RunState, observation: ActivityObservation):
 
   if (
     !UNTHROTTLED.includes(observation.source) &&
+    observation.urgent !== true &&
     Number.isFinite(previous) &&
     at - previous < ACTIVITY_WRITE_MS
   ) {
     return;
   }
 
+  if (observation.turns !== undefined) mergeInFlight(state, observation.turns);
+
   if (!Number.isFinite(previous) || at > previous) {
     state.lastActivityAt = observation.at.toISOString();
+  }
+
+  // A failed turn records what it spent and nothing else. `lastOutputAt` and
+  // `turnStartedAt` describe turns that are *running*, and `withHeartbeat` has
+  // always refused to record a completed-turn output time for a turn the adapter
+  // rejected; `stop()` recomputes both for whatever is still live a moment later.
+  if (observation.source === 'failed') {
+    saveState(state);
+    return;
   }
   // Taken from the observation, not the clock: a skipped write delays the value
   // without ever making it claim a child was quieter than it was.

@@ -362,6 +362,11 @@ test('applying a charge cannot yield, so nothing can interleave inside it', asyn
     applyCharge(state, config(), {
       costUsd: null,
       tokens: 500,
+      // Stated since #77, where the share used to be inferred from a null cost.
+      // Nothing about what this case asserts changes: it is still one charge
+      // with no await in it.
+      provider: 'codex',
+      label: 'critique-0',
       event: { type: 'codex_turn', data: { label: 'critique-0', tokens: 500 } },
       describe: () => 'critique-0: charged',
       warnings: [],

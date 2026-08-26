@@ -2,6 +2,7 @@ import { readFileSync, existsSync, renameSync } from 'node:fs';
 import path from 'node:path';
 import { applyOverrides, configDiff, EFFORTS, loadConfig } from '@src/config.js';
 import {
+  allocateRun,
   artifact,
   createRun,
   listRuns,
@@ -12,6 +13,10 @@ import {
   verificationCaveat,
   verificationIncomplete,
 } from '@src/run.js';
+import type { AllocatedRun } from '@src/run.js';
+import { acquireLock, describeLiveness } from '@src/lock.js';
+import type { Liveness, LockHandle } from '@src/lock.js';
+import { assertUsableRunId } from '@src/stored.js';
 import { Escalation, EXIT, orchestrate, writeEscalation } from '@src/orchestrator.js';
 import type { ExitCode } from '@src/orchestrator.js';
 import {
@@ -25,7 +30,7 @@ import { claudeBin, setSessionArgs } from '@src/claude.js';
 import { codexBin } from '@src/codex.js';
 // The accounting seam, from the leaf it lives in: orchestrator.js re-exports
 // applyCharge but not fmtTokens, and charge.js imports nothing that imports this.
-import { applyCharge, fmtTokens } from '@src/charge.js';
+import { applyCharge, fmtTokens, takeInFlight } from '@src/charge.js';
 import { preflight, REAL_PROBES } from '@src/preflight.js';
 import type { PreflightProbes, PreflightReport } from '@src/preflight.js';
 import { closeCodexRateLimits, describeLimits, readCodexRateLimits } from '@src/ratelimits.js';
@@ -42,7 +47,7 @@ vibe - automated plan/critique/implement/review loop (Claude Code + Codex)
 Usage
   vibe run "<task>" [options]      Plan, critique to zero P1s, implement, review to zero P1s
   vibe plan "<task>" [options]     Stop after the plan is approved; do not implement
-  vibe resume <run-id>             Continue a run that stopped for input
+  vibe resume <run-id> [--force]   Continue a run that stopped for input
   vibe list                        Show runs in this repo
   vibe doctor                      Verify both CLIs and the environment
 
@@ -88,6 +93,9 @@ Options
   --verify-runs <n>          Times it must pass (default: 3; catches races)
   --no-verify                Do not run the verification gates
   --skip-probe               Skip the agent environment preflight
+  --force                    Resume a run whose lock says another process may still
+                             own it. Reports what that process had spent but charges
+                             none of it: a forced resume cannot tell whose it is
   -h, --help
 
 Exit codes
@@ -126,6 +134,7 @@ interface ParsedArgs {
     noCodexSession?: boolean;
     blockingQuestionsOnly?: boolean;
     skipProbe?: boolean;
+    force?: boolean;
     noVerify?: boolean;
     verifyCommand?: string;
     verifyRuns?: number;
@@ -219,6 +228,10 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       case '--no-codex-session': out.flags.noCodexSession = true; break;
       case '--blocking-questions-only': out.flags.blockingQuestionsOnly = true; break;
       case '--skip-probe': out.flags.skipProbe = true; break;
+      // Not a config setting and deliberately absent from `buildOverrides`: it
+      // describes one invocation's willingness to take a lock, not anything the
+      // run should carry forward into the next resume.
+      case '--force': out.flags.force = true; break;
       case '--no-verify': out.flags.noVerify = true; break;
       case '--verify-command': out.flags.verifyCommand = next(); break;
       case '--verify-runs': out.flags.verifyRuns = nextNum(); break;
@@ -307,20 +320,62 @@ async function cmdRun(args: readonly string[], planOnly: boolean): Promise<ExitC
 
   const targetDir = path.resolve(flags.cwd ?? process.cwd());
   const cfg = loadConfig(targetDir, buildOverrides(flags));
-  const state = createRun(targetDir, task, planOnly);
-  // Persist the effective settings so resume continues on them.
-  state.config = cfg;
-  saveState(state);
 
+  // Read before anything is created. A missing context file used to be found two
+  // state writes into a run that then existed on disk, half-configured, for the
+  // user to notice and delete; now nothing has been made yet (#77).
+  let extraContext: string | null = null;
   if (flags.context !== undefined) {
     const file = path.resolve(flags.context);
     if (!existsSync(file)) {
       log.fail(`Context file not found: ${file}`);
       return EXIT.ERROR;
     }
-    state.extraContext = readFileSync(file, 'utf8');
+    extraContext = readFileSync(file, 'utf8');
   }
-  saveState(state);
+
+  // Allocate, lock, then initialise - in that order, and it is load-bearing.
+  // The directory has to exist before the lock can live in it, and the first
+  // state write has to happen inside the lock and carry the config and the
+  // context, so that a kill anywhere in here leaves either no state at all or a
+  // complete one. The old order wrote three times and a kill between the first
+  // and the last left a resumable run whose settings were silently the defaults.
+  const allocated = allocateRun(targetDir, task);
+  const { ok, verdict, handle } = acquireLock(allocated.dir, allocated.id, false);
+  if (!ok || handle === null) {
+    // A fresh run id colliding with a live lock means the clock went backwards
+    // or two runs started in the same second on the same slug; either way this
+    // must not become a second writer.
+    log.fail(`Run ${allocated.id} is already locked: ${describeLiveness(verdict)}`);
+    return EXIT.ERROR;
+  }
+
+  try {
+    return await startRun(targetDir, task, planOnly, cfg, allocated, extraContext, flags, handle);
+  } finally {
+    // Every path out, including the ones that never reach `execute`: the throws
+    // from `loadConfig`-adjacent work, an escalation, or an ordinary return.
+    handle.release();
+  }
+}
+
+/**
+ * The run itself, once the lock is held.
+ *
+ * Split from `cmdRun` only so the `finally` that releases the lock wraps
+ * everything after acquisition without indenting the whole command.
+ */
+async function startRun(
+  targetDir: string,
+  task: string,
+  planOnly: boolean,
+  cfg: Config,
+  allocated: AllocatedRun,
+  extraContext: string | null,
+  flags: ParsedArgs['flags'],
+  handle: LockHandle,
+): Promise<ExitCode> {
+  const state = createRun(targetDir, task, planOnly, { allocated, config: cfg, extraContext });
 
   log.attachTranscript(path.join(state.dir, 'transcript.log'));
   log.heading(`Run ${state.id}`);
@@ -369,7 +424,7 @@ async function cmdRun(args: readonly string[], planOnly: boolean): Promise<ExitC
     );
   }
 
-  return execute(state, cfg, false, flags.skipProbe === true);
+  return execute(state, cfg, false, flags.skipProbe === true, runPreflight, orchestrate, handle);
 }
 
 /**
@@ -426,6 +481,54 @@ async function cmdResume(args: readonly string[]): Promise<ExitCode> {
     return EXIT.ERROR;
   }
 
+  // Before `loadRun`, and that ordering is the whole point of the lock living
+  // here rather than in `execute` (#77). `loadRun` writes: it records repairs as
+  // events and ensures the ignore file, and `resumeConfig` writes the effective
+  // config straight after. A resume that asked permission only once it reached
+  // `execute` would already have rewritten a run another process was driving.
+  //
+  // The id is constrained before it becomes a path, exactly as `loadRun` does
+  // it, so a traversal attempt cannot cause a lock file to be written outside
+  // the runs root. A run with no state.json takes no lock at all and falls
+  // through to `loadRun`, whose error already says what is wrong.
+  const runsRoot = path.join(targetDir, '.vibe', 'runs');
+  assertUsableRunId(id, runsRoot);
+  const runDir = path.join(runsRoot, id);
+  if (!existsSync(path.join(runDir, 'state.json'))) {
+    // No lock, and no new message: `loadRun` already refuses this by name, and
+    // writing a lock into a directory that holds no run would leave litter.
+    loadRun(targetDir, id);
+  }
+
+  const { ok, verdict, handle } = acquireLock(runDir, id, flags.force === true);
+  if (!ok || handle === null) {
+    log.fail(`Run ${id} cannot be resumed: ${describeLiveness(verdict)}`);
+    log.info(
+      'Nothing was read or written. If that process is genuinely gone, resume with --force - ' +
+        'which reports what it had spent but charges none of it.',
+    );
+    return EXIT.ERROR;
+  }
+  if (handle.forced) {
+    log.warn(`--force: took the lock anyway. It was ${describeLiveness(verdict)}`);
+  }
+
+  try {
+    return await resumeRun(targetDir, id, flags, handle);
+  } finally {
+    // Covers the no-answers early return and every throw between here and the
+    // end of `execute`, which is why acquisition and this sit in one function.
+    handle.release();
+  }
+}
+
+/** The resume itself, once the lock is held. Mirrors `startRun`. */
+async function resumeRun(
+  targetDir: string,
+  id: string,
+  flags: ParsedArgs['flags'],
+  handle: LockHandle,
+): Promise<ExitCode> {
   const state = loadRun(targetDir, id);
   const stored = state.config;
   const cfg = resumeConfig(targetDir, state, flags);
@@ -445,7 +548,7 @@ async function cmdResume(args: readonly string[]): Promise<ExitCode> {
       log.info('Previous stop reported findings, not questions - continuing with raised limits.');
       renameSync(answersFile, path.join(state.dir, `stalled-${state.planRound}.md`));
       log.heading(`Resuming ${state.id}`);
-      return execute(state, cfg, true, flags.skipProbe === true);
+      return execute(state, cfg, true, flags.skipProbe === true, runPreflight, orchestrate, handle);
     }
 
     const answers = parseHumanAnswers(raw);
@@ -463,7 +566,7 @@ async function cmdResume(args: readonly string[]): Promise<ExitCode> {
   }
 
   log.heading(`Resuming ${state.id}`);
-  return execute(state, cfg, true, flags.skipProbe === true);
+  return execute(state, cfg, true, flags.skipProbe === true, runPreflight, orchestrate, handle);
 }
 
 /**
@@ -550,6 +653,147 @@ function reportRoles(cfg: Config): void {
   for (const warning of roleWarnings(cfg)) log.warn(warning);
 }
 
+/**
+ * What this process found waiting for it, and what it did about it (#77).
+ *
+ * In memory and never persisted. A stored "this total is incomplete" flag would
+ * have no owner to clear it and is the state-history question #78 owns; the
+ * events (`recovered_spend`, `interrupted_turn`, `forced_release`) are the
+ * durable record, and this is how one run tells its user.
+ */
+interface RecoveryReport {
+  /** Claude turns whose observed spend this process charged. */
+  recovered: { label: string; tokens: number }[];
+  /** Turns that were interrupted with no figure anyone can attribute. */
+  unattributed: { label: string; provider: 'claude' | 'codex' }[];
+  /** Amounts a forced resume cleared without charging. */
+  released: { label: string; provider: 'claude' | 'codex'; tokens: number | null }[];
+}
+
+function emptyRecovery(): RecoveryReport {
+  return { recovered: [], unattributed: [], released: [] };
+}
+
+function anyRecovery(r: RecoveryReport): boolean {
+  return r.recovered.length > 0 || r.unattributed.length > 0 || r.released.length > 0;
+}
+
+/**
+ * Charge what the last process spent and never paid for.
+ *
+ * An in-flight entry that outlived its process is spend no `catch` ever settled:
+ * every in-process outcome disposes of its own entry in the write that records
+ * it, so anything still here means the process died before its accounting ran.
+ *
+ * Iterates a **snapshot**, because `applyCharge` and the unattributed path both
+ * remove from `state.inFlight` as they go, and walking the live array would skip
+ * the entry after each removal - a concurrent Claude/Codex pair would leave one
+ * of them unreported. The snapshot says that outright where an index trick
+ * would leave the next reader to work it out.
+ *
+ * The report is filled *before* each charge, so a ceiling that ends the resume
+ * mid-walk still leaves the caller something true to print.
+ */
+function recoverInterrupted(state: RunState, cfg: Config, report: RecoveryReport): void {
+  const entries = [...(state.inFlight ?? [])];
+  for (const entry of entries) {
+    if (entry.provider === 'claude' && (entry.tokens ?? 0) > 0) {
+      const tokens = entry.tokens ?? 0;
+      report.recovered.push({ label: entry.label, tokens });
+      // Through `applyCharge` so the ceilings run - including when that ends
+      // the resume before it has done anything, which is correct and is the
+      // point: the run really has spent that much. `costUsd` stays null because
+      // Claude reports no cost until a turn ends, and this turn never did.
+      applyCharge(state, cfg, {
+        costUsd: null,
+        tokens,
+        provider: 'claude',
+        label: entry.label,
+        event: {
+          type: 'recovered_spend',
+          data: { label: entry.label, provider: 'claude', tokens, tokensFrom: 'stream' },
+        },
+        describe: () =>
+          `recovered ${fmtTokens(tokens)} tok from the interrupted "${entry.label}" turn ` +
+          `(run ${fmtTokens(state.tokensUsed)} tok / ~$${state.costUsd.toFixed(2)})`,
+        warnings: [],
+      });
+      continue;
+    }
+
+    // Nothing to charge: a Codex turn, which reports no usage until it ends, or
+    // a Claude turn killed before it said anything. Removed *before* the event
+    // so `recordEvent`'s save carries both - split in two, a kill between them
+    // would either repeat the event or lose it.
+    report.unattributed.push({ label: entry.label, provider: entry.provider });
+    takeInFlight(state, entry.label, entry.provider);
+    recordEvent(state, 'interrupted_turn', {
+      label: entry.label,
+      provider: entry.provider,
+      tokens: null,
+    });
+  }
+}
+
+/**
+ * Report what a forced resume found, and clear it without charging.
+ *
+ * Forcing is the declaration that vibe cannot tell whether another process still
+ * owns these amounts - a live pid on this host, or a foreign host it cannot
+ * probe. An amount that cannot be attributed is not charged; that is the rule
+ * that makes Codex cost null rather than estimated. It is not kept either: the
+ * record is keyed by label plus provider, the resumed phase reuses the same
+ * labels, and the first turn under one of them would overwrite the amount and
+ * the charge after it would clear the key - so "we will get it next time" is a
+ * promise this key cannot keep. Reported, not charged, not kept.
+ */
+function releaseForced(state: RunState, verdict: Liveness, report: RecoveryReport): void {
+  const entries = [...(state.inFlight ?? [])];
+  if (entries.length === 0) return;
+  for (const entry of entries) {
+    report.released.push({
+      label: entry.label,
+      provider: entry.provider,
+      tokens: entry.tokens ?? null,
+    });
+  }
+  // Cleared then recorded, in one save, for `recoverInterrupted`'s reason.
+  delete state.inFlight;
+  recordEvent(state, 'forced_release', {
+    verdict,
+    turns: entries.map((e) => ({ label: e.label, provider: e.provider, tokens: e.tokens ?? null })),
+  });
+}
+
+/** The recovery facts, said once, in the words each case has earned. */
+function reportRecovery(report: RecoveryReport): void {
+  for (const { label, tokens } of report.recovered) {
+    log.warn(
+      `Recovered: ${fmtTokens(tokens)} tok from "${label}", killed before it was charged. ` +
+        'Its cost is not in the dollar figure - Claude reports none until a turn ends.',
+    );
+  }
+  for (const { label, provider } of report.unattributed) {
+    log.warn(
+      provider === 'codex'
+        ? `Unattributed: the "${label}" Codex turn was interrupted; its tokens are in no total - ` +
+            'Codex reports no usage until a turn ends.'
+        : `Unattributed: the "${label}" Claude turn was interrupted before any usage was ` +
+            'observed; nothing could be recovered for it.',
+    );
+  }
+  for (const { label, tokens } of report.released) {
+    log.warn(
+      (tokens === null
+        ? `Not charged: the "${label}" turn was interrupted and what it spent was never observed`
+        : `Not charged: ${fmtTokens(tokens)} tokens were observed by the interrupted process ` +
+          `("${label}")`) +
+        ', and none of it was charged, because a forced resume cannot tell whether another ' +
+        'process still owns it.',
+    );
+  }
+}
+
 export async function execute(
   state: RunState,
   cfg: Config,
@@ -557,18 +801,54 @@ export async function execute(
   skipProbe = false,
   preflightGate: PreflightGate = runPreflight,
   loop: RunLoop = orchestrate,
+  /**
+   * The run's lock, acquired by the command. Trailing and optional so every
+   * existing positional call site compiles unchanged, and so a test that drives
+   * `execute` directly holds no lock, exactly as before.
+   *
+   * `execute` acquires nothing and releases nothing - the command owns the
+   * lifetime, which is what lets it cover the paths that never reach here. What
+   * is read from it is the verdict, which decides whether this process may
+   * charge what it found or only report it.
+   */
+  lock?: LockHandle,
 ): Promise<ExitCode> {
   const started = Date.now();
+  const recovery = emptyRecovery();
+  let reported = false;
+  /** Print the recovery facts exactly once, whichever way this exits. */
+  const flushRecovery = (): void => {
+    if (reported) return;
+    reported = true;
+    if (anyRecovery(recovery)) reportRecovery(recovery);
+  };
 
   reportRoles(cfg);
 
   try {
+    // After the lock and before preflight: this is spend that has already
+    // happened, and the ceilings have to see it before the run buys anything
+    // more. A forced lock reports instead of charging - see `releaseForced`.
+    if (lock !== undefined && lock.forced) {
+      releaseForced(state, lock.verdict.liveness, recovery);
+    } else {
+      recoverInterrupted(state, cfg, recovery);
+    }
+    flushRecovery();
+
     // Inside the try, not above it: preflight now charges what its probes spent,
     // so it can raise the same budget Escalation a turn can, and that belongs in
     // the one handler that reports an escalation rather than escaping uncaught.
     if (!skipProbe) {
       const gate = await preflightGate(state, cfg);
-      if (gate !== null) return gate;
+      if (gate !== null) {
+        // Summarised, where it used to return in silence. The probes have
+        // already been charged through `chargePreflight`, and after a recovery
+        // there may be a caveat owed as well: a run that exits owing a number
+        // should say what the number is, wherever it exits (#77).
+        summary(state, started, recovery);
+        return gate;
+      }
     }
 
     await loop(state, cfg, resume);
@@ -618,9 +898,14 @@ export async function execute(
     reportGates(state);
     reportReviewCoverage(state);
     reportDeferred(state);
-    summary(state, started);
+    summary(state, started, recovery);
     return incomplete === null ? EXIT.OK : EXIT.UNVERIFIED;
   } catch (err) {
+    // First thing in the handler, so it precedes the summary on this path too.
+    // A ceiling raised from inside the recovery walk itself lands here with the
+    // report holding what was recovered before it fired, which is the case the
+    // one-shot guard exists for: the walk's own flush never ran.
+    flushRecovery();
     if (err instanceof Escalation) {
       state.status = err.code === EXIT.NEEDS_HUMAN ? 'needs-input' : 'stalled';
       // recordEvent persists, so the status and the event that explains it land
@@ -631,15 +916,20 @@ export async function execute(
       log.warn(err.message);
       log.info(`Details: ${file}`);
       log.info(`Resume:  vibe resume ${state.id}`);
-      summary(state, started);
+      summary(state, started, recovery);
       return err.code;
     }
     state.status = 'error';
     recordEvent(state, 'error', { message: err instanceof Error ? err.message : String(err) });
     log.heading('Failed');
     log.fail(err instanceof Error ? (err.stack ?? err.message) : String(err));
-    summary(state, started);
+    summary(state, started, recovery);
     return EXIT.ERROR;
+  } finally {
+    // The backstop. Both sites above run before any summary, so this only fires
+    // for an exit neither of them covers - and it must still fire, because the
+    // facts are the point and losing them to an unfamiliar path is the defect.
+    flushRecovery();
   }
 }
 
@@ -786,11 +1076,18 @@ export function chargePreflight(state: RunState, cfg: Config, report: PreflightR
 
     try {
       applyCharge(state, cfg, {
-        // Straight through the existing routing: Claude reports a cost, Codex
-        // reports none, so Codex's tokens land in codexTokens exactly as a Codex
-        // turn's do. No second rule.
+        // Each probe's tokens land in that agent's share, which is where they
+        // landed before the routing was stated rather than inferred from the
+        // cost being null (#77) - Claude reports a cost, Codex reports none, so
+        // the old proxy and this agree for every probe either of them produces.
+        // The difference is that this keeps agreeing if a Claude probe ever
+        // returns no cost figure, where the proxy would have filed it as Codex's.
         costUsd: usage.costUsd,
         tokens: usage.tokens,
+        provider,
+        // Preflight runs without a heartbeat, so there is no in-flight record to
+        // dispose of; the label names the charge in the log and nothing else.
+        label: `preflight-${provider}`,
         event: {
           type: 'preflight_probe',
           data: {
@@ -932,13 +1229,21 @@ function reportDeferred(state: RunState): void {
   log.info(`  Detail: ${file}`);
 }
 
-function summary(state: RunState, started: number): void {
+function summary(state: RunState, started: number, recovery?: RecoveryReport): void {
   const mins = ((Date.now() - started) / 60000).toFixed(1);
   log.info(`Run:      ${state.id}  (${state.status})`);
   // Split by agent rather than printing one total beside one dollar figure: the
   // cost covers only the Claude share, and a single line implied it covered all.
   const codex = state.codexTokens ?? 0;
-  log.info(`Work:     ${state.tokensUsed.toLocaleString()} tokens, ${mins} min`);
+  // A total this run knows to be missing something says so where the total is,
+  // not only in a warning further up: a recovered Claude turn's cost is absent
+  // from the dollar figure, an interrupted Codex turn's tokens are in no total
+  // at all, and a forced resume charged none of what it found (#77).
+  const incomplete = recovery !== undefined && anyRecovery(recovery);
+  log.info(
+    `Work:     ${state.tokensUsed.toLocaleString()} tokens, ${mins} min` +
+      (incomplete ? '  (incomplete - see above)' : ''),
+  );
   log.info(
     `          Claude ${(state.tokensUsed - codex).toLocaleString()} tok ` +
       `(~$${state.costUsd.toFixed(2)} API-equivalent)`,
@@ -982,7 +1287,12 @@ function cmdList(args: readonly string[]): ExitCode {
   for (const r of runs) {
     // A cost that could not be read prints as unknown rather than as money.
     const cost = r.costUsd === null ? '     ?' : `$${r.costUsd.toFixed(2)}`;
-    console.log(`  ${r.id.padEnd(52)} ${r.status.padEnd(12)} ${cost}`);
+    // Every row carries a verdict, `not running` included: a blank would be
+    // indistinguishable from a version that cannot tell, and `unknown` is a real
+    // answer here - a foreign host or an unreadable lock - not a missing one. An
+    // absent value renders as `unknown` for the same reason (#77).
+    const live = (r.liveness ?? 'unknown').replace('-', ' ');
+    console.log(`  ${r.id.padEnd(52)} ${r.status.padEnd(12)} ${cost}  ${live}`);
     console.log(log.dim(`    ${r.task}`));
   }
   return EXIT.OK;

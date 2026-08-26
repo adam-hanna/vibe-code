@@ -458,6 +458,53 @@ test('a run under its ceiling still waits and retries exactly as it did', async 
   assert.equal(state.costUsd, 0.03);
 });
 
+test('a first attempt that only the stream saw is charged, and the retry adds its own', async () => {
+  // The case that made the in-flight record need disposing rather than keeping
+  // (#77). The first attempt reports usage on the stream and then fails with
+  // nothing attached - a timeout, a killed child, a rejected payload - so the
+  // provider figure is absent and vibe's own observation is all there is. The
+  // retry runs under the SAME label, so if the failure left its record behind,
+  // the retry's heartbeat would overwrite the amount and the retry's charge
+  // would clear the key: the first attempt's spend would vanish with no error
+  // anywhere. Charging it at the failure is what closes that.
+  const state = freshState();
+  const cfg = config({ budget: { ...DEFAULTS.budget, maxWaitMinutes: 0.005 } });
+  let calls = 0;
+  const claude = (options: ClaudeTurnOptions): Promise<ClaudeTurnResult> => {
+    calls += 1;
+    if (calls === 1) {
+      // What the heartbeat had persisted by the time the attempt died.
+      state.inFlight = [{ label: 'plan', provider: 'claude', tokens: 6_000 }];
+      return Promise.reject(new RateLimitError('usage limit reached', null));
+    }
+    return Promise.resolve({
+      text: 'claude said so',
+      costUsd: 0.02,
+      sessionId: options.sessionId,
+      denials: [],
+      numTurns: 1,
+      usage: null,
+      tokens: tokens(2_000),
+    });
+  };
+
+  const { result } = await captureLog(() =>
+    runTurn(state, cfg, request('planner', { label: 'plan' }), { ...forbidden(), claude }),
+  );
+
+  assert.equal(result.text, 'claude said so');
+  assert.equal(calls, 2);
+  // Each attempt once: 6,000 observed on the first, 2,000 reported by the second.
+  assert.equal(state.tokensUsed, 8_000);
+  assert.equal(state.costUsd, 0.02, 'the failed attempt reported no cost, and none was invented');
+  assert.equal(state.codexTokens, undefined, 'a Claude turn, cost figure or not');
+  const failed = state.events.find((e) => e.type === 'turn_failed');
+  assert.equal(failed?.['tokensFrom'], 'stream');
+  assert.equal(failed?.['tokens'], 6_000);
+  // Nothing owing: the run ends with no record for anything to charge twice.
+  assert.equal(state.inFlight, undefined);
+});
+
 test('a rate limit with nothing to charge is still retried, not stopped', async () => {
   // The pre-turn Codex limit check raises a RateLimitError before anything has
   // been spent. It must reach the existing policy branches untouched.

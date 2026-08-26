@@ -149,13 +149,43 @@ review: 2m03s · 14 events · command_execution
 
 Every segment except elapsed time is omitted when the stream did not supply it, which is why the sparser Codex line is shorter — partial information beats an invented number. `ctx%` needs a context window, which only a *completed* turn reports — an ordinary turn or a session-rotation turn, whichever comes first — so it appears from the second Claude turn of a process onward, or from the first on a resumed run whose stored window was measured under the same model, and is omitted entirely after a `--claude-model` change until a turn under the new model has measured one. The heartbeat is also driven by a timer, not only by arriving events, because a long silent reasoning block emits nothing at all and silence was the whole problem.
 
-It is a plain appended line, never a repainting one: runs are expected to be unattended and piped to a log. The same clock writes `lastActivityAt` into `state.json` — advancing even through silence, since vibe is still watching the turn — alongside `lastOutputAt`, the last line the agent actually wrote. The pair separates "thinking" from "gone" without inspecting the process table.
+It is a plain appended line, never a repainting one: runs are expected to be unattended and piped to a log. The same clock writes `lastActivityAt` into `state.json` — advancing even through silence, since vibe is still watching the turn — alongside `lastOutputAt`, the last line the agent actually wrote. The pair separates "working quietly" from "not saying anything", which is a fact about output and not a verdict about life: **whether a run is still alive is answered by its lock, not by its timestamps** — see [Is this run still alive?](#is-this-run-still-alive) below. A threshold over these fields cannot answer it, because a healthy run is routinely silent for a long time: the verification gate runs your test command three times at up to fifteen minutes each, entirely outside any heartbeat.
 
 **`turnStartedAt` and `lastOutputAt` describe the turn running now, not the run.** A turn boundary rebases them and clears `lastOutputAt`; without that, a turn that died before its first line left the previous turn's timestamps in place and a watcher read a finished turn's pulse as current work. `lastOutputAt` is flushed at the end of a turn only when the adapter *accepted* that turn's output — for these CLIs that means a complete `result` envelope or a schema-conformant output file, not a zero exit status, since a bad exit beside a good payload is teardown failing after the work was done, and it is logged rather than throwing the turn away.
 
 Compaction can overlap a rotation turn with a Codex turn, so two turns are occasionally live. Both fields are then recomputed across the live turns on every observation: `turnStartedAt` is the most recently started one, `lastOutputAt` the most recent line from either, and when the rotation finishes they fall back to the Codex turn still running rather than leaving a completed turn's output standing as the live turn's progress. `lastActivityAt` is the exception and only advances — it is about the run, so it stays readable between turns, when the other two still describe the turn that just ended. All three are maintained only while progress is enabled.
 
 `--no-progress` turns the output off; `--progress-interval <sec>` changes the cadence. No compaction or rotation behaviour changes.
+
+## Is this run still alive?
+
+A run holds `run.lock` in its own run directory while it works, naming the pid, the host and when it started. `vibe list` prints a verdict per run, and `vibe resume` acts on it:
+
+| what the lock says | verdict | `vibe resume` |
+|---|---|---|
+| no lock | **not running** | proceeds |
+| this host, pid alive | **running** | refused |
+| this host, pid gone | **interrupted** | proceeds, and recovers what that process spent |
+| another host | **unknown** | refused — vibe cannot read another machine's process table |
+| unreadable | **unknown** | refused — an unreadable lock cannot rule out a live process |
+
+The pid probe sends no signal; it only asks whether the process exists. **Pid reuse is not solved**: a recycled pid makes a dead run read as *running* and refuses a resume that should have been allowed. That is the safe direction — the alternative is two processes writing one run — and `--force` is the way out. Ctrl-C leaves the lock behind with a pid that is now dead, which reads as *interrupted*, which is exactly what happened.
+
+A refusal prints who holds the lock and, where the run kept the liveness timestamps, how long it has been since vibe observed anything. That figure is stated as an observation and never as a verdict, for the reason above.
+
+### What a resume can recover, and what it cannot
+
+A killed turn has usually spent real money that nothing ever charged: on the run that prompted this, an implementation turn spent 17.4M tokens and the process died before the accounting ran. vibe watches its own stream, so it knows the figure — the heartbeat's running total is now the same arithmetic the finished turn reports, deduplicated by message id — and it persists it beside the liveness timestamps. On the next resume, that spend is charged, the ceilings see it, and the summary says so.
+
+What it cannot recover is stated rather than estimated:
+
+- **A killed Claude turn's cost.** Claude reports no dollar figure until the turn ends, and there is none anywhere else, so the tokens are charged and the cost is absent.
+- **An interrupted Codex turn's tokens, entirely.** `codex exec --json` reports usage only on `turn.completed`, so there is nothing to observe in flight. The turn is named in the summary as unattributed; no total moves.
+- **Up to five seconds of a turn killed between two writes.** The record rides the existing five-second write, so the recovered figure is the last one observed. It is an under-count, never an over-count, and the first figure a turn produces is written immediately so an early kill is not recorded as a zero.
+
+**`--force` reports what it finds and charges none of it.** Forcing is the declaration that vibe cannot tell whether the other process is still alive and still owns those amounts, and an amount that cannot be attributed is not charged — the same rule that makes Codex cost absent rather than estimated. The figures are printed with the reason they were not charged, and then cleared. If you know the run is dead and want that spend counted, delete `run.lock` by hand and resume normally: that is the route that keeps it.
+
+A run whose progress heartbeat is off (`--no-progress`) observes none of this, so there is nothing for it to recover. The lock and the verdict work exactly the same.
 
 ## The verification gates
 

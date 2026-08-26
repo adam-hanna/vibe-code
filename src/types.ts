@@ -1,5 +1,6 @@
 import type { RoleProviders } from '@src/roles.js';
 import type { EnvironmentFacts, ToolchainContract } from '@src/runtime.js';
+import type { Liveness } from '@src/lock.js';
 
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
@@ -684,6 +685,25 @@ export interface ReviewCoverage {
   truncated: string[];
 }
 
+/**
+ * One turn's observed-but-uncharged spend. See `RunState.inFlight`.
+ *
+ * Keyed by `label` plus `provider` wherever it is looked up, which is unique
+ * among live turns: the only concurrency is `withConcurrentCompaction`, and it
+ * pairs Claude's `compact` with a Codex critique or review turn, so the pair
+ * differs on both axes.
+ *
+ * `tokens` absent means the provider reports no figure while a turn is in
+ * flight, which is true of Codex: its stream carries usage only on
+ * `turn.completed`, so a killed Codex turn has no number to recover and is
+ * recorded as a known unknown rather than as a zero.
+ */
+export interface InFlightTurn {
+  label: string;
+  provider: 'claude' | 'codex';
+  tokens?: number;
+}
+
 export interface RunEvent {
   at: string;
   type: string;
@@ -721,6 +741,27 @@ export interface RunState {
    * Optional so runs recorded before Codex usage was read still load.
    */
   codexTokens?: number;
+  /**
+   * Turns whose spend has been observed but not yet charged (#77).
+   *
+   * **An amount observed, never a claim that a turn is running.** That
+   * distinction is load-bearing: `src/progress.ts` keeps the live-turn set in
+   * memory only, because a persisted liveness record left behind by a killed
+   * process would assert that a turn is running when none is. Liveness is the
+   * run lock's job (`src/lock.ts`); this is accounting.
+   *
+   * **One lifetime rule, and only one.** An entry lives from its turn's first
+   * observation until the next accounting decision touches it - a charge, a
+   * failure, a recovery, or a forced release - and every one of those disposes
+   * of it in the same `saveState` that records what it decided. So an entry
+   * still here when a process starts means the last process died before
+   * reaching that turn's accounting, and recovery never has to guess. Nothing
+   * may add a second rule: a sealed or protected entry would be one that
+   * survives its own disposal, and the sentence above would stop being true.
+   *
+   * Optional so every state written before this existed loads with no repair.
+   */
+  inFlight?: InFlightTurn[];
   /**
    * Codex's rate-limit window as last read from app-server, so the summary can
    * report it. Optional: it is absent whenever app-server is unavailable, which
@@ -1062,4 +1103,14 @@ export interface RunSummary {
    * cost is reported as absent, an unknown context window stays null.
    */
   costUsd: number | null;
+  /**
+   * Whether anything is working on this run, from its lock (#77).
+   *
+   * Optional so that a caller building a summary by hand does not have to have
+   * an answer; `cmdList` renders an absent value as `unknown`, which is what an
+   * unasked question and an unanswerable one both amount to on a listing.
+   * `listRuns` always fills it, including for a run whose state.json could not
+   * be read - the lock is a separate file and stays legible when state does not.
+   */
+  liveness?: Liveness;
 }

@@ -101,6 +101,89 @@ test('claude usage accumulates turn tokens and replaces the prompt size', () => 
   assert.equal(snapshot.promptTokens, 1_120);
 });
 
+/**
+ * The duplication the real stream produces, and the reason it matters.
+ *
+ * Claude emits one `assistant` event per content block and repeats the whole
+ * message's usage on each, while the result envelope the turn is charged from
+ * counts it once. Undeduped, the #60 run's killed implement turn summed to
+ * 22,756,746 against the envelope's 17,390,262, and its plan turn overstated by
+ * 99% - so the running figure was not a converging estimate of the charge, it
+ * was a different and wrong number wearing the same name (#77).
+ */
+function usageLine(id: string | null, input: number, output: number): string {
+  return assistantLine({
+    ...(id === null ? {} : { id }),
+    usage: { input_tokens: input, output_tokens: output },
+  });
+}
+
+test('one message id arriving across several assistant events counts once', () => {
+  const snapshot = emptySnapshot();
+
+  // The shape a message with text plus two tool_use blocks produces.
+  parseClaudeLine(snapshot, usageLine('msg_1', 100, 20));
+  parseClaudeLine(snapshot, usageLine('msg_1', 100, 20));
+  parseClaudeLine(snapshot, usageLine('msg_1', 100, 20));
+
+  assert.equal(snapshot.tokens, 120, 'the message is worth what it reported, once');
+  assert.equal(snapshot.promptTokens, 100);
+});
+
+test('distinct message ids accumulate, including interleaved with a repeat', () => {
+  const snapshot = emptySnapshot();
+
+  parseClaudeLine(snapshot, usageLine('msg_1', 100, 20));
+  parseClaudeLine(snapshot, usageLine('msg_2', 200, 30));
+  // Out of order and after another message: the id is what decides, not adjacency.
+  parseClaudeLine(snapshot, usageLine('msg_1', 100, 20));
+  parseClaudeLine(snapshot, usageLine('msg_3', 300, 40));
+
+  assert.equal(snapshot.tokens, 120 + 230 + 340);
+  assert.equal(snapshot.promptTokens, 300, 'the latest request that was counted');
+});
+
+test('a repeat that also carries a tool use still counts the tool use', () => {
+  const snapshot = emptySnapshot();
+
+  parseClaudeLine(snapshot, usageLine('msg_1', 100, 20));
+  const recognised = parseClaudeLine(
+    snapshot,
+    assistantLine({
+      id: 'msg_1',
+      usage: { input_tokens: 100, output_tokens: 20 },
+      content: [{ type: 'tool_use', name: 'Read', input: { file_path: 'a.ts' } }],
+    }),
+  );
+
+  // The activity is per block and genuinely happened; only the usage repeats.
+  assert.equal(recognised, true, 'a repeat is still a recognised assistant event');
+  assert.equal(snapshot.activities, 1);
+  assert.equal(snapshot.lastActivity, 'Read a.ts');
+  assert.equal(snapshot.tokens, 120);
+});
+
+test('a repeat does not move the prompt size either', () => {
+  const snapshot = emptySnapshot();
+
+  parseClaudeLine(snapshot, usageLine('msg_1', 500, 10));
+  parseClaudeLine(snapshot, usageLine('msg_2', 900, 10));
+  parseClaudeLine(snapshot, usageLine('msg_1', 500, 10));
+
+  assert.equal(snapshot.promptTokens, 900, 'the repeat is not the latest request');
+});
+
+test('messages carrying no id are each counted, which is the safe direction', () => {
+  const snapshot = emptySnapshot();
+
+  // The real stream always carries an id. Merging two messages that named none
+  // would undercount a turn, and undercounting spend is the expensive error.
+  parseClaudeLine(snapshot, usageLine(null, 100, 20));
+  parseClaudeLine(snapshot, usageLine(null, 100, 20));
+
+  assert.equal(snapshot.tokens, 240);
+});
+
 test('a claude result event is recognised but changes nothing', () => {
   const snapshot = emptySnapshot();
 
@@ -289,6 +372,8 @@ function harness(
     intervalMs?: number;
     scope?: object;
     clock?: ReturnType<typeof sharedClock>;
+    label?: string;
+    provider?: 'claude' | 'codex';
   } = {},
 ): Harness {
   const lines: string[] = [];
@@ -297,10 +382,14 @@ function harness(
   const clock = over.clock ?? sharedClock();
 
   const heartbeat = createHeartbeat({
-    label: 'plan',
+    label: over.label ?? 'plan',
     intervalMs: over.intervalMs ?? 30_000,
     parse: over.parse ?? parseClaudeLine,
     unit: 'tool use',
+    // Claude by default because the default parser is Claude's: the provider
+    // decides whether an in-flight figure exists at all, so it has to match what
+    // is being parsed rather than be a neutral placeholder (#77).
+    provider: over.provider ?? 'claude',
     now: clock.now,
     emit: (line) => lines.push(line),
     onActivity: (observation) => seen.push(observation),
@@ -440,6 +529,7 @@ test('a throwing sink or a throwing state write does not propagate', () => {
     intervalMs: 1_000,
     parse: parseClaudeLine,
     unit: 'tool use',
+    provider: 'claude',
     now: () => clock,
     emit: () => {
       throw new Error('sink is gone');
@@ -491,6 +581,7 @@ function recordingHeartbeat(): { heartbeat: Heartbeat; calls: string[] } {
       begin: () => calls.push('begin'),
       onLine: () => calls.push('line'),
       flush: () => calls.push('flush'),
+      fail: () => calls.push('fail'),
       stop: () => calls.push('stop'),
     },
   };
@@ -505,7 +596,7 @@ test('withHeartbeat opens the turn, then flushes and stops on a completed turn',
   assert.deepEqual(calls, ['begin', 'flush', 'stop']);
 });
 
-test('withHeartbeat stops but does not flush a turn that failed', async () => {
+test('withHeartbeat fails and stops, but does not flush, a turn that failed', async () => {
   const { heartbeat, calls } = recordingHeartbeat();
 
   await assert.rejects(
@@ -513,7 +604,11 @@ test('withHeartbeat stops but does not flush a turn that failed', async () => {
     /timed out/,
   );
 
-  assert.deepEqual(calls, ['begin', 'stop']);
+  // Still no flush: that records a completed turn's output time, which a turn
+  // that threw has not earned. What is new is `fail`, and its position - before
+  // stop, so the spend this turn observed is persisted while the turn is still
+  // registered, ready for `chargeFailure` to read (#77).
+  assert.deepEqual(calls, ['begin', 'fail', 'stop']);
 });
 
 test('a turn opens the boundary before the child has said anything', () => {
@@ -631,7 +726,13 @@ test('output the adapter rejects is not flushed as a completed turn', async () =
     /no result event/,
   );
 
-  assert.deepEqual(h.seen.map((observation) => observation.source), ['start', 'stdout']);
+  // The claim this case exists for, unchanged: no `'final'`, so nothing here
+  // records a completed turn's output. What is new is `'failed'` (#77), which
+  // records what the turn spent and deliberately touches no timestamp -
+  // `markActivity` returns on that source before `lastOutputAt` is written.
+  const sources = h.seen.map((observation) => observation.source);
+  assert.deepEqual(sources, ['start', 'stdout', 'failed']);
+  assert.ok(!sources.includes('final'), 'a rejected turn is still never flushed');
 });
 
 test('withHeartbeat passes the value through when progress is disabled', async () => {

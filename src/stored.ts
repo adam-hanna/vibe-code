@@ -13,6 +13,7 @@ import type {
   DeferredQuestion,
   Finding,
   GateOutcome,
+  InFlightTurn,
   OpenQuestion,
   OutOfScopeItem,
   PendingFindings,
@@ -981,6 +982,53 @@ function readGateOutcomes(raw: unknown, ctx: ReadContext): GateOutcome[] | undef
 }
 
 /**
+ * Turns observed but not charged, or nothing at all (#77).
+ *
+ * Dropped rather than repaired, for `readReviewCoverage`'s reason one function
+ * down: every field of an entry is load-bearing and none can be reconstructed. A
+ * `label` invented for an entry that lost its own would be charged against a
+ * turn name no run ever ran, and a `tokens` invented as 0 would turn "we never
+ * saw a figure" into "the turn spent nothing" - which is the same fabrication
+ * `codexTokens` and the context window refuse.
+ *
+ * Per-entry, so one damaged entry does not take the readable ones with it, and
+ * an empty survivor list becomes absent: absent is what a run with nothing in
+ * flight looks like, and `[]` would be a second spelling of it for every later
+ * reader to remember.
+ */
+function readInFlight(raw: unknown, ctx: ReadContext): InFlightTurn[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) {
+    ctx.repairs.replaced('inFlight', raw, 'nothing');
+    return undefined;
+  }
+
+  const turns: InFlightTurn[] = [];
+  for (const entry of raw) {
+    const provider = isRecord(entry) ? enumOf(entry['provider'], PROVIDERS) : null;
+    if (!isRecord(entry) || provider === null || !isString(entry['label']) || entry['label'] === '') {
+      ctx.repairs.dropped('inFlight', 'inFlight entry');
+      continue;
+    }
+    const tokens = entry['tokens'];
+    if (tokens !== undefined && !isTotal(tokens)) {
+      // The entry names a real turn, so it is kept: an interrupted turn with no
+      // usable figure is exactly what a Codex entry is, and reporting it as
+      // unattributed is more than dropping it would say.
+      ctx.repairs.dropped('inFlight', `inFlight tokens for "${entry['label']}"`);
+      turns.push({ label: entry['label'], provider });
+      continue;
+    }
+    turns.push({
+      label: entry['label'],
+      provider,
+      ...(tokens === undefined ? {} : { tokens }),
+    });
+  }
+  return turns.length > 0 ? turns : undefined;
+}
+
+/**
  * What the last review round saw, or nothing at all.
  *
  * Dropped rather than repaired, which is the opposite of `gateOutcomes` one
@@ -1260,6 +1308,7 @@ const READERS = {
   phase: (raw, ctx) => optionalEnum('phase', raw, PHASES, ctx),
   pendingFindings: (raw, ctx) => readPendingFindings(raw, ctx),
   codexTokens: (raw, ctx) => optionalNumber('codexTokens', raw, ctx, isTotal),
+  inFlight: (raw, ctx) => readInFlight(raw, ctx),
   codexRateLimit: (raw, ctx) => readRateLimit(raw, ctx),
   codexSessionStarted: (raw, ctx) => optionalBool('codexSessionStarted', raw, ctx),
   judgeContextTokens: (raw, ctx) =>

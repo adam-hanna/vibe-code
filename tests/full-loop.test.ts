@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { Escalation, EXIT, orchestrate } from '@src/orchestrator.js';
+import { RateLimitError } from '@src/claude.js';
+import { DEFAULTS } from '@src/config.js';
 import {
   agents,
   BLOCKING,
@@ -142,4 +144,72 @@ test('a run that stalls in the plan phase resumes and finishes', async () => {
   assert.equal(state.phase, 'complete');
   assert.equal(state.pendingFindings, null);
   assert.equal(commits(state)[0], 'vibe: implement approved plan');
+});
+
+/**
+ * The invariant the recovery report rests on (#77).
+ *
+ * An in-flight entry means "the process died before this turn's accounting ran".
+ * That is only true if every in-process outcome disposes of its own entry, so
+ * the claim is checked over the whole loop rather than per call site: if any
+ * path through `orchestrate` ever fails a turn without reaching `chargeFailure`,
+ * or charges one without clearing, an entry survives here and a later resume
+ * announces an ordinary turn as a killed one.
+ */
+test('a completed loop leaves nothing owing in the in-flight record', async () => {
+  const state = fullRun();
+
+  await orchestrate(
+    state,
+    config({}, { ...committing(), ...verifying(state) }),
+    false,
+    agents(passing(state), []),
+  );
+
+  assert.equal(state.inFlight, undefined);
+});
+
+test('a loop whose turn fails and is retried leaves nothing owing either', async () => {
+  const state = fullRun();
+  const handlers = passing(state);
+  let first = true;
+  const calls: string[] = [];
+  // Sub-minute, as ratelimits-monitor.test.ts notes for the no-reset branch, so
+  // the retry's wait is milliseconds rather than the default hour.
+  const cfg = config(
+    {},
+    {
+      ...committing(),
+      ...verifying(state),
+      budget: { ...DEFAULTS.budget, planShare: 0, maxWaitMinutes: 0.005 },
+    },
+  );
+
+  await orchestrate(
+    state,
+    cfg,
+    false,
+    agents(
+      {
+        ...handlers,
+        claude: (label, options) => {
+          if (label === 'implement' && first) {
+            first = false;
+            // What the heartbeat had persisted when the attempt died, and a
+            // failure carrying no provider figure of its own.
+            state.inFlight = [{ label: 'implement', provider: 'claude', tokens: 3_000 }];
+            throw new RateLimitError('usage limit reached', null);
+          }
+          return handlers.claude?.(label, options) ?? 'claude said so';
+        },
+      },
+      calls,
+    ),
+  );
+
+  assert.deepEqual(calls, ['plan', 'critique-0', 'implement', 'implement', 'review-0']);
+  // The failed attempt was charged from what the stream saw, and its record went
+  // with the charge - so the retry started from a clean key and left one too.
+  assert.ok(state.tokensUsed >= 3_000);
+  assert.equal(state.inFlight, undefined);
 });

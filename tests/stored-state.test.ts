@@ -447,6 +447,78 @@ test('an absent optional is never corruption', () => {
   assert.equal('config' in loaded, false);
 });
 
+// ---- in-flight turns: observed spend that has not been charged (#77) ---------
+
+test('a valid inFlight record loads with no repair at all', () => {
+  const loaded = load((raw) => {
+    raw['inFlight'] = [
+      { label: 'implement', provider: 'claude', tokens: 17_390_262 },
+      { label: 'review-0', provider: 'codex' },
+    ];
+  });
+
+  assert.deepEqual(repairs(loaded), []);
+  assert.deepEqual(loaded.inFlight, [
+    { label: 'implement', provider: 'claude', tokens: 17_390_262 },
+    { label: 'review-0', provider: 'codex' },
+  ]);
+});
+
+test('an absent inFlight stays absent - it is what a run with nothing owing looks like', () => {
+  const loaded = load((raw) => {
+    delete raw['inFlight'];
+  });
+
+  assert.deepEqual(repairs(loaded), []);
+  assert.equal('inFlight' in loaded, false);
+});
+
+test('an inFlight that is not a list is dropped, and the drop is recorded', () => {
+  const loaded = load((raw) => {
+    raw['inFlight'] = 'nope';
+  });
+
+  assert.equal('inFlight' in loaded, false);
+  assert.deepEqual(repairs(loaded), ['inFlight']);
+});
+
+test('an unusable inFlight entry is dropped without taking the readable ones', () => {
+  const loaded = load((raw) => {
+    raw['inFlight'] = [
+      { label: 'plan', provider: 'claude', tokens: 100 },
+      { label: '', provider: 'claude' },
+      { label: 'no-provider' },
+      { provider: 'codex' },
+      'not an entry',
+      { label: 'critique-0', provider: 'gemini' },
+    ];
+  });
+
+  assert.deepEqual(loaded.inFlight, [{ label: 'plan', provider: 'claude', tokens: 100 }]);
+  assert.deepEqual(repairs(loaded), ['inFlight']);
+});
+
+test('an entry whose token figure is unusable keeps the turn and loses the number', () => {
+  // The turn is real and was interrupted; that much is still worth reporting.
+  // What cannot be reconstructed is the figure, and a zero would say the turn
+  // spent nothing rather than that nobody knows.
+  const loaded = load((raw) => {
+    raw['inFlight'] = [{ label: 'implement', provider: 'claude', tokens: 'lots' }];
+  });
+
+  assert.deepEqual(loaded.inFlight, [{ label: 'implement', provider: 'claude' }]);
+  assert.deepEqual(repairs(loaded), ['inFlight']);
+});
+
+test('an inFlight with nothing usable left in it becomes absent, never an empty list', () => {
+  const loaded = load((raw) => {
+    raw['inFlight'] = [{ label: 3 }];
+  });
+
+  assert.equal('inFlight' in loaded, false);
+  assert.deepEqual(repairs(loaded), ['inFlight']);
+});
+
 // ---- per-field only: no cross-field rule ships here (#54) --------------------
 
 test('a phase this version does not know is dropped, and status inference takes over', () => {
