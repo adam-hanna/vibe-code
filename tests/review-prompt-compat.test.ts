@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { critiquePrompt, reviewPrompt } from '@src/prompts.js';
 import { CRITERIA, DIFF, FILES, OUT_OF_SCOPE, PLAN_MD } from './helpers/prompt-fixture-args.js';
+import { scopeBlock, spliceScope } from './helpers/scope-block.js';
 
 /**
  * What #49 promised not to change, and the one thing it did.
@@ -14,6 +15,16 @@ import { CRITERIA, DIFF, FILES, OUT_OF_SCOPE, PLAN_MD } from './helpers/prompt-f
  * `tests/fixtures/prompts/` were generated from the build at `f0312d6` before
  * `src/prompts.ts` was touched, from the arguments this file imports - the same
  * module the generator used, so the two cannot drift apart.
+ *
+ * #56 narrowed that bar deliberately, and this file was edited for the second
+ * of the two reasons AGENTS.md allows: the claim *byte-identical* is no longer
+ * the contract. `scopeGuidance` gained the other half of the deferral decision,
+ * and it renders into every one of these prompts. The fixtures were NOT
+ * regenerated - each case now asserts equality with its baseline with the
+ * `## Scope` block as the single replacement, which is strictly stronger than a
+ * regenerated fixture because it proves nothing else moved. `spliceScope`
+ * throws rather than passing vacuously if the region goes missing or turns out
+ * not to have changed.
  */
 
 function fixture(name: string): string {
@@ -38,12 +49,67 @@ function prompt(round: number, hasMemory: boolean): string {
   );
 }
 
-test('a first-round review prompt is byte-identical to the one before chunking', () => {
-  assert.equal(prompt(1, false), fixture('review-round1.txt'));
+test('a first-round review prompt moved by the scope block alone', () => {
+  const now = prompt(1, false);
+  assert.equal(
+    now,
+    spliceScope(fixture('review-round1.txt'), now),
+    'something other than the ## Scope block moved',
+  );
 });
 
-test('a continuing review prompt is byte-identical to the one before chunking', () => {
-  assert.equal(prompt(3, true), fixture('review-round3-memory.txt'));
+test('a continuing review prompt moved by the scope block alone', () => {
+  const now = prompt(3, true);
+  assert.equal(
+    now,
+    spliceScope(fixture('review-round3-memory.txt'), now),
+    'something other than the ## Scope block moved',
+  );
+});
+
+test('the replaced scope block still carries every guard it had before', () => {
+  // The splice above proves only that the delta is confined to one region. What
+  // is *inside* that region is the thing #56 changed, and these are the parts of
+  // it that were never meant to move: a reviewer that may defer more freely
+  // needs the counterweights more, not less.
+  const block = scopeBlock(prompt(1, false));
+
+  assert.ok(block.includes('is a defect in your finding'));
+  assert.ok(block.includes('at P2 or P3'));
+  assert.ok(block.includes('disputing it is legitimate'));
+});
+
+/**
+ * The helper's own contract.
+ *
+ * Every case above asserts `current === splice(baseline, current)`, and that
+ * assertion is only worth anything because `spliceScope` refuses the two ways it
+ * could be satisfied while proving nothing: a region it cannot find (it would
+ * hand back the baseline, or a silently wrong slice) and a region that did not
+ * change (it would hand back the baseline, which for an unchanged prompt equals
+ * `current` - a green test asserting that nothing happened). Those refusals are
+ * the entire reason this is a helper rather than an inline `replace`, so they
+ * are pinned here rather than trusted.
+ */
+test('the splice refuses to pass vacuously when the scope block did not move', () => {
+  const now = prompt(1, false);
+  assert.throws(
+    () => spliceScope(now, now),
+    /identical/,
+    'splicing a prompt into itself must throw, not return it unchanged',
+  );
+});
+
+test('the splice refuses a baseline or a current whose scope region is gone', () => {
+  const now = prompt(1, false);
+  const noHeading = now.replace('## Scope\n', '## Boundary\n');
+  const noEnd = now.replace('\n## Acceptance criteria', '\n## The bar');
+
+  for (const broken of [noHeading, noEnd]) {
+    assert.throws(() => spliceScope(broken, now), /prompt shape moved/);
+    assert.throws(() => spliceScope(now, broken), /prompt shape moved/);
+    assert.throws(() => scopeBlock(broken), /prompt shape moved/);
+  }
 });
 
 test('the memoryless round note changed by exactly one paragraph, and nothing else moved', () => {
@@ -68,8 +134,17 @@ test('the memoryless round note changed by exactly one paragraph, and nothing el
   const baseline = fixture('review-round3-nomemory.txt');
   assert.ok(baseline.includes(before), 'the baseline fixture no longer holds the old paragraph');
 
+  // Two replacements on this one path, and they belong to different changes:
+  // the paragraph swap is #49's delta, already baked into a baseline frozen at
+  // `f0312d6`, and the scope splice is #56's. This change moved one region, not
+  // two - the rule that a second region is a defect is about regions moved by
+  // the same change.
   const now = prompt(3, false);
-  assert.equal(now, baseline.replace(before, after), 'something other than that paragraph moved');
+  assert.equal(
+    now,
+    spliceScope(baseline.replace(before, after), now),
+    'something other than that paragraph and the ## Scope block moved',
+  );
   assert.equal(now.includes('quoted below'), false);
   assert.equal(now.includes('re-litigate'), false);
 });

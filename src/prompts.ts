@@ -163,27 +163,56 @@ function formatOutOfScope(items: readonly OutOfScopeItem[] | undefined): string 
 }
 
 /**
- * What a reviewer may do with the plan's boundary - conditional on there being
- * one.
+ * What a reviewer may do with the plan's boundary - and what it may do when
+ * there is no boundary at all.
  *
- * The defer instruction only makes sense against a boundary someone drew.
- * Offering it where none was recorded would let a reviewer wave off a
- * legitimate finding on the authority of a plan that never claimed anything,
- * and legacy runs are exactly the ones with no boundary to check the finding
- * against.
+ * What the two branches differ on is the plan's AUTHORITY, not the flag. Both
+ * offer `defer`, because the question it answers - would the change be correct,
+ * complete and safe to ship without this - is one the reviewer can answer from
+ * the change itself. What only a declared boundary can support is the stronger
+ * claim that demanding the work is a defect *in the finding*: offering that
+ * where nothing was recorded would let a reviewer wave off a legitimate finding
+ * on the authority of a plan that never claimed anything, and legacy runs are
+ * exactly the ones with no boundary to check a finding against. So the legacy
+ * branch says the plan's silence is not evidence, and says it in place of the
+ * defect-in-your-finding sentence rather than beside it.
+ *
+ * That distinction is why the branch used to withhold the instruction outright
+ * (its bar was "work the plan never touches", narrower than the other branch's
+ * and unreachable for any run since #18, when `out_of_scope` became required).
+ * #56 replaced the withholding with the narrower guard that was actually meant.
+ *
+ * Both directions of the decision are stated, and #56 is why. Across the nine
+ * runs archived in `.vibe/runs/`, the critic and the reviewer set `defer` on 2
+ * findings out of 81 while plan revisions added 46 fresh `out_of_scope` items -
+ * the same judgement, reached 23 times more often through the actor that cannot
+ * make it cheaply. A deferral costs nothing; declining the work through a plan
+ * revision costs a full round. Every sentence here used to warn against setting
+ * the flag and none named the cost of leaving it unset, so the reviewer was
+ * weighing one error against nothing. This is the same shape the `## Severity`
+ * section has carried since it was written ("a P2 inflated to P1 burns a full
+ * revision cycle"), applied to the one other judgement a finding carries. It is
+ * not an instruction to defer more.
  */
 function scopeGuidance(
   items: readonly OutOfScopeItem[] | undefined,
   subject: 'plan' | 'change',
 ): string {
   const what = subject === 'plan' ? 'the plan' : 'this change';
+  // Asking whether a *plan* is safe to ship is a category error, so the test is
+  // put to the critic about the change its plan describes. The shared tail -
+  // "correct, complete and safe to ship" - is the operative wording either way.
+  const ship =
+    subject === 'plan'
+      ? 'the change this plan describes, built as written, be correct, complete and safe to ship'
+      : 'this change be correct, complete and safe to ship';
 
   if (items === undefined) {
     return `## Scope
 
 This plan predates the out-of-scope field, so **no boundary was recorded**. Nothing here has been declared out of scope, and you must not treat anything as out of scope on the plan's authority - judge every finding on its merits, at its true severity.
 
-\`defer\` is required on every finding: set it to \`false\` unless the finding is plainly about work ${what} never touches.`;
+\`defer\` is required on every finding, and the question it answers is not what the plan says - the plan said nothing here, and its silence is not evidence. It is: **would ${ship} without this?** If it would, the finding is real but belongs in separate work: \`defer: true\`, at P2 or P3, never P0 or P1. If it would not, set \`false\` and raise it at its true severity. Your own judgement about what is separate work is still yours to exercise; what you may not do is treat anything as out of scope on the plan's authority.`;
   }
 
   return `## Scope
@@ -193,6 +222,12 @@ ${formatOutOfScope(items)}
 ${what === 'the plan' ? 'The plan' : 'The plan behind this change'} has drawn the boundary above. Work it declared out of scope is not a hole in the plan - it is the plan being explicit. **Demanding work beyond that boundary is a defect in your finding, not in the plan.**
 
 If you notice something real that belongs in separate work, that is worth reporting: raise it as a finding with \`defer: true\`, at P2 or P3. Deferring costs you the same honesty as choosing a severity does - a finding you defer is one you are saying does not have to be resolved for ${what} to be correct, so it can never be a P0 or a P1.
+
+**The list above is where the plan drew the line. \`defer\` is how you draw one.** A finding does not have to appear on that list to belong in separate work, and the flag is not only for work the plan already excluded - marking something \`defer: true\` because you judge it to be separate work is you doing your job, not declining to.
+
+The test is not whether ${what} touches the same file or the same function: two real defects a few lines apart can fall on opposite sides of this line. The test is - **would ${ship} without this?** If it would, the finding is a follow-up and the flag is how you say so. If it would not, it is not deferrable at any severity, and what you should be disputing is the boundary itself.
+
+Both mistakes cost, and they cost in opposite directions. Deferring something ${what} actually needs signs off work that is still broken. Raising real separate work *without* the flag is not the safe option: it becomes part of ${what}, and what the plan says is what gets built and what the next round is judged against - putting the work back outside costs a full round of revision.
 
 If the boundary itself is wrong - ${what} cannot work without the thing it excluded - say *that*, at its real severity, and explain why the exclusion breaks it. An empty boundary is a claim like any other, and disputing it is legitimate.`;
 }
