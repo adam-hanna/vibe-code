@@ -179,7 +179,40 @@ A few things learned the expensive way:
   `vibe resume <run-id>`, usually with a raised `--max-tokens`.
 - **The run commits to `vibe/<run-id>`, not to your branch.** Point the branch at the run's
   final commit before opening the PR: `git branch -f feat/22-… <sha>`.
-- **Prune when done**: `git worktree remove .worktrees/issue-22`.
+- **Archive the run record before pruning the worktree.** `git worktree remove` takes `.vibe/`
+  with it, and since #52 the planner reads `.vibe/runs/` in the repo it is run against — so a
+  pruned worktree destroys the record the next run would have read. `vibe` only ever creates
+  `.vibe/` under the directory it ran in (`createRun`), which is the worktree, so the main
+  checkout's copy has to be made:
+
+  ```bash
+  # from the main checkout
+  mkdir -p .vibe/runs
+  [ -f .vibe/.gitignore ] || printf '*\n' > .vibe/.gitignore   # never overwrite an existing one
+  cp -r .worktrees/issue-52/.vibe/runs/<run-id> .vibe/runs/
+  git worktree remove .worktrees/issue-52
+  ```
+
+  Seed a new worktree from the archive when the past matters:
+
+  ```bash
+  mkdir -p .worktrees/issue-N/.vibe/runs
+  [ -f .worktrees/issue-N/.vibe/.gitignore ] || printf '*\n' > .worktrees/issue-N/.vibe/.gitignore
+  cp -r .vibe/runs/. .worktrees/issue-N/.vibe/runs/
+  ```
+
+  The `.vibe/.gitignore` containing `*` is what `ensureVibeIgnored` writes, and it is why the
+  archive is self-ignoring wherever it sits — this repo's `.gitignore` also lists `.vibe/`, but
+  a copy made by hand cannot rely on that in someone else's checkout. The archive survives
+  because the main checkout is long-lived, not because it is tracked. The seven runs up to #50
+  were preserved this way by hand. There is no command for this and there is not meant to be:
+  for an ordinary user `.vibe/runs/` already persists in their repo across runs.
+- **What the past-run index reaches.** The planner is the only role *given* the index, but
+  Claude has one conversation — the implementer resumes `main` and inherits the planner's
+  history, that section included, exactly as it already inherits the plan prompt. The
+  Codex-seated roles (critic, answerer, reviewer) never see it.
+- **Prune when done**, after archiving the run above:
+  `git worktree remove .worktrees/issue-22`.
 
 ## Releases
 

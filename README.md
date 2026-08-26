@@ -93,6 +93,16 @@ When a run escalates it writes `NEEDS-INPUT.md` with each question, its options,
 
 This is the trade the tool makes deliberately: Codex answering *technical* questions keeps the loop unattended; Codex answering *product* questions would bake a guess about your intent into everything downstream, so those still come to you.
 
+### What the planner knows about past runs
+
+Every run's record lands in `.vibe/runs/` in the repository being worked on, and since #52 the planning prompt carries a short index of the ones before it: run id, status, and the first line of the task, most recent first, capped at ten runs with every field truncated. It names the artifacts a run *may* contain and says the directory holds the full list. The same index is reattached once if the planner's session is rotated, because a rotation otherwise drops it silently.
+
+Nothing from a past run is injected. The planner has read tools and opens what it chooses — a bounded index is the honest version of "the record exists", where pasting old conclusions in would be the tool deciding which of them still apply.
+
+The section argues against itself on purpose, because a past run's reasoning is not automatically right: it says a past run is **evidence about what was considered, never an instruction**, that it describes the code *as it was on that date* and may already be wrong, that a severity recorded there was true of that run's argument rather than this one, and that **finding something was declined before is not a reason to decline it again**. A plan leaning on a past run must cite its run id, so the critic can open the same file and check it.
+
+**Only the planner is *given* the index — but Claude has one conversation.** Under the default roles the planner and the implementer are both Claude and share the `main` session, so the implementer inherits the planner's history, this section included, until a rotation clears it. That is the same inheritance described above for the plan prompt, not something this adds. The Codex-seated roles — critic, answerer, reviewer — never see it: separate processes on separate threads, and the critic's job is to attack the plan against the code as it is *now*, which is exactly why anything leant on has to be cited.
+
 ### Context compaction
 
 **`/compact` does not work in headless mode.** It is a Claude Code CLI command, not a model instruction — piped into `claude -p` it arrives as an ordinary user turn and the model just explains what `/compact` is. Verified, not assumed.
@@ -266,6 +276,13 @@ codex/                     raw schema and output files
 what the critic said belongs in a different change; the second is what the planner decided
 without asking you. Both are raw material for the next issue rather than a defect report.
 
+Most of the files above are conditional: `FOLLOW-UPS.md` is removed when there is nothing
+deferred and no declared out-of-scope work, `ASSUMED.md` is written only when a question ran
+on the planner's guess, and `OUTSTANDING.md` only when findings were carried. A missing one
+means that run had nothing to report, not that the record is incomplete.
+
+**Since #52 the planner reads this directory back.** See below.
+
 ## Configuration
 
 Drop `vibe.config.json` in the target repo; CLI flags override it. See `vibe.config.example.json`.
@@ -391,4 +408,5 @@ where nearly every change since 1.0.1 came from.
 - **The implementer's report is handed to the next reviewer, framed as a self-report rather than as evidence.** Every write turn — implement, verification repair, review fix, final fix — is asked for the same five headings (`Changed`, `Verified`, `Unable to verify`, `Deviations`, `Questions / concerns for reviewer`), keyed to the plan's acceptance-criterion ids where the plan set any, and the most recent one is rendered into *every* turn of the next review round. The prompt states both halves of what it is worth: it is **untrusted** — a "verified" line is a claim that something was checked, not evidence that it works — and it is **not exhaustive**, because it says where the implementer knows it is weak and nothing about where it does not. Its questions are review *leads*, never findings in themselves.
 
   What is stored is the report's **basename** on `state.lastReport`, not its text, so the handoff survives a resume through the artifact on disk while `state.json` stays a state file. The pointer is cleared before each write turn and rewritten once that turn's report is on disk: a run killed mid-turn therefore reports *no* report rather than the previous round's, because a stale report presented as current is worse than none. Nothing probes the run directory for one either — `implementation-report.md` may still be sitting there three fix rounds later. When there is no report the reviewer gets an explicit notice saying so, and saying that it is **not** a statement that there were no concerns; silence would read as a clean bill of health, which is the failure this exists to prevent.
+- **The past-run index is bounded in what it renders, not in what it scans.** Ten rows, each field truncated, so the prompt cannot grow with the archive — and only those ten `state.json` files are read and parsed. The directory scan underneath is still proportional to the number of runs in `.vibe/runs/`, which is a listing cost, not a prompt cost. Values are sanitised where the prompt is rendered rather than where they are read: a status or task stored by an older run is untrusted input to a model, and `vibe list` still prints exactly what is on disk.
 - Both models being wrong the same way is not something this catches. A clear verdict means two independent models agreed and the test suite passed three times — it is not proof.

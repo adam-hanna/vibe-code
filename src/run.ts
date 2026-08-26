@@ -150,30 +150,71 @@ export function loadRun(targetDir: string, id: string): RunState {
   return state;
 }
 
+/** Narrowing applied before any state.json is parsed (#52). */
+export interface ListRunsOptions {
+  /**
+   * A run id to leave out. `createRun` mkdirs and saves state *before* the
+   * planning turn, so the current run is always already on disk; without this
+   * filter the planner's index would list the run reading it, and a repo with
+   * no prior runs would never happen. A resume keeps the same id, so the same
+   * filter covers it.
+   */
+  exclude?: string | undefined;
+  /**
+   * Parse at most this many runs, newest first. Applied before the map, so an
+   * archive of a hundred runs costs ten reads rather than a hundred - the
+   * directory scan itself is still proportional to the archive, which is stated
+   * rather than fixed here (#52).
+   */
+  limit?: number | undefined;
+}
+
 /**
- * What `vibe list` shows. Never throws, and never writes.
+ * What `vibe list` shows, and what the planner's past-run index is built from
+ * (#52). Never throws, and never writes.
  *
  * A run whose state.json cannot be read at all lists as unreadable with no cost
  * figure: `$0.00` would assert that an unreadable run cost nothing, which is the
  * invented number this codebase refuses everywhere else. One corrupt run must
  * not take out the listing of every healthy one beside it.
+ *
+ * Values are returned exactly as they were stored - `summariseStored` passes an
+ * unrecognised status through verbatim on purpose. That is safe for a terminal
+ * and is not for a prompt, so the bounding happens where the prompt is
+ * rendered, in `priorRunsSection`, and this stays the listing it has always
+ * been.
  */
-export function listRuns(targetDir: string): RunSummary[] {
+export function listRuns(targetDir: string, opts: ListRunsOptions = {}): RunSummary[] {
   const root = path.join(targetDir, RUNS_DIR);
   if (!existsSync(root)) return [];
 
-  return readdirSync(root)
+  // Since #52 this sits on the planning path, where "never throws" has to hold
+  // against a runs root that exists but cannot be read (EACCES, EPERM, a name
+  // that is not a directory). An unreadable archive is an absent one.
+  let entries: string[];
+  try {
+    entries = readdirSync(root);
+  } catch {
+    return [];
+  }
+
+  let ids = entries
     .filter((d) => existsSync(path.join(root, d, 'state.json')))
+    // Before the slice: excluding the current run must never cost a listed one.
+    .filter((d) => d !== opts.exclude)
     .sort()
-    .reverse()
-    .map((d): RunSummary => {
-      try {
-        const raw: unknown = JSON.parse(readFileSync(path.join(root, d, 'state.json'), 'utf8'));
-        return summariseStored(raw, d);
-      } catch {
-        return { id: d, status: 'unreadable', task: '', costUsd: null };
-      }
-    });
+    .reverse();
+  // Before the map, so only the runs that will be shown are read and parsed.
+  if (opts.limit !== undefined) ids = ids.slice(0, Math.max(0, opts.limit));
+
+  return ids.map((d): RunSummary => {
+    try {
+      const raw: unknown = JSON.parse(readFileSync(path.join(root, d, 'state.json'), 'utf8'));
+      return summariseStored(raw, d);
+    } catch {
+      return { id: d, status: 'unreadable', task: '', costUsd: null };
+    }
+  });
 }
 
 /**
