@@ -353,6 +353,37 @@ interface ReadContext {
  */
 const RUN_ID = /^[A-Za-z0-9._-]+$/;
 
+/** The same whitelist, for a file name inside a run directory. See `isArtifactBasename`. */
+const ARTIFACT_NAME = /^[A-Za-z0-9._-]+$/;
+
+/**
+ * An artifact basename, or nothing.
+ *
+ * `artifactText` does `path.join(state.dir, name)`, so a stored `../../etc/passwd`
+ * or `C:\...` reads a file outside the run directory and renders it into a
+ * prompt. Whitelisted like `assertUsableRunId` rather than blacklisting
+ * separators, and for the same reason: `/`, `\`, drive prefixes, `..` and
+ * control characters all fall out of one rule. A value that fails is dropped to
+ * absent with the repair logged, exactly as `readReviewCoverage` drops a damaged
+ * record - the reviewer then gets the "no report was recorded" notice, which is
+ * honest (#50, #23).
+ *
+ * Exported so `src/orchestrator.ts` asks the same question this reader asks. Two
+ * answers to "is this a basename" is the drift `unvalidated('config')` warns
+ * about, one field along.
+ */
+export function isArtifactBasename(v: unknown): v is string {
+  return (
+    isString(v) &&
+    v !== '' &&
+    v !== '.' &&
+    v !== '..' &&
+    ARTIFACT_NAME.test(v) &&
+    path.basename(v) === v &&
+    path.win32.basename(v) === v
+  );
+}
+
 export function assertUsableRunId(id: string, runsRoot: string): void {
   if (id === '' || id === '.' || id === '..' || !RUN_ID.test(id) || path.basename(id) !== id) {
     throw new StoredStateError(
@@ -1223,6 +1254,17 @@ const READERS = {
   // review part has completed, and a damaged record is dropped to absence
   // rather than guessed into one (#49).
   reviewCoverage: (raw, ctx) => readReviewCoverage(raw, ctx),
+  // Absent stays absent again, and a present value is checked rather than
+  // trusted: this one becomes a path under the run directory and its contents
+  // are rendered into a prompt, so a stored `../../something` would read a file
+  // the run never wrote. Dropped, logged, and the reviewer is told there is no
+  // report - which is what a pointer vibe will not follow honestly means (#50).
+  lastReport: (raw, ctx) => {
+    if (raw === undefined) return undefined;
+    if (isArtifactBasename(raw)) return raw;
+    ctx.repairs.replaced('lastReport', raw, 'nothing');
+    return undefined;
+  },
   carried: (raw, ctx) =>
     raw === undefined ? undefined : repairedArray('carried', raw, ctx, readFinding),
   declined: (raw, ctx) =>

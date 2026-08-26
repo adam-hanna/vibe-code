@@ -377,9 +377,12 @@ export function artifactDir(state: RunState, name: string): string {
 /**
  * An artifact's text, or null when there is nothing readable there.
  *
- * Null rather than a throw for a directory of that name or an unreadable file:
- * the one caller asks "does this file say what I wrote", and anything it cannot
- * read is not a file it wrote (see `finaliseOutstanding` in orchestrator.ts).
+ * Null rather than a throw for a directory of that name or an unreadable file.
+ * Both callers want that: `finaliseOutstanding` asks "does this file say what I
+ * wrote", and anything it cannot read is not a file it wrote; `runReview` asks
+ * for the last write turn's report, and a file it cannot read is no report at
+ * all - missing and unreadable render the reviewer the same notice, so they are
+ * the same answer here too (#50).
  */
 export function artifactText(state: RunState, name: string): string | null {
   const file = path.join(state.dir, name);

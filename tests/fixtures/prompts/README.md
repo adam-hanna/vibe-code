@@ -20,6 +20,12 @@ reviewPrompt(DIFF, FILES, PLAN_MD, OUT_OF_SCOPE, <round>, <hasMemory>, null, und
 | `review-round3-memory.txt` | 3 | true | **Frozen contract.** The `hasMemory` branch of `continuityNote`. Must match byte for byte. |
 | `review-round3-nomemory.txt` | 3 | false | **Deliberate-delta baseline.** #49 rewrote exactly one paragraph on this path - the memoryless note used to claim the earlier findings were "quoted below", which `reviewPrompt` has never done. The test asserts the new output equals this file with *only* that paragraph replaced, which is what proves nothing else moved. |
 
+Since #50 every real review prompt carries a report section — the last write turn's report, or an
+explicit notice that none was recorded — so the bar these two files hold has narrowed. It is now:
+*an under-limit round **with no report** renders byte-identically to develop's.* The shared
+argument tuple passes no report at all, which is why they still match; `runReview` always passes
+one, so no run produces these bytes any more.
+
 **Regenerating any of these is a statement that the review prompt changed**, and it needs saying
 out loud in the PR rather than absorbing quietly. For the two frozen files that is a compatibility
 break; for the third it means a second deliberate change to a path this one already moved.

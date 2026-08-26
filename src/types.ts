@@ -753,6 +753,28 @@ export interface RunState {
    * (#49).
    */
   reviewCoverage?: ReviewCoverage | undefined;
+  /**
+   * The **basename** of the most recent write turn's report artifact.
+   *
+   * Cleared before each write turn and written again once that turn's report is
+   * on disk - implement, verify-fix, review-fix, final-fix - and read by
+   * `runReview`, which renders the file's text into the reviewer's prompt. The
+   * clear comes first deliberately: the artifact write and this field's save
+   * are two separate file writes, and a process that died between them would
+   * otherwise leave a pointer to the PREVIOUS round's report, which the prompt
+   * presents as current. Absent is the honest answer in that window (#50).
+   *
+   * A basename and not the text: `state.json` is already ~96KB on a real run
+   * and a report is prose of unbounded length, and the handoff has to survive a
+   * resume through the persisted artifact rather than through in-memory state.
+   *
+   * Absent means no write turn has recorded a report this run can vouch for -
+   * including every run whose state predates this field. Nothing probes the run
+   * directory for one: `implementation-report.md` may still be sitting there
+   * three fix rounds later, and a stale report presented as current is worse
+   * than none.
+   */
+  lastReport?: string | undefined;
   /** Question-and-replan cycles spent so far. */
   questionRound: number;
   events: RunEvent[];
