@@ -202,10 +202,13 @@ export const FINDINGS_SCHEMA = {
             type: 'boolean',
             description:
               'true = this is real and worth doing, but it belongs in separate work rather ' +
-              'than in this change. A deferred finding is by definition not blocking: it must ' +
-              'be P2 or P3, never P0 or P1. That is deliberate - choosing to defer costs the ' +
-              'same honesty as choosing a severity does. If the work has to happen inside this ' +
-              'change for it to be correct, do not defer it; raise it at its true severity.',
+              'than in this change. The test: would this change be correct, complete and safe ' +
+              'to ship without it? If yes, defer it. If no, it is not deferrable at any ' +
+              'severity - raise it at its true severity instead. A deferred finding is by ' +
+              'definition not blocking: it must be P2 or P3, never P0 or P1. That is ' +
+              'deliberate - choosing to defer costs the same honesty as choosing a severity ' +
+              'does. Not deferring costs too: separate work raised without this flag becomes ' +
+              'part of the change, and the change is what gets built.',
           },
           evidence: {
             type: 'array',

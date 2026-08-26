@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { fixPrompt, implementPrompt, reviewPrompt } from '@src/prompts.js';
 import { CRITERIA, DIFF, FILES, OUT_OF_SCOPE, PLAN_MD } from './helpers/prompt-fixture-args.js';
+import { spliceScope } from './helpers/scope-block.js';
 import type { Finding } from '@src/types.js';
 
 /**
@@ -156,16 +157,24 @@ test('a report argument that is not passed at all renders nothing', () => {
   assert.equal(prompt.includes('No report was recorded'), false);
 });
 
-test('the review prompt with no report is still byte-identical to the frozen goldens', () => {
-  // The #49 bar, narrowed by this change and asserted here rather than argued:
-  // an under-limit round WITH NO REPORT renders exactly what develop rendered.
-  // `review-prompt-compat.test.ts` makes the same call; this file repeats it
-  // because this change is what moved the bar, and that file is frozen too.
+test('the review prompt with no report still differs from the goldens by the scope block alone', () => {
+  // The #49 bar, narrowed by #50 (this file's change) and narrowed again by
+  // #56: an under-limit round WITH NO REPORT renders exactly what develop
+  // rendered, outside the `## Scope` block. #56 rewrote `scopeGuidance`, which
+  // renders into every review prompt, so byte-identity is no longer the claim -
+  // the claim is that the report work still moves nothing. That is what the
+  // splice asserts, and it fails if this file's own section ever leaks into a
+  // no-report prompt. `review-prompt-compat.test.ts` makes the same call; this
+  // file repeats it because #50 is what moved the bar, and that file is frozen
+  // in its own way.
   const frozen = (round: number, hasMemory: boolean): string =>
     reviewPrompt(DIFF, FILES, PLAN_MD, OUT_OF_SCOPE, round, hasMemory, null, undefined, CRITERIA);
 
-  assert.equal(frozen(1, false), fixture('review-round1.txt'));
-  assert.equal(frozen(3, true), fixture('review-round3-memory.txt'));
+  const first = frozen(1, false);
+  assert.equal(first, spliceScope(fixture('review-round1.txt'), first));
+
+  const continuing = frozen(3, true);
+  assert.equal(continuing, spliceScope(fixture('review-round3-memory.txt'), continuing));
 });
 
 test('a chunked part carries the report as well as its part framing', () => {

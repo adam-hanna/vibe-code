@@ -28,7 +28,9 @@ ordinary first run still sends, and it must match byte for byte.
 Three renderings of `reviewPrompt`, generated from the build at **`f0312d6`** - the `develop`
 tip #49 was branched from - **before** `src/prompts.ts` was touched. They exist so that the
 compatibility bar #49 set can be asserted rather than asserted-about: *for a change under the
-diff limit, the reviewer's prompt is byte-identical to develop's.*
+diff limit, the reviewer's prompt is byte-identical to develop's.* That bar has been narrowed
+twice since - by #50 and by #56 - and both narrowings are recorded below; the table's Status
+column is the current claim, not this sentence.
 
 Every one was produced with the same arguments, which live in
 [`tests/helpers/prompt-fixture-args.ts`](../../helpers/prompt-fixture-args.ts) and are imported by
@@ -41,19 +43,29 @@ reviewPrompt(DIFF, FILES, PLAN_MD, OUT_OF_SCOPE, <round>, <hasMemory>, null, und
 
 | File | `round` | `hasMemory` | Status |
 | --- | --- | --- | --- |
-| `review-round1.txt` | 1 | false | **Frozen contract.** No continuity note at all; this is the shape an ordinary first review round renders. Must match byte for byte, forever. |
-| `review-round3-memory.txt` | 3 | true | **Frozen contract.** The `hasMemory` branch of `continuityNote`. Must match byte for byte. |
-| `review-round3-nomemory.txt` | 3 | false | **Deliberate-delta baseline.** #49 rewrote exactly one paragraph on this path - the memoryless note used to claim the earlier findings were "quoted below", which `reviewPrompt` has never done. The test asserts the new output equals this file with *only* that paragraph replaced, which is what proves nothing else moved. |
+| `review-round1.txt` | 1 | false | **Deliberate-delta baseline.** No continuity note at all; this is the shape an ordinary first review round renders. Everything outside the `## Scope` block must match byte for byte, forever. |
+| `review-round3-memory.txt` | 3 | true | **Deliberate-delta baseline.** The `hasMemory` branch of `continuityNote`. Everything outside the `## Scope` block must match byte for byte. |
+| `review-round3-nomemory.txt` | 3 | false | **Deliberate-delta baseline, two deltas.** #49 rewrote exactly one paragraph on this path - the memoryless note used to claim the earlier findings were "quoted below", which `reviewPrompt` has never done - and #56 replaced the `## Scope` block along with the other two files. The test asserts the new output equals this file with *only* those two regions replaced, which is what proves nothing else moved. |
 
 Since #50 every real review prompt carries a report section — the last write turn's report, or an
-explicit notice that none was recorded — so the bar these two files hold has narrowed. It is now:
+explicit notice that none was recorded — so the bar these files hold has narrowed. It is now:
 *an under-limit round **with no report** renders byte-identically to develop's.* The shared
 argument tuple passes no report at all, which is why they still match; `runReview` always passes
 one, so no run produces these bytes any more.
 
+**#56 narrowed it again, and the first two files stopped being frozen contracts.** `scopeGuidance`
+gained the other half of the deferral decision - the cost of *not* deferring, and an operative test
+for telling separate work apart - and it renders into every one of these prompts. So the bar is now
+*byte-identical outside the `## Scope` block*, held by
+[`tests/helpers/scope-block.ts`](../../helpers/scope-block.ts): each case asserts the current output
+equals its baseline with that one region spliced in, and the helper throws if the region goes
+missing or turns out not to have changed. That assertion is strictly stronger than a regenerated
+fixture, which would only prove the build equals itself — which is why none of these files was
+regenerated for #56.
+
 **Regenerating any of these is a statement that the review prompt changed**, and it needs saying
-out loud in the PR rather than absorbing quietly. For the two frozen files that is a compatibility
-break; for the third it means a second deliberate change to a path this one already moved.
+out loud in the PR rather than absorbing quietly. For all three it now means a further deliberate
+change to a path that has already moved, and it destroys the evidence that nothing else did.
 
 To regenerate: build at the commit whose output you mean to freeze, then render each shape above
 with the shared arguments and write it here with `'utf8'` and no post-processing.
