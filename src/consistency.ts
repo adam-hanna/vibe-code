@@ -10,6 +10,41 @@ import type { RunPhase, RunStatus } from '@src/types.js';
  * *triple* of them can say is a different question, and this module is the only
  * place it is asked.
  *
+ * ## NOTHING CALLS THIS YET, and what it would take
+ *
+ * This ships as groundwork, with no behaviour change - the pattern AGENTS.md
+ * calls "Groundwork ships separately". The intended call site is `loadRun`
+ * (`src/run.ts`), immediately after `validateStoredState` and *before*
+ * `ensureVibeIgnored`, which is that function's first write:
+ *
+ * ```ts
+ * const state: RunState = { ...checked, dir, targetDir };
+ * const normalisation = checkStoredConsistency(state, resumePhase(state), rawPhase);
+ * ensureVibeIgnored(targetDir);
+ * ...
+ * if (normalisation !== null) {
+ *   const moved = state.phase !== normalisation.phase;
+ *   state.phase = normalisation.phase;
+ *   if (moved) recordEvent(state, 'state_normalised', { ...normalisation });
+ *   log.warn(...);   // its own event type and wording: this is not a repair
+ * }
+ * ```
+ *
+ * It is not wired because wiring it makes three existing cases in
+ * `tests/stored-state.test.ts` fail. `fresh()` there builds PLAN-ONLY runs, and
+ * `every legal status loads` then sets an implementing, reviewing or done
+ * status; `a phase this version does not know is dropped` does the same; and
+ * `a recognised phase is trusted whatever status and planOnly hold` asserts
+ * three triples that rules B, C and A respectively act on. Each of the three
+ * asserts that a contradictory triple loads CLEAN, which is precisely the claim
+ * this module exists to withdraw - so they cannot survive the rules, and there
+ * is no arrangement of the rules that leaves them standing while `loadRun`
+ * enforces them.
+ *
+ * Editing them needs an exception to AGENTS.md's "**Add tests; do not edit
+ * existing ones**", which only the repository owner can grant. It has not been
+ * granted, so the wiring is left out rather than the rules weakened.
+ *
  * **Pure, like `stored.ts`.** It reads, decides, and either throws or returns.
  * That is what makes "no file has been rewritten" in the refusal below literally
  * true, and it is why `loadRun` calls this before its first write of any kind.
@@ -221,9 +256,10 @@ export function checkStoredConsistency(
   // status. Left alone it resolves to `complete` and skips implementation.
   //
   // This is the one rule that keeps matching after it has fired: its predicate
-  // reads `status`, and `status` is deliberately never rewritten. `loadRun`
-  // records the event only when the phase actually changes, so a run resumed
-  // repeatedly warns every time and grows its event log once.
+  // reads `status`, and `status` is deliberately never rewritten. Once wired,
+  // the caller must therefore record its event only when the phase actually
+  // changes, so a run resumed repeatedly warns every time and grows its event
+  // log once.
   if (!state.planOnly && state.status === 'planned') {
     return normalised(
       'B',

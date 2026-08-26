@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRun, listRuns, loadRun, resumePhase } from '@src/run.js';
-import { KNOWN_KEYS, REDERIVED_KEYS, StoredStateError, validateStoredState } from '@src/stored.js';
+import { KNOWN_KEYS, REDERIVED_KEYS, StoredStateError } from '@src/stored.js';
 import type { RunState, RunStatus } from '@src/types.js';
 
 /**
@@ -266,12 +266,6 @@ test('every legal status loads', () => {
   for (const status of statuses) {
     const loaded = load((raw) => {
       raw['status'] = status;
-      // `fresh()` creates a PLAN-ONLY run, and since #54 a plan-only run beside
-      // an implementing, reviewing or done status is refused by
-      // `src/consistency.ts` - it is a combination no writer produces. The
-      // subject here is the per-field status reader, so the case is made a full
-      // run and every assertion below is unchanged.
-      raw['planOnly'] = false;
     });
     assert.equal(loaded.status, status);
     assert.deepEqual(repairs(loaded), []);
@@ -438,41 +432,23 @@ test('an absent optional is never corruption', () => {
   assert.equal('config' in loaded, false);
 });
 
-// ---- per-field only: no cross-field rule ships here -------------------------
-//
-// The cross-field rules over status/phase/planOnly now live in
-// `src/consistency.ts` and are pinned by `tests/state-consistency.test.ts`
-// (#54). This module still decides each field alone, which is what these cases
-// are about - so where one of them would now trip a cross-field rule through
-// `loadRun`, it says so and either states a non-plan-only run or asks
-// `validateStoredState` directly.
+// ---- per-field only: no cross-field rule ships here (#54) --------------------
 
 test('a phase this version does not know is dropped, and status inference takes over', () => {
   const loaded = load((raw) => {
     raw['phase'] = 'banana';
     raw['status'] = 'implementing';
-    // A full run, for the reason given in 'every legal status loads': plan-only
-    // beside an implementing status is refused by the cross-field pass (#54),
-    // and the subject here is the per-field phase reader.
-    raw['planOnly'] = false;
   });
   assert.equal('phase' in loaded, false);
   assert.deepEqual(repairs(loaded), ['phase']);
   assert.equal(resumePhase(loaded), 'implementing');
 });
 
-test('a recognised phase is trusted per field, whatever status and planOnly hold (#54)', () => {
+test('a recognised phase is trusted whatever status and planOnly hold - see #54', () => {
   // Regression guard for a rule that was proposed twice and refuted twice. A
   // failed preflight sets status 'error' without touching the phase, so
   // error+complete is writer-generated: "repairing" it would make resumePhase
   // infer planning and re-run finished work.
-  //
-  // Asked of `validateStoredState` rather than `loadRun`, because it is this
-  // module's per-field contract that is under test. Three of these five pairs
-  // are contradictory as TRIPLES and `loadRun` now normalises or refuses them
-  // through `src/consistency.ts` - which is a different claim, made by a
-  // different module, and pinned in `tests/state-consistency.test.ts`. Every
-  // pair and every assertion below is the one this case has always made.
   const pairs: [string, string, boolean][] = [
     ['error', 'complete', false],
     ['planning', 'complete', false],
@@ -481,20 +457,14 @@ test('a recognised phase is trusted per field, whatever status and planOnly hold
     ['stalled', 'complete', true],
   ];
   for (const [status, phase, planOnly] of pairs) {
-    const run = corrupt((raw) => {
+    const loaded = load((raw) => {
       raw['status'] = status;
       raw['phase'] = phase;
       raw['planOnly'] = planOnly;
     });
-    const raw: unknown = JSON.parse(readFileSync(run.file, 'utf8'));
-    const checked = validateStoredState(raw, run.id, path.dirname(run.file));
-    assert.equal(checked.state.phase, phase, `${status}/${phase} is kept`);
-    assert.equal(checked.state.planOnly, planOnly);
-    assert.deepEqual(
-      checked.repairs.map((r) => r.field),
-      [],
-      `${status}/${phase} produces no repair`,
-    );
+    assert.equal(loaded.phase, phase, `${status}/${phase} is kept`);
+    assert.equal(loaded.planOnly, planOnly);
+    assert.deepEqual(repairs(loaded), [], `${status}/${phase} produces no repair`);
   }
 });
 

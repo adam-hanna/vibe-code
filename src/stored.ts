@@ -69,13 +69,19 @@ import type {
  *    resumed and fails preflight persists exactly that pair, and "repairing" it
  *    would make `resumePhase` infer `planning` and re-run completed work.
  *    Cross-field consistency over `status`/`phase`/`planOnly` lives in
- *    `src/consistency.ts`, which `loadRun` calls immediately after this module
- *    and before its first write (#54). It is written against the phase
- *    `resumePhase` RESOLVES rather than the stored field, because `phase` is
- *    optional and the loop branches on the resolution. Of its two
- *    normalisations, rule B keeps matching on every later load - its predicate
- *    reads `status`, which is never rewritten - while rule C matches once,
- *    because the phase it writes makes its own predicate false. The
+ *    `src/consistency.ts` (#54). It is written against the phase `resumePhase`
+ *    RESOLVES rather than the stored field, because `phase` is optional and the
+ *    loop branches on the resolution. Of its two normalisations, rule B keeps
+ *    matching on every later load - its predicate reads `status`, which is
+ *    never rewritten - while rule C matches once, because the phase it writes
+ *    makes its own predicate false.
+ *
+ *    **That module is not yet called from anywhere.** It ships as groundwork,
+ *    with no behaviour change: wiring it into `loadRun` makes three existing
+ *    cases in `tests/stored-state.test.ts` fail, because they assert that
+ *    contradictory triples load clean, and editing them needs an exception to
+ *    AGENTS.md's "add tests; do not edit existing ones" that only the
+ *    repository owner can grant. See the header of `src/consistency.ts`. The
  *    `codexTokens <= tokensUsed` share still has NO rule anywhere: it is a
  *    reporting concern rather than a resume one, since nothing in `runPhases`
  *    branches on either field while `summary()` (`src/cli.ts`) renders
@@ -106,13 +112,7 @@ import type {
 
 // ---- primitives -------------------------------------------------------------
 
-/**
- * Exported so `loadRun` can reach into the PARSED state for the one raw value
- * the cross-field check needs (#54) without a type assertion. `validateStoredState`
- * has already refused a non-record by then; TypeScript cannot see that, and a
- * predicate is the honest way to say so.
- */
-export function isRecord(v: unknown): v is Record<string, unknown> {
+function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
