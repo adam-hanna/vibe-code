@@ -702,6 +702,13 @@ The change was too large to show in one turn, so it is being reviewed a few file
  * about where it does not, so a reviewer that treats it as the set of concerns
  * and stops looking has been made worse off by having it. Its questions are
  * leads, never findings in themselves.
+ *
+ * The text is trimmed before it is rendered, for the same reason it is trimmed
+ * before it is called blank: whether a model's final message happens to end in
+ * a newline is not something the prompt's bytes should depend on. Untrimmed it
+ * produced a stray blank line before the paragraph below it on some turns and
+ * not others - cosmetic in markdown, but this file freezes prompt bytes in
+ * fixtures, so one input should render one output.
  */
 function reportSection(report: string | null | undefined): string {
   if (report === undefined) return '';
@@ -717,7 +724,7 @@ function reportSection(report: string | null | undefined): string {
 
 This is the report from the most recent write turn on this change.
 
-${report}
+${report.trim()}
 
 **Two things about it, and they pull in opposite directions.**
 
