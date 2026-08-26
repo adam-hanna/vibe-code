@@ -79,6 +79,39 @@ test('the replaced scope block still carries every guard it had before', () => {
   assert.ok(block.includes('disputing it is legitimate'));
 });
 
+/**
+ * The helper's own contract.
+ *
+ * Every case above asserts `current === splice(baseline, current)`, and that
+ * assertion is only worth anything because `spliceScope` refuses the two ways it
+ * could be satisfied while proving nothing: a region it cannot find (it would
+ * hand back the baseline, or a silently wrong slice) and a region that did not
+ * change (it would hand back the baseline, which for an unchanged prompt equals
+ * `current` - a green test asserting that nothing happened). Those refusals are
+ * the entire reason this is a helper rather than an inline `replace`, so they
+ * are pinned here rather than trusted.
+ */
+test('the splice refuses to pass vacuously when the scope block did not move', () => {
+  const now = prompt(1, false);
+  assert.throws(
+    () => spliceScope(now, now),
+    /identical/,
+    'splicing a prompt into itself must throw, not return it unchanged',
+  );
+});
+
+test('the splice refuses a baseline or a current whose scope region is gone', () => {
+  const now = prompt(1, false);
+  const noHeading = now.replace('## Scope\n', '## Boundary\n');
+  const noEnd = now.replace('\n## Acceptance criteria', '\n## The bar');
+
+  for (const broken of [noHeading, noEnd]) {
+    assert.throws(() => spliceScope(broken, now), /prompt shape moved/);
+    assert.throws(() => spliceScope(now, broken), /prompt shape moved/);
+    assert.throws(() => scopeBlock(broken), /prompt shape moved/);
+  }
+});
+
 test('the memoryless round note changed by exactly one paragraph, and nothing else moved', () => {
   // The deliberate change. The old note told a reviewer that its earlier
   // findings were "quoted below" - `reviewPrompt` has never quoted a finding -

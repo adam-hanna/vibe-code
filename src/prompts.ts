@@ -163,14 +163,24 @@ function formatOutOfScope(items: readonly OutOfScopeItem[] | undefined): string 
 }
 
 /**
- * What a reviewer may do with the plan's boundary - conditional on there being
- * one.
+ * What a reviewer may do with the plan's boundary - and what it may do when
+ * there is no boundary at all.
  *
- * The defer instruction only makes sense against a boundary someone drew.
- * Offering it where none was recorded would let a reviewer wave off a
- * legitimate finding on the authority of a plan that never claimed anything,
- * and legacy runs are exactly the ones with no boundary to check the finding
- * against.
+ * What the two branches differ on is the plan's AUTHORITY, not the flag. Both
+ * offer `defer`, because the question it answers - would the change be correct,
+ * complete and safe to ship without this - is one the reviewer can answer from
+ * the change itself. What only a declared boundary can support is the stronger
+ * claim that demanding the work is a defect *in the finding*: offering that
+ * where nothing was recorded would let a reviewer wave off a legitimate finding
+ * on the authority of a plan that never claimed anything, and legacy runs are
+ * exactly the ones with no boundary to check a finding against. So the legacy
+ * branch says the plan's silence is not evidence, and says it in place of the
+ * defect-in-your-finding sentence rather than beside it.
+ *
+ * That distinction is why the branch used to withhold the instruction outright
+ * (its bar was "work the plan never touches", narrower than the other branch's
+ * and unreachable for any run since #18, when `out_of_scope` became required).
+ * #56 replaced the withholding with the narrower guard that was actually meant.
  *
  * Both directions of the decision are stated, and #56 is why. Across the nine
  * runs archived in `.vibe/runs/`, the critic and the reviewer set `defer` on 2

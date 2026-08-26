@@ -124,6 +124,17 @@ test('the legacy branch gains the operative test and keeps its own guard', () =>
     // The bar this branch used to set was narrower than the other branch's -
     // "work the plan never touches" excludes the same-file case entirely.
     assert.ok(!text.includes('never touches'));
+
+    // The restriction that keeps a freer deferral honest travels with it. This
+    // branch now offers the flag where it previously withheld it, so it is the
+    // branch that most needs the severity rule stated, and the assertion above
+    // this one would pass on a version that dropped it.
+    assert.ok(text.includes('at P2 or P3'), 'a legacy-run deferral is still non-blocking');
+    assert.ok(text.includes('never P0 or P1'));
+    assert.ok(
+      text.includes('raise it at its true severity'),
+      'work the change needs is still raised, not relabelled',
+    );
   }
 });
 

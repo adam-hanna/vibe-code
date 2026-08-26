@@ -207,7 +207,13 @@ test('an absent boundary is never rendered as an explicit empty one', () => {
 
 // ---- The guidance is conditional on a boundary existing --------------------
 
-test('the defer-for-out-of-scope instruction is given only where a boundary exists', () => {
+// Renamed by #56, assertions untouched. The old name said the *defer
+// instruction* was conditional on a boundary; since #56 both branches offer the
+// flag and what stays conditional is the plan's authority to make demanding the
+// work a defect. Every line below already tested only that narrower claim -
+// `DEFECT_IN_FINDING` present with a boundary, absent without one - so the name
+// was the part that stopped being true.
+test("the plan's authority over what is out of scope is claimed only where a boundary exists", () => {
   for (const boundary of [[ITEM], []] as const) {
     const [, critique, review] = renderings(boundary);
     assert.ok(critique?.includes(DEFECT_IN_FINDING));
