@@ -37,6 +37,7 @@ src/orchestrator.ts  the loop: planPhase, reviewPhase, the guards, the prompt di
 src/run.ts           run state, artifacts, convergence maths (assessConvergence et al)
 src/roles.ts         who does what: the role table, refusals, warnings
 src/config.ts        DEFAULTS, config merge, validation
+src/consistency.ts   cross-field rules over status/phase/planOnly, checked on load
 src/types.ts         shared types, including RunState
 src/prompts.ts       every prompt the agents receive
 src/claude.ts        Claude Code adapter (stream-json)

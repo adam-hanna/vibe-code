@@ -1,12 +1,14 @@
 import { mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
+import { checkStoredConsistency } from '@src/consistency.js';
 import * as log from '@src/log.js';
 import type { ActivityObservation } from '@src/progress.js';
 import { initialSlotFields } from '@src/slots.js';
 import {
   assertUsableRunId,
   hasFindingShape,
+  isRecord,
   parseStoredState,
   summariseStored,
   validateStoredState,
@@ -107,10 +109,11 @@ export function createRun(targetDir: string, task: string, planOnly: boolean): R
  * repair-or-refuse rule this enforces.
  *
  * The order is load-bearing. The id is constrained before it becomes a path, so
- * a traversal attempt never opens a file; parsing and validation are pure and
- * throw before anything is written, so a refused state file is left
- * byte-for-byte unchanged; and only once the state is known good are the
- * repairs recorded, which is the first write this function makes.
+ * a traversal attempt never opens a file; parsing, per-field validation and the
+ * cross-field check are all pure and throw before anything is written, so a
+ * refused state file is left byte-for-byte unchanged - and no `.vibe/.gitignore`
+ * is created for a run vibe is about to refuse; and only once the state is known
+ * good are the repairs recorded, which is the first write this function makes.
  */
 export function loadRun(targetDir: string, id: string): RunState {
   const root = path.join(targetDir, RUNS_DIR);
@@ -121,12 +124,26 @@ export function loadRun(targetDir: string, id: string): RunState {
 
   const parsed = parseStoredState(readFileSync(file, 'utf8'), id, dir);
   const { state: checked, repairs } = validateStoredState(parsed, id, dir);
-  // Also on resume: a run created before this existed still needs the guard.
-  ensureVibeIgnored(targetDir);
   // Paths are re-derived so a run directory stays valid if the repo moves. They
   // are the two fields the validator does not decide, and the only two it does
   // not carry, so they are supplied here rather than asserted there.
   const state: RunState = { ...checked, dir, targetDir };
+
+  // The cross-field pass (#54), against the phase the loop will actually branch
+  // on rather than the stored field - `resumePhase` collapses an absent phase
+  // into one derived from `status`, and that is what `runPhases` reads. The raw
+  // `phase` rides along for the refusal message only: an unrecognised value is
+  // repaired to absence above, but on this path the repair is discarded
+  // unwritten, so the file still holds it and the message must not claim the
+  // field is missing.
+  //
+  // Placed before ensureVibeIgnored, which is the first write below: a refusal
+  // here must leave the target directory exactly as it was found.
+  const rawPhase = isRecord(parsed) ? parsed['phase'] : undefined;
+  const normalisation = checkStoredConsistency(state, resumePhase(state), rawPhase);
+
+  // Also on resume: a run created before this existed still needs the guard.
+  ensureVibeIgnored(targetDir);
 
   // Recorded, not merely applied: a repair the user cannot see is one they
   // cannot judge, and `recordEvent` persists the repaired state that the resume
@@ -145,6 +162,34 @@ export function loadRun(targetDir: string, id: string): RunState {
       `state.json for ${id} had ${repairs.length} unusable field(s) - ` +
         `${repairs.map((r) => r.field).join(', ')}. Each was replaced with the empty value its ` +
         'type implies and recorded in the run\'s event log; nothing else was changed.',
+    );
+  }
+
+  // A normalisation is not a repair, and gets its own event type and its own
+  // wording: nothing was replaced with an empty value here - one field was
+  // corrected because the three of them together said something no run could
+  // have written.
+  //
+  // Only `phase` is written. `status` is the historical record of how the run
+  // last ended, `resumePhase` prefers `phase` whenever it is present so the
+  // phase alone decides the resume, and the loop overwrites the status at its
+  // next step anyway - rewriting it here would destroy evidence to no purpose.
+  //
+  // The event is recorded only when the phase actually MOVED, while the warning
+  // is emitted on every load that matches. Rule B's predicate reads `status`,
+  // which is never rewritten, so it keeps matching for the life of the run;
+  // `recordEvent` persists, so recording unconditionally would append a
+  // duplicate entry on every resume. Rule C makes its own predicate false and
+  // so matches once.
+  if (normalisation !== null) {
+    const moved = state.phase !== normalisation.phase;
+    state.phase = normalisation.phase;
+    if (moved) recordEvent(state, 'state_normalised', { ...normalisation });
+    log.warn(
+      `state.json for ${id} holds a combination no run could have written - ` +
+        `${normalisation.why}. vibe set "phase" to "planning" so the resume redoes work ` +
+        'rather than skipping it; "status" and "planOnly" are unchanged and nothing else ' +
+        'was touched.',
     );
   }
   return state;

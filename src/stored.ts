@@ -68,8 +68,18 @@ import type {
  *    status without touching the phase (`src/cli.ts`), so a finished run that is
  *    resumed and fails preflight persists exactly that pair, and "repairing" it
  *    would make `resumePhase` infer `planning` and re-run completed work.
- *    Cross-field consistency over `status`/`phase`/`planOnly`, and the
- *    `codexTokens <= tokensUsed` share, are issue #54.
+ *    Cross-field consistency over `status`/`phase`/`planOnly` lives in
+ *    `src/consistency.ts`, which `loadRun` calls immediately after this module
+ *    and before its first write (#54). It is written against the phase
+ *    `resumePhase` RESOLVES rather than the stored field, because `phase` is
+ *    optional and the loop branches on the resolution. Of its two
+ *    normalisations, rule B keeps matching on every later load - its predicate
+ *    reads `status`, which is never rewritten - while rule C matches once,
+ *    because the phase it writes makes its own predicate false. The
+ *    `codexTokens <= tokensUsed` share still has NO rule anywhere: it is a
+ *    reporting concern rather than a resume one, since nothing in `runPhases`
+ *    branches on either field while `summary()` (`src/cli.ts`) renders
+ *    `tokensUsed - codexTokens` and would print a negative Claude share.
  * 6. **Nothing is written on a refusal path.** Every function here is pure: it
  *    reads, decides, and either throws or returns. That is what makes the
  *    refusal messages' "the run directory is intact and no file has been
@@ -96,7 +106,13 @@ import type {
 
 // ---- primitives -------------------------------------------------------------
 
-function isRecord(v: unknown): v is Record<string, unknown> {
+/**
+ * Exported so `loadRun` can reach into the PARSED state for the one raw value
+ * the cross-field check needs (#54) without a type assertion. `validateStoredState`
+ * has already refused a non-record by then; TypeScript cannot see that, and a
+ * predicate is the honest way to say so.
+ */
+export function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
@@ -229,8 +245,15 @@ const FINDING_PHASES = {
   review: 'review',
 } satisfies Record<PendingFindings['phase'], PendingFindings['phase']>;
 
-/** What was found, worded for a human rather than as a type name. */
-function describe(v: unknown): string {
+/**
+ * What was found, worded for a human rather than as a type name.
+ *
+ * Exported for `src/consistency.ts`, which has to describe a stored `phase` this
+ * version does not recognise: the repair that drops it is discarded on the
+ * refusal path, so the file still holds the value and the message must say so.
+ * One wording for both modules, like `intact` below.
+ */
+export function describe(v: unknown): string {
   if (v === null) return 'null';
   if (Array.isArray(v)) return 'an array';
   switch (typeof v) {
@@ -261,8 +284,14 @@ export class StoredStateError extends Error {
   }
 }
 
-/** The one sentence a user needs after a refusal: nothing was destroyed. */
-const intact = (dir: string): string =>
+/**
+ * The one sentence a user needs after a refusal: nothing was destroyed.
+ *
+ * Exported so `src/consistency.ts` refuses in the same words. Two wordings of
+ * "nothing has been lost" is exactly the drift `unvalidated('config')` warns
+ * about one field along.
+ */
+export const intact = (dir: string): string =>
   `Nothing has been lost - the run directory is intact at ${dir} and no file has been rewritten.`;
 
 /**
