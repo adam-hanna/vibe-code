@@ -275,8 +275,15 @@ export async function diffChunks(
       current = { files: [], diff: '', truncated: [] };
     }
 
+    // Keyed on the file count, exactly as `separator` above is, so the join and
+    // the size accounting cannot disagree. They differ only for a file whose own
+    // diff is empty, which nothing here is known to produce - `--no-renames`
+    // makes a rename a delete plus an add, and a mode-only change still prints
+    // its mode lines. So this buys the two rules one definition rather than
+    // fixing an observed defect, and no test claims otherwise (#49 review).
+    const first = current.files.length === 0;
     current.files.push(file);
-    current.diff = current.diff === '' ? body : `${current.diff}\n${body}`;
+    current.diff = first ? body : `${current.diff}\n${body}`;
     if (oversized) {
       current.truncated.push(file);
       chunks.push(current);

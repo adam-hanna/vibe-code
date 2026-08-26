@@ -177,12 +177,25 @@ test('a patch keeps its trailing whitespace, and two files are separated by one 
 
 test('an awkward filename is listed and diffed as itself', async () => {
   const dir = repo();
-  const wanted = ['with space.txt', '[x].txt', ' lead.txt', 'trail .txt', 'new\nline.txt'];
+  // `trail.txt ` ends in the space - `trail .txt` only has one in the middle,
+  // which no filesystem finds awkward and which left the trailing-whitespace
+  // case the comment below claims untested on every platform (#49 review).
+  const wanted = [
+    'with space.txt',
+    '[x].txt',
+    ' lead.txt',
+    'trail .txt',
+    'trail.txt ',
+    'new\nline.txt',
+  ];
   const made = wanted.filter((name) => creatable(dir, name));
 
-  // Said out loud rather than skipped silently: on Windows a trailing space and
-  // a newline are not storable, and a case that quietly tested neither would
-  // read as coverage it does not have.
+  // Said out loud rather than skipped silently: which of these a filesystem
+  // will store is a property of the filesystem, not something to predict here,
+  // and a case that quietly tested fewer names than it lists would read as
+  // coverage it does not have. Measured, not assumed - on Windows 11 + NTFS
+  // through `node:fs` only `new\nline.txt` is refused; the trailing space is
+  // stored, listed and diffed like any other name.
   const missing = wanted.filter((n) => !made.includes(n));
   if (missing.length > 0) {
     console.log(`  (filesystem refused: ${missing.map((n) => JSON.stringify(n)).join(', ')})`);
