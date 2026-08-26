@@ -13,6 +13,7 @@ import type {
   Answer,
   ClaudeTurnResult,
   Config,
+  ContextUsage,
   Evidence,
   Finding,
   LoopConfig,
@@ -176,6 +177,18 @@ export interface Handlers {
    * handed the critique's id" an assertion rather than a coincidence.
    */
   codexSessionId?: (label: string, options: CodexTurnOptions) => string | null;
+  /**
+   * What this Claude turn measured about its conversation, or null for a turn
+   * that reported none.
+   *
+   * Defaults to null - which is what this fake returned before the hook
+   * existed, so every case that does not set it dispatches and records exactly
+   * what it did. A case that *does* set it can reach session rotation through
+   * the loop: `shouldRotate` needs a stored measurement, `recordTurnContext`
+   * only writes one from a turn that reported usage, and without this there was
+   * no way for an injected turn to report any.
+   */
+  usage?: (label: string, options: ClaudeTurnOptions) => ContextUsage | null;
 }
 
 /**
@@ -201,7 +214,7 @@ export function agents(handlers: Handlers, calls: string[]): AgentTurns {
         sessionId: options.sessionId,
         denials: [],
         numTurns: 1,
-        usage: null,
+        usage: handlers.usage?.(label, options) ?? null,
         tokens: tokens(1000),
       });
     },

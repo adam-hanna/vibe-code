@@ -533,9 +533,17 @@ function reportRoles(cfg: Config): void {
   if (changed.length > 0) {
     const named = ROLE_NAMES.map((role) => {
       const spec = table[role];
-      // Only where the role named an effort of its own. Printing the provider's
-      // against every role would read as five overrides where there are none.
-      return `${role}=${spec.provider}${spec.effort === undefined ? '' : `/${spec.effort}`}`;
+      // Only where the role named a model or an effort of its own. Printing the
+      // provider's against every role would read as five overrides where there
+      // are none. The model matters here in a way the effort does not: nothing
+      // validates a model name, so this line is where a typo is seen in the
+      // first ten lines rather than after the planner and the implementer have
+      // run (#60).
+      return (
+        `${role}=${spec.provider}` +
+        `${spec.model === undefined ? '' : `@${spec.model}`}` +
+        `${spec.effort === undefined ? '' : `/${spec.effort}`}`
+      );
     });
     log.info(`Roles:   ${named.join(' ')}`);
   }

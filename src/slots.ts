@@ -260,8 +260,10 @@ export const SLOTS: Record<SlotName, SlotSpec> = {
         state.reviewContextTokens = tokens;
         state.reviewContextThread = now;
       },
-      // The same setting for both Codex conversations: `codex.contextWindow` is
-      // a fact about the model, and both threads run the same one.
+      // The same setting for both Codex conversations. `codex.contextWindow` is
+      // a fact about a model, and since #60 the two threads may name two - so
+      // this describes at most one of them, which is what `roleWarnings` W5
+      // says out loud rather than inventing a second number here.
       window: (cfg) => cfg.codex.contextWindow ?? null,
     },
   },

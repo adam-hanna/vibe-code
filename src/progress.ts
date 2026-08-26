@@ -507,13 +507,20 @@ export function progressOptions(
   state: RunState,
   cfg: Config,
   label: string,
+  /**
+   * Whose window the `ctx%` segment may use. Defaulted to the provider setting
+   * every caller read directly before it was a parameter, so a caller that
+   * passes nothing renders exactly what it renders today - which is what makes
+   * a per-role model (#60) reach only the turns that named one.
+   */
+  model: string = cfg.claude.model,
 ): ProgressOptions | undefined {
   if (!cfg.progress.enabled) return undefined;
   // Either source has to name this exact model: the in-process map is keyed by
   // it, and the persisted one is only returned when its `contextModel` tag
   // matches. A resumed run can therefore show `ctx%` on its first turn instead
   // of its second, without the rule changing.
-  const contextWindow = windows.get(cfg.claude.model) ?? measuredWindow(state, cfg.claude.model);
+  const contextWindow = windows.get(model) ?? measuredWindow(state, model);
   return {
     label,
     intervalMs: cfg.progress.intervalMs,

@@ -56,6 +56,13 @@ export interface RoleSpec {
    * a table cannot then claim an override nobody wrote. See `effortFor`.
    */
   effort?: Effort | undefined;
+  /**
+   * The model this role named for itself, and absent when it named none - which
+   * means its provider's `claude.model`/`codex.model`, as every role meant
+   * before this key existed. Absent rather than pre-resolved for `effort`'s
+   * reason: a table cannot then claim an override nobody wrote. See `modelFor`.
+   */
+  model?: string | undefined;
 }
 
 /**
@@ -104,15 +111,25 @@ const JOBS: Readonly<
  */
 export interface RoleSetting {
   provider: AgentProvider;
-  /**
-   * The one provider-level setting a role may override. Model deliberately is
-   * not: an effort is a closed enum and is fully checked before a turn is
-   * spawned, while a model string has no config-time check available - the
-   * preflight probe is an environment contract check rather than a model
-   * validator, and already runs on `PROBE_MODEL` whatever `claude.model` says.
-   * A `model` key inside a role object is refused, not ignored (#46).
-   */
+  /** The reasoning effort this seat runs at, checked against a closed enum. */
   effort?: Effort | undefined;
+  /**
+   * The model this seat runs, checked only for being a non-empty string.
+   *
+   * Accepted on trust, and that is the whole of the validation decision (#60):
+   * no config-time check for a model *name* exists, because the preflight probe
+   * is an environment contract check rather than a model validator. It runs
+   * `PROBE_MODEL` for Claude whatever `claude.model` says, and `cfg.codex.model`
+   * for Codex - so it has never validated a role's model and is not made to. No
+   * allowlist and no default table: guessing whether a model exists is the
+   * never-invent-a-number rule applied to a name. A typo is caught by the run
+   * summary before anything is spent, and by a turn failure that names
+   * `roles.<role>.model` rather than the provider key (see `modelSource`).
+   *
+   * #46 refused this key rather than ignoring it, so nothing has to be
+   * un-taught here: the refusal simply becomes a setting.
+   */
+  model?: string | undefined;
 }
 
 /** The config surface for one role: who holds it, optionally with what it overrides. */
@@ -120,8 +137,8 @@ export type RoleValue = AgentProvider | RoleSetting;
 
 /**
  * The `roles` section as a user writes it: a provider name per role, or an
- * object naming the provider and, optionally, that role's own effort. Keeps the
- * name it shipped with in #2.
+ * object naming the provider and, optionally, that role's own model (#60) and
+ * effort (#46). Keeps the name it shipped with in #2.
  *
  * Either form can be *persisted*, not just written: `cmdRun` stores the
  * effective config, so a `state.config` written by this version carries whichever
@@ -197,14 +214,27 @@ function defaultSlot(role: Role, provider: AgentProvider): SlotName {
 }
 
 /** The keys a role object may carry. Anything else is a mistake worth naming. */
-const ROLE_OBJECT_KEYS: readonly string[] = ['provider', 'effort'];
+const ROLE_OBJECT_KEYS: readonly string[] = ['provider', 'model', 'effort'];
+
+/**
+ * `provider, model and effort` - a list a person would read aloud.
+ *
+ * `join(' and ')` was fine while there were two keys and reads as
+ * `provider and model and effort` with three, which is how #60 found it. Written
+ * against the array's length rather than its contents, so a fourth key does not
+ * need this touched again.
+ */
+function listKeys(keys: readonly string[]): string {
+  if (keys.length < 2) return keys.join('');
+  return `${keys.slice(0, -1).join(', ')} and ${keys[keys.length - 1]}`;
+}
 
 /** What a role's configured value has to say to be one, worded for a user. */
 function expectedRoleValue(role: Role, value: unknown): Error {
   return new Error(
     `roles.${role} is ${JSON.stringify(value) ?? String(value)}; expected ` +
       `${PROVIDERS.map((p) => `"${p}"`).join(' or ')}, or an object naming a provider and ` +
-      `optionally an effort`,
+      `optionally a model and an effort`,
   );
 }
 
@@ -218,9 +248,9 @@ function expectedRoleValue(role: Role, value: unknown): Error {
  * the one field `validateStoredState` deliberately passes through unchecked, so
  * `rolesFor` can reach a value nothing has validated.
  *
- * Unknown keys are reported before a missing provider on purpose. `{"model":
- * "..."}` is a user reaching for a per-role model, and answering that with "no
- * provider" sends them the wrong way.
+ * Unknown keys are reported before a missing provider on purpose: a role object
+ * carrying a key this shape does not take is a user reaching for a setting, and
+ * answering that with "no provider" sends them the wrong way.
  */
 export function roleSetting(role: Role, value: unknown): RoleSetting {
   if (typeof value === 'string') {
@@ -229,26 +259,11 @@ export function roleSetting(role: Role, value: unknown): RoleSetting {
   }
   if (!isRecord(value)) throw expectedRoleValue(role, value);
 
-  // Asked before the scan below, not inside it: `model` gets a message of its own
-  // and must get it whenever it is present, and a single loop would report
-  // whichever bad key JSON happened to put first - `{"sandbox": ..., "model":
-  // ...}` would answer a per-role-model attempt with "unknown key sandbox".
-  // Refused rather than ignored, because a role naming a model its provider's
-  // section does not is a real request, and silently dropping a setting a user
-  // wrote is the failure this section is strict to prevent. The shape can grow
-  // `model` once the probe question it raises is answered; until then this is the
-  // honest answer.
-  if (Object.prototype.hasOwnProperty.call(value, 'model')) {
-    throw new Error(
-      `roles.${role}.model is not supported: a role runs on its provider's model. Set ` +
-        `claude.model or codex.model instead.`,
-    );
-  }
   for (const key of Object.keys(value)) {
     if (!ROLE_OBJECT_KEYS.includes(key)) {
       throw new Error(
         `roles.${role} has unknown key "${key}"; a role object takes ` +
-          `${ROLE_OBJECT_KEYS.join(' and ')}`,
+          `${listKeys(ROLE_OBJECT_KEYS)}`,
       );
     }
   }
@@ -265,14 +280,33 @@ export function roleSetting(role: Role, value: unknown): RoleSetting {
   }
 
   const effort = value['effort'];
-  if (effort === undefined) return { provider: provider as AgentProvider };
-  if (typeof effort !== 'string' || !EFFORTS.includes(effort as Effort)) {
+  if (effort !== undefined && (typeof effort !== 'string' || !EFFORTS.includes(effort as Effort))) {
     throw new Error(
       `roles.${role}.effort is ${JSON.stringify(effort) ?? String(effort)}; must be one of ` +
         `${EFFORTS.join(', ')}`,
     );
   }
-  return { provider: provider as AgentProvider, effort: effort as Effort };
+
+  // All config can check about a model is that it is a name at all. Whitespace
+  // is rejected with the empty string rather than trimmed: `--model " "` is a
+  // spawn with no model, and silently repairing what a user wrote is the failure
+  // the whole of this key's design is strict to prevent. The value is stored
+  // verbatim for the same reason.
+  const model = value['model'];
+  if (model !== undefined && (typeof model !== 'string' || model.trim() === '')) {
+    throw new Error(
+      `roles.${role}.model is ${JSON.stringify(model) ?? String(model)}; must be a non-empty ` +
+        `model name string, or absent for ${provider}.model`,
+    );
+  }
+
+  // Spread rather than assigned, for the reason `tableFor` spreads them: a role
+  // that named neither must carry neither key, not two holding undefined.
+  return {
+    provider: provider as AgentProvider,
+    ...(effort === undefined ? {} : { effort: effort as Effort }),
+    ...(model === undefined ? {} : { model }),
+  };
 }
 
 /**
@@ -291,7 +325,7 @@ export function tableFor(providers: RoleProviders): RoleTable {
   if (!isRecord(providers)) {
     throw new Error(
       'roles must be an object mapping role names to "claude" or "codex", or to an object ' +
-        'naming a provider and optionally an effort',
+        'naming a provider and optionally a model and an effort',
     );
   }
   const table = {} as RoleTable;
@@ -306,6 +340,9 @@ export function tableFor(providers: RoleProviders): RoleTable {
       // says "this role means its provider's", and `exactOptionalPropertyTypes`
       // keeps the two distinguishable.
       ...(setting.effort === undefined ? {} : { effort: setting.effort }),
+      // The same rule, for the same reason: an absent key is what says "this
+      // role means its provider's model".
+      ...(setting.model === undefined ? {} : { model: setting.model }),
     };
   }
   return table;
@@ -576,13 +613,45 @@ export function turnTimeoutMs(role: Role, cfg: Config, roles: RoleTable = rolesF
  * seat rather than being replaced by this: two roles on one provider could not
  * differ before, which is the whole of #46, and one that names nothing has not
  * asked to.
- *
- * Model is deliberately not resolved here. It stays provider-level, so context
- * measurement and session rotation keep naming the model they name today.
  */
 export function effortFor(role: Role, cfg: Config, roles: RoleTable = rolesFor(cfg)): Effort {
   const spec = roles[role];
   return spec.effort ?? cfg[spec.provider].effort;
+}
+
+/**
+ * The model a turn in this role is spawned with.
+ *
+ * `effortFor`'s rule, for the other setting a role may name (#60): the role's
+ * own where it named one, and its provider's otherwise. `claude.model` and
+ * `codex.model` remain the model every seat on that provider runs, and a role
+ * that names nothing has not asked to differ - so under any table naming no
+ * per-role model this returns, for every role, the identical string the site
+ * that asked read directly before. That is the compatibility claim.
+ *
+ * Accepted on trust; see `RoleSetting.model` for why nothing validates the name.
+ *
+ * Unlike `effortFor` this is asked by more than the dispatch sites: a model is
+ * also what a context measurement is attributed to and what a rotation decision
+ * is made against, so the same resolver answers "which model is this turn's" for
+ * all three. See `shouldRotate` and `rotateSession`.
+ */
+export function modelFor(role: Role, cfg: Config, roles: RoleTable = rolesFor(cfg)): string {
+  const spec = roles[role];
+  return spec.model ?? cfg[spec.provider].model;
+}
+
+/**
+ * The setting that named this role's model, as a user would edit it.
+ *
+ * For the one place it matters: a turn that failed under a model the user typed.
+ * Shown `codex.model` when the name came from `roles.reviewer.model`, a user
+ * edits the wrong line - and the two keys can now hold different strings, so the
+ * provider key is no longer a safe thing to name by default.
+ */
+export function modelSource(role: Role, roles: RoleTable = ROLES): string {
+  const spec = roles[role];
+  return spec.model === undefined ? `${spec.provider}.model` : `roles.${role}.model`;
 }
 
 /** What a log line calls each agent. */
@@ -675,15 +744,50 @@ export function roleWarnings(cfg: Config, roles: RoleTable = rolesFor(cfg)): str
     const persists =
       shared.some((role) => slotForRole(role, roles) === implementerSlot) &&
       SLOTS[implementerSlot].persists(cfg);
-    warnings.push(
-      persists
-        ? `${named} share the implementer's ${implementer} conversation, so the judge remembers ` +
+    if (persists) {
+      // Unchanged, and asked first: a carried shared conversation is the
+      // dominant fact whatever models the two seats name, because the judge
+      // remembers the writing either way.
+      warnings.push(
+        `${named} share the implementer's ${implementer} conversation, so the judge remembers ` +
           `writing the code it is judging. Review independence is most of what this tool buys; ` +
-          `the run continues without it.`
-        : `${named} run on the same provider and model as the implementer (${implementer}), so ` +
-          `their judgement is not independent of the code's author. Each turn is one-shot, so no ` +
-          `conversation is shared; the run continues.`,
-    );
+          `the run continues without it.`,
+      );
+    } else {
+      // "the same provider and model" was true while a model was uniform per
+      // provider, and is false the moment two seats on one provider name
+      // different ones (#60). A warning that states something false is worse
+      // than no warning, so the group is split by the fact the sentence rests
+      // on and each half is told only what is true of it. Same-model first, so
+      // a table with both prints in a stable order - and a table where every
+      // shared role matches gets today's sentence, verbatim.
+      const implementerModel = modelFor('implementer', cfg, roles);
+      const sameModel = shared.filter((role) => modelFor(role, cfg, roles) === implementerModel);
+      const otherModel = shared.filter((role) => modelFor(role, cfg, roles) !== implementerModel);
+      if (sameModel.length > 0) {
+        warnings.push(
+          `${namePaths(sameModel)} run on the same provider and model as the implementer ` +
+            `(${implementer}), so their judgement is not independent of the code's author. Each ` +
+            `turn is one-shot, so no conversation is shared; the run continues.`,
+        );
+      }
+      if (otherModel.length > 0) {
+        // Weaker than the sentence above, and deliberately still said: a
+        // different model is not the code's author, which is most of what the
+        // warning asks for - but the shared provider is a real remainder, and
+        // stating it without a verdict it cannot support is what this file's
+        // rule allows.
+        const named = otherModel
+          .map((role) => `${`roles.${role}`} (${modelFor(role, cfg, roles)})`)
+          .join(', ');
+        warnings.push(
+          `${named} run on the implementer's provider (${implementer}) but on a different model ` +
+            `than the implementer (${implementerModel}). Each turn is one-shot, so no conversation ` +
+            `is shared and the judge is not the model that wrote the code; the shared provider is ` +
+            `what remains of the dependence, and the run continues.`,
+        );
+      }
+    }
   }
 
   // W2: rotation belongs to a slot, and not every slot has one. What is true of
@@ -739,6 +843,36 @@ export function roleWarnings(cfg: Config, roles: RoleTable = rolesFor(cfg)): str
         'side and cannot see the expensive half of this run. budget.maxTokens still counts both ' +
         'agents.',
     );
+  }
+
+  // W5: `codex.contextWindow` is one number, and a table may now name two Codex
+  // models (#60). The window stays provider-level - "the Codex context window is
+  // a setting, not a derivation" is settled, and a per-role window is a config
+  // surface this change does not open - so the honest response is to say that at
+  // most one of those conversations is measured against its own model's window.
+  // Conditional on the setting being present because an unset window measures
+  // neither thread, which W2 and W3 already describe, and conditional on the
+  // roles being enabled so a conversation nothing opens cannot fire it. Silent
+  // on every default run and on every run that sets nothing.
+  if (cfg.codex.contextWindow != null) {
+    const byModel = new Map<string, Role[]>();
+    for (const role of enabledRolesFor('codex', cfg, roles)) {
+      const model = modelFor(role, cfg, roles);
+      byModel.set(model, [...(byModel.get(model) ?? []), role]);
+    }
+    if (byModel.size > 1) {
+      const listed = [...byModel.entries()]
+        .map(([model, held]) => `${model} (${namePaths(held)})`)
+        .join(', ');
+      warnings.push(
+        `This run holds Codex roles on ${byModel.size} different models - ${listed} - and ` +
+          `codex.contextWindow (${cfg.codex.contextWindow}) is one setting describing one model. ` +
+          'Occupancy, the ctx% display and the context.compactAboveRatio threshold for at least ' +
+          'one of those conversations are therefore computed against a window that is not its ' +
+          "model's. Set codex.contextWindow for the model whose thread matters, or unset it to " +
+          'measure neither.',
+      );
+    }
   }
 
   return warnings;
