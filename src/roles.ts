@@ -137,8 +137,8 @@ export type RoleValue = AgentProvider | RoleSetting;
 
 /**
  * The `roles` section as a user writes it: a provider name per role, or an
- * object naming the provider and, optionally, that role's own effort. Keeps the
- * name it shipped with in #2.
+ * object naming the provider and, optionally, that role's own model (#60) and
+ * effort (#46). Keeps the name it shipped with in #2.
  *
  * Either form can be *persisted*, not just written: `cmdRun` stores the
  * effective config, so a `state.config` written by this version carries whichever
@@ -216,6 +216,19 @@ function defaultSlot(role: Role, provider: AgentProvider): SlotName {
 /** The keys a role object may carry. Anything else is a mistake worth naming. */
 const ROLE_OBJECT_KEYS: readonly string[] = ['provider', 'model', 'effort'];
 
+/**
+ * `provider, model and effort` - a list a person would read aloud.
+ *
+ * `join(' and ')` was fine while there were two keys and reads as
+ * `provider and model and effort` with three, which is how #60 found it. Written
+ * against the array's length rather than its contents, so a fourth key does not
+ * need this touched again.
+ */
+function listKeys(keys: readonly string[]): string {
+  if (keys.length < 2) return keys.join('');
+  return `${keys.slice(0, -1).join(', ')} and ${keys[keys.length - 1]}`;
+}
+
 /** What a role's configured value has to say to be one, worded for a user. */
 function expectedRoleValue(role: Role, value: unknown): Error {
   return new Error(
@@ -250,7 +263,7 @@ export function roleSetting(role: Role, value: unknown): RoleSetting {
     if (!ROLE_OBJECT_KEYS.includes(key)) {
       throw new Error(
         `roles.${role} has unknown key "${key}"; a role object takes ` +
-          `${ROLE_OBJECT_KEYS.join(' and ')}`,
+          `${listKeys(ROLE_OBJECT_KEYS)}`,
       );
     }
   }

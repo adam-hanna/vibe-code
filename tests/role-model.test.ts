@@ -394,6 +394,23 @@ test('a model that is not a non-empty string is a config error naming the path',
   bothPathsReject('reviewer', { provider: 'codex', model: '' }, /non-empty/);
 });
 
+test('tableFor rejects every one of them too, which is the path a resume takes', () => {
+  // `bothPathsReject` covers the two config readers. This covers the third, and
+  // it is the one with no validation in front of it: `validateStoredState`
+  // deliberately passes `state.config` through unchecked, so `rolesFor` ->
+  // `tableFor` can be handed a role value nothing has ever looked at. Its own
+  // header says that is why it checks; only the empty string was pinned, so a
+  // regression on null, a number, whitespace, an object or an array would have
+  // gone straight to a spawn.
+  for (const bad of [123, null, '', '   ', {}, []]) {
+    assert.throws(
+      () => tableFor({ ...DEFAULT_ROLE_PROVIDERS, reviewer: { provider: 'codex', model: bad } } as unknown as RoleProviders),
+      /roles\.reviewer\.model/,
+      `tableFor accepted ${JSON.stringify(bad) ?? String(bad)}`,
+    );
+  }
+});
+
 test('a legal model is accepted on trust, with no allowlist to be on', () => {
   const cfg = loadConfig(
     repoWith({

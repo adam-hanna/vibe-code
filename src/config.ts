@@ -208,11 +208,14 @@ function mergeSection<T extends object>(base: T, override: unknown): T {
  * agent, silently, with no error and no log line. Nothing else in a config can
  * fail that way, which is why this one section is strict.
  *
- * A role's value may now be an object - `{provider, effort}` (#46) - and it is
- * still replaced *wholesale*, key by key, exactly as a string was. That is why
- * `provider` is required inside the object: a deep merge, or a defaulted
- * provider, would let `{"effort": "max"}` written on top of an earlier
- * `"claude"` hand the role back to Codex without saying so.
+ * A role's value may now be an object - `{provider, model, effort}` (#46, #60) -
+ * and it is still replaced *wholesale*, key by key, exactly as a string was.
+ * That is why `provider` is required inside the object: a deep merge, or a
+ * defaulted provider, would let `{"effort": "max"}` written on top of an earlier
+ * `"claude"` hand the role back to Codex without saying so. `model` is replaced
+ * by the same rule and needs no separate treatment - an override that names a
+ * provider and no model means that provider's model, which is what a role
+ * naming no model has always meant.
  */
 function mergeRoles(base: RoleProviders, override: unknown): RoleProviders {
   if (override === undefined) return base;
