@@ -391,7 +391,13 @@ const PRIOR_RUN_TASK_CHARS = 100;
 function promptSafeCell(value: string, max: number): string {
   // The first line, and only the first: a task is a whole brief, and the rest
   // of it is what the planner opens the run directory for.
-  const firstLine = value.split(/\r?\n/)[0] ?? '';
+  //
+  // Every CR/LF boundary, not just LF and CRLF. A lone CR is a line ending too,
+  // and `\r?\n` does not see one: `first\rSECOND` split that way is a single
+  // "line", and the flattening below then turns the CR into a space rather than
+  // cutting there - so the whole of `SECOND` reached the prompt, which is
+  // exactly what first-line-only exists to stop (#52 review).
+  const firstLine = value.split(/\r\n|\r|\n/)[0] ?? '';
   const flattened = Array.from(firstLine, (ch) => {
     const code = ch.codePointAt(0) ?? 0;
     // Everything below space, plus DEL and the two Unicode line separators:

@@ -1556,6 +1556,15 @@ function freshConversationPrefix(state: RunState, role: Role, hasMemory: boolean
  * and predates this change; separate Claude sessions per generative role is the
  * only thing that would alter it, and that is a slot-ownership redesign rather
  * than this change.
+ *
+ * The Codex-seated roles - the critic, the answerer and the reviewer - never
+ * see this section at all, under the default table or any other. They are
+ * separate `codex exec` processes on their own threads, so there is no history
+ * for them to inherit it through, and nothing here or in `prompts.ts` renders
+ * it into a prompt they receive. That is deliberate: the critic's job is to
+ * attack this plan against the code as it is now, and handing it the same
+ * archive invites it to relitigate past runs instead. A plan that leans on a
+ * past run cites the run id, and the critic reads the same repository (#52).
  */
 function rehydratedPriorRuns(state: RunState, role: Role): string {
   if (role !== 'planner' || state.plan === null) return '';

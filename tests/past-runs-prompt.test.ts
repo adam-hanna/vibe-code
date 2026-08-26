@@ -101,6 +101,20 @@ test('a multi-kilobyte task is one bounded line, and the rest of it never arrive
   assert.equal(planPrompt(TASK, null, null, undefined, [run]).includes('SECOND-LINE-MARKER'), false);
 });
 
+test('a lone CR ends the line too, so the rest of the task still never arrives', () => {
+  // `\r?\n` does not see a bare CR, so `first\rSECOND` was one "line" and the
+  // flattening below turned the CR into a space rather than cutting there - the
+  // whole of SECOND reached the prompt. Classic-Mac endings are rare; the task
+  // is arbitrary text read off disk, and first-line-only either holds for every
+  // line ending or is not a bound at all (#52 review).
+  const CR = String.fromCharCode(13);
+  const run = summary({ id: 'cr', task: `first line${CR}SECOND-LINE-MARKER` });
+  const listed = rows([run]);
+
+  assert.deepEqual(listed, ['- `cr` - done - first line']);
+  assert.equal(planPrompt(TASK, null, null, undefined, [run]).includes('SECOND-LINE-MARKER'), false);
+});
+
 test('an unreadable run is a row with no task, and nothing invented in its place', () => {
   const listed = rows([
     summary({ id: 'broken', status: 'unreadable', task: '', costUsd: null }),
