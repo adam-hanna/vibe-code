@@ -14,6 +14,8 @@ import {
   effortFor,
   GENERATIVE_ROLES,
   holderLabel,
+  modelFor,
+  modelSource,
   roleEnabled,
   rolesFor,
   slotForRole,
@@ -80,6 +82,7 @@ import {
 import { describeFailure, resolveGates, runGateCommand } from '@src/verify.js';
 import type {
   Answer,
+  ClaudeTurnResult,
   Config,
   Finding,
   FindingsReport,
@@ -1396,6 +1399,8 @@ export {
   enabledRolesFor,
   GENERATIVE_ROLES,
   holderLabel,
+  modelFor,
+  modelSource,
   providerAccess,
   providersForRoles,
   READ_ONLY_TOOLS,
@@ -1591,6 +1596,54 @@ function planOfRecord(state: RunState, role: Role): string | null {
     : P.renderPlanDoc(state.plan);
 }
 
+/**
+ * Say which setting named this turn's model, on the way out of a failure.
+ *
+ * A user who set `roles.reviewer.model` and is shown `codex.model` edits the
+ * wrong line - and since #60 the two keys can hold different strings, so the
+ * provider key is no longer a safe thing to name. Nothing here classifies the
+ * failure: the note states what the turn ran and where the name came from,
+ * which is true of a timeout, a rate limit and an unknown model alike. There is
+ * deliberately no retry and no fallback to the provider's model - a model the
+ * user named and vibe silently replaced is the failure this key's design is
+ * strict to prevent.
+ *
+ * Added only where the role named a model of its own, so no run that sets
+ * nothing has its error text changed.
+ *
+ * The error object itself is rethrown, never wrapped: `charge.ts` keys a failed
+ * turn's spend in a WeakMap on identity, the retry loop tests `instanceof
+ * RateLimitError` and cli.ts tests `instanceof Escalation`. cli.ts prints
+ * `err.stack ?? err.message`, so the stack's first line - which is the message
+ * as it stood at construction - is amended alongside the message, or the note
+ * never reaches the reported failure at all.
+ *
+ * Applied from a `try`/`catch` around the turn's existing `await` rather than
+ * from a wrapper function, and that is not a style choice: a wrapper would put
+ * one more promise between a provider's result and that turn's accounting, and
+ * `turn-seam.test.ts` measures that distance in microtasks because a session
+ * rotation running concurrently can land in the gap. A `catch` costs nothing on
+ * the path that succeeds.
+ */
+function noteModelProvenance(err: unknown, role: Role, cfg: Config, roles: RoleTable): unknown {
+  // The guard that keeps a run setting nothing byte-identical: no per-role
+  // model, no note.
+  if (roles[role].model === undefined) return err;
+  const note = `[this turn ran ${modelSource(role, roles)} = "${modelFor(role, cfg, roles)}"]`;
+  if (!(err instanceof Error) || err.message.includes(note)) return err;
+  // Read before the message is changed, and this order is the whole of it: V8
+  // builds `stack` lazily on first access, from the message as it stands at
+  // that moment. Touching `message` first and `stack` second therefore appends
+  // the note to a first line that already had it - which is exactly what a
+  // throwaway script against dist/ showed, twice, before this was reordered.
+  const stack = typeof err.stack === 'string' ? err.stack : null;
+  err.message = `${err.message} ${note}`;
+  if (stack !== null) {
+    err.stack = stack.includes(note) ? stack : stack.replace(/^[^\n]*/, (first) => `${first} ${note}`);
+  }
+  return err;
+}
+
 async function claudeDispatch(
   state: RunState,
   cfg: Config,
@@ -1600,32 +1653,48 @@ async function claudeDispatch(
   turn: ClaudeTurnFn,
 ): Promise<TurnOutcome> {
   const slot = slotForRole(req.role, roles);
+  // The role's, falling back to the provider's - which is what every role on a
+  // string value still gets, and what every site below used to read directly.
+  // One resolution, used for the spawn, the measurement and the rotation
+  // decision, so those three cannot disagree about which model this turn is.
+  const model = modelFor(req.role, cfg, roles);
 
   // A rotation that could not be overlapped with Codex work happens here, at a
-  // turn boundary - never mid-turn.
-  if (shouldRotate(state, cfg, roles)) await rotateSession(state, cfg, turn, roles);
+  // turn boundary - never mid-turn. Asked with *this* turn's model rather than
+  // the rotating role's: the question is whether the conversation is too full
+  // for the turn about to use it, and the reset that follows has to tag the
+  // model the next measurement will be taken under. Where the planner and the
+  // implementer name different models this is the boundary that fires once.
+  if (shouldRotate(state, cfg, roles, model)) {
+    await rotateSession(state, cfg, turn, roles, model);
+  }
 
   const resume = slotHasMemory(state, cfg, slot);
   const prompt = freshConversationPrefix(state, req.role, resume) + req.prompt;
 
-  const result = await withRateLimitRetry(state, cfg, req.label, 'claude', () =>
-    turn({
-      prompt,
-      sessionId: ensureSlotId(state, slot),
-      resume,
-      permissionMode: claudePermission(access),
-      model: cfg.claude.model,
-      // The role's, falling back to the provider's - which is what every role on
-      // a string value still gets. The model above stays provider-level, so the
-      // context measurement below still names the model that produced it.
-      effort: effortFor(req.role, cfg, roles),
-      cwd: req.cwd,
-      jsonSchema: req.jsonSchema,
-      tools: req.tools,
-      timeoutMs: req.timeoutMs,
-      progress: progressOptions(state, cfg, req.label),
-    }),
-  );
+  // The `await` a plain assignment would have done, wrapped so a failure can say
+  // which setting named the model it ran. Outside the retry, so a turn that is
+  // waited out and retried is annotated once, when it finally gives up.
+  let result: ClaudeTurnResult;
+  try {
+    result = await withRateLimitRetry(state, cfg, req.label, 'claude', () =>
+      turn({
+        prompt,
+        sessionId: ensureSlotId(state, slot),
+        resume,
+        permissionMode: claudePermission(access),
+        model,
+        effort: effortFor(req.role, cfg, roles),
+        cwd: req.cwd,
+        jsonSchema: req.jsonSchema,
+        tools: req.tools,
+        timeoutMs: req.timeoutMs,
+        progress: progressOptions(state, cfg, req.label, model),
+      }),
+    );
+  } catch (err: unknown) {
+    throw noteModelProvenance(err, req.role, cfg, roles);
+  }
 
   // The slot's marker, not its id: this turn returning is the only evidence
   // that the conversation exists at all.
@@ -1633,9 +1702,9 @@ async function claudeDispatch(
   // Tagged with the model that produced it: the ratio is a fraction of this
   // model's window and means nothing under another one. Through the shared seam
   // so the rotation turn in context.ts cannot drift out of step with this one.
-  recordTurnContext(state, cfg.claude.model, result.usage);
+  recordTurnContext(state, model, result.usage);
 
-  const measured = measuredRatio(state, cfg.claude.model);
+  const measured = measuredRatio(state, model);
   const ctx = result.usage ? `, ctx ${(result.usage.ratio * 100).toFixed(0)}%` : '';
   applyCharge(state, cfg, {
     costUsd: result.costUsd,
@@ -1897,19 +1966,23 @@ async function codexDispatch(
   // Through the same retry the Claude turns use, so a Codex rate limit gets the
   // wait, the maxWaitMinutes cap and the resumable exit that already exist
   // rather than a second implementation of all three.
-  const { structured, raw, sessionId, tokens } = await withRateLimitRetry(
-    state,
-    cfg,
-    req.label,
-    'codex',
-    async () => {
+  // As on the Claude side: the ordinary `await`, in a `try` so the failure can
+  // name where this turn's model came from.
+  let outcome: CodexTurnResult;
+  try {
+    outcome = await withRateLimitRetry(state, cfg, req.label, 'codex', async () => {
       await checkCodexLimits(state, cfg, req.cwd, req.label);
       return turn({
         prompt,
         schema: spec.schema,
         schemaName: req.label,
         artifactDir: artifactDir(state, 'codex'),
-        model: cfg.codex.model,
+        // As with effort below: the role's where it named one, this provider's
+        // otherwise (#60). The two Codex conversations are already separate
+        // threads, so they can now run two different models - which is what
+        // `roleWarnings` W5 says out loud when `codex.contextWindow` is set,
+        // because one window cannot describe both.
+        model: modelFor(req.role, cfg, roles),
         // As on the Claude side: the role's effort where it named one, and this
         // provider's otherwise. Two Codex roles can now differ, which is the
         // whole of #46 - the reviewer's thread and the judge's are already
@@ -1919,10 +1992,17 @@ async function codexDispatch(
         cwd: req.cwd,
         timeoutMs: req.timeoutMs,
         sessionId: slotResumeId(state, cfg, slot),
+        // Deliberately unchanged: this resolves a *Claude* window for a Codex
+        // turn, which predates #60 and is a separate defect. Handing it this
+        // role's model would half-fix it - a Codex model has no entry in either
+        // window source - so it is left exactly as wrong as it was.
         progress: progressOptions(state, cfg, req.label),
       });
-    },
-  );
+    });
+  } catch (err: unknown) {
+    throw noteModelProvenance(err, req.role, cfg, roles);
+  }
+  const { structured, raw, sessionId, tokens } = outcome;
 
   // The marker is set whatever the run does with the id: a turn either succeeded
   // or it did not. `idChanged` is false when this run is not carrying the

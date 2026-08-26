@@ -145,7 +145,9 @@ test('under the default table every turn runs at its provider effort', async () 
     const expected =
       turn.provider === 'claude' ? DEFAULTS.claude.effort : DEFAULTS.codex.effort;
     assert.equal(turn.effort, expected, `${turn.label} runs at its provider's effort`);
-    // The model is not per-role in this change, and must not have moved.
+    // A role that names no model runs its provider's, which is what this table
+    // does - the compatibility claim #60 had to keep, asserted here as well as
+    // in `role-model.test.ts` because this case would notice it moving first.
     assert.equal(
       turn.model,
       turn.provider === 'claude' ? DEFAULTS.claude.model : DEFAULTS.codex.model,
@@ -309,17 +311,14 @@ test('an effort a role names that is not an effort is a config error naming the 
   bothPathsReject('reviewer', { provider: 'codex', effort: 3 }, /roles\.reviewer\.effort/);
 });
 
-test('a model inside a role object is refused rather than silently ignored', () => {
-  bothPathsReject(
-    'reviewer',
-    { provider: 'codex', model: 'gpt-5.6-luna' },
-    /roles\.reviewer\.model/,
-    /not supported/,
-    /codex\.model/,
-  );
-  // Named even when it is the only key, rather than reported as a missing
-  // provider: the user is reaching for a per-role model, and that is the answer.
-  bothPathsReject('reviewer', { model: 'gpt-5.6-luna' }, /roles\.reviewer\.model/);
+// The refusal this file used to pin - `{provider, model}` reported as "model is
+// not supported" - is gone: #46 refused the key so that #60 could grant it, and
+// it is now a setting. What it accepts, and where it reaches, is
+// `role-model.test.ts`. The half of that case which still holds is below: a
+// model does not excuse a missing provider, because a role value is replaced
+// wholesale on merge whatever keys it carries.
+test('a role object naming a model but no provider is still a missing-provider error', () => {
+  bothPathsReject('reviewer', { model: 'gpt-5.6-luna' }, /roles\.reviewer/, /provider is required/);
 });
 
 test('an unknown key inside a role object is a config error naming the key', () => {
@@ -331,14 +330,16 @@ test('an unknown key inside a role object is a config error naming the key', () 
   );
 });
 
-test('a model beside another unknown key still gets the model message, either order', () => {
-  // One scan over `Object.keys` would answer whichever key JSON put first, so a
-  // user reaching for a per-role model could be told about `sandbox` instead.
+test('a model beside an unknown key still reports the unknown key, either order', () => {
+  // This case used to pin the *ordering* rule that gave `model` its own message
+  // ahead of the unknown-key scan. That rule existed only because `model` was
+  // refused; now that it is a setting (#60), the only bad key here is `sandbox`
+  // and it must be the one named however JSON ordered the object.
   for (const value of [
     { provider: 'codex', model: 'o3', sandbox: 'x' },
     { provider: 'codex', sandbox: 'x', model: 'o3' },
   ]) {
-    bothPathsReject('reviewer', value, /roles\.reviewer\.model/, /not supported/);
+    bothPathsReject('reviewer', value, /roles\.reviewer/, /unknown key "sandbox"/);
   }
 });
 
@@ -528,8 +529,13 @@ test('tableFor refuses an effort it does not recognise, as it refuses a provider
     () => tableFor({ ...DEFAULT_ROLE_PROVIDERS, reviewer: { effort: 'max' } } as never),
     /provider is required/,
   );
+  // `{provider, model}` is no longer refused here - it is a setting since #60,
+  // and `role-model.test.ts` pins that `tableFor` carries it. What this line
+  // keeps is the claim it was making: a value `tableFor` cannot use is reported
+  // by it rather than crashing three frames away, so a *bad* model gets the
+  // same treatment an unrecognised effort does.
   assert.throws(
-    () => tableFor({ ...DEFAULT_ROLE_PROVIDERS, reviewer: { provider: 'codex', model: 'x' } } as never),
+    () => tableFor({ ...DEFAULT_ROLE_PROVIDERS, reviewer: { provider: 'codex', model: '' } } as never),
     /roles\.reviewer\.model/,
   );
 });
