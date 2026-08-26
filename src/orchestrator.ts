@@ -36,6 +36,7 @@ import {
   assessConvergence,
   clearPendingFindings,
   hasArtifact,
+  listRuns,
   measuredRatio,
   p1Signature,
   persistenceNotice,
@@ -87,6 +88,7 @@ import type {
   RoundRecord,
   Plan,
   RunState,
+  RunSummary,
   Severity,
 } from '@src/types.js';
 
@@ -1525,7 +1527,48 @@ export function runTurn(
  */
 function freshConversationPrefix(state: RunState, role: Role, hasMemory: boolean): string {
   if (hasMemory || !GENERATIVE_ROLES.includes(role)) return '';
-  return P.handoffContext(state.handoff, planOfRecord(state, role), state.handoffStale === true);
+  return (
+    P.handoffContext(state.handoff, planOfRecord(state, role), state.handoffStale === true) +
+    rehydratedPriorRuns(state, role)
+  );
+}
+
+/**
+ * The past-run index, reattached once when a *planner* session is rehydrated
+ * (#52).
+ *
+ * `handoffContext` carries the briefing and the plan of record; it has never
+ * carried the plan prompt, so a rotation between the plan turn and a revise
+ * turn would drop the archive with no sign that it had. An ordinary revise turn
+ * reuses the session that already saw it and is not given it again.
+ *
+ * `state.plan !== null` is the discriminator, and it is exact rather than
+ * approximate: the plan turn is the only planner turn that renders the section
+ * in its own prompt, and it is dispatched while `state.plan` is still null -
+ * `runPlan` assigns it only once the turn has returned. So a memoryless first
+ * plan turn carries the section once, from `planPrompt`; every later memoryless
+ * planner turn carries it once, from here; and no turn carries it twice.
+ *
+ * Planner-gated, which bounds *injection* and not *exposure*. Under the default
+ * table the implementer shares Claude's single `main` conversation and inherits
+ * the planner's history, this section included, until a rotation clears it.
+ * That is already true of the whole plan prompt, is documented in README.md,
+ * and predates this change; separate Claude sessions per generative role is the
+ * only thing that would alter it, and that is a slot-ownership redesign rather
+ * than this change.
+ *
+ * The Codex-seated roles - the critic, the answerer and the reviewer - never
+ * see this section at all, under the default table or any other. They are
+ * separate `codex exec` processes on their own threads, so there is no history
+ * for them to inherit it through, and nothing here or in `prompts.ts` renders
+ * it into a prompt they receive. That is deliberate: the critic's job is to
+ * attack this plan against the code as it is now, and handing it the same
+ * archive invites it to relitigate past runs instead. A plan that leans on a
+ * past run cites the run id, and the critic reads the same repository (#52).
+ */
+function rehydratedPriorRuns(state: RunState, role: Role): string {
+  if (role !== 'planner' || state.plan === null) return '';
+  return P.priorRunsSection(priorRuns(state));
 }
 
 /**
@@ -1702,6 +1745,28 @@ function describeReset(err: RateLimitError): string {
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * What previous runs on this repository decided, for the planner's index (#52).
+ *
+ * The filesystem read belongs here rather than in `prompts.ts`, which renders
+ * and does not read. The current run is excluded because its own directory
+ * exists before the planning turn is dispatched - `createRun` mkdirs and saves
+ * state first - so without the filter the planner would be shown the run
+ * reading the index, and a repo with no prior runs could never occur.
+ *
+ * `listRuns` already never throws, already lists an unreadable run rather than
+ * dropping the listing, and already sorts newest-first. The catch is the last
+ * line of the same rule: a run's own record must never be able to stop it
+ * planning, so anything unexpected here is absence, not an error.
+ */
+function priorRuns(state: RunState): readonly RunSummary[] {
+  try {
+    return listRuns(state.targetDir, { exclude: state.id, limit: P.PRIOR_RUN_LIMIT });
+  } catch {
+    return [];
+  }
+}
+
 async function runPlan(
   state: RunState,
   cfg: Config,
@@ -1715,7 +1780,13 @@ async function runPlan(
     cfg,
     {
       role: 'planner',
-      prompt: P.planPrompt(state.task, state.extraContext, state.environment, roles),
+      prompt: P.planPrompt(
+        state.task,
+        state.extraContext,
+        state.environment,
+        roles,
+        priorRuns(state),
+      ),
       cwd,
       label: 'plan',
     },

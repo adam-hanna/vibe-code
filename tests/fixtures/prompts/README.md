@@ -1,4 +1,29 @@
-# Golden review prompts
+# Golden prompts
+
+Two sets, generated the same way and held to the same rule: **regenerating one is a statement
+that the prompt changed**, and it needs saying out loud in the PR rather than absorbing quietly.
+
+## The planning prompt
+
+`plan-no-runs.txt` is one rendering of `planPrompt`, generated from the build at **`50e14d3`** -
+the `develop` tip #52 was branched from - **before** `src/prompts.ts` was touched. It exists so
+that the bar #52 was accepted against can be asserted rather than asserted-about: *a repo with no
+prior runs renders a planning prompt byte-identical to develop's.*
+
+```ts
+planPrompt(TASK, EXTRA_CONTEXT, null)
+```
+
+Its arguments live in [`tests/helpers/plan-prompt-args.ts`](../../helpers/plan-prompt-args.ts),
+which imports nothing but a type so it compiles unchanged inside a checkout of `50e14d3`; the
+generator was given a copy of that file, so the fixture and `tests/past-runs-prompt.test.ts`
+cannot drift onto different tuples.
+
+**Frozen contract.** The past-run index renders nothing when the list is empty, and a first-ever
+run's list *is* empty - the current run is filtered out of its own index. So this file is what an
+ordinary first run still sends, and it must match byte for byte.
+
+## Golden review prompts
 
 Three renderings of `reviewPrompt`, generated from the build at **`f0312d6`** - the `develop`
 tip #49 was branched from - **before** `src/prompts.ts` was touched. They exist so that the
