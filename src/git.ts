@@ -14,16 +14,62 @@ interface GitResult {
   stderr: string;
 }
 
+/**
+ * `raw` returns stdout untouched. Off at every call site that predates #49, so
+ * those are byte-for-byte what they always were.
+ *
+ * The trim is right for a sha, a branch name or a porcelain status, and wrong
+ * for two things this file now reads: a NUL-separated path list, where a
+ * filename may legitimately begin or end with whitespace, and a patch body,
+ * where trailing whitespace on the last changed line is *review content* - and
+ * silently rewriting it would have the tool show the reviewer something other
+ * than the change.
+ */
 async function git(
   cwd: string,
   args: readonly string[],
-  options: { allowFail?: boolean } = {},
+  options: { allowFail?: boolean; raw?: boolean } = {},
 ): Promise<GitResult> {
   const { code, stdout, stderr } = await run(gitBin(), args, { cwd });
   if (code !== 0 && !options.allowFail) {
     throw new Error(`git ${args.join(' ')} failed (${code}): ${stderr.trim()}`);
   }
-  return { code, stdout: stdout.trim(), stderr: stderr.trim() };
+  return {
+    code,
+    stdout: options.raw === true ? stdout : stdout.trim(),
+    stderr: stderr.trim(),
+  };
+}
+
+/**
+ * Split `--name-only -z` output into paths.
+ *
+ * Empty output is NO files, not one nameless one: `''.split('\0')` is `['']`,
+ * which would put a phantom empty entry in the reviewer's file list and in
+ * `state.reviewCoverage` - a file the run claims to have shown and cannot name.
+ *
+ * Nothing else is filtered and nothing is trimmed, so `" x "` and `"a\nb"`
+ * survive as themselves. That is the whole reason for `-z`: under
+ * `core.quotePath` the newline-separated form would come back quoted, and the
+ * quoted name does not match the path handed back to `git diff --`.
+ */
+export function splitNul(out: string): string[] {
+  if (out === '') return [];
+  const body = out.endsWith('\0') ? out.slice(0, -1) : out;
+  return body === '' ? [] : body.split('\0');
+}
+
+/**
+ * Remove ONE trailing newline, and nothing else.
+ *
+ * Each per-file patch ends with a newline that would double up when the pieces
+ * are joined with one. `trim()` would also eat trailing spaces on the final
+ * changed line, which is exactly the content that must survive.
+ */
+function stripFinalNewline(out: string): string {
+  if (out.endsWith('\r\n')) return out.slice(0, -2);
+  if (out.endsWith('\n')) return out.slice(0, -1);
+  return out;
 }
 
 export async function isRepo(cwd: string): Promise<boolean> {
@@ -85,6 +131,19 @@ export async function commitAll(cwd: string, message: string): Promise<string | 
 }
 
 /**
+ * The ceiling on what one reviewer turn is shown. Shared by `diffSince` and
+ * `diffChunks` so the single-chunk path and the packer cannot disagree about
+ * where "too big" starts. The figure itself is unchanged by #49 - raising it
+ * would move the hole, not close it.
+ */
+const DIFF_MAX_CHARS = 400_000;
+
+/** What a cut diff says, in both the whole-diff and the per-file case. */
+function truncationMarker(maxChars: number): string {
+  return `\n\n[... diff truncated at ${maxChars} chars - review the working tree directly ...]`;
+}
+
+/**
  * The diff handed to the reviewer. Falls back to staged-everything in a repo
  * with no baseline commit, so a greenfield run still gets reviewed.
  */
@@ -93,7 +152,7 @@ export async function diffSince(
   baseSha: string | null,
   options: { maxChars?: number } = {},
 ): Promise<string> {
-  const maxChars = options.maxChars ?? 400_000;
+  const maxChars = options.maxChars ?? DIFF_MAX_CHARS;
   let out: string;
 
   if (baseSha) {
@@ -105,12 +164,131 @@ export async function diffSince(
   }
 
   if (out.length > maxChars) {
-    return (
-      out.slice(0, maxChars) +
-      `\n\n[... diff truncated at ${maxChars} chars - review the working tree directly ...]`
-    );
+    return out.slice(0, maxChars) + truncationMarker(maxChars);
   }
   return out;
+}
+
+/** One reviewer turn's worth of the change: whole files, in git's order. */
+export interface DiffChunk {
+  files: string[];
+  diff: string;
+  /** Files whose own diff exceeded the limit and was cut inside this chunk. */
+  truncated: string[];
+}
+
+/**
+ * The diff mode, decided ONCE, plus the whole diff it produced.
+ *
+ * `diffSince` and `changedFiles` can describe different changes: `diffSince`
+ * falls back to the working tree when `baseSha..HEAD` is empty, `changedFiles`
+ * does not, so with `git.commitEachRound: false` the reviewer used to be handed
+ * a working-tree diff beside an EMPTY file list. Harmless while the list was
+ * decoration; fatal once the list is what the change is chunked by, since the
+ * reviewer would be handed nothing at all (#49).
+ *
+ * The whole diff comes back through the trimming read on purpose: it is what
+ * the single-chunk path returns verbatim, and it has to stay byte-identical to
+ * `diffSince`.
+ */
+async function resolveDiffMode(
+  cwd: string,
+  baseSha: string | null,
+): Promise<{ prefix: string[]; whole: string }> {
+  if (baseSha) {
+    let { stdout: whole } = await git(cwd, ['diff', `${baseSha}..HEAD`]);
+    if (whole) return { prefix: ['diff', `${baseSha}..HEAD`], whole };
+    ({ stdout: whole } = await git(cwd, ['diff', 'HEAD']));
+    return { prefix: ['diff', 'HEAD'], whole };
+  }
+  await git(cwd, ['add', '-A'], { allowFail: true });
+  const { stdout: whole } = await git(cwd, ['diff', '--cached']);
+  return { prefix: ['diff', '--cached'], whole };
+}
+
+/**
+ * The change, split into as many reviewer turns as it takes.
+ *
+ * The unit is a whole file: it is the natural boundary for a review comment,
+ * and it is what the file list already gives. Greedy first-fit in git's own
+ * order rather than optimal bin-packing - a split a human can predict from
+ * `git diff --name-only` is worth more than a tighter one.
+ *
+ * A file whose own diff exceeds `maxChars` is still cut, inside its own chunk,
+ * and named in `truncated`. Splitting it by `@@` hunks would need the
+ * `diff --git`/`---`/`+++` header reconstructed onto every piece - a second
+ * mechanism with its own failure mode - so it is recorded rather than silent,
+ * which is the half of #49 that mattered.
+ *
+ * Under the limit this returns the whole diff verbatim as one chunk and makes
+ * no per-file call at all, so an ordinary round is the same string `diffSince`
+ * has always produced, from the same command.
+ *
+ * Considered and rejected: splitting the whole diff on `^diff --git ` instead of
+ * asking git per file. It saves n subprocesses but needs the `a/`.../`b/` header
+ * paths parsed - quoting, renames, mode-only changes - to name each piece, and
+ * the name is precisely what `reviewCoverage` and `truncated` assert on.
+ */
+export async function diffChunks(
+  cwd: string,
+  baseSha: string | null,
+  options: { maxChars?: number } = {},
+): Promise<{ chunks: DiffChunk[]; files: string[] }> {
+  const maxChars = options.maxChars ?? DIFF_MAX_CHARS;
+  const { prefix, whole } = await resolveDiffMode(cwd, baseSha);
+
+  // Before the size branch, not after it: both paths return this list, and the
+  // caller needs it for the prompt and for the coverage record even when there
+  // is only one chunk.
+  //
+  // `--literal-pathspecs` because `--` separates options from paths but does NOT
+  // disable pathspec magic: a file honestly named `[x].txt` would otherwise be
+  // read as a glob and match something else, or nothing, while still being
+  // recorded as covered. `--no-renames` so this list and the per-file diffs
+  // below describe the same set of files - `--name-only` reports only a
+  // rename's destination, and the diff for that destination can be empty.
+  const listArgs = ['--literal-pathspecs', ...prefix, '--name-only', '-z', '--no-renames'];
+  const { stdout: listed } = await git(cwd, listArgs, { raw: true });
+  const files = splitNul(listed);
+
+  if (whole.length <= maxChars) {
+    return { chunks: [{ files: [...files], diff: whole, truncated: [] }], files };
+  }
+
+  const chunks: DiffChunk[] = [];
+  let current: DiffChunk = { files: [], diff: '', truncated: [] };
+
+  for (const file of files) {
+    const args = ['--literal-pathspecs', ...prefix, '--no-renames', '--', file];
+    const { stdout } = await git(cwd, args, { raw: true });
+    let body = stripFinalNewline(stdout);
+    const oversized = body.length > maxChars;
+    if (oversized) body = body.slice(0, maxChars) + truncationMarker(maxChars);
+
+    // The separator counts. Without it a chunk of two files could exceed the
+    // limit by the byte the join adds, which is the sort of off-by-one that
+    // only shows up on the one diff that lands exactly on the boundary.
+    const separator = current.files.length > 0 ? 1 : 0;
+    const fits = current.diff.length + separator + body.length <= maxChars;
+    if (current.files.length > 0 && (oversized || !fits)) {
+      chunks.push(current);
+      current = { files: [], diff: '', truncated: [] };
+    }
+
+    current.files.push(file);
+    current.diff = current.diff === '' ? body : `${current.diff}\n${body}`;
+    if (oversized) {
+      current.truncated.push(file);
+      chunks.push(current);
+      current = { files: [], diff: '', truncated: [] };
+    }
+  }
+
+  // The trailing chunk, and the empty-change case: a run that reaches here with
+  // nothing packed still gets one chunk, because "no chunks" is not a thing the
+  // caller can review.
+  if (current.files.length > 0 || chunks.length === 0) chunks.push(current);
+  return { chunks, files };
 }
 
 export async function changedFiles(cwd: string, baseSha: string | null): Promise<string[]> {

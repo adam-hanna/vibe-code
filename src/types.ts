@@ -659,6 +659,30 @@ export interface GateOutcome {
   required: boolean;
 }
 
+/**
+ * What the most recent review round actually saw - extended after each chunk
+ * turn succeeds, never before it.
+ *
+ * Absent means no completed review coverage: no review has run, or one is in
+ * flight and has not finished a single part. Never repaired into a zero-valued
+ * record - "the reviewer saw no files" is a different fact from "no review
+ * happened" (#49, and #44's rule about absence).
+ *
+ * Flat by decision: which chunk saw which file lives in the per-turn Codex
+ * artifacts and in the prompts, and storing it here would be redundant state
+ * with a second repair surface.
+ */
+export interface ReviewCoverage {
+  /** 1-based, matching the `Code review (round N)` heading. */
+  round: number;
+  /** Chunk turns COMPLETED so far, not the number planned. One for an ordinary round. */
+  chunks: number;
+  /** Every file the reviewer was actually shown, in order. */
+  files: string[];
+  /** Files whose diff was cut even inside their own chunk. */
+  truncated: string[];
+}
+
 export interface RunEvent {
   at: string;
   type: string;
@@ -720,6 +744,15 @@ export interface RunState {
    * absence).
    */
   gateOutcomes?: GateOutcome[] | undefined;
+  /**
+   * What the most recent review round was shown.
+   *
+   * Reset at the start of each round and extended one completed chunk at a
+   * time, so it never claims coverage a turn has not bought. Absent on a run
+   * that has not finished a review part, and never repaired into a record
+   * (#49).
+   */
+  reviewCoverage?: ReviewCoverage | undefined;
   /** Question-and-replan cycles spent so far. */
   questionRound: number;
   events: RunEvent[];

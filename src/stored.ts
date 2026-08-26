@@ -18,6 +18,7 @@ import type {
   PendingFindings,
   Plan,
   QuestionKind,
+  ReviewCoverage,
   RoundRecord,
   RunEvent,
   RunPhase,
@@ -912,6 +913,44 @@ function readGateOutcomes(raw: unknown, ctx: ReadContext): GateOutcome[] | undef
   return outcomes;
 }
 
+/**
+ * What the last review round saw, or nothing at all.
+ *
+ * Dropped rather than repaired, which is the opposite of `gateOutcomes` one
+ * function up, and the difference is what the value is for. A gate record feeds
+ * the exit rule, so it has to be repaired into something the rule reads as "no
+ * evidence". This one is read only to be reported, and its two scalars cannot be
+ * reconstructed - a `round` invented as 0 would be exactly the fabricated number
+ * this repo refuses everywhere else. So a damaged record reads as "this run
+ * makes no claim about coverage", and the repair is still logged: `loadRun`
+ * turns the repair log into a `state_repaired` event, so the corruption is
+ * visible even though the field is not.
+ *
+ * `isPositiveInt`, not `isCounter`: the writer only ever emits `round >= 1` and
+ * `chunks >= 1`, so a stored zero is not a value any version of this tool
+ * produced and must not read back as a plausible record (#49).
+ */
+function readReviewCoverage(raw: unknown, ctx: ReadContext): ReviewCoverage | undefined {
+  if (raw === undefined) return undefined;
+  if (
+    !isRecord(raw) ||
+    !isPositiveInt(raw['round']) ||
+    !isPositiveInt(raw['chunks']) ||
+    !Array.isArray(raw['files']) ||
+    !Array.isArray(raw['truncated'])
+  ) {
+    ctx.repairs.dropped('reviewCoverage', 'reviewCoverage');
+    return undefined;
+  }
+  const strings = (list: readonly unknown[]): string[] => list.filter((v): v is string => isString(v));
+  const files = strings(raw['files']);
+  const truncated = strings(raw['truncated']);
+  if (files.length !== raw['files'].length || truncated.length !== raw['truncated'].length) {
+    ctx.repairs.dropped('reviewCoverage', 'reviewCoverage entries that were not paths');
+  }
+  return { round: raw['round'], chunks: raw['chunks'], files, truncated };
+}
+
 function readTool(entry: unknown): AgentEnvironmentFacts['tools'][number] | null {
   if (!isRecord(entry)) return null;
   const version = entry['version'];
@@ -1180,6 +1219,10 @@ const READERS = {
   // record that could not be read is repaired to - and `run.ts` reads that as
   // "no evidence", never as "nothing went wrong" (#47).
   gateOutcomes: (raw, ctx) => readGateOutcomes(raw, ctx),
+  // Absent stays absent for the same reason, one field along: absence means no
+  // review part has completed, and a damaged record is dropped to absence
+  // rather than guessed into one (#49).
+  reviewCoverage: (raw, ctx) => readReviewCoverage(raw, ctx),
   carried: (raw, ctx) =>
     raw === undefined ? undefined : repairedArray('carried', raw, ctx, readFinding),
   declined: (raw, ctx) =>
