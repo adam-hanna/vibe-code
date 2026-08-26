@@ -608,6 +608,7 @@ export async function execute(
     // a human reliably reads. `summary()` is spend, rounds, branch and rate
     // limits; this is a statement about what the run did and did not establish.
     reportGates(state);
+    reportReviewCoverage(state);
     reportDeferred(state);
     summary(state, started);
     return incomplete === null ? EXIT.OK : EXIT.UNVERIFIED;
@@ -860,6 +861,39 @@ function reportGates(state: RunState): void {
     );
   }
   log.warn(parts.join(' '));
+}
+
+/**
+ * What the last review round was actually shown.
+ *
+ * Here for the reason `reportGates` is here: a change too large for one turn is
+ * reviewed in parts forty minutes before the run ends, and if a file inside one
+ * of those parts was still too big to show whole, the exit code cannot say so -
+ * a review that covered every file across several turns is complete, and this
+ * one is not quite (#49).
+ *
+ * Silent on the ordinary round. A chunked round that showed everything gets one
+ * detail line, because it is information rather than a caveat.
+ */
+function reportReviewCoverage(state: RunState): void {
+  const coverage = state.reviewCoverage;
+  if (coverage === undefined) return;
+
+  if (coverage.truncated.length > 0) {
+    const named = coverage.truncated.map((f) => `\`${f}\``).join(', ');
+    log.warn(
+      `The last review saw a cut diff for ${named}: ${
+        coverage.truncated.length === 1 ? 'that file is' : 'those files are'
+      } larger than a single review turn can carry. The reviewer was told so and asked to read ` +
+        `the rest from the working tree, but nothing here establishes that it did. The exit code ` +
+        'does not move for this.',
+    );
+  }
+  if (coverage.chunks > 1) {
+    log.detail(
+      `Review round ${coverage.round} ran in ${coverage.chunks} parts over ${coverage.files.length} file(s).`,
+    );
+  }
 }
 
 /**

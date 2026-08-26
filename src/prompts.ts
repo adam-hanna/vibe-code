@@ -542,6 +542,73 @@ ${planMd}
 ${implementerCriteria(acceptanceCriteria)}${known}${notDoing}`;
 }
 
+/** One part of a review round, as the reviewer is told about it. */
+export interface ReviewChunk {
+  /** 1-based. */
+  index: number;
+  total: number;
+  files: readonly string[];
+  /** Files in THIS part whose diff was cut. */
+  truncated: readonly string[];
+  /**
+   * Whether the earlier parts of THIS round are in this same conversation.
+   * Not the slot's lifetime memory - see `chunkNote`.
+   */
+  carriesEarlierParts: boolean;
+}
+
+/**
+ * What this turn is a part of, and what it was not shown.
+ *
+ * Two paragraphs, independently rendered, because they answer two different
+ * questions and the cases do not coincide:
+ *
+ * - The part framing appears only when there IS more than one part. A single
+ *   oversized file is one chunk, and telling it that it is "part 1 of 1" would
+ *   be noise.
+ * - The truncation paragraph appears whenever something was cut, single chunk or
+ *   not. That case is exactly the one #49 is named after: the reviewer used to
+ *   be handed a diff with a marker in it and nothing that asked it to go and
+ *   read the rest, and an absence of findings about the tail is what an APPROVE
+ *   is made of.
+ *
+ * `carriesEarlierParts` is NOT the slot's memory. A later round's part 1 resumes
+ * a thread that remembers earlier *rounds* and has never seen this round's other
+ * parts, so keying the "you already saw them" wording on `hasMemory` would tell
+ * it not to repeat findings for a diff it has not been shown.
+ */
+function chunkNote(chunk: ReviewChunk): string {
+  const parts: string[] = [];
+
+  if (chunk.total > 1) {
+    parts.push(
+      `## This is part ${chunk.index} of ${chunk.total}
+
+The change was too large to show in one turn, so it is being reviewed a few files at a time. **This is one review round, not ${chunk.total} of them** - the findings from every part are merged into a single report, so raise what you see here and do not wait for a later part to raise it for you. A defect that spans parts is worth raising on the part where it is visible.`,
+    );
+    parts.push(
+      chunk.carriesEarlierParts
+        ? `The earlier parts of this same round were shown to you earlier in this conversation, so do not re-file a finding you already raised for them.`
+        : `**You have not been shown the other parts of this round** - either this is the first part, or this turn is a fresh conversation. Do not assume they were reviewed, and do not assume they were fine. Raise anything this part shows you even if it might also appear in a part you cannot see; repeated ids are merged.`,
+    );
+  }
+
+  if (chunk.truncated.length > 0) {
+    const named = chunk.truncated.map((f) => `\`${f}\``).join(', ');
+    parts.push(
+      `**The diff below is incomplete for ${named}.** ${
+        chunk.truncated.length === 1 ? 'That file is' : 'Those files are'
+      } larger than one turn can carry, so the patch stops part-way through and the rest is not here. Open ${
+        chunk.truncated.length === 1 ? 'it' : 'them'
+      } in the working tree and read the remainder before judging ${
+        chunk.truncated.length === 1 ? 'it' : 'them'
+      } - "nothing found" about a part you were never shown is the one answer this review cannot give.`,
+    );
+  }
+
+  return `\n${parts.join('\n\n')}\n`;
+}
+
 export function reviewPrompt(
   diff: string,
   changedFiles: readonly string[],
@@ -553,6 +620,12 @@ export function reviewPrompt(
   roles: RoleTable = ROLES,
   /** The gate-pass snapshot, appended for the reason `critiquePrompt`'s is. */
   acceptanceCriteria?: readonly AcceptanceCriterion[] | undefined,
+  /**
+   * Present only when this turn is one part of a change too large for a single
+   * one, or when a file in it was cut. Absent renders NOTHING, which is what
+   * keeps an ordinary round's prompt byte-identical to the one before #49.
+   */
+  chunk?: ReviewChunk | undefined,
 ): string {
   return `You are reviewing a code change against the plan it was meant to implement.${
     round > 1 ? continuityNote(round, hasMemory, 'change') : ''
@@ -594,7 +667,7 @@ This is the bar the plan was approved against - the conditions the change claime
 There is no per-criterion verdict to report and no field to set. Your findings and their severities are the only signal this loop reads, exactly as before; the criteria are something a finding may cite, not a second scoreboard.
 
 ${REVIEW_BREADTH}
-
+${chunk === undefined ? '' : chunkNote(chunk)}
 ## Files changed
 
 ${changedFiles.length > 0 ? changedFiles.map((f) => `- ${f}`).join('\n') : '(none detected)'}
@@ -705,6 +778,23 @@ function continuityNote(round: number, hasMemory: boolean, subject: 'plan' | 'ch
     return `\n\nThis is review round ${round}, and it continues the same conversation in which you reviewed the earlier ${what} - you have your previous findings in context.
 
 Two things follow. If a finding of yours is **still unresolved**, re-raise it with the **exact same \`id\` you used before**; do not restate it under a new name. If it was addressed, drop it and do not re-litigate it. Judging whether your own earlier objections were actually met is the main job this round.`;
+  }
+  // The `change` half of the memoryless branch says something different from the
+  // `plan` half, because only one of the two prompts is telling the truth.
+  // `revisePlanPrompt` does put the critique's findings in front of the planner;
+  // `reviewPrompt` puts NO findings in front of the reviewer - it renders the
+  // files, the diff, the plan, the scope and the criteria. So under
+  // `codex.persistSession: false`, where every review turn is a fresh
+  // conversation, this note used to tell a reviewer that had never seen a
+  // finding not to re-litigate it, and a defect that was never fixed reads back
+  // as an approval - the exact failure #49 exists to close.
+  //
+  // The `plan` half has the same shape of problem for the critic and is
+  // deliberately left alone: the critic is out of scope for #49, and changing
+  // its prompt inside a change to the review loop would move a second loop's
+  // behaviour without evidence. Recorded as a follow-up.
+  if (subject === 'change') {
+    return `\n\nThis is review round ${round}. The change has already been revised in response to findings from earlier rounds, but **you do not have those findings** - this turn starts a fresh conversation and they are not reproduced here. Review what you are given on its own terms and raise every defect you can see, including one that may already have been raised before; do not stay silent about something because it might have been addressed. Use whatever \`id\` you would naturally choose - repeats are reconciled by the tool.`;
   }
   return `\n\nThis is review round ${round}. The ${what} has already been revised in response to earlier findings, which are quoted below. Re-raise one with its original \`id\` only if it is genuinely still unresolved - do not re-litigate points that were addressed.`;
 }

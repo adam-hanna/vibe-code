@@ -87,6 +87,7 @@ import type {
   RoundRecord,
   Plan,
   RunState,
+  Severity,
 } from '@src/types.js';
 
 // The accounting vocabulary lives in @src/charge.js, a leaf: the session
@@ -2002,35 +2003,160 @@ async function runReview(
   turns: AgentTurns,
 ): Promise<FindingsReport> {
   log.step(`${holderLabel('reviewer', roles)} is reviewing the implementation`);
-  const diff = await git.diffSince(cwd, state.baseSha);
-  const files = await git.changedFiles(cwd, state.baseSha);
+  const { chunks, files } = await git.diffChunks(cwd, state.baseSha);
 
-  const outcome = await runTurn(
-    state,
-    cfg,
-    {
-      role: 'reviewer',
-      prompt: P.reviewPrompt(
-        diff,
-        files,
-        plan.plan_md,
-        plan.out_of_scope,
-        state.reviewRound + 1,
-        roleHasMemory(state, cfg, 'reviewer', roles),
-        state.environment,
-        roles,
-        // The snapshot, and deliberately not `?? []`: the reviewer's rendering
-        // is three-state, so collapsing an absent bar to an empty one would
-        // have a legacy run claim done-ness is unobservable.
-        state.acceptanceCriteria,
-      ),
-      cwd,
-      label: `review-${state.reviewRound}`,
-    },
-    turns,
-    roles,
+  // The round's own report, before the round is bought again. A process that
+  // died between the artifact write and `recordPendingFindings` leaves a
+  // complete-looking `code-review-<n>.json` for a round the resume is about to
+  // review from scratch, and with several turns in a round that window is
+  // wider. The file is rewritten by the same code path on success (#49).
+  removeArtifact(state, `code-review-${state.reviewRound}.json`);
+
+  // Cleared, not written: a coverage record published before the first turn
+  // would claim the reviewer saw every file the instant before that turn failed,
+  // which is the shape of overclaim this field exists to prevent.
+  state.reviewCoverage = undefined;
+  saveState(state);
+
+  if (chunks.length > 1) {
+    log.info(`Diff too large for one turn - reviewing ${files.length} file(s) in ${chunks.length} parts`);
+    // How the round was SPLIT, which is true before any turn runs. What was
+    // actually seen is `reviewCoverage`, recorded per completed part below.
+    recordEvent(state, 'review_chunked', { chunks: chunks.length, files: files.length });
+  }
+
+  const reports: FindingsReport[] = [];
+  // Accumulated here rather than read back off `state`: the record is what the
+  // reviewer has been handed so far, and reading the field it was just cleared
+  // to would make that a round trip through a value this function owns.
+  const seen: string[] = [];
+  const cut: string[] = [];
+  for (const [i, chunk] of chunks.entries()) {
+    // Read inside the loop: the slot is marked started by the turn that
+    // succeeds, so with a persistent thread part 1 is memoryless and parts 2..n
+    // continue the conversation without anything new (#45).
+    const hasMemory = roleHasMemory(state, cfg, 'reviewer', roles);
+    // And separately from it: lifetime memory is not this round's parts. Part 1
+    // of a later round resumes a thread that has never seen the other parts of
+    // *this* round, and telling it not to repeat findings for them would ask it
+    // to stay quiet about a diff it was never shown.
+    const carriesEarlierParts = i > 0 && hasMemory;
+    const chunked = chunks.length > 1;
+    const outcome = await runTurn(
+      state,
+      cfg,
+      {
+        role: 'reviewer',
+        prompt: P.reviewPrompt(
+          chunk.diff,
+          chunk.files,
+          plan.plan_md,
+          plan.out_of_scope,
+          state.reviewRound + 1,
+          hasMemory,
+          state.environment,
+          roles,
+          // The snapshot, and deliberately not `?? []`: the reviewer's rendering
+          // is three-state, so collapsing an absent bar to an empty one would
+          // have a legacy run claim done-ness is unobservable.
+          state.acceptanceCriteria,
+          // Absent for the ordinary round - one chunk, nothing cut - which is
+          // what keeps that prompt byte-identical. Present when a file was cut
+          // even in a single chunk, because that reviewer is the one that most
+          // needs telling to go and read the rest.
+          chunked || chunk.truncated.length > 0
+            ? {
+                index: i + 1,
+                total: chunks.length,
+                files: chunk.files,
+                truncated: chunk.truncated,
+                carriesEarlierParts,
+              }
+            : undefined,
+        ),
+        cwd,
+        // Unchanged when there is one chunk: this string is Codex's output name
+        // and the retry label, and a round that did not need splitting must look
+        // exactly as it always did.
+        label: chunked ? `review-${state.reviewRound}-part${i + 1}` : `review-${state.reviewRound}`,
+      },
+      turns,
+      roles,
+    );
+    reports.push(
+      groundAndRecord(state, cwd, 'reviewer', roles, parseFindings(readStructured(outcome))),
+    );
+
+    // After the turn, never before it: this says what the reviewer was actually
+    // handed. A round that stops here leaves a record of the parts it got.
+    seen.push(...chunk.files);
+    cut.push(...chunk.truncated);
+    state.reviewCoverage = {
+      round: state.reviewRound + 1,
+      chunks: i + 1,
+      files: [...seen],
+      truncated: [...cut],
+    };
+    saveState(state);
+    for (const file of chunk.truncated) {
+      log.warn(`${file} is larger than one review turn - the reviewer was shown a cut diff`);
+      recordEvent(state, 'review_file_truncated', { file });
+    }
+  }
+
+  const [only] = reports;
+  if (reports.length === 1 && only !== undefined) return only;
+  return mergeReviewReports(reports);
+}
+
+/** Most blocking first, so a later chunk can only ever raise a finding's severity. */
+const SEVERITY_RANK = {
+  P0: 0,
+  P1: 1,
+  P2: 2,
+  P3: 3,
+} satisfies Record<Severity, number>;
+
+/**
+ * Several parts of one round, read as one report.
+ *
+ * The rule is fail-closed and order-independent: the most blocking severity
+ * wins, and a tie keeps the first occurrence - which is chunk order, which is
+ * git's file order, so the same change merges the same way on every run.
+ *
+ * The `defer` invariant is re-applied afterwards because `parseFindings` can
+ * only enforce it per chunk: a finding deferred at P2 in one part and raised at
+ * P1 in another would otherwise arrive at P1 still carrying `defer: true`, an
+ * invariant the boundary states and would then stop keeping.
+ *
+ * `verdict` is honest bookkeeping and nothing more. Nothing in this loop reads
+ * it - the gate counts severities - so do not build anything on it.
+ */
+function mergeReviewReports(reports: readonly FindingsReport[]): FindingsReport {
+  const merged = new Map<string, Finding>();
+  for (const report of reports) {
+    for (const finding of report.findings) {
+      const seen = merged.get(finding.id);
+      if (seen === undefined || SEVERITY_RANK[finding.severity] < SEVERITY_RANK[seen.severity]) {
+        merged.set(finding.id, finding);
+      }
+    }
+  }
+
+  const findings = [...merged.values()].map((f) =>
+    f.severity === 'P0' || f.severity === 'P1' ? { ...f, defer: false } : f,
   );
-  return groundAndRecord(state, cwd, 'reviewer', roles, parseFindings(readStructured(outcome)));
+
+  const summary = reports
+    .map((r, i) => (r.summary === '' ? '' : `Part ${i + 1}/${reports.length}: ${r.summary}`))
+    .filter((s) => s !== '')
+    .join('\n\n');
+
+  return {
+    verdict: reports.some((r) => r.verdict === 'REVISE') ? 'REVISE' : 'APPROVE',
+    summary,
+    findings,
+  };
 }
 
 /**
