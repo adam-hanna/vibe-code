@@ -247,8 +247,9 @@ PLAN.md                    final approved plan
 plan-0.json ...            each plan revision, with assumptions and questions
 plan-critique-0.json ...   Codex findings per round
 code-review-0.json ...     Codex review findings per round
-implementation-report.md   what Claude says it did
-fix-report-1.md ...
+implementation-report.md   what Claude says it did — handed to the next reviewer
+fix-report-1.md ...        the same, after a review fix round
+verify-fix-1.md ...        the same, after a verification repair
 answers-N.json             Codex's answers to blocking questions
 answered-N.md              those answers as the planner received them
 ASSUMED.md                 non-blocking questions the run proceeded on, and the answer it used
@@ -387,4 +388,7 @@ where nearly every change since 1.0.1 came from.
   **A single file whose own diff exceeds the limit is still cut** — splitting one file by hunk would mean rebuilding its `diff --git` header onto every piece, which is a second mechanism with its own failure mode. But it is no longer silent: the reviewer is told in the prompt which file was cut and to read the rest from the working tree, the file is named in `state.reviewCoverage.truncated`, a `review_file_truncated` event records it, and the `Done` block says so at the end. It does not change the exit code — a review that covered every file across several turns is complete.
 
   `state.reviewCoverage` is written one completed part at a time, so it never claims the reviewer saw a file whose turn had not happened yet. Absent means no review part has finished.
+- **The implementer's report is handed to the next reviewer, framed as a self-report rather than as evidence.** Every write turn — implement, verification repair, review fix, final fix — is asked for the same five headings (`Changed`, `Verified`, `Unable to verify`, `Deviations`, `Questions / concerns for reviewer`), keyed to the plan's acceptance-criterion ids where the plan set any, and the most recent one is rendered into *every* turn of the next review round. The prompt states both halves of what it is worth: it is **untrusted** — a "verified" line is a claim that something was checked, not evidence that it works — and it is **not exhaustive**, because it says where the implementer knows it is weak and nothing about where it does not. Its questions are review *leads*, never findings in themselves.
+
+  What is stored is the report's **basename** on `state.lastReport`, not its text, so the handoff survives a resume through the artifact on disk while `state.json` stays a state file. The pointer is cleared before each write turn and rewritten once that turn's report is on disk: a run killed mid-turn therefore reports *no* report rather than the previous round's, because a stale report presented as current is worse than none. Nothing probes the run directory for one either — `implementation-report.md` may still be sitting there three fix rounds later. When there is no report the reviewer gets an explicit notice saying so, and saying that it is **not** a statement that there were no concerns; silence would read as a clean bill of health, which is the failure this exists to prevent.
 - Both models being wrong the same way is not something this catches. A clear verdict means two independent models agreed and the test suite passed three times — it is not proof.

@@ -48,7 +48,7 @@ import {
   takePendingFindings,
   verificationCaveat,
 } from '@src/run.js';
-import { hasFindingShape } from '@src/stored.js';
+import { hasFindingShape, isArtifactBasename } from '@src/stored.js';
 import {
   blockers as blockingFindings,
   gate,
@@ -106,6 +106,69 @@ export {
   takeSpend,
 } from '@src/charge.js';
 export type { ExitCode, TurnCharge, TurnSpend } from '@src/charge.js';
+
+/**
+ * A write turn is about to start, so this run can no longer vouch for any
+ * report (#50).
+ *
+ * Called before the turn and persisted immediately. Between here and
+ * `recordReport` the run has an EARLIER turn's report artifact on disk and a
+ * newer one possibly half-written, and there is no ordering of two separate
+ * file writes that makes "the pointer names the newest report" true throughout.
+ * So the window says "no report", and a resume that lands in it hands the
+ * reviewer the explicit notice rather than a previous round's report dressed as
+ * current - the same reason `runReview` removes `code-review-<n>.json` before
+ * buying the round again.
+ *
+ * The invariant this buys: `state.lastReport`, when present, names the newest
+ * report this run completed. It is never an earlier turn's report while a newer
+ * turn is in flight or half-recorded.
+ */
+function beginReport(state: RunState): void {
+  delete state.lastReport;
+  saveState(state);
+}
+
+/**
+ * That turn's report: on disk, and pointed at.
+ *
+ * One function for all four write sites - implement, verify-fix, review-fix,
+ * final-fix - so a fifth cannot set the artifact and forget the pointer.
+ */
+function recordReport(state: RunState, name: string, text: string): void {
+  artifact(state, name, text);
+  state.lastReport = name;
+  saveState(state);
+}
+
+/**
+ * The last write turn's report, or null when this run has none it can vouch for.
+ *
+ * Null for four causes - no pointer at all, a pointer `beginReport` cleared for
+ * a turn that never finished recording, a pointer this version will not join
+ * onto a path, and a file that is missing, unreadable or blank - and every one
+ * of them renders the same notice. What differs is the record: the first two
+ * are silence, the other two are run events, because a pointer that does not
+ * resolve is a fact about this run rather than about the reviewer's job (#50).
+ */
+function latestReport(state: RunState): string | null {
+  const name = state.lastReport;
+  if (name === undefined) return null;
+  // The same predicate `validateStoredState` applies on the way in, asked again
+  // here because this is the call that turns the value into a path.
+  if (!isArtifactBasename(name)) {
+    log.warn(`The recorded report name is not one vibe will read: ${name}`);
+    recordEvent(state, 'report_unusable', { name });
+    return null;
+  }
+  const text = artifactText(state, name);
+  if (text === null || text.trim() === '') {
+    log.warn(`The recorded report ${name} could not be read - the reviewer is told so`);
+    recordEvent(state, 'report_unreadable', { name });
+    return null;
+  }
+  return text;
+}
 
 export async function orchestrate(
   state: RunState,
@@ -185,6 +248,9 @@ async function runPhases(
     state.status = 'implementing';
     state.baseSha = await git.markBase(cwd);
     saveState(state);
+    // Before the turn, not after it. See `beginReport`: a run killed inside this
+    // turn must not leave the reviewer pointed at an earlier round's report.
+    beginReport(state);
 
     log.heading('Implementing');
     const impl = await runTurn(
@@ -210,7 +276,7 @@ async function runPhases(
       turns,
       roles,
     );
-    artifact(state, 'implementation-report.md', impl.text);
+    recordReport(state, 'implementation-report.md', impl.text);
 
     // Advanced before the commit, not after. The implementation turn is the
     // single most expensive step in a run, and a failure while committing it
@@ -482,6 +548,7 @@ async function reviewPhase(
 
       state.verifyRound += 1;
       saveState(state);
+      beginReport(state);
 
       log.step('Fixing the verification failure');
       const repair = await runTurn(
@@ -489,14 +556,22 @@ async function reviewPhase(
         cfg,
         {
           role: 'implementer',
-          prompt: P.fixPrompt([verified], state.verifyRound),
+          prompt: P.fixPrompt(
+            [verified],
+            state.verifyRound,
+            // The snapshot, never `plan.acceptance_criteria`: a criterion the
+            // critic never saw is not an approved criterion. The fixer's report
+            // is read by the reviewer exactly as the implementer's is, so it is
+            // held to the same bar (#50).
+            state.acceptanceCriteria,
+          ),
           cwd,
           label: `verify-fix-${state.verifyRound}`,
         },
         turns,
         roles,
       );
-      artifact(state, `verify-fix-${state.verifyRound}.md`, repair.text);
+      recordReport(state, `verify-fix-${state.verifyRound}.md`, repair.text);
       await maybeCommit(cfg, cwd, `vibe: fix verification failure (round ${state.verifyRound})`);
       continue;
     }
@@ -570,6 +645,7 @@ async function reviewPhase(
       state.finalFixDone = true;
       state.outstanding = decision.tolerated;
       saveState(state);
+      beginReport(state);
 
       log.step(
         `Incorporating ${decision.tolerated.length} carried P1(s), then finishing: ` +
@@ -582,14 +658,14 @@ async function reviewPhase(
         cfg,
         {
           role: 'implementer',
-          prompt: P.fixPrompt(review.findings, state.reviewRound),
+          prompt: P.fixPrompt(review.findings, state.reviewRound, state.acceptanceCriteria),
           cwd,
           label: `final-fix-${state.reviewRound}`,
         },
         turns,
         roles,
       );
-      artifact(state, `fix-report-${state.reviewRound}.md`, finalFix.text);
+      recordReport(state, `fix-report-${state.reviewRound}.md`, finalFix.text);
       // The moment the fix stops being worth buying again, and therefore the
       // moment to drop the carry: the turn is done and its report is on disk.
       // Everything after this - the record, three git invocations - can fail
@@ -652,6 +728,7 @@ async function runFixRound(
 ): Promise<void> {
   state.reviewRound += 1;
   saveState(state);
+  beginReport(state);
 
   log.step(`Fixing ${blockingFindings(findings).length} blocking finding(s)`);
   const fix = await runTurn(
@@ -659,14 +736,14 @@ async function runFixRound(
     cfg,
     {
       role: 'implementer',
-      prompt: P.fixPrompt(findings, state.reviewRound),
+      prompt: P.fixPrompt(findings, state.reviewRound, state.acceptanceCriteria),
       cwd,
       label: `fix-${state.reviewRound}`,
     },
     turns,
     roles,
   );
-  artifact(state, `fix-report-${state.reviewRound}.md`, fix.text);
+  recordReport(state, `fix-report-${state.reviewRound}.md`, fix.text);
   // Consumed once the turn's report is on disk, and before the commit: a commit
   // that fails must not buy this turn a second time. Everything before this
   // point leaves them outstanding, which is what makes a died-mid-turn resume
@@ -2018,6 +2095,12 @@ async function runReview(
   state.reviewCoverage = undefined;
   saveState(state);
 
+  // Read once, before the loop, and handed to EVERY part. Each part sees a
+  // slice of the diff while the report describes the whole change, so a concern
+  // about a file in part 3 is context a reviewer of part 1 may still need - and
+  // a report is small next to a 400k-character diff (#49, #50).
+  const report = latestReport(state);
+
   if (chunks.length > 1) {
     log.info(`Diff too large for one turn - reviewing ${files.length} file(s) in ${chunks.length} parts`);
     // How the round was SPLIT, which is true before any turn runs. What was
@@ -2073,6 +2156,11 @@ async function runReview(
                 carriesEarlierParts,
               }
             : undefined,
+          // Every part, deliberately - see where it is read above. Never
+          // `undefined`: that is the "no caller statement" state which renders
+          // nothing, and a real round must always say something about the
+          // report, even when the thing it says is that there is none (#50).
+          report,
         ),
         cwd,
         // Unchanged when there is one chunk: this string is Codex's output name

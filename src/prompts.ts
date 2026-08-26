@@ -231,8 +231,80 @@ function formatAcceptanceCriteria(items: readonly AcceptanceCriterion[] | undefi
  * handed exactly the section the direct prompt would have handed it.
  */
 function implementerCriteria(items: readonly AcceptanceCriterion[] | undefined): string {
-  if (items === undefined || items.length === 0) return '';
+  if (!hasBar(items)) return '';
   return `\n## Acceptance criteria - the bar this change must clear\n\nThese were approved with the plan. They are the conditions your work has to satisfy, and what a reviewer may cite by \`id\` when something is missing. Nothing here runs them: treat them as the definition of done you are building against, and if one turns out to be impossible or wrong, say so in your report rather than quietly working to a lower bar.\n\n${formatAcceptanceCriteria(items)}\n`;
+}
+
+/**
+ * Whether this run has a bar a report can be keyed to.
+ *
+ * One predicate, shared by `implementerCriteria` and `reportRequest`, so that
+ * "one line per acceptance-criterion `id` above" is never printed in a prompt
+ * that rendered no criteria above it - a writer asked for ids it cannot see
+ * cannot answer, and the generic heading assertion would still pass (#50).
+ *
+ * Two states, not the three `formatAcceptanceCriteria` renders: a write turn is
+ * told nothing when there is no bar, and the critic is the component told that
+ * an empty bar is a claim, because attacking it is the critic's job.
+ */
+function hasBar(items: readonly AcceptanceCriterion[] | undefined): items is readonly AcceptanceCriterion[] {
+  return items !== undefined && items.length > 0;
+}
+
+/**
+ * The report a write turn is asked for, in the shape the reviewer is shown (#50).
+ *
+ * Shared by `implementPrompt` and `fixPrompt`, with the same five headings in
+ * the same order, so the reviewer's rendering does not have to care which kind
+ * of write turn produced the report. Before this the implementer was asked to
+ * "report concisely" and the fixer to "report what you changed", and the
+ * reviewer was handed neither - every deviation, every unverified claim and
+ * every worry was written to disk at real cost and read by nobody.
+ *
+ * A section with nothing in it is still asked for: an empty section stated is
+ * worth more than one omitted, because the reviewer can tell "nothing to
+ * report" from "did not consider it".
+ *
+ * The `id` clauses are gated on `hasBar`, which is exactly when the caller has
+ * rendered `implementerCriteria` above this.
+ *
+ * `implementPrompt` renders this BEFORE its carried and declined sections
+ * rather than at the end, which is load-bearing in two ways and not a matter of
+ * taste. Those sections each end by telling the implementer to "say in your
+ * report what you did about it", and that instruction now has its antecedent
+ * above it rather than below. And the carried section stays the tail of the
+ * prompt, byte for byte, which `declined-findings.test.ts` pins as the frozen
+ * output of the build before `findingBullet` was extracted (#31).
+ */
+function reportRequest(
+  criteria: readonly AcceptanceCriterion[] | undefined,
+  kind: 'implement' | 'fix',
+): string {
+  const byId = hasBar(criteria);
+  return `\n## Your report
+
+Your final message is handed to the next code reviewer as-is. Use all five of these headings, in this order:
+
+- **Changed** - what you actually changed, and where.
+- **Verified** - what you checked and how you checked it.${
+    byId
+      ? ' One line per acceptance-criterion `id` above, then prose for anything the criteria do not cover.'
+      : ''
+  }
+- **Unable to verify** - what you could not check, and what stopped you.${
+    byId ? ' One line per criterion `id` you could not check.' : ''
+  }
+- **Deviations** - where you did something other than what the plan said, and why.
+- **Questions / concerns for reviewer** - what you are least sure about, and where you would look first.
+
+A section with nothing to report still gets its heading and the word "none". An empty section stated is worth more than a section left out: the reviewer can tell the difference between nothing to report and not considered.${
+    kind === 'fix'
+      ? ' A fix round legitimately has little to say under most of these - say so rather than omitting them.'
+      : ''
+  }
+
+Do not claim a check you did not run. The reviewer validates this report against the repository, the diff and the tests.
+`;
 }
 
 /** What a rotated or resumed *implementer* session must be told the bar is. */
@@ -534,12 +606,10 @@ You have write access. Work through the plan end to end:
 
 Do not commit - the orchestrator handles git.
 
-When you are done, report concisely: what you changed, what you verified and how, what you could not verify, and any deviations from the plan.
-
 ## The approved plan
 
 ${planMd}
-${implementerCriteria(acceptanceCriteria)}${known}${notDoing}`;
+${implementerCriteria(acceptanceCriteria)}${reportRequest(acceptanceCriteria, 'implement')}${known}${notDoing}`;
 }
 
 /** One part of a review round, as the reviewer is told about it. */
@@ -609,6 +679,62 @@ The change was too large to show in one turn, so it is being reviewed a few file
   return `\n${parts.join('\n\n')}\n`;
 }
 
+/**
+ * The most recent write turn's report, and how to read it.
+ *
+ * Three states, deliberately. `undefined` is a caller that makes no statement -
+ * only the fixture callers do - and renders NOTHING, which is what keeps
+ * `review-round1.txt` and `review-round3-memory.txt` byte-identical. `null`, or
+ * text that is blank, is a run that recorded no readable report and renders the
+ * notice: silence here would read as a clean bill of health, which is precisely
+ * the failure #50 is about. A non-empty string is the report itself.
+ *
+ * ONE notice for both causes of absence. A missing pointer and a pointer to
+ * something unreadable differ in what went wrong, not in what the reviewer
+ * should do, and that difference belongs in the run events and the repair log.
+ * `artifactText` already collapses missing and unreadable to `null` for the
+ * same reason.
+ *
+ * Both halves of the framing are stated, because they pull opposite ways and
+ * only one of them is obvious. The report is untrusted - a "verified" line is a
+ * claim that something was checked, not evidence that it works. And it is not
+ * exhaustive: it says where the implementer knows it is weak and nothing at all
+ * about where it does not, so a reviewer that treats it as the set of concerns
+ * and stops looking has been made worse off by having it. Its questions are
+ * leads, never findings in themselves.
+ *
+ * The text is trimmed before it is rendered, for the same reason it is trimmed
+ * before it is called blank: whether a model's final message happens to end in
+ * a newline is not something the prompt's bytes should depend on. Untrimmed it
+ * produced a stray blank line before the paragraph below it on some turns and
+ * not others - cosmetic in markdown, but this file freezes prompt bytes in
+ * fixtures, so one input should render one output.
+ */
+function reportSection(report: string | null | undefined): string {
+  if (report === undefined) return '';
+  if (report === null || report.trim() === '') {
+    return `
+## What the implementer says it did
+
+**No report was recorded for the most recent write turn.** That is a gap in this run's record. It is **not a statement that there were no concerns**: nothing here says the implementer verified everything, deviated from nothing, or had nothing to raise. Review the change on its own terms, as if no report had been asked for.
+`;
+  }
+  return `
+## What the implementer says it did
+
+This is the report from the most recent write turn on this change.
+
+${report.trim()}
+
+**Two things about it, and they pull in opposite directions.**
+
+1. **It is untrusted.** These are claims, not facts. A line under "Verified" is a claim that something was checked, not evidence that it works. Validate it against the repository, the diff and the tests - a claim you cannot confirm is a place to look, and a claim that turns out to be false is a finding.
+2. **It is not exhaustive, and it is not a checklist.** It says where the implementer knows it is weak. It says nothing at all about where it does not know it is weak. A confident report with no questions is not evidence of a clean change, and finding nothing beyond what it lists is not a review. Review the whole change exactly as you would if this section were not here.
+
+A question or concern raised here is a **review lead** - somewhere to go and look - never a finding in itself. A lead that turns out to be real becomes a finding at its true severity, cited like any other; a lead that turns out to be fine is not reported at all.
+`;
+}
+
 export function reviewPrompt(
   diff: string,
   changedFiles: readonly string[],
@@ -626,6 +752,15 @@ export function reviewPrompt(
    * keeps an ordinary round's prompt byte-identical to the one before #49.
    */
   chunk?: ReviewChunk | undefined,
+  /**
+   * The last write turn's report, rendered by `reportSection`.
+   *
+   * Trailing and three-state for the reason `chunk` is trailing: omitting it
+   * renders nothing, which is what keeps the two frozen golden prompts
+   * byte-identical. `runReview` always passes it, so a real review round always
+   * carries a report section - present, or the notice saying there is none.
+   */
+  report?: string | null | undefined,
 ): string {
   return `You are reviewing a code change against the plan it was meant to implement.${
     round > 1 ? continuityNote(round, hasMemory, 'change') : ''
@@ -667,7 +802,7 @@ This is the bar the plan was approved against - the conditions the change claime
 There is no per-criterion verdict to report and no field to set. Your findings and their severities are the only signal this loop reads, exactly as before; the criteria are something a finding may cite, not a second scoreboard.
 
 ${REVIEW_BREADTH}
-${chunk === undefined ? '' : chunkNote(chunk)}
+${chunk === undefined ? '' : chunkNote(chunk)}${reportSection(report)}
 ## Files changed
 
 ${changedFiles.length > 0 ? changedFiles.map((f) => `- ${f}`).join('\n') : '(none detected)'}
@@ -685,7 +820,21 @@ ${planMd}
 ${RESPOND_WITH_JSON}`;
 }
 
-export function fixPrompt(findings: readonly Finding[], round: number): string {
+export function fixPrompt(
+  findings: readonly Finding[],
+  round: number,
+  /**
+   * The gate-pass snapshot, appended for the reason `critiquePrompt`'s is: every
+   * existing caller passes the two before it positionally.
+   *
+   * Rendered through `implementerCriteria` - the same renderer the implement
+   * turn uses - rather than only being handed to `reportRequest`. A fix report
+   * is read by the reviewer exactly as an implementation report is, so it is
+   * asked for a line per criterion `id`; asking for that without printing the
+   * ids would be asking the fixer for something it cannot see (#50).
+   */
+  acceptanceCriteria?: readonly AcceptanceCriterion[] | undefined,
+): string {
   return `A code reviewer found issues in your implementation. This is fix round ${round}.
 
 Resolve **every P1**. Address P2s where the fix is contained and low-risk; skip P3s unless trivial.
@@ -697,8 +846,7 @@ ${FIX_BREADTH}
 Re-run the project's tests after fixing. If you believe a finding is incorrect, fix nothing for it but explain why in your final message - do not silently skip it.
 
 Do not commit - the orchestrator handles git.
-
-Report what you changed for each finding.`;
+${implementerCriteria(acceptanceCriteria)}${reportRequest(acceptanceCriteria, 'fix')}`;
 }
 
 /**
