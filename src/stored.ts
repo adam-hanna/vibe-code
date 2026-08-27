@@ -89,11 +89,14 @@ import type {
  *    a refusal here can. Three cases in `tests/stored-state.test.ts` had to be
  *    narrowed for it: each asserted a contradictory triple loads clean, which
  *    is the claim the module exists to withdraw - see that file's comments and
- *    the PR for which was which. The `codexTokens <= tokensUsed` share still
- *    has NO rule anywhere: it is a
- *    reporting concern rather than a resume one, since nothing in `runPhases`
- *    branches on either field while `summary()` (`src/cli.ts`) renders
- *    `tokensUsed - codexTokens` and would print a negative Claude share.
+ *    the PR for which was which. The `codexTokens <= tokensUsed` share is that
+ *    module's rule D since #87: still not policed HERE - both values are legal
+ *    per field, and this validator does not ask what the pair says - but the
+ *    load path clamps the Codex share down to the run total and records the
+ *    change, because `summary()` (`src/cli.ts`) renders `tokensUsed -
+ *    codexTokens` and printed a negative Claude share without it. Rule D
+ *    normalises rather than refusing, and runs in `loadRun` and `planFork`
+ *    alike.
  * 6. **Nothing is written on a refusal path.** Every function here is pure: it
  *    reads, decides, and either throws or returns. That is what makes the
  *    refusal messages' "the run directory is intact and no file has been
@@ -1226,6 +1229,15 @@ function readForkOrigin(raw: unknown, ctx: ReadContext): ForkOrigin | undefined 
   // Absent stays absent. It is NOT defaulted to zero: a checkpoint with no
   // recorded Codex share may mean no Codex turn ran or that none was recorded,
   // and vibe does not decide which.
+  //
+  // And deliberately NOT checked against `inheritedTokens` the way rule D checks
+  // the live pair (#87). Two reasons. This is a historical record of what a
+  // parent held at a point in time, and `commitFork` cannot write an over-large
+  // one any more - `planFork` clamps first. And nothing subtracts these: the
+  // `Forked:` lines in `summary()` print `inheritedTokens` and
+  // `inheritedCostUsd` only, so no display can turn this field negative.
+  // Clamping on read would rewrite a record to satisfy an invariant no reader
+  // has.
   if (codexTokens !== undefined && !isTotal(codexTokens)) {
     return refuse('forkedFrom', raw, 'a complete fork record', ctx, note);
   }
