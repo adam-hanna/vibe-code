@@ -280,8 +280,10 @@ export async function rotateSession(
       tools: ['Read'],
       timeoutMs: cfg.claude.planTimeoutMs,
       // `handoffModel`, not the incoming one: the `ctx%` segment is a fraction
-      // of the window of the model this turn actually runs.
-      progress: progressOptions(state, cfg, 'compact', handoffModel),
+      // of the window of the model this turn actually runs. `'claude'` is a fact
+      // rather than a choice - a rotation exists because a Claude session can be
+      // replaced and a Codex thread cannot.
+      progress: progressOptions(state, cfg, 'compact', handoffModel, 'claude'),
     });
   } catch (err: unknown) {
     // A handoff that failed still spent. Charged through the seam a dispatched

@@ -1979,7 +1979,7 @@ async function claudeDispatch(
           jsonSchema: req.jsonSchema,
           tools: req.tools,
           timeoutMs: req.timeoutMs,
-          progress: progressOptions(state, cfg, req.label, model),
+          progress: progressOptions(state, cfg, req.label, model, 'claude'),
         });
       },
       // Every OBSERVED failure, including one about to be waited out and retried
@@ -2292,6 +2292,12 @@ async function codexDispatch(
   turn: CodexTurnFn,
 ): Promise<TurnOutcome> {
   const slot = slotForRole(req.role, roles);
+  // The role's, falling back to the provider's, resolved once: the spawn and the
+  // progress window below both read it, and they must not be able to disagree
+  // about which model this turn is. As on the Claude side (`claudeDispatch`),
+  // and outside the retry for the same reason - it is a pure resolution over
+  // inputs no attempt changes.
+  const model = modelFor(req.role, cfg, roles);
   const forkFrom = noteSpawn(state, cfg, slot);
   const prompt = freshConversationPrefix(state, req.role, slotContinuity(state, cfg, slot)) + req.prompt;
 
@@ -2314,7 +2320,7 @@ async function codexDispatch(
         // threads, so they can now run two different models - which is what
         // `roleWarnings` W5 says out loud when `codex.contextWindow` is set,
         // because one window cannot describe both.
-        model: modelFor(req.role, cfg, roles),
+        model,
         // As on the Claude side: the role's effort where it named one, and this
         // provider's otherwise. Two Codex roles can now differ, which is the
         // whole of #46 - the reviewer's thread and the judge's are already
@@ -2328,11 +2334,23 @@ async function codexDispatch(
         ...(forkFrom === null
           ? { sessionId: slotResumeId(state, cfg, slot) }
           : { forkFrom }),
-        // Deliberately unchanged: this resolves a *Claude* window for a Codex
-        // turn, which predates #60 and is a separate defect. Handing it this
-        // role's model would half-fix it - a Codex model has no entry in either
-        // window source - so it is left exactly as wrong as it was.
-        progress: progressOptions(state, cfg, req.label),
+        // This role's own model, on this role's own provider's conversation -
+        // the same two facts the Claude path names. It resolves to no window at
+        // all, because no Codex conversation has ever reported one: both
+        // sources are written by completed Claude turns. Naming the model alone
+        // would not have been enough, because both are keyed by a bare model
+        // name and `claude.model` may legally equal a Codex role's model - a
+        // shared name would then have handed this turn Claude's window (#86).
+        //
+        // The defect this closes was latent, not live. Across the 15 archived
+        // runs (census 2026-08-27) there are 1,270 Codex heartbeat lines and not
+        // one carries a `ctx%` segment: `formatHeartbeat` gates that segment on
+        // `promptTokens > 0`, `parseCodexLine` never sets it, and Codex reports
+        // usage only at `turn.completed`, which is the end of the turn. So the
+        // wrong denominator was delivered on every Codex turn and would have
+        // rendered - `ctx 210%` on a real critique turn - the moment a numerator
+        // existed. Fixed before the numerator, rather than after.
+        progress: progressOptions(state, cfg, req.label, model, 'codex'),
       });
     });
   } catch (err: unknown) {
