@@ -390,6 +390,10 @@ export async function rotateSession(
   applyCharge(state, cfg, {
     costUsd: result.costUsd,
     tokens: result.tokens.total,
+    provider: 'claude',
+    // The label the rotation's own heartbeat runs under, so this charge disposes
+    // of that turn's in-flight record rather than some other turn's.
+    label: 'compact',
     event: { type: 'session_rotated', data: rotationEvent(result.costUsd, result.tokens.total) },
     describe: () =>
       `compact: ${fmtTokens(result.tokens.total)} tok, ~$${result.costUsd.toFixed(3)} ` +

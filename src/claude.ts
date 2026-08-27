@@ -107,7 +107,12 @@ export async function claudeTurn(
   detail(`claude ${args.filter((a) => !a.startsWith('{')).join(' ')}`);
 
   const heartbeat = options.progress
-    ? createHeartbeat({ ...options.progress, parse: parseClaudeLine, unit: 'tool use' })
+    ? createHeartbeat({
+        ...options.progress,
+        parse: parseClaudeLine,
+        unit: 'tool use',
+        provider: 'claude',
+      })
     : null;
   // Validation runs inside the heartbeat's work, not after it: the end-of-turn
   // flush is a claim that the turn completed, and while only `run()` was wrapped

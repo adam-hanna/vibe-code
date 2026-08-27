@@ -1709,6 +1709,8 @@ async function claudeDispatch(
   applyCharge(state, cfg, {
     costUsd: result.costUsd,
     tokens: result.tokens.total,
+    provider: 'claude',
+    label: req.label,
     event: {
       type: 'claude_turn',
       data: {
@@ -2037,6 +2039,8 @@ async function codexDispatch(
   applyCharge(state, cfg, {
     costUsd: null,
     tokens: tokens.total,
+    provider: 'codex',
+    label: req.label,
     event: {
       type: 'codex_turn',
       data: {

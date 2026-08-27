@@ -382,7 +382,12 @@ export async function codexTurn(
   detail(`codex ${sessionId ? 'resume' : 'exec'} -m ${model} (${effort}) -> ${schemaName}`);
 
   const heartbeat = options.progress
-    ? createHeartbeat({ ...options.progress, parse: parseCodexLine, unit: 'event' })
+    ? createHeartbeat({
+        ...options.progress,
+        parse: parseCodexLine,
+        unit: 'event',
+        provider: 'codex',
+      })
     : null;
   // Validation runs inside the heartbeat's work, not after it: the end-of-turn
   // flush is a claim that the turn completed, and while only `run()` was wrapped

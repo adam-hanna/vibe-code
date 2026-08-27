@@ -224,12 +224,21 @@ test('a rotation overlapping a Codex turn leaves state describing the Codex turn
   // both turns reporting into one run's state.json.
   const state = scratchRun();
   let clock = T0.getTime();
-  const heartbeat = (): ReturnType<typeof createHeartbeat> =>
+  // Labelled and attributed per turn since #77: the in-flight record is keyed by
+  // label plus provider, and the two turns this case overlaps are a Codex turn
+  // and a Claude rotation - which is what the case has always been about. The
+  // parser stays parseClaudeLine for both, because what is asserted here is the
+  // timestamp arithmetic and TOOL_LINE has to be recognised by whatever parses it.
+  const heartbeat = (
+    label: string,
+    provider: 'claude' | 'codex',
+  ): ReturnType<typeof createHeartbeat> =>
     createHeartbeat({
-      label: 'fixture',
+      label,
       intervalMs: 30_000,
       parse: parseClaudeLine,
       unit: 'tool use',
+      provider,
       scope: state,
       now: () => clock,
       emit: () => {},
@@ -237,12 +246,12 @@ test('a rotation overlapping a Codex turn leaves state describing the Codex turn
       onActivity: (o) => markActivity(state, o),
     });
 
-  const codex = heartbeat();
+  const codex = heartbeat('review-0', 'codex');
   codex.begin();
   codex.onLine(TOOL_LINE);
 
   clock += 60_000;
-  const rotation = heartbeat();
+  const rotation = heartbeat('compact', 'claude');
   rotation.begin();
   assert.equal(persisted(state).lastOutputAt, T0.toISOString(), 'the Codex line is still live');
 
@@ -258,4 +267,107 @@ test('a rotation overlapping a Codex turn leaves state describing the Codex turn
   assert.equal(file.turnStartedAt, T0.toISOString(), 'the Codex turn is what is running');
   assert.equal(file.lastOutputAt, T0.toISOString(), 'and it has not spoken since');
   codex.stop();
+});
+
+// ---- What a turn has spent, on the same write (#77) -------------------------
+
+/** An observation carrying spend, in the shape the heartbeat layer builds. */
+function spending(
+  source: ActivityObservation['source'],
+  atMs: number,
+  turns: ActivityObservation['turns'],
+  urgent = false,
+): ActivityObservation {
+  return { ...observation(source, atMs, atMs), turns, ...(urgent ? { urgent } : {}) };
+}
+
+test('an observation carrying turns persists what they have spent', () => {
+  const state = scratchRun();
+
+  markActivity(
+    state,
+    spending('start', 0, [
+      { label: 'implement', provider: 'claude', tokens: 1_000 },
+      { label: 'review-0', provider: 'codex' },
+    ]),
+  );
+
+  const file = persisted(state);
+  assert.deepEqual(file.inFlight, [
+    { label: 'implement', provider: 'claude', tokens: 1_000 },
+    // No `tokens` key at all: Codex reports no usage until a turn ends, and a
+    // zero would say the turn spent nothing rather than that nobody knows.
+    { label: 'review-0', provider: 'codex' },
+  ]);
+});
+
+test('a later observation replaces the figure rather than adding to it', () => {
+  const state = scratchRun();
+
+  markActivity(state, spending('start', 0, [{ label: 'plan', provider: 'claude', tokens: 500 }]));
+  // The heartbeat reports a running total, not a delta.
+  markActivity(state, spending('final', 6_000, [{ label: 'plan', provider: 'claude', tokens: 900 }]));
+
+  assert.deepEqual(persisted(state).inFlight, [
+    { label: 'plan', provider: 'claude', tokens: 900 },
+  ]);
+});
+
+test('an observation with no turns leaves an existing record alone', () => {
+  const state = scratchRun();
+
+  markActivity(state, spending('start', 0, [{ label: 'plan', provider: 'claude', tokens: 500 }]));
+  // Absence is not a claim that nothing is in flight: only the accounting
+  // removes an entry, and a timestamp-only observation is not accounting.
+  markActivity(state, observation('final', 6_000, 6_000));
+
+  assert.deepEqual(persisted(state).inFlight, [
+    { label: 'plan', provider: 'claude', tokens: 500 },
+  ]);
+});
+
+test('a failed turn persists its spend without moving the turn timestamps', () => {
+  const state = scratchRun();
+  markActivity(state, observation('start', 0, 0));
+  assert.equal(persisted(state).lastOutputAt, T0.toISOString());
+
+  // Inside the throttle window, and it still writes: this is the observation the
+  // charge is about to read.
+  markActivity(
+    state,
+    spending('failed', 1_000, [{ label: 'implement', provider: 'claude', tokens: 4_242 }]),
+  );
+
+  const file = persisted(state);
+  assert.deepEqual(file.inFlight, [
+    { label: 'implement', provider: 'claude', tokens: 4_242 },
+  ]);
+  assert.equal(file.lastActivityAt, iso(1_000), 'vibe did observe something');
+  // Untouched: a failed turn has not completed its output, and `stop()` is what
+  // rebases these across whatever is still running.
+  assert.equal(file.lastOutputAt, T0.toISOString());
+  assert.equal(file.turnStartedAt, T0.toISOString());
+});
+
+test('the first non-zero figure is written even inside the throttle window', () => {
+  const state = scratchRun();
+  markActivity(state, observation('start', 0, 0));
+
+  // A throttled stdout observation one second in: without the urgent flag this
+  // write is skipped, and a turn killed at four seconds recovers as a zero.
+  markActivity(
+    state,
+    spending('stdout', 1_000, [{ label: 'plan', provider: 'claude', tokens: 700 }], true),
+  );
+
+  assert.deepEqual(persisted(state).inFlight, [{ label: 'plan', provider: 'claude', tokens: 700 }]);
+});
+
+test('an ordinary throttled observation still writes nothing', () => {
+  const state = scratchRun();
+  markActivity(state, observation('start', 0, 0));
+
+  markActivity(state, spending('stdout', 1_000, [{ label: 'plan', provider: 'claude', tokens: 700 }]));
+
+  assert.equal(persisted(state).inFlight, undefined, 'the throttle is otherwise unchanged');
 });
