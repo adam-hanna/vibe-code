@@ -1,4 +1,4 @@
-import {
+﻿import {
   closeSync,
   mkdirSync,
   openSync,
@@ -755,7 +755,17 @@ export function tryRecordEvent(
   }
 }
 
-const CHECKPOINT_RE = /^checkpoint-(\d+)\.json$/;
+/**
+ * The exact filenames `writeCheckpoint` produces: a canonical positive decimal,
+ * so neither `checkpoint-0.json` nor `checkpoint-01.json` is one of ours.
+ *
+ * The looser `\d+` was a scanner accepting more than the writer emits, and the
+ * two ends then disagreed: `checkpoint-01.json` listed as fork point 1, while
+ * `--at 1` rebuilds the canonical `checkpoint-1.json` and refuses - and with
+ * both files present the listing showed the same number twice. Same rule, and
+ * the same reason, as `isReportBasename` in `src/stored.ts`.
+ */
+const CHECKPOINT_RE = /^checkpoint-([1-9][0-9]*)\.json$/;
 
 const checkpointName = (n: number): string => `checkpoint-${n}.json`;
 

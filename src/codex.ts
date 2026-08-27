@@ -1,4 +1,4 @@
-import { writeFileSync, readFileSync, existsSync, renameSync, rmSync } from 'node:fs';
+﻿import { writeFileSync, readFileSync, existsSync, renameSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { attachSpend } from '@src/charge.js';
 import { resolveBin, run } from '@src/proc.js';
@@ -314,6 +314,26 @@ function supersede(file: string, keepAt: string): void {
 const FORK_FLAGS: readonly string[] = ['--json', '-m', '-c', '--skip-git-repo-check', '-o'];
 
 /**
+ * Every option token a help text declares, as exact tokens.
+ *
+ * Token boundaries, and short and long kept apart, because substring matching is
+ * wrong in both directions here: `help.includes('-m')` is satisfied by `--model`
+ * - and by `--skip-git-repo-check`, and by the word "command" in a sentence - so
+ * a binary that accepts only the long forms would have read as accepting the
+ * short ones and been sent a vector it rejects. The lookbehind is what stops
+ * `--model` also contributing `-model`; the lookahead stops `--out` matching
+ * inside `--output-schema`.
+ */
+export function parseOptionTokens(help: string): Set<string> {
+  const found = new Set<string>();
+  for (const match of help.matchAll(/(?<![A-Za-z0-9_-])(--?[A-Za-z0-9][A-Za-z0-9-]*)(?![A-Za-z0-9-])/g)) {
+    const token = match[1];
+    if (token !== undefined) found.add(token);
+  }
+  return found;
+}
+
+/**
  * What `codex exec fork --help` said, read once per process.
  *
  * `undefined` is "not asked yet", `null` is "asked and could not be read". The
@@ -341,20 +361,26 @@ async function forkHelp(exec: RunFn, cwd: string): Promise<string | null> {
 }
 
 /**
- * Whether `codex exec fork` on THIS machine accepts everything the direct vector
- * sends.
+ * What `codex exec fork` on THIS machine accepts, or null when the help could
+ * not be read.
  *
  * The plan pinned the direct form against codex-cli 0.150.0-alpha.8, and both
  * CLIs move. Rather than trust that reading forever, the help text is read once
  * and the answer decides which path a fork takes. Unreadable help means the
- * direct form, unchanged: it is what every probed version accepts, and the
- * fallback is not free.
+ * direct form, unchanged: it is what every probed version accepts, the fallback
+ * is not free, and an unreadable help text is not evidence that anything is
+ * missing.
  */
-async function directForkWorks(exec: RunFn, cwd: string, hasSchema: boolean): Promise<boolean> {
+async function forkOptions(exec: RunFn, cwd: string): Promise<Set<string> | null> {
   const help = await forkHelp(exec, cwd);
-  if (help === null) return true;
+  return help === null ? null : parseOptionTokens(help);
+}
+
+/** Whether the direct vector's whole flag set is declared. Unknown counts as yes. */
+function directForkWorks(options: Set<string> | null, hasSchema: boolean): boolean {
+  if (options === null) return true;
   const needed = hasSchema ? [...FORK_FLAGS, '--output-schema'] : FORK_FLAGS;
-  return needed.every((flag) => help.includes(flag));
+  return needed.every((flag) => options.has(flag));
 }
 
 /**
@@ -432,17 +458,38 @@ export async function codexTurn(
   // the turn itself on the new thread through the ordinary `exec resume` path.
   // Still a fork on the first turn, which is the property that matters.
   let resumeAfterFork: string | null = null;
-  if (forkFrom && !(await directForkWorks(exec, cwd, schema !== undefined))) {
-    detail(`codex exec fork ${forkFrom} (two-call: this codex does not accept the direct flags)`);
-    const minted = await exec(codexBin(), ['exec', 'fork', forkFrom, '--json'], { input: '', cwd, timeoutMs });
-    const thread = parseEvents(minted.stdout).threadId;
-    if (thread === null) {
-      throw new Error(
-        `codex exec fork ${forkFrom} named no thread, so there is nothing to take the turn on. ` +
-          `${minted.stderr.trim() || 'No error was reported.'}`,
+  if (forkFrom) {
+    const options = await forkOptions(exec, cwd);
+    if (!directForkWorks(options, schema !== undefined)) {
+      detail(`codex exec fork ${forkFrom} (two-call: this codex does not accept the direct flags)`);
+      // The mint call sends NOTHING the probe has not confirmed. `--json` is one
+      // of the flags that can be missing, and sending it here would fail on
+      // exactly the binaries this path exists for - the fallback would then be
+      // broken on every machine that needs it and on no machine that does not,
+      // which is the worst possible place for a defect to hide.
+      const wantsJson = options?.has('--json') === true;
+      const minted = await exec(
+        codexBin(),
+        wantsJson ? ['exec', 'fork', forkFrom, '--json'] : ['exec', 'fork', forkFrom],
+        { input: '', cwd, timeoutMs },
       );
+      // With `--json` the id arrives as a `thread.started` event; without it,
+      // the human-readable banner is all there is, and it is printed to either
+      // stream depending on the version. All three are read, in order of how
+      // much the source is trusted.
+      const thread =
+        parseEvents(minted.stdout).threadId ??
+        SESSION_ID_RE.exec(minted.stderr)?.[1] ??
+        SESSION_ID_RE.exec(minted.stdout)?.[1] ??
+        null;
+      if (thread === null) {
+        throw new Error(
+          `codex exec fork ${forkFrom} named no thread, so there is nothing to take the turn on. ` +
+            `${minted.stderr.trim() || 'No error was reported.'}`,
+        );
+      }
+      resumeAfterFork = thread;
     }
-    resumeAfterFork = thread;
   }
 
   const args: string[] = resumeAfterFork

@@ -608,3 +608,49 @@ test('a commitFork killed at any point leaves a child that is complete or absent
   assert.ok(sawIncomplete, 'no kill landed before the fork completed - narrow the delays');
 });
 
+
+test('a noncanonical checkpoint file is neither listed nor selectable', async () => {
+  const parent = await parentRun('noncanonical fork point');
+  const n = committedPoint(parent);
+  const canonical = readFileSync(path.join(parent.dir, `checkpoint-${n}.json`), 'utf8');
+  writeFileSync(path.join(parent.dir, 'checkpoint-0900.json'), canonical, 'utf8');
+
+  const points = listForkPoints(parent.targetDir, parent.id);
+  assert.equal(points.some((p) => p.n === 900), false, 'it is not offered as a fork point');
+  // And every point that IS offered can actually be forked, which is the
+  // property the two ends disagreeing broke.
+  for (const point of points) {
+    assert.ok(existsSync(path.join(parent.dir, `checkpoint-${point.n}.json`)));
+  }
+  await assert.rejects(() => fork(parent, 900), /no checkpoint 900/);
+});
+
+test('the losses a --no-branch fork states are true of a --no-branch fork', async () => {
+  const parent = await parentRun('honest losses');
+  const withoutCommit = listCheckpoints(parent.dir).find((c) => c.meta?.commit == null);
+  assert.ok(withoutCommit !== undefined);
+
+  const { child, branch } = await fork(parent, withoutCommit.n, { git: { useBranch: false } });
+  assert.equal(branch, null);
+  const stated = child.forkedFrom?.notInherited ?? [];
+
+  // `notInherited` is read as a record of what actually happened, so it must not
+  // describe a ref this fork never created.
+  for (const claim of stated) {
+    assert.equal(claim.includes("fork's branch is a new ref"), false, `false claim: ${claim}`);
+    assert.equal(claim.includes('the fork branches from the'), false, `false claim: ${claim}`);
+  }
+  assert.ok(stated.some((l) => l.includes('--no-branch')));
+  assert.ok(stated.some((l) => l.includes('only PLAN.md and the last report are copied')));
+});
+
+test('a branching fork does state what its branch is and is not', async () => {
+  const parent = await parentRun('branch losses');
+  const { child, branch } = await fork(parent, committedPoint(parent));
+  assert.ok(branch !== null);
+  const stated = child.forkedFrom?.notInherited ?? [];
+
+  assert.ok(stated.some((l) => l.includes("fork's branch is a new ref")));
+  assert.ok(stated.some((l) => l.includes('the repository may have moved on')));
+  assert.equal(stated.some((l) => l.includes('--no-branch')), false);
+});

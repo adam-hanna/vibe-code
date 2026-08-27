@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
+﻿import { copyFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { applyOverrides, loadConfig } from '@src/config.js';
 import { checkStoredConsistency } from '@src/consistency.js';
@@ -214,9 +214,16 @@ export async function planFork(
     commit = resolved;
   }
 
+  // Exactly the condition `commitFork` creates a branch under, so what is said
+  // here is what will actually be true afterwards.
+  const willBranch = cfg.git.useBranch && isRepo && commit !== null;
+
   if (cfg.git.useBranch) {
     if (!isRepo) {
       losses.push('this is not a git repository, so the fork gets no branch of its own');
+      losses.push(
+        'without a branch, the fork will run on whatever is checked out when you resume it',
+      );
     } else if (commit === null) {
       const withCommits = listCheckpoints(sourceDir)
         .filter((c) => c.meta?.commit != null)
@@ -237,13 +244,20 @@ export async function planFork(
     );
   }
 
-  losses.push(
-    'the repository may have moved on since the checkpoint - the fork branches from the ' +
-      "commit the checkpoint recorded, not from today's HEAD",
-  );
-  losses.push(
-    "the fork's branch is a new ref at the same commit, not a copy of the parent's branch",
-  );
+  // Only when there will BE a branch. Under `--no-branch` - or outside a
+  // repository - both of these describe a ref that is never created, and a
+  // losses list that states things about a result it did not produce is worse
+  // than one that says less: `notInherited` is read as a record of what actually
+  // happened.
+  if (willBranch) {
+    losses.push(
+      'the repository may have moved on since the checkpoint - the fork branches from the ' +
+        "commit the checkpoint recorded, not from today's HEAD",
+    );
+    losses.push(
+      "the fork's branch is a new ref at the same commit, not a copy of the parent's branch",
+    );
+  }
   losses.push(
     'only PLAN.md and the last report are copied; every other artifact stays with the parent',
   );

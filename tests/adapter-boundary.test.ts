@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { claudeTurn } from '@src/claude.js';
 import type { ClaudeTurnOptions } from '@src/claude.js';
-import { codexTurn, resetCodexForkProbe } from '@src/codex.js';
+import { codexTurn, parseOptionTokens, resetCodexForkProbe } from '@src/codex.js';
 import type { CodexTurnOptions } from '@src/codex.js';
 import type { ActivityObservation, ProgressOptions, RepeatingTimer, TimerApi } from '@src/progress.js';
 import type { RunFn, RunResult } from '@src/proc.js';
@@ -446,5 +446,85 @@ test('codex: the probe is read once per process, not once per turn', async () =>
   await codexTurn({ ...codexOptions(dir, options), forkFrom: 'b' }, exec);
 
   assert.equal(args.filter((a) => a[2] === '--help').length, 1);
+});
+
+
+test('codex: option tokens are read with boundaries, and short is not long', () => {
+  // The defect this replaces: `help.includes('-m')` is satisfied by `--model`,
+  // by `--skip-git-repo-check`, and by the word "command" in a sentence.
+  const long = parseOptionTokens('  --model <m>   the model\n  --config <k=v>\n  --output <f>\n');
+  assert.ok(long.has('--model') && long.has('--config') && long.has('--output'));
+  for (const short of ['-m', '-c', '-o']) {
+    assert.equal(long.has(short), false, `${short} is not declared by a long-only help`);
+  }
+  const both = parseOptionTokens('  -m, --model <m>\n  -o <file>\n  --output-schema <f>\n');
+  assert.ok(both.has('-m') && both.has('--model') && both.has('-o') && both.has('--output-schema'));
+  assert.equal(both.has('--out'), false, 'a prefix of a declared option is not a declared option');
+  assert.equal(parseOptionTokens('runs the command in a sandbox').size, 0);
+});
+
+test('codex: a long-only help takes the fallback rather than sending short flags', async () => {
+  resetCodexForkProbe();
+  const dir = codexDir();
+  const { options } = progressRecorder();
+  // Everything the direct vector needs, but declared only in long form. The
+  // substring probe read this as compatible and sent `-m -c -o` to a binary
+  // that does not take them.
+  const { args, exec } = codexWithFork(
+    dir,
+    ['--json', '--model', '--config', '--skip-git-repo-check', '--output', '--output-schema'],
+    (argv) =>
+      argv[1] === 'fork'
+        ? { stdout: JSON.stringify({ type: 'thread.started', thread_id: 'long-only-thread' }) }
+        : {},
+  );
+
+  const result = await codexTurn({ ...codexOptions(dir, options), forkFrom: 'parent-thread' }, exec);
+
+  assert.deepEqual(args[1], ['exec', 'fork', 'parent-thread', '--json']);
+  assert.deepEqual(args[2]?.slice(0, 3), ['exec', 'resume', 'long-only-thread']);
+  assert.equal(result.sessionId, 'long-only-thread');
+});
+
+test('codex: a fallback on a codex with no --json does not send --json', async () => {
+  resetCodexForkProbe();
+  const dir = codexDir();
+  const { options } = progressRecorder();
+  // The flag the probe found missing must not be the flag the fallback sends -
+  // that would break the fallback on exactly the binaries it exists for. With no
+  // `--json` there is no event stream, so the id comes from the banner.
+  const { args, exec } = codexWithFork(dir, ['-m', '-c', '--skip-git-repo-check', '-o'], (argv) =>
+    argv[1] === 'fork'
+      ? { stderr: 'session id: 123e4567-e89b-12d3-a456-426614174000\n' }
+      : {},
+  );
+
+  const result = await codexTurn({ ...codexOptions(dir, options), forkFrom: 'parent-thread' }, exec);
+
+  assert.deepEqual(args[1], ['exec', 'fork', 'parent-thread'], 'no --json on the mint call');
+  assert.deepEqual(args[2]?.slice(0, 3), [
+    'exec',
+    'resume',
+    '123e4567-e89b-12d3-a456-426614174000',
+  ]);
+  assert.equal(result.sessionId, '123e4567-e89b-12d3-a456-426614174000');
+});
+
+test('codex: a banner on stdout is read too', async () => {
+  resetCodexForkProbe();
+  const dir = codexDir();
+  const { options } = progressRecorder();
+  const { args, exec } = codexWithFork(dir, ['-m'], (argv) =>
+    argv[1] === 'fork'
+      ? { stdout: 'session id: 123e4567-e89b-12d3-a456-426614174000\n' }
+      : {},
+  );
+
+  await codexTurn({ ...codexOptions(dir, options), forkFrom: 'parent-thread' }, exec);
+  assert.deepEqual(args[2]?.slice(0, 3), [
+    'exec',
+    'resume',
+    '123e4567-e89b-12d3-a456-426614174000',
+  ]);
 });
 

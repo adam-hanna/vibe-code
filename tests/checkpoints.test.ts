@@ -488,3 +488,32 @@ test('assertUsableRunId rejects a trailing dot or space', () => {
   }
 });
 
+
+test('a checkpoint filename no writer produces is not a fork point', () => {
+  // A scanner that accepted more than the writer emits put the listing and the
+  // selection out of step: `checkpoint-01.json` listed as fork point 1, while
+  // `--at 1` rebuilds `checkpoint-1.json` and finds nothing - and with both
+  // present the same number appeared twice.
+  const state = freshRun({ ...RUN, task: 'noncanonical' });
+  writeCheckpoint(state, 'plan-round', { sha: null, note: 'no-commit-in-round' });
+  const canonical = readFileSync(path.join(state.dir, 'checkpoint-1.json'), 'utf8');
+  for (const name of ['checkpoint-01.json', 'checkpoint-001.json', 'checkpoint-0.json']) {
+    writeFileSync(path.join(state.dir, name), canonical, 'utf8');
+  }
+
+  const entries = listCheckpoints(state.dir);
+  assert.deepEqual(entries.map((c) => c.n), [1], 'only the canonical name is a checkpoint');
+  assert.equal(entries[0]?.file.endsWith('checkpoint-1.json'), true);
+});
+
+test('numbering is unaffected by a noncanonical file sitting beside it', () => {
+  const state = freshRun({ ...RUN, task: 'noncanonical numbering' });
+  writeCheckpoint(state, 'plan-round', { sha: null, note: 'no-commit-in-round' });
+  writeFileSync(path.join(state.dir, 'checkpoint-09.json'), '{}', 'utf8');
+
+  // The reservation is an exclusive create, so it cannot land on a name that is
+  // taken whatever the scan counted.
+  const next = writeCheckpoint(state, 'complete', { sha: null, note: 'no-commit-in-round' });
+  assert.equal(next?.n, 2);
+  assert.deepEqual(listCheckpoints(state.dir).map((c) => c.n), [1, 2]);
+});
