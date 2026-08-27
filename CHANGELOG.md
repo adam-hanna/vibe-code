@@ -18,22 +18,25 @@ closes.
   the parent run are all untouched; the fork moves onto that branch when you resume it.
   `forkedFrom` records what the parent had spent at that point as provenance only - nothing
   in vibe computes from it - and the fork's own ceilings count the inherited totals.
-  (#78)
+  (#78, [#81](https://github.com/adam-hanna/vibe-code/pull/81))
 
 ### Fixed
 
 - **A resume no longer commits to whatever branch is checked out.** `vibe resume` refuses
   when the run records a branch that exists and HEAD is somewhere else, naming the
   `git checkout` to run; `--no-branch` skips the check. Previously those commits landed on
-  the wrong branch silently, which forking makes easy to hit. (#78)
+  the wrong branch silently, which forking makes easy to hit.
+  (#78, [#81](https://github.com/adam-hanna/vibe-code/pull/81))
 - **Two runs started in the same second on the same task no longer share a directory.** The
   allocator claimed the run directory with a recursive `mkdir`, which succeeds on one that
   already exists, so the second run overwrote the first. The claim is now exclusive, with a
-  bounded suffix and a refusal past it. (#78)
+  bounded suffix and a refusal past it.
+  (#78, [#81](https://github.com/adam-hanna/vibe-code/pull/81))
 - **A stored report pointer is checked against the names vibe actually writes.** It was a
   character whitelist, so a stored `lastReport` of `state.json` rendered the whole state
   file into the reviewer's prompt. `vibe resume "<id>."` is refused for the same class of
-  reason: Windows strips the trailing dot, so it named a different run than it said. (#78)
+  reason: Windows strips the trailing dot, so it named a different run than it said.
+  (#78, [#81](https://github.com/adam-hanna/vibe-code/pull/81))
 
 ## 1.1.0 - 2026-08-20
 
