@@ -19,12 +19,23 @@ import type { Config, ForkedConversation, ForkPendingEntry, RunState } from '@sr
  *
  * So the contract is stated once, here, for every slot:
  *
- *   id        the conversation id, or null when there is none to resume
- *   origin    who mints the id: the client, before the first turn, or the provider
- *   started   a turn has ever SUCCEEDED here. Never inferred from `id`.
- *   persists  the run is configured to carry this conversation across turns
- *   hasMemory persists && started && id !== null
- *   rotatable the slot has a mechanism for abandoning its conversation
+ *   id         the conversation id, or null when there is none to resume
+ *   origin     who mints the id: the client, before the first turn, or the provider
+ *   started    a turn has ever SUCCEEDED here. Never inferred from `id`.
+ *   registered this id has been handed to the provider and is spent. Client-origin
+ *              slots only - a provider-origin slot has no id to hand over until a
+ *              turn returns one.
+ *   persists   the run is configured to carry this conversation across turns
+ *   hasMemory  persists && started && id !== null
+ *   rotatable  the slot has a mechanism for abandoning its conversation
+ *
+ * `registered` is the third question, and #74 is what it costs to be without it:
+ * `claude --session-id X` spends X on *attempt*, so "has a turn succeeded here"
+ * cannot also answer "is this id still free". A process killed between the two
+ * left a state that re-issued a spent id forever. Registered-and-not-started is
+ * therefore a state with a meaning of its own - a previous process died here -
+ * and it is recoverable rather than fatal, because that session is resumable and
+ * holds the dead turn's work.
  *
  * `hasMemory` is the only question dispatch asks. The `id !== null` clause is
  * not a second marker: it is "there is something to resume". It is vacuously
@@ -59,6 +70,18 @@ export interface SlotSpec {
   id: (state: RunState) => string | null;
   /** Whether a turn has ever succeeded here. Never derived from `id`. */
   started: (state: RunState) => boolean;
+  /**
+   * Whether this slot's id has been handed to the provider and is therefore
+   * spent. Always false for a provider-origin slot, which has no id to hand
+   * over until a turn returns one.
+   */
+  registered: (state: RunState) => boolean;
+  /**
+   * Record that the id has been handed over. Called BEFORE the spawn, not after
+   * the result: what makes this fact worth storing is precisely the case where
+   * no result ever arrives. A no-op for a provider-origin slot.
+   */
+  markRegistered: (state: RunState) => void;
   /**
    * Record that a turn just succeeded. The marker is set unconditionally - a
    * turn either succeeded or it did not. `carryId` says whether this run keeps
@@ -139,12 +162,22 @@ export const SLOTS: Record<SlotName, SlotSpec> = {
     markStarted: (state) => {
       state.sessionStarted = true;
     },
+    registered: (state) => state.sessionRegistered === true,
+    markRegistered: (state) => {
+      state.sessionRegistered = true;
+    },
     // Constant, because there is no Claude equivalent of `codex.persistSession`
     // and inventing one would be a config key rather than a lifecycle.
     persists: () => true,
     reset: (state) => {
       state.sessionId = randomUUID();
       state.sessionStarted = false;
+      // Deleted rather than set false, because absent is what "never registered"
+      // means everywhere else in this file - and because this function is the
+      // single statement of what a fresh conversation on this slot looks like.
+      // A fresh id carrying the old id's registration would be read as a session
+      // that died mid-turn and resumed into nothing.
+      delete state.sessionRegistered;
     },
     // Claude reports a ratio against a window it names itself, recorded by
     // `recordContextMeasurement` and acted on by `shouldRotate`. Measuring it a
@@ -180,6 +213,11 @@ export const SLOTS: Record<SlotName, SlotSpec> = {
       state.codexSessionStarted = true;
       if (carryId && returnedId !== null) state.codexSessionId = returnedId;
     },
+    // Vacuously false, and nothing to record: `codex exec` takes no session-id
+    // flag, so vibe never hands this conversation an id and there is none to
+    // spend. The whole of #74 is a client-origin problem.
+    registered: () => false,
+    markRegistered: () => {},
     persists: (cfg) => cfg.codex.persistSession,
     reset: null,
     occupancy: {
@@ -233,6 +271,10 @@ export const SLOTS: Record<SlotName, SlotSpec> = {
       state.reviewSessionStarted = true;
       if (carryId && returnedId !== null) state.reviewSessionId = returnedId;
     },
+    // The judge's answer, for the judge's reason: provider-minted, so there is
+    // no id to hand over and nothing to burn.
+    registered: () => false,
+    markRegistered: () => {},
     persists: (cfg) => cfg.codex.persistSession,
     // Still nothing that rotates a Codex thread (#30): `codex exec resume` takes
     // no session-id flag, and a second slot is not the place to invent one.
@@ -275,6 +317,61 @@ export function slotId(state: RunState, slot: SlotName): string | null {
 
 export function slotStarted(state: RunState, slot: SlotName): boolean {
   return SLOTS[slot].started(state);
+}
+
+/** Whether this slot's id has been handed to the provider and is spent. */
+export function slotRegistered(state: RunState, slot: SlotName): boolean {
+  return SLOTS[slot].registered(state);
+}
+
+/**
+ * A previous process died on this conversation (#74).
+ *
+ * The id was handed over and nothing has ever succeeded on it, which - once an
+ * *observed* failure resets the slot - can mean nothing else. That is what makes
+ * the recovery need no retry budget and no error-string matching.
+ *
+ * Registration, never `!started` alone: an id that has not been handed over has
+ * no evidence of having been spent, and discarding one would throw away a
+ * conversation nobody has used. Client-origin only, for the same reason.
+ */
+export function slotHasDeadTurn(state: RunState, slot: SlotName): boolean {
+  const spec = SLOTS[slot];
+  return spec.origin === 'client' && spec.registered(state) && !spec.started(state);
+}
+
+/**
+ * Record that this slot's id is about to be handed over, returning whether
+ * anything changed - so the caller can persist it in a write it was already
+ * making rather than adding one per turn.
+ *
+ * Mutates nothing for a provider-origin slot, which has no id to hand over, and
+ * nothing for a slot already registered.
+ */
+export function noteSlotRegistered(state: RunState, slot: SlotName): boolean {
+  const spec = SLOTS[slot];
+  if (spec.origin !== 'client' || spec.registered(state)) return false;
+  spec.markRegistered(state);
+  return true;
+}
+
+/**
+ * Abandon a conversation whose id is spent and on which nothing ever succeeded,
+ * returning the id given up - or null when there was nothing to recover.
+ *
+ * Called on an OBSERVED failure, which is what makes the dispatch rule beside it
+ * unambiguous: a slot still registered-and-unstarted at dispatch time can only
+ * be one this run never saw fail, i.e. one a killed process left behind.
+ *
+ * Mutates memory only. The caller persists it in the write that records the
+ * failure, so a kill cannot land between a fresh id and the account of what
+ * spent the old one.
+ */
+export function recoverDeadSlot(state: RunState, slot: SlotName): string | null {
+  if (!slotHasDeadTurn(state, slot)) return null;
+  const dead = SLOTS[slot].id(state);
+  resetSlot(state, slot);
+  return dead;
 }
 
 /**
@@ -436,9 +533,18 @@ export function slotForkAttempts(state: RunState, slot: SlotName): number {
  * conversation really does arrive holding the parent's context, so greeting it
  * with a fresh-conversation preamble would restate what it already knows and,
  * worse, imply it knows nothing.
+ *
+ * The third case is the same shape a third time (#74): a session that died
+ * mid-turn is resumed holding that turn's work - including the briefing and the
+ * plan of record the dead turn was given - so it is not a fresh conversation
+ * either.
  */
 export function slotContinuity(state: RunState, cfg: Config, slot: SlotName): boolean {
-  return slotHasMemory(state, cfg, slot) || slotForkParent(state, cfg, slot) !== null;
+  return (
+    slotHasMemory(state, cfg, slot) ||
+    slotForkParent(state, cfg, slot) !== null ||
+    slotHasDeadTurn(state, slot)
+  );
 }
 
 /**
@@ -518,6 +624,11 @@ export function forkedSlotFields(parent: RunState, cfg: Config): ForkedSlotField
   // everywhere else in this file, and `undefined` in a spread is a second
   // spelling of it.
   const clear: (keyof RunState)[] = [
+    // The child's `main` id is minted fresh above and has been handed to nobody.
+    // Inheriting the parent's registration would read as a session that died
+    // mid-turn, and the child's first turn would `--resume` an id that has never
+    // existed (#74).
+    'sessionRegistered',
     'codexSessionStarted',
     'judgeContextTokens',
     'judgeContextThread',
@@ -552,6 +663,10 @@ export function forkedSlotFields(parent: RunState, cfg: Config): ForkedSlotField
  * `codexSessionStarted` is deliberately absent rather than `false`: absent is
  * the correct reading for a slot that has never run, and it is the same state a
  * run recorded before this module presents.
+ *
+ * `sessionRegistered` is absent for the same reason and is not listed here at
+ * all: a fresh run has minted an id and handed it to nobody, which is exactly
+ * what a missing marker says (#74).
  *
  * The `review` slot's fields are absent for the same reason, and all four of
  * them: a fresh run and a run recorded before that conversation existed present

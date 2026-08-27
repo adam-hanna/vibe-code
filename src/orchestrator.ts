@@ -27,9 +27,12 @@ import {
   ensureSlotId,
   markSlotStarted,
   noteSlotForkAttempt,
+  noteSlotRegistered,
   recordSlotOccupancy,
+  recoverDeadSlot,
   slotContinuity,
   slotForkParent,
+  slotHasDeadTurn,
   slotHasMemory,
   slotId,
   slotResumeId,
@@ -1825,26 +1828,39 @@ function noteModelProvenance(err: unknown, role: Role, cfg: Config, roles: RoleT
 }
 
 /**
- * The parent conversation this turn must fork, or null - recording the attempt
- * before the child is spawned.
+ * What this turn must know before it is spawned: the parent conversation it owes
+ * a fork of, or null - and, on the way past, that the slot's id is about to be
+ * handed to the provider.
  *
- * ONE write, and it happens *before* the turn: the counter and the disclosure it
- * justifies land together, so no interruption can leave a state carrying
- * `attempts: 2` without the `fork_retried` event beside it, or the event without
- * the counter.
+ * ONE write, and it happens *before* the turn. Both facts are pre-turn for the
+ * same reason: they are the facts that matter precisely when no result ever
+ * arrives. The counter and the disclosure it justifies land together, so no
+ * interruption can leave a state carrying `attempts: 2` without the
+ * `fork_retried` event beside it, or the event without the counter.
  *
  * The counter is not decoration. A Codex thread id is provider-minted, so a
  * process that dies between the provider returning and the accounting write
  * loses the id and the next pass forks again - leaving one orphaned thread on
  * the provider's side. That is bounded and it is disclosed here, rather than
  * being made invisible.
+ *
+ * The registration is #74: `claude --session-id` spends the id on attempt, so a
+ * state that has not recorded the handover before the spawn cannot tell a killed
+ * turn from one that never ran, and re-issues an id the CLI refuses. It costs
+ * one extra write per Claude session - the first turn, and the first turn after
+ * each rotation - and none at all on the Codex path, where the provider mints
+ * the id and there is nothing to hand over (D7).
  */
-function noteFork(state: RunState, cfg: Config, slot: SlotName): string | null {
+function noteSpawn(state: RunState, cfg: Config, slot: SlotName): string | null {
   const forkFrom = slotForkParent(state, cfg, slot);
-  if (forkFrom === null) return null;
-  const attempt = noteSlotForkAttempt(state, slot);
-  if (attempt > 1) stageEvent(state, 'fork_retried', { slot, parentId: forkFrom, attempt });
-  saveState(state);
+  if (forkFrom !== null) {
+    const attempt = noteSlotForkAttempt(state, slot);
+    if (attempt > 1) stageEvent(state, 'fork_retried', { slot, parentId: forkFrom, attempt });
+  }
+  const registered = noteSlotRegistered(state, slot);
+  // Only where something changed, so a run that owes no fork and has already
+  // registered writes exactly as often as it did before this existed.
+  if (forkFrom !== null || registered) saveState(state);
   return forkFrom;
 }
 
@@ -1873,45 +1889,100 @@ async function claudeDispatch(
     await rotateSession(state, cfg, turn, roles, model);
   }
 
-  const forkFrom = noteFork(state, cfg, slot);
-  // A fork is not a resume: `--fork-session` copies the parent into a new
-  // session rather than continuing one, so `--resume` alone would continue the
-  // parent's own conversation and put two runs in it.
-  const resume = forkFrom === null && slotHasMemory(state, cfg, slot);
-  // Continuity, not `resume`: a forked conversation arrives holding the
-  // parent's context, so greeting it as a fresh one would be false.
-  const prompt = freshConversationPrefix(state, req.role, slotContinuity(state, cfg, slot)) + req.prompt;
-
   // The `await` a plain assignment would have done, wrapped so a failure can say
   // which setting named the model it ran. Outside the retry, so a turn that is
   // waited out and retried is annotated once, when it finally gives up.
   let result: ClaudeTurnResult;
   try {
-    result = await withRateLimitRetry(state, cfg, req.label, 'claude', () =>
-      turn({
-        prompt,
-        sessionId: ensureSlotId(state, slot),
-        resume,
-        ...(forkFrom === null ? {} : { forkFrom }),
-        permissionMode: claudePermission(access),
-        model,
-        effort: effortFor(req.role, cfg, roles),
-        cwd: req.cwd,
-        jsonSchema: req.jsonSchema,
-        tools: req.tools,
-        timeoutMs: req.timeoutMs,
-        progress: progressOptions(state, cfg, req.label, model),
-      }),
+    result = await withRateLimitRetry(
+      state,
+      cfg,
+      req.label,
+      'claude',
+      () => {
+        // Everything a spawn depends on is asked PER ATTEMPT (#74). It used to
+        // be computed once outside this closure while the id was read inside it,
+        // so a turn that hit a rate limit, waited, and retried re-issued
+        // `--session-id` against an id its own first attempt had already spent -
+        // and the wait bought nothing, because "already in use" is not a rate
+        // limit and is not retried.
+        //
+        // Ordering: `dead` and the prompt are both read BEFORE `noteSpawn` marks
+        // this slot registered, or a genuinely fresh first attempt would see its
+        // own registration and mistake itself for a session that died mid-turn.
+        //
+        // Synchronous, and returning the provider's promise unawaited: this is
+        // the seam `turn-seam.test.ts` measures in microtasks, and an `async`
+        // wrapper here puts one more await between a provider result and its
+        // accounting.
+        const dead = slotHasDeadTurn(state, slot);
+        // Continuity, not `resume`: a forked conversation arrives holding the
+        // parent's context, and so does a resumed dead one, so greeting either
+        // as fresh would be false. Rebuilt per attempt because a reset between
+        // two of them turns a continuing conversation into a genuinely fresh
+        // one, and a retry carrying the first attempt's prefix would start that
+        // fresh session without the handoff or the plan of record.
+        const prompt =
+          freshConversationPrefix(state, req.role, slotContinuity(state, cfg, slot)) + req.prompt;
+        // A registered id with no successful turn means a previous process died
+        // here - an observed failure resets the slot, so it cannot mean anything
+        // else. That session is resumable and holds the dead turn's work; and
+        // where a fork was owed, the child already holds the parent's whole
+        // history, because `--fork-session` copies at session creation rather
+        // than at turn completion. So the fork is already made: resume it, and
+        // do NOT fork again.
+        const forkFrom = dead ? null : noteSpawn(state, cfg, slot);
+        // A fork is not a resume: `--fork-session` copies the parent into a new
+        // session rather than continuing one, so `--resume` alone would continue
+        // the parent's own conversation and put two runs in it.
+        const resume = dead || (forkFrom === null && slotHasMemory(state, cfg, slot));
+        return turn({
+          prompt,
+          sessionId: ensureSlotId(state, slot),
+          resume,
+          ...(forkFrom === null ? {} : { forkFrom }),
+          permissionMode: claudePermission(access),
+          model,
+          effort: effortFor(req.role, cfg, roles),
+          cwd: req.cwd,
+          jsonSchema: req.jsonSchema,
+          tools: req.tools,
+          timeoutMs: req.timeoutMs,
+          progress: progressOptions(state, cfg, req.label, model),
+        });
+      },
+      // Every OBSERVED failure, including one about to be waited out and retried
+      // - which is what makes the resume above unambiguous, because a slot still
+      // registered-and-unstarted at dispatch time can then only be one a killed
+      // process left behind. Exactly registered-and-unstarted: an id never
+      // handed over has no evidence of having been spent.
+      //
+      // Passed to the retry loop rather than wrapped around the turn, so the
+      // path that succeeds gains no await at all.
+      () => {
+        const discarded = recoverDeadSlot(state, slot);
+        if (discarded !== null) {
+          log.warn(
+            `"${req.label}" failed on session ${discarded} before any turn succeeded; ` +
+              'starting a fresh conversation rather than re-using a spent id.',
+          );
+        }
+      },
     );
   } catch (err: unknown) {
     throw noteModelProvenance(err, req.role, cfg, roles);
   }
 
+  // Asked before `markSlotStarted`, which is what makes `slotForkParent` answer
+  // null. True both for a fork this turn made and for one a dead turn had
+  // already made and this turn only resumed - the copy exists either way, so
+  // both owe the same clear.
+  const owedFork = slotForkParent(state, cfg, slot) !== null;
   // The slot's marker, not its id: this turn returning is the only evidence
   // that the conversation exists at all.
   markSlotStarted(state, cfg, slot, result.sessionId);
   // Staged, NOT persisted here - see `clearSlotFork` and `applyCharge` below.
-  if (forkFrom !== null) clearSlotFork(state, slot);
+  if (owedFork) clearSlotFork(state, slot);
   // Tagged with the model that produced it: the ratio is a fraction of this
   // model's window and means nothing under another one. Through the shared seam
   // so the rotation turn in context.ts cannot drift out of step with this one.
@@ -1957,6 +2028,14 @@ async function claudeDispatch(
  * overage disabled - no charge accrues, requests simply start failing. The wait
  * is capped so a weekly-cap reset cannot hang the process for days; past the cap
  * the run exits resumable.
+ *
+ * `onFailure` runs once per failed attempt, before the charge and before the
+ * decision to wait, and it is where a caller repairs whatever that attempt spoiled
+ * (#74: a Claude session id spent by an attempt that then failed). It mutates
+ * state in memory only, so the charge below persists the repair in the same write
+ * as the account of what the failure cost. A callback rather than a wrapper around
+ * `work`, because the path that succeeds must not gain an await - see
+ * `applyCharge` and `turn-seam.test.ts`.
  */
 async function withRateLimitRetry<T>(
   state: RunState,
@@ -1964,11 +2043,13 @@ async function withRateLimitRetry<T>(
   label: string,
   provider: 'claude' | 'codex',
   work: () => Promise<T>,
+  onFailure?: (err: unknown) => void,
 ): Promise<T> {
   for (;;) {
     try {
       return await work();
     } catch (err) {
+      onFailure?.(err);
       // What this attempt spent, whether or not it is retryable, and per attempt
       // rather than per turn: a turn that burns tokens, fails, waits and burns
       // them again used to have nothing consulted between the two. Any ceiling
@@ -2180,7 +2261,7 @@ async function codexDispatch(
   turn: CodexTurnFn,
 ): Promise<TurnOutcome> {
   const slot = slotForRole(req.role, roles);
-  const forkFrom = noteFork(state, cfg, slot);
+  const forkFrom = noteSpawn(state, cfg, slot);
   const prompt = freshConversationPrefix(state, req.role, slotContinuity(state, cfg, slot)) + req.prompt;
 
   // Through the same retry the Claude turns use, so a Codex rate limit gets the
