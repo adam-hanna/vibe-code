@@ -338,14 +338,23 @@ test('an accounting fault while charging a failure does not become the failure',
   // it out would replace the run's real failure with a write error.
   const state = freshState();
   const boom = attachSpend(new Error('boom'), { costUsd: 0.02, tokens: 1000 });
-  rmSync(state.dir, { recursive: true, force: true });
 
   const { lines } = await captureLog(async () => {
     await assert.rejects(
       () =>
         runTurn(state, config(), request('planner', { label: 'plan' }), {
           ...forbidden(),
-          claude: failingClaude(boom),
+          // The directory goes when the turn is already under way, rather than
+          // before the dispatch. Since #74 a Claude turn persists the session
+          // registration BEFORE it spawns - fail closed: an id that cannot be
+          // recorded as handed over must not be handed over - so deleting the
+          // directory first now faults that write instead, and the turn this
+          // case is about never runs. The fault it means to stage is the one
+          // inside `applyCharge`, and this is where the turn reaches it.
+          claude: () => {
+            rmSync(state.dir, { recursive: true, force: true });
+            return Promise.reject(boom);
+          },
         }),
       (err: unknown) => err === boom,
     );

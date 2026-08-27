@@ -18,6 +18,14 @@ import {
 } from '@src/orchestrator.js';
 import type { AgentTurns, Role, RoleTable, TurnRequest } from '@src/orchestrator.js';
 import { handoffContext } from '@src/prompts.js';
+import {
+  noteSlotRegistered,
+  recoverDeadSlot,
+  resetSlot,
+  slotContinuity,
+  slotHasDeadTurn,
+  slotRegistered,
+} from '@src/slots.js';
 import { createRun, loadRun, recordContextMeasurement } from '@src/run.js';
 import { ANSWERS_SCHEMA, FINDINGS_SCHEMA } from '@src/schemas.js';
 import type { ClaudeTurnOptions } from '@src/claude.js';
@@ -329,6 +337,62 @@ test('the Claude slot resumes from its second turn onward, on one id', async () 
   assert.equal(rec.claudeCalls[1]?.resume, true);
   assert.equal(rec.claudeCalls[0]?.sessionId, rec.claudeCalls[1]?.sessionId);
   assert.equal(rec.claudeCalls[0]?.sessionId, slotId(state, 'main'));
+});
+
+// ---- The third marker: an id handed over is spent (#74) ---------------------
+
+test('a rotation states the whole of a fresh conversation, registration included', async () => {
+  const state = freshState();
+  const cfg = config();
+  const rec = recorder();
+
+  await captureLog(() => runTurn(state, cfg, request('planner'), rec.turns));
+  const first = slotId(state, 'main');
+  assert.equal(slotRegistered(state, 'main'), true, 'the id was handed to the CLI');
+  assert.equal(slotStarted(state, 'main'), true);
+
+  resetSlot(state, 'main');
+
+  // All three together, from one function: a fresh id whose marker said it had
+  // already been handed over would be read as a session that died mid-turn, and
+  // the next turn would resume an id that has never existed.
+  assert.notEqual(slotId(state, 'main'), first);
+  assert.equal(slotStarted(state, 'main'), false);
+  assert.equal(slotRegistered(state, 'main'), false);
+  assert.equal(state.sessionRegistered, undefined, 'absent, not false');
+  assert.equal(slotHasDeadTurn(state, 'main'), false);
+});
+
+test('a provider-minted slot has nothing to register', () => {
+  const state = freshState();
+  state.codexSessionId = 'thread-x';
+
+  // `codex exec` takes no session-id flag: there is no id to hand over until a
+  // turn returns one, so there is none to spend.
+  assert.equal(noteSlotRegistered(state, 'judge'), false, 'nothing changed');
+  assert.equal(noteSlotRegistered(state, 'review'), false);
+  assert.equal(slotRegistered(state, 'judge'), false);
+  assert.equal(slotHasDeadTurn(state, 'judge'), false);
+  assert.equal(recoverDeadSlot(state, 'judge'), null, 'and nothing to recover');
+  assert.equal(state.codexSessionId, 'thread-x', 'the thread is untouched');
+});
+
+test('a session that died mid-turn carries the run without having started it', () => {
+  const state = freshState();
+  const cfg = config();
+  state.sessionRegistered = true;
+
+  // `slotHasMemory` keeps its exact meaning - it answers whether a turn ever
+  // succeeded - while the prompts are told the truth, which is that this
+  // conversation already holds the dead turn's work.
+  assert.equal(slotHasMemory(state, cfg, 'main'), false);
+  assert.equal(slotHasDeadTurn(state, 'main'), true);
+  assert.equal(slotContinuity(state, cfg, 'main'), true);
+
+  // Once a turn succeeds there, it is ordinary memory again and nothing is dead.
+  state.sessionStarted = true;
+  assert.equal(slotHasDeadTurn(state, 'main'), false);
+  assert.equal(slotHasMemory(state, cfg, 'main'), true);
 });
 
 test('the Codex thread is adopted from a successful turn and continued', async () => {

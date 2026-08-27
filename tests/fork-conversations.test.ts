@@ -307,8 +307,18 @@ test('a turn that never returns leaves the fork owed, so the next pass re-forks'
   assert.equal(persisted.forkPending?.main?.parentId, parent.sessionId, 'so the fork is still owed');
   assert.equal(persisted.forkPending?.main?.attempts, 1, 'and the attempt is recorded');
 
-  // The next pass forks again, to the SAME vibe-chosen session id - which is
-  // what stops orphan Claude sessions accumulating.
+  // The next pass forks again - from the same parent, into a NEW child id.
+  //
+  // This case used to assert the same child id, on the grounds that re-issuing
+  // the identical command was idempotent. #74 measured that it is not: the id is
+  // spent by the ATTEMPT, so the second `--session-id <child>` fails instantly
+  // with "Session ID ... is already in use", forever. An observed failure now
+  // discards the spent id, which is what makes this retry make progress. The
+  // orphan session that leaves behind is what `attempts` and `fork_retried`
+  // disclose - see the case below.
+  assert.notEqual(persisted.sessionId, child.sessionId, 'the spent id was discarded');
+  assert.equal(persisted.sessionRegistered, undefined, 'and the fresh one is unspent');
+
   const seen: ClaudeTurnOptions[] = [];
   await orchestrate(
     persisted,
@@ -316,8 +326,9 @@ test('a turn that never returns leaves the fork owed, so the next pass re-forks'
     true,
     agents({ claude: (_l, options) => { seen.push(options); return planFixture(); } }, []),
   );
-  assert.equal(seen[0]?.forkFrom, parent.sessionId);
-  assert.equal(seen[0]?.sessionId, child.sessionId, 'the same id as the first attempt');
+  assert.equal(seen[0]?.forkFrom, parent.sessionId, 'the parent is forked again');
+  assert.notEqual(seen[0]?.sessionId, child.sessionId, 'into an id the CLI has not refused');
+  assert.equal(seen[0]?.sessionId, persisted.sessionId, 'the one the failure minted');
 });
 
 test('the retry counter and its event are persisted by one write', async () => {

@@ -295,6 +295,21 @@ test('claude: a fork names the parent to --resume and the child to --session-id'
   assert.equal(argv[argv.indexOf('--session-id') + 1], 'fixture-session', 'into vibe own id');
 });
 
+test('claude: a resume continues one session and mints nothing', async () => {
+  const { options } = progressRecorder();
+  const { args, exec } = capture();
+
+  await claudeTurn({ ...claudeOptions(options), resume: true }, exec);
+
+  const argv = args[0] ?? [];
+  assert.equal(argv[argv.indexOf('--resume') + 1], 'fixture-session');
+  // Not `--session-id`, and this is the argv half of #74: that flag CREATES a
+  // session and spends the id on attempt, so sending it for a conversation that
+  // already exists is what the CLI refuses with "already in use".
+  assert.equal(argv.includes('--session-id'), false, `no id is minted: ${argv.join(' ')}`);
+  assert.equal(argv.includes('--fork-session'), false, 'and nothing is copied');
+});
+
 test('claude: an ordinary turn sends no fork flag at all', async () => {
   const { options } = progressRecorder();
   const { args, exec } = capture();

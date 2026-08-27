@@ -48,9 +48,16 @@ export interface ClaudeTurnOptions {
    *
    * `--fork-session` copies the parent's history into a NEW session rather than
    * continuing it, so the parent stays resumable under its own id and both runs
-   * can proceed independently. The new session is vibe's own chosen id, which is
-   * what makes the fork idempotent: a process killed before the turn is charged
-   * re-forks to the same id rather than accumulating orphans.
+   * can proceed independently. The new session is vibe's own chosen id.
+   *
+   * That id is NOT re-usable, and this comment used to claim it was: re-issuing
+   * the identical command after a killed fork was called idempotence, and #74
+   * measured it failing with "Session ID ... is already in use" every time,
+   * forever. The copy is made at session creation rather than at turn
+   * completion, so a fork whose first turn died has already happened - the
+   * child holds the parent's history - and the recovery is `--resume <child>`,
+   * decided by the slot in `src/slots.ts`. A fork this adapter is asked to make
+   * is always one being made for the first time.
    *
    * Mutually exclusive with `resume` - forking a conversation you are already
    * continuing is not a state a run can be in.

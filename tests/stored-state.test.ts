@@ -339,6 +339,25 @@ test('a corrupt sessionStarted or contextRatio takes its empty value', () => {
   assert.deepEqual(repairs(ratio), ['contextRatio']);
 });
 
+test('a state written before sessionRegistered existed loads with no repair', () => {
+  // Absent is what an id that has never been handed to the CLI looks like, and
+  // it is what every state written before #74 presents - so there is nothing to
+  // migrate and nothing to repair.
+  const loaded = load((raw) => {
+    delete raw['sessionRegistered'];
+  });
+  assert.equal(loaded.sessionRegistered, undefined);
+  assert.deepEqual(repairs(loaded), []);
+
+  // Present and unreadable is dropped to that same absence, named once - the
+  // `reviewSessionStarted` precedent, and never corruption.
+  const damaged = load((raw) => {
+    raw['sessionRegistered'] = 'yes';
+  });
+  assert.equal(damaged.sessionRegistered, undefined);
+  assert.deepEqual(repairs(damaged), ['sessionRegistered']);
+});
+
 test('a stored string in pendingAnswers never reaches the planner as characters', () => {
   const loaded = load((raw) => {
     raw['pendingAnswers'] = 'lazy';

@@ -970,6 +970,26 @@ export interface RunState {
    * `src/slots.ts`, never here.
    */
   sessionStarted: boolean;
+  /**
+   * Whether `sessionId` has been handed to the Claude CLI - `SLOTS.main`'s third
+   * marker (#74).
+   *
+   * Written BEFORE the spawn, because `claude --session-id` spends the id on
+   * *attempt* and not on success: a process killed after the CLI registered the
+   * session but before the turn returned otherwise leaves a state that believes
+   * the id is still free, and every later attempt fails instantly with
+   * "Session ID ... is already in use".
+   *
+   * Separate from `sessionStarted`, which answers a different question - has a
+   * turn ever SUCCEEDED here. The two together are what distinguish a session
+   * that died mid-turn (resumable, and holding that turn's work) from one that
+   * has never been spawned at all.
+   *
+   * Optional: absent means never registered, so every state written before this
+   * existed loads with no repair. Read and written through `src/slots.ts`,
+   * never here.
+   */
+  sessionRegistered?: boolean;
   planOnly: boolean;
   answeredQuestions: string[];
   deferredQuestions: DeferredQuestion[];

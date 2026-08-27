@@ -1572,6 +1572,11 @@ const READERS = {
   // has never run looks like, and there is nothing here to migrate into.
   reviewSessionId: (raw, ctx) => optionalString('reviewSessionId', raw, ctx),
   reviewSessionStarted: (raw, ctx) => optionalBool('reviewSessionStarted', raw, ctx),
+  // The Claude slot's registration marker (#74). Optional for the reason the
+  // four above are: absent is what an id that has never been handed to the CLI
+  // looks like, and it is what every state written before this field existed
+  // presents - so nothing here is migrated and nothing is repaired.
+  sessionRegistered: (raw, ctx) => optionalBool('sessionRegistered', raw, ctx),
   reviewContextTokens: (raw, ctx) =>
     optionalNumber('reviewContextTokens', raw, ctx, isPositiveInt),
   reviewContextThread: (raw, ctx) => optionalString('reviewContextThread', raw, ctx),
