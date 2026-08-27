@@ -42,6 +42,20 @@ export interface ClaudeTurnOptions {
   prompt: string;
   sessionId: string;
   resume: boolean;
+  /**
+   * A parent session to fork into `sessionId`, for a forked run's first turn on
+   * this conversation (#78).
+   *
+   * `--fork-session` copies the parent's history into a NEW session rather than
+   * continuing it, so the parent stays resumable under its own id and both runs
+   * can proceed independently. The new session is vibe's own chosen id, which is
+   * what makes the fork idempotent: a process killed before the turn is charged
+   * re-forks to the same id rather than accumulating orphans.
+   *
+   * Mutually exclusive with `resume` - forking a conversation you are already
+   * continuing is not a state a run can be in.
+   */
+  forkFrom?: string | undefined;
   permissionMode: PermissionMode;
   model: string;
   effort: Effort;
@@ -85,8 +99,15 @@ export async function claudeTurn(
   options: ClaudeTurnOptions,
   exec: RunFn = run,
 ): Promise<ClaudeTurnResult> {
-  const { prompt, sessionId, resume, permissionMode, model, effort, cwd, jsonSchema, tools, timeoutMs } =
+  const { prompt, sessionId, resume, forkFrom, permissionMode, model, effort, cwd, jsonSchema, tools, timeoutMs } =
     options;
+
+  // A programming error rather than a runtime state: the dispatch computes
+  // `resume` as "no fork is owed AND this slot has memory", so the two cannot
+  // both be set unless something above stopped asking the slot.
+  if (forkFrom !== undefined && resume) {
+    throw new Error('claudeTurn: forkFrom and resume are mutually exclusive');
+  }
 
   // stream-json rather than json: the aggregate `usage` on the result envelope
   // sums every API request in the turn, so it cannot measure live context. The
@@ -97,7 +118,14 @@ export async function claudeTurn(
     '--verbose',
     '--permission-mode', permissionMode,
   ];
-  args.push(resume ? '--resume' : '--session-id', sessionId);
+  // Fork, resume, or start fresh - one of exactly three. The fork names the
+  // parent to `--resume` and the child to `--session-id`, which is the only
+  // form that both carries the history and leaves the parent resumable.
+  if (forkFrom !== undefined) {
+    args.push('--resume', forkFrom, '--fork-session', '--session-id', sessionId);
+  } else {
+    args.push(resume ? '--resume' : '--session-id', sessionId);
+  }
   args.push('--model', model, '--effort', effort);
   if (jsonSchema) args.push('--json-schema', JSON.stringify(jsonSchema));
   args.push(...sessionArgs);

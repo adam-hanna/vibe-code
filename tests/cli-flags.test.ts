@@ -84,3 +84,24 @@ test('disabled progress is the single point that stops any hook or timer existin
 
   assert.equal(progressOptions(state, cfg, 'plan'), undefined);
 });
+
+// ---- vibe fork (#78) --------------------------------------------------------
+
+test('--at is parsed as a number, and is not a config override', () => {
+  const parsed = parseArgs(['20260101-000000-x', '--at', '3']);
+
+  assert.deepEqual(parsed.positional, ['20260101-000000-x']);
+  assert.equal(parsed.flags.at, 3);
+  // It names a point in one run, so - like --force - it must never be written
+  // back onto the run as a setting the next resume inherits.
+  assert.deepEqual(overridesFor(['--at', '3']), overridesFor([]));
+});
+
+test('--at refuses a value that is not a number', () => {
+  assert.throws(() => parseArgs(['--at', 'second']), /--at must be a number/);
+  assert.throws(() => parseArgs(['--at']), /--at requires a value/);
+});
+
+test('--no-branch still reaches the fork through the shared override builder', () => {
+  assert.equal(overridesFor(['--no-branch']).git?.useBranch, false);
+});

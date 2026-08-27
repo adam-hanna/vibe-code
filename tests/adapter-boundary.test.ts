@@ -1,11 +1,11 @@
-import { test } from 'node:test';
+﻿import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { claudeTurn } from '@src/claude.js';
 import type { ClaudeTurnOptions } from '@src/claude.js';
-import { codexTurn } from '@src/codex.js';
+import { codexTurn, parseOptionTokens, resetCodexForkProbe } from '@src/codex.js';
 import type { CodexTurnOptions } from '@src/codex.js';
 import type { ActivityObservation, ProgressOptions, RepeatingTimer, TimerApi } from '@src/progress.js';
 import type { RunFn, RunResult } from '@src/proc.js';
@@ -261,3 +261,270 @@ test('codex: the schema file is still written for the child to read', async () =
   const schema = JSON.parse(readFileSync(path.join(dir, 'review-0.schema.json'), 'utf8')) as unknown;
   assert.deepEqual(schema, { type: 'object' });
 });
+
+// ---- forking a conversation (#78) -------------------------------------------
+
+/** The argv a turn would have spawned, captured rather than run. */
+function capture(): { args: string[][]; exec: RunFn } {
+  const args: string[][] = [];
+  return {
+    args,
+    exec: (_bin, argv, options): Promise<RunResult> => {
+      args.push([...argv]);
+      for (const line of [ASSISTANT, SUCCESS]) options?.onLine?.(line);
+      return Promise.resolve({
+        code: 0,
+        stdout: `${ASSISTANT}\n${SUCCESS}\n`,
+        stderr: '',
+      });
+    },
+  };
+}
+
+test('claude: a fork names the parent to --resume and the child to --session-id', async () => {
+  const { options } = progressRecorder();
+  const { args, exec } = capture();
+
+  await claudeTurn({ ...claudeOptions(options), forkFrom: 'parent-session' }, exec);
+
+  const argv = args[0] ?? [];
+  const at = argv.indexOf('--resume');
+  assert.ok(at >= 0, `--resume is sent: ${argv.join(' ')}`);
+  assert.equal(argv[at + 1], 'parent-session', 'the parent is what is resumed');
+  assert.ok(argv.includes('--fork-session'), 'and forked rather than continued');
+  assert.equal(argv[argv.indexOf('--session-id') + 1], 'fixture-session', 'into vibe own id');
+});
+
+test('claude: an ordinary turn sends no fork flag at all', async () => {
+  const { options } = progressRecorder();
+  const { args, exec } = capture();
+
+  await claudeTurn(claudeOptions(options), exec);
+  assert.equal((args[0] ?? []).includes('--fork-session'), false);
+});
+
+test('claude: forking a conversation it is also resuming is a programming error', async () => {
+  const { options } = progressRecorder();
+  const { exec } = capture();
+
+  await assert.rejects(
+    () => claudeTurn({ ...claudeOptions(options), resume: true, forkFrom: 'parent' }, exec),
+    /mutually exclusive/,
+  );
+});
+
+/**
+ * A codex whose `exec fork --help` names `flags`, recording every invocation.
+ *
+ * The probe is a real child, so a case that does not model it is a case testing
+ * the wrong argv. `null` flags means the help could not be read at all - which
+ * is not evidence that anything is missing, and must leave the direct vector
+ * alone.
+ */
+function codexWithFork(
+  dir: string,
+  flags: readonly string[] | null,
+  extra: (argv: readonly string[]) => Partial<RunResult> = () => ({}),
+): { args: string[][]; exec: RunFn } {
+  const args: string[][] = [];
+  const exec: RunFn = (_bin, argv): Promise<RunResult> => {
+    args.push([...argv]);
+    if (argv[2] === '--help') {
+      return Promise.resolve(
+        flags === null
+          ? { code: 1, stdout: '', stderr: '' }
+          : { code: 0, stdout: `Usage: codex exec fork\n\n${flags.join('\n')}\n`, stderr: '' },
+      );
+    }
+    writeFileSync(outPath(dir), JSON.stringify({ verdict: 'APPROVE' }), 'utf8');
+    return Promise.resolve({ code: 0, stdout: '', stderr: '', ...extra(argv) });
+  };
+  return { args, exec };
+}
+
+const ALL_FORK_FLAGS = ['--json', '-m', '-c', '--skip-git-repo-check', '-o', '--output-schema'];
+
+test('codex: a fork is `exec fork <parent> ... -`, with no -s and no -C', async () => {
+  resetCodexForkProbe();
+  const dir = codexDir();
+  const { options } = progressRecorder();
+  const { args, exec } = codexWithFork(dir, ALL_FORK_FLAGS);
+
+  await codexTurn({ ...codexOptions(dir, options), forkFrom: 'parent-thread' }, exec);
+
+  assert.deepEqual(args[0]?.slice(0, 3), ['exec', 'fork', '--help'], 'the flags are probed first');
+  const argv = args[1] ?? [];
+  assert.deepEqual(argv.slice(0, 3), ['exec', 'fork', 'parent-thread']);
+  assert.equal(argv.at(-1), '-', 'the prompt still arrives on stdin');
+  assert.ok(argv.includes('--json') && argv.includes('--skip-git-repo-check'));
+  // `fork` inherits neither, exactly as `resume` does not.
+  assert.equal(argv[argv.indexOf('-m') + 1], 'fixture-model');
+  assert.ok(argv.some((a) => a.startsWith('model_reasoning_effort=')));
+  // Neither flag is accepted by `fork`; the cwd and the sandbox come from the
+  // spawned process, as they do for a resumed thread.
+  assert.equal(argv.includes('-s'), false);
+  assert.equal(argv.includes('-C'), false);
+});
+
+test('codex: an ordinary one-shot turn is still `exec`, and a resume still `exec resume`', async () => {
+  const dir = codexDir();
+  const { options } = progressRecorder();
+  const args: string[][] = [];
+  const exec: RunFn = (_bin, argv): Promise<RunResult> => {
+    args.push([...argv]);
+    writeFileSync(outPath(dir), JSON.stringify({ verdict: 'APPROVE' }), 'utf8');
+    return Promise.resolve({ code: 0, stdout: '', stderr: '' });
+  };
+
+  await codexTurn(codexOptions(dir, options), exec);
+  await codexTurn({ ...codexOptions(dir, options), sessionId: 'thread-9' }, exec);
+
+  assert.deepEqual((args[0] ?? []).slice(0, 1), ['exec']);
+  assert.deepEqual((args[1] ?? []).slice(0, 3), ['exec', 'resume', 'thread-9']);
+});
+
+test('codex: a fork missing a flag falls back to fork-then-resume, in one turn', async () => {
+  resetCodexForkProbe();
+  const dir = codexDir();
+  const { options } = progressRecorder();
+  // A codex whose `exec fork` takes no `--output-schema`: the direct vector
+  // would be rejected before any model work, so the turn is taken another way.
+  const { args, exec } = codexWithFork(dir, ['--json', '-m', '-c', '--skip-git-repo-check', '-o'], (argv) =>
+    argv[1] === 'fork'
+      ? { stdout: JSON.stringify({ type: 'thread.started', thread_id: 'forked-thread' }) }
+      : {},
+  );
+
+  const result = await codexTurn({ ...codexOptions(dir, options), forkFrom: 'parent-thread' }, exec);
+
+  assert.deepEqual(args[0]?.slice(0, 3), ['exec', 'fork', '--help']);
+  // One: mint the copy, with no prompt and nothing to charge.
+  assert.deepEqual(args[1], ['exec', 'fork', 'parent-thread', '--json']);
+  // Two: the turn itself, on the thread that copy created.
+  assert.deepEqual(args[2]?.slice(0, 3), ['exec', 'resume', 'forked-thread']);
+  assert.equal(args[2]?.at(-1), '-');
+  assert.ok(args[2]?.includes('--output-schema'), 'the schema is enforced on the turn that answers');
+  // The slot must learn which thread it is on, or the next pass re-forks one
+  // that already exists.
+  assert.equal(result.sessionId, 'forked-thread');
+});
+
+test('codex: a fork whose mint names no thread fails rather than running the turn somewhere', async () => {
+  resetCodexForkProbe();
+  const dir = codexDir();
+  const { options } = progressRecorder();
+  const { args, exec } = codexWithFork(dir, ['--json', '-m']);
+
+  await assert.rejects(
+    () => codexTurn({ ...codexOptions(dir, options), forkFrom: 'parent-thread' }, exec),
+    /named no thread/,
+  );
+  assert.equal(args.length, 2, 'the probe and the mint - and no turn after them');
+});
+
+test('codex: help that cannot be read is not evidence a flag is missing', async () => {
+  resetCodexForkProbe();
+  const dir = codexDir();
+  const { options } = progressRecorder();
+  const { args, exec } = codexWithFork(dir, null);
+
+  await codexTurn({ ...codexOptions(dir, options), forkFrom: 'parent-thread' }, exec);
+
+  // The direct vector, unchanged: an unreadable help text says nothing about
+  // what the binary accepts, and switching paths on no evidence would be the
+  // same fabrication this codebase refuses about numbers.
+  assert.deepEqual(args[1]?.slice(0, 3), ['exec', 'fork', 'parent-thread']);
+});
+
+test('codex: the probe is read once per process, not once per turn', async () => {
+  resetCodexForkProbe();
+  const dir = codexDir();
+  const { options } = progressRecorder();
+  const { args, exec } = codexWithFork(dir, ALL_FORK_FLAGS);
+
+  await codexTurn({ ...codexOptions(dir, options), forkFrom: 'a' }, exec);
+  await codexTurn({ ...codexOptions(dir, options), forkFrom: 'b' }, exec);
+
+  assert.equal(args.filter((a) => a[2] === '--help').length, 1);
+});
+
+
+test('codex: option tokens are read with boundaries, and short is not long', () => {
+  // The defect this replaces: `help.includes('-m')` is satisfied by `--model`,
+  // by `--skip-git-repo-check`, and by the word "command" in a sentence.
+  const long = parseOptionTokens('  --model <m>   the model\n  --config <k=v>\n  --output <f>\n');
+  assert.ok(long.has('--model') && long.has('--config') && long.has('--output'));
+  for (const short of ['-m', '-c', '-o']) {
+    assert.equal(long.has(short), false, `${short} is not declared by a long-only help`);
+  }
+  const both = parseOptionTokens('  -m, --model <m>\n  -o <file>\n  --output-schema <f>\n');
+  assert.ok(both.has('-m') && both.has('--model') && both.has('-o') && both.has('--output-schema'));
+  assert.equal(both.has('--out'), false, 'a prefix of a declared option is not a declared option');
+  assert.equal(parseOptionTokens('runs the command in a sandbox').size, 0);
+});
+
+test('codex: a long-only help takes the fallback rather than sending short flags', async () => {
+  resetCodexForkProbe();
+  const dir = codexDir();
+  const { options } = progressRecorder();
+  // Everything the direct vector needs, but declared only in long form. The
+  // substring probe read this as compatible and sent `-m -c -o` to a binary
+  // that does not take them.
+  const { args, exec } = codexWithFork(
+    dir,
+    ['--json', '--model', '--config', '--skip-git-repo-check', '--output', '--output-schema'],
+    (argv) =>
+      argv[1] === 'fork'
+        ? { stdout: JSON.stringify({ type: 'thread.started', thread_id: 'long-only-thread' }) }
+        : {},
+  );
+
+  const result = await codexTurn({ ...codexOptions(dir, options), forkFrom: 'parent-thread' }, exec);
+
+  assert.deepEqual(args[1], ['exec', 'fork', 'parent-thread', '--json']);
+  assert.deepEqual(args[2]?.slice(0, 3), ['exec', 'resume', 'long-only-thread']);
+  assert.equal(result.sessionId, 'long-only-thread');
+});
+
+test('codex: a fallback on a codex with no --json does not send --json', async () => {
+  resetCodexForkProbe();
+  const dir = codexDir();
+  const { options } = progressRecorder();
+  // The flag the probe found missing must not be the flag the fallback sends -
+  // that would break the fallback on exactly the binaries it exists for. With no
+  // `--json` there is no event stream, so the id comes from the banner.
+  const { args, exec } = codexWithFork(dir, ['-m', '-c', '--skip-git-repo-check', '-o'], (argv) =>
+    argv[1] === 'fork'
+      ? { stderr: 'session id: 123e4567-e89b-12d3-a456-426614174000\n' }
+      : {},
+  );
+
+  const result = await codexTurn({ ...codexOptions(dir, options), forkFrom: 'parent-thread' }, exec);
+
+  assert.deepEqual(args[1], ['exec', 'fork', 'parent-thread'], 'no --json on the mint call');
+  assert.deepEqual(args[2]?.slice(0, 3), [
+    'exec',
+    'resume',
+    '123e4567-e89b-12d3-a456-426614174000',
+  ]);
+  assert.equal(result.sessionId, '123e4567-e89b-12d3-a456-426614174000');
+});
+
+test('codex: a banner on stdout is read too', async () => {
+  resetCodexForkProbe();
+  const dir = codexDir();
+  const { options } = progressRecorder();
+  const { args, exec } = codexWithFork(dir, ['-m'], (argv) =>
+    argv[1] === 'fork'
+      ? { stdout: 'session id: 123e4567-e89b-12d3-a456-426614174000\n' }
+      : {},
+  );
+
+  await codexTurn({ ...codexOptions(dir, options), forkFrom: 'parent-thread' }, exec);
+  assert.deepEqual(args[2]?.slice(0, 3), [
+    'exec',
+    'resume',
+    '123e4567-e89b-12d3-a456-426614174000',
+  ]);
+});
+

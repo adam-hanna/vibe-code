@@ -97,6 +97,84 @@ export async function createBranch(cwd: string, name: string): Promise<void> {
   detail(`on branch ${name}`);
 }
 
+/** A full object id, never an abbreviation: 40 lowercase hex characters. */
+const FULL_SHA = /^[0-9a-f]{40}$/;
+
+export function isFullSha(v: unknown): v is string {
+  return typeof v === 'string' && FULL_SHA.test(v);
+}
+
+/**
+ * The canonical 40-hex id `sha` names, or null. Never throws.
+ *
+ * `^{commit}` so a tag or a tree is not accepted as a commit, and callers
+ * compare the answer to what they stored rather than adopting it: a checkpoint
+ * that recorded an abbreviation, a branch name or a tag would otherwise resolve
+ * to *something*, and forking from "whatever `main` means today" is not forking
+ * from the commit the round produced.
+ */
+export async function resolveCommit(cwd: string, sha: string): Promise<string | null> {
+  const { code, stdout } = await git(cwd, ['rev-parse', '--verify', '--quiet', sha], {
+    allowFail: true,
+  });
+  if (code !== 0 || !isFullSha(stdout)) return null;
+  // The object type in its own call rather than `<sha>^{commit}` peel syntax:
+  // git 2.31 answers "Needed a single revision" to that form under `--verify`,
+  // and `^` is cmd.exe's escape character besides. Two plain invocations answer
+  // the same question everywhere.
+  const { code: typed, stdout: kind } = await git(cwd, ['cat-file', '-t', stdout], {
+    allowFail: true,
+  });
+  return typed === 0 && kind === 'commit' ? stdout : null;
+}
+
+export async function branchExists(cwd: string, name: string): Promise<boolean> {
+  const { code } = await git(cwd, ['rev-parse', '--verify', '--quiet', `refs/heads/${name}`], {
+    allowFail: true,
+  });
+  return code === 0;
+}
+
+/**
+ * `git branch <name> <sha>`: creates the REF only.
+ *
+ * HEAD, the index and the working tree are untouched, which is the whole
+ * difference from `createBranch` above. `vibe fork` creates a run and stops; it
+ * has no business moving the user's tree, and the forked run checks its own
+ * branch out when it is actually resumed (`prepareGit`).
+ *
+ * Reports failure rather than throwing: `commitFork` has to roll back what it
+ * created before it refuses, which it cannot do from inside a throw it did not
+ * expect.
+ */
+export async function createBranchRef(
+  cwd: string,
+  name: string,
+  sha: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const { code, stderr } = await git(cwd, ['branch', name, sha], { allowFail: true });
+  return code === 0 ? { ok: true } : { ok: false, error: stderr };
+}
+
+/** `git branch -D <name>`, for a ref this process created moments ago and is rolling back. */
+export async function deleteBranchRef(cwd: string, name: string): Promise<boolean> {
+  const { code } = await git(cwd, ['branch', '-D', name], { allowFail: true });
+  return code === 0;
+}
+
+/** `git checkout <name>` for a branch that already exists. Reports failure rather than throwing. */
+export async function checkoutBranch(
+  cwd: string,
+  name: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const { code, stderr } = await git(cwd, ['checkout', name], { allowFail: true });
+  if (code === 0) {
+    detail(`on branch ${name}`);
+    return { ok: true };
+  }
+  return { ok: false, error: stderr };
+}
+
 /** Diff marker for the implementation. Null in a repo with no commits yet. */
 export async function markBase(cwd: string): Promise<string | null> {
   if (!(await hasCommits(cwd))) return null;
@@ -104,7 +182,16 @@ export async function markBase(cwd: string): Promise<string | null> {
   return stdout;
 }
 
-export async function commitAll(cwd: string, message: string): Promise<string | null> {
+/**
+ * What a commit attempt did.
+ *
+ * `string | null` could not tell "there was nothing to commit" from "the commit
+ * failed", and a checkpoint has to record which: one is a round that changed no
+ * files, the other is a round whose work is not in the history at all.
+ */
+export type CommitResult = { sha: string } | { sha: null; why: 'nothing-to-commit' | 'failed' };
+
+export async function commitAll(cwd: string, message: string): Promise<CommitResult> {
   // vibe's own run directory is kept out of the user's history by the
   // `.gitignore` written inside `.vibe` itself (see `ensureVibeIgnored`), not
   // by a pathspec here. `:(exclude).vibe` was worse than useless: git counts a
@@ -119,15 +206,20 @@ export async function commitAll(cwd: string, message: string): Promise<string | 
   const { stdout: staged } = await git(cwd, ['diff', '--cached', '--name-only']);
   if (!staged) {
     detail('nothing to commit');
-    return null;
+    return { sha: null, why: 'nothing-to-commit' };
   }
   const { code, stderr } = await git(cwd, ['commit', '-m', message], { allowFail: true });
   if (code !== 0) {
     warn(`commit failed: ${stderr}`);
-    return null;
+    return { sha: null, why: 'failed' };
   }
-  const { stdout: sha } = await git(cwd, ['rev-parse', '--short', 'HEAD']);
-  return sha;
+  // The FULL sha, not `--short`. An abbreviation is unique in the repo it was
+  // taken from at the moment it was taken; a checkpoint is read months later,
+  // by which point the same seven characters may be ambiguous or name another
+  // commit entirely - and forking from the wrong commit is not a failure a
+  // reader could spot.
+  const { stdout: sha } = await git(cwd, ['rev-parse', 'HEAD']);
+  return { sha };
 }
 
 /**

@@ -3,15 +3,21 @@ import { setOwn } from '@src/runtime.js';
 import type { AgentEnvironmentFacts, EnvironmentFacts } from '@src/runtime.js';
 import type { AgentProvider, AgentShell } from '@src/runtime.js';
 import type { PathStyle } from '@src/pathstyle.js';
+import type { SlotName } from '@src/slots.js';
 import type {
   AcceptanceCriterion,
   Answer,
   Assumption,
   CheckKind,
+  CheckpointBoundary,
+  CheckpointCommitNote,
   CodexRateLimitRecord,
   Confidence,
   DeferredQuestion,
   Finding,
+  ForkedConversation,
+  ForkOrigin,
+  ForkPendingEntry,
   GateOutcome,
   InFlightTurn,
   OpenQuestion,
@@ -21,6 +27,7 @@ import type {
   QuestionKind,
   ReviewCoverage,
   RoundRecord,
+  RunCheckpointMeta,
   RunEvent,
   RunPhase,
   RunState,
@@ -226,6 +233,37 @@ const PROVIDERS = {
   codex: 'codex',
 } satisfies Record<AgentProvider, AgentProvider>;
 
+const BOUNDARIES = {
+  'plan-round': 'plan-round',
+  'plan-approved': 'plan-approved',
+  implemented: 'implemented',
+  'verify-round': 'verify-round',
+  'review-round': 'review-round',
+  'final-fix': 'final-fix',
+  complete: 'complete',
+} satisfies Record<CheckpointBoundary, CheckpointBoundary>;
+
+const COMMIT_NOTES = {
+  committed: 'committed',
+  'nothing-to-commit': 'nothing-to-commit',
+  'commit-failed': 'commit-failed',
+  'sha-unusable': 'sha-unusable',
+  'commits-disabled': 'commits-disabled',
+  'not-a-repo': 'not-a-repo',
+  'no-commit-in-round': 'no-commit-in-round',
+} satisfies Record<CheckpointCommitNote, CheckpointCommitNote>;
+
+const SLOT_NAMES = {
+  main: 'main',
+  judge: 'judge',
+  review: 'review',
+} satisfies Record<SlotName, SlotName>;
+
+const FORK_WHYS = {
+  'never-started': 'never-started',
+  'not-persisted': 'not-persisted',
+} satisfies Record<NonNullable<ForkedConversation['why']>, NonNullable<ForkedConversation['why']>>;
+
 const SHELLS = {
   bash: 'bash',
   zsh: 'zsh',
@@ -390,38 +428,60 @@ interface ReadContext {
  */
 const RUN_ID = /^[A-Za-z0-9._-]+$/;
 
-/** The same whitelist, for a file name inside a run directory. See `isArtifactBasename`. */
-const ARTIFACT_NAME = /^[A-Za-z0-9._-]+$/;
+/**
+ * The exact names `recordReport` writes: `implementation-report.md`, and the two
+ * numbered forms.
+ *
+ * Case-sensitive, and the round number is a canonical positive decimal -
+ * `[1-9][0-9]*`, so neither `fix-report-0.md` nor `fix-report-01.md` is
+ * accepted. Both writers interpolate a round that has just been incremented, so
+ * neither can produce a zero or a leading zero; a predicate that accepts more
+ * than the writer emits is one that will be asked to accept something else
+ * later, which is exactly how the character whitelist this replaced came to
+ * accept `state.json`.
+ */
+const REPORT_NAME =
+  /^(implementation-report\.md|fix-report-[1-9][0-9]*\.md|verify-fix-[1-9][0-9]*\.md)$/;
 
 /**
- * An artifact basename, or nothing.
+ * A report basename this tool wrote, or nothing. **An allowlist, and it replaces
+ * a character whitelist that could not answer the question.**
  *
- * `artifactText` does `path.join(state.dir, name)`, so a stored `../../etc/passwd`
- * or `C:\...` reads a file outside the run directory and renders it into a
- * prompt. Whitelisted like `assertUsableRunId` rather than blacklisting
- * separators, and for the same reason: `/`, `\`, drive prefixes, `..` and
- * control characters all fall out of one rule. A value that fails is dropped to
- * absent with the repair logged, exactly as `readReviewCoverage` drops a damaged
- * record - the reviewer then gets the "no report was recorded" notice, which is
- * honest (#50, #23).
+ * Its two callers - the `lastReport` reader and `latestReport`
+ * (`src/orchestrator.ts`) - both ask exactly one thing: is this the name of a
+ * report *vibe produced*. The old whitelist only asked whether the string was a
+ * plausible basename, which passes `state.json` (so `latestReport` renders the
+ * whole state file into the reviewer's prompt), passes `PLAN.md` (so a fork
+ * would copy over the plan it just generated), and on Windows passes
+ * `STATE.JSON` and `state.json.` - both of which open `state.json`.
  *
- * Exported so `src/orchestrator.ts` asks the same question this reader asks. Two
- * answers to "is this a basename" is the drift `unvalidated('config')` warns
- * about, one field along.
+ * The trailing dot/space rejection is Windows: the filesystem strips them, so
+ * `"state.json."` and `"state.json"` are the same file while being different
+ * strings. `path.basename` on both flavours is kept as a second belt.
  */
-export function isArtifactBasename(v: unknown): v is string {
+export function isReportBasename(v: unknown): v is string {
   return (
     isString(v) &&
     v !== '' &&
     v !== '.' &&
     v !== '..' &&
-    ARTIFACT_NAME.test(v) &&
+    !/[. ]$/.test(v) &&
+    REPORT_NAME.test(v) &&
     path.basename(v) === v &&
     path.win32.basename(v) === v
   );
 }
 
 export function assertUsableRunId(id: string, runsRoot: string): void {
+  // A trailing dot or space is stripped by Windows, so `"<id>."` names `<id>`
+  // while passing every lexical check above - the same hole `isReportBasename`
+  // closes one field along.
+  if (/[. ]$/.test(id)) {
+    throw new StoredStateError(
+      `"${id}" is not a run id: it ends in a dot or a space, which Windows strips - so it would ` +
+        'name a different directory than it says. Nothing was read or written.',
+    );
+  }
   if (id === '' || id === '.' || id === '..' || !RUN_ID.test(id) || path.basename(id) !== id) {
     throw new StoredStateError(
       `"${id}" is not a run id. A run id is a single directory name under ${runsRoot} - ` +
@@ -1066,6 +1126,199 @@ function readReviewCoverage(raw: unknown, ctx: ReadContext): ReviewCoverage | un
   return { round: raw['round'], chunks: raw['chunks'], files, truncated };
 }
 
+/** A full object id, never an abbreviation. The same rule `src/git.ts` applies. */
+const FULL_SHA = /^[0-9a-f]{40}$/;
+
+/**
+ * A checkpoint's metadata, or null - a pure shape check with no repair log.
+ *
+ * Exported because `listCheckpoints` needs the same answer without a
+ * `ReadContext` to log into: a listing reads snapshots that are not the run
+ * being loaded, and there is nothing there to repair.
+ *
+ * `commit` is null or 40 hex and nothing else. An abbreviation or a branch name
+ * would resolve to *something* months later, which is how a fork ends up seeded
+ * from a commit no round ever produced.
+ */
+export function readCheckpointShape(raw: unknown): RunCheckpointMeta | null {
+  if (!isRecord(raw)) return null;
+  const boundary = enumOf(raw['boundary'], BOUNDARIES);
+  const commitNote = enumOf(raw['commitNote'], COMMIT_NOTES);
+  const phase = enumOf(raw['phase'], PHASES);
+  const commit = raw['commit'];
+  if (boundary === null || commitNote === null || phase === null) return null;
+  if (!isPositiveInt(raw['n']) || !isTimestamp(raw['at'])) return null;
+  if (!isCounter(raw['planRound']) || !isCounter(raw['reviewRound']) || !isCounter(raw['verifyRound'])) {
+    return null;
+  }
+  if (!(commit === null || (isString(commit) && FULL_SHA.test(commit)))) return null;
+  return {
+    n: raw['n'],
+    at: raw['at'],
+    boundary,
+    phase,
+    planRound: raw['planRound'],
+    reviewRound: raw['reviewRound'],
+    verifyRound: raw['verifyRound'],
+    commit,
+    commitNote,
+  };
+}
+
+/**
+ * The checkpoint a state came from, dropped to absent when unreadable.
+ *
+ * Tolerant, unlike the three fork fields below, and deliberately so. On a live
+ * `state.json` this is display-only provenance that nothing acts on; on a
+ * snapshot it is required, and `planFork` refuses to fork anything that needed a
+ * repair at all - so a dropped `checkpoint` refuses the fork rather than being
+ * quietly forked from an unknown boundary.
+ */
+function readCheckpointMeta(raw: unknown, ctx: ReadContext): RunCheckpointMeta | undefined {
+  if (raw === undefined) return undefined;
+  const meta = readCheckpointShape(raw);
+  if (meta === null) {
+    ctx.repairs.dropped('checkpoint', 'checkpoint');
+    return undefined;
+  }
+  return meta;
+}
+
+/**
+ * What this run was forked from - **refused when present and unreadable.**
+ *
+ * The one field here whose loss cannot be noticed later. Once a forked run's
+ * pending conversations have all been consumed, `forkPending` is legitimately
+ * absent and every slot is legitimately started, so a state whose `forkedFrom`
+ * was silently dropped is indistinguishable from an ordinary run: its
+ * provenance is gone, and no invariant over the other fields can tell. The
+ * alternative - a second durable marker whose only job is to detect the loss of
+ * this one - just moves the question.
+ *
+ * Absent is not an error: that is every non-forked run there has ever been.
+ */
+function readForkOrigin(raw: unknown, ctx: ReadContext): ForkOrigin | undefined {
+  if (raw === undefined) return undefined;
+  const note =
+    'A fork records where it came from; discarding that silently would leave the run ' +
+    'indistinguishable from one that was never forked. Nothing was rewritten.';
+  if (!isRecord(raw)) return refuse('forkedFrom', raw, 'an object', ctx, note);
+
+  const boundary = enumOf(raw['boundary'], BOUNDARIES);
+  const branchFrom = raw['branchFrom'];
+  if (
+    !isString(raw['runId']) ||
+    raw['runId'] === '' ||
+    !isPositiveInt(raw['checkpoint']) ||
+    !isTimestamp(raw['checkpointAt']) ||
+    !isTimestamp(raw['forkedAt']) ||
+    boundary === null ||
+    !isTotal(raw['inheritedTokens']) ||
+    !isMoney(raw['inheritedCostUsd']) ||
+    !(branchFrom === null || (isString(branchFrom) && FULL_SHA.test(branchFrom))) ||
+    !Array.isArray(raw['conversations']) ||
+    !Array.isArray(raw['notInherited'])
+  ) {
+    return refuse('forkedFrom', raw, 'a complete fork record', ctx, note);
+  }
+
+  const codexTokens = raw['inheritedCodexTokens'];
+  // Absent stays absent. It is NOT defaulted to zero: a checkpoint with no
+  // recorded Codex share may mean no Codex turn ran or that none was recorded,
+  // and vibe does not decide which.
+  if (codexTokens !== undefined && !isTotal(codexTokens)) {
+    return refuse('forkedFrom', raw, 'a complete fork record', ctx, note);
+  }
+
+  const conversations: ForkedConversation[] = [];
+  for (const entry of raw['conversations']) {
+    if (!isRecord(entry)) return refuse('forkedFrom', raw, 'a complete fork record', ctx, note);
+    const slot = enumOf(entry['slot'], SLOT_NAMES);
+    const parentId = entry['parentId'];
+    if (slot === null || !(parentId === null || (isString(parentId) && parentId !== ''))) {
+      return refuse('forkedFrom', raw, 'a complete fork record', ctx, note);
+    }
+    const why = entry['why'] === undefined ? null : enumOf(entry['why'], FORK_WHYS);
+    if (entry['why'] !== undefined && why === null) {
+      return refuse('forkedFrom', raw, 'a complete fork record', ctx, note);
+    }
+    conversations.push({ slot, parentId, ...(why === null ? {} : { why }) });
+  }
+
+  const notInherited: string[] = [];
+  for (const entry of raw['notInherited']) {
+    if (!isString(entry)) return refuse('forkedFrom', raw, 'a complete fork record', ctx, note);
+    notInherited.push(entry);
+  }
+
+  return {
+    runId: raw['runId'],
+    checkpoint: raw['checkpoint'],
+    checkpointAt: raw['checkpointAt'],
+    boundary,
+    forkedAt: raw['forkedAt'],
+    inheritedTokens: raw['inheritedTokens'],
+    inheritedCostUsd: raw['inheritedCostUsd'],
+    ...(codexTokens === undefined ? {} : { inheritedCodexTokens: codexTokens }),
+    branchFrom,
+    conversations,
+    notInherited,
+  };
+}
+
+/**
+ * The forks a run still owes - **refused when present and unreadable.**
+ *
+ * An instruction rather than a record: dropped silently, the next turn on that
+ * slot starts a fresh conversation instead of forking the parent's, and the run
+ * loses the context it was created to inherit without anyone being told.
+ */
+function readForkPending(
+  raw: unknown,
+  ctx: ReadContext,
+): Partial<Record<SlotName, ForkPendingEntry>> | undefined {
+  if (raw === undefined) return undefined;
+  const note =
+    'It says which conversations the next turn must fork; dropping it would silently start ' +
+    'them fresh instead. Nothing was rewritten.';
+  if (!isRecord(raw)) return refuse('forkPending', raw, 'an object', ctx, note);
+
+  const out: Partial<Record<SlotName, ForkPendingEntry>> = {};
+  for (const [key, value] of Object.entries(raw)) {
+    const slot = enumOf(key, SLOT_NAMES);
+    if (slot === null || !isRecord(value)) {
+      return refuse('forkPending', raw, 'entries naming a known conversation', ctx, note);
+    }
+    if (!isString(value['parentId']) || value['parentId'] === '' || !isCounter(value['attempts'])) {
+      return refuse('forkPending', raw, 'entries with a parent id and an attempt count', ctx, note);
+    }
+    out[slot] = { parentId: value['parentId'], attempts: value['attempts'] };
+  }
+  return out;
+}
+
+/**
+ * Whether a forked run still has to check its branch out - **refused when
+ * present and unreadable.**
+ *
+ * The same class of loss as `forkPending`, one layer down: dropped, the fork
+ * never gets onto the branch `vibe fork` created for it and its commits land on
+ * whatever HEAD happens to be. `true` is the only value any writer produces -
+ * the flag is deleted rather than set false - so anything else is corruption.
+ */
+function readBranchPending(raw: unknown, ctx: ReadContext): true | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === true) return true;
+  return refuse(
+    'branchPending',
+    raw,
+    'true, or nothing at all',
+    ctx,
+    'It says the run has not yet been put on the branch its fork created; dropping it would ' +
+      'let the run commit to whatever branch happens to be checked out. Nothing was rewritten.',
+  );
+}
+
 function readTool(entry: unknown): AgentEnvironmentFacts['tools'][number] | null {
   if (!isRecord(entry)) return null;
   const version = entry['version'];
@@ -1346,10 +1599,16 @@ const READERS = {
   // report - which is what a pointer vibe will not follow honestly means (#50).
   lastReport: (raw, ctx) => {
     if (raw === undefined) return undefined;
-    if (isArtifactBasename(raw)) return raw;
+    if (isReportBasename(raw)) return raw;
     ctx.repairs.replaced('lastReport', raw, 'nothing');
     return undefined;
   },
+  // The snapshot a state came from: tolerant, because nothing acts on it. The
+  // three fork fields below are refused instead - see each reader for why.
+  checkpoint: (raw, ctx) => readCheckpointMeta(raw, ctx),
+  forkedFrom: (raw, ctx) => readForkOrigin(raw, ctx),
+  forkPending: (raw, ctx) => readForkPending(raw, ctx),
+  branchPending: (raw, ctx) => readBranchPending(raw, ctx),
   carried: (raw, ctx) =>
     raw === undefined ? undefined : repairedArray('carried', raw, ctx, readFinding),
   declined: (raw, ctx) =>
@@ -1451,5 +1710,22 @@ export function summariseStored(raw: unknown, id: string): RunSummary {
     status: isString(status) ? status : 'unknown',
     task: isString(task) ? task : '',
     costUsd: isMoney(cost) ? cost : null,
+    ...forkLabel(raw['forkedFrom']),
   };
+}
+
+/**
+ * The parent and checkpoint a row may be labelled with, or nothing.
+ *
+ * Deliberately more tolerant than `readForkOrigin`, which refuses the same
+ * field: a listing that failed over one bad run would hide every healthy row
+ * beside it, and the two rules differ because one prints and the other acts.
+ * Both halves must be legible or the row renders exactly as it does today.
+ */
+function forkLabel(raw: unknown): { forkedFrom?: { runId: string; checkpoint: number } } {
+  if (!isRecord(raw)) return {};
+  const runId = raw['runId'];
+  const checkpoint = raw['checkpoint'];
+  if (!isString(runId) || runId === '' || !isPositiveInt(checkpoint)) return {};
+  return { forkedFrom: { runId, checkpoint } };
 }

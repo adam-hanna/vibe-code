@@ -1,6 +1,7 @@
 import type { RoleProviders } from '@src/roles.js';
 import type { EnvironmentFacts, ToolchainContract } from '@src/runtime.js';
 import type { Liveness } from '@src/lock.js';
+import type { SlotName } from '@src/slots.js';
 
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
@@ -710,6 +711,111 @@ export interface RunEvent {
   [key: string]: unknown;
 }
 
+/**
+ * The phase or round boundary a checkpoint was taken at (#78).
+ *
+ * A run's `state.json` is a single mutable file, so nothing recorded what it
+ * looked like at any earlier point. These are the points at which a snapshot is
+ * a coherent thing to resume from: each is taken after the work of a round has
+ * been recorded and before the next round has begun.
+ */
+export type CheckpointBoundary =
+  | 'plan-round'
+  | 'plan-approved'
+  | 'implemented'
+  | 'verify-round'
+  | 'review-round'
+  | 'final-fix'
+  | 'complete';
+
+/**
+ * Why a checkpoint's `commit` is what it is.
+ *
+ * Absence is reported as absence, with the cause named: a boundary that never
+ * commits (`no-commit-in-round`) says something different from a repository
+ * where commits are switched off, from a round that changed no files, and from
+ * a commit that failed. `sha-unusable` is the one that would otherwise be a
+ * fabrication - a commit succeeded but git named it something that is not a
+ * 40-hex object id, so the id is dropped rather than stored as though it could
+ * be resolved later.
+ */
+export type CheckpointCommitNote =
+  | 'committed'
+  | 'nothing-to-commit'
+  | 'commit-failed'
+  | 'sha-unusable'
+  | 'commits-disabled'
+  | 'not-a-repo'
+  | 'no-commit-in-round';
+
+/**
+ * A checkpoint's own metadata, carried inside the snapshot it describes.
+ *
+ * Written into `checkpoint-<n>.json` only. A live `state.json` gains it on a
+ * forked run, where it means "this state came from that checkpoint".
+ */
+export interface RunCheckpointMeta {
+  /** Matches the filename. Monotonic per run, from 1. */
+  n: number;
+  at: string;
+  boundary: CheckpointBoundary;
+  phase: RunPhase;
+  planRound: number;
+  reviewRound: number;
+  verifyRound: number;
+  /** A full 40-hex object id, or null. Never abbreviated, never symbolic. */
+  commit: string | null;
+  commitNote: CheckpointCommitNote;
+}
+
+/** One conversation a fork did - or could not do - anything about. */
+export interface ForkedConversation {
+  slot: SlotName;
+  /** The parent conversation this slot's first turn will fork from, or null when there was none. */
+  parentId: string | null;
+  why?: 'never-started' | 'not-persisted';
+}
+
+/**
+ * What the parent was, at the checkpoint the fork was taken from.
+ *
+ * **A PROVENANCE RECORD.** Nothing in vibe reads these figures: no ceiling, no
+ * guard, no summary arithmetic. They exist so a human - or a later tool - can
+ * subtract the shared prefix when adding two runs up, which is the whole of what
+ * was asked for. A fork's own `tokensUsed` and `costUsd` are the checkpoint's
+ * plus whatever it goes on to spend, and its ceilings read those exactly as an
+ * unforked run's do.
+ */
+export interface ForkOrigin {
+  /** The parent run. */
+  runId: string;
+  checkpoint: number;
+  checkpointAt: string;
+  boundary: CheckpointBoundary;
+  forkedAt: string;
+  /** The checkpoint's totals, verbatim. */
+  inheritedTokens: number;
+  inheritedCostUsd: number;
+  /**
+   * The checkpoint's `codexTokens`, verbatim - **absent when the checkpoint had
+   * none.** Not classified and not defaulted: an absent Codex share may mean no
+   * Codex turn ran or that none was recorded, and nothing here decides which,
+   * because nothing depends on the answer. A zero would be an invented number.
+   */
+  inheritedCodexTokens?: number;
+  /** The 40-hex commit the fork's branch ref was created at, or null. */
+  branchFrom: string | null;
+  conversations: ForkedConversation[];
+  /** What the fork did NOT carry, stated rather than left to be assumed. */
+  notInherited: string[];
+}
+
+/** A conversation a forked run's first turn still owes a fork to. */
+export interface ForkPendingEntry {
+  parentId: string;
+  attempts: number;
+}
+
 export interface RunState {
   id: string;
   dir: string;
@@ -771,6 +877,44 @@ export interface RunState {
   rateLimitWaits: number;
   baseSha: string | null;
   branch: string | null;
+  /**
+   * The checkpoint this state came from (#78).
+   *
+   * Written into every `checkpoint-<n>.json`, and present on a live
+   * `state.json` only for a forked run - where it says which snapshot the run
+   * was seeded from. Optional, so every state written before checkpoints existed
+   * loads with no repair.
+   */
+  checkpoint?: RunCheckpointMeta;
+  /**
+   * What this run was forked from, or absent because it is not a fork (#78).
+   *
+   * Present-but-unreadable is fatal on load rather than repaired: provenance
+   * quietly discarded leaves a state indistinguishable from an ordinary run,
+   * and once every pending fork has been consumed there is nothing else left
+   * that would show the loss. Purely a record - see `ForkOrigin`.
+   */
+  forkedFrom?: ForkOrigin;
+  /**
+   * Conversations whose first turn still owes a fork, and how many times it has
+   * been attempted.
+   *
+   * An **instruction**, not a record, which is why a present-but-unreadable
+   * value refuses the load: dropped silently, a forked conversation becomes a
+   * fresh one and the run loses the parent's context with nobody told. An entry
+   * is cleared by the accounting write that charges the turn which forked it, so
+   * absent means every fork this run owed has been made and paid for.
+   */
+  forkPending?: Partial<Record<SlotName, ForkPendingEntry>>;
+  /**
+   * Set by `vibe fork` when it creates the branch ref; cleared by `prepareGit`
+   * once the run is actually on that branch.
+   *
+   * An instruction too, and refused when unreadable for the same reason one
+   * layer down: dropped, the forked run never checks its branch out and its
+   * commits land wherever HEAD happens to be.
+   */
+  branchPending?: true;
   /** One entry per code-review round, driving the convergence assessment. */
   p1Rounds: RoundRecord[];
   /** The same, for verification-fix rounds, which converge independently. */
@@ -1113,4 +1257,13 @@ export interface RunSummary {
    * be read - the lock is a separate file and stays legible when state does not.
    */
   liveness?: Liveness;
+  /**
+   * The run and checkpoint this one was forked from, when the stored state says
+   * so legibly (#78).
+   *
+   * Filled tolerantly, unlike `loadRun`'s refusal for the same field: a listing
+   * must not fail over one bad run. The two rules differ because the two callers
+   * do - one prints, the other acts.
+   */
+  forkedFrom?: { runId: string; checkpoint: number };
 }

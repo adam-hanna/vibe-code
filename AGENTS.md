@@ -34,7 +34,8 @@ every commit is the whole gate, and it is on you to run it. Node 20+ (`engines`)
 src/main.ts          bin entry point — the thing package.json points at
 src/cli.ts           argument parsing, the five commands, run summary
 src/orchestrator.ts  the loop: planPhase, reviewPhase, the guards, the prompt dispatch
-src/run.ts           run state, artifacts, convergence maths (assessConvergence et al)
+src/run.ts           run state, artifacts, checkpoints, convergence maths (assessConvergence et al)
+src/fork.ts          `vibe fork`: preflight that only reads, then a commit phase that creates
 src/roles.ts         who does what: the role table, refusals, warnings
 src/config.ts        DEFAULTS, config merge, validation
 src/consistency.ts   cross-field rules over status/phase/planOnly, applied by loadRun

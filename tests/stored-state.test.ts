@@ -896,3 +896,146 @@ test('vibe list shows every run, healthy or not, and invents no cost', () => {
     assert.equal(readFileSync(path.join(targetDir, RUNS, id, 'state.json'), 'utf8'), text);
   }
 });
+
+// ---- the fork protocol (#78) ------------------------------------------------
+
+/** A `forkedFrom` a healthy fork would carry. */
+function origin(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    runId: 'parent-run',
+    checkpoint: 2,
+    checkpointAt: new Date().toISOString(),
+    boundary: 'implemented',
+    forkedAt: new Date().toISOString(),
+    inheritedTokens: 1000,
+    inheritedCostUsd: 0.5,
+    branchFrom: null,
+    conversations: [{ slot: 'main', parentId: 'parent-session' }],
+    notInherited: ['nothing much'],
+    ...over,
+  };
+}
+
+test('a healthy fork record loads untouched, with its Codex share absent', () => {
+  const state = load((raw) => {
+    raw['forkedFrom'] = origin();
+  });
+
+  assert.equal(state.forkedFrom?.runId, 'parent-run');
+  assert.equal(state.forkedFrom?.checkpoint, 2);
+  // Absent, never zero: an absent Codex share may mean no Codex turn ran or
+  // that none was recorded, and nothing decides which.
+  assert.equal('inheritedCodexTokens' in (state.forkedFrom ?? {}), false);
+  assert.deepEqual(repairs(state), []);
+});
+
+test('an absent forkedFrom is not an error - that is every run that is not a fork', () => {
+  const state = load(() => {});
+  assert.equal(state.forkedFrom, undefined);
+  assert.deepEqual(repairs(state), []);
+});
+
+test('a present-but-unreadable forkedFrom refuses, and rewrites nothing', () => {
+  for (const bad of [
+    'not a record',
+    origin({ runId: '' }),
+    origin({ checkpoint: 0 }),
+    origin({ boundary: 'made-up-boundary' }),
+    origin({ inheritedTokens: -1 }),
+    origin({ inheritedCodexTokens: 'lots' }),
+    origin({ branchFrom: 'abc1234' }),
+    origin({ conversations: [{ slot: 'nowhere', parentId: 'x' }] }),
+    origin({ notInherited: [7] }),
+  ]) {
+    const run = corrupt((raw) => {
+      raw['forkedFrom'] = bad;
+    });
+    const message = refusal(run);
+    assert.match(message, /forkedFrom/);
+    assert.match(message, /intact|rewritten/);
+  }
+});
+
+test('a completed fork whose forkedFrom is corrupted still refuses', () => {
+  // The shape a fork has once every conversation it owed has been forked:
+  // `forkPending` legitimately absent, every slot started. Repaired instead of
+  // refused, this state would be indistinguishable from a run that was never a
+  // fork, and nothing left would show the loss.
+  const run = corrupt((raw) => {
+    delete raw['forkPending'];
+    raw['sessionStarted'] = true;
+    raw['codexSessionStarted'] = true;
+    raw['forkedFrom'] = { runId: 'parent-run' };
+  });
+
+  assert.match(refusal(run), /forkedFrom/);
+});
+
+test('a present-but-unreadable forkPending refuses for its own reason', () => {
+  for (const bad of [
+    'not a record',
+    { main: 'not an entry' },
+    { nowhere: { parentId: 'x', attempts: 0 } },
+    { main: { parentId: '', attempts: 0 } },
+    { main: { parentId: 'x', attempts: -1 } },
+  ]) {
+    const run = corrupt((raw) => {
+      raw['forkPending'] = bad;
+    });
+    assert.match(refusal(run), /forkPending/);
+  }
+});
+
+test('a healthy forkPending loads as the instruction it is', () => {
+  const state = load((raw) => {
+    raw['forkPending'] = { main: { parentId: 'parent-session', attempts: 1 } };
+  });
+
+  assert.deepEqual(state.forkPending, { main: { parentId: 'parent-session', attempts: 1 } });
+});
+
+test('branchPending is true or nothing, and anything else refuses', () => {
+  const ok = load((raw) => {
+    raw['branchPending'] = true;
+  });
+  assert.equal(ok.branchPending, true);
+
+  for (const bad of [false, 'yes', 1, null]) {
+    const run = corrupt((raw) => {
+      raw['branchPending'] = bad;
+    });
+    assert.match(refusal(run), /branchPending/);
+  }
+});
+
+test('a malformed checkpoint is dropped rather than refused', () => {
+  // The opposite rule from the three fields above, and the difference is what
+  // acts on the value: nothing does. A fork refuses on any repair, so a dropped
+  // checkpoint refuses the FORK rather than being quietly forked.
+  const state = load((raw) => {
+    raw['checkpoint'] = { n: 'second' };
+  });
+
+  assert.equal(state.checkpoint, undefined);
+  assert.deepEqual(repairs(state), ['checkpoint']);
+});
+
+test('a healthy checkpoint record survives a round trip', () => {
+  const meta = {
+    n: 3,
+    at: new Date().toISOString(),
+    boundary: 'implemented',
+    phase: 'reviewing',
+    planRound: 2,
+    reviewRound: 0,
+    verifyRound: 0,
+    commit: 'a'.repeat(40),
+    commitNote: 'committed',
+  };
+  const state = load((raw) => {
+    raw['checkpoint'] = meta;
+  });
+
+  assert.deepEqual(state.checkpoint, meta);
+  assert.deepEqual(repairs(state), []);
+});

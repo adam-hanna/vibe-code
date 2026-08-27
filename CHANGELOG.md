@@ -7,6 +7,37 @@ for a change that breaks an existing config or an existing run.
 Each entry links the pull request that made it and, where there is one, the issue it
 closes.
 
+## Unreleased
+
+### Added
+
+- **A run's state history, and `vibe fork`.** Each run writes a `checkpoint-<n>.json` at
+  every phase and round boundary - the whole state, valid on its own - and records the
+  commit that round produced as a full object id. `vibe fork <run-id> --at <n>` seeds a new
+  run from one of them, creating its branch with `git branch` so the working tree, HEAD and
+  the parent run are all untouched; the fork moves onto that branch when you resume it.
+  `forkedFrom` records what the parent had spent at that point as provenance only - nothing
+  in vibe computes from it - and the fork's own ceilings count the inherited totals.
+  (#78, [#81](https://github.com/adam-hanna/vibe-code/pull/81))
+
+### Fixed
+
+- **A resume no longer commits to whatever branch is checked out.** `vibe resume` refuses
+  when the run records a branch that exists and HEAD is somewhere else, naming the
+  `git checkout` to run; `--no-branch` skips the check. Previously those commits landed on
+  the wrong branch silently, which forking makes easy to hit.
+  (#78, [#81](https://github.com/adam-hanna/vibe-code/pull/81))
+- **Two runs started in the same second on the same task no longer share a directory.** The
+  allocator claimed the run directory with a recursive `mkdir`, which succeeds on one that
+  already exists, so the second run overwrote the first. The claim is now exclusive, with a
+  bounded suffix and a refusal past it.
+  (#78, [#81](https://github.com/adam-hanna/vibe-code/pull/81))
+- **A stored report pointer is checked against the names vibe actually writes.** It was a
+  character whitelist, so a stored `lastReport` of `state.json` rendered the whole state
+  file into the reviewer's prompt. `vibe resume "<id>."` is refused for the same class of
+  reason: Windows strips the trailing dot, so it named a different run than it said.
+  (#78, [#81](https://github.com/adam-hanna/vibe-code/pull/81))
+
 ## 1.1.0 - 2026-08-20
 
 Nineteen changes since 1.0.1. **Nothing here breaks an existing setup**: every new config

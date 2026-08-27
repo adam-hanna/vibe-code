@@ -63,8 +63,37 @@ vibe run "Fix the flaky auth tests" -C ../my-service
 # Continue a run that stopped for your input
 vibe resume 20260811-142530-add-rate-limiting
 
+# Start a new run from a point inside an old one
+vibe fork 20260811-142530-add-rate-limiting            # list the points it can start from
+vibe fork 20260811-142530-add-rate-limiting --at 3     # create the run, and stop
+vibe resume <the-new-run-id>                           # now run it
+
 vibe list
 ```
+
+### Forking a run
+
+Every run now writes a `checkpoint-<n>.json` at each phase and round boundary: the whole
+state, as it stood, beside the artifacts that round produced. `vibe fork <run-id> --at <n>`
+seeds a new run from one of them — the same plan, the same approved criteria, the same
+history up to that point — and gives it a branch created at the commit that boundary
+recorded.
+
+Two things it deliberately does not do. **It does not touch your working tree**: the branch
+is created with `git branch`, so HEAD, the index and your uncommitted work are exactly as
+they were, and the parent run is still resumable a second later. The fork moves onto its own
+branch when you `vibe resume` it, which is the first moment it needs the tree. And **it does
+not start the run** — forking and spending are separate decisions.
+
+The fork's `forkedFrom` records what the parent had spent at that point. Nothing in vibe
+computes from it; it is there so you can subtract the shared prefix when adding two runs up.
+The fork's own totals start at the checkpoint's, so its budget ceilings count the inherited
+spend — a fork taken from a run near `budget.maxTokens` will stop early and say so.
+
+Since forks and their parents share a repository, `vibe resume` now **refuses** when the run
+records a branch that exists and something else is checked out, naming the `git checkout` to
+run. Before, those commits landed wherever HEAD happened to be. `--no-branch` skips the
+check.
 
 ## How the two hard parts work
 
@@ -303,6 +332,7 @@ NEEDS-INPUT.md             written when the run stops for you
 OUTSTANDING.md             carried P1s: fixed in a final round, but not re-reviewed
 FOLLOW-UPS.md              deferred findings and the plan's declared out-of-scope work
 state.json                 resumable state, tokens, cost, event log, turnStartedAt/lastActivityAt/lastOutputAt
+checkpoint-1.json ...      the state as it stood at each phase/round boundary — what `vibe fork` reads
 transcript.log
 codex/                     raw schema and output files
 ```
