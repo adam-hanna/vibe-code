@@ -633,7 +633,7 @@ export async function withHeartbeat<T>(
  * needs no state write to maintain.
  *
  * **Claude measurements, keyed by a bare model name.** Both writers are Claude
- * paths (`recordUsage` and `rotateSession` in context.ts) and nothing Codex ever
+ * paths (`recordTurnContext` and `rotateSession` in context.ts) and nothing Codex ever
  * puts an entry here, so a hit says "some Claude turn measured this name" and
  * not "this window belongs to whoever asked". A model name is not unique across
  * providers - `claude.model` and a Codex role's model may legally be the same
