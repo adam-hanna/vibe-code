@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { RateLimitError } from '@src/claude.js';
@@ -370,4 +370,35 @@ test('a provider-minted thread is never registered, and a Codex turn writes noth
   assert.equal(state.sessionId, dormant);
   assert.equal(state.codexSessionStarted, true, 'the Codex thread started as usual');
   assert.equal(slotHasDeadTurn(state, 'judge'), false);
+});
+
+// ---- The pre-spawn write is a precondition, not a formality -----------------
+
+test('an id that cannot be recorded as handed over is not handed over', async () => {
+  // The one part of this change that reaches every run rather than only the
+  // failure paths: the registration is persisted BEFORE the spawn, so a run
+  // directory that cannot be written now ends the turn instead of starting one.
+  //
+  // That is the fail-closed direction and it is the whole point. A turn spawned
+  // without its handover recorded is precisely the state #74 is about, and it is
+  // the state the fork path already refused to enter for the same reason - its
+  // attempt counter has been a pre-turn write since #78.
+  //
+  // Pinned here because the coverage moved: `failure-accounting.test.ts`'s "an
+  // accounting fault while charging a failure does not become the failure"
+  // reached an unwritable directory by deleting it before the dispatch, which
+  // now faults this write rather than the accounting one that case is about, so
+  // it deletes from inside the injected turn instead.
+  const state = freshState();
+  const cfg = config();
+  const rec = recorder();
+  rmSync(state.dir, { recursive: true, force: true });
+
+  await captureLog(async () => {
+    await assert.rejects(() => runTurn(state, cfg, request('planner'), rec.turns));
+    return null;
+  });
+
+  assert.equal(rec.calls.length, 0, 'no turn was spawned');
+  assert.equal(state.sessionStarted, false, 'and nothing claims one ran');
 });
