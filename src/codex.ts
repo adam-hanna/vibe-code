@@ -308,6 +308,56 @@ function supersede(file: string, keepAt: string): void {
 }
 
 /**
+ * The flags the direct fork vector sends. `--output-schema` is conditional, so
+ * it is checked only when a schema is in play.
+ */
+const FORK_FLAGS: readonly string[] = ['--json', '-m', '-c', '--skip-git-repo-check', '-o'];
+
+/**
+ * What `codex exec fork --help` said, read once per process.
+ *
+ * `undefined` is "not asked yet", `null` is "asked and could not be read". The
+ * distinction matters: an unreadable help text is not evidence that a flag is
+ * missing, and switching to the slower two-call path on no evidence would be
+ * the same fabrication this codebase refuses about numbers.
+ */
+let forkHelpText: string | null | undefined;
+
+/** Exported for the tests, which must not inherit another case's probe. */
+export function resetCodexForkProbe(): void {
+  forkHelpText = undefined;
+}
+
+async function forkHelp(exec: RunFn, cwd: string): Promise<string | null> {
+  if (forkHelpText !== undefined) return forkHelpText;
+  try {
+    const { code, stdout, stderr } = await exec(codexBin(), ['exec', 'fork', '--help'], { cwd });
+    const text = `${stdout}\n${stderr}`;
+    forkHelpText = code === 0 && text.trim() !== '' ? text : null;
+  } catch {
+    forkHelpText = null;
+  }
+  return forkHelpText;
+}
+
+/**
+ * Whether `codex exec fork` on THIS machine accepts everything the direct vector
+ * sends.
+ *
+ * The plan pinned the direct form against codex-cli 0.150.0-alpha.8, and both
+ * CLIs move. Rather than trust that reading forever, the help text is read once
+ * and the answer decides which path a fork takes. Unreadable help means the
+ * direct form, unchanged: it is what every probed version accepts, and the
+ * fallback is not free.
+ */
+async function directForkWorks(exec: RunFn, cwd: string, hasSchema: boolean): Promise<boolean> {
+  const help = await forkHelp(exec, cwd);
+  if (help === null) return true;
+  const needed = hasSchema ? [...FORK_FLAGS, '--output-schema'] : FORK_FLAGS;
+  return needed.every((flag) => help.includes(flag));
+}
+
+/**
  * One Codex turn with a schema-constrained final message.
  *
  * `--output-schema` is what makes the surrounding loop terminable: the stop
@@ -374,7 +424,39 @@ export async function codexTurn(
   //
   // Mutually exclusive with `sessionId` by construction: the dispatch asks the
   // slot for a fork parent first and only resumes when there is none.
-  const args: string[] = forkFrom
+  //
+  // The TWO-CALL fallback, for a `codex exec fork` that does not accept the flags
+  // the direct vector sends: mint the forked thread with a bare
+  // `codex exec fork <parent>` and no prompt - which copies the thread and runs
+  // no turn, so it reports no usage and there is nothing to charge - then take
+  // the turn itself on the new thread through the ordinary `exec resume` path.
+  // Still a fork on the first turn, which is the property that matters.
+  let resumeAfterFork: string | null = null;
+  if (forkFrom && !(await directForkWorks(exec, cwd, schema !== undefined))) {
+    detail(`codex exec fork ${forkFrom} (two-call: this codex does not accept the direct flags)`);
+    const minted = await exec(codexBin(), ['exec', 'fork', forkFrom, '--json'], { input: '', cwd, timeoutMs });
+    const thread = parseEvents(minted.stdout).threadId;
+    if (thread === null) {
+      throw new Error(
+        `codex exec fork ${forkFrom} named no thread, so there is nothing to take the turn on. ` +
+          `${minted.stderr.trim() || 'No error was reported.'}`,
+      );
+    }
+    resumeAfterFork = thread;
+  }
+
+  const args: string[] = resumeAfterFork
+    ? [
+        'exec', 'resume', resumeAfterFork,
+        '--json',
+        '-m', model,
+        '-c', `model_reasoning_effort="${effort}"`,
+        '--skip-git-repo-check',
+        ...schemaArgs,
+        '-o', outFile,
+        '-',
+      ]
+    : forkFrom
     ? [
         'exec', 'fork', forkFrom,
         '--json',
@@ -409,7 +491,8 @@ export async function codexTurn(
         '-',
       ];
 
-  detail(`codex ${forkFrom ? 'fork' : sessionId ? 'resume' : 'exec'} -m ${model} (${effort}) -> ${schemaName}`);
+  const verb = forkFrom ? (resumeAfterFork === null ? 'fork' : 'fork+resume') : sessionId ? 'resume' : 'exec';
+  detail(`codex ${verb} -m ${model} (${effort}) -> ${schemaName}`);
 
   const heartbeat = options.progress
     ? createHeartbeat({
@@ -431,7 +514,13 @@ export async function codexTurn(
     });
 
     const events = parseEvents(stdout);
-    const returnedSession = events.threadId ?? SESSION_ID_RE.exec(stderr)?.[1] ?? sessionId ?? null;
+    // `resumeAfterFork` is in the chain because the two-call path takes its turn
+    // through `exec resume`, whose stream names the thread it resumed - but if
+    // that turn emitted no `thread.started` at all, the id the first call minted
+    // is still the thread this turn ran on, and losing it would leave the slot
+    // fresh and re-fork a thread that already exists.
+    const returnedSession =
+      events.threadId ?? SESSION_ID_RE.exec(stderr)?.[1] ?? resumeAfterFork ?? sessionId ?? null;
 
     // What the turn spent before it failed. `parseEvents` has already read the
     // `turn.completed` usage block by this point, so every throw below can carry

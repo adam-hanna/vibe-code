@@ -1,4 +1,4 @@
-import path from 'node:path';
+﻿import path from 'node:path';
 import { applyCharge, chargeFailure, enforceCeilings, Escalation, EXIT, fmtTokens } from '@src/charge.js';
 import { claudeTurn, parseStructured, RateLimitError } from '@src/claude.js';
 import { codexTurn } from '@src/codex.js';
@@ -187,17 +187,16 @@ export async function orchestrate(
   state: RunState,
   cfg: Config,
   /**
-   * Whether this is a resume. **No longer consulted** (#78): it used to gate
-   * `prepareGit`, which is now called on every pass because a forked run is
-   * always started by `vibe resume` and has to be put on its branch, and because
-   * a resume whose stored branch is not checked out must be refused rather than
-   * allowed to commit elsewhere. `prepareGit` reads the state instead, which is
-   * the durable fact - the flag only ever said which command was typed.
+   * Whether this is a resume.
    *
-   * Kept in the signature: every caller passes it, and removing a positional
-   * argument from the entry point is a change for its own sake.
+   * It no longer decides *whether* `prepareGit` runs - since #78 that happens on
+   * every pass, because a forked run is always started by `vibe resume` and has
+   * to be put on its branch, and because a resume whose stored branch is not
+   * checked out must be refused rather than allowed to commit elsewhere. It
+   * still decides what `prepareGit` may *do*: creating a branch is a fresh-run
+   * act, and a resume must not gain one it never had.
    */
-  _resume: boolean,
+  resume: boolean,
   /**
    * The same seam `runTurn` has, hoisted to the entry point.
    *
@@ -214,7 +213,7 @@ export async function orchestrate(
     // nothing; on a resume it is the one point holding both the stored plan and
     // the artifact the previous process may have died between writing.
     reconcileFollowUps(state);
-    return await runPhases(state, cfg, turns);
+    return await runPhases(state, cfg, resume, turns);
   } finally {
     // A `finally`, not a tail call: the phases below return early at the
     // "already finished" check and at the plan-only exit, and a persistent
@@ -224,7 +223,12 @@ export async function orchestrate(
   }
 }
 
-async function runPhases(state: RunState, cfg: Config, turns: AgentTurns): Promise<RunState> {
+async function runPhases(
+  state: RunState,
+  cfg: Config,
+  resume: boolean,
+  turns: AgentTurns,
+): Promise<RunState> {
   const cwd = state.targetDir;
   // Resolved once and threaded, so no step below can answer "who does this job"
   // from the module default while holding a config that says otherwise.
@@ -234,7 +238,7 @@ async function runPhases(state: RunState, cfg: Config, turns: AgentTurns): Promi
   // `vibe resume`, and it is `prepareGit` that puts it on the branch `vibe fork`
   // created; the same call is what stops a resumed run committing to a branch it
   // never claimed. It decides what this pass needs - see `prepareGit`.
-  await prepareGit(state, cfg, cwd);
+  await prepareGit(state, cfg, cwd, resume);
 
   const phase = resumePhase(state);
   if (phase === 'complete') {
@@ -1245,12 +1249,35 @@ export function guardProgress(
  *    unrecoverably by reading the log. It is a refusal rather than a warning for
  *    that reason, with `git checkout` and `--no-branch` both named.
  */
-async function prepareGit(state: RunState, cfg: Config, cwd: string): Promise<void> {
+async function prepareGit(
+  state: RunState,
+  cfg: Config,
+  cwd: string,
+  resume: boolean,
+): Promise<void> {
+  // A fork that has not yet been put on its branch. Checked before anything
+  // else, because every early return below would otherwise let its first turn
+  // run - and commit - on whatever happens to be checked out.
+  const owed = cfg.git.useBranch && state.branchPending === true;
+
   if (!(await git.isRepo(cwd))) {
-    log.warn('Not a git repository - running without branch isolation or commits.');
+    if (owed) {
+      throw new Escalation(
+        EXIT.ERROR,
+        `Run ${state.id} was forked onto branch "${String(state.branch)}", but ${cwd} is not a ` +
+          'git repository, so it cannot be put on it. Nothing has run. Point the run at the ' +
+          'repository it was forked in, or resume with --no-branch to run here anyway.',
+      );
+    }
+    // Only on a fresh run, as before: a resume said this once already, and
+    // repeating it every pass would be new output for an unchanged situation.
+    if (!resume) log.warn('Not a git repository - running without branch isolation or commits.');
     return;
   }
-  if (await git.isDirty(cwd)) {
+  // Fresh runs only, and not merely to keep the output identical: "they will be
+  // swept into the first commit" is a claim about a run that has not committed
+  // yet, and it is false on a resume.
+  if (!resume && (await git.isDirty(cwd))) {
     log.warn('Working tree has uncommitted changes; they will be swept into the first commit.');
   }
   // With branch isolation off nothing below runs, which is also what makes
@@ -1258,6 +1285,12 @@ async function prepareGit(state: RunState, cfg: Config, cwd: string): Promise<vo
   if (!cfg.git.useBranch) return;
 
   if (state.branch === null) {
+    // A run that has no branch is one that never got one - it was started with
+    // `--no-branch`, or outside a repository, or before this field existed.
+    // Creating one now would move HEAD on a run that has already done work
+    // somewhere else, which is a bigger change than the wrong-branch refusal
+    // this function exists to make. Branch creation stays a fresh-run act.
+    if (resume) return;
     const branch = `${cfg.git.branchPrefix}${state.id}`;
     await git.createBranch(cwd, branch);
     state.branch = branch;
@@ -1268,7 +1301,6 @@ async function prepareGit(state: RunState, cfg: Config, cwd: string): Promise<vo
 
   const branch = state.branch;
   const exists = await git.branchExists(cwd, branch);
-  const owed = state.branchPending === true;
 
   if (!exists) {
     // Nothing to check out, and recreating it at HEAD would fabricate a base the
@@ -2315,6 +2347,15 @@ async function checkCodexLimits(
 /**
  * Whether the conversation this role talks through already carries the run.
  *
+ * `slotContinuity`, NOT `slotHasMemory` (#78). The two answer different
+ * questions and only one of them is the prompt's: `slotHasMemory` decides
+ * whether to send a resume flag, and a slot that still owes a fork has no
+ * successful turn on it, so it answers false. But the conversation the fork is
+ * about to create really does hold the parent's history - so telling the critic
+ * or the reviewer it has never seen this run makes it re-derive findings it
+ * already made, under new ids, which reads as churn rather than as the
+ * repetition it is.
+ *
  * The `roles` parameter is defaulted rather than absent so this cannot become a
  * second site that ignores an injected table; the two call sites are top-level
  * loop steps, which are never handed one.
@@ -2325,7 +2366,7 @@ function roleHasMemory(
   role: Role,
   roles: RoleTable = rolesFor(cfg),
 ): boolean {
-  return slotHasMemory(state, cfg, slotForRole(role, roles));
+  return slotContinuity(state, cfg, slotForRole(role, roles));
 }
 
 /**

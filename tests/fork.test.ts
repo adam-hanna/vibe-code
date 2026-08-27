@@ -1,8 +1,11 @@
-import { test } from 'node:test';
+﻿import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
+import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { commitFork, ForkError, listForkPoints, planFork } from '@src/fork.js';
 import { orchestrate } from '@src/orchestrator.js';
@@ -505,3 +508,103 @@ test('a run with no checkpoints has no fork points, and nothing is invented', ()
   artifact(legacy, 'PLAN.md', '# nothing');
   assert.deepEqual(listForkPoints(legacy.targetDir, legacy.id), []);
 });
+
+// ---- the kill window --------------------------------------------------------
+
+const HELPER = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  'helpers',
+  'kill-during-save.js',
+);
+
+/** Spawn the fork helper and wait for the parent run id it prints. */
+function startFork(targetDir: string): Promise<{ child: ChildProcessWithoutNullStreams; parentId: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [HELPER, targetDir, 'fork'], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let out = '';
+    let stderr = '';
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+    child.stdout.on('data', (chunk: Buffer) => {
+      out += chunk.toString();
+      const line = out.split('\n')[0] ?? '';
+      if (line.startsWith('ready ')) resolve({ child, parentId: line.slice('ready '.length).trim() });
+    });
+    child.on('exit', (code) => {
+      reject(new Error(`helper exited ${String(code)} before saying ready: ${stderr}`));
+    });
+  });
+}
+
+const killed = (child: ChildProcessWithoutNullStreams): Promise<void> =>
+  new Promise((resolve) => {
+    child.on('exit', () => resolve());
+    child.kill('SIGKILL');
+  });
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+test('a commitFork killed at any point leaves a child that is complete or absent', async () => {
+  // A real process, killed at points spread across a real `commitFork`. The
+  // ordering this guards - artifacts, then the state write, last - cannot be
+  // shown by asserting which function was called first; only by stopping the
+  // process without unwinding and reading the directory back.
+  // Three outcomes are legal and all three are safe: nothing created at all, a
+  // directory with no state.json (not a run), or a complete child. The
+  // invariant is asserted at every kill point; the two counters below only
+  // establish that kills really did land on both sides of the final write, so
+  // the case cannot pass by never interrupting anything.
+  let sawIncomplete = false;
+  let sawComplete = false;
+
+  // Spread wide rather than aimed: the early delays land inside `commitFork`
+  // (which validates and rewrites a ~1.1MB state, so it is not instant) and the
+  // late ones land after it, and the case asserts it observed both.
+  for (const delay of [0, 2, 5, 10, 20, 40, 80, 150, 300, 600, 1200]) {
+    const targetDir = mkdtempSync(path.join(tmpdir(), 'vibe-fork-kill-'));
+    const { child, parentId } = await startFork(targetDir);
+    child.stdin.write('go\n');
+    await sleep(delay);
+    await killed(child);
+
+    const root = path.join(targetDir, '.vibe', 'runs');
+    const children = readdirSync(root).filter((id) => id !== parentId);
+    // At most one child is ever created, whatever the kill did.
+    assert.ok(children.length <= 1, `unexpected directories: ${children.join(', ')}`);
+
+    const listed = listRuns(targetDir).map((r) => r.id);
+    if (children.length === 0) sawIncomplete = true;
+    for (const id of children) {
+      const dir = path.join(root, id);
+      const entries = readdirSync(dir);
+      if (existsSync(path.join(dir, 'state.json'))) {
+        sawComplete = true;
+        // Complete: whatever it points at is already on disk beside it.
+        const state = JSON.parse(readFileSync(path.join(dir, 'state.json'), 'utf8')) as RunState;
+        assert.ok(existsSync(path.join(dir, 'PLAN.md')), 'a listed child has its plan');
+        if (state.lastReport !== undefined) {
+          assert.ok(existsSync(path.join(dir, state.lastReport)));
+        }
+        assert.ok(listed.includes(id), 'and it is a run');
+      } else {
+        sawIncomplete = true;
+        // Absent: not a run, and nothing may present it as one.
+        assert.equal(listed.includes(id), false, 'a directory with no state.json is not a run');
+      }
+      assert.equal(
+        entries.some((e) => e.endsWith('.tmp')),
+        false,
+        `a killed fork left temp litter: ${entries.join(', ')}`,
+      );
+    }
+  }
+
+  // Both sides of the final write have to have been reached, or the case proved
+  // only one of them.
+  assert.ok(sawComplete, 'no kill landed after the fork completed - widen the delays');
+  assert.ok(sawIncomplete, 'no kill landed before the fork completed - narrow the delays');
+});
+

@@ -1,8 +1,9 @@
-import { test } from 'node:test';
+﻿import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { orchestrate } from '@src/orchestrator.js';
 import {
@@ -405,13 +406,36 @@ test('a tenth collision refuses rather than reusing a directory', () => {
 // ---- reserved names ---------------------------------------------------------
 
 test('isReportBasename accepts exactly the names recordReport writes', () => {
-  // The drift guard: these are the four name expressions in `recordReport`'s
-  // call sites, evaluated the way the orchestrator evaluates them.
   for (const n of [1, 2, 17]) {
     assert.ok(isReportBasename(`fix-report-${n}.md`));
     assert.ok(isReportBasename(`verify-fix-${n}.md`));
   }
   assert.ok(isReportBasename('implementation-report.md'));
+});
+
+test('every recordReport call site writes a name isReportBasename accepts', () => {
+  // The drift guard, read off the source rather than restated here: a fifth
+  // write site, or a rename of an existing one, must not be able to produce a
+  // pointer the reader then drops - which would silently cost the reviewer the
+  // report while everything still looked healthy.
+  // Walked up rather than hardcoded: these run from `dist/tests`, so `../src`
+  // is the emitted JavaScript and the TypeScript this reads is two levels up.
+  let at = path.dirname(fileURLToPath(import.meta.url));
+  while (!existsSync(path.join(at, 'src', 'orchestrator.ts')) && path.dirname(at) !== at) {
+    at = path.dirname(at);
+  }
+  const source = readFileSync(path.join(at, 'src', 'orchestrator.ts'), 'utf8');
+  const sites = [...source.matchAll(/recordReport\(\s*state,\s*(`[^`]+`|'[^']+')/g)].map(
+    (m) => m[1] ?? '',
+  );
+  assert.equal(sites.length, 4, `expected four write sites, found ${sites.length}`);
+
+  for (const expression of sites) {
+    // The round is always a counter that has just been incremented, so 1 is the
+    // smallest value any of these can hold.
+    const name = expression.slice(1, -1).replace(/\$\{[^}]+\}/g, '1');
+    assert.ok(isReportBasename(name), `${expression} produces ${name}, which is not a report name`);
+  }
 });
 
 test('isReportBasename rejects every name vibe would be wrong to follow', () => {
@@ -427,6 +451,13 @@ test('isReportBasename rejects every name vibe would be wrong to follow', () => 
     'NEEDS-INPUT.md',
     'IMPLEMENTATION-REPORT.MD',
     'fix-report-.md',
+    // Non-canonical round numbers. Both writers interpolate a round that has
+    // just been incremented, so neither a zero nor a leading zero is a name any
+    // version of this tool has written.
+    'fix-report-0.md',
+    'fix-report-01.md',
+    'verify-fix-0.md',
+    'verify-fix-007.md',
     'fix-report-1.md ',
     '../fix-report-1.md',
     '.',
@@ -456,3 +487,4 @@ test('assertUsableRunId rejects a trailing dot or space', () => {
     assert.throws(() => assertUsableRunId(id, root), StoredStateError);
   }
 });
+

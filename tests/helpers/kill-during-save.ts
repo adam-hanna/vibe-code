@@ -1,4 +1,5 @@
-import { allocateRun, createRun, saveState } from '@src/run.js';
+import { allocateRun, createRun, saveState, writeCheckpoint } from '@src/run.js';
+import { commitFork, planFork } from '@src/fork.js';
 import { DEFAULTS } from '@src/config.js';
 import {
   ALLOC_CONTEXT_PADDING,
@@ -102,12 +103,58 @@ function allocMode(targetDir: string): void {
   process.stdin.resume();
 }
 
+/**
+ * A parent run with one checkpoint, then a fork of it - with the parent process
+ * free to kill this one anywhere inside `commitFork`.
+ *
+ * The property under test is that the child run is complete or absent: there is
+ * no moment at which a directory under `.vibe/runs` holds a run that points at
+ * an artifact nobody wrote. `commitFork` writes the child's `state.json` last
+ * for exactly that reason, and only a real kill can show it - asserting the
+ * order of the calls would be asserting the implementation back at itself.
+ *
+ * The checkpoint is padded to ~1.1MB for the reason `PADDING_EVENTS` gives one
+ * function up: at a lifelike size the final write is a single syscall that
+ * `TerminateProcess` does not split, so the kill would land in the window
+ * without ever exercising it.
+ */
+function forkMode(targetDir: string): void {
+  const parent = createRun(targetDir, 'kill during fork', true, {
+    config: { ...DEFAULTS, git: { ...DEFAULTS.git, useBranch: false } },
+  });
+  for (let i = 0; i < PADDING_EVENTS; i++) {
+    parent.events.push({ at: new Date().toISOString(), type: 'padding', note: PADDING_TEXT });
+  }
+  parent.plan = {
+    plan_md: '# the plan',
+    assumptions: [],
+    open_questions: [],
+    out_of_scope: [],
+    acceptance_criteria: [],
+  };
+  saveState(parent);
+  writeCheckpoint(parent, 'plan-round', { sha: null, note: 'no-commit-in-round' });
+
+  process.stdout.write(`ready ${parent.id}\n`);
+  process.stdin.once('data', () => {
+    void (async (): Promise<void> => {
+      const plan = await planFork(targetDir, parent.id, 1, { git: { useBranch: false } });
+      await commitFork(targetDir, plan);
+      // Idle: the parent is killing this to see what the runs root looks like at
+      // rest, whenever its kill happens to land.
+      setInterval(() => {}, 1_000);
+    })();
+  });
+  process.stdin.resume();
+}
+
 function main(): void {
   const targetDir = process.argv[2];
   const mode = process.argv[3] ?? 'save';
   if (targetDir === undefined) throw new Error('usage: kill-during-save <targetDir> [mode]');
 
   if (mode === 'alloc') allocMode(targetDir);
+  else if (mode === 'fork') forkMode(targetDir);
   else saveMode(targetDir);
 }
 

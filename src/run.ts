@@ -122,7 +122,22 @@ export function claimRunDir(targetDir: string, id: string): AllocatedRun | null 
     if ((err as { code?: unknown } | null)?.code === 'EEXIST') return null;
     throw err;
   }
-  ensureVibeIgnored(targetDir);
+  try {
+    ensureVibeIgnored(targetDir);
+  } catch (err: unknown) {
+    // The claim is not complete until the directory is usable. `ensureVibeIgnored`
+    // writes, and a write that fails here would otherwise leave an empty run
+    // directory behind for the caller's own rollback to know nothing about - and
+    // for the NEXT allocation to collide with. Removing the leaf this call
+    // created moments ago is safe: the exclusive mkdir above is what proves
+    // nobody else owns it.
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // Nothing useful to say over the real failure.
+    }
+    throw err;
+  }
   return { id, dir };
 }
 

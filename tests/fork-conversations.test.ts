@@ -1,7 +1,7 @@
 ﻿import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { commitFork, planFork } from '@src/fork.js';
 import { Escalation, orchestrate } from '@src/orchestrator.js';
@@ -456,3 +456,119 @@ test('a fresh run still creates and checks out its branch exactly as before', as
   assert.equal(state.branch, `vibe/${state.id}`);
   assert.equal(branchOf(state), state.branch);
 });
+
+// ---- what a resume must NOT do to the branch --------------------------------
+
+test('a resumed run with no branch does not gain one', async () => {
+  // Started with --no-branch, resumed with branch isolation back on. Creating a
+  // branch here would move HEAD on a run that has already done work somewhere
+  // else - a bigger change than the wrong-branch refusal, and one nothing asked
+  // for. Branch creation stays a fresh-run act.
+  const state = freshRun({ ...FORK, task: 'branchless', git: true, commit: true });
+  const before = branchOf(state);
+  await orchestrate(
+    state,
+    config({}, { git: { ...config().git, useBranch: false } }),
+    false,
+    agents({ claude: () => planFixture() }, []),
+  );
+  assert.equal(state.branch, null);
+  assert.equal(branchOf(state), before, 'the fresh run made no branch either');
+
+  const resumed = loadRun(state.targetDir, state.id);
+  resumed.phase = 'reviewing';
+  resumed.status = 'reviewing';
+  await orchestrate(resumed, config(), true, agents({}, []));
+
+  assert.equal(resumed.branch, null, 'and the resume did not invent one');
+  assert.equal(branchOf(resumed), before, 'HEAD did not move');
+});
+
+test('a legacy run resumed in a repo it was never branched in keeps HEAD where it is', async () => {
+  // The same shape one step further out: a state written before branches, or by
+  // a run started outside a repository, resumed inside one.
+  const state = freshRun({ ...FORK, task: 'legacy branchless', git: true, commit: true });
+  state.branch = null;
+  state.phase = 'reviewing';
+  state.status = 'reviewing';
+  state.plan = planFixture();
+  saveState(state);
+  const before = branchOf(state);
+
+  await orchestrate(state, config(), true, agents({}, []));
+  assert.equal(branchOf(state), before);
+  assert.equal(state.branch, null);
+});
+
+test('a pending fork outside a git repository refuses rather than running on HEAD', async () => {
+  const parent = await parentRun('fork moved out of the repo');
+  const child = await forkOf(parent, committedPoint(parent));
+  assert.equal(child.branchPending, true);
+
+  // The repository is gone from under the fork - moved, or the run copied
+  // elsewhere. `prepareGit`'s not-a-repo path returns early for an ordinary run,
+  // and that early return must not let a fork owing a branch dispatch a turn.
+  const loaded = loadRun(child.targetDir, child.id);
+  rmSync(path.join(parent.targetDir, '.git'), { recursive: true, force: true });
+
+  const err = await orchestrate(loaded, config(), true, agents({}, [])).then(
+    () => null,
+    (e: unknown) => e,
+  );
+  assert.ok(err instanceof Escalation, 'it stops before any turn is dispatched');
+  assert.match(err.message, /not a git repository/);
+  assert.match(err.message, /--no-branch/);
+  assert.equal(
+    loadRun(child.targetDir, child.id).branchPending,
+    true,
+    'and the fork still owes its branch',
+  );
+});
+
+// ---- what a forked conversation is told -------------------------------------
+
+test('a forked Codex conversation is not told it is starting fresh', async () => {
+  const parent = await parentRun('codex continuity');
+  const child = await forkOf(parent, planPoint(parent), NO_BRANCH);
+  const cfg = config();
+
+  // The distinction the prompts turn on: the slot is not `started`, so it has no
+  // memory to resume - but the conversation the fork creates does hold the
+  // parent's history, and telling the critic otherwise makes it re-derive
+  // findings it already made under new ids.
+  assert.equal(slotForkParent(child, cfg, 'judge'), 'judge-thread');
+  assert.equal(child.codexSessionStarted, undefined, 'no turn has succeeded here yet');
+  assert.equal(slotContinuity(child, cfg, 'judge'), true);
+
+  // And it reaches the prompt: a second planning round on a forked judge is told
+  // it has seen this run before.
+  const prompts = new Map<string, string>();
+  const loaded = loadRun(child.targetDir, child.id);
+  await orchestrate(
+    loaded,
+    config({ maxPlanRounds: 3 }),
+    true,
+    agents(
+      {
+        claude: () => planFixture(),
+        codex: (label, options) => {
+          prompts.set(label, options.prompt);
+          return report([]);
+        },
+      },
+      [],
+    ),
+  );
+  const critique = [...prompts.entries()].find(([label]) => label.startsWith('critique'))?.[1];
+  assert.ok(critique !== undefined, 'the critic ran');
+  // The round-2 continuity note, which is the whole of the difference: told it
+  // has memory, the critic is asked to re-raise unresolved findings under their
+  // EXISTING ids; told it has none, it is asked to judge afresh - and every
+  // still-live objection comes back under a new id, which reads as churn.
+  assert.ok(
+    critique.includes('continues the same conversation'),
+    'a forked conversation is not told it is seeing this run for the first time',
+  );
+  assert.ok(critique.includes('exact same `id` you used before'));
+});
+

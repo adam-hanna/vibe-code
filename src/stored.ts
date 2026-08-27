@@ -432,11 +432,16 @@ const RUN_ID = /^[A-Za-z0-9._-]+$/;
  * The exact names `recordReport` writes: `implementation-report.md`, and the two
  * numbered forms.
  *
- * Case-sensitive, and digits only for the round number - `fix-report-01.md` is
- * not a name any writer produces, and a predicate that accepts more than the
- * writer emits is one that will be asked to accept something else later.
+ * Case-sensitive, and the round number is a canonical positive decimal -
+ * `[1-9][0-9]*`, so neither `fix-report-0.md` nor `fix-report-01.md` is
+ * accepted. Both writers interpolate a round that has just been incremented, so
+ * neither can produce a zero or a leading zero; a predicate that accepts more
+ * than the writer emits is one that will be asked to accept something else
+ * later, which is exactly how the character whitelist this replaced came to
+ * accept `state.json`.
  */
-const REPORT_NAME = /^(implementation-report\.md|fix-report-[0-9]+\.md|verify-fix-[0-9]+\.md)$/;
+const REPORT_NAME =
+  /^(implementation-report\.md|fix-report-[1-9][0-9]*\.md|verify-fix-[1-9][0-9]*\.md)$/;
 
 /**
  * A report basename this tool wrote, or nothing. **An allowlist, and it replaces

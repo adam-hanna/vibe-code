@@ -1,11 +1,11 @@
-import { test } from 'node:test';
+﻿import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { claudeTurn } from '@src/claude.js';
 import type { ClaudeTurnOptions } from '@src/claude.js';
-import { codexTurn } from '@src/codex.js';
+import { codexTurn, resetCodexForkProbe } from '@src/codex.js';
 import type { CodexTurnOptions } from '@src/codex.js';
 import type { ActivityObservation, ProgressOptions, RepeatingTimer, TimerApi } from '@src/progress.js';
 import type { RunFn, RunResult } from '@src/proc.js';
@@ -313,19 +313,47 @@ test('claude: forking a conversation it is also resuming is a programming error'
   );
 });
 
-test('codex: a fork is `exec fork <parent> ... -`, with no -s and no -C', async () => {
-  const dir = codexDir();
-  const { options } = progressRecorder();
+/**
+ * A codex whose `exec fork --help` names `flags`, recording every invocation.
+ *
+ * The probe is a real child, so a case that does not model it is a case testing
+ * the wrong argv. `null` flags means the help could not be read at all - which
+ * is not evidence that anything is missing, and must leave the direct vector
+ * alone.
+ */
+function codexWithFork(
+  dir: string,
+  flags: readonly string[] | null,
+  extra: (argv: readonly string[]) => Partial<RunResult> = () => ({}),
+): { args: string[][]; exec: RunFn } {
   const args: string[][] = [];
   const exec: RunFn = (_bin, argv): Promise<RunResult> => {
     args.push([...argv]);
+    if (argv[2] === '--help') {
+      return Promise.resolve(
+        flags === null
+          ? { code: 1, stdout: '', stderr: '' }
+          : { code: 0, stdout: `Usage: codex exec fork\n\n${flags.join('\n')}\n`, stderr: '' },
+      );
+    }
     writeFileSync(outPath(dir), JSON.stringify({ verdict: 'APPROVE' }), 'utf8');
-    return Promise.resolve({ code: 0, stdout: '', stderr: '' });
+    return Promise.resolve({ code: 0, stdout: '', stderr: '', ...extra(argv) });
   };
+  return { args, exec };
+}
+
+const ALL_FORK_FLAGS = ['--json', '-m', '-c', '--skip-git-repo-check', '-o', '--output-schema'];
+
+test('codex: a fork is `exec fork <parent> ... -`, with no -s and no -C', async () => {
+  resetCodexForkProbe();
+  const dir = codexDir();
+  const { options } = progressRecorder();
+  const { args, exec } = codexWithFork(dir, ALL_FORK_FLAGS);
 
   await codexTurn({ ...codexOptions(dir, options), forkFrom: 'parent-thread' }, exec);
 
-  const argv = args[0] ?? [];
+  assert.deepEqual(args[0]?.slice(0, 3), ['exec', 'fork', '--help'], 'the flags are probed first');
+  const argv = args[1] ?? [];
   assert.deepEqual(argv.slice(0, 3), ['exec', 'fork', 'parent-thread']);
   assert.equal(argv.at(-1), '-', 'the prompt still arrives on stdin');
   assert.ok(argv.includes('--json') && argv.includes('--skip-git-repo-check'));
@@ -354,3 +382,69 @@ test('codex: an ordinary one-shot turn is still `exec`, and a resume still `exec
   assert.deepEqual((args[0] ?? []).slice(0, 1), ['exec']);
   assert.deepEqual((args[1] ?? []).slice(0, 3), ['exec', 'resume', 'thread-9']);
 });
+
+test('codex: a fork missing a flag falls back to fork-then-resume, in one turn', async () => {
+  resetCodexForkProbe();
+  const dir = codexDir();
+  const { options } = progressRecorder();
+  // A codex whose `exec fork` takes no `--output-schema`: the direct vector
+  // would be rejected before any model work, so the turn is taken another way.
+  const { args, exec } = codexWithFork(dir, ['--json', '-m', '-c', '--skip-git-repo-check', '-o'], (argv) =>
+    argv[1] === 'fork'
+      ? { stdout: JSON.stringify({ type: 'thread.started', thread_id: 'forked-thread' }) }
+      : {},
+  );
+
+  const result = await codexTurn({ ...codexOptions(dir, options), forkFrom: 'parent-thread' }, exec);
+
+  assert.deepEqual(args[0]?.slice(0, 3), ['exec', 'fork', '--help']);
+  // One: mint the copy, with no prompt and nothing to charge.
+  assert.deepEqual(args[1], ['exec', 'fork', 'parent-thread', '--json']);
+  // Two: the turn itself, on the thread that copy created.
+  assert.deepEqual(args[2]?.slice(0, 3), ['exec', 'resume', 'forked-thread']);
+  assert.equal(args[2]?.at(-1), '-');
+  assert.ok(args[2]?.includes('--output-schema'), 'the schema is enforced on the turn that answers');
+  // The slot must learn which thread it is on, or the next pass re-forks one
+  // that already exists.
+  assert.equal(result.sessionId, 'forked-thread');
+});
+
+test('codex: a fork whose mint names no thread fails rather than running the turn somewhere', async () => {
+  resetCodexForkProbe();
+  const dir = codexDir();
+  const { options } = progressRecorder();
+  const { args, exec } = codexWithFork(dir, ['--json', '-m']);
+
+  await assert.rejects(
+    () => codexTurn({ ...codexOptions(dir, options), forkFrom: 'parent-thread' }, exec),
+    /named no thread/,
+  );
+  assert.equal(args.length, 2, 'the probe and the mint - and no turn after them');
+});
+
+test('codex: help that cannot be read is not evidence a flag is missing', async () => {
+  resetCodexForkProbe();
+  const dir = codexDir();
+  const { options } = progressRecorder();
+  const { args, exec } = codexWithFork(dir, null);
+
+  await codexTurn({ ...codexOptions(dir, options), forkFrom: 'parent-thread' }, exec);
+
+  // The direct vector, unchanged: an unreadable help text says nothing about
+  // what the binary accepts, and switching paths on no evidence would be the
+  // same fabrication this codebase refuses about numbers.
+  assert.deepEqual(args[1]?.slice(0, 3), ['exec', 'fork', 'parent-thread']);
+});
+
+test('codex: the probe is read once per process, not once per turn', async () => {
+  resetCodexForkProbe();
+  const dir = codexDir();
+  const { options } = progressRecorder();
+  const { args, exec } = codexWithFork(dir, ALL_FORK_FLAGS);
+
+  await codexTurn({ ...codexOptions(dir, options), forkFrom: 'a' }, exec);
+  await codexTurn({ ...codexOptions(dir, options), forkFrom: 'b' }, exec);
+
+  assert.equal(args.filter((a) => a[2] === '--help').length, 1);
+});
+
