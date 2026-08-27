@@ -88,6 +88,28 @@ function fingerprint(dir: string): Map<string, string> {
 const gitIn = (cwd: string, ...args: string[]): string =>
   execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
 
+/**
+ * The run id `mintRunId` would produce `seconds` from now.
+ *
+ * Deliberately mirrors `stamp()` in `src/run.ts`, and takes the slug from
+ * `mintRunId` itself so only the timestamp is restated. It exists to bracket a
+ * second-resolution id that cannot otherwise be known before it is minted. If
+ * the id format ever changes, the case that uses this fails loudly - it stops
+ * blocking the name the fork derives and the expected refusal never arrives -
+ * which is the failure worth having.
+ */
+function idInSeconds(task: string, seconds: number): string {
+  const now = mintRunId(task);
+  // `YYYYMMDD-HHMMSS` is the first 15 characters; the rest is `-` plus the slug.
+  const slug = now.slice(15);
+  const d = new Date(Date.now() + seconds * 1000);
+  const p = (n: number): string => String(n).padStart(2, '0');
+  const at =
+    `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-` +
+    `${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+  return `${at}${slug}`;
+}
+
 /** The checkpoint with a commit, which is the one a branching fork can use. */
 function committedPoint(state: RunState): number {
   const found = listCheckpoints(state.dir).find((c) => c.meta?.commit != null);
@@ -336,45 +358,36 @@ test('an existing branch of the derived name refuses when branching', async () =
 
   // The branch name is `branchPrefix` + the id `commitFork` claims, and that id
   // carries a second-resolution stamp - so it cannot be known in advance, only
-  // guessed at inside the same second. Rather than race the clock (which is how
-  // AGENTS.md's banned wall-clock fixtures get written), a guess that turns out
-  // to have missed is treated as INCONCLUSIVE and retried: the fork succeeded,
-  // so its run and its branch are removed and the next attempt starts clean.
-  // The case fails only if it never once observed the refusal.
-  for (let attempt = 0; attempt < 8; attempt++) {
-    const branch = `vibe/${mintRunId(parent.task)}`;
-    if (gitHas(parent.targetDir, branch)) continue;
-    execFileSync('git', ['branch', branch, 'HEAD'], { cwd: parent.targetDir });
-
-    const dirs = runDirs(parent);
-    const outcome = await fork(parent, n).then(
-      (ok) => ok,
-      (err: unknown) => err,
-    );
-
-    if (outcome instanceof ForkError) {
-      assert.match(outcome.message, /already exists/);
-      assert.deepEqual(runDirs(parent), dirs, 'the refusal creates no run directory');
-      assert.ok(gitHas(parent.targetDir, branch), 'and does not delete the branch it found');
-
-      // With no branch wanted, that ref is nothing to do with this fork: it
-      // will not be read, written or moved, so it is not a reason to refuse.
-      const { branch: none } = await fork(parent, n, { git: { useBranch: false } });
-      assert.equal(none, null);
-      return;
+  // bracketed. Blocking a WINDOW of seconds around now makes the collision
+  // certain without racing: the fork resolves in milliseconds, so whichever
+  // second it lands in, one of these refs is already in its way. This replaced
+  // a guess-and-retry loop that undid a real fork up to eight times; it was
+  // correct but it exercised the rollback path far more than the claim.
+  //
+  // Relative to now, never a fixed instant - the rule AGENTS.md states.
+  const blocked = [0, 1, 2].map((seconds) => `vibe/${idInSeconds(parent.task, seconds)}`);
+  assert.equal(new Set(blocked).size, 3, 'the three ids differ, so the window really is three seconds wide');
+  for (const branch of blocked) {
+    if (!gitHas(parent.targetDir, branch)) {
+      execFileSync('git', ['branch', branch, 'HEAD'], { cwd: parent.targetDir });
     }
-
-    // Inconclusive: the second rolled over, so the fork derived a different
-    // name and went ahead. Undo it and guess again.
-    assert.ok(!(outcome instanceof Error), `unexpected failure: ${String(outcome)}`);
-    const made = outcome as { child: RunState; branch: string | null };
-    rmSync(made.child.dir, { recursive: true, force: true });
-    if (made.branch !== null) {
-      execFileSync('git', ['branch', '-D', made.branch], { cwd: parent.targetDir });
-    }
-    execFileSync('git', ['branch', '-D', branch], { cwd: parent.targetDir });
   }
-  assert.fail('never landed a branch in the way of the derived name');
+
+  const dirs = runDirs(parent);
+  await assert.rejects(
+    () => fork(parent, n),
+    (err: unknown) => err instanceof ForkError && /already exists/.test(err.message),
+    'a branch already at the derived name refuses the fork',
+  );
+  assert.deepEqual(runDirs(parent), dirs, 'the refusal creates no run directory');
+  for (const branch of blocked) {
+    assert.ok(gitHas(parent.targetDir, branch), `and does not delete ${branch}, which it only read`);
+  }
+
+  // With no branch wanted, those refs are nothing to do with this fork: they
+  // will not be read, written or moved, so they are not a reason to refuse.
+  const { branch: none } = await fork(parent, n, { git: { useBranch: false } });
+  assert.equal(none, null);
 });
 
 test('an unvalidatable stored config refuses with nothing created', async () => {
