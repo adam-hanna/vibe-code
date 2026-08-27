@@ -1,5 +1,6 @@
 import { detail } from '@src/log.js';
 import { markActivity, measuredWindow } from '@src/run.js';
+import type { AgentProvider } from '@src/runtime.js';
 import type { Config, InFlightTurn, RunState } from '@src/types.js';
 
 /**
@@ -630,6 +631,17 @@ export async function withHeartbeat<T>(
  * (issue #6), so it is a second, equally justifiable source - see
  * progressOptions. This map stays because it is the fresher of the two and
  * needs no state write to maintain.
+ *
+ * **Claude measurements, keyed by a bare model name.** Both writers are Claude
+ * paths (`recordUsage` and `rotateSession` in context.ts) and nothing Codex ever
+ * puts an entry here, so a hit says "some Claude turn measured this name" and
+ * not "this window belongs to whoever asked". A model name is not unique across
+ * providers - `claude.model` and a Codex role's model may legally be the same
+ * string, since config checks only that a model is a non-empty name - so the
+ * caller has to qualify by provider. `progressOptions` does; anything else
+ * reading this map must too, and the day a Codex conversation reports a window
+ * this map and `state.contextModel` need a provider tag before it can be stored
+ * (#86).
  */
 const windows = new Map<string, number>();
 
@@ -642,19 +654,35 @@ export function progressOptions(
   cfg: Config,
   label: string,
   /**
-   * Whose window the `ctx%` segment may use. Defaulted to the provider setting
-   * every caller read directly before it was a parameter, so a caller that
-   * passes nothing renders exactly what it renders today - which is what makes
-   * a per-role model (#60) reach only the turns that named one.
+   * Which model this turn runs. No default: one used to exist, `cfg.claude.model`,
+   * as #60's migration device - and a caller that named nothing therefore
+   * inherited Claude's model silently, which is exactly how a Codex turn came to
+   * be handed Claude's window (#86). Every caller now says whose window it is
+   * asking for, so the trap cannot be re-armed by the next one.
    */
-  model: string = cfg.claude.model,
+  model: string,
+  /**
+   * Which provider's conversation this turn runs on, and the other half of the
+   * key. Both window sources hold Claude measurements under a bare model name
+   * (see `windows`), and the same name may legally be configured for both
+   * providers - `claude.model = "shared"` with a Codex role on `"shared"` is a
+   * valid config, so the name alone cannot say whose conversation a window
+   * describes. Without this, that config hands a Claude-measured window to a
+   * Codex turn (#86).
+   */
+  provider: AgentProvider,
 ): ProgressOptions | undefined {
   if (!cfg.progress.enabled) return undefined;
   // Either source has to name this exact model: the in-process map is keyed by
   // it, and the persisted one is only returned when its `contextModel` tag
   // matches. A resumed run can therefore show `ctx%` on its first turn instead
   // of its second, without the rule changing.
-  const contextWindow = windows.get(model) ?? measuredWindow(state, model);
+  //
+  // And only a Claude turn may read them at all, because only Claude turns write
+  // them. Suppressing an unqualified hit is the fail-closed reading: a window
+  // that cannot be attributed to this conversation is not evidence about it.
+  const contextWindow =
+    provider === 'claude' ? (windows.get(model) ?? measuredWindow(state, model)) : undefined;
   return {
     label,
     intervalMs: cfg.progress.intervalMs,

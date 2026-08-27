@@ -82,7 +82,7 @@ test('disabled progress is the single point that stops any hook or timer existin
   const state = { dir: '/nowhere', events: [] } as unknown as RunState;
   const cfg: Config = { ...DEFAULTS, progress: { ...DEFAULTS.progress, enabled: false } };
 
-  assert.equal(progressOptions(state, cfg, 'plan'), undefined);
+  assert.equal(progressOptions(state, cfg, 'plan', cfg.claude.model, 'claude'), undefined);
 });
 
 // ---- vibe fork (#78) --------------------------------------------------------
