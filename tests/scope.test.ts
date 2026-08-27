@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { DEFAULTS } from '@src/config.js';
 import {
@@ -11,7 +10,6 @@ import {
   runTurn,
   writeFollowUps,
 } from '@src/orchestrator.js';
-import type { AgentTurns } from '@src/orchestrator.js';
 import {
   critiquePrompt,
   fixPrompt,
@@ -19,17 +17,14 @@ import {
   revisePlanPrompt,
   reviewPrompt,
 } from '@src/prompts.js';
-import { createRun } from '@src/run.js';
 import { FINDINGS_SCHEMA, PLAN_SCHEMA } from '@src/schemas.js';
 import { parseFindings, parsePlan, ShapeError } from '@src/validate.js';
-import type {
-  ClaudeTurnResult,
-  Config,
-  Finding,
-  OutOfScopeItem,
-  Plan,
-  RunState,
-} from '@src/types.js';
+import type { Finding, OutOfScopeItem, Plan, RunState } from '@src/types.js';
+import {
+  agents,
+  config,
+  freshRun as harnessFreshRun,
+} from './helpers/loop-harness.js';
 
 /**
  * The scope axis: a plan states what it is deliberately not doing, a reviewer
@@ -76,7 +71,7 @@ function rawFinding(over: Record<string, unknown> = {}): Record<string, unknown>
 }
 
 function freshRun(): RunState {
-  return createRun(mkdtempSync(path.join(tmpdir(), 'vibe-scope-')), 'scope fixture', true);
+  return harnessFreshRun({ prefix: 'vibe-scope-', task: 'scope fixture', planOnly: true });
 }
 
 const followUpsPath = (state: RunState): string => path.join(state.dir, 'FOLLOW-UPS.md');
@@ -131,6 +126,9 @@ test('a valid out_of_scope round-trips', () => {
     assumptions: [],
     open_questions: [],
     out_of_scope: [ITEM],
+    // Added by #44: `parsePlan` is now strict about `acceptance_criteria` too,
+    // so a fresh plan omitting it is refused. The assertion below is unchanged.
+    acceptance_criteria: [],
   });
   assert.deepEqual(parsed.out_of_scope, [ITEM]);
 });
@@ -209,7 +207,13 @@ test('an absent boundary is never rendered as an explicit empty one', () => {
 
 // ---- The guidance is conditional on a boundary existing --------------------
 
-test('the defer-for-out-of-scope instruction is given only where a boundary exists', () => {
+// Renamed by #56, assertions untouched. The old name said the *defer
+// instruction* was conditional on a boundary; since #56 both branches offer the
+// flag and what stays conditional is the plan's authority to make demanding the
+// work a defect. Every line below already tested only that narrower claim -
+// `DEFECT_IN_FINDING` present with a boundary, absent without one - so the name
+// was the part that stopped being true.
+test("the plan's authority over what is out of scope is claimed only where a boundary exists", () => {
   for (const boundary of [[ITEM], []] as const) {
     const [, critique, review] = renderings(boundary);
     assert.ok(critique?.includes(DEFECT_IN_FINDING));
@@ -248,28 +252,20 @@ test('a rehydrated session is given the boundary, not just plan_md', async () =>
   state.plan = plan({ out_of_scope: [ITEM] });
 
   const prompts: string[] = [];
-  const turns: AgentTurns = {
-    claude: (options): Promise<ClaudeTurnResult> => {
-      prompts.push(options.prompt);
-      return Promise.resolve({
-        text: 'ok',
-        costUsd: 0,
-        sessionId: options.sessionId,
-        denials: [],
-        numTurns: 1,
-        usage: null,
-        tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, total: 0 },
-      });
+  const turns = agents(
+    {
+      claude: (_label, options) => {
+        prompts.push(options.prompt);
+        return 'ok';
+      },
+      codex: () => {
+        throw new Error('codex should not be reached');
+      },
     },
-    codex: () => Promise.reject(new Error('codex should not be reached')),
-  };
+    [],
+  );
 
-  const cfg: Config = {
-    ...DEFAULTS,
-    codex: { ...DEFAULTS.codex, readRateLimits: false },
-    progress: { ...DEFAULTS.progress, enabled: false },
-    context: { ...DEFAULTS.context, enabled: false },
-  };
+  const cfg = config({}, { progress: { ...DEFAULTS.progress, enabled: false } });
 
   await runTurn(
     state,

@@ -1,8 +1,12 @@
 import type {
+  AcceptanceCriterion,
   Answer,
   AnswersReport,
   Assumption,
+  CheckKind,
   Confidence,
+  Evidence,
+  EvidenceKind,
   Finding,
   FindingsReport,
   OpenQuestion,
@@ -79,10 +83,68 @@ function stringList(obj: Record<string, unknown>, key: string): string[] {
   return v.filter((x): x is string => typeof x === 'string');
 }
 
+const EVIDENCE_KINDS: readonly EvidenceKind[] = ['code', 'artifact', 'absence', 'external'];
+
+/**
+ * One citation, or null when the entry is not one.
+ *
+ * The codebase's single answer to "is this stored object a citation", the way
+ * `hasFindingShape` is its single answer to "is this stored object a finding" -
+ * and for the same reason. `evidence` is never validated on the way into
+ * state.json (deliberately: a bad citation must not delete a finding from
+ * FOLLOW-UPS.md), so every consumer meets raw `unknown` and each one has to ask
+ * this question. Asking it in two places is how they come to disagree.
+ *
+ * What each consumer *does* with a null is its own business: `parseFindings`
+ * and the prompt renderers drop it, `groundFindings` counts it as a citation
+ * that did not resolve.
+ *
+ * Every optional field is written with a conditional spread rather than a
+ * possibly-`undefined` value, because `exactOptionalPropertyTypes` makes those
+ * different types - and because an explicit `path: undefined` would serialise
+ * into state.json as a key that was never cited.
+ */
+export function readEvidenceEntry(raw: unknown): Evidence | null {
+  if (!isRecord(raw)) return null;
+  const kind = raw['kind'];
+  if (typeof kind !== 'string' || !(EVIDENCE_KINDS as readonly string[]).includes(kind)) {
+    return null;
+  }
+  const path = raw['path'];
+  const line = raw['line'];
+  const excerpt = raw['excerpt'];
+  const ref = raw['ref'];
+  return {
+    kind: kind as EvidenceKind,
+    ...(typeof path === 'string' ? { path } : {}),
+    ...(typeof line === 'number' && Number.isInteger(line) ? { line } : {}),
+    ...(typeof excerpt === 'string' ? { excerpt } : {}),
+    ...(typeof ref === 'string' ? { ref } : {}),
+  };
+}
+
+/**
+ * Every usable citation in a value that claims to be a list of them.
+ *
+ * Tolerant like `defer` and for a sharper reason: the schema marks `evidence`
+ * required, and this parser cannot afford to. Throwing would destroy a whole
+ * round's output - 3M tokens on the #47 review - because one finding in ten
+ * omitted a field. A non-array reads as none, a malformed entry is dropped, and
+ * `groundFindings` then treats "cited nothing" and "cited something that does
+ * not resolve" as the same case: the finding is downgraded, never deleted (#48).
+ */
+export function readEvidence(raw: unknown): Evidence[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((entry): Evidence | null => readEvidenceEntry(entry))
+    .filter((e): e is Evidence => e !== null);
+}
+
 const SEVERITIES: readonly Severity[] = ['P0', 'P1', 'P2', 'P3'];
 const VERDICTS: readonly Verdict[] = ['APPROVE', 'REVISE'];
 const KINDS: readonly QuestionKind[] = ['technical', 'product'];
 const CONFIDENCES: readonly Confidence[] = ['high', 'medium', 'low'];
+const CHECKS: readonly CheckKind[] = ['command', 'inspection', 'qa'];
 
 export function parsePlan(raw: unknown): Plan {
   const o = record(raw, 'plan', raw);
@@ -118,11 +180,32 @@ export function parsePlan(raw: unknown): Plan {
     };
   });
 
+  // Strict for the same reason, and it is the same argument one field along: a
+  // plan that omitted this would be a plan with no definition of done, and the
+  // critic would have nothing to attack but the approach. Tolerance belongs in
+  // `readPlan`, which is the reader that meets state written before this field
+  // existed.
+  const acceptanceCriteria: AcceptanceCriterion[] = arr(
+    o,
+    'acceptance_criteria',
+    'plan',
+    raw,
+  ).map((c, i) => {
+    const r = record(c, `plan.acceptance_criteria[${i}]`, raw);
+    return {
+      id: str(r, 'id', `plan.acceptance_criteria[${i}]`, raw),
+      criterion: str(r, 'criterion', `plan.acceptance_criteria[${i}]`, raw),
+      check: oneOf(r, 'check', CHECKS, `plan.acceptance_criteria[${i}]`, raw),
+      how: str(r, 'how', `plan.acceptance_criteria[${i}]`, raw),
+    };
+  });
+
   return {
     plan_md: str(o, 'plan_md', 'plan', raw),
     assumptions,
     open_questions: openQuestions,
     out_of_scope: outOfScope,
+    acceptance_criteria: acceptanceCriteria,
   };
 }
 
@@ -143,6 +226,11 @@ export function parseFindings(raw: unknown): FindingsReport {
     // true on our side of the wire. Both defaults only ever make a finding more
     // blocking, and `gate` reads severity alone, so no control flow changes.
     const defer = r['defer'] === true && severity !== 'P0' && severity !== 'P1';
+    // Absent rather than `[]` when nothing usable came back: "cited nothing" is
+    // what actually happened, and an empty list would assert the model offered
+    // a list. Both read the same downstream - `groundFindings` downgrades a
+    // blocker either way - but only one of them is true.
+    const evidence = readEvidence(r['evidence']);
     return {
       id,
       severity,
@@ -150,6 +238,7 @@ export function parseFindings(raw: unknown): FindingsReport {
       detail: str(r, 'detail', `report.findings[${i}]`, raw),
       suggested_fix: str(r, 'suggested_fix', `report.findings[${i}]`, raw),
       defer,
+      ...(evidence.length > 0 ? { evidence } : {}),
     };
   });
 

@@ -5,7 +5,24 @@ import { hostDirectoryFor } from '@src/hosttools.js';
 import type { ToolchainContract } from '@src/runtime.js';
 import type { VerifyConfig } from '@src/types.js';
 
+/**
+ * One gate with every default filled in - what actually gets run.
+ *
+ * Produced by `resolveGates`, which is the single place migration from the
+ * legacy `verify.command` and auto-detection happen (#47).
+ */
+export interface ResolvedGate {
+  name: string;
+  /** Null means unavailable: the gate is enabled and there is nothing to run. */
+  command: string | null;
+  runs: number;
+  timeoutMs: number;
+  required: boolean;
+}
+
 export interface VerifyResult {
+  /** Which gate this describes, so a failure can be filed under its own id. */
+  name: string;
   ok: boolean;
   command: string | null;
   /** Which attempt failed, 1-based. Null when every attempt passed. */
@@ -14,8 +31,14 @@ export interface VerifyResult {
   exitCode: number | null;
   /** Combined stdout/stderr of the failing attempt, tail-trimmed. */
   output: string;
-  /** Set when verification could not run at all, as distinct from failing. */
-  skipped: string | null;
+  /**
+   * Set when the gate could not run at all, as distinct from failing.
+   *
+   * Named `unavailable` since #47: "skipped" reads as a decision somebody made,
+   * and this is the absence of one - an enabled gate with nothing to run, which
+   * is not a pass and may cost the run its exit code.
+   */
+  unavailable: string | null;
   /**
    * Set when the command itself could not start, as distinct from the project
    * failing its own checks.
@@ -100,38 +123,92 @@ function launchFailure(output: string, exitCode: number | null, command: string)
 }
 
 /**
- * Run the project's own verification command.
+ * A command string that can actually be run, or null.
+ *
+ * Blank is null. An empty string reached the shell, exited 0 and was reported as
+ * a pass - a gate that never ran, indistinguishable from one that did (#47).
+ * Config validation refuses it; this is the second answer, because a guard that
+ * cannot read its input treats it as absent rather than as fine.
+ */
+function usable(command: string | null): string | null {
+  return command !== null && command.trim() !== '' ? command : null;
+}
+
+/**
+ * The gates this config asks for, in the order they run.
+ *
+ * The one place migration and detection happen. An absent `gates` synthesizes
+ * the gate every config before #47 described - named `verification`, so its
+ * finding id stays `verification-failing` with no special case anywhere.
+ *
+ * Detection belongs to that legacy gate ALONE. A listed gate with no command is
+ * unavailable and nothing is guessed: a gate named `qa` that silently ran `npm
+ * test` because the project happens to have one would report QA as passing when
+ * no QA ran. A *blank* legacy command does not detect either - the user wrote
+ * something, and guessing past it runs a command they never named.
+ */
+export function resolveGates(cfg: VerifyConfig, cwd: string): ResolvedGate[] {
+  if (cfg.gates === null || cfg.gates === undefined) {
+    return [
+      {
+        name: 'verification',
+        command: cfg.command === null ? detectCommand(cwd) : usable(cfg.command),
+        runs: cfg.runs,
+        timeoutMs: cfg.timeoutMs,
+        required: true,
+      },
+    ];
+  }
+
+  return cfg.gates.map((gate) => ({
+    name: gate.name,
+    command: usable(gate.command),
+    runs: gate.runs ?? cfg.runs,
+    timeoutMs: gate.timeoutMs ?? cfg.timeoutMs,
+    required: gate.required ?? true,
+  }));
+}
+
+/**
+ * Run one gate's command.
  *
  * Executed by vibe rather than by an agent. An agent reporting "tests pass" is
  * a claim; this is an observation, and it is the only thing in the loop that
  * distinguishes code that works from code that reads as though it does.
  */
-export async function runVerification(
+export async function runGateCommand(
   cwd: string,
-  cfg: VerifyConfig,
+  gate: ResolvedGate,
   contract: ToolchainContract,
 ): Promise<VerifyResult> {
-  const command = cfg.command ?? detectCommand(cwd);
+  const command = gate.command;
   const base: VerifyResult = {
+    name: gate.name,
     ok: true,
     command,
     failedRun: null,
     runs: 0,
     exitCode: null,
     output: '',
-    skipped: null,
+    unavailable: null,
     unlaunchable: null,
   };
 
   if (command === null) {
-    return { ...base, skipped: 'no verification command configured and none could be detected' };
+    return {
+      ...base,
+      unavailable:
+        gate.name === 'verification'
+          ? 'no verification command configured and none could be detected'
+          : `no command configured for the ${gate.name} gate`,
+    };
   }
 
   const env = verificationEnv(contract);
-  const attempts = Math.max(1, cfg.runs);
+  const attempts = Math.max(1, gate.runs);
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    const result = await execute(command, cwd, env, cfg.timeoutMs);
+    const result = await execute(command, cwd, env, gate.timeoutMs);
     if (result.code !== 0) {
       return {
         ...base,
@@ -262,8 +339,11 @@ export function describeFailure(result: VerifyResult): string {
     result.runs > 1
       ? ` on attempt ${result.failedRun ?? '?'} of ${result.runs}`
       : '';
+  // The gate is named, not just the command: with a list, "it exited 1" does not
+  // say which check the fixer has to make pass (#47, problem 2).
   return (
-    `\`${result.command ?? 'verification'}\` exited ${result.exitCode ?? 'abnormally'}${attempt}.\n\n` +
+    `Gate \`${result.name}\`: \`${result.command ?? 'verification'}\` exited ` +
+    `${result.exitCode ?? 'abnormally'}${attempt}.\n\n` +
     `\`\`\`\n${result.output}\n\`\`\``
   );
 }

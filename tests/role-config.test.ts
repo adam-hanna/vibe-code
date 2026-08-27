@@ -582,6 +582,44 @@ test('a judge on the implementer s provider warns about independence, and says o
   assert.ok(!has(sharedCodex, UNMEASURED));
 });
 
+test('a judge on the implementer s provider but a different model says the weaker thing', () => {
+  // "the same provider AND MODEL" was true while a model was uniform per
+  // provider. Since #60 it is false for a judge that names its own, and a
+  // warning that states something false is worse than none.
+  const cfg = withRoles({
+    ...ALL_CODEX,
+    critic: { provider: 'codex', model: 'gpt-critic-fixture' },
+  } as unknown as RoleProviders);
+  const warnings = roleWarnings(cfg);
+
+  const weaker = warnings.filter((w) => /different model/.test(w)).join('\n');
+  assert.ok(/roles\.critic/.test(weaker), weaker);
+  assert.ok(/gpt-critic-fixture/.test(weaker), weaker);
+  assert.ok(!/same provider and model/.test(weaker), weaker);
+  // Still says what remains of the dependence, rather than nothing at all.
+  assert.ok(/shared provider/.test(weaker), weaker);
+
+  // The judges that did NOT name a model keep today's sentence, verbatim, and
+  // name only themselves.
+  const same = warnings.filter((w) => /same provider and model/.test(w)).join('\n');
+  assert.ok(/roles\.answerer, roles\.reviewer/.test(same), same);
+  assert.ok(!/roles\.critic/.test(same), same);
+});
+
+test('a judge naming the same model as the implementer keeps the sentence verbatim', () => {
+  // Written out rather than inherited: naming a model explicitly must produce
+  // the identical warning to naming nothing, or the split is testing the key
+  // rather than the fact.
+  const explicit = roleWarnings(
+    withRoles({
+      ...ALL_CODEX,
+      critic: { provider: 'codex', model: DEFAULTS.codex.model },
+    } as unknown as RoleProviders),
+  );
+
+  assert.deepEqual(explicit, roleWarnings(withRoles(ALL_CODEX)));
+});
+
 test('the swap warns about independence, rotation and the cost ceiling but not measurement', () => {
   const warnings = roleWarnings(withRoles(SWAP));
 

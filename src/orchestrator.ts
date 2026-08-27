@@ -1,16 +1,21 @@
-import path from 'node:path';
+﻿import path from 'node:path';
 import { applyCharge, chargeFailure, enforceCeilings, Escalation, EXIT, fmtTokens } from '@src/charge.js';
 import { claudeTurn, parseStructured, RateLimitError } from '@src/claude.js';
 import { codexTurn } from '@src/codex.js';
 import type { CodexTurnOptions, CodexTurnResult } from '@src/codex.js';
+import { groundFindings } from '@src/evidence.js';
 import * as git from '@src/git.js';
 import * as log from '@src/log.js';
+import type { PathStyle } from '@src/pathstyle.js';
 import * as P from '@src/prompts.js';
 import {
   claudePermission,
   codexSandbox,
+  effortFor,
   GENERATIVE_ROLES,
   holderLabel,
+  modelFor,
+  modelSource,
   roleEnabled,
   rolesFor,
   slotForRole,
@@ -18,21 +23,27 @@ import {
 } from '@src/roles.js';
 import type { Access, Role, RoleSpec, RoleTable } from '@src/roles.js';
 import {
+  clearSlotFork,
   ensureSlotId,
   markSlotStarted,
+  noteSlotForkAttempt,
   recordSlotOccupancy,
+  slotContinuity,
+  slotForkParent,
   slotHasMemory,
   slotId,
   slotResumeId,
 } from '@src/slots.js';
+import type { SlotName } from '@src/slots.js';
 import {
   advancePhase,
   artifact,
   artifactDir,
+  artifactText,
   assessConvergence,
   clearPendingFindings,
   hasArtifact,
-  hasFindingShape,
+  listRuns,
   measuredRatio,
   p1Signature,
   persistenceNotice,
@@ -40,16 +51,21 @@ import {
   recordPendingFindings,
   recordRound,
   removeArtifact,
+  stageEvent,
   resumePhase,
   saveState,
   takePendingFindings,
+  verificationCaveat,
+  writeCheckpoint,
 } from '@src/run.js';
+import { hasFindingShape, isReportBasename } from '@src/stored.js';
 import {
   blockers as blockingFindings,
   gate,
   parseAnswers,
   parseFindings,
   parsePlan,
+  readEvidence,
 } from '@src/validate.js';
 import {
   markOccupancyWarned,
@@ -70,16 +86,21 @@ import {
   readCodexRateLimits,
   recordLimits,
 } from '@src/ratelimits.js';
-import { describeFailure, runVerification } from '@src/verify.js';
+import { describeFailure, resolveGates, runGateCommand } from '@src/verify.js';
 import type {
   Answer,
+  CheckpointCommitNote,
+  ClaudeTurnResult,
   Config,
   Finding,
   FindingsReport,
+  GateOutcome,
   OpenQuestion,
   RoundRecord,
   Plan,
   RunState,
+  RunSummary,
+  Severity,
 } from '@src/types.js';
 
 // The accounting vocabulary lives in @src/charge.js, a leaf: the session
@@ -99,9 +120,82 @@ export {
 } from '@src/charge.js';
 export type { ExitCode, TurnCharge, TurnSpend } from '@src/charge.js';
 
+/**
+ * A write turn is about to start, so this run can no longer vouch for any
+ * report (#50).
+ *
+ * Called before the turn and persisted immediately. Between here and
+ * `recordReport` the run has an EARLIER turn's report artifact on disk and a
+ * newer one possibly half-written, and there is no ordering of two separate
+ * file writes that makes "the pointer names the newest report" true throughout.
+ * So the window says "no report", and a resume that lands in it hands the
+ * reviewer the explicit notice rather than a previous round's report dressed as
+ * current - the same reason `runReview` removes `code-review-<n>.json` before
+ * buying the round again.
+ *
+ * The invariant this buys: `state.lastReport`, when present, names the newest
+ * report this run completed. It is never an earlier turn's report while a newer
+ * turn is in flight or half-recorded.
+ */
+function beginReport(state: RunState): void {
+  delete state.lastReport;
+  saveState(state);
+}
+
+/**
+ * That turn's report: on disk, and pointed at.
+ *
+ * One function for all four write sites - implement, verify-fix, review-fix,
+ * final-fix - so a fifth cannot set the artifact and forget the pointer.
+ */
+function recordReport(state: RunState, name: string, text: string): void {
+  artifact(state, name, text);
+  state.lastReport = name;
+  saveState(state);
+}
+
+/**
+ * The last write turn's report, or null when this run has none it can vouch for.
+ *
+ * Null for four causes - no pointer at all, a pointer `beginReport` cleared for
+ * a turn that never finished recording, a pointer this version will not join
+ * onto a path, and a file that is missing, unreadable or blank - and every one
+ * of them renders the same notice. What differs is the record: the first two
+ * are silence, the other two are run events, because a pointer that does not
+ * resolve is a fact about this run rather than about the reviewer's job (#50).
+ */
+function latestReport(state: RunState): string | null {
+  const name = state.lastReport;
+  if (name === undefined) return null;
+  // The same predicate `validateStoredState` applies on the way in, asked again
+  // here because this is the call that turns the value into a path.
+  if (!isReportBasename(name)) {
+    log.warn(`The recorded report name is not one vibe will read: ${name}`);
+    recordEvent(state, 'report_unusable', { name });
+    return null;
+  }
+  const text = artifactText(state, name);
+  if (text === null || text.trim() === '') {
+    log.warn(`The recorded report ${name} could not be read - the reviewer is told so`);
+    recordEvent(state, 'report_unreadable', { name });
+    return null;
+  }
+  return text;
+}
+
 export async function orchestrate(
   state: RunState,
   cfg: Config,
+  /**
+   * Whether this is a resume.
+   *
+   * It no longer decides *whether* `prepareGit` runs - since #78 that happens on
+   * every pass, because a forked run is always started by `vibe resume` and has
+   * to be put on its branch, and because a resume whose stored branch is not
+   * checked out must be refused rather than allowed to commit elsewhere. It
+   * still decides what `prepareGit` may *do*: creating a branch is a fresh-run
+   * act, and a resume must not gain one it never had.
+   */
   resume: boolean,
   /**
    * The same seam `runTurn` has, hoisted to the entry point.
@@ -140,7 +234,11 @@ async function runPhases(
   // from the module default while holding a config that says otherwise.
   const roles = rolesFor(cfg);
 
-  if (!resume) await prepareGit(state, cfg, cwd);
+  // On every pass, not only a fresh one (#78). A forked run is always started by
+  // `vibe resume`, and it is `prepareGit` that puts it on the branch `vibe fork`
+  // created; the same call is what stops a resumed run committing to a branch it
+  // never claimed. It decides what this pass needs - see `prepareGit`.
+  await prepareGit(state, cfg, cwd, resume);
 
   const phase = resumePhase(state);
   if (phase === 'complete') {
@@ -159,10 +257,12 @@ async function runPhases(
     if (state.planOnly) {
       state.status = 'planned';
       advancePhase(state, 'complete');
+      writeCheckpoint(state, 'complete', NO_COMMIT);
       log.ok('Plan-only run: stopping before implementation.');
       return state;
     }
     advancePhase(state, 'implementing');
+    writeCheckpoint(state, 'plan-approved', NO_COMMIT);
   } else {
     const approved = state.plan;
     if (approved === null) {
@@ -177,6 +277,9 @@ async function runPhases(
     state.status = 'implementing';
     state.baseSha = await git.markBase(cwd);
     saveState(state);
+    // Before the turn, not after it. See `beginReport`: a run killed inside this
+    // turn must not leave the reviewer pointed at an earlier round's report.
+    beginReport(state);
 
     log.heading('Implementing');
     const impl = await runTurn(
@@ -184,27 +287,47 @@ async function runPhases(
       cfg,
       {
         role: 'implementer',
-        prompt: P.implementPrompt(plan.plan_md, state.carried ?? []),
+        // Re-filtered rather than trusted, as `writeFollowUps` re-filters:
+        // `validateStoredState` checks a stored finding's shape but not its
+        // severity or its `defer`, and the section this feeds asserts in prose
+        // that everything in it was agreed non-blocking.
+        prompt: P.implementPrompt(
+          plan.plan_md,
+          state.carried ?? [],
+          (state.declined ?? []).filter(isDeferrable),
+          // The snapshot, never `plan.acceptance_criteria`: a criterion the
+          // critic never saw is not an approved criterion.
+          state.acceptanceCriteria,
+        ),
         cwd,
         label: 'implement',
       },
       turns,
       roles,
     );
-    artifact(state, 'implementation-report.md', impl.text);
+    recordReport(state, 'implementation-report.md', impl.text);
 
     // Advanced before the commit, not after. The implementation turn is the
     // single most expensive step in a run, and a failure while committing it
     // must not charge for it twice - which is exactly what happened when a
     // `git add` error came back as a bare 'error' status.
     advancePhase(state, 'reviewing');
-    await maybeCommit(cfg, cwd, 'vibe: implement approved plan');
+    const committed = await maybeCommit(cfg, cwd, 'vibe: implement approved plan');
 
     // Reset only on a fresh implementation. Resuming mid-review must keep the
     // histories, or the convergence assessment loses the evidence it is built
     // on and a stalled loop reads as a healthy one.
     state.p1Rounds = [];
     state.verifyRounds = [];
+    // Below the resets, and deliberately: a snapshot taken above them carries
+    // the PLANNING critique history into a state whose phase is already
+    // `reviewing`, so a fork resuming there would feed planning rounds to the
+    // review convergence assessment. The status is set here for the same reason
+    // - the snapshot has to be internally coherent - and the existing assignment
+    // below the block stays where it is.
+    state.status = 'reviewing';
+    saveState(state);
+    writeCheckpoint(state, 'implemented', committed);
   }
 
   // ---- Review --------------------------------------------------------------
@@ -215,6 +338,7 @@ async function runPhases(
 
   state.status = 'done';
   advancePhase(state, 'complete');
+  writeCheckpoint(state, 'complete', NO_COMMIT);
   return state;
 }
 
@@ -344,9 +468,36 @@ async function planPhase(
       } else {
         log.ok(`Plan approved - ${critique.findings.length} non-blocking finding(s)`);
       }
+      // The one round whose findings reach nobody otherwise: a revising round
+      // hands its deferrals to the planner through `pendingFindings`, and this
+      // one is about to clear them. Recorded, not acted on - `defer` decides
+      // what a later prompt is told, never whether a turn happens. Assigned
+      // unconditionally so an approving round that declined nothing cannot
+      // leave an earlier round's value standing, and written on the same state
+      // save that clears the pending findings below.
+      state.declined = critique.findings.filter(isDeferrable);
+      // The bar, frozen at the instant it was approved. A copy, not a view:
+      // replacing `state.plan` is not the only way its criteria can move - the
+      // array and each criterion are mutable, and anything later holding the
+      // same objects would edit an approved bar in place. Every field of a
+      // criterion is a primitive, so a spread per entry is a full clone.
+      //
+      // `undefined` is preserved rather than collapsed to `[]`: a plan stored
+      // before this field existed never stated a bar, and inventing an empty
+      // one would put a claim in its mouth. Assigned unconditionally for the
+      // reason `declined` is - an approving round must not leave an earlier
+      // round's bar standing - and on the same state save.
+      state.acceptanceCriteria = plan.acceptance_criteria?.map((c) => ({ ...c }));
       recordEvent(state, 'plan_approved', {
         findings: critique.findings.length,
         carried: decision.tolerated.map((f) => f.id),
+        declined: state.declined.map((f) => f.id),
+        // Present only when a bar was recorded. `?? []` here would log an
+        // explicit empty bar for a legacy plan that never claimed one, which is
+        // the absent-as-empty collapse the rest of this field refuses.
+        ...(state.acceptanceCriteria === undefined
+          ? {}
+          : { criteria: state.acceptanceCriteria.map((c) => c.id) }),
       });
       // An approved plan has nothing outstanding: what the gate tolerated
       // travels on `state.carried` into implementation, and leaving these set
@@ -419,6 +570,11 @@ async function reviewPhase(
     // execute buys an opinion about the wrong thing.
     const verified = await runGate(state, cfg, cwd);
     if (verified !== null) {
+      // Before `guardProgress`, which can stop the run at its cap: a record this
+      // process published before the gate ran must describe the gate's verdict
+      // by the time anything can throw past it, or the run stops leaving a file
+      // saying verification has not run when it has, and failed (#47).
+      settlePendingOutstanding(state);
       // Its own counter and its own history: making the suite pass and
       // satisfying the reviewer are separate problems that converge
       // separately, and sharing a budget starved whichever came second.
@@ -431,6 +587,7 @@ async function reviewPhase(
 
       state.verifyRound += 1;
       saveState(state);
+      beginReport(state);
 
       log.step('Fixing the verification failure');
       const repair = await runTurn(
@@ -438,15 +595,27 @@ async function reviewPhase(
         cfg,
         {
           role: 'implementer',
-          prompt: P.fixPrompt([verified], state.verifyRound),
+          prompt: P.fixPrompt(
+            [verified],
+            state.verifyRound,
+            // The snapshot, never `plan.acceptance_criteria`: a criterion the
+            // critic never saw is not an approved criterion. The fixer's report
+            // is read by the reviewer exactly as the implementer's is, so it is
+            // held to the same bar (#50).
+            state.acceptanceCriteria,
+          ),
           cwd,
           label: `verify-fix-${state.verifyRound}`,
         },
         turns,
         roles,
       );
-      artifact(state, `verify-fix-${state.verifyRound}.md`, repair.text);
-      await maybeCommit(cfg, cwd, `vibe: fix verification failure (round ${state.verifyRound})`);
+      recordReport(state, `verify-fix-${state.verifyRound}.md`, repair.text);
+      writeCheckpoint(
+        state,
+        'verify-round',
+        await maybeCommit(cfg, cwd, `vibe: fix verification failure (round ${state.verifyRound})`),
+      );
       continue;
     }
 
@@ -462,8 +631,14 @@ async function reviewPhase(
       // wrote. This rewrites it, and only from here, because from anywhere
       // earlier it would be asserting a fix or a passing suite that had not
       // happened.
-      recoverOutstanding(state, cwd);
-      log.ok('Carried findings addressed and verification still passes.');
+      finaliseOutstanding(state, cwd);
+      // The claim is only made when the gates support it. A required gate that
+      // never ran, an optional one, or a disabled section each get said out loud
+      // instead: the run may still finish, but not while asserting a pass
+      // nobody observed (#47).
+      const caveat = verificationCaveat(state);
+      if (caveat === null) log.ok('Carried findings addressed and verification still passes.');
+      else log.warn(`Carried findings addressed, but ${caveat}.`);
       break;
     }
 
@@ -513,6 +688,7 @@ async function reviewPhase(
       state.finalFixDone = true;
       state.outstanding = decision.tolerated;
       saveState(state);
+      beginReport(state);
 
       log.step(
         `Incorporating ${decision.tolerated.length} carried P1(s), then finishing: ` +
@@ -525,14 +701,14 @@ async function reviewPhase(
         cfg,
         {
           role: 'implementer',
-          prompt: P.fixPrompt(review.findings, state.reviewRound),
+          prompt: P.fixPrompt(review.findings, state.reviewRound, state.acceptanceCriteria),
           cwd,
           label: `final-fix-${state.reviewRound}`,
         },
         turns,
         roles,
       );
-      artifact(state, `fix-report-${state.reviewRound}.md`, finalFix.text);
+      recordReport(state, `fix-report-${state.reviewRound}.md`, finalFix.text);
       // The moment the fix stops being worth buying again, and therefore the
       // moment to drop the carry: the turn is done and its report is on disk.
       // Everything after this - the record, three git invocations - can fail
@@ -541,10 +717,21 @@ async function reviewPhase(
       // once the gate has passed. Same order as `runFixRound`.
       clearPendingFindings(state);
 
-      const file = artifact(state, 'OUTSTANDING.md', renderOutstanding(state, decision.tolerated));
+      // Written `pending`: the gate has not run yet at this point in the loop,
+      // so the file cannot say how it went. `finaliseOutstanding` rewrites it
+      // from the completion branch once it has.
+      const file = artifact(
+        state,
+        'OUTSTANDING.md',
+        renderOutstanding(state, decision.tolerated, 'pending'),
+      );
       log.info(`Carried findings and what was done about them: ${path.relative(cwd, file)}`);
 
-      await maybeCommit(cfg, cwd, `vibe: address carried review findings (final round)`);
+      writeCheckpoint(
+        state,
+        'final-fix',
+        await maybeCommit(cfg, cwd, `vibe: address carried review findings (final round)`),
+      );
       recordEvent(state, 'review_approved', {
         findings: review.findings.length,
         carriedAndFixed: decision.tolerated.map((f) => f.id),
@@ -588,6 +775,7 @@ async function runFixRound(
 ): Promise<void> {
   state.reviewRound += 1;
   saveState(state);
+  beginReport(state);
 
   log.step(`Fixing ${blockingFindings(findings).length} blocking finding(s)`);
   const fix = await runTurn(
@@ -595,20 +783,24 @@ async function runFixRound(
     cfg,
     {
       role: 'implementer',
-      prompt: P.fixPrompt(findings, state.reviewRound),
+      prompt: P.fixPrompt(findings, state.reviewRound, state.acceptanceCriteria),
       cwd,
       label: `fix-${state.reviewRound}`,
     },
     turns,
     roles,
   );
-  artifact(state, `fix-report-${state.reviewRound}.md`, fix.text);
+  recordReport(state, `fix-report-${state.reviewRound}.md`, fix.text);
   // Consumed once the turn's report is on disk, and before the commit: a commit
   // that fails must not buy this turn a second time. Everything before this
   // point leaves them outstanding, which is what makes a died-mid-turn resume
   // retry the fix rather than skip it.
   clearPendingFindings(state);
-  await maybeCommit(cfg, cwd, `vibe: address review round ${state.reviewRound}`);
+  writeCheckpoint(
+    state,
+    'review-round',
+    await maybeCommit(cfg, cwd, `vibe: address review round ${state.reviewRound}`),
+  );
 }
 
 /**
@@ -620,8 +812,9 @@ async function runFixRound(
  * later finishes clean while pointing at a file that does not exist. Recovered
  * from `state.outstanding` rather than from the carried findings so it holds
  * however far that sequence got, and skipped when the file is already there so
- * a good artifact is never rewritten. Stored state is unvalidated, hence the
- * shape check: this artifact makes claims about what is in it.
+ * a good artifact is never rewritten. `validateStoredState` now owns that
+ * invariant on the way in; the shape check remains as defence in depth, because
+ * this artifact makes claims about what is in it.
  *
  * Call it from ONE place, and only that one: after `runGate` has come back
  * clean, immediately before the completion branch. The document states that the
@@ -639,24 +832,104 @@ function recoverOutstanding(state: RunState, cwd: string): void {
     : [];
   if (outstanding.length === 0) return;
 
-  const file = artifact(state, 'OUTSTANDING.md', renderOutstanding(state, outstanding));
+  const file = artifact(state, 'OUTSTANDING.md', renderOutstanding(state, outstanding, 'settled'));
   log.info(`Carried findings and what was done about them: ${path.relative(cwd, file)}`);
 }
 
-/** The findings the last fix round addressed without a reviewer confirming it. */
-function renderOutstanding(state: RunState, findings: readonly Finding[]): string {
+/**
+ * The marker that says "vibe wrote this file, and may bring it up to date".
+ *
+ * On disk, not in memory, and in EVERY form the document takes rather than only
+ * the pre-gate one. A process-local flag answers the question only for the
+ * process that wrote the file: kill a run between the final fix and the gate,
+ * resume it, and the resumed process knows nothing - `recoverOutstanding` finds
+ * a file, skips it, and the run finishes clean while the artifact still says
+ * verification has not run.
+ *
+ * It is ownership rather than pending-ness because the document settles more
+ * than once: a gate can fail, be fixed, and pass, and each of those is a
+ * different true sentence. A marker consumed by the first rewrite would freeze
+ * the file at the failure. What the marker still protects is the rule
+ * `recoverOutstanding` has always kept - an OUTSTANDING.md vibe did not write is
+ * never touched.
+ */
+const OUTSTANDING_OWNED = '<!-- vibe:outstanding -->';
+
+/**
+ * Rewrite vibe's own OUTSTANDING.md to whatever the gates have just said. True
+ * when there was one to correct.
+ *
+ * Called from BOTH sides of the gate's verdict, not only from completion. A run
+ * does not finish over a failing gate, but it can stop over one - at
+ * `maxVerifyRounds`, or on a ceiling - and the file published before the gate
+ * ran would otherwise sit there saying verification has not run when it has, and
+ * failed. `verificationCaveat` names the failing gate in that case.
+ */
+function settlePendingOutstanding(state: RunState): boolean {
+  if (state.finalFixDone !== true) return false;
+  const existing = artifactText(state, 'OUTSTANDING.md');
+  if (existing === null || !existing.includes(OUTSTANDING_OWNED)) return false;
+
+  const outstanding = Array.isArray(state.outstanding)
+    ? state.outstanding.filter(hasFindingShape)
+    : [];
+  if (outstanding.length === 0) return false;
+  artifact(state, 'OUTSTANDING.md', renderOutstanding(state, outstanding, 'settled'));
+  return true;
+}
+
+/**
+ * Settle the pre-gate OUTSTANDING.md at the end of a completing run.
+ *
+ * Falls back to `recoverOutstanding` when there is no pending file of ours,
+ * which is the case a process killed before publishing anything leaves.
+ */
+function finaliseOutstanding(state: RunState, cwd: string): void {
+  if (state.finalFixDone !== true) return;
+  if (!settlePendingOutstanding(state)) recoverOutstanding(state, cwd);
+}
+
+/**
+ * The findings the last fix round addressed without a reviewer confirming it.
+ *
+ * `stage` is which of the two moments this is being written at, because the
+ * document's claim about verification is only true at one of them (#47). The
+ * tolerance sentences are identical either way: what changes is the clause about
+ * the gate, which used to assert a pass from a call site that ran *before* the
+ * gate did - and stayed wrong afterwards when a gate turned out to be
+ * unavailable or disabled.
+ */
+function renderOutstanding(
+  state: RunState,
+  findings: readonly Finding[],
+  stage: 'pending' | 'settled',
+): string {
   const body = findings
     .map(
       (f) =>
         `## ${f.title} \`${f.id}\`\n\n${f.detail}\n\n*Suggested fix:* ${f.suggested_fix}\n`,
     )
     .join('\n');
+
+  const caveat = verificationCaveat(state);
+  const verification =
+    stage === 'pending'
+      ? 'A final fix round addressed them. **Verification has not run yet at the time of ' +
+        'writing**; the run only completes if the gates come back clean, and this file is ' +
+        'rewritten with the outcome'
+      : caveat === null
+        ? 'A final fix round addressed them and verification still passed'
+        : `A final fix round addressed them, but ${caveat}`;
+
   return (
     `# Carried findings\n\n` +
+    // In every form, not just the pre-gate one: it says vibe wrote this file and
+    // may bring it up to date, which stays true after the first rewrite.
+    `${OUTSTANDING_OWNED}\n\n` +
     `**Run:** \`${state.id}\`\n` +
     `**Task:** ${state.task}\n\n` +
     `The last review raised ${findings.length} P1 finding(s), within \`loop.p1Tolerance\`. ` +
-    `A final fix round addressed them and verification still passed, but that round was ` +
+    `${verification}, but that round was ` +
     `deliberately **not reviewed again** - re-reviewing would reopen the loop the tolerance ` +
     `exists to close. So these were worked on, and nobody has confirmed they are gone.\n\n` +
     `Worth a human eye. Set \`loop.p1Tolerance\` to 0 to require a spotless review instead, ` +
@@ -668,8 +941,9 @@ function renderOutstanding(state: RunState, findings: readonly Finding[]): strin
 /**
  * What may appear in FOLLOW-UPS.md.
  *
- * Written against `unknown` on purpose: `loadRun` casts stored JSON with no
- * validation, so an entry in `state.deferred` is a `Finding` by assertion only.
+ * Written against `unknown` on purpose. `validateStoredState` now owns this
+ * invariant on the way in; the check remains as defence in depth, since the
+ * field is also appended to mid-run from parsed model output.
  * Severity is checked as well as `defer`, even though `parseFindings` already
  * normalises, because the artifact this feeds asserts in prose that everything
  * in it was non-blocking - and an invariant a boundary states should be one the
@@ -685,11 +959,11 @@ function isDeferrable(f: unknown): f is Finding {
 /**
  * The stored list, or null when the field is genuinely absent. Never throws.
  *
- * The `unknown` hop is the point: the declared `Finding[]` is an assertion over
- * stored JSON, and a present non-array - `null`, a string, an object - would
- * make `.filter` throw inside the code resume calls before it can reconcile
- * anything. Such a value is dirty rather than absent, so it reads as an empty
- * list and gets replaced.
+ * The `unknown` hop is defence in depth, kept now that `validateStoredState`
+ * owns the invariant on the way in: a present non-array - `null`, a string, an
+ * object - would make `.filter` throw inside the code resume calls before it can
+ * reconcile anything. Such a value is dirty rather than absent, so it reads as
+ * an empty list and gets replaced.
  */
 function storedDeferred(state: RunState): readonly unknown[] | null {
   const raw: unknown = state.deferred;
@@ -826,9 +1100,10 @@ export function writeFollowUps(state: RunState, plan: Plan): string | null {
  * on the way down for exactly this reason; this is the same thought applied to
  * the one place a run starts from stored state.
  *
- * The empty collection is deliberate: stored state is unvalidated and the
- * artifact asserts its own contents were non-blocking, so it is sanitised
- * before being rendered rather than after.
+ * The empty collection is deliberate: the artifact asserts its own contents were
+ * non-blocking, so it is sanitised before being rendered rather than after.
+ * `validateStoredState` now owns the same invariant on the way in; this stays as
+ * defence in depth.
  */
 export function reconcileFollowUps(state: RunState): string | null {
   const plan = state.plan;
@@ -956,92 +1231,310 @@ export function guardProgress(
   if (notice !== null) log.warn(notice);
 }
 
-async function prepareGit(state: RunState, cfg: Config, cwd: string): Promise<void> {
+/**
+ * Put the run on the branch it belongs on, whatever kind of pass this is.
+ *
+ * Called on every pass since #78, not only on a fresh run, and it decides what a
+ * pass needs rather than the call site deciding for it. There are three jobs
+ * here and they used to be one:
+ *
+ * 1. **A fresh run** creates and checks out its branch - unchanged.
+ * 2. **A forked run** has a branch ref `vibe fork` created without checking out
+ *    (it must not touch the user's tree), flagged by `branchPending`. This is
+ *    where it is actually checked out, before any turn is dispatched, because
+ *    this is the first moment vibe needs the tree.
+ * 3. **Any run whose stored branch exists while HEAD is somewhere else refuses.**
+ *    Job 2 leaves HEAD on the fork's branch, so resuming the *parent* afterwards
+ *    would commit the parent's work onto the child's branch - silently, and
+ *    unrecoverably by reading the log. It is a refusal rather than a warning for
+ *    that reason, with `git checkout` and `--no-branch` both named.
+ */
+async function prepareGit(
+  state: RunState,
+  cfg: Config,
+  cwd: string,
+  resume: boolean,
+): Promise<void> {
+  // A fork that has not yet been put on its branch. Checked before anything
+  // else, because every early return below would otherwise let its first turn
+  // run - and commit - on whatever happens to be checked out.
+  const owed = cfg.git.useBranch && state.branchPending === true;
+
   if (!(await git.isRepo(cwd))) {
-    log.warn('Not a git repository - running without branch isolation or commits.');
+    if (owed) {
+      throw new Escalation(
+        EXIT.ERROR,
+        `Run ${state.id} was forked onto branch "${String(state.branch)}", but ${cwd} is not a ` +
+          'git repository, so it cannot be put on it. Nothing has run. Point the run at the ' +
+          'repository it was forked in, or resume with --no-branch to run here anyway.',
+      );
+    }
+    // Only on a fresh run, as before: a resume said this once already, and
+    // repeating it every pass would be new output for an unchanged situation.
+    if (!resume) log.warn('Not a git repository - running without branch isolation or commits.');
     return;
   }
-  if (await git.isDirty(cwd)) {
+  // Fresh runs only, and not merely to keep the output identical: "they will be
+  // swept into the first commit" is a claim about a run that has not committed
+  // yet, and it is false on a resume.
+  if (!resume && (await git.isDirty(cwd))) {
     log.warn('Working tree has uncommitted changes; they will be swept into the first commit.');
   }
-  if (cfg.git.useBranch) {
+  // With branch isolation off nothing below runs, which is also what makes
+  // `vibe resume <id> --no-branch` the documented escape from the refusal.
+  if (!cfg.git.useBranch) return;
+
+  if (state.branch === null) {
+    // A run that has no branch is one that never got one - it was started with
+    // `--no-branch`, or outside a repository, or before this field existed.
+    // Creating one now would move HEAD on a run that has already done work
+    // somewhere else, which is a bigger change than the wrong-branch refusal
+    // this function exists to make. Branch creation stays a fresh-run act.
+    if (resume) return;
     const branch = `${cfg.git.branchPrefix}${state.id}`;
     await git.createBranch(cwd, branch);
     state.branch = branch;
     saveState(state);
     log.ok(`Isolated on branch ${branch}`);
+    return;
   }
-}
 
-async function maybeCommit(cfg: Config, cwd: string, message: string): Promise<void> {
-  if (!cfg.git.commitEachRound) return;
-  if (!(await git.isRepo(cwd))) return;
-  const sha = await git.commitAll(cwd, message);
-  if (sha) log.ok(`Committed ${sha}`);
+  const branch = state.branch;
+  const exists = await git.branchExists(cwd, branch);
+
+  if (!exists) {
+    // Nothing to check out, and recreating it at HEAD would fabricate a base the
+    // run never had. A fork whose ref was deleted is the stronger case: it has
+    // never been on that branch, so continuing would run it somewhere it never
+    // claimed.
+    if (owed) {
+      throw new Escalation(
+        EXIT.ERROR,
+        `Run ${state.id} was forked onto branch "${branch}", which no longer exists. ` +
+          'Nothing has run. Fork again, or resume with --no-branch to run on whatever is ' +
+          'checked out.',
+      );
+    }
+    log.warn(`The branch this run recorded ("${branch}") no longer exists - continuing on HEAD.`);
+    return;
+  }
+
+  const head = await git.currentBranch(cwd);
+  if (head === branch) {
+    // Already there. A fork resumed twice takes this path the second time.
+    if (owed) {
+      delete state.branchPending;
+      saveState(state);
+    }
+    return;
+  }
+
+  if (owed) {
+    const result = await git.checkoutBranch(cwd, branch);
+    if (!result.ok) {
+      throw new Escalation(
+        EXIT.ERROR,
+        `Run ${state.id} could not be put on its branch "${branch}": ${result.error}\n` +
+          'Nothing has run and no turn was dispatched. Commit or stash the changes in the way, ' +
+          'then resume.',
+      );
+    }
+    delete state.branchPending;
+    saveState(state);
+    log.ok(`On branch ${branch}`);
+    return;
+  }
+
+  // The stored branch exists and HEAD is elsewhere - including a detached HEAD,
+  // which `currentBranch` reports as "HEAD". Committing here would put this
+  // run's work on a branch it never claimed, which no amount of reading the log
+  // afterwards can undo.
+  throw new Escalation(
+    EXIT.ERROR,
+    `Run ${state.id} records branch "${branch}", but ${head === 'HEAD' ? 'HEAD is detached' : `"${String(head)}" is checked out`}. ` +
+      'Its commits would land on the wrong branch, so nothing has run.\n' +
+      `  git checkout ${branch}\n` +
+      'then resume - or resume with --no-branch to run on what is checked out.',
+  );
 }
 
 /**
- * Run the project's verification command.
+ * Commit the round, and say honestly what happened.
  *
- * Returns a P0 finding when it fails, or null when the code is good to review.
- * The finding is shaped like any other so it flows through the existing fix
- * loop, oscillation detection and round caps rather than needing its own.
+ * The sha used to be discarded and `null` meant both "nothing was staged" and
+ * "the commit failed"; a checkpoint has to record which, and has to record a
+ * *full* id, because it is read months later.
+ */
+async function maybeCommit(
+  cfg: Config,
+  cwd: string,
+  message: string,
+): Promise<{ sha: string | null; note: CheckpointCommitNote }> {
+  if (!cfg.git.commitEachRound) return { sha: null, note: 'commits-disabled' };
+  if (!(await git.isRepo(cwd))) return { sha: null, note: 'not-a-repo' };
+  const result = await git.commitAll(cwd, message);
+  if (result.sha === null) {
+    return { sha: null, note: result.why === 'failed' ? 'commit-failed' : 'nothing-to-commit' };
+  }
+  // A commit that succeeded but whose id is not a 40-hex object id records the
+  // absence and why, rather than a string no later reader could resolve.
+  if (!git.isFullSha(result.sha)) {
+    log.warn(`git named the new commit "${result.sha}", which is not an object id - not recorded`);
+    return { sha: null, note: 'sha-unusable' };
+  }
+  log.ok(`Committed ${result.sha.slice(0, 7)}`);
+  return { sha: result.sha, note: 'committed' };
+}
+
+/** A boundary that never commits: the checkpoint says so rather than implying a failure. */
+const NO_COMMIT = { sha: null, note: 'no-commit-in-round' } as const;
+
+/**
+ * Run the project's verification gates, in order.
+ *
+ * Returns a P0 finding for the FIRST gate that fails, or null when the code is
+ * good to review. The finding is shaped like any other so it flows through the
+ * existing fix loop, oscillation detection and round caps rather than needing
+ * its own.
+ *
+ * Three rules that are easy to get backwards (#47):
+ *
+ * - A failure STOPS the sequence. Later gates are not run: the fixer is given
+ *   one problem, and running a suite against code that does not typecheck buys
+ *   an opinion about the wrong thing.
+ * - An unavailable gate does NOT stop it. A `typecheck` gate nobody configured
+ *   must not prevent `test` from running.
+ * - `state.gateOutcomes` is RESET each call, so it always describes the most
+ *   recent pass rather than accumulating history across fix rounds. Gates behind
+ *   a failure get no entry at all: the vocabulary is what was observed.
  */
 async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Finding | null> {
-  if (!cfg.verify.enabled) return null;
+  const gates = resolveGates(cfg.verify, cwd);
+  const outcomes: GateOutcome[] = [];
+  state.gateOutcomes = outcomes;
 
-  log.step('Verifying');
-  const result = await runVerification(cwd, cfg.verify, cfg.toolchain);
-
-  if (result.skipped !== null) {
-    // Say so rather than letting silence read as a pass.
-    log.warn(`Verification skipped: ${result.skipped}`);
-    recordEvent(state, 'verify_skipped', { reason: result.skipped });
+  if (!cfg.verify.enabled) {
+    // Recorded rather than silent. "Verification is off" and "no gate ever ran"
+    // are different facts, and before this the disabled path wrote nothing at
+    // all - so a reader could not tell them apart.
+    for (const gate of gates) {
+      outcomes.push({
+        name: gate.name,
+        status: 'disabled',
+        command: gate.command,
+        runs: 0,
+        required: gate.required,
+      });
+    }
+    recordEvent(state, 'verify_disabled', { gates: gates.map((g) => g.name) });
+    saveState(state);
     return null;
   }
 
-  if (result.ok) {
-    log.ok(`Verification passed: ${result.command} (${result.runs}x)`);
-    recordEvent(state, 'verify_passed', { command: result.command, runs: result.runs });
-    return null;
-  }
+  for (const gate of gates) {
+    log.step(`Verifying: ${gate.name}`);
+    const result = await runGateCommand(cwd, gate, cfg.toolchain);
 
-  // A command that never started cannot be fixed by editing source. Stopping
-  // here costs one message; the alternative was observed burning two fix
-  // rounds asking an agent to repair a mistyped command path.
-  if (result.unlaunchable !== null) {
-    artifact(state, `verify-unlaunchable-${state.reviewRound}.txt`, result.output);
-    throw new Escalation(
-      EXIT.PREFLIGHT,
-      `The verification command could not run: ${result.unlaunchable}.\n` +
-        `Command: ${result.command}\n` +
-        'This is a configuration problem, not a defect in the code. Fix ' +
-        '--verify-command (or verify.command), then resume.',
+    if (result.unavailable !== null) {
+      // Say so rather than letting silence read as a pass - and carry on to the
+      // next gate, which may well have a command.
+      log.warn(`Gate ${gate.name} unavailable: ${result.unavailable}`);
+      // Pushed before the event, which persists: the outcome and the event that
+      // explains it then land in one write rather than two.
+      outcomes.push({
+        name: gate.name,
+        status: 'unavailable',
+        command: null,
+        runs: 0,
+        required: gate.required,
+      });
+      recordEvent(state, 'verify_unavailable', {
+        gate: gate.name,
+        reason: result.unavailable,
+        required: gate.required,
+      });
+      continue;
+    }
+
+    // A command that never started cannot be fixed by editing source. Stopping
+    // here costs one message; the alternative was observed burning two fix
+    // rounds asking an agent to repair a mistyped command path.
+    if (result.unlaunchable !== null) {
+      artifact(state, `verify-unlaunchable-${state.reviewRound}.txt`, result.output);
+      saveState(state);
+      throw new Escalation(
+        EXIT.PREFLIGHT,
+        `The ${gate.name} gate's command could not run: ${result.unlaunchable}.\n` +
+          `Command: ${result.command}\n` +
+          'This is a configuration problem, not a defect in the code. Fix ' +
+          `${cfg.verify.gates === null ? '--verify-command (or verify.command)' : `the ${gate.name} gate's command in verify.gates`}` +
+          ', then resume.',
+      );
+    }
+
+    if (result.ok) {
+      log.ok(`Gate ${gate.name} passed: ${result.command} (${result.runs}x)`);
+      outcomes.push({
+        name: gate.name,
+        status: 'passed',
+        command: result.command,
+        runs: result.runs,
+        required: gate.required,
+      });
+      recordEvent(state, 'verify_passed', {
+        gate: gate.name,
+        command: result.command,
+        runs: result.runs,
+      });
+      continue;
+    }
+
+    log.warn(
+      `Gate ${gate.name} failed: ${result.command} (attempt ${result.failedRun} of ${result.runs})`,
     );
+    outcomes.push({
+      name: gate.name,
+      status: 'failed',
+      command: result.command,
+      runs: result.runs,
+      required: gate.required,
+    });
+    recordEvent(state, 'verify_failed', {
+      gate: gate.name,
+      command: result.command,
+      failedRun: result.failedRun,
+      exitCode: result.exitCode,
+    });
+    artifact(state, `verify-failure-${state.reviewRound}.txt`, result.output);
+
+    return {
+      // A stable id, and one PER GATE: an identical failure across rounds is what
+      // oscillation detection needs to see to conclude the fixer is not making
+      // progress, and a typecheck failure alternating with a test failure is
+      // progress it could not see while both were filed as one id. A legacy
+      // config synthesizes the gate named `verification`, so this is still
+      // `verification-failing` for it - unchanged, with no special case.
+      id: `${result.name}-failing`,
+      // P0, so `loop.p1Tolerance` can never carry it. Every other finding is an
+      // opinion about the code; this one is the code not working, and a run that
+      // shipped past it would be reporting success over a failing suite.
+      severity: 'P0',
+      title: `${result.name}: ${result.command} does not pass`,
+      // Constructed in code, not parsed from a model, so it never passes
+      // through the grounding seam and can never be downgraded. Cited anyway,
+      // and at the file written one line above: the artifact is uniform, and
+      // the fixer is pointed at the output it has to read (#48).
+      evidence: [{ kind: 'artifact', path: `verify-failure-${state.reviewRound}.txt` }],
+      detail: describeFailure(result),
+      suggested_fix:
+        `Make the ${result.name} gate's command pass. If it fails only sometimes, the defect ` +
+        'is a race - fix the underlying synchronisation rather than retrying or loosening ' +
+        'the test.',
+    };
   }
 
-  log.warn(`Verification failed: ${result.command} (attempt ${result.failedRun} of ${result.runs})`);
-  recordEvent(state, 'verify_failed', {
-    command: result.command,
-    failedRun: result.failedRun,
-    exitCode: result.exitCode,
-  });
-  artifact(state, `verify-failure-${state.reviewRound}.txt`, result.output);
-
-  return {
-    // A stable id: an identical failure across rounds is what oscillation
-    // detection needs to see to conclude the fixer is not making progress.
-    id: 'verification-failing',
-    // P0, so `loop.p1Tolerance` can never carry it. Every other finding is an
-    // opinion about the code; this one is the code not working, and a run that
-    // shipped past it would be reporting success over a failing suite.
-    severity: 'P0',
-    title: `${result.command} does not pass`,
-    detail: describeFailure(result),
-    suggested_fix:
-      'Make the verification command pass. If it fails only sometimes, the defect is a race - ' +
-      'fix the underlying synchronisation rather than retrying or loosening the test.',
-  };
+  saveState(state);
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -1082,9 +1575,12 @@ export {
   codexSandbox,
   DEFAULT_ROLE_PROVIDERS,
   describedRole,
+  effortFor,
   enabledRolesFor,
   GENERATIVE_ROLES,
   holderLabel,
+  modelFor,
+  modelSource,
   providerAccess,
   providersForRoles,
   READ_ONLY_TOOLS,
@@ -1100,7 +1596,15 @@ export {
   tableFor,
   turnTimeoutMs,
 } from '@src/roles.js';
-export type { Access, Role, RoleProviders, RoleSpec, RoleTable } from '@src/roles.js';
+export type {
+  Access,
+  Role,
+  RoleProviders,
+  RoleSetting,
+  RoleSpec,
+  RoleTable,
+  RoleValue,
+} from '@src/roles.js';
 export {
   SLOTS,
   slotHasMemory,
@@ -1208,11 +1712,140 @@ export function runTurn(
  */
 function freshConversationPrefix(state: RunState, role: Role, hasMemory: boolean): string {
   if (hasMemory || !GENERATIVE_ROLES.includes(role)) return '';
-  return P.handoffContext(
-    state.handoff,
-    state.plan === null ? null : P.renderPlanDoc(state.plan),
-    state.handoffStale === true,
+  return (
+    P.handoffContext(state.handoff, planOfRecord(state, role), state.handoffStale === true) +
+    rehydratedPriorRuns(state, role)
   );
+}
+
+/**
+ * The past-run index, reattached once when a *planner* session is rehydrated
+ * (#52).
+ *
+ * `handoffContext` carries the briefing and the plan of record; it has never
+ * carried the plan prompt, so a rotation between the plan turn and a revise
+ * turn would drop the archive with no sign that it had. An ordinary revise turn
+ * reuses the session that already saw it and is not given it again.
+ *
+ * `state.plan !== null` is the discriminator, and it is exact rather than
+ * approximate: the plan turn is the only planner turn that renders the section
+ * in its own prompt, and it is dispatched while `state.plan` is still null -
+ * `runPlan` assigns it only once the turn has returned. So a memoryless first
+ * plan turn carries the section once, from `planPrompt`; every later memoryless
+ * planner turn carries it once, from here; and no turn carries it twice.
+ *
+ * Planner-gated, which bounds *injection* and not *exposure*. Under the default
+ * table the implementer shares Claude's single `main` conversation and inherits
+ * the planner's history, this section included, until a rotation clears it.
+ * That is already true of the whole plan prompt, is documented in README.md,
+ * and predates this change; separate Claude sessions per generative role is the
+ * only thing that would alter it, and that is a slot-ownership redesign rather
+ * than this change.
+ *
+ * The Codex-seated roles - the critic, the answerer and the reviewer - never
+ * see this section at all, under the default table or any other. They are
+ * separate `codex exec` processes on their own threads, so there is no history
+ * for them to inherit it through, and nothing here or in `prompts.ts` renders
+ * it into a prompt they receive. That is deliberate: the critic's job is to
+ * attack this plan against the code as it is now, and handing it the same
+ * archive invites it to relitigate past runs instead. A plan that leans on a
+ * past run cites the run id, and the critic reads the same repository (#52).
+ */
+function rehydratedPriorRuns(state: RunState, role: Role): string {
+  if (role !== 'planner' || state.plan === null) return '';
+  return P.priorRunsSection(priorRuns(state));
+}
+
+/**
+ * The plan of record as a given role must read it.
+ *
+ * The acceptance bar is the one part that differs by reader, so the *same*
+ * rendering cannot serve both generative roles. The planner is still revising
+ * the plan and must see the plan's own three-state field - what it wrote, or
+ * that it wrote nothing. The implementer is bound by the frozen snapshot, and
+ * `implementPrompt` already hands it exactly that: rehydrating from
+ * `state.plan` would put a bar the gate never approved - a later write, an
+ * in-place edit, or the legacy claim the direct prompt suppresses - directly
+ * above the approved one in the same turn, and a rotated implementer would be
+ * reading two different definitions of done.
+ */
+function planOfRecord(state: RunState, role: Role): string | null {
+  if (state.plan === null) return null;
+  return role === 'implementer'
+    ? P.renderPlanDoc(state.plan, { acceptanceCriteria: state.acceptanceCriteria })
+    : P.renderPlanDoc(state.plan);
+}
+
+/**
+ * Say which setting named this turn's model, on the way out of a failure.
+ *
+ * A user who set `roles.reviewer.model` and is shown `codex.model` edits the
+ * wrong line - and since #60 the two keys can hold different strings, so the
+ * provider key is no longer a safe thing to name. Nothing here classifies the
+ * failure: the note states what the turn ran and where the name came from,
+ * which is true of a timeout, a rate limit and an unknown model alike. There is
+ * deliberately no retry and no fallback to the provider's model - a model the
+ * user named and vibe silently replaced is the failure this key's design is
+ * strict to prevent.
+ *
+ * Added only where the role named a model of its own, so no run that sets
+ * nothing has its error text changed.
+ *
+ * The error object itself is rethrown, never wrapped: `charge.ts` keys a failed
+ * turn's spend in a WeakMap on identity, the retry loop tests `instanceof
+ * RateLimitError` and cli.ts tests `instanceof Escalation`. cli.ts prints
+ * `err.stack ?? err.message`, so the stack's first line - which is the message
+ * as it stood at construction - is amended alongside the message, or the note
+ * never reaches the reported failure at all.
+ *
+ * Applied from a `try`/`catch` around the turn's existing `await` rather than
+ * from a wrapper function, and that is not a style choice: a wrapper would put
+ * one more promise between a provider's result and that turn's accounting, and
+ * `turn-seam.test.ts` measures that distance in microtasks because a session
+ * rotation running concurrently can land in the gap. A `catch` costs nothing on
+ * the path that succeeds.
+ */
+function noteModelProvenance(err: unknown, role: Role, cfg: Config, roles: RoleTable): unknown {
+  // The guard that keeps a run setting nothing byte-identical: no per-role
+  // model, no note.
+  if (roles[role].model === undefined) return err;
+  const note = `[this turn ran ${modelSource(role, roles)} = "${modelFor(role, cfg, roles)}"]`;
+  if (!(err instanceof Error) || err.message.includes(note)) return err;
+  // Read before the message is changed, and this order is the whole of it: V8
+  // builds `stack` lazily on first access, from the message as it stands at
+  // that moment. Touching `message` first and `stack` second therefore appends
+  // the note to a first line that already had it - which is exactly what a
+  // throwaway script against dist/ showed, twice, before this was reordered.
+  const stack = typeof err.stack === 'string' ? err.stack : null;
+  err.message = `${err.message} ${note}`;
+  if (stack !== null) {
+    err.stack = stack.includes(note) ? stack : stack.replace(/^[^\n]*/, (first) => `${first} ${note}`);
+  }
+  return err;
+}
+
+/**
+ * The parent conversation this turn must fork, or null - recording the attempt
+ * before the child is spawned.
+ *
+ * ONE write, and it happens *before* the turn: the counter and the disclosure it
+ * justifies land together, so no interruption can leave a state carrying
+ * `attempts: 2` without the `fork_retried` event beside it, or the event without
+ * the counter.
+ *
+ * The counter is not decoration. A Codex thread id is provider-minted, so a
+ * process that dies between the provider returning and the accounting write
+ * loses the id and the next pass forks again - leaving one orphaned thread on
+ * the provider's side. That is bounded and it is disclosed here, rather than
+ * being made invisible.
+ */
+function noteFork(state: RunState, cfg: Config, slot: SlotName): string | null {
+  const forkFrom = slotForkParent(state, cfg, slot);
+  if (forkFrom === null) return null;
+  const attempt = noteSlotForkAttempt(state, slot);
+  if (attempt > 1) stageEvent(state, 'fork_retried', { slot, parentId: forkFrom, attempt });
+  saveState(state);
+  return forkFrom;
 }
 
 async function claudeDispatch(
@@ -1224,43 +1857,73 @@ async function claudeDispatch(
   turn: ClaudeTurnFn,
 ): Promise<TurnOutcome> {
   const slot = slotForRole(req.role, roles);
+  // The role's, falling back to the provider's - which is what every role on a
+  // string value still gets, and what every site below used to read directly.
+  // One resolution, used for the spawn, the measurement and the rotation
+  // decision, so those three cannot disagree about which model this turn is.
+  const model = modelFor(req.role, cfg, roles);
 
   // A rotation that could not be overlapped with Codex work happens here, at a
-  // turn boundary - never mid-turn.
-  if (shouldRotate(state, cfg, roles)) await rotateSession(state, cfg, turn, roles);
+  // turn boundary - never mid-turn. Asked with *this* turn's model rather than
+  // the rotating role's: the question is whether the conversation is too full
+  // for the turn about to use it, and the reset that follows has to tag the
+  // model the next measurement will be taken under. Where the planner and the
+  // implementer name different models this is the boundary that fires once.
+  if (shouldRotate(state, cfg, roles, model)) {
+    await rotateSession(state, cfg, turn, roles, model);
+  }
 
-  const resume = slotHasMemory(state, cfg, slot);
-  const prompt = freshConversationPrefix(state, req.role, resume) + req.prompt;
+  const forkFrom = noteFork(state, cfg, slot);
+  // A fork is not a resume: `--fork-session` copies the parent into a new
+  // session rather than continuing one, so `--resume` alone would continue the
+  // parent's own conversation and put two runs in it.
+  const resume = forkFrom === null && slotHasMemory(state, cfg, slot);
+  // Continuity, not `resume`: a forked conversation arrives holding the
+  // parent's context, so greeting it as a fresh one would be false.
+  const prompt = freshConversationPrefix(state, req.role, slotContinuity(state, cfg, slot)) + req.prompt;
 
-  const result = await withRateLimitRetry(state, cfg, req.label, 'claude', () =>
-    turn({
-      prompt,
-      sessionId: ensureSlotId(state, slot),
-      resume,
-      permissionMode: claudePermission(access),
-      model: cfg.claude.model,
-      effort: cfg.claude.effort,
-      cwd: req.cwd,
-      jsonSchema: req.jsonSchema,
-      tools: req.tools,
-      timeoutMs: req.timeoutMs,
-      progress: progressOptions(state, cfg, req.label),
-    }),
-  );
+  // The `await` a plain assignment would have done, wrapped so a failure can say
+  // which setting named the model it ran. Outside the retry, so a turn that is
+  // waited out and retried is annotated once, when it finally gives up.
+  let result: ClaudeTurnResult;
+  try {
+    result = await withRateLimitRetry(state, cfg, req.label, 'claude', () =>
+      turn({
+        prompt,
+        sessionId: ensureSlotId(state, slot),
+        resume,
+        ...(forkFrom === null ? {} : { forkFrom }),
+        permissionMode: claudePermission(access),
+        model,
+        effort: effortFor(req.role, cfg, roles),
+        cwd: req.cwd,
+        jsonSchema: req.jsonSchema,
+        tools: req.tools,
+        timeoutMs: req.timeoutMs,
+        progress: progressOptions(state, cfg, req.label, model),
+      }),
+    );
+  } catch (err: unknown) {
+    throw noteModelProvenance(err, req.role, cfg, roles);
+  }
 
   // The slot's marker, not its id: this turn returning is the only evidence
   // that the conversation exists at all.
   markSlotStarted(state, cfg, slot, result.sessionId);
+  // Staged, NOT persisted here - see `clearSlotFork` and `applyCharge` below.
+  if (forkFrom !== null) clearSlotFork(state, slot);
   // Tagged with the model that produced it: the ratio is a fraction of this
   // model's window and means nothing under another one. Through the shared seam
   // so the rotation turn in context.ts cannot drift out of step with this one.
-  recordTurnContext(state, cfg.claude.model, result.usage);
+  recordTurnContext(state, model, result.usage);
 
-  const measured = measuredRatio(state, cfg.claude.model);
+  const measured = measuredRatio(state, model);
   const ctx = result.usage ? `, ctx ${(result.usage.ratio * 100).toFixed(0)}%` : '';
   applyCharge(state, cfg, {
     costUsd: result.costUsd,
     tokens: result.tokens.total,
+    provider: 'claude',
+    label: req.label,
     event: {
       type: 'claude_turn',
       data: {
@@ -1366,6 +2029,28 @@ function describeReset(err: RateLimitError): string {
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * What previous runs on this repository decided, for the planner's index (#52).
+ *
+ * The filesystem read belongs here rather than in `prompts.ts`, which renders
+ * and does not read. The current run is excluded because its own directory
+ * exists before the planning turn is dispatched - `createRun` mkdirs and saves
+ * state first - so without the filter the planner would be shown the run
+ * reading the index, and a repo with no prior runs could never occur.
+ *
+ * `listRuns` already never throws, already lists an unreadable run rather than
+ * dropping the listing, and already sorts newest-first. The catch is the last
+ * line of the same rule: a run's own record must never be able to stop it
+ * planning, so anything unexpected here is absence, not an error.
+ */
+function priorRuns(state: RunState): readonly RunSummary[] {
+  try {
+    return listRuns(state.targetDir, { exclude: state.id, limit: P.PRIOR_RUN_LIMIT });
+  } catch {
+    return [];
+  }
+}
+
 async function runPlan(
   state: RunState,
   cfg: Config,
@@ -1379,7 +2064,13 @@ async function runPlan(
     cfg,
     {
       role: 'planner',
-      prompt: P.planPrompt(state.task, state.extraContext, state.environment, roles),
+      prompt: P.planPrompt(
+        state.task,
+        state.extraContext,
+        state.environment,
+        roles,
+        priorRuns(state),
+      ),
       cwd,
       label: 'plan',
     },
@@ -1431,6 +2122,9 @@ async function revisePlan(
         // plan, and a session rotated concurrently with the critique would
         // otherwise re-derive `out_of_scope` from nothing.
         outOfScope: state.plan?.out_of_scope,
+        // And the bar, for the same reason: a revision returns the whole plan,
+        // so a bar it is not shown is a bar it re-derives or drops.
+        acceptanceCriteria: state.plan?.acceptance_criteria,
         round: state.planRound,
       }),
       cwd,
@@ -1458,14 +2152,24 @@ async function revisePlan(
   // it immediately - including deleting it when this revision dropped the last
   // out-of-scope item and nothing has been deferred.
   writeFollowUps(state, plan);
+  // After the artifact and its save, so the snapshot describes a round whose
+  // record is complete. No commit here: the planning phase does not touch the
+  // tree, and the note says that rather than implying a failure.
+  writeCheckpoint(state, 'plan-round', NO_COMMIT);
   return plan;
 }
 
 /**
- * Every Codex call goes through here so the run keeps a single Codex thread.
- * Continuity matters for the oscillation guard: a stateless reviewer re-derives
- * a still-unresolved issue under a fresh id each round, which reads as progress
- * when it is actually the same objection.
+ * Every Codex call goes through here, so each Codex conversation is continued by
+ * the turns that belong to it and by no others.
+ *
+ * Which conversation that is comes from the role's slot and nothing else, which
+ * is what lets the critic and the reviewer hold separate threads (#45) without a
+ * branch here. Continuity within a conversation matters for the oscillation
+ * guard: a stateless reviewer re-derives a still-unresolved issue under a fresh
+ * id each round, which reads as progress when it is actually the same objection.
+ * Continuity *between* the two would be the defect - a reviewer that remembers
+ * approving the plan is not reviewing the code independently of it.
  */
 async function codexDispatch(
   state: RunState,
@@ -1476,33 +2180,53 @@ async function codexDispatch(
   turn: CodexTurnFn,
 ): Promise<TurnOutcome> {
   const slot = slotForRole(req.role, roles);
-  const prompt = freshConversationPrefix(state, req.role, slotHasMemory(state, cfg, slot)) + req.prompt;
+  const forkFrom = noteFork(state, cfg, slot);
+  const prompt = freshConversationPrefix(state, req.role, slotContinuity(state, cfg, slot)) + req.prompt;
 
   // Through the same retry the Claude turns use, so a Codex rate limit gets the
   // wait, the maxWaitMinutes cap and the resumable exit that already exist
   // rather than a second implementation of all three.
-  const { structured, raw, sessionId, tokens } = await withRateLimitRetry(
-    state,
-    cfg,
-    req.label,
-    'codex',
-    async () => {
+  // As on the Claude side: the ordinary `await`, in a `try` so the failure can
+  // name where this turn's model came from.
+  let outcome: CodexTurnResult;
+  try {
+    outcome = await withRateLimitRetry(state, cfg, req.label, 'codex', async () => {
       await checkCodexLimits(state, cfg, req.cwd, req.label);
       return turn({
         prompt,
         schema: spec.schema,
         schemaName: req.label,
         artifactDir: artifactDir(state, 'codex'),
-        model: cfg.codex.model,
-        effort: cfg.codex.effort,
+        // As with effort below: the role's where it named one, this provider's
+        // otherwise (#60). The two Codex conversations are already separate
+        // threads, so they can now run two different models - which is what
+        // `roleWarnings` W5 says out loud when `codex.contextWindow` is set,
+        // because one window cannot describe both.
+        model: modelFor(req.role, cfg, roles),
+        // As on the Claude side: the role's effort where it named one, and this
+        // provider's otherwise. Two Codex roles can now differ, which is the
+        // whole of #46 - the reviewer's thread and the judge's are already
+        // separate conversations, and they no longer have to think alike.
+        effort: effortFor(req.role, cfg, roles),
         sandbox: codexSandbox(spec.access, cfg),
         cwd: req.cwd,
         timeoutMs: req.timeoutMs,
-        sessionId: slotResumeId(state, cfg, slot),
+        // One or the other, never both: a fork owed outranks a resume, and a
+        // slot owing a fork has never started, so it has no id to resume.
+        ...(forkFrom === null
+          ? { sessionId: slotResumeId(state, cfg, slot) }
+          : { forkFrom }),
+        // Deliberately unchanged: this resolves a *Claude* window for a Codex
+        // turn, which predates #60 and is a separate defect. Handing it this
+        // role's model would half-fix it - a Codex model has no entry in either
+        // window source - so it is left exactly as wrong as it was.
         progress: progressOptions(state, cfg, req.label),
       });
-    },
-  );
+    });
+  } catch (err: unknown) {
+    throw noteModelProvenance(err, req.role, cfg, roles);
+  }
+  const { structured, raw, sessionId, tokens } = outcome;
 
   // The marker is set whatever the run does with the id: a turn either succeeded
   // or it did not. `idChanged` is false when this run is not carrying the
@@ -1510,8 +2234,15 @@ async function codexDispatch(
   // already stored - so the write and the line below happen exactly where they
   // always did.
   const { idChanged, first } = markSlotStarted(state, cfg, slot, sessionId ?? null);
+  // Staged, NOT persisted here. `applyCharge` below makes one write carrying the
+  // started marker, this clear, the in-flight disposal, the totals and the turn
+  // event - so a kill cannot leave the fork durably done while the turn it paid
+  // for is uncharged, which #77 established cannot be reconstructed for Codex.
+  if (forkFrom !== null) clearSlotFork(state, slot);
   if (idChanged) {
-    saveState(state);
+    // Suppressed on the fork path for the same reason: the provider-minted id
+    // rides the accounting write rather than a save of its own.
+    if (forkFrom === null) saveState(state);
     if (first) log.detail(`codex thread ${slotId(state, slot) ?? ''}`);
   }
 
@@ -1537,6 +2268,8 @@ async function codexDispatch(
   applyCharge(state, cfg, {
     costUsd: null,
     tokens: tokens.total,
+    provider: 'codex',
+    label: req.label,
     event: {
       type: 'codex_turn',
       data: {
@@ -1614,6 +2347,15 @@ async function checkCodexLimits(
 /**
  * Whether the conversation this role talks through already carries the run.
  *
+ * `slotContinuity`, NOT `slotHasMemory` (#78). The two answer different
+ * questions and only one of them is the prompt's: `slotHasMemory` decides
+ * whether to send a resume flag, and a slot that still owes a fork has no
+ * successful turn on it, so it answers false. But the conversation the fork is
+ * about to create really does hold the parent's history - so telling the critic
+ * or the reviewer it has never seen this run makes it re-derive findings it
+ * already made, under new ids, which reads as churn rather than as the
+ * repetition it is.
+ *
  * The `roles` parameter is defaulted rather than absent so this cannot become a
  * second site that ignores an injected table; the two call sites are top-level
  * loop steps, which are never handed one.
@@ -1624,7 +2366,67 @@ function roleHasMemory(
   role: Role,
   roles: RoleTable = rolesFor(cfg),
 ): boolean {
-  return slotHasMemory(state, cfg, slotForRole(role, roles));
+  return slotContinuity(state, cfg, slotForRole(role, roles));
+}
+
+/**
+ * The path convention the *reporting* agent's shell uses, or null when this run
+ * has no probe to say.
+ *
+ * A citation comes back in the agent's own convention - `/c/repo/src/run.ts`
+ * from Claude's Git Bash, `C:\repo\src\run.ts` from Codex's PowerShell - and
+ * grounding has to open the file. Read from the role table rather than from the
+ * provider name, so a config that seats the reviewer on Claude is asked about
+ * Claude.
+ */
+function pathStyleFor(state: RunState, role: Role, roles: RoleTable): PathStyle | null {
+  const provider = roles[role].provider;
+  return state.environment?.agents.find((a) => a.provider === provider)?.pathStyle ?? null;
+}
+
+/**
+ * The grounding seam: one place, both findings-producing turns.
+ *
+ * Here rather than at the call sites, because everything that reads a severity
+ * happens after this - the artifact, `collectDeferred`, `recordPendingFindings`
+ * and the gate - and a downgrade that landed later would be a downgrade a
+ * resume could not see.
+ *
+ * `log.warn` as well as the event: this is the run telling the user that a
+ * reviewer asserted something it could not point at, which is worth seeing at
+ * the time and not only in a file (#48).
+ */
+function groundAndRecord(
+  state: RunState,
+  cwd: string,
+  role: Role,
+  roles: RoleTable,
+  found: FindingsReport,
+): FindingsReport {
+  const { report, downgraded } = groundFindings(
+    found,
+    cwd,
+    state.dir,
+    pathStyleFor(state, role, roles),
+  );
+  for (const f of downgraded) {
+    // Set by construction in `groundFindings`; narrowed rather than asserted.
+    const d = f.downgraded;
+    if (d === undefined) continue;
+    log.warn(`Downgraded ${f.id} from ${d.from} to P2 - ${d.reason}`);
+    recordEvent(state, 'finding_downgraded', {
+      id: f.id,
+      from: d.from,
+      reason: d.reason,
+      // The kinds it *offered*, which is the fact a human reads this for: a
+      // blocker that rested only on `external` is visible for what it was.
+      // Read through the same tolerant reader as everything else that meets an
+      // unvalidated `evidence`, so an unusable entry is absent from the list
+      // rather than an exception in the middle of recording the downgrade.
+      kinds: [...new Set(readEvidence(f.evidence).map((e) => e.kind))],
+    });
+  }
+  return report;
 }
 
 async function runCritique(
@@ -1649,6 +2451,9 @@ async function runCritique(
         roleHasMemory(state, cfg, 'critic', roles),
         state.environment,
         roles,
+        // The plan's own bar, not a snapshot: this runs before the gate, and
+        // the critic is what decides whether the bar is any good.
+        plan.acceptance_criteria,
       ),
       cwd,
       label: `critique-${state.planRound}`,
@@ -1656,7 +2461,7 @@ async function runCritique(
     turns,
     roles,
   );
-  return parseFindings(readStructured(outcome));
+  return groundAndRecord(state, cwd, 'critic', roles, parseFindings(readStructured(outcome)));
 }
 
 async function runReview(
@@ -1668,31 +2473,171 @@ async function runReview(
   turns: AgentTurns,
 ): Promise<FindingsReport> {
   log.step(`${holderLabel('reviewer', roles)} is reviewing the implementation`);
-  const diff = await git.diffSince(cwd, state.baseSha);
-  const files = await git.changedFiles(cwd, state.baseSha);
+  const { chunks, files } = await git.diffChunks(cwd, state.baseSha);
 
-  const outcome = await runTurn(
-    state,
-    cfg,
-    {
-      role: 'reviewer',
-      prompt: P.reviewPrompt(
-        diff,
-        files,
-        plan.plan_md,
-        plan.out_of_scope,
-        state.reviewRound + 1,
-        roleHasMemory(state, cfg, 'reviewer', roles),
-        state.environment,
-        roles,
-      ),
-      cwd,
-      label: `review-${state.reviewRound}`,
-    },
-    turns,
-    roles,
+  // The round's own report, before the round is bought again. A process that
+  // died between the artifact write and `recordPendingFindings` leaves a
+  // complete-looking `code-review-<n>.json` for a round the resume is about to
+  // review from scratch, and with several turns in a round that window is
+  // wider. The file is rewritten by the same code path on success (#49).
+  removeArtifact(state, `code-review-${state.reviewRound}.json`);
+
+  // Cleared, not written: a coverage record published before the first turn
+  // would claim the reviewer saw every file the instant before that turn failed,
+  // which is the shape of overclaim this field exists to prevent.
+  state.reviewCoverage = undefined;
+  saveState(state);
+
+  // Read once, before the loop, and handed to EVERY part. Each part sees a
+  // slice of the diff while the report describes the whole change, so a concern
+  // about a file in part 3 is context a reviewer of part 1 may still need - and
+  // a report is small next to a 400k-character diff (#49, #50).
+  const report = latestReport(state);
+
+  if (chunks.length > 1) {
+    log.info(`Diff too large for one turn - reviewing ${files.length} file(s) in ${chunks.length} parts`);
+    // How the round was SPLIT, which is true before any turn runs. What was
+    // actually seen is `reviewCoverage`, recorded per completed part below.
+    recordEvent(state, 'review_chunked', { chunks: chunks.length, files: files.length });
+  }
+
+  const reports: FindingsReport[] = [];
+  // Accumulated here rather than read back off `state`: the record is what the
+  // reviewer has been handed so far, and reading the field it was just cleared
+  // to would make that a round trip through a value this function owns.
+  const seen: string[] = [];
+  const cut: string[] = [];
+  for (const [i, chunk] of chunks.entries()) {
+    // Read inside the loop: the slot is marked started by the turn that
+    // succeeds, so with a persistent thread part 1 is memoryless and parts 2..n
+    // continue the conversation without anything new (#45).
+    const hasMemory = roleHasMemory(state, cfg, 'reviewer', roles);
+    // And separately from it: lifetime memory is not this round's parts. Part 1
+    // of a later round resumes a thread that has never seen the other parts of
+    // *this* round, and telling it not to repeat findings for them would ask it
+    // to stay quiet about a diff it was never shown.
+    const carriesEarlierParts = i > 0 && hasMemory;
+    const chunked = chunks.length > 1;
+    const outcome = await runTurn(
+      state,
+      cfg,
+      {
+        role: 'reviewer',
+        prompt: P.reviewPrompt(
+          chunk.diff,
+          chunk.files,
+          plan.plan_md,
+          plan.out_of_scope,
+          state.reviewRound + 1,
+          hasMemory,
+          state.environment,
+          roles,
+          // The snapshot, and deliberately not `?? []`: the reviewer's rendering
+          // is three-state, so collapsing an absent bar to an empty one would
+          // have a legacy run claim done-ness is unobservable.
+          state.acceptanceCriteria,
+          // Absent for the ordinary round - one chunk, nothing cut - which is
+          // what keeps that prompt byte-identical. Present when a file was cut
+          // even in a single chunk, because that reviewer is the one that most
+          // needs telling to go and read the rest.
+          chunked || chunk.truncated.length > 0
+            ? {
+                index: i + 1,
+                total: chunks.length,
+                files: chunk.files,
+                truncated: chunk.truncated,
+                carriesEarlierParts,
+              }
+            : undefined,
+          // Every part, deliberately - see where it is read above. Never
+          // `undefined`: that is the "no caller statement" state which renders
+          // nothing, and a real round must always say something about the
+          // report, even when the thing it says is that there is none (#50).
+          report,
+        ),
+        cwd,
+        // Unchanged when there is one chunk: this string is Codex's output name
+        // and the retry label, and a round that did not need splitting must look
+        // exactly as it always did.
+        label: chunked ? `review-${state.reviewRound}-part${i + 1}` : `review-${state.reviewRound}`,
+      },
+      turns,
+      roles,
+    );
+    reports.push(
+      groundAndRecord(state, cwd, 'reviewer', roles, parseFindings(readStructured(outcome))),
+    );
+
+    // After the turn, never before it: this says what the reviewer was actually
+    // handed. A round that stops here leaves a record of the parts it got.
+    seen.push(...chunk.files);
+    cut.push(...chunk.truncated);
+    state.reviewCoverage = {
+      round: state.reviewRound + 1,
+      chunks: i + 1,
+      files: [...seen],
+      truncated: [...cut],
+    };
+    saveState(state);
+    for (const file of chunk.truncated) {
+      log.warn(`${file} is larger than one review turn - the reviewer was shown a cut diff`);
+      recordEvent(state, 'review_file_truncated', { file });
+    }
+  }
+
+  const [only] = reports;
+  if (reports.length === 1 && only !== undefined) return only;
+  return mergeReviewReports(reports);
+}
+
+/** Most blocking first, so a later chunk can only ever raise a finding's severity. */
+const SEVERITY_RANK = {
+  P0: 0,
+  P1: 1,
+  P2: 2,
+  P3: 3,
+} satisfies Record<Severity, number>;
+
+/**
+ * Several parts of one round, read as one report.
+ *
+ * The rule is fail-closed and order-independent: the most blocking severity
+ * wins, and a tie keeps the first occurrence - which is chunk order, which is
+ * git's file order, so the same change merges the same way on every run.
+ *
+ * The `defer` invariant is re-applied afterwards because `parseFindings` can
+ * only enforce it per chunk: a finding deferred at P2 in one part and raised at
+ * P1 in another would otherwise arrive at P1 still carrying `defer: true`, an
+ * invariant the boundary states and would then stop keeping.
+ *
+ * `verdict` is honest bookkeeping and nothing more. Nothing in this loop reads
+ * it - the gate counts severities - so do not build anything on it.
+ */
+function mergeReviewReports(reports: readonly FindingsReport[]): FindingsReport {
+  const merged = new Map<string, Finding>();
+  for (const report of reports) {
+    for (const finding of report.findings) {
+      const seen = merged.get(finding.id);
+      if (seen === undefined || SEVERITY_RANK[finding.severity] < SEVERITY_RANK[seen.severity]) {
+        merged.set(finding.id, finding);
+      }
+    }
+  }
+
+  const findings = [...merged.values()].map((f) =>
+    f.severity === 'P0' || f.severity === 'P1' ? { ...f, defer: false } : f,
   );
-  return parseFindings(readStructured(outcome));
+
+  const summary = reports
+    .map((r, i) => (r.summary === '' ? '' : `Part ${i + 1}/${reports.length}: ${r.summary}`))
+    .filter((s) => s !== '')
+    .join('\n\n');
+
+  return {
+    verdict: reports.some((r) => r.verdict === 'REVISE') ? 'REVISE' : 'APPROVE',
+    summary,
+    findings,
+  };
 }
 
 /**

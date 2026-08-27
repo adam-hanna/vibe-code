@@ -1,0 +1,348 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { acquireLock, describeLiveness, livenessOf, lockPath, readLock } from '@src/lock.js';
+import type { RunLock } from '@src/lock.js';
+import { createRun, listRuns, statePresence } from '@src/run.js';
+import type { RunState } from '@src/types.js';
+
+/**
+ * Whether a run is being worked on, and what a listing may say about it.
+ *
+ * The question a timestamp cannot answer. `lastActivityAt` says *quiet*, and
+ * quiet is not dead: the verification gate runs the project's test command three
+ * times at up to fifteen minutes each, entirely outside any heartbeat, so a
+ * healthy run is routinely silent for longer than any threshold would allow. A
+ * pid says *gone*. These cases pin the four answers the pair produces, and the
+ * two promises `listRuns` has to keep while producing them (#77).
+ */
+
+function scratch(): { targetDir: string; state: RunState } {
+  const targetDir = mkdtempSync(path.join(tmpdirSafe(), 'vibe-lock-'));
+  return { targetDir, state: createRun(targetDir, 'run lock', true) };
+}
+
+function tmpdirSafe(): string {
+  return os.tmpdir();
+}
+
+/** Write a lock by hand, as another process would have left it. */
+function plant(dir: string, over: Partial<RunLock>): RunLock {
+  const lock: RunLock = {
+    pid: process.pid,
+    host: os.hostname(),
+    startedAt: new Date().toISOString(),
+    id: 'planted',
+    token: 'planted-token',
+    ...over,
+  };
+  writeFileSync(lockPath(dir), JSON.stringify(lock, null, 2), 'utf8');
+  return lock;
+}
+
+/**
+ * A pid that is definitely not running.
+ *
+ * A process that has already exited, rather than a number picked out of the air:
+ * an invented pid can be recycled onto something live between the pick and the
+ * probe, which would make this case fail for a reason that has nothing to do
+ * with what it is testing.
+ */
+function deadPid(): number {
+  const out = execFileSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], {
+    encoding: 'utf8',
+  });
+  return Number(out.trim());
+}
+
+/** Everything in a directory, with sizes, for proving nothing was written. */
+function snapshotDir(dir: string): string {
+  return readdirSync(dir)
+    .sort()
+    .map((f) => `${f}:${statSync(path.join(dir, f)).size}`)
+    .join('|');
+}
+
+// ---- the four verdicts ------------------------------------------------------
+
+test('no lock at all is not running', () => {
+  const { state } = scratch();
+
+  const verdict = livenessOf(state.dir);
+
+  assert.equal(verdict.liveness, 'not-running');
+  assert.equal(verdict.lock, null);
+});
+
+test('a lock held by a live process on this host is running', () => {
+  const { state } = scratch();
+  plant(state.dir, { pid: process.pid });
+
+  const verdict = livenessOf(state.dir);
+
+  assert.equal(verdict.liveness, 'running');
+  assert.equal(verdict.lock?.pid, process.pid);
+  assert.match(describeLiveness(verdict), /live process/);
+});
+
+test('a lock naming a dead pid on this host is interrupted', () => {
+  const { state } = scratch();
+  plant(state.dir, { pid: deadPid() });
+
+  const verdict = livenessOf(state.dir);
+
+  assert.equal(verdict.liveness, 'interrupted');
+  assert.match(describeLiveness(verdict), /no longer running/);
+});
+
+test('a lock from another host is unknown, because it cannot be probed', () => {
+  const { state } = scratch();
+  plant(state.dir, { host: `${os.hostname()}-elsewhere`, pid: 1 });
+
+  const verdict = livenessOf(state.dir);
+
+  // Not "not running": vibe cannot see that machine's process table, and
+  // guessing in that direction is what would license a second writer.
+  assert.equal(verdict.liveness, 'unknown');
+  assert.match(describeLiveness(verdict), /another machine/);
+});
+
+test('a lock that cannot be parsed is unknown, not absent', () => {
+  const { state } = scratch();
+  writeFileSync(lockPath(state.dir), '{"pid": 42, "host":', 'utf8');
+
+  assert.equal(livenessOf(state.dir).liveness, 'unknown');
+  assert.equal(readLock(state.dir), null);
+});
+
+test('a lock missing a field it needs is unknown too', () => {
+  const { state } = scratch();
+  writeFileSync(lockPath(state.dir), JSON.stringify({ pid: process.pid }), 'utf8');
+
+  assert.equal(livenessOf(state.dir).liveness, 'unknown');
+});
+
+test('a lock that cannot be probed at all is unknown, never not-running', () => {
+  // A path no filesystem call can even attempt: `readFileSync` rejects the null
+  // byte before it reaches the OS, so this stands in for every read that fails
+  // for a reason other than ENOENT - EACCES, EBUSY, EIO, a directory in the
+  // file's place. The distinction is the whole point: `existsSync` reports all
+  // of them as `false`, which reads as "no lock" and licenses a second writer.
+  const { state } = scratch();
+  plant(state.dir, { pid: process.pid });
+
+  const verdict = livenessOf(`${state.dir}\0`);
+
+  assert.equal(verdict.liveness, 'unknown');
+  assert.equal(verdict.lock, null);
+  assert.match(describeLiveness(verdict), /could not be read/);
+});
+
+test('a run directory whose state.json cannot be probed is a run, not an absent one', () => {
+  const { state } = scratch();
+
+  // The three answers `existsSync` collapses into two. Only the first may drop a
+  // directory from `vibe list`; the third has to keep its row so the lock beside
+  // it can still give a verdict.
+  assert.equal(statePresence(path.join(state.dir, 'no-such-file.json')), 'absent');
+  assert.equal(statePresence(path.join(state.dir, 'state.json')), 'present');
+  assert.equal(statePresence(`${path.join(state.dir, 'state.json')}\0`), 'unknown');
+});
+
+// ---- quiet is a fact about output, never a verdict --------------------------
+
+test('the quiet figure is reported when the run has one, and omitted when it does not', () => {
+  const { state } = scratch();
+  plant(state.dir, { pid: process.pid });
+
+  const withField = livenessOf(state.dir, { lastActivityAt: new Date(Date.now() - 840_000).toISOString() });
+  assert.ok(withField.quietMs !== null && withField.quietMs >= 840_000);
+  assert.match(describeLiveness(withField), /last observed activity 14m ago/);
+
+  // A run with `progress.enabled: false` maintains none of the three
+  // timestamps, and "quiet for 0m" over an absent field would be a measurement
+  // nobody took.
+  const without = livenessOf(state.dir, {});
+  assert.equal(without.quietMs, null);
+  assert.ok(!describeLiveness(without).includes('last observed activity'));
+});
+
+test('a run whose progress heartbeat is off reports no quiet figure, however old the timestamp', () => {
+  const { state } = scratch();
+  plant(state.dir, { pid: process.pid });
+  const lastActivityAt = new Date(Date.now() - 840_000).toISOString();
+
+  // The case the timestamp alone cannot see: a run that recorded activity with
+  // progress enabled and was later resumed with --no-progress keeps the stale
+  // value, and nothing is updating it any more. Reporting "quiet for 14m" off it
+  // would be a measurement nobody is taking - and the figure would keep growing.
+  const off = livenessOf(state.dir, {
+    lastActivityAt,
+    config: { progress: { enabled: false } },
+  });
+  assert.equal(off.quietMs, null);
+  assert.ok(!describeLiveness(off).includes('last observed activity'));
+
+  // Enabled explicitly, and absent entirely (a state written before the setting
+  // existed, which runs on the default) both still report it.
+  assert.ok(livenessOf(state.dir, { lastActivityAt, config: { progress: { enabled: true } } }).quietMs !== null);
+  assert.ok(livenessOf(state.dir, { lastActivityAt }).quietMs !== null);
+});
+
+// ---- what a listing may say -------------------------------------------------
+
+test('vibe list carries a verdict for every run, whatever its state.json says', () => {
+  const targetDir = mkdtempSync(path.join(tmpdirSafe(), 'vibe-lock-list-'));
+  const live = createRun(targetDir, 'live', true);
+  const dead = createRun(targetDir, 'dead', true);
+  const foreign = createRun(targetDir, 'foreign', true);
+  const quiet = createRun(targetDir, 'quiet', true);
+  const broken = createRun(targetDir, 'broken', true);
+
+  plant(live.dir, { pid: process.pid });
+  plant(dead.dir, { pid: deadPid() });
+  plant(foreign.dir, { host: `${os.hostname()}-elsewhere`, pid: 1 });
+  // A state.json that cannot be read, beside a perfectly readable lock: the two
+  // are different files answering different questions.
+  writeFileSync(path.join(broken.dir, 'state.json'), '{ not json', 'utf8');
+  plant(broken.dir, { pid: deadPid() });
+
+  const before = new Map(
+    [live, dead, foreign, quiet, broken].map((s) => [s.id, snapshotDir(s.dir)]),
+  );
+  const runs = listRuns(targetDir);
+  const row = (id: string): (typeof runs)[number] => {
+    const found = runs.find((r) => r.id === id);
+    assert.ok(found, `${id} is listed`);
+    return found;
+  };
+
+  assert.equal(row(live.id).liveness, 'running');
+  assert.equal(row(dead.id).liveness, 'interrupted');
+  assert.equal(row(foreign.id).liveness, 'unknown');
+  assert.equal(row(quiet.id).liveness, 'not-running');
+  // The row whose state could not be read still gets a verdict: "this run cannot
+  // be read" and "nobody is working on it" are answers to different questions.
+  assert.equal(row(broken.id).status, 'unreadable');
+  assert.equal(row(broken.id).liveness, 'interrupted');
+
+  // And the listing still writes nothing, which it has always promised and
+  // which the planner's past-run index depends on.
+  for (const [id, snap] of before) {
+    const dir = path.join(targetDir, '.vibe', 'runs', id);
+    assert.equal(snapshotDir(dir), snap, `${id} was written to`);
+  }
+});
+
+test('listRuns does not throw on a run directory it cannot make sense of', () => {
+  const targetDir = mkdtempSync(path.join(tmpdirSafe(), 'vibe-lock-hostile-'));
+  const run = createRun(targetDir, 'hostile', true);
+  writeFileSync(lockPath(run.dir), '  not a lock at all', 'utf8');
+  writeFileSync(path.join(run.dir, 'state.json'), '', 'utf8');
+
+  let runs: ReturnType<typeof listRuns> = [];
+  assert.doesNotThrow(() => {
+    runs = listRuns(targetDir);
+  });
+  assert.equal(runs[0]?.liveness, 'unknown');
+});
+
+// ---- acquisition and release ------------------------------------------------
+
+test('acquiring writes a lock this process can be identified by, and releasing removes it', () => {
+  const { state } = scratch();
+
+  const { ok, handle } = acquireLock(state.dir, state.id, false);
+
+  assert.equal(ok, true);
+  assert.ok(handle);
+  const written = readLock(state.dir);
+  assert.equal(written?.pid, process.pid);
+  assert.equal(written?.host, os.hostname());
+  assert.equal(written?.id, state.id);
+
+  handle.release();
+  assert.equal(existsSync(lockPath(state.dir)), false);
+});
+
+test('a live lock refuses, and --force takes it anyway', () => {
+  const { state } = scratch();
+  plant(state.dir, { pid: process.pid });
+
+  const refused = acquireLock(state.dir, state.id, false);
+  assert.equal(refused.ok, false);
+  assert.equal(refused.handle, null);
+  assert.equal(refused.verdict.liveness, 'running');
+  // Refusing must not have touched the other process's lock.
+  assert.equal(readLock(state.dir)?.token, 'planted-token');
+
+  const forced = acquireLock(state.dir, state.id, true);
+  assert.equal(forced.ok, true);
+  assert.equal(forced.handle?.forced, true);
+  // The verdict handed on is what was true BEFORE the takeover, which is what
+  // `execute` needs in order to decide it may not charge what it found.
+  assert.equal(forced.handle?.verdict.liveness, 'running');
+  forced.handle?.release();
+});
+
+test('an interrupted lock is taken without force, and is not called forced', () => {
+  const { state } = scratch();
+  plant(state.dir, { pid: deadPid() });
+
+  const { ok, handle } = acquireLock(state.dir, state.id, false);
+
+  assert.equal(ok, true);
+  assert.equal(handle?.forced, false);
+  assert.equal(handle?.verdict.liveness, 'interrupted');
+  handle?.release();
+});
+
+test('release is idempotent', () => {
+  const { state } = scratch();
+  const { handle } = acquireLock(state.dir, state.id, false);
+
+  handle?.release();
+  assert.doesNotThrow(() => handle?.release());
+  assert.equal(existsSync(lockPath(state.dir)), false);
+});
+
+test('release will not remove a lock carrying another token', () => {
+  const { state } = scratch();
+  const { handle } = acquireLock(state.dir, state.id, false);
+  // Another process forced its way in after this handle was taken.
+  plant(state.dir, { pid: process.pid, token: 'someone-elses' });
+
+  handle?.release();
+
+  assert.equal(readLock(state.dir)?.token, 'someone-elses', 'the other lock survives');
+});
+
+test('a stale handle does not remove a lock acquired later in the same process', () => {
+  // The reason the token exists at all: this process can acquire, release and
+  // acquire again, and the first handle's exit listener would otherwise unlink
+  // the second acquisition's lock.
+  const { state } = scratch();
+  const first = acquireLock(state.dir, state.id, false);
+  first.handle?.release();
+
+  const second = acquireLock(state.dir, state.id, false);
+  const token = readLock(state.dir)?.token;
+
+  first.handle?.release();
+
+  assert.equal(readLock(state.dir)?.token, token, 'the second lock is untouched');
+  second.handle?.release();
+});
+
+test('the lock a run writes is readable as JSON by anything that wants it', () => {
+  const { state } = scratch();
+  const { handle } = acquireLock(state.dir, state.id, false);
+
+  const raw: unknown = JSON.parse(readFileSync(lockPath(state.dir), 'utf8'));
+  assert.ok(raw !== null && typeof raw === 'object');
+
+  handle?.release();
+});

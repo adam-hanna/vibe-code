@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { AgentProvider } from '@src/runtime.js';
-import type { Config, RunState } from '@src/types.js';
+import type { Config, ForkedConversation, ForkPendingEntry, RunState } from '@src/types.js';
 
 /**
  * A managed conversation, with an explicit lifecycle.
@@ -37,7 +37,7 @@ import type { Config, RunState } from '@src/types.js';
  * half of one convention and half of the other.
  */
 
-export type SlotName = 'main' | 'judge';
+export type SlotName = 'main' | 'judge' | 'review';
 
 /**
  * Who mints the id.
@@ -115,11 +115,12 @@ function asId(raw: string | null | undefined): string | null {
 /**
  * A usable conversation id: a non-empty string, or null for anything else.
  *
- * Not `asId`, which is typed for ids this codebase produced. Stored state is
- * unvalidated JSON (`loadRun` casts it), so the value read back may not be a
- * string at all, and a measurement compared against a number or an object would
- * be attributed on the strength of a coincidence. Everything that is not an id
- * fails closed to null, which matches nothing.
+ * Not `asId`, which is typed for ids this codebase produced. `validateStoredState`
+ * now owns this invariant on the way in; the check remains as defence in depth,
+ * because a measurement compared against a number or an object would be
+ * attributed on the strength of a coincidence, and these fields are also written
+ * mid-run from provider output. Everything that is not an id fails closed to
+ * null, which matches nothing.
  */
 function usableId(raw: unknown): string | null {
   return typeof raw === 'string' && raw !== '' ? raw : null;
@@ -150,7 +151,21 @@ export const SLOTS: Record<SlotName, SlotSpec> = {
     // second way here would be two answers to one question.
     occupancy: null,
   },
-  /** The Codex thread the critic, answerer and reviewer share. */
+  /**
+   * The plan-side judge's Codex thread: the critic, and the answerer with it.
+   *
+   * The reviewer used to be here too, which meant the agent reviewing the code
+   * was the conversation that had argued the plan into shape and approved it.
+   * `review` below is the answer to that (#45); the answerer stays here on
+   * purpose, because answering the planner's blocking questions is plan-side
+   * work and the conversation that has argued about the plan is the right one to
+   * answer questions about it.
+   *
+   * `codexSessionId`, `codexSessionStarted`, `judgeContextTokens` and
+   * `judgeContextThread` keep their provider-shaped names. Renaming a slot is
+   * cosmetic; renaming those is a stored-state migration, and this comment does
+   * the job.
+   */
   judge: {
     provider: 'codex',
     origin: 'provider',
@@ -191,6 +206,64 @@ export const SLOTS: Record<SlotName, SlotSpec> = {
         state.judgeContextTokens = tokens;
         state.judgeContextThread = now;
       },
+      window: (cfg) => cfg.codex.contextWindow ?? null,
+    },
+  },
+  /**
+   * The reviewer's own Codex thread, so the code review is not formed inside the
+   * conversation that approved the plan.
+   *
+   * Everything here mirrors `judge` except the storage and the `started` rule:
+   * the two conversations are the same *kind* of thing, held with the same
+   * provider under the same `codex.persistSession`, and what makes them
+   * independent is that neither can read the other's id. There is no ordering
+   * between them and no handoff: a reviewer that inherited a briefing from the
+   * critique would be the defect wearing a different mechanism.
+   */
+  review: {
+    provider: 'codex',
+    origin: 'provider',
+    id: (state) => asId(state.reviewSessionId),
+    // No `?? id !== null` fallback, unlike `judge`. That fallback IS the legacy
+    // reading for a field older states wrote without a marker beside it; nothing
+    // has ever written this one, so absent means never run and the marker is the
+    // only evidence a turn happened here.
+    started: (state) => state.reviewSessionStarted === true,
+    markStarted: (state, returnedId, carryId) => {
+      state.reviewSessionStarted = true;
+      if (carryId && returnedId !== null) state.reviewSessionId = returnedId;
+    },
+    persists: (cfg) => cfg.codex.persistSession,
+    // Still nothing that rotates a Codex thread (#30): `codex exec resume` takes
+    // no session-id flag, and a second slot is not the place to invent one.
+    reset: null,
+    occupancy: {
+      read: (state) => {
+        const tokens: unknown = state.reviewContextTokens;
+        const on = usableId(state.reviewContextThread);
+        const now = usableId(state.reviewSessionId);
+        // The judge's rule, against this slot's own fields: both sides have to
+        // name the same conversation before a number here says anything. Keyed
+        // to this thread and no other, so a figure measured here can never be
+        // read as the judge's however the two runs interleave.
+        if (now === null || on === null || on !== now) return null;
+        return typeof tokens === 'number' && Number.isInteger(tokens) && tokens > 0 ? tokens : null;
+      },
+      record: (state, tokens, ranOn) => {
+        const now = usableId(state.reviewSessionId);
+        const on = usableId(ranOn);
+        // Fail closed and mutate nothing, exactly as the judge does: an
+        // unattributable measurement is not one. Writing only this slot's fields
+        // is what makes a turn here leave the judge's figure standing.
+        if (now === null || on === null || on !== now) return;
+        if (typeof tokens !== 'number' || !Number.isInteger(tokens) || tokens <= 0) return;
+        state.reviewContextTokens = tokens;
+        state.reviewContextThread = now;
+      },
+      // The same setting for both Codex conversations. `codex.contextWindow` is
+      // a fact about a model, and since #60 the two threads may name two - so
+      // this describes at most one of them, which is what `roleWarnings` W5
+      // says out loud rather than inventing a second number here.
       window: (cfg) => cfg.codex.contextWindow ?? null,
     },
   },
@@ -324,12 +397,165 @@ export function resetSlot(state: RunState, slot: SlotName): void {
   reset(state);
 }
 
+// ---- forking: the third lifecycle -------------------------------------------
+//
+// A slot has always had two lifecycle questions - does this run carry the
+// conversation, and has a turn ever succeeded on it. Forking adds a third: does
+// this slot's FIRST turn owe a fork of somebody else's conversation. It is
+// recorded per slot in `state.forkPending`, it is consumed by the first turn
+// that succeeds, and it is durably once-only because `slotForkParent` returns
+// null the moment the slot's own `started` marker is set.
+
+/**
+ * The parent conversation this slot's next turn must fork, or null.
+ *
+ * Null when the run carries no fork for this slot, when the config does not
+ * persist it (a one-shot conversation has nothing to inherit into), and - the
+ * durable half of "once" - when a turn has already succeeded here. The `started`
+ * marker is set by the same write that charges the forking turn, so a process
+ * killed before that write re-forks, and one killed after it never does.
+ */
+export function slotForkParent(state: RunState, cfg: Config, slot: SlotName): string | null {
+  const spec = SLOTS[slot];
+  if (!spec.persists(cfg)) return null;
+  if (spec.started(state)) return null;
+  return asId(state.forkPending?.[slot]?.parentId);
+}
+
+/** How many times a fork of this slot has been attempted. Zero when none is owed. */
+export function slotForkAttempts(state: RunState, slot: SlotName): number {
+  return state.forkPending?.[slot]?.attempts ?? 0;
+}
+
+/**
+ * Whether this turn's conversation carries the run's history - by resumption OR
+ * by the fork it is about to make.
+ *
+ * `slotHasMemory` answers the narrower question dispatch asks about `--resume`,
+ * and keeps its exact meaning. This is what the prompts must be told: a forked
+ * conversation really does arrive holding the parent's context, so greeting it
+ * with a fresh-conversation preamble would restate what it already knows and,
+ * worse, imply it knows nothing.
+ */
+export function slotContinuity(state: RunState, cfg: Config, slot: SlotName): boolean {
+  return slotHasMemory(state, cfg, slot) || slotForkParent(state, cfg, slot) !== null;
+}
+
+/**
+ * Record another attempt at this slot's fork, returning the new count. Does NOT
+ * save: the caller persists it together with the event that discloses it.
+ */
+export function noteSlotForkAttempt(state: RunState, slot: SlotName): number {
+  const entry = state.forkPending?.[slot];
+  if (entry === undefined) return 0;
+  entry.attempts += 1;
+  return entry.attempts;
+}
+
+/**
+ * Mark this slot's fork done, in memory only.
+ *
+ * The caller decides the write, and there is exactly one right answer: the
+ * accounting write that charges the turn which did the forking. Clearing this in
+ * a save of its own would make the fork durably complete while the turn it paid
+ * for was not yet charged, and a kill in that gap loses the spend entirely.
+ */
+export function clearSlotFork(state: RunState, slot: SlotName): void {
+  const pending = state.forkPending;
+  if (pending === undefined) return;
+  delete pending[slot];
+  if (Object.keys(pending).length === 0) delete state.forkPending;
+}
+
+export interface ForkedSlotFields {
+  /** Fields to set on the child. */
+  fields: Partial<RunState>;
+  /** Fields to DELETE from the child - absent is what "never ran" looks like. */
+  clear: (keyof RunState)[];
+  /** What each slot could or could not inherit, for the fork's provenance record. */
+  conversations: ForkedConversation[];
+}
+
+/**
+ * The conversation fields a forked run starts with, and the forks it owes.
+ *
+ * Every slot starts as a *fresh* run's would: an inherited conversation id would
+ * be the parent's own thread, and two runs writing turns into one conversation
+ * is precisely what forking exists to avoid. What is inherited is recorded in
+ * `forkPending` and made real by each slot's first turn.
+ */
+export function forkedSlotFields(parent: RunState, cfg: Config): ForkedSlotFields {
+  const conversations: ForkedConversation[] = [];
+  const pending: Partial<Record<SlotName, ForkPendingEntry>> = {};
+
+  for (const slot of Object.keys(SLOTS) as SlotName[]) {
+    const spec = SLOTS[slot];
+    const parentId = spec.id(parent);
+    if (!spec.persists(cfg)) {
+      conversations.push({ slot, parentId: null, why: 'not-persisted' });
+      continue;
+    }
+    if (!spec.started(parent) || parentId === null) {
+      // Nothing to fork: a conversation that never took a turn has no history,
+      // and one that never named an id cannot be pointed at.
+      conversations.push({ slot, parentId: null, why: 'never-started' });
+      continue;
+    }
+    conversations.push({ slot, parentId });
+    pending[slot] = { parentId, attempts: 0 };
+  }
+
+  const fields: Partial<RunState> = {
+    // `main` is client-minted, so the child's id is chosen here and persisted
+    // before any turn runs - which is what makes a re-fork after a crash target
+    // the same session rather than accumulating orphans.
+    ...initialSlotFields(),
+    ...(Object.keys(pending).length === 0 ? {} : { forkPending: pending }),
+  };
+  // The two Codex threads are provider-minted, so there is nothing to mint:
+  // ids, markers and per-thread measurements are DELETED rather than set to a
+  // value, because absent is what a conversation that has never run looks like
+  // everywhere else in this file, and `undefined` in a spread is a second
+  // spelling of it.
+  const clear: (keyof RunState)[] = [
+    'codexSessionStarted',
+    'judgeContextTokens',
+    'judgeContextThread',
+    'reviewSessionId',
+    'reviewSessionStarted',
+    'reviewContextTokens',
+    'reviewContextThread',
+  ];
+
+  // ONLY when a fork is actually owed for `main`. The parent's context ratio
+  // describes the parent's conversation; left in place, the child's first turn
+  // marks the slot started while reporting no usage of its own, and `shouldRotate`
+  // would rotate a conversation that was created moments ago. A fresh run's shape
+  // is exactly "nothing has been measured", which is the truth here.
+  //
+  // The handoff goes for the same reason and under the same condition, and the
+  // condition matters: a parent that rotated and never took a turn on the new
+  // session owes no fork at all, and its handoff is precisely the briefing the
+  // child still needs.
+  if (pending.main !== undefined) {
+    fields.contextRatio = 0;
+    fields.handoff = null;
+    clear.push('contextModel', 'contextWindow', 'handoffStale');
+  }
+
+  return { fields, clear, conversations };
+}
+
 /**
  * The slot fields a fresh run starts with.
  *
  * `codexSessionStarted` is deliberately absent rather than `false`: absent is
  * the correct reading for a slot that has never run, and it is the same state a
  * run recorded before this module presents.
+ *
+ * The `review` slot's fields are absent for the same reason, and all four of
+ * them: a fresh run and a run recorded before that conversation existed present
+ * the identical fact, which is that nothing has ever run there.
  */
 export function initialSlotFields(): Pick<
   RunState,

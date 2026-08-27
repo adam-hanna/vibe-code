@@ -1,0 +1,117 @@
+{
+  "id": "20260817-125733-implement-github-issue-1-make-vibe-aware",
+  "dir": "C:\\Users\\Adam\\Documents\\apps\\vibe-code\\.worktrees\\issue-1\\.vibe\\runs\\20260817-125733-implement-github-issue-1-make-vibe-aware",
+  "targetDir": "C:\\Users\\Adam\\Documents\\apps\\vibe-code\\.worktrees\\issue-1",
+  "task": "Implement GitHub issue #1: make vibe aware of Codex rate limits. The full brief, including the measured account/rateLimits/read payload and the app-server handshake, is in the context file. Read it first. Add tests for the new code and an npm test script, as the brief requires. The change must be additive: the existing codex exec --json path that every turn depends on must keep working unchanged, and if app-server is unavailable the run must carry on rather than fail.",
+  "sessionId": "32032427-6fa3-47d3-aed6-f9349e0a1a6f",
+  "createdAt": "2026-08-17T19:57:33.205Z",
+  "status": "planning",
+  "phase": "planning",
+  "planRound": 0,
+  "reviewRound": 0,
+  "costUsd": 0,
+  "tokensUsed": 0,
+  "rateLimitWaits": 0,
+  "baseSha": null,
+  "branch": null,
+  "p1Rounds": [],
+  "verifyRounds": [],
+  "verifyRound": 0,
+  "questionRound": 0,
+  "events": [],
+  "sessionStarted": false,
+  "planOnly": false,
+  "answeredQuestions": [],
+  "deferredQuestions": [],
+  "sessionRotations": 0,
+  "codexSessionId": null,
+  "handoff": null,
+  "contextRatio": 0,
+  "plan": null,
+  "pendingAnswers": null,
+  "extraContext": "# Issue #1: Codex rate-limit awareness via app-server\n\n## Problem\n\n`vibe` waits out Claude rate limits (`budget.waitOnRateLimit`, `withRateLimitRetry` in `src/orchestrator.ts`) but is completely blind to Codex's. On a subscription the rate-limit window — not cost — is the thing that actually stops a long unattended run, so this is the one brake with no Codex-side equivalent.\n\n## What is available\n\n`codex app-server` (experimental JSON-RPC over stdio) answers `account/rateLimits/read`. Measured response on a ChatGPT Plus account:\n\n```json\n{\n  \"rateLimits\": {\n    \"limitId\": \"codex\",\n    \"primary\": { \"usedPercent\": 15, \"windowDurationMins\": 10080, \"resetsAt\": 1787196925 },\n    \"secondary\": null,\n    \"credits\": { \"hasCredits\": true, \"unlimited\": false, \"balance\": \"974.5723860000\" },\n    \"spendControlReached\": false,\n    \"planType\": \"plus\"\n  }\n}\n```\n\nThere is also an `AccountRateLimitsUpdatedNotification` (\"sparse rolling rate-limit update\") in the protocol schema, so a client that holds the connection open gets pushed updates rather than having to poll.\n\nHandshake: `initialize` with a `clientInfo` object, then an `initialized` notification, then calls. Omitting `clientInfo` fails every subsequent call with `-32600 Not initialized`.\n\n## Proposed behaviour\n\n- Read `usedPercent` before an expensive Codex turn; if it is above a configurable threshold, stop the run resumably rather than starting work that will fail partway.\n- On `rateLimitReachedType` being non-null, wait until `resetsAt` under the existing `budget.maxWaitMinutes` cap, reusing the wait/escalate logic Claude already has.\n- Surface `usedPercent` in the run summary alongside the token totals.\n\n## Risks\n\n- `app-server` is marked **experimental** and the protocol is versioned (`v1`/`v2` schema dirs). This is a stability bet in a way `codex exec --json` is not.\n- It is a second process model — a persistent stdio JSON-RPC connection alongside the existing one-shot `codex exec` spawns.\n- `usedPercent` is an integer percent of a rolling window (10080 min = weekly here). It does not move measurably for a single turn, so it is a coarse whole-run brake, not per-turn metering.\n\n## Not a solution to\n\nCost accounting. See the \"Notes and limitations\" section of the README: no endpoint returns money, and `credits.balance` was measured not to move when subscription-metered work is done.\n\n\n---\n\n# Working constraints for this task\n\n## Tests are part of the deliverable\n\nThis repo currently has no test suite and no `test` script. As part of this\nchange:\n\n- Add tests covering the new code, especially the JSON-RPC framing and the\n  parsing of the rate-limit payload. Those are pure functions over strings and\n  objects and can be tested without spawning anything.\n- Add an npm `test` script so `npm test` runs them. Use the Node built-in test\n  runner; there are no test dependencies today and adding a framework is not\n  required.\n- Make whatever build/config changes that needs (tsconfig currently includes\n  only `src/**/*.ts`).\n- Do not spawn a real `codex app-server` from a test. It requires a logged-in\n  account, takes seconds, and hits the network. Structure the code so the\n  transport is separable from the parsing, and test the parsing.\n\nThe verification command for this run is:\n\n    npm run typecheck && npm run build && npm test\n\nAll three must pass. `npm test` currently fails with \"Missing script\", so the\ntask is not complete until that script exists and passes.\n\n## Constraints\n\n- Do not change the `codex exec --json` path in `src/codex.ts` that ordinary\n  turns depend on. This is additive.\n- Match the existing code's commenting style: comments explain why a decision\n  was made, usually citing the concrete failure that motivated it. Do not add\n  comments that restate what the line does.\n- The codebase is strict TypeScript with `noUncheckedIndexedAccess` and\n  `exactOptionalPropertyTypes`, and there is no `any` in the source. Keep it\n  that way.\n- Internal imports use the `@src/*` alias, not relative `../..` chains.\n- `app-server` is experimental. If it is unavailable or the handshake fails,\n  the run must continue unaffected rather than dying - this is an optional\n  signal, never a new failure mode.\r\n",
+  "config": {
+    "claude": {
+      "model": "opus",
+      "effort": "medium",
+      "planTimeoutMs": 1800000,
+      "implementTimeoutMs": 5400000
+    },
+    "codex": {
+      "model": "gpt-5.6-luna",
+      "effort": "xhigh",
+      "sandbox": "read-only",
+      "timeoutMs": 2700000,
+      "persistSession": true
+    },
+    "loop": {
+      "maxPlanRounds": 10,
+      "maxReviewRounds": 30,
+      "maxVerifyRounds": 3,
+      "maxQuestionRounds": 3,
+      "p1Tolerance": 1,
+      "oscillationThreshold": 3,
+      "convergenceWindow": 3
+    },
+    "budget": {
+      "maxCostUsd": 25,
+      "maxTokens": 60000000,
+      "waitOnRateLimit": true,
+      "maxWaitMinutes": 360,
+      "planShare": 0.4
+    },
+    "questions": {
+      "askCodex": true,
+      "answerNonBlocking": true,
+      "escalateOnDefer": true,
+      "escalateOnLowConfidence": true
+    },
+    "git": {
+      "useBranch": false,
+      "branchPrefix": "vibe/",
+      "commitEachRound": true
+    },
+    "context": {
+      "enabled": true,
+      "compactAboveRatio": 0.5,
+      "compactDuringCodex": true
+    },
+    "verify": {
+      "enabled": true,
+      "command": "npm run typecheck && npm run build && npm test",
+      "timeoutMs": 900000,
+      "runs": 3
+    },
+    "toolchain": {
+      "git": {
+        "probe": "git --version",
+        "phases": [
+          "plan",
+          "implement",
+          "review"
+        ]
+      },
+      "node": {
+        "probe": "node --version",
+        "phases": [
+          "implement",
+          "review"
+        ],
+        "agents": [
+          "claude"
+        ]
+      },
+      "npm": {
+        "probe": "npm --version",
+        "phases": [
+          "implement",
+          "review"
+        ],
+        "agents": [
+          "claude"
+        ]
+      }
+    },
+    "configPath": null
+  }
+}

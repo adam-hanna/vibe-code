@@ -1,6 +1,6 @@
 import { detail } from '@src/log.js';
 import { markActivity, measuredWindow } from '@src/run.js';
-import type { Config, RunState } from '@src/types.js';
+import type { Config, InFlightTurn, RunState } from '@src/types.js';
 
 /**
  * In-turn progress: what the live event stream says, and how often to say it.
@@ -22,10 +22,24 @@ export interface ProgressSnapshot {
   tokens: number;
   /** Prompt size of the most recent request: the live context proxy. */
   promptTokens: number;
+  /**
+   * Assistant message ids whose usage has already been added to `tokens`.
+   *
+   * Claude emits one `assistant` event per content block, each repeating the
+   * whole message's usage, so counting every event triples a message carrying
+   * text plus two tool_use blocks. See `parseClaudeLine`.
+   */
+  countedMessages: Set<string>;
 }
 
 export function emptySnapshot(): ProgressSnapshot {
-  return { activities: 0, lastActivity: null, tokens: 0, promptTokens: 0 };
+  return {
+    activities: 0,
+    lastActivity: null,
+    tokens: 0,
+    promptTokens: 0,
+    countedMessages: new Set(),
+  };
 }
 
 /** Returns true when the line was recognised. Never throws. */
@@ -80,6 +94,19 @@ function toolTarget(input: unknown): string | null {
  * extractTokens and adds output too, so the running figure converges on the
  * number the finished turn reports rather than being a second, differently
  * defined metric.
+ *
+ * The dedupe by `message.id` is what makes that last sentence true. Claude emits
+ * one `assistant` event per content block and repeats the whole message's usage
+ * on each, while the result envelope counts it once - so the running figure used
+ * to overstate, badly and silently. On the #60 run's killed implement turn the
+ * undeduped sum was 22,756,746 against the envelope's 17,390,262, and on its
+ * plan turn the heartbeat overstated by 99%. Deduped, the running figure matched
+ * what vibe charged to the token on all three chargeable turns of that run,
+ * which is what lets a killed turn's spend be reconstructed from it (#77).
+ *
+ * A message with no id counts as distinct: the real stream always carries one,
+ * and inventing an identity for a message that named none would merge two
+ * genuinely separate messages, which is the error in the expensive direction.
  */
 export const parseClaudeLine: LineParser = (snapshot, line) => {
   const event = asEvent(line);
@@ -105,12 +132,21 @@ export const parseClaudeLine: LineParser = (snapshot, line) => {
 
   const usage = message['usage'];
   if (isRecord(usage)) {
-    const input = num(usage['input_tokens']);
-    const output = num(usage['output_tokens']);
-    const cacheRead = num(usage['cache_read_input_tokens']);
-    const cacheCreation = num(usage['cache_creation_input_tokens']);
-    snapshot.tokens += input + output + cacheRead + cacheCreation;
-    snapshot.promptTokens = input + cacheRead + cacheCreation;
+    const id = message['id'];
+    const seen = typeof id === 'string' && id !== '' && snapshot.countedMessages.has(id);
+    if (typeof id === 'string' && id !== '') snapshot.countedMessages.add(id);
+    // Recognised either way: this event WAS a usage-bearing assistant event, and
+    // saying otherwise would make the parser's return value mean something new.
+    // Only the arithmetic is skipped, `promptTokens` included - a repeat carries
+    // the same prompt size, so re-assigning it would be a no-op with a hazard.
+    if (!seen) {
+      const input = num(usage['input_tokens']);
+      const output = num(usage['output_tokens']);
+      const cacheRead = num(usage['cache_read_input_tokens']);
+      const cacheCreation = num(usage['cache_creation_input_tokens']);
+      snapshot.tokens += input + output + cacheRead + cacheCreation;
+      snapshot.promptTokens = input + cacheRead + cacheCreation;
+    }
     recognised = true;
   }
 
@@ -213,19 +249,39 @@ export function dueForEmit(lastEmitAt: number, now: number, intervalMs: number):
  * child really spoke rather than when vibe got round to writing the file.
  *
  * `'start'` is the turn boundary, `'end'` a turn leaving while others continue,
- * and `'final'` the end-of-turn flush; all three bypass the write throttle.
- * Without `'final'`, a line arriving inside the throttle window immediately
- * before the child closed would never be persisted at all. Without `'start'`, a
- * turn that failed before saying anything left the previous turn's timestamps in
- * place, and a watcher read them as this turn's.
+ * `'final'` the end-of-turn flush, and `'failed'` the flush of a turn that
+ * threw; all of them bypass the write throttle. Without `'final'`, a line
+ * arriving inside the throttle window immediately before the child closed would
+ * never be persisted at all. Without `'start'`, a turn that failed before saying
+ * anything left the previous turn's timestamps in place, and a watcher read them
+ * as this turn's. Without `'failed'`, a turn that reported usage and then threw
+ * inside the throttle window would be charged the last figure written up to five
+ * seconds earlier - see the source rule in `markActivity`.
  */
 export interface ActivityObservation {
-  source: 'start' | 'stdout' | 'heartbeat' | 'final' | 'end';
+  source: 'start' | 'stdout' | 'heartbeat' | 'final' | 'end' | 'failed';
   at: Date;
   /** Most recent line from any live turn; null when none has spoken yet. */
   lastLineAt: Date | null;
   /** Start of the most recently started live turn; null when none is live. */
   turnStartedAt: Date | null;
+  /**
+   * What each contributing turn has spent so far, for the accounting (#77).
+   *
+   * Optional and additive: an observation that carries none says nothing about
+   * spend, and the state layer leaves the record alone rather than reading the
+   * absence as "nothing in flight".
+   */
+  turns?: readonly InFlightTurn[] | undefined;
+  /**
+   * Write even inside the throttle window.
+   *
+   * Set for the first observation in which a turn's token figure becomes
+   * non-zero. One extra write per turn, and it is the difference between
+   * recovering a turn killed in its first five seconds and recording a zero for
+   * it.
+   */
+  urgent?: boolean | undefined;
 }
 
 /** Behind an interface so a test can observe that `unref` was called. */
@@ -281,6 +337,15 @@ export interface Heartbeat {
   onLine: (line: string) => void;
   /** Persist the last line's time, ignoring the write throttle. Emits nothing. */
   flush: () => void;
+  /**
+   * Persist what this turn spent before it threw, ignoring the write throttle.
+   *
+   * The counterpart to `flush` for a turn that failed, and deliberately not the
+   * same call: `flush` records a completed turn's output time, which a failed
+   * turn has not earned. This carries the spend and nothing else, so the charge
+   * that follows reads the figure the stream actually reached (#77).
+   */
+  fail: () => void;
   stop: () => void;
 }
 
@@ -288,6 +353,16 @@ export interface Heartbeat {
 interface LiveTurn {
   startedAt: number;
   lastLineAt: number | null;
+  /** What this turn is, for the accounting record. See `InFlightTurn`. */
+  label: string;
+  provider: 'claude' | 'codex';
+  /**
+   * This turn's spend so far, or null where the provider reports none in flight.
+   *
+   * A function rather than a number because each heartbeat owns its own
+   * snapshot and the set is read from every contributor on every observation.
+   */
+  tokens: () => number | null;
 }
 
 /**
@@ -332,7 +407,19 @@ function latest(values: readonly (number | null)[]): number | null {
  * hold the event loop open, and `stop()` makes it inert for turns that threw.
  */
 export function createHeartbeat(
-  options: ProgressOptions & { parse: LineParser; unit: string },
+  options: ProgressOptions & {
+    parse: LineParser;
+    unit: string;
+    /**
+     * Whose stream this is, for the in-flight record (#77).
+     *
+     * Supplied by the adapters rather than by `progressOptions`, because the
+     * adapter is what knows which parser it is handing over - which keeps a
+     * per-role provider (#60) correct without a second place to state it, and
+     * leaves every `ProgressOptions` literal untouched.
+     */
+    provider: 'claude' | 'codex';
+  },
 ): Heartbeat {
   const {
     label,
@@ -341,6 +428,7 @@ export function createHeartbeat(
     onActivity,
     parse,
     unit,
+    provider,
     scope = DEFAULT_SCOPE,
     now = () => Date.now(),
     emit = detail,
@@ -351,11 +439,22 @@ export function createHeartbeat(
   const startedAt = now();
   const turns = liveTurnsFor(scope);
   const id = (nextTurnId += 1);
-  const self: LiveTurn = { startedAt, lastLineAt: null };
+  const self: LiveTurn = {
+    startedAt,
+    lastLineAt: null,
+    label,
+    provider,
+    // Codex reports no usage until `turn.completed`, so there is nothing to
+    // observe in flight and nothing honest to persist. A killed Codex turn is a
+    // known unknown, not a zero.
+    tokens: () => (provider === 'codex' ? null : snapshot.tokens),
+  };
   let lastEmitAt = startedAt;
   let lastLineAt: number | null = null;
   let stopped = false;
   let begun = false;
+  /** Whether this turn's spend has already been persisted once. See `urgent`. */
+  let spendSeen = false;
 
   /** Emits if the throttle allows. Notifies nobody: see the ownership rule. */
   const emitNow = (): boolean => {
@@ -390,7 +489,22 @@ export function createHeartbeat(
     return includeSelf && !turns.has(id) ? [...live, self] : live;
   };
 
-  const notify = (source: ActivityObservation['source'], includeSelf = true): void => {
+  /** What the contributing turns have spent, in the shape the state layer stores. */
+  const spend = (live: readonly LiveTurn[]): InFlightTurn[] =>
+    live.map((turn) => {
+      const tokens = turn.tokens();
+      return {
+        label: turn.label,
+        provider: turn.provider,
+        ...(tokens === null ? {} : { tokens }),
+      };
+    });
+
+  const notify = (
+    source: ActivityObservation['source'],
+    includeSelf = true,
+    urgent = false,
+  ): void => {
     try {
       const live = contributors(includeSelf);
       const line = latest(live.map((turn) => turn.lastLineAt));
@@ -400,6 +514,8 @@ export function createHeartbeat(
         at: new Date(now()),
         lastLineAt: line === null ? null : new Date(line),
         turnStartedAt: started === null ? null : new Date(started),
+        turns: spend(live),
+        ...(urgent ? { urgent } : {}),
       });
     } catch {
       // A failing state write must not take down a run either.
@@ -419,7 +535,13 @@ export function createHeartbeat(
     } catch {
       // A malformed line is not a run-ending event.
     }
-    notify('stdout');
+    // The first line that puts a figure on this turn is written immediately,
+    // once. Everything after it rides the ordinary throttle: writing per usage
+    // event would rewrite state.json thousands of times a turn, which is what
+    // the throttle exists to prevent.
+    const first = !spendSeen && (self.tokens() ?? 0) > 0;
+    if (first) spendSeen = true;
+    notify('stdout', true, first);
     emitNow();
   };
 
@@ -439,6 +561,12 @@ export function createHeartbeat(
     onLine,
     flush: () => {
       if (!stopped && lastLineAt !== null) notify('final');
+    },
+    // Unconditional where `flush` is not: a turn that threw without ever
+    // speaking still has to clear its own record, and a turn that spoke inside
+    // the throttle window has a figure the charge is about to read.
+    fail: () => {
+      if (!stopped) notify('failed');
     },
     stop: () => {
       if (stopped) return;
@@ -484,6 +612,12 @@ export async function withHeartbeat<T>(
     const result = await work();
     heartbeat?.flush();
     return result;
+  } catch (err: unknown) {
+    // Before the rethrow, so the last observed spend is in state.json and in
+    // memory by the time `chargeFailure` looks for it. Not `flush`: this records
+    // what the turn spent, never that its output completed (#77).
+    heartbeat?.fail();
+    throw err;
   } finally {
     heartbeat?.stop();
   }
@@ -507,13 +641,20 @@ export function progressOptions(
   state: RunState,
   cfg: Config,
   label: string,
+  /**
+   * Whose window the `ctx%` segment may use. Defaulted to the provider setting
+   * every caller read directly before it was a parameter, so a caller that
+   * passes nothing renders exactly what it renders today - which is what makes
+   * a per-role model (#60) reach only the turns that named one.
+   */
+  model: string = cfg.claude.model,
 ): ProgressOptions | undefined {
   if (!cfg.progress.enabled) return undefined;
   // Either source has to name this exact model: the in-process map is keyed by
   // it, and the persisted one is only returned when its `contextModel` tag
   // matches. A resumed run can therefore show `ctx%` on its first turn instead
   // of its second, without the rule changing.
-  const contextWindow = windows.get(cfg.claude.model) ?? measuredWindow(state, cfg.claude.model);
+  const contextWindow = windows.get(model) ?? measuredWindow(state, model);
   return {
     label,
     intervalMs: cfg.progress.intervalMs,

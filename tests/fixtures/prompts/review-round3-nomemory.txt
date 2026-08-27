@@ -1,0 +1,103 @@
+You are reviewing a code change against the plan it was meant to implement.
+
+This is review round 3. The change has already been revised in response to earlier findings, which are quoted below. Re-raise one with its original `id` only if it is genuinely still unresolved - do not re-litigate points that were addressed.
+
+Read the repository as needed - the diff is context, not the whole picture. Check the surrounding code the change interacts with, and run the tests if that is the fastest way to settle a question.
+
+
+
+Judge two things:
+1. **Correctness on its own terms** - bugs, security issues, race conditions, unhandled errors, resource leaks, broken edge cases.
+2. **Fidelity to the plan** - was anything silently skipped, or done differently in a way that matters?
+
+## Severity
+
+- **P0** - stop the run and fetch a human. Data loss, a security hole, or an approach that cannot be made to work. A single P0 halts everything, so use it only when carrying on would be worse than stopping.
+- **P1** - must fix. Correctness, security, data loss, or a plan requirement dropped without justification.
+- **P2** - should fix. Missing tests, error handling, maintainability.
+- **P3** - nit.
+
+The loop may carry a small number of P1s forward and settle them against the test suite rather than in discussion, so a P1 is not a demand that everything stop. It is never ignored. Do not inflate a finding to P0 to force attention: P0 is for defects where continuing is the wrong thing to do at all.
+
+Do not wave through a real defect. Reserve P1 for defects you can name a concrete failure case for, and prefer P1 over P0 for anything a test run could settle.
+
+Give each finding a stable kebab-case `id`.
+
+## Evidence
+
+Every finding must cite something. Each entry names one kind of claim:
+- `code` - this line does X. Needs `path` (a file); may add `line` and `excerpt`. Checked against the repository: the file must exist, `line` must be inside it, and `excerpt` must appear somewhere in it.
+- `artifact` - the plan does not say what happens on resume. Needs `path`, the basename of a run artifact such as `PLAN.md` or `code-review-0.json`. Checked against the run directory.
+- `absence` - no test covers this path. Needs `path`, naming the file **or directory** the thing is missing from. Only that the place exists is checked.
+- `external` - a fact about another tool, a spec, or a URL that nothing here can check. Needs `ref`. Nothing is checked.
+
+A path must name something inside the repository - or, for `artifact`, inside the run directory. Cite as many places as you like: the finding stands if **any one** entry resolves.
+
+A P0 or P1 whose evidence does not resolve is downgraded to P2 and stops blocking. It is kept, not deleted, and the downgrade is recorded with the kinds it offered. So cite the place you actually looked: an unresolvable citation costs the finding its severity, and `external` on a claim you could have pointed at in the code is visible for what it is.
+
+## Scope
+
+1. **Renaming the widget module**
+   - Why: Unrelated churn in a change about one string.
+
+The plan behind this change has drawn the boundary above. Work it declared out of scope is not a hole in the plan - it is the plan being explicit. **Demanding work beyond that boundary is a defect in your finding, not in the plan.**
+
+If you notice something real that belongs in separate work, that is worth reporting: raise it as a finding with `defer: true`, at P2 or P3. Deferring costs you the same honesty as choosing a severity does - a finding you defer is one you are saying does not have to be resolved for this change to be correct, so it can never be a P0 or a P1.
+
+If the boundary itself is wrong - this change cannot work without the thing it excluded - say *that*, at its real severity, and explain why the exclusion breaks it. An empty boundary is a claim like any other, and disputing it is legitimate.
+
+## Acceptance criteria
+
+1. **`widget()` returns the new string.** `returns-new`
+   - Check (command): npm test
+
+This is the bar the plan was approved against - the conditions the change claimed would show it worked. Check the change against it as well as against the plan's prose: a criterion the change does not meet is a finding at its true severity, and naming the criterion's `id` in the finding is what makes it concrete.
+
+There is no per-criterion verdict to report and no field to set. Your findings and their severities are the only signal this loop reads, exactly as before; the criteria are something a finding may cite, not a second scoreboard.
+
+## Review breadth
+
+Do not stop at the first instance of a defect.
+
+- **Generalise it.** For each defect, name the *class* of mistake, then look for
+  the same class elsewhere - the same wrong assumption in a sibling function,
+  the same unchecked boundary on another code path, the same pattern copied
+  into a second module. Report every site you find, in one finding that lists
+  them, rather than one site now and its twin two rounds later.
+- **Trace downstream.** Ask what depends on the defective behaviour. A caller
+  relying on the current output, a test asserting it, a documented contract
+  that would become false once it is fixed - all of that belongs in the finding.
+- **Attack the previous round's fixes.** Where a fix landed, the likeliest new
+  defect is a consequence of that fix: a narrowed condition that now excludes a
+  valid case, a changed return shape a caller still reads the old way.
+- **Prefer root causes.** Given a choice between a finding that names the
+  underlying error and one that names a symptom, report the former and list the
+  symptoms under it. Symptom-level findings produce symptom-level patches.
+
+## Files changed
+
+- src/widget.ts
+- tests/widget.test.ts
+
+## Diff
+
+```diff
+diff --git a/src/widget.ts b/src/widget.ts
+index 1111111..2222222 100644
+--- a/src/widget.ts
++++ b/src/widget.ts
+@@ -1,3 +1,4 @@
+ export function widget(): string {
+-  return 'old';
++  return 'new';
+ }
+
+```
+
+## The plan this was implementing
+
+# Widget
+
+Return the new string instead of the old one, and cover it with a test.
+
+Respond with JSON matching the required schema. No prose outside the JSON.

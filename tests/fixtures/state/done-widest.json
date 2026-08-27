@@ -1,0 +1,513 @@
+{
+  "id": "20260819-200504-implement-github-issue-32-a-convergence-",
+  "dir": "C:\\Users\\Adam\\Documents\\apps\\vibe-code\\.worktrees\\issue-32\\.vibe\\runs\\20260819-200504-implement-github-issue-32-a-convergence-",
+  "targetDir": "C:\\Users\\Adam\\Documents\\apps\\vibe-code\\.worktrees\\issue-32",
+  "task": "Implement GitHub issue #32: a convergence or budget stall discards the critique or review the run has just paid for, so a resume re-buys the identical one and the loop cannot make progress. The attached brief is authoritative - read it in full. Its decisions are already made; do not re-derive them.",
+  "sessionId": "85630de1-59d8-4df0-947f-0f0e96bcfedf",
+  "sessionStarted": true,
+  "codexSessionId": "01a01d2a-f28d-7011-9491-89e6b4dfd7d5",
+  "createdAt": "2026-08-20T03:05:04.718Z",
+  "status": "done",
+  "phase": "complete",
+  "planRound": 1,
+  "reviewRound": 2,
+  "costUsd": 30.0211,
+  "tokensUsed": 48341454,
+  "rateLimitWaits": 0,
+  "baseSha": "df05ec74c8e4e8b79e6e73753c57999ecd58b98d",
+  "branch": "vibe/20260819-200504-implement-github-issue-32-a-convergence-",
+  "p1Rounds": [
+    {
+      "signature": "8b705a23a0b3",
+      "count": 2,
+      "ids": [
+        "outstanding-recovery-before-final-fix-completion",
+        "final-fix-clear-after-commit"
+      ]
+    }
+  ],
+  "verifyRounds": [],
+  "verifyRound": 0,
+  "questionRound": 1,
+  "events": [
+    {
+      "at": "2026-08-20T03:05:52.137Z",
+      "type": "preflight-ok",
+      "repairArgs": false
+    },
+    {
+      "at": "2026-08-20T03:05:52.138Z",
+      "type": "preflight_probe",
+      "provider": "claude",
+      "tokens": 10302,
+      "costUsd": 0.0101815,
+      "turns": 1
+    },
+    {
+      "at": "2026-08-20T03:05:52.139Z",
+      "type": "preflight_probe",
+      "provider": "codex",
+      "tokens": 32446,
+      "costUsd": null,
+      "turns": 1
+    },
+    {
+      "at": "2026-08-20T03:15:47.953Z",
+      "type": "claude_turn",
+      "label": "plan",
+      "costUsd": 3.1571654999999996,
+      "tokens": 1873706,
+      "turns": 29,
+      "contextRatio": 0.113
+    },
+    {
+      "at": "2026-08-20T03:15:48.786Z",
+      "type": "codex_rate_limit",
+      "label": "answers-0",
+      "action": "proceed",
+      "usedPercent": 44,
+      "reachedType": null
+    },
+    {
+      "at": "2026-08-20T03:18:29.543Z",
+      "type": "codex_turn",
+      "label": "answers-0",
+      "tokens": 648590
+    },
+    {
+      "at": "2026-08-20T03:21:47.517Z",
+      "type": "claude_turn",
+      "label": "revise-1",
+      "costUsd": 0.9402355,
+      "tokens": 540622,
+      "turns": 5,
+      "contextRatio": 0.135
+    },
+    {
+      "at": "2026-08-20T03:21:48.020Z",
+      "type": "codex_rate_limit",
+      "label": "critique-1",
+      "action": "proceed",
+      "usedPercent": 44,
+      "reachedType": null
+    },
+    {
+      "at": "2026-08-20T03:32:52.690Z",
+      "type": "codex_turn",
+      "label": "critique-1",
+      "tokens": 2842969
+    },
+    {
+      "at": "2026-08-20T03:32:52.693Z",
+      "type": "plan_approved",
+      "findings": 2,
+      "carried": [
+        "final-fix-outstanding-recovery-window"
+      ]
+    },
+    {
+      "at": "2026-08-20T03:44:31.156Z",
+      "type": "claude_turn",
+      "label": "implement",
+      "costUsd": 13.014847999999999,
+      "tokens": 19134835,
+      "turns": 89,
+      "contextRatio": 0.267
+    },
+    {
+      "at": "2026-08-20T03:44:51.417Z",
+      "type": "verify_passed",
+      "command": "npm test",
+      "runs": 3
+    },
+    {
+      "at": "2026-08-20T03:44:51.989Z",
+      "type": "codex_rate_limit",
+      "label": "review-0",
+      "action": "proceed",
+      "usedPercent": 0,
+      "reachedType": null
+    },
+    {
+      "at": "2026-08-20T03:50:05.373Z",
+      "type": "codex_turn",
+      "label": "review-0",
+      "tokens": 4637874
+    },
+    {
+      "at": "2026-08-20T03:54:32.919Z",
+      "type": "claude_turn",
+      "label": "fix-1",
+      "costUsd": 6.110914,
+      "tokens": 6394108,
+      "turns": 23,
+      "contextRatio": 0.287
+    },
+    {
+      "at": "2026-08-20T03:54:53.332Z",
+      "type": "verify_passed",
+      "command": "npm test",
+      "runs": 3
+    },
+    {
+      "at": "2026-08-20T03:54:53.863Z",
+      "type": "codex_rate_limit",
+      "label": "review-1",
+      "action": "proceed",
+      "usedPercent": 0,
+      "reachedType": null
+    },
+    {
+      "at": "2026-08-20T03:56:36.725Z",
+      "type": "codex_turn",
+      "label": "review-1",
+      "tokens": 4710099
+    },
+    {
+      "at": "2026-08-20T04:04:09.362Z",
+      "type": "claude_turn",
+      "label": "final-fix-2",
+      "costUsd": 6.787840999999999,
+      "tokens": 7515903,
+      "turns": 25,
+      "contextRatio": 0.308
+    },
+    {
+      "at": "2026-08-20T04:04:09.814Z",
+      "type": "review_approved",
+      "findings": 2,
+      "carriedAndFixed": [
+        "final-fix-clear-after-outstanding-artifact"
+      ]
+    },
+    {
+      "at": "2026-08-20T04:04:29.394Z",
+      "type": "verify_passed",
+      "command": "npm test",
+      "runs": 3
+    }
+  ],
+  "planOnly": false,
+  "answeredQuestions": [
+    "should the needs input md answers path clear pendingfindings or leave them for the loop to consume with a second revision",
+    "should the review phase re entry skip the verification gate or run it first",
+    "is the agentturns parameter on the public orchestrate acceptable or should the seam be planphase reviewphase exports",
+    "should the verification fix loop get the same carry given it has the identical re entry shape but costs no agent tokens",
+    "name of the field pendingfindings or something else unconsumedfindings carriedfindings",
+    "should the needs input md answers path clear pendingfindings or leave them for the loop to consume with a second revision technical advisory",
+    "should the review phase re entry skip the verification gate or run it first technical advisory",
+    "is the agentturns parameter on the public orchestrate acceptable or should the seam be planphase reviewphase exports technical blocking",
+    "should the verification fix loop get the same carry given it has the identical re entry shape but costs no agent tokens product advisory",
+    "name of the field pendingfindings or something else unconsumedfindings carriedfindings technical advisory"
+  ],
+  "deferredQuestions": [],
+  "sessionRotations": 0,
+  "handoff": null,
+  "contextRatio": 0.307537,
+  "plan": {
+    "plan_md": "# Issue #32 - carry unconsumed critique/review findings across a stall\n\n## Context\n\nBoth loops in `src/orchestrator.ts` are shaped **turn -> gate -> guard -> consume**, and the guard throws in the gap:\n\n- Plan phase: critique at `src/orchestrator.ts:244-257` (artifact written at `:249`), `gate` at `:259`, `guardPlanBudget`/`guardProgress` at `:284-290` - either may throw - and the consumption, `revisePlan(..., { findings: critique.findings })`, only at `:292`.\n- Review phase: review at `src/orchestrator.ts:359-372` (artifact at `:364`), `gate` at `:374`, `guardProgress` at `:430`, consumption (`state.reviewRound += 1` and the fix turn) at `:437-454`.\n\nThe findings live only in the local `critique` / `review` binding. `guardProgress` has *already* appended a `RoundRecord` via `recordRound` before it throws, so the run records that a round happened but not what it found. On resume, `planPhase` sees `state.plan` set, skips `runPlan`, finds no `pendingAnswers`, and re-enters at the top of `for(;;)` - which is the critique. Observed twice on the run for #2: 7.3M then 7.5M tokens to re-derive the same two P1s byte for byte, and the re-critique appends a *second* `RoundRecord` for a plan that never changed, polluting the history `assessConvergence` reasons over. Review re-entry is worse (15.0M tokens for `review-0`, plus the verification gate re-runs first).\n\nOutcome wanted: a stalled run carries its unconsumed findings on `RunState`, and a resumed loop **consumes them before buying more** - re-entry is `revisePlan` / the fix turn, not `runCritique` / `runReview`. Both phases, one mechanism.\n\n### Decisions already settled (do not re-derive)\n\nFrom the issue brief:\n\n1. Do **not** re-run the guard for a round it has already recorded. Consume, revise, and let the *next* critique be judged on its own round.\n2. Absence of the new field means today's behaviour.\n3. The findings on `state` are the record, not a re-read of `plan-critique-<n>.json`.\n4. Clear them when they are **consumed**, not when they are read.\n\nConfirmed in review round 1:\n\n5. The NEEDS-INPUT.md answers path does **not** clear the findings. Human answers do not establish that the findings were addressed, so clearing there would discard paid, unconsumed work; the loop consumes them with an ordinary revision on its next iteration.\n6. The review-phase re-entry **skips** `runGate` for the carried-finding iteration, runs the fix, and returns to the gate immediately afterwards.\n7. The test seam is an optional fourth `AgentTurns` parameter on `orchestrate`, threaded through the phases and their callees.\n8. The field is named `pendingFindings`, mirroring `pendingAnswers`. (`carried` already means something else in `RunState`.)\n\n## The change\n\n### 1. `src/types.ts` - the field\n\nAdd beside `pendingAnswers` in `RunState`:\n\n```ts\n/**\n * Findings the run has paid for and no revision or fix round has yet answered.\n *\n * Written by the critique/review turn itself, cleared by the revision or fix\n * that consumes them. A guard that stops the run between the two used to\n * discard them, so a resume re-bought an identical critique - 7.5M tokens for\n * an answer the run already had - and re-entered at the same guard.\n *\n * Optional: `loadRun` casts stored JSON with no validation, so a state written\n * before this existed has no field, and absent must read as \"nothing\n * unconsumed\" - exactly what such a run meant.\n */\npendingFindings?: PendingFindings | null;\n```\n\nand the type:\n\n```ts\n/** Which loop paid for a set of findings, and what they were. */\nexport interface PendingFindings {\n  /** 'plan' from the critic, 'review' from the reviewer. */\n  phase: 'plan' | 'review';\n  findings: Finding[];\n}\n```\n\nThe phase tag is what keeps this **one notion for both loops** while making a plan-phase remnant unreadable by the review loop.\n\n### 2. `src/run.ts` - record / read / clear, and one shared shape predicate\n\nNext to `recordRound` (`src/run.ts:366`), add three exported helpers plus a tolerant predicate. They live here because this is the module that owns stored state and its persistence, and because `orchestrator.ts` already imports it.\n\n- `export function hasFindingShape(f: unknown): f is Finding` - object, non-null; `severity` one of P0/P1/P2/P3; `id` a non-empty string; `title`, `detail`, `suggested_fix` strings. Never throws.\n- `export function recordPendingFindings(state, phase, findings): void` - assigns `{ phase, findings: [...findings] }` and `saveState`.\n- `export function takePendingFindings(state, phase): Finding[] | null` - reads only, never clears (decision 4), never throws. Returns null unless the stored value is a record whose `phase` matches the caller's *and* whose `findings` is an array with at least one entry passing `hasFindingShape`; entries that fail are dropped. Empty or junk reads as null - i.e. as today.\n- `export function clearPendingFindings(state): void` - sets `null` (not `delete`, so the cleared fact is visible in `state.json`) and `saveState`.\n\nThen refactor `isDeferrable` in `src/orchestrator.ts:491` to build on the imported `hasFindingShape`, keeping its behaviour bit-for-bit (`defer === true` and severity P2/P3). This is what stops the codebase growing two answers to \"is this stored object a finding\".\n\n### 3. `src/orchestrator.ts` - plan phase\n\nInside the existing `withConcurrentCompaction` callback at `:244-257`, after `writeFollowUps`: `recordPendingFindings(state, 'plan', found.findings);`\n\nInside the callback deliberately, for the reason the comment at `:239-243` already gives: a concurrent rotation can raise a budget escalation that `withConcurrentCompaction` surfaces once `work` has resolved, and anything outside the callback is skipped for a critique already paid for.\n\nOn the approving path (`if (decision.pass)`), call `clearPendingFindings(state)` immediately before `break` - a passing critique has nothing to consume.\n\nConsume at the **top of the loop**, as the first statement inside `for (;;)`:\n\n```ts\nconst carried = takePendingFindings(state, 'plan');\nif (carried !== null) {\n  if (firstPass) log.info(`Revising against ${carried.length} finding(s) carried across the stop - not re-critiquing.`);\n  firstPass = false;\n  plan = await revisePlan(state, cfg, cwd, { findings: carried }, roles, turns);\n  clearPendingFindings(state);\n  continue;\n}\nfirstPass = false;\n```\n\nand replace the tail `plan = await revisePlan(state, cfg, cwd, { findings: critique.findings }, roles)` at `:292` with a bare `continue;`. That makes the top of the loop the **single** consumption site: in a run that never stalls the sequence of turns is identical (critique -> gate fail -> guards -> `continue` -> consume -> revise -> `continue` -> no pending -> question check -> critique), and on resume the same site is reached with the stored findings instead of the fresh ones.\n\n`firstPass` is a `let firstPass = true;` declared just above the loop, used only to decide whether to print the resume notice, so a normal round's log output is unchanged.\n\nSettled decision 5, made concrete: the `pendingAnswers` block at `:203-208` still revises with `{ answers }` and does **not** clear `pendingFindings`. Those findings are still unconsumed, so the loop consumes them on its first iteration with an ordinary revision - such a resume spends two planner turns before the next critique, which is the correct price for not discarding paid work. Merging answers and findings into one revise call is a prompt change and stays out of scope.\n\n### 4. `src/orchestrator.ts` - review phase\n\nInside the review `withConcurrentCompaction` callback at `:359-372`, after `writeFollowUps`: `recordPendingFindings(state, 'review', found.findings);` Clear on the clean-review `break` (`:378-380`).\n\nConsume at the **top of `for (;;)` in `reviewPhase`**, before `runGate` (settled decision 6): consuming before buying more is the point, and re-entry there otherwise pays for a full verification run before answering findings the run already owns. The gate runs immediately after the fix, on the next iteration, so nothing is accepted unverified.\n\n```ts\nconst carried = takePendingFindings(state, 'review');\nif (carried !== null) {\n  if (firstPass) log.info(`Fixing ${carried.length} finding(s) carried across the stop - not re-reviewing.`);\n  firstPass = false;\n  await runFixRound(state, cfg, cwd, carried, roles, turns);\n  continue;\n}\nfirstPass = false;\n```\n\nExtract the existing tail (`:437-454`) verbatim into a private helper so there is one fix site:\n\n```ts\nasync function runFixRound(state, cfg, cwd, findings: readonly Finding[], roles, turns): Promise<void> {\n  state.reviewRound += 1;\n  saveState(state);\n  log.step(`Fixing ${blockingFindings(findings).length} blocking finding(s)`);\n  const fix = await runTurn(state, cfg, {\n    role: 'implementer',\n    prompt: P.fixPrompt(findings, state.reviewRound),\n    cwd,\n    label: `fix-${state.reviewRound}`,\n  }, turns, roles);\n  artifact(state, `fix-report-${state.reviewRound}.md`, fix.text);\n  // Cleared before the commit, not after: a commit failure must not buy the fix turn twice.\n  clearPendingFindings(state);\n  await maybeCommit(cfg, cwd, `vibe: address review round ${state.reviewRound}`);\n}\n```\n\nThe blocking path at `:427-435` keeps its `log.warn`/`log.info` lines and its `guardProgress` call, then ends in `continue;`. The `log.step` count uses `blockingFindings(findings).length`, which equals today's `stoppers.length` for the same report - so the message is identical on the unchanged path.\n\nThe **final-fix** branch (`:391-424`) keeps its own bookkeeping (`finalFixDone`, `state.outstanding`, label `final-fix-N`, `OUTSTANDING.md`) and gains `clearPendingFindings(state)` immediately after its `artifact(state, 'fix-report-...')`, before `maybeCommit`. A process that dies inside that branch after `finalFixDone = true` therefore resumes into the top-of-loop fix round, which addresses the same findings under the `fix-N` label; to keep the human record intact, the consume branch writes OUTSTANDING.md when it finds `state.finalFixDone === true` and `state.outstanding` set, reusing `renderOutstanding(state, state.outstanding)`.\n\nThe verification-fix branch is untouched: its finding is re-derived for free by re-running the suite, and it costs no agent tokens (see Out of scope).\n\n### 5. `src/orchestrator.ts` - the injection seam the tests need\n\n`planPhase`, `reviewPhase` and their callees hardcode `REAL_AGENTS` at `:157`, `:339`, `:411`, `:450`, and inside `runPlan`/`revisePlan`/`runCritique`/`runReview`/`resolveQuestions`. Nothing can drive the loop with fakes today - `tests/scope.test.ts:575` only reaches `orchestrate`'s \"already finished\" early return.\n\nPer settled decision 7, add an optional last parameter, mirroring the convention `runTurn` already has: `export async function orchestrate(state, cfg, resume, turns: AgentTurns = REAL_AGENTS)`, and thread `turns` through `runPhases`, `planPhase`, `reviewPhase`, `runPlan`, `revisePlan`, `runCritique`, `runReview`, `resolveQuestions`, `runFixRound`, replacing every literal `REAL_AGENTS`. Also pass `turns.claude` as the 4th argument of both `withConcurrentCompaction` calls (currently `undefined`, which defaults to the real `claudeTurn` - identical in production, and it completes the seam).\n\n`RunLoop` in `src/cli.ts:481` is `(state, cfg, resume) => Promise<unknown>`; a function with an extra optional parameter still satisfies it, so `cli.ts` needs no change. The internal phase functions stay unexported.\n\n## Order of work\n\n1. `src/types.ts`: `PendingFindings` + the `RunState` field.\n2. `src/run.ts`: the predicate and the three helpers.\n3. `src/orchestrator.ts`: refactor `isDeferrable` onto `hasFindingShape`; run `npm test` - all 387 must still pass with no behaviour change yet.\n4. `src/orchestrator.ts`: thread the `turns` seam (mechanical, no behaviour change); `npm test` again.\n5. Plan-phase record/consume/clear + the `continue` restructure.\n6. Review-phase `runFixRound` extraction, then record/consume/clear.\n7. `tests/pending-findings.test.ts`.\n8. `npm test` three consecutive times.\n\nSteps 5 and 6 are independent of each other; both depend on 1-4. Steps 3 and 4 are the \"prove nothing moved\" checkpoints - keep them as separate commits so a bisect can tell a seam bug from a loop bug.\n\n## Tests - `tests/pending-findings.test.ts` (new file; no existing test is edited)\n\nConventions copied from `tests/turn-seam.test.ts` and `tests/role-shaped-sites.test.ts`: a `config()` helper over `DEFAULTS` with `codex.readRateLimits: false`, `progress.enabled: false`, `context.enabled: false`, `verify.enabled: false`, `git.commitEachRound: false`, `budget.planShare: 0`; `createRun(mkdtempSync(...), ...)` for state; a `recorder()` returning `AgentTurns` fakes for both providers. Under `DEFAULTS.roles` the planner/implementer are Claude and the critic/reviewer are Codex, so both fakes are needed.\n\nThe fakes are **scripted and ordered**: each pushes `options`' label into a shared `calls: string[]` and returns the next queued payload for its role. The Claude fake returns a `ClaudeTurnResult` whose `text` is `JSON.stringify(plan)`; the Codex fake returns `{ structured: report, raw, sessionId, tokens }`. Plan fixtures must include `out_of_scope` (`parsePlan` is strict); finding fixtures need `id/severity/title/detail/suggested_fix`.\n\nStalls are produced deterministically with `loop.maxPlanRounds: 1` / `maxReviewRounds: 1`, which makes `guardProgress` throw on `round >= cap` *after* it has recorded its `RoundRecord` - the exact shape of the defect. Two P1s beat the default `p1Tolerance` of 1, so the gate fails.\n\nCases:\n\n1. **A plan stall leaves the findings recoverable.** `orchestrate(state, cfg({maxPlanRounds:1}), true, turns)` rejects with an `Escalation` carrying `EXIT.NO_CONVERGENCE`; assert `state.pendingFindings.phase === 'plan'` and its two P1 ids, and that `plan-critique-0.json` exists.\n2. **A resumed plan run revises rather than re-critiquing.** Continue case 1 with `maxPlanRounds: 5` and a critic fake whose next reply approves. Assert the recorded call order is `['revise-1', 'critique-1']` - the revision first, the critique **once**. The critic fake throws if called more than once in the resumed run.\n3. **No second `RoundRecord` for a plan that was not revised.** Snapshot `state.p1Rounds.length` at the stall (1) and assert it is still 1 after the resumed run - the approving critique never reaches `guardProgress`.\n4. **Two resumes produce two revisions, not two identical critiques.** Resume with `maxPlanRounds: 2` (stalls again on the new round), then with `maxPlanRounds: 3`. Assert labels `['revise-1','critique-1']` then `['revise-2','critique-2']`, `state.planRound === 2`, and that no two `critique-*` calls carry the same round.\n5. **A revision that throws leaves the findings outstanding.** Resume with a planner fake that rejects; assert `orchestrate` rejects, `state.pendingFindings` still holds the same two findings, and a third run with a working planner consumes them (revise-first order again).\n6. **A stored state with no field resumes exactly as today.** `delete state.pendingFindings` after the stall, resume; assert the first call is `critique-*` and no `revise-*` precedes it. Same assertion for junk (`state.pendingFindings` set to a string, and to `{ phase: 'plan', findings: [{}] }`) - `takePendingFindings` must not throw.\n7. **A run that does not stall records and consumes nothing new.** A plan run whose first critique approves: assert calls are exactly `['critique-0']`, `state.p1Rounds` is `[]`, `state.planRound` is 0, `state.pendingFindings` is null at the end, and `PLAN.md` was written. This is the constraint-A canary.\n8. **Review phase, same three properties.** `state.phase = 'reviewing'`, `state.plan` preset, `state.baseSha = null`, and the temp target dir initialised with `execFileSync('git', ['init','-q'])` so `git.diffSince`/`changedFiles` work (`.vibe` self-ignores via `ensureVibeIgnored`, and nothing commits). Stall with `maxReviewRounds: 1`; assert `pendingFindings.phase === 'review'`; resume and assert the call order is `['fix-1', 'review-1']` - the fix turn first, the reviewer **once**.\n9. **The carried review iteration skips the gate.** Same setup as case 8 but with `verify.enabled: true` and `verify.command` set to a script that appends to a file when it runs; assert the file is untouched until after `fix-1` - i.e. the gate is not re-bought before the findings are consumed, and does run on the following iteration.\n10. **Phase tagging.** Unit case: `takePendingFindings(state, 'plan')` returns null for a record tagged `'review'`, and vice versa.\n\n## Verification\n\n- `npm test` (whose `pretest` builds via `tsc && tsc-alias`) - the existing 387 cases must pass **unmodified**, plus the new file. Run three consecutive times, as the acceptance bar requires.\n- `npm run typecheck` for the optional-field shape of `pendingFindings?: PendingFindings | null`.\n- Targeted while iterating: `node --test dist/tests/pending-findings.test.js`.\n- No manual end-to-end run is proposed: reproducing a real stall costs millions of tokens, which is the defect being fixed. Cases 8 and 9's ordering assertions are the stand-in.\n\n## Edge cases and failure modes\n\n- **Crash between the consuming turn and `clearPendingFindings`.** The next resume repeats the revision or the fix - one extra generative turn, never a re-critique or a re-review. This is the deliberate cost of decision 4; clearing on read would reintroduce the bug being removed.\n- **Plan approved, process dies before the `break`.** The pass path clears within one `saveState` of the gate, but inside that window a resumed run revises once against an approving critique's non-blocking findings and then re-critiques. Wasteful, not wrong.\n- **Resume after a human filled in NEEDS-INPUT.md while findings are pending.** Two planner turns (the answers revision, then the findings revision) before the next critique. Accepted per settled decision 5; near-unreachable in practice, since a convergence or budget stall writes NEEDS-INPUT.md with no `**Your answer:**` block and `src/cli.ts:413` routes that straight to resume without ever setting `pendingAnswers`.\n- **Budget stall (`guardPlanBudget`).** Resuming without raising `budget.planShare` now buys a revision and one critique before stopping again, instead of a critique alone. Each resume ratchets forward by one revision, and the *new* critique's findings become the next `pendingFindings`.\n- **Stored junk.** `takePendingFindings` never throws and reads junk as absent; the next critique overwrites it. This matches how `storedDeferred`/`isDeferrable` already treat unvalidated state without starting to validate it (#23 stays out of scope).\n- **Phase crossing.** The `phase` tag plus clear-on-pass means a plan remnant can never be fed to the fix turn.\n- **`state.json` growth.** One report is duplicated (artifact + state) for the life of one round.\n\n## Rollback\n\nEvery behavioural change is guarded by `takePendingFindings(...) !== null`, which is false for any state never written by this code. Rollback is the commit revert of steps 5-7, or - as a hotfix - making `takePendingFindings` return `null` unconditionally, after which both loops behave exactly as they do today. Keeping steps 3 and 4 as separate commits means they need not be reverted with the behaviour.\n",
+    "assumptions": [
+      {
+        "assumption": "The findings are recorded inside the `withConcurrentCompaction` callback (right after the artifact write), not after the gate fails - so a passing critique writes them and the pass path clears them one statement later.",
+        "why": "The comment at src/orchestrator.ts:239-243 says a concurrent rotation can raise a budget escalation that surfaces only once `work` resolves; recording after the gate would leave that path discarding a critique already paid for, which is the same class of bug #32 describes. The cost is a set-then-clear on every approving round and a one-`saveState` window where an approved plan carries non-blocking pending findings.",
+        "blast_radius": "If a reviewer prefers record-only-on-gate-failure, move one line below the `if (decision.pass)` block and delete the two `clearPendingFindings` calls on the pass paths. Tests 1, 7 and 8 need their pass-path assertions adjusted; nothing else moves."
+      },
+      {
+        "assumption": "The loops are restructured so the existing tail-of-loop revise/fix becomes a `continue` and the single consumption site is the top of the loop.",
+        "why": "It gives one consumption site per phase rather than two, avoids duplicating the fix-round bookkeeping, and produces an identical sequence of turns, prompts, artifacts and commits for a run that never stalls (nothing runs between the old site and the new one but `continue`).",
+        "blast_radius": "If review objects to touching the hot loop, the alternative is a pre-loop consume block in each phase, leaving the tails as they are - about 15 more lines and two revise/fix sites, with the same tests."
+      },
+      {
+        "assumption": "The new state helpers and the shared `hasFindingShape` predicate live in `src/run.ts` rather than `src/validate.ts` or `src/orchestrator.ts`.",
+        "why": "run.ts already owns stored-state persistence (`saveState`, `recordRound`, `loadRun`) and is already imported by orchestrator.ts, so no new dependency edge appears; validate.ts is explicitly the strict parser for fresh model output, and this predicate is deliberately tolerant.",
+        "blast_radius": "Import-site churn only: moving them later is a rename plus import edits, no behaviour."
+      },
+      {
+        "assumption": "A single field `pendingFindings` with a `phase` tag serves both loops, rather than two fields.",
+        "why": "The 'one notion per fact' constraint, and a run is only ever in one phase; the tag makes a leftover plan record unreadable by the review loop instead of relying on the clear having happened.",
+        "blast_radius": "If two fields are preferred, the helpers take a field name instead of a phase and case 10 is dropped - localised to run.ts and two call sites."
+      },
+      {
+        "assumption": "The verification-fix branch (`guardProgress` over `state.verifyRounds`) is left alone even though it has the same re-entry shape.",
+        "why": "Its finding is produced by running the project's own test command - zero agent tokens - and is re-derived exactly on resume, so nothing paid-for is discarded. The brief scopes this to 'the critique or review the run has just paid for' and names two phases.",
+        "blast_radius": "A verify stall remains unresumable without raising `maxVerifyRounds` (the re-run records a duplicate `RoundRecord` and throws again). Fixing it later means reusing the same helpers with a third phase tag plus one branch - additive, no rework."
+      },
+      {
+        "assumption": "On resume into a half-finished final-fix round, the top-of-loop consume path writes OUTSTANDING.md from `state.outstanding` when `finalFixDone` is already true.",
+        "why": "Without it that rare recovery addresses the carried findings but leaves no human record, which the tolerance design says must exist. `renderOutstanding` already exists and takes exactly this input.",
+        "blast_radius": "Three lines and one guard; dropping it costs only the artifact on a rare crash path."
+      },
+      {
+        "assumption": "Tests may run `git init` in a temp directory for the review-phase cases (8 and 9).",
+        "why": "`runReview` calls `git.diffSince`/`changedFiles` before the reviewer turn, and `diffSince` throws outside a repo. git 2.31 is verified present in both agent shells, and no commit or identity is needed because `git.commitEachRound` is off.",
+        "blast_radius": "If spawning git in tests is unwanted, the review cases must assert order via a path that never reaches git, which weakens case 8 to 'the fix ran first' without proving the review completed once."
+      },
+      {
+        "assumption": "Case 9 can assert gate-skipping with a real `verify.command` (a small script that appends to a marker file) rather than by stubbing `runVerification`.",
+        "why": "`runGate` calls `runVerification` directly with no seam, and adding one is scope this change does not need; a marker-file command is observable, cheap and cross-platform if written as a `node -e` invocation.",
+        "blast_radius": "If the command proves awkward on Windows/msys, drop case 9 to asserting only the turn order (case 8) - the gate-skip then rests on code reading rather than a test."
+      },
+      {
+        "assumption": "`log.info` notices on the resume path (gated by `firstPass`) are acceptable new output, and the 'identical behaviour' constraint covers turns, prompts, artifacts, `p1Rounds` and commits rather than every log line on a stalled run.",
+        "why": "A user resuming needs to know why the loop revised without critiquing; the gate on `firstPass` keeps every non-resume round's output byte-identical.",
+        "blast_radius": "Deleting the two `log.info` lines if a reviewer disagrees; no test depends on them."
+      }
+    ],
+    "open_questions": [
+      {
+        "question": "Should the verification-fix loop get the same carry, given it has the identical re-entry shape but costs no agent tokens?",
+        "options": [
+          "No - out of scope, it re-derives for free by re-running the suite",
+          "Yes - a verify stall is equally unresumable today"
+        ],
+        "recommended": "No for this change; the helpers are shaped so a third phase tag is additive later. Worth its own issue, because today a verify stall can only be resumed by raising `maxVerifyRounds`.",
+        "kind": "product",
+        "blocking": false
+      }
+    ],
+    "out_of_scope": [
+      {
+        "item": "The convergence heuristic itself (#33) - whether 2 -> 2 -> 2 with total finding turnover should have stopped the run at all.",
+        "why": "This change makes the stop survivable; when the stop fires is a separate argument. `assessConvergence` and `guardProgress`'s thresholds are untouched."
+      },
+      {
+        "item": "Validating stored state (#23).",
+        "why": "The resume constraint is about not breaking existing `state.json` files, not about starting to validate them. The new read helper is tolerant in the same way `storedDeferred`/`isDeferrable` already are, and nothing else gains validation."
+      },
+      {
+        "item": "Deferred-only critique rounds (#22).",
+        "why": "Unrelated loop-entry question; `collectDeferred`/`writeFollowUps` behaviour is unchanged here."
+      },
+      {
+        "item": "Anything about the role table (#2 / PR #34, the branch this is stacked on).",
+        "why": "The `roles` parameter is threaded exactly as it already is; no assignment, table or provider decision changes."
+      },
+      {
+        "item": "Changing what any ceiling or round cap means, or what `vibe resume` raises.",
+        "why": "`maxPlanRounds`, `maxReviewRounds`, `budget.planShare` and `resumeConfig` keep their current meanings. A budget stall still stops; it just stops one revision further along."
+      },
+      {
+        "item": "The NEEDS-INPUT.md answer path and its overlap with findings (revising with `{ answers }` instead of `{ findings }`).",
+        "why": "It works and is the current workaround; merging the two inputs into one revise prompt is a separate prompt-design change with its own risk. Settled decision 5 only fixes where the findings survive to, not how the answers prompt is built."
+      },
+      {
+        "item": "The verification-fix loop's identical re-entry shape (`guardProgress` over `state.verifyRounds` in reviewPhase).",
+        "why": "Its finding is produced by running the project's test command - no agent tokens - and is re-derived exactly on resume, so nothing paid for is lost. The brief scopes this to the critique and the review."
+      },
+      {
+        "item": "Reading findings back from `plan-critique-<n>.json` / `code-review-<n>.json` as a fallback when the state field is missing.",
+        "why": "Decision 3: the findings on `state` are the record. A second way of knowing the same thing is precisely what is being avoided."
+      },
+      {
+        "item": "Any change to how `NEEDS-INPUT.md` is rendered or what a stall reports to the user.",
+        "why": "`writeEscalation` already carries the blocking findings; this change alters what the *next process* does with them, not what the human is told."
+      },
+      {
+        "item": "Adding a seam around `runVerification` so the verification gate can be stubbed in tests.",
+        "why": "Case 9 observes the gate through a real marker-file `verify.command` instead. A test seam for verification is a separate refactor with its own call sites in `src/verify.ts`."
+      },
+      {
+        "item": "Surfacing `pendingFindings` in `vibe list` / run-summary output.",
+        "why": "Nothing in the reporting path reads it, and the field's whole job is to be consumed by the next process rather than displayed. Additive later if a user needs to see what a stalled run is holding."
+      }
+    ]
+  },
+  "pendingAnswers": null,
+  "extraContext": "Stop throwing away the critique or review the run has just paid for. GitHub issue #32.\n\n## The defect, verified on this repo's own runs\n\nBoth loops in `src/orchestrator.ts` are shaped critique/review -> gate -> guard -> consume, and\nthe guard throws in the gap:\n\n**Plan phase**\n- `:232-244` the critique turn; `:237` writes `plan-critique-<n>.json`\n- `:246` `gate(...)`, which breaks the loop on a pass\n- `:271` `guardPlanBudget`, `:272` `guardProgress` - **either may throw**\n- `:279` `plan = await revisePlan(state, cfg, cwd, { findings: critique.findings })`\n\n**Review phase**\n- `:334-346` the review turn; `:339` writes `code-review-<n>.json`\n- `:348` `gate(...)`\n- `:398` `guardProgress` - **may throw**\n- `:405-416` `state.reviewRound += 1`, then the fix turn\n\nThe findings exist only in the local `critique` / `review` binding. `RunState` records that a\nround happened - `p1Rounds` gets an entry from `recordRound` *before* the throw - but not what\nwas found. So when the process exits, `state.plan` is the unrevised plan and no fix has run.\n\nOn resume, `planPhase` sees `state.plan` set, skips `runPlan`, finds no `pendingAnswers`, and\nenters the `for(;;)` at the top. The top is the critique. Nothing anywhere records that this\nexact plan has already been critiqued.\n\nObserved twice on the run for #2:\n\n```\nPlan critique (round 4)\n  critique-3: 7.3M tok  -> 2 P1s\nStopped for input          Rounds: 3 plan revision(s)\n\n$ vibe resume <id>\nPlan critique (round 4)\n  critique-3: 7.5M tok  -> the same 2 P1s, byte for byte\nStopped for input          Rounds: 3 plan revision(s)\n```\n\n7.5M tokens to re-derive an answer the run already had, and a third resume would have done it\nagain. **The loop cannot make progress across a resume, at any price.** The only way past it was\nto hand-write answers into `NEEDS-INPUT.md`.\n\nThe review path is worse in cash terms and has never been seen because reviews stall less often:\nthat same run's `review-0` cost 15.0M tokens, and re-entry there also re-runs the verification\ngate first.\n\n## Second-order harm\n\nThe re-critique appends **another** `RoundRecord` through `guardProgress` -> `recordRound`, for\na plan that did not change. The history `assessConvergence` reasons over is now polluted with a\nduplicate observation of the same plan, which makes the next stall arrive sooner and understates\nhow much the findings actually turned over. Fixing the re-entry fixes this too - a resume that\nrevises instead of re-critiquing records nothing new.\n\n## What to build\n\nA stalled run must carry its unconsumed findings, and a resumed loop must **consume them before\nbuying more**. Concretely: if a phase has findings no revision or fix round has yet answered,\nthe loop's re-entry point is `revisePlan` / the fix turn, not `runCritique` / `runReview`.\n\nBoth phases. They are the same defect twice, and fixing only the plan one leaves the more\nexpensive path broken.\n\n## Decisions already made\n\n**1. Do not re-run the guard for a round it has already recorded.** `guardProgress` appended its\n`RoundRecord` before throwing, and the user has chosen to continue by resuming. Re-running it on\nthe same observation would throw again immediately - which is exactly today's behaviour, in a\ncheaper disguise. Consume, revise, and let the *next* critique be judged on its own round.\n\n**2. Absence means today's behaviour.** `loadRun` casts stored JSON with no validation (#23), so\na `state.json` written before this change has no such field. Absent must read as \"nothing\nunconsumed\", which is precisely what a pre-change run meant. Do not rename or repurpose an\nexisting field.\n\n**3. The findings on `state` are the record, not the artifact file.** `plan-critique-<n>.json`\nand `code-review-<n>.json` are already written before the gate runs, so nothing has to be\nre-derived - but re-reading a file by name on resume is a second way of knowing the same thing.\nPut them where the loop reads them.\n\n**4. Clear them when they are consumed, not when they are read.** A revision that fails, is\nrate-limited, or dies mid-turn must leave the findings still outstanding, or this change\nintroduces the very bug it removes.\n\n## Hard constraints\n\n**A run that never stalls behaves identically.** Same turns, same order, same prompts, same\nartifacts, same `p1Rounds` entries, same commits.\n\n**The existing 387 tests pass unchanged.** A test that has to be edited is a signal that\nbehaviour moved, and it is the only early warning available.\n\n**Resume compatibility.** A `state.json` from before this change must load and behave exactly as\nit does today. See decision 2.\n\n**One notion per fact.** Do not end up with both \"the findings are unconsumed\" and \"the round was\nrecorded\" as separate answers to the same question in the two phases. If the plan phase and the\nreview phase need the same thing, they get the same thing.\n\n## Out of scope - put these in your `out_of_scope`\n\n- **The convergence heuristic itself (#33).** Whether `2 -> 2 -> 2` with total finding turnover\n  *should* have stopped the run is a separate argument. This change makes the stop survivable; it\n  does not relitigate when the stop fires.\n- **Stored-state validation (#23).** The resume constraint above is about not breaking stored\n  state, not about starting to validate it.\n- **Deferred-only critique rounds (#22).**\n- Anything about the role table (#2 / PR #34, which this branch is stacked on).\n- Changing what any ceiling or round cap means, or what `vibe resume` raises.\n- The `NEEDS-INPUT.md` answer path. It works, it is the current workaround, and it is a different\n  mechanism - note that it revises with `{ answers }` *instead of* the findings, which is why the\n  workaround needed the whole defect restated by hand. Fixing that overlap is not this change.\n\n## Tests\n\nAdd tests; modify none.\n\n- A stall thrown at the plan guard leaves the findings recoverable, and a resumed run revises\n  against them rather than re-critiquing. Exercised through injected fakes: the critique fake must\n  assert it is **not** called a second time.\n- The same for the review phase: a resumed run fixes rather than re-reviewing.\n- A resumed run appends no second `RoundRecord` for a plan it has not revised.\n- Two resumes in a row produce two revisions, not two identical critiques.\n- A revision that throws leaves the findings still outstanding, so the next resume retries it.\n- A stored state with no such field resumes exactly as it does today.\n- A run that does not stall records and consumes nothing new - the default path is untouched.\n",
+  "config": {
+    "roles": {
+      "planner": "claude",
+      "implementer": "claude",
+      "critic": "codex",
+      "answerer": "codex",
+      "reviewer": "codex"
+    },
+    "claude": {
+      "model": "opus",
+      "effort": "medium",
+      "planTimeoutMs": 1800000,
+      "implementTimeoutMs": 5400000
+    },
+    "codex": {
+      "model": "gpt-5.6-luna",
+      "effort": "xhigh",
+      "sandbox": "read-only",
+      "timeoutMs": 2700000,
+      "implementTimeoutMs": 5400000,
+      "persistSession": true,
+      "readRateLimits": true
+    },
+    "loop": {
+      "maxPlanRounds": 5,
+      "maxReviewRounds": 5,
+      "maxVerifyRounds": 3,
+      "maxQuestionRounds": 3,
+      "p1Tolerance": 1,
+      "oscillationThreshold": 3,
+      "convergenceWindow": 3
+    },
+    "budget": {
+      "maxCostUsd": 50,
+      "maxTokens": 50000000,
+      "waitOnRateLimit": true,
+      "maxWaitMinutes": 360,
+      "codexLimitPercent": 95,
+      "planShare": 0.4
+    },
+    "questions": {
+      "askCodex": true,
+      "answerNonBlocking": true,
+      "escalateOnDefer": true,
+      "escalateOnLowConfidence": true
+    },
+    "git": {
+      "useBranch": true,
+      "branchPrefix": "vibe/",
+      "commitEachRound": true
+    },
+    "context": {
+      "enabled": true,
+      "compactAboveRatio": 0.5,
+      "compactDuringCodex": true
+    },
+    "verify": {
+      "enabled": true,
+      "command": null,
+      "timeoutMs": 900000,
+      "runs": 3
+    },
+    "progress": {
+      "enabled": true,
+      "intervalMs": 30000
+    },
+    "toolchain": {
+      "git": {
+        "probe": "git --version",
+        "phases": [
+          "plan",
+          "implement",
+          "review"
+        ]
+      },
+      "node": {
+        "probe": "node --version",
+        "phases": [
+          "implement",
+          "review"
+        ],
+        "agents": [
+          "claude"
+        ]
+      },
+      "npm": {
+        "probe": "npm --version",
+        "phases": [
+          "implement",
+          "review"
+        ],
+        "agents": [
+          "claude"
+        ]
+      }
+    },
+    "configPath": null
+  },
+  "environment": {
+    "agents": [
+      {
+        "provider": "claude",
+        "shell": "bash",
+        "pathStyle": "msys",
+        "repaired": false,
+        "tools": [
+          {
+            "name": "git",
+            "available": true,
+            "version": "git version 2.31.1.windows.1"
+          },
+          {
+            "name": "node",
+            "available": true,
+            "version": "v24.18.0"
+          },
+          {
+            "name": "npm",
+            "available": true,
+            "version": "11.16.0"
+          }
+        ]
+      },
+      {
+        "provider": "codex",
+        "shell": "powershell",
+        "pathStyle": "win32",
+        "repaired": true,
+        "tools": [
+          {
+            "name": "git",
+            "available": true,
+            "version": "git version 2.31.1"
+          }
+        ]
+      }
+    ],
+    "verifyCommand": "npm test",
+    "verifyRuns": 3
+  },
+  "codexTokens": 12871978,
+  "lastActivityAt": "2026-08-20T04:04:09.361Z",
+  "turnStartedAt": "2026-08-20T03:56:36.749Z",
+  "contextModel": "opus",
+  "contextWindow": 1000000,
+  "codexRateLimit": {
+    "window": "primary",
+    "windowFromServer": false,
+    "usedPercent": 0,
+    "windowDurationMins": 10080,
+    "resetsAt": "2026-08-27T03:45:07.000Z",
+    "reachedType": null,
+    "planType": "plus",
+    "capturedAt": "2026-08-20T03:54:53.863Z"
+  },
+  "codexSessionStarted": true,
+  "carried": [
+    {
+      "id": "final-fix-outstanding-recovery-window",
+      "severity": "P1",
+      "title": "Final-fix recovery can clear the carry before OUTSTANDING.md is durable",
+      "detail": "The proposed final-fix path clears `pendingFindings` immediately after the fix artifact, then runs `maybeCommit`, and only afterward writes `OUTSTANDING.md`. If the process dies after the clear but before that artifact write, the persisted state still has `finalFixDone` and `outstanding` but no pending findings. Resume therefore skips the consume branch, sees `finalFixDone` after verification, and exits without recreating `OUTSTANDING.md`; the CLI can then report “see OUTSTANDING.md” even though it is missing. The same ordering applies to the recovery path if it writes the artifact only after `runFixRound`.",
+      "suggested_fix": "Make the outstanding artifact idempotently recoverable independent of `pendingFindings`: write it before clearing the carry, or at the top of `reviewPhase` whenever `finalFixDone` and valid `outstanding` exist but `OUTSTANDING.md` is absent. Add a test covering `finalFixDone` with `pendingFindings === null` and a missing artifact.",
+      "defer": false
+    }
+  ],
+  "deferred": [
+    {
+      "id": "unplanned-ratelimit-test-edit",
+      "severity": "P2",
+      "title": "An unrelated existing test was changed despite the plan's test boundary",
+      "detail": "`tests/ratelimits-monitor.test.ts` is modified even though the plan explicitly says the new test file is added without editing existing tests. The change updates a time-dependent fixture unrelated to pending findings; it may be valid maintenance, but it is silently outside this issue's scope.",
+      "suggested_fix": "Move the rate-limit fixture maintenance to a separate change, or document why it is required for this branch and keep it isolated from the feature commit.",
+      "defer": true
+    },
+    {
+      "id": "unplanned-ratelimit-fixture-edit",
+      "severity": "P2",
+      "title": "An unrelated existing test was changed",
+      "detail": "tests/ratelimits-monitor.test.ts was modified even though the plan explicitly says the existing tests remain unmodified and only tests/pending-findings.test.ts is new. The change may be useful maintenance for an expiring timestamp, but it is unrelated to issue #32 and silently broadens the patch.",
+      "suggested_fix": "Split this fixture refresh into separate work, or explicitly justify and scope it as part of this change.",
+      "defer": true
+    }
+  ],
+  "finalFixDone": true,
+  "outstanding": [
+    {
+      "id": "final-fix-clear-after-outstanding-artifact",
+      "severity": "P1",
+      "title": "Final-fix findings are cleared too late",
+      "detail": "The final-fix branch writes OUTSTANDING.md and only then calls clearPendingFindings. If the process exits in that interval, the completed fix is persisted but pendingFindings remains, so resume runs another fix round for the same findings. This violates the plan's required clear-immediately-after-fix-report ordering.",
+      "suggested_fix": "Clear pendingFindings immediately after writing fix-report-N, before OUTSTANDING.md and before maybeCommit. Recovery after a successful verification gate can recreate OUTSTANDING.md if the process exits before that artifact is written.",
+      "defer": false
+    }
+  ],
+  "lastOutputAt": "2026-08-20T04:04:09.085Z"
+}

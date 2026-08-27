@@ -7,7 +7,7 @@ import { hostExecutableFor } from '@src/hosttools.js';
 import { run } from '@src/proc.js';
 import { codexProbeSandbox, enabledRolesFor, providerAccess, rolesFor } from '@src/roles.js';
 import type { Access, RoleTable } from '@src/roles.js';
-import { contractForAgent, validateContract } from '@src/runtime.js';
+import { contractForAgent, setOwn, validateContract } from '@src/runtime.js';
 import type {
   AgentProvider,
   AgentRuntime,
@@ -185,7 +185,10 @@ export function contractForPhases(
 ): ToolchainContract {
   const out: Record<string, (typeof contract)[string]> = {};
   for (const [tool, requirement] of Object.entries(contract)) {
-    if (requirement.phases.some((phase) => phases.includes(phase))) out[tool] = requirement;
+    // `setOwn` because the tool name is the user's - see its comment in
+    // src/runtime.ts. Dropping a required tool while narrowing would have
+    // preflight vouch for a contract it never checked.
+    if (requirement.phases.some((phase) => phases.includes(phase))) setOwn(out, tool, requirement);
   }
   return out;
 }
@@ -375,7 +378,9 @@ function violationsFor(
   phases: readonly Phase[],
 ): ContractViolation[] {
   const hosts: Record<string, string | null> = {};
-  for (const tool of Object.keys(contract)) hosts[tool] = hostExecutableFor(tool);
+  // Keyed by the user's tool names, so through `setOwn` - a lookup that silently
+  // missed would report a repaired tool as unrepaired.
+  for (const tool of Object.keys(contract)) setOwn(hosts, tool, hostExecutableFor(tool));
 
   // One entry per tool, not per phase. A tool required by both `implement` and
   // `review` is one broken thing, and reporting it twice makes a short list

@@ -1,5 +1,5 @@
 import * as log from '@src/log.js';
-import { recordEvent } from '@src/run.js';
+import { recordEvent, saveState } from '@src/run.js';
 import type { Config, Finding, OpenQuestion, RunState } from '@src/types.js';
 
 /**
@@ -25,6 +25,14 @@ export const EXIT = {
   RATE_LIMITED: 5,
   /** The agents' execution environments do not satisfy the toolchain contract. */
   PREFLIGHT: 6,
+  /**
+   * The loop finished and a required verification gate never ran.
+   *
+   * Not an error and not a stall: the work is done, reviewed and committed, and
+   * its artifacts are worth having. What is missing is the evidence that it
+   * runs, and 0 has always been documented to mean verification passed (#47).
+   */
+  UNVERIFIED: 7,
 } as const;
 
 export type ExitCode = (typeof EXIT)[keyof typeof EXIT];
@@ -51,6 +59,20 @@ export class Escalation extends Error {
 export interface TurnCharge {
   costUsd: number | null;
   tokens: number;
+  /**
+   * Which agent spent it, stated rather than inferred (#77).
+   *
+   * The share used to be routed on `costUsd === null`, which was a proxy that
+   * held only while every null-cost charge was Codex's. It stopped holding the
+   * moment a Claude turn could be charged with no cost figure - a turn recovered
+   * from a killed process, or one charged from the stream after a failure - and
+   * a proxy that is right by coincidence is one that misreports both agents when
+   * the coincidence ends. `codexTokens` is documented as the Codex share and
+   * `summary()` renders `tokensUsed - codexTokens` as Claude's.
+   */
+  provider: 'claude' | 'codex';
+  /** The turn this pays for, which is how its in-flight record is found. */
+  label: string;
   event: { type: string; data: Record<string, unknown> };
   /** Built after the totals are updated, so the line can quote the run total. */
   describe: () => string;
@@ -115,6 +137,31 @@ export function takeSpend(err: unknown): TurnSpend | null {
 }
 
 /**
+ * What the stream observed for a turn, removing the record. Null when there is
+ * none, and null when there is one carrying no figure - a Codex entry, which
+ * says a turn was in flight and nothing about what it spent.
+ *
+ * Removal without a caller-side save on purpose: every caller is about to write
+ * anyway, and disposing of the record has to land in that same write. See
+ * `RunState.inFlight` for why an entry must never outlive its own accounting.
+ */
+export function takeInFlight(
+  state: RunState,
+  label: string,
+  provider: 'claude' | 'codex',
+): number | null {
+  const list = state.inFlight;
+  if (list === undefined) return null;
+  const index = list.findIndex((e) => e.label === label && e.provider === provider);
+  if (index === -1) return null;
+  const [entry] = list.splice(index, 1);
+  // Absent is what a run with nothing in flight looks like, and `[]` would be a
+  // second spelling of it for every reader to remember.
+  if (list.length === 0) delete state.inFlight;
+  return entry?.tokens ?? null;
+}
+
+/**
  * Charge what a failed turn spent, if it reported anything.
  *
  * Returns the `Escalation` a ceiling raised rather than throwing it: a failure
@@ -134,6 +181,15 @@ export function takeSpend(err: unknown): TurnSpend | null {
  * The ceilings are run either way. A failed write is a lost record; it must not
  * also be a lost brake, and the totals it failed to persist are in memory and
  * already over.
+ *
+ * Two figures, never summed (#77). The provider's, attached at the throw site,
+ * and vibe's own, observed on the stream and persisted by the heartbeat. They
+ * measure the same turn, so the larger is charged: the provider's is
+ * structurally incomplete whenever the failure envelope carries no usage block
+ * (`src/claude.ts` builds `tokens: 0` beside a real cost for exactly that case),
+ * and the stream's is incomplete when the turn died between two throttled
+ * writes. `tokensFrom` records which one was used, because a figure this repo
+ * charges has to be traceable to the thing that measured it.
  */
 export function chargeFailure(
   state: RunState,
@@ -141,29 +197,55 @@ export function chargeFailure(
   err: unknown,
   meta: { label: string; provider: 'claude' | 'codex' },
 ): Escalation | null {
-  // Null is the whole "nothing to charge" answer - `attachSpend` never records a
+  // Null is the whole "nothing reported" answer - `attachSpend` never records a
   // spend of nothing - so there is no second zero test here. One definition.
   const spend = takeSpend(err);
-  if (spend === null) return null;
+  // Read and removed unconditionally: this failure is the turn's accounting, and
+  // whatever it decides, the record must not outlive it. A turn that reported
+  // nothing and observed nothing still has a `'start'` entry to dispose of, and
+  // leaving that behind is what would make a later resume announce an ordinary
+  // failed turn as a killed one.
+  const observed = takeInFlight(state, meta.label, meta.provider) ?? 0;
+  const reported = spend?.tokens ?? 0;
+  const tokens = Math.max(reported, observed);
+  const costUsd = spend?.costUsd ?? null;
+
+  if (tokens <= 0 && (costUsd ?? 0) <= 0) {
+    // Nothing observed and nothing reported: no event, because nothing happened
+    // that a reader could act on - but the record above is gone, and that has to
+    // reach disk. Swallowed for the same reason the accounting fault below is:
+    // a write fault must never replace the failure already in flight.
+    try {
+      saveState(state);
+    } catch {
+      // A lost disposal is recovered as an interrupted turn at worst, which
+      // reports honestly and charges nothing.
+    }
+    return null;
+  }
 
   const message = err instanceof Error ? err.message : String(err);
   try {
     applyCharge(state, cfg, {
-      costUsd: spend.costUsd,
-      tokens: spend.tokens,
+      costUsd,
+      tokens,
+      provider: meta.provider,
+      label: meta.label,
       event: {
         type: 'turn_failed',
         data: {
           label: meta.label,
           provider: meta.provider,
-          tokens: spend.tokens,
-          costUsd: spend.costUsd,
+          tokens,
+          costUsd,
+          tokensFrom: observed > reported ? 'stream' : 'provider',
           error: message.slice(0, 200),
         },
       },
       describe: () =>
-        `${meta.label} (failed): ${fmtTokens(spend.tokens)} tok` +
-        (spend.costUsd === null ? ', cost not reported' : `, ~$${spend.costUsd.toFixed(3)}`) +
+        `${meta.label} (failed): ${fmtTokens(tokens)} tok` +
+        (observed > reported ? ' observed on the stream' : '') +
+        (costUsd === null ? ', cost not reported' : `, ~$${costUsd.toFixed(3)}`) +
         ` (run ${fmtTokens(state.tokensUsed)} tok / ~$${state.costUsd.toFixed(2)})`,
       warnings: [],
     });
@@ -176,7 +258,7 @@ export function chargeFailure(
     // than left to the next charge, which may never come.
     let ceiling: Escalation | null = null;
     try {
-      enforceCeilings(state, cfg, spend.costUsd !== null);
+      enforceCeilings(state, cfg, costUsd !== null);
     } catch (ceilingErr: unknown) {
       // `enforceCeilings` raises nothing else. Anything that is not a ceiling is
       // a fault in the accounting itself and belongs with the fault below.
@@ -214,13 +296,36 @@ export function chargeFailure(
  */
 export function applyCharge(state: RunState, cfg: Config, charge: TurnCharge): void {
   state.tokensUsed += charge.tokens;
-  if (charge.costUsd === null) {
+  // Two independent questions since #77, where one used to answer both: which
+  // agent's share this is, and whether there is a cost figure at all.
+  if (charge.provider === 'codex') {
     state.codexTokens = (state.codexTokens ?? 0) + charge.tokens;
-  } else {
+  }
+  if (charge.costUsd !== null) {
     state.costUsd = Number((state.costUsd + charge.costUsd).toFixed(4));
   }
 
-  recordEvent(state, charge.event.type, charge.event.data);
+  // Before the event, so `recordEvent`'s save carries the charge and the
+  // disposal of what it paid for in one write. Split across two writes, a kill
+  // between them would leave an entry the next run charges a second time.
+  const observed = takeInFlight(state, charge.label, charge.provider);
+  const data =
+    observed !== null && observed > charge.tokens
+      ? { ...charge.event.data, observedTokens: observed }
+      : charge.event.data;
+
+  recordEvent(state, charge.event.type, data);
+  // Said out loud rather than dropped. The provider's own figure is what a
+  // completed turn is charged - it is the authority, and re-charging the
+  // difference would invent spend - but evidence that disagrees with it is a
+  // fact about this run, and a silently discarded one is how a systematic
+  // shortfall would go unnoticed.
+  if (observed !== null && observed > charge.tokens) {
+    log.warn(
+      `${charge.label}: the stream observed ${fmtTokens(observed)} tok but the turn reported ` +
+        `${fmtTokens(charge.tokens)}; charged what was reported, and recorded the difference.`,
+    );
+  }
   log.detail(charge.describe());
   for (const warning of charge.warnings) log.warn(warning);
 

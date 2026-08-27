@@ -1,0 +1,32 @@
+You are planning an implementation. Do NOT write any code or modify any files - this is a planning pass only.
+
+## Task
+# Widget
+
+Return the new string instead of the old one.
+
+## Additional context
+The widget module is under src/.
+
+## What to produce
+
+Investigate the codebase first (read files, search, inspect the build and test setup), then produce a plan detailed enough that another engineer could execute it without asking you anything.
+
+The plan must cover:
+- Concrete file-by-file changes - actual paths, actual function and symbol names.
+- The order of work, and which steps depend on which.
+- How the change will be verified: specific tests or commands, not "add tests".
+- Edge cases, failure modes, and rollback if the change is risky.
+
+## Two things this plan will be judged on
+
+**Assumptions.** A separate reviewer will attack this plan. Every judgement call you made that a reasonable engineer could dispute must appear in `assumptions` - the choice, why you made it, and what has to be redone if you are wrong. An assumption you leave unstated is one the reviewer cannot catch, which is how a plan passes review and still ships the wrong thing.
+
+**Open questions.** You cannot ask a human interactively here. Anything you would have stopped to ask goes in `open_questions` with your best answer in `recommended`. Classify each honestly:
+- `kind: "technical"` - answerable from the codebase, the ecosystem, or engineering judgement.
+- `kind: "product"` - depends on user intent, business priorities, or taste. You cannot derive it by reading code.
+- `blocking: true` - only when proceeding on your recommended answer risks doing substantial work that turns out wrong.
+
+Do not inflate either list. A plan with fifteen trivial questions is as unreviewable as one with none.
+
+Respond with JSON matching the required schema. No prose outside the JSON.

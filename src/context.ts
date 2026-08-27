@@ -4,7 +4,7 @@ import type { ClaudeTurnOptions } from '@src/claude.js';
 import * as log from '@src/log.js';
 import { progressOptions, rememberContextWindow } from '@src/progress.js';
 import { handoffPrompt } from '@src/prompts.js';
-import { rolesFor, rotatesConcurrentlyWith, rotatingSlot } from '@src/roles.js';
+import { modelFor, rolesFor, rotatesConcurrentlyWith, rotatingSlot, ROTATING_ROLE } from '@src/roles.js';
 import type { Role, RoleTable } from '@src/roles.js';
 import {
   ensureSlotId,
@@ -46,7 +46,20 @@ import type { ClaudeTurnResult, Config, ContextUsage, RunState } from '@src/type
  * below refuses to rotate a slot that cannot be reset rather than half-doing it.
  */
 
-export function shouldRotate(state: RunState, cfg: Config, roles: RoleTable = rolesFor(cfg)): boolean {
+export function shouldRotate(
+  state: RunState,
+  cfg: Config,
+  roles: RoleTable = rolesFor(cfg),
+  /**
+   * The model the question is asked about: is this conversation too full for a
+   * turn under *this* model. Defaulted to the rotating conversation's own role,
+   * for a caller that does not know which turn comes next; `claudeDispatch`
+   * knows and passes the incoming turn's. Under a table naming no per-role
+   * model this is `cfg.claude.model`, which is what this line read before it
+   * was a parameter.
+   */
+  model: string = modelFor(ROTATING_ROLE, cfg, roles),
+): boolean {
   if (!cfg.context.enabled) return false;
 
   const slot = rotatingSlot(roles);
@@ -59,10 +72,12 @@ export function shouldRotate(state: RunState, cfg: Config, roles: RoleTable = ro
   // the run is configured to carry it.
   if (!slotStarted(state, slot)) return false;
 
-  const ratio = measuredRatio(state, cfg.claude.model);
+  const ratio = measuredRatio(state, model);
   // An unattributable ratio is unknown, not a number. A non-zero one is still
   // evidence that a real session accumulated somewhere - under a window this
-  // process cannot name, because `--claude-model` may have changed on resume.
+  // process cannot name, because `--claude-model` may have changed on resume,
+  // or because the role about to run names a different model than the one that
+  // grew the conversation (#60). Both are the same fact to this line.
   // Against a smaller window the stored figure understates occupancy, which is
   // how compaction got deferred past the turn that overflowed. Rotating
   // establishes a baseline; `resetContextMeasurement` tags it with this model,
@@ -213,6 +228,14 @@ export async function rotateSession(
   cfg: Config,
   turn: ClaudeTurnFn = claudeTurn,
   roles: RoleTable = rolesFor(cfg),
+  /**
+   * The model the fresh conversation will be measured under - the incoming
+   * turn's where the caller knows it, and the rotating role's otherwise. It
+   * decides whether this is a baseline rotation, and it is what
+   * `resetContextMeasurement` tags; it is *not* necessarily what the handoff
+   * turn runs, which is `handoffModel` below.
+   */
+  model: string = modelFor(ROTATING_ROLE, cfg, roles),
 ): Promise<void> {
   const slot = rotatingSlot(roles);
   // Before anything is spent. `shouldRotate` already refuses such a slot, so
@@ -223,7 +246,7 @@ export async function rotateSession(
     throw new Error(`slot "${slot}" has no rotation mechanism; nothing may compact it`);
   }
 
-  const measured = measuredRatio(state, cfg.claude.model);
+  const measured = measuredRatio(state, model);
   const baseline = measured === null;
   log.step(
     baseline
@@ -236,7 +259,7 @@ export async function rotateSession(
   // one is exactly the request that fails. Absent provenance leaves nothing
   // better than the configured model, which is why the failure path below is
   // not optional.
-  const handoffModel = baseline && state.contextModel !== undefined ? state.contextModel : cfg.claude.model;
+  const handoffModel = baseline && state.contextModel !== undefined ? state.contextModel : model;
 
   let result: ClaudeTurnResult | null = null;
   // A ceiling crossed by a *failed* handoff, held until the rotation this
@@ -256,7 +279,9 @@ export async function rotateSession(
       cwd: state.targetDir,
       tools: ['Read'],
       timeoutMs: cfg.claude.planTimeoutMs,
-      progress: progressOptions(state, cfg, 'compact'),
+      // `handoffModel`, not the incoming one: the `ctx%` segment is a fraction
+      // of the window of the model this turn actually runs.
+      progress: progressOptions(state, cfg, 'compact', handoffModel),
     });
   } catch (err: unknown) {
     // A handoff that failed still spent. Charged through the seam a dispatched
@@ -282,7 +307,7 @@ export async function rotateSession(
   // looks like is stated in one place, so the next turn cannot read the new id
   // as evidence that anything has run on it.
   resetSlot(state, slot);
-  resetContextMeasurement(state, cfg.claude.model);
+  resetContextMeasurement(state, model);
 
   // After the reset, which would otherwise wipe it. The handoff turn's *ratio*
   // describes the session just abandoned and stays discarded; its *window* is a
@@ -306,7 +331,7 @@ export async function rotateSession(
     costUsd,
     tokens,
     newSessionId: slotId(state, slot),
-    contextModel: cfg.claude.model,
+    contextModel: model,
     baseline,
     handoffModel,
     handoff: result !== null,
@@ -365,6 +390,10 @@ export async function rotateSession(
   applyCharge(state, cfg, {
     costUsd: result.costUsd,
     tokens: result.tokens.total,
+    provider: 'claude',
+    // The label the rotation's own heartbeat runs under, so this charge disposes
+    // of that turn's in-flight record rather than some other turn's.
+    label: 'compact',
     event: { type: 'session_rotated', data: rotationEvent(result.costUsd, result.tokens.total) },
     describe: () =>
       `compact: ${fmtTokens(result.tokens.total)} tok, ~$${result.costUsd.toFixed(3)} ` +
@@ -398,6 +427,12 @@ export async function withConcurrentCompaction<T>(
   workRole: Role = 'reviewer',
   roles: RoleTable = rolesFor(cfg),
 ): Promise<T> {
+  // Deliberately not `workRole`'s: that is the role doing the *concurrent*
+  // work, and under every table that reaches this line it is on the other
+  // provider entirely. The conversation being rotated is `rotatingSlot(roles)`,
+  // whose role is `ROTATING_ROLE`, so that is whose model both decisions below
+  // are made against.
+  const model = modelFor(ROTATING_ROLE, cfg, roles);
   if (
     !cfg.context.compactDuringCodex ||
     !rotatesConcurrentlyWith(workRole, roles) ||
@@ -405,7 +440,7 @@ export async function withConcurrentCompaction<T>(
     // rotate under `ROLES` while the guard consulted an injected table is how
     // the wrapper came to permit concurrent work beside a rotation of the very
     // conversation that work was being done through.
-    !shouldRotate(state, cfg, roles)
+    !shouldRotate(state, cfg, roles, model)
   ) {
     return work();
   }
@@ -422,7 +457,7 @@ export async function withConcurrentCompaction<T>(
   // indistinguishable: both await both.
   const [outcome, compaction] = await Promise.allSettled([
     work(),
-    rotateSession(state, cfg, turn, roles).catch((err: unknown) => {
+    rotateSession(state, cfg, turn, roles, model).catch((err: unknown) => {
       // A budget escalation is the run being told to stop, not a lost
       // optimisation, so it is held and rethrown below rather than swallowed.
       // Held rather than rejected straight into Promise.all: `work` is a turn

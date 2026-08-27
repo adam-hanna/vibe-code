@@ -7,6 +7,7 @@ import { DEFAULTS } from '@src/config.js';
 import { rotateSession, shouldRotate } from '@src/context.js';
 import { handoffContext } from '@src/prompts.js';
 import { progressOptions } from '@src/progress.js';
+import { DEFAULT_ROLE_PROVIDERS, tableFor } from '@src/roles.js';
 import {
   createRun,
   measuredRatio,
@@ -277,4 +278,46 @@ test('a baseline rotation window is not attributed to the incoming model', async
 
   assert.equal('contextWindow' in state, false);
   assert.equal(progressOptions(state, cfgWith('fixture-new'), 'plan')?.contextWindow, undefined);
+});
+
+test('a per-role implementer model is what the rotation resets to, and the grower is still asked', async () => {
+  // Since #60 the conversation `rotateSession` compacts may be grown by a model
+  // that is not `cfg.claude.model`: the implementer names its own, and `main` is
+  // its conversation. Two claims here, and they pull in opposite directions -
+  // the handoff must be asked of the model that grew the session, while the
+  // reset must tag the model about to inherit it.
+  const state = runFor('per-role rotation model');
+  state.contextModel = 'grew-it';
+  state.contextRatio = 0.4;
+  state.sessionStarted = true;
+  const asked: ClaudeTurnOptions[] = [];
+
+  const roles = tableFor({
+    ...DEFAULT_ROLE_PROVIDERS,
+    implementer: { provider: 'claude', model: 'inherits-it' },
+  } as never);
+
+  await rotateSession(
+    state,
+    cfgWith('sonnet'),
+    (options) => {
+      asked.push(options);
+      return Promise.resolve(turnResult('briefing'));
+    },
+    roles,
+  );
+
+  // Neither of these is `cfg.claude.model`, which is what this line read before
+  // the role's model reached it.
+  assert.equal(asked[0]?.model, 'grew-it', 'the handoff asks the model that grew the session');
+  assert.equal(state.contextModel, 'inherits-it', 'the reset tags the role about to run');
+  assert.equal(state.contextRatio, 0);
+  // And it settles: the next boundary under the same role reads 0 > 0.
+  assert.equal(
+    shouldRotate(state, { ...cfgWith('sonnet'), roles: { ...DEFAULT_ROLE_PROVIDERS } } as never, roles),
+    false,
+  );
+  const rotated = state.events.filter((e) => e.type === 'session_rotated');
+  assert.equal(rotated[0]?.['contextModel'], 'inherits-it');
+  assert.equal(rotated[0]?.['handoffModel'], 'grew-it');
 });

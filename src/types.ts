@@ -1,7 +1,21 @@
 import type { RoleProviders } from '@src/roles.js';
 import type { EnvironmentFacts, ToolchainContract } from '@src/runtime.js';
+import type { Liveness } from '@src/lock.js';
+import type { SlotName } from '@src/slots.js';
 
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
+/**
+ * The efforts either provider accepts, as a list.
+ *
+ * Here rather than in `src/config.ts`, which is where it used to live and which
+ * still exports it: `src/roles.ts` has to check a role's own effort (#46) and
+ * cannot import config, because config imports the role table's runtime values.
+ * A closed enum is the whole reason effort is the one provider setting a role may
+ * name - it is checkable before a turn is spawned, and a model string is not.
+ */
+export const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
+
 /**
  * P0 exists because P1s are now survivable.
  *
@@ -65,8 +79,14 @@ export interface CodexConfig {
    */
   implementTimeoutMs: number;
   /**
-   * Keep one Codex thread for the whole run via `codex exec resume`, so the
-   * reviewer remembers what it already raised instead of re-deriving it.
+   * Carry each Codex conversation across the run via `codex exec resume`, so a
+   * judging agent remembers what it already raised instead of re-deriving it.
+   *
+   * One switch, every Codex conversation - not one thread. Since #45 the
+   * plan-side judge (critic and answerer) and the reviewer hold *separate*
+   * threads, so that neither forms its judgement inside the other's; this key
+   * says whether either is carried at all, and off means every judging turn is
+   * one-shot.
    */
   persistSession: boolean;
   /**
@@ -287,6 +307,38 @@ export interface ContextConfig {
   enabled: boolean;
 }
 
+/**
+ * One named check the run must pass before the reviewer is asked for an opinion.
+ *
+ * The name is not decoration: it becomes the finding id (`${name}-failing`), so
+ * the oscillation guard can tell a typecheck that keeps failing from a test
+ * suite that keeps failing - which it could not do while every failure was
+ * filed under one id (#47, problem 2).
+ */
+export interface VerifyGate {
+  /** Kebab-case, unique in the list. It becomes a finding id, so it must be stable. */
+  name: string;
+  /**
+   * Null means the gate is unavailable - enabled, but with nothing to run.
+   *
+   * A required key that may hold null, for the reason `provider` is required
+   * inside a role object (#46): a key that must be written cannot be forgotten
+   * into a default, and "I meant to configure this" must not read as "there is
+   * deliberately nothing here".
+   */
+  command: string | null;
+  /** Defaults to `verify.runs`. */
+  runs?: number;
+  /** Defaults to `verify.timeoutMs`. */
+  timeoutMs?: number;
+  /**
+   * Defaults to true. False says only: if this gate has no command, that is a
+   * deliberate configuration and not a hole. A gate that RUNS and fails always
+   * blocks, whatever this says.
+   */
+  required?: boolean;
+}
+
 export interface VerifyConfig {
   enabled: boolean;
   /** Shell command to run. Null auto-detects (`npm test` when a test script exists). */
@@ -302,6 +354,17 @@ export interface VerifyConfig {
    * distinguish working code from a race that happened to win.
    */
   runs: number;
+  /**
+   * The gates, in the order they run.
+   *
+   * Null means not configured: one gate named `verification` is synthesized from
+   * `command`, `runs` and `timeoutMs`, so a config written before this key
+   * existed behaves exactly as it did - including its finding id (#47).
+   * `command` and `gates` together are refused: two keys naming what to run is
+   * the ambiguity. `runs` and `timeoutMs` are NOT in conflict - they are the
+   * per-gate defaults a gate may override.
+   */
+  gates: VerifyGate[] | null;
 }
 
 export interface ProgressConfig {
@@ -312,10 +375,12 @@ export interface ProgressConfig {
 
 export interface Config {
   /**
-   * Which agent holds each role on this run.
+   * Which agent holds each role on this run, and what model and effort it runs
+   * at.
    *
-   * The only choice a run makes about the role table: `access`, the output
-   * schema and the conversation slot are facts about the job, not user
+   * The three choices a run makes about the role table - a provider per role,
+   * and optionally that role's own effort (#46) and model (#60): `access`, the
+   * output schema and the conversation slot are facts about the job, not user
    * settings. Absent - a config stored before this key existed - means the
    * default assignment, which is what every run before it did.
    */
@@ -384,6 +449,29 @@ export interface OutOfScopeItem {
   why: string;
 }
 
+/**
+ * How a criterion says it can be checked.
+ *
+ * Descriptive, not dispatched on: nothing in the loop reads this to decide what
+ * to run, and nothing may. It exists so the critic can argue about whether a
+ * criterion is checkable the way it claims to be.
+ */
+export type CheckKind = 'command' | 'inspection' | 'qa';
+
+/** One observable condition that says whether the change is done. */
+export interface AcceptanceCriterion {
+  /**
+   * Stable kebab-case slug. Like a finding's id and for the same reason:
+   * something must be able to refer to one without quoting it.
+   */
+  id: string;
+  /** The condition, stated so that two people would agree whether it holds. */
+  criterion: string;
+  check: CheckKind;
+  /** The command to run, what to inspect, or the named scenario. */
+  how: string;
+}
+
 export interface Plan {
   plan_md: string;
   assumptions: Assumption[];
@@ -399,10 +487,62 @@ export interface Plan {
    * it, where both cases legitimately contribute nothing.
    *
    * Optional in TypeScript, required in `PLAN_SCHEMA`: the schema governs fresh
-   * model output, while `loadRun` casts stored JSON with no validation and must
-   * keep loading runs recorded before this existed.
+   * model output, while `validateStoredState` reads stored JSON tolerantly and
+   * must keep loading runs recorded before this existed - which is why it
+   * preserves an absent `out_of_scope` rather than filling one in.
    */
   out_of_scope?: OutOfScopeItem[];
+  /**
+   * How anyone can tell this change worked.
+   *
+   * Absent and empty are different facts here too. `undefined` means no bar was
+   * ever recorded - a plan stored before this field existed. `[]` means the
+   * planner considered the question and claims done-ness here is unobservable,
+   * which is a claim the critic can attack.
+   *
+   * Optional in TypeScript, required in `PLAN_SCHEMA`, for the reason
+   * `out_of_scope` is: the schema governs fresh model output, while
+   * `validateStoredState` reads stored JSON tolerantly and must keep loading
+   * runs recorded before this existed.
+   */
+  acceptance_criteria?: AcceptanceCriterion[];
+}
+
+/**
+ * What kind of claim a citation is making - and, therefore, what can be checked
+ * about it.
+ *
+ * Three of the four are checkable and one is not, which is the whole design.
+ * `code` is "this line does X"; `artifact` is "the plan does not say what
+ * happens on resume"; `absence` is "no test covers the carried-P1 path", and
+ * cites the place the thing is missing *from*, so a directory is legitimate;
+ * `external` is "`codex exec resume` takes no `-s` flag", where nothing here
+ * can check another tool's CLI and pretending otherwise would be inventing a
+ * verdict.
+ *
+ * `external` is an escape hatch and that is accepted deliberately: a model that
+ * wants to keep a blocking severity can always pick it. What the taxonomy buys
+ * is that it must *say* which kind of claim it is making, and the
+ * `finding_downgraded` event names the kinds each finding offered - so "this P1
+ * rested only on an unverifiable external claim" is a fact a human can see
+ * (#48).
+ */
+export type EvidenceKind = 'code' | 'artifact' | 'absence' | 'external';
+
+/**
+ * One place a finding points at. Checked by `src/evidence.ts`, never here.
+ *
+ * Every field but `kind` is optional in TypeScript because the requirement is
+ * per-kind - `path` for the three filesystem kinds, `ref` for `external` - and
+ * expressing that in the schema needs `oneOf`, whose handling by both CLIs is
+ * unverified. A missing field costs the entry, never the report.
+ */
+export interface Evidence {
+  kind: EvidenceKind;
+  path?: string;
+  line?: number;
+  excerpt?: string;
+  ref?: string;
 }
 
 export interface Finding {
@@ -411,6 +551,26 @@ export interface Finding {
   title: string;
   detail: string;
   suggested_fix: string;
+  /**
+   * Where this finding says to look. At least one entry, per the schema.
+   *
+   * A blocking finding with no entry that resolves is downgraded to P2 before
+   * anything reads its severity (#48): a reviewer that ran no commands could
+   * previously halt a run over a claim it could not point at. Optional in
+   * TypeScript for the reason `defer` is - a report stored before this field
+   * existed has none - and absent rather than `[]` when the model cited
+   * nothing, because absent is what actually happened.
+   */
+  evidence?: Evidence[];
+  /**
+   * Set when a blocking finding was downgraded for citing nothing that
+   * resolves.
+   *
+   * On the finding itself, not only in the event log: a downgrade that appeared
+   * in a log line alone would be invisible by the time anyone read the round's
+   * artifact.
+   */
+  downgraded?: { from: Severity; reason: string };
   /**
    * Real, worth doing, and belongs in separate work rather than in this change.
    *
@@ -486,10 +646,174 @@ export interface ClaudeTurnResult {
   tokens: TokenUsage;
 }
 
+/**
+ * What one gate did on the most recent pass.
+ *
+ * `required` is stored here rather than re-read from config so the exit rule is
+ * a pure function of state: a summary written from `state.json` must not need
+ * the config that produced it (#47).
+ */
+export interface GateOutcome {
+  name: string;
+  status: 'passed' | 'failed' | 'unavailable' | 'disabled';
+  command: string | null;
+  /** Executions actually performed. Zero for unavailable and disabled. */
+  runs: number;
+  required: boolean;
+}
+
+/**
+ * What the most recent review round actually saw - extended after each chunk
+ * turn succeeds, never before it.
+ *
+ * Absent means no completed review coverage: no review has run, or one is in
+ * flight and has not finished a single part. Never repaired into a zero-valued
+ * record - "the reviewer saw no files" is a different fact from "no review
+ * happened" (#49, and #44's rule about absence).
+ *
+ * Flat by decision: which chunk saw which file lives in the per-turn Codex
+ * artifacts and in the prompts, and storing it here would be redundant state
+ * with a second repair surface.
+ */
+export interface ReviewCoverage {
+  /** 1-based, matching the `Code review (round N)` heading. */
+  round: number;
+  /** Chunk turns COMPLETED so far, not the number planned. One for an ordinary round. */
+  chunks: number;
+  /** Every file the reviewer was actually shown, in order. */
+  files: string[];
+  /** Files whose diff was cut even inside their own chunk. */
+  truncated: string[];
+}
+
+/**
+ * One turn's observed-but-uncharged spend. See `RunState.inFlight`.
+ *
+ * Keyed by `label` plus `provider` wherever it is looked up, which is unique
+ * among live turns: the only concurrency is `withConcurrentCompaction`, and it
+ * pairs Claude's `compact` with a Codex critique or review turn, so the pair
+ * differs on both axes.
+ *
+ * `tokens` absent means the provider reports no figure while a turn is in
+ * flight, which is true of Codex: its stream carries usage only on
+ * `turn.completed`, so a killed Codex turn has no number to recover and is
+ * recorded as a known unknown rather than as a zero.
+ */
+export interface InFlightTurn {
+  label: string;
+  provider: 'claude' | 'codex';
+  tokens?: number;
+}
+
 export interface RunEvent {
   at: string;
   type: string;
   [key: string]: unknown;
+}
+
+/**
+ * The phase or round boundary a checkpoint was taken at (#78).
+ *
+ * A run's `state.json` is a single mutable file, so nothing recorded what it
+ * looked like at any earlier point. These are the points at which a snapshot is
+ * a coherent thing to resume from: each is taken after the work of a round has
+ * been recorded and before the next round has begun.
+ */
+export type CheckpointBoundary =
+  | 'plan-round'
+  | 'plan-approved'
+  | 'implemented'
+  | 'verify-round'
+  | 'review-round'
+  | 'final-fix'
+  | 'complete';
+
+/**
+ * Why a checkpoint's `commit` is what it is.
+ *
+ * Absence is reported as absence, with the cause named: a boundary that never
+ * commits (`no-commit-in-round`) says something different from a repository
+ * where commits are switched off, from a round that changed no files, and from
+ * a commit that failed. `sha-unusable` is the one that would otherwise be a
+ * fabrication - a commit succeeded but git named it something that is not a
+ * 40-hex object id, so the id is dropped rather than stored as though it could
+ * be resolved later.
+ */
+export type CheckpointCommitNote =
+  | 'committed'
+  | 'nothing-to-commit'
+  | 'commit-failed'
+  | 'sha-unusable'
+  | 'commits-disabled'
+  | 'not-a-repo'
+  | 'no-commit-in-round';
+
+/**
+ * A checkpoint's own metadata, carried inside the snapshot it describes.
+ *
+ * Written into `checkpoint-<n>.json` only. A live `state.json` gains it on a
+ * forked run, where it means "this state came from that checkpoint".
+ */
+export interface RunCheckpointMeta {
+  /** Matches the filename. Monotonic per run, from 1. */
+  n: number;
+  at: string;
+  boundary: CheckpointBoundary;
+  phase: RunPhase;
+  planRound: number;
+  reviewRound: number;
+  verifyRound: number;
+  /** A full 40-hex object id, or null. Never abbreviated, never symbolic. */
+  commit: string | null;
+  commitNote: CheckpointCommitNote;
+}
+
+/** One conversation a fork did - or could not do - anything about. */
+export interface ForkedConversation {
+  slot: SlotName;
+  /** The parent conversation this slot's first turn will fork from, or null when there was none. */
+  parentId: string | null;
+  why?: 'never-started' | 'not-persisted';
+}
+
+/**
+ * What the parent was, at the checkpoint the fork was taken from.
+ *
+ * **A PROVENANCE RECORD.** Nothing in vibe reads these figures: no ceiling, no
+ * guard, no summary arithmetic. They exist so a human - or a later tool - can
+ * subtract the shared prefix when adding two runs up, which is the whole of what
+ * was asked for. A fork's own `tokensUsed` and `costUsd` are the checkpoint's
+ * plus whatever it goes on to spend, and its ceilings read those exactly as an
+ * unforked run's do.
+ */
+export interface ForkOrigin {
+  /** The parent run. */
+  runId: string;
+  checkpoint: number;
+  checkpointAt: string;
+  boundary: CheckpointBoundary;
+  forkedAt: string;
+  /** The checkpoint's totals, verbatim. */
+  inheritedTokens: number;
+  inheritedCostUsd: number;
+  /**
+   * The checkpoint's `codexTokens`, verbatim - **absent when the checkpoint had
+   * none.** Not classified and not defaulted: an absent Codex share may mean no
+   * Codex turn ran or that none was recorded, and nothing here decides which,
+   * because nothing depends on the answer. A zero would be an invented number.
+   */
+  inheritedCodexTokens?: number;
+  /** The 40-hex commit the fork's branch ref was created at, or null. */
+  branchFrom: string | null;
+  conversations: ForkedConversation[];
+  /** What the fork did NOT carry, stated rather than left to be assumed. */
+  notInherited: string[];
+}
+
+/** A conversation a forked run's first turn still owes a fork to. */
+export interface ForkPendingEntry {
+  parentId: string;
+  attempts: number;
 }
 
 export interface RunState {
@@ -524,6 +848,27 @@ export interface RunState {
    */
   codexTokens?: number;
   /**
+   * Turns whose spend has been observed but not yet charged (#77).
+   *
+   * **An amount observed, never a claim that a turn is running.** That
+   * distinction is load-bearing: `src/progress.ts` keeps the live-turn set in
+   * memory only, because a persisted liveness record left behind by a killed
+   * process would assert that a turn is running when none is. Liveness is the
+   * run lock's job (`src/lock.ts`); this is accounting.
+   *
+   * **One lifetime rule, and only one.** An entry lives from its turn's first
+   * observation until the next accounting decision touches it - a charge, a
+   * failure, a recovery, or a forced release - and every one of those disposes
+   * of it in the same `saveState` that records what it decided. So an entry
+   * still here when a process starts means the last process died before
+   * reaching that turn's accounting, and recovery never has to guess. Nothing
+   * may add a second rule: a sealed or protected entry would be one that
+   * survives its own disposal, and the sentence above would stop being true.
+   *
+   * Optional so every state written before this existed loads with no repair.
+   */
+  inFlight?: InFlightTurn[];
+  /**
    * Codex's rate-limit window as last read from app-server, so the summary can
    * report it. Optional: it is absent whenever app-server is unavailable, which
    * is a normal outcome rather than an error.
@@ -532,12 +877,90 @@ export interface RunState {
   rateLimitWaits: number;
   baseSha: string | null;
   branch: string | null;
+  /**
+   * The checkpoint this state came from (#78).
+   *
+   * Written into every `checkpoint-<n>.json`, and present on a live
+   * `state.json` only for a forked run - where it says which snapshot the run
+   * was seeded from. Optional, so every state written before checkpoints existed
+   * loads with no repair.
+   */
+  checkpoint?: RunCheckpointMeta;
+  /**
+   * What this run was forked from, or absent because it is not a fork (#78).
+   *
+   * Present-but-unreadable is fatal on load rather than repaired: provenance
+   * quietly discarded leaves a state indistinguishable from an ordinary run,
+   * and once every pending fork has been consumed there is nothing else left
+   * that would show the loss. Purely a record - see `ForkOrigin`.
+   */
+  forkedFrom?: ForkOrigin;
+  /**
+   * Conversations whose first turn still owes a fork, and how many times it has
+   * been attempted.
+   *
+   * An **instruction**, not a record, which is why a present-but-unreadable
+   * value refuses the load: dropped silently, a forked conversation becomes a
+   * fresh one and the run loses the parent's context with nobody told. An entry
+   * is cleared by the accounting write that charges the turn which forked it, so
+   * absent means every fork this run owed has been made and paid for.
+   */
+  forkPending?: Partial<Record<SlotName, ForkPendingEntry>>;
+  /**
+   * Set by `vibe fork` when it creates the branch ref; cleared by `prepareGit`
+   * once the run is actually on that branch.
+   *
+   * An instruction too, and refused when unreadable for the same reason one
+   * layer down: dropped, the forked run never checks its branch out and its
+   * commits land wherever HEAD happens to be.
+   */
+  branchPending?: true;
   /** One entry per code-review round, driving the convergence assessment. */
   p1Rounds: RoundRecord[];
   /** The same, for verification-fix rounds, which converge independently. */
   verifyRounds: RoundRecord[];
   /** Verification-fix rounds spent so far. */
   verifyRound: number;
+  /**
+   * The most recent pass over the gates.
+   *
+   * Absent means no gate has run - a plan-only run, or a run that stopped before
+   * the gate. Never repaired into `[]`, which would mean "gates ran and there
+   * were none" and is a state nothing produces (#47, and #44's rule about
+   * absence).
+   */
+  gateOutcomes?: GateOutcome[] | undefined;
+  /**
+   * What the most recent review round was shown.
+   *
+   * Reset at the start of each round and extended one completed chunk at a
+   * time, so it never claims coverage a turn has not bought. Absent on a run
+   * that has not finished a review part, and never repaired into a record
+   * (#49).
+   */
+  reviewCoverage?: ReviewCoverage | undefined;
+  /**
+   * The **basename** of the most recent write turn's report artifact.
+   *
+   * Cleared before each write turn and written again once that turn's report is
+   * on disk - implement, verify-fix, review-fix, final-fix - and read by
+   * `runReview`, which renders the file's text into the reviewer's prompt. The
+   * clear comes first deliberately: the artifact write and this field's save
+   * are two separate file writes, and a process that died between them would
+   * otherwise leave a pointer to the PREVIOUS round's report, which the prompt
+   * presents as current. Absent is the honest answer in that window (#50).
+   *
+   * A basename and not the text: `state.json` is already ~96KB on a real run
+   * and a report is prose of unbounded length, and the handoff has to survive a
+   * resume through the persisted artifact rather than through in-memory state.
+   *
+   * Absent means no write turn has recorded a report this run can vouch for -
+   * including every run whose state predates this field. Nothing probes the run
+   * directory for one: `implementation-report.md` may still be sitting there
+   * three fix rounds later, and a stale report presented as current is worse
+   * than none.
+   */
+  lastReport?: string | undefined;
   /** Question-and-replan cycles spent so far. */
   questionRound: number;
   events: RunEvent[];
@@ -552,9 +975,15 @@ export interface RunState {
   deferredQuestions: DeferredQuestion[];
   sessionRotations: number;
   /**
-   * Codex's own thread id, reused across critique/answer/review turns -
-   * `SLOTS.judge`'s storage. Provider-minted, so it is null until a turn has
-   * returned one. Read and written through `src/slots.ts`, never here.
+   * The plan-side judge's Codex thread id, reused across critique and answer
+   * turns - `SLOTS.judge`'s storage. Provider-minted, so it is null until a turn
+   * has returned one. Read and written through `src/slots.ts`, never here.
+   *
+   * Provider-named for history, and deliberately not renamed by #45: it is one
+   * of two Codex threads now, but renaming it would be a stored-state migration
+   * where this comment does the job. A state written before that change keeps
+   * naming the thread this field has always named - the critique conversation -
+   * and the reviewer, which used to share it, simply starts fresh.
    */
   codexSessionId: string | null;
   /**
@@ -593,6 +1022,44 @@ export interface RunState {
    * one-shot run simply carries no measurement between turns.
    */
   judgeContextThread?: string;
+  /**
+   * The reviewer's own Codex thread id - `SLOTS.review`'s storage, and the whole
+   * of #45: the agent that reviews the code must not be the conversation that
+   * argued the plan into shape and approved it.
+   *
+   * Optional and never null, unlike `codexSessionId`. Absent is the correct
+   * reading for a conversation that has never run, it is what every state
+   * written before this field presents, and only a successful turn ever produces
+   * an id to store. Read and written through `SLOTS.review`, never here.
+   */
+  reviewSessionId?: string;
+  /**
+   * Whether a Codex turn has ever succeeded on `reviewSessionId` - the slot's
+   * `started` marker, separate from its id because every slot has both.
+   *
+   * No state has ever carried a review thread, so this has no legacy reading to
+   * answer for and the marker is the only evidence a turn happened here. See
+   * `SLOTS.review.started`, which is why it is not inferred from the id the way
+   * `codexSessionStarted`'s absence is.
+   */
+  reviewSessionStarted?: boolean;
+  /**
+   * Tokens occupying the review slot's Codex thread as of the last turn that
+   * reported any, exactly as `judgeContextTokens` is for the judge's.
+   *
+   * Meaningless without `reviewContextThread`, and read only through
+   * `src/slots.ts`. Absent means no measurement, which is NOT zero.
+   */
+  reviewContextTokens?: number;
+  /**
+   * The Codex thread id the figure above was measured on.
+   *
+   * Same provenance rule as `judgeContextThread`, and separately stored for the
+   * same reason the threads are separate: a figure measured on the reviewer's
+   * conversation must never be readable as the judge's, and a turn on one
+   * conversation must not disturb the other's record.
+   */
+  reviewContextThread?: string;
   /** Carried into the first turn of a rotated session. */
   handoff: string | null;
   /**
@@ -683,6 +1150,35 @@ export interface RunState {
    */
   carried?: Finding[];
   /**
+   * Findings the approving plan-critique round marked `defer`. Stated to the
+   * implementer as work *not* to do.
+   *
+   * The mirror image of `carried`, and the one round whose deferrals reach
+   * nobody otherwise: a revising round already hands its findings to the
+   * planner through `pendingFindings`, but the round that passes the gate
+   * clears them and breaks. Plan phase only - a review that approves has no
+   * later turn to tell, and FOLLOW-UPS.md is the whole of that record.
+   *
+   * Optional, so state written before this existed loads unchanged.
+   */
+  declined?: Finding[];
+  /**
+   * The acceptance bar the critique round that *approved* the plan saw.
+   *
+   * A copy, not a view of `state.plan`. The plan can be replaced by a later
+   * write, mutated in place by anything holding the same objects, or replaced
+   * with `null` by `readPlan` when a stored one is unusable - and none of that
+   * may move a bar the critic already passed. Where the two disagree the
+   * snapshot wins: a criterion the critic never saw is not an approved
+   * criterion.
+   *
+   * Assigned unconditionally at the gate, including as `undefined` for a legacy
+   * plan that never stated a bar - inventing `[]` there would put a claim in
+   * its mouth, and a conditional assignment would leave an earlier round's bar
+   * standing. Optional, so state written before this existed loads unchanged.
+   */
+  acceptanceCriteria?: AcceptanceCriterion[] | undefined;
+  /**
    * P1s the review carried, within `loop.p1Tolerance`. A final fix round
    * addresses them and OUTSTANDING.md records them, because that round is not
    * re-reviewed and so nothing has confirmed they are gone.
@@ -729,9 +1225,11 @@ export interface RunState {
    * to re-derive an answer the run already had, byte for byte, and appended a
    * second `RoundRecord` for a plan that had not changed.
    *
-   * Optional, and absent means "nothing unconsumed": `loadRun` casts stored
-   * JSON with no validation, so a state written before this field existed has
-   * none, and that is precisely what such a run meant.
+   * Optional, and absent means "nothing unconsumed": a state written before this
+   * field existed has none, and that is precisely what such a run meant. An
+   * explicit `null` is the ordinary post-consumption value `clearPendingFindings`
+   * writes, and `validateStoredState` keeps it as it is - it is healthy, not
+   * damage.
    */
   pendingFindings?: PendingFindings | null;
   extraContext: string | null;
@@ -741,5 +1239,31 @@ export interface RunSummary {
   id: string;
   status: string;
   task: string;
-  costUsd: number;
+  /**
+   * Null when the file could not be read, or held something that is not a cost.
+   *
+   * Not zero: `$0.00` asserts that an unreadable run cost nothing, which is the
+   * fabricated figure this codebase refuses everywhere else - an unknown Codex
+   * cost is reported as absent, an unknown context window stays null.
+   */
+  costUsd: number | null;
+  /**
+   * Whether anything is working on this run, from its lock (#77).
+   *
+   * Optional so that a caller building a summary by hand does not have to have
+   * an answer; `cmdList` renders an absent value as `unknown`, which is what an
+   * unasked question and an unanswerable one both amount to on a listing.
+   * `listRuns` always fills it, including for a run whose state.json could not
+   * be read - the lock is a separate file and stays legible when state does not.
+   */
+  liveness?: Liveness;
+  /**
+   * The run and checkpoint this one was forked from, when the stored state says
+   * so legibly (#78).
+   *
+   * Filled tolerantly, unlike `loadRun`'s refusal for the same field: a listing
+   * must not fail over one bad run. The two rules differ because the two callers
+   * do - one prints, the other acts.
+   */
+  forkedFrom?: { runId: string; checkpoint: number };
 }

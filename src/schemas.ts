@@ -8,7 +8,7 @@
 export const PLAN_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['plan_md', 'assumptions', 'open_questions', 'out_of_scope'],
+  required: ['plan_md', 'assumptions', 'open_questions', 'out_of_scope', 'acceptance_criteria'],
   properties: {
     plan_md: {
       type: 'string',
@@ -55,6 +55,46 @@ export const PLAN_SCHEMA = {
         },
       },
     },
+    acceptance_criteria: {
+      type: 'array',
+      description:
+        'How anyone can tell this change worked: the observable conditions that make it done. ' +
+        'State each so that two people would agree whether it holds - a criterion nobody can ' +
+        'check is not one. An empty array is legal, but it is a claim that done-ness here is ' +
+        'unobservable, so make it only when that is true. When you revise a plan, restate the ' +
+        'bar in full: this field is the whole bar, not a delta.',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['id', 'criterion', 'check', 'how'],
+        properties: {
+          id: {
+            type: 'string',
+            description:
+              'Stable kebab-case slug, unique within the plan, e.g. "resumes-without-repair". ' +
+              'A finding cites this rather than quoting the criterion.',
+          },
+          criterion: {
+            type: 'string',
+            description: 'The observable condition, stated so that two people would agree whether it holds.',
+          },
+          check: {
+            // Typed and enumerated for the reason `defer` is: with
+            // `additionalProperties: false` a required property carrying no
+            // `type` still accepts a number, and nothing downstream would say so.
+            type: 'string',
+            enum: ['command', 'inspection', 'qa'],
+            description:
+              'How it is checked: a command to run, something to inspect, or a named QA ' +
+              'scenario. Descriptive - nothing here runs it.',
+          },
+          how: {
+            type: 'string',
+            description: 'The command to run, what to inspect, or the named scenario.',
+          },
+        },
+      },
+    },
     open_questions: {
       type: 'array',
       description: 'Questions you would have asked a human interactively.',
@@ -84,6 +124,34 @@ export const PLAN_SCHEMA = {
   },
 } as const satisfies object;
 
+/**
+ * The evidence taxonomy and its consequence, in one place.
+ *
+ * Exported because `critiquePrompt` and `reviewPrompt` state the same rule, and
+ * a model told the rule in two different wordings has to guess which one the
+ * code implements. The consequence is stated as plainly as the rule: a model
+ * told the cost complies, one told only the rule guesses (#48).
+ */
+export const EVIDENCE_RULE =
+  'Every finding must cite something. Each entry names one kind of claim:\n' +
+  '- `code` - this line does X. Needs `path` (a file); may add `line` and `excerpt`. ' +
+  'Checked against the repository: the file must exist, `line` must be inside it, and ' +
+  '`excerpt` must appear somewhere in it.\n' +
+  '- `artifact` - the plan does not say what happens on resume. Needs `path`, the basename ' +
+  'of a run artifact such as `PLAN.md` or `code-review-0.json`. Checked against the run ' +
+  'directory.\n' +
+  '- `absence` - no test covers this path. Needs `path`, naming the file **or directory** ' +
+  'the thing is missing from. Only that the place exists is checked.\n' +
+  '- `external` - a fact about another tool, a spec, or a URL that nothing here can check. ' +
+  'Needs `ref`. Nothing is checked.\n\n' +
+  'A path must name something inside the repository - or, for `artifact`, inside the run ' +
+  'directory. Cite as many places as you like: the finding stands if **any one** entry ' +
+  'resolves.\n\n' +
+  'A P0 or P1 whose evidence does not resolve is downgraded to P2 and stops blocking. It is ' +
+  'kept, not deleted, and the downgrade is recorded with the kinds it offered. So cite the ' +
+  'place you actually looked: an unresolvable citation costs the finding its severity, and ' +
+  '`external` on a claim you could have pointed at in the code is visible for what it is.';
+
 /** Shared shape for both plan critique and post-implementation code review. */
 export const FINDINGS_SCHEMA = {
   type: 'object',
@@ -101,7 +169,7 @@ export const FINDINGS_SCHEMA = {
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['id', 'severity', 'title', 'detail', 'suggested_fix', 'defer'],
+        required: ['id', 'severity', 'title', 'detail', 'suggested_fix', 'defer', 'evidence'],
         properties: {
           id: {
             type: 'string',
@@ -134,10 +202,77 @@ export const FINDINGS_SCHEMA = {
             type: 'boolean',
             description:
               'true = this is real and worth doing, but it belongs in separate work rather ' +
-              'than in this change. A deferred finding is by definition not blocking: it must ' +
-              'be P2 or P3, never P0 or P1. That is deliberate - choosing to defer costs the ' +
-              'same honesty as choosing a severity does. If the work has to happen inside this ' +
-              'change for it to be correct, do not defer it; raise it at its true severity.',
+              'than in this change. The test: would this change be correct, complete and safe ' +
+              'to ship without it? If yes, defer it. If no, it is not deferrable at any ' +
+              'severity - raise it at its true severity instead. A deferred finding is by ' +
+              'definition not blocking: it must be P2 or P3, never P0 or P1. That is ' +
+              'deliberate - choosing to defer costs the same honesty as choosing a severity ' +
+              'does. Not deferring costs too: separate work raised without this flag becomes ' +
+              'part of the change, and the change is what gets built.',
+          },
+          evidence: {
+            type: 'array',
+            minItems: 1,
+            description: EVIDENCE_RULE,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              // EVERY key, not just `kind`, and the optional ones are nullable
+              // instead. OpenAI structured outputs refuse an object with
+              // `additionalProperties: false` whose `required` does not cover
+              // all of `properties` - so `required: ['kind']` was a 400 on
+              // `text.format.schema` before the model was ever reached, killing
+              // every critique and every review on develop (#68).
+              //
+              // Which CLI is asked matters: Claude accepted the same schema
+              // through `--json-schema` in the run that died, so the planner was
+              // fine and only Codex's `--output-schema` refused it. The two do
+              // not enforce the same subset, and the invariant test over these
+              // schemas is what now holds the line offline.
+              //
+              // Per-kind requirements - `path` for the three filesystem kinds,
+              // `ref` for `external` - are still NOT expressed here. That needs
+              // `oneOf`, and the runtime enforces it instead, where a miss costs
+              // one citation rather than the whole report (#48).
+              required: ['kind', 'path', 'line', 'excerpt', 'ref'],
+              properties: {
+                kind: {
+                  type: 'string',
+                  enum: ['code', 'artifact', 'absence', 'external'],
+                  description:
+                    'Which kind of claim this citation makes. `code` and `absence` are checked ' +
+                    'against the repository, `artifact` against the run directory, `external` ' +
+                    'not at all.',
+                },
+                path: {
+                  type: ['string', 'null'],
+                  description:
+                    'Repo-relative, e.g. "src/run.ts". For `artifact`, the basename of a run ' +
+                    'artifact ("PLAN.md", "code-review-0.json"). For `absence`, a file or a ' +
+                    'directory. Required for `code`, `artifact` and `absence`; null for ' +
+                    '`external`.',
+                },
+                line: {
+                  type: ['integer', 'null'],
+                  description:
+                    'Optional, `code` only - null otherwise. Must be a real line of the file. ' +
+                    'Not required to be where an `excerpt` appears.',
+                },
+                excerpt: {
+                  type: ['string', 'null'],
+                  description:
+                    'Optional, `code` only - null otherwise. Must appear somewhere in the ' +
+                    'file; whitespace is normalised before comparing, so re-indenting is safe. ' +
+                    'Quote it exactly otherwise - a paraphrase does not resolve.',
+                },
+                ref: {
+                  type: ['string', 'null'],
+                  description:
+                    '`external` only: the URL, spec, or tool documentation being relied on. ' +
+                    'Required for `external`; null for the other kinds.',
+                },
+              },
+            },
           },
         },
       },
