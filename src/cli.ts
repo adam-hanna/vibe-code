@@ -34,7 +34,7 @@ import { codexBin } from '@src/codex.js';
 // The accounting seam, from the leaf it lives in: orchestrator.js re-exports
 // applyCharge but not fmtTokens, and charge.js imports nothing that imports this.
 import { applyCharge, fmtTokens, takeInFlight } from '@src/charge.js';
-import { preflight, REAL_PROBES } from '@src/preflight.js';
+import { gitPrecondition, preflight, REAL_PROBES } from '@src/preflight.js';
 import type { PreflightProbes, PreflightReport } from '@src/preflight.js';
 import { closeCodexRateLimits, describeLimits, readCodexRateLimits } from '@src/ratelimits.js';
 import { resolveGates } from '@src/verify.js';
@@ -440,7 +440,7 @@ async function startRun(
     );
   }
 
-  return execute(state, cfg, false, flags.skipProbe === true, runPreflight, orchestrate, handle);
+  return execute(state, cfg, false, flags.skipProbe === true, REAL_GATE, orchestrate, handle);
 }
 
 /**
@@ -574,7 +574,7 @@ async function resumeRun(
       log.info('Previous stop reported findings, not questions - continuing with raised limits.');
       renameSync(answersFile, path.join(state.dir, `stalled-${state.planRound}.md`));
       log.heading(`Resuming ${state.id}`);
-      return execute(state, cfg, true, flags.skipProbe === true, runPreflight, orchestrate, handle);
+      return execute(state, cfg, true, flags.skipProbe === true, REAL_GATE, orchestrate, handle);
     }
 
     const answers = parseHumanAnswers(raw);
@@ -592,7 +592,7 @@ async function resumeRun(
   }
 
   log.heading(`Resuming ${state.id}`);
-  return execute(state, cfg, true, flags.skipProbe === true, runPreflight, orchestrate, handle);
+  return execute(state, cfg, true, flags.skipProbe === true, REAL_GATE, orchestrate, handle);
 }
 
 /**
@@ -724,8 +724,25 @@ export function parseHumanAnswers(md: string): Answer[] {
   return answers;
 }
 
+/**
+ * What the gate may skip.
+ *
+ * `--skip-probe` is documented as "Skip the agent environment preflight", and
+ * since #71 the gate does two separable things: it probes both agents, and it
+ * checks deterministic preconditions on the target directory. Only the first is
+ * skippable, so the flag is passed *into* the gate rather than deciding whether
+ * to call it.
+ */
+export interface PreflightOptions {
+  skipProbe: boolean;
+}
+
 /** The preflight gate, injected so its escalation path is testable without spawning. */
-export type PreflightGate = (state: RunState, cfg: Config) => Promise<ExitCode | null>;
+export type PreflightGate = (
+  state: RunState,
+  cfg: Config,
+  options: PreflightOptions,
+) => Promise<ExitCode | null>;
 
 /**
  * The loop itself, injected alongside the gate for the same reason: a test that
@@ -918,7 +935,7 @@ export async function execute(
   cfg: Config,
   resume: boolean,
   skipProbe = false,
-  preflightGate: PreflightGate = runPreflight,
+  preflightGate: PreflightGate = REAL_GATE,
   loop: RunLoop = orchestrate,
   /**
    * The run's lock, acquired by the command. Trailing and optional so every
@@ -958,16 +975,17 @@ export async function execute(
     // Inside the try, not above it: preflight now charges what its probes spent,
     // so it can raise the same budget Escalation a turn can, and that belongs in
     // the one handler that reports an escalation rather than escaping uncaught.
-    if (!skipProbe) {
-      const gate = await preflightGate(state, cfg);
-      if (gate !== null) {
-        // Summarised, where it used to return in silence. The probes have
-        // already been charged through `chargePreflight`, and after a recovery
-        // there may be a caveat owed as well: a run that exits owing a number
-        // should say what the number is, wherever it exits (#77).
-        summary(state, started, recovery);
-        return gate;
-      }
+    // Always called, and handed the flag rather than gated on it: since #71 the
+    // gate's deterministic half is not skippable, and only it knows which half
+    // is which.
+    const gate = await preflightGate(state, cfg, { skipProbe });
+    if (gate !== null) {
+      // Summarised, where it used to return in silence. The probes have
+      // already been charged through `chargePreflight`, and after a recovery
+      // there may be a caveat owed as well: a run that exits owing a number
+      // should say what the number is, wherever it exits (#77).
+      summary(state, started, recovery);
+      return gate;
     }
 
     await loop(state, cfg, resume);
@@ -1098,18 +1116,57 @@ function environmentFacts(
 }
 
 /**
- * Gate the run on both agents' execution environments.
+ * Gate the run on the target directory, then on both agents' execution
+ * environments.
  *
  * Returns an exit code to stop on, or null to proceed. Deliberately before the
  * first planning token: the failure this replaces cost 35 minutes and surfaced
  * as a plan-stage P1 from the reviewer rather than as an environment error.
+ *
+ * Two halves since #71, and only the second is skippable. The deterministic
+ * preconditions are neither an agent nor a probe - they are free, they cannot
+ * be wrong, and `--skip-probe` is documented as skipping the *agent
+ * environment* preflight.
+ *
+ * This is also the one place the run path derives `phases` from `planOnly`;
+ * both halves read that single derivation rather than each computing its own.
  */
 export async function runPreflight(
   state: RunState,
   cfg: Config,
   probes: PreflightProbes = REAL_PROBES,
+  options: { skipProbe?: boolean } = {},
 ): Promise<ExitCode | null> {
   const phases: Phase[] = state.planOnly ? ['plan'] : ['plan', 'implement', 'review'];
+
+  // What is actually ahead, which is not always what the run's phases are. A
+  // finished run has none: `runPhases` recognises `resumePhase(state) ===
+  // 'complete'` and returns without dispatching one, so refusing such a resume
+  // for want of a repository would stop a run that was never going to review
+  // anything. The probe half deliberately keeps asking about all of `phases` -
+  // narrowing the toolchain contract by resume point is a separate change with
+  // its own blast radius, and this is the half that must not over-refuse.
+  const ahead: readonly Phase[] = resumePhase(state) === 'complete' ? [] : phases;
+
+  // Before the probes, so a refusal costs nothing: the run that produced #71
+  // spent 30M tokens before the review phase found this out for itself.
+  const blocked = await gitPrecondition(state.targetDir, ahead);
+  if (blocked !== null) {
+    log.heading('Preflight');
+    log.fail(blocked);
+    state.status = 'error';
+    recordEvent(state, 'preflight-failed', { reasons: [blocked] });
+    // Deliberately NOT followed by the probe path's "re-run with --skip-probe
+    // to proceed anyway": that flag does not skip this check, and if it did the
+    // run would still die at the review phase. It is the one piece of advice
+    // that is always wrong here.
+    return EXIT.PREFLIGHT;
+  }
+
+  // After the preconditions, before the heading: a skipped probe printed
+  // nothing before #71 and still prints nothing now.
+  if (options.skipProbe === true) return null;
+
   log.heading('Preflight');
 
   let report: Awaited<ReturnType<typeof preflight>>;
@@ -1167,6 +1224,16 @@ export async function runPreflight(
 
   return report.ok ? null : EXIT.PREFLIGHT;
 }
+
+/**
+ * What a real run gates on.
+ *
+ * An adapter rather than `runPreflight` itself: the gate's third argument is
+ * the options and `runPreflight`'s is its injected probes, which a test
+ * substitutes. Naming the real pairing here keeps both seams intact.
+ */
+export const REAL_GATE: PreflightGate = (state, cfg, options) =>
+  runPreflight(state, cfg, REAL_PROBES, options);
 
 /**
  * What preflight's probes spent, through the same seam a turn pays through.
@@ -1556,11 +1623,36 @@ async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
     closeCodexRateLimits();
   }
 
-  if (await git.isRepo(targetDir)) {
+  // `repoStatus`, because this is the command whose whole job is to report a
+  // broken environment: `isRepo` throws when the git binary cannot be resolved
+  // or spawned, and an unhandled throw here would end `vibe doctor` on a
+  // generic error instead of the line the user came for (#71, review round 1).
+  const repo = await git.repoStatus(targetDir);
+  if (repo.isRepo) {
     log.ok(`git repo: ${targetDir} (branch ${await git.currentBranch(targetDir)})`);
     if (await git.isDirty(targetDir)) log.warn('working tree is dirty');
+  } else if (repo.error !== null) {
+    // A failure, not a warning, and it counts against the exit code. An
+    // ordinary non-repository target is a fine environment - `vibe plan` works
+    // there - but a git that cannot be run is broken, and `check('git', ...)`
+    // above only RESOLVES the binary: a path that exists but cannot be spawned
+    // passes it and would otherwise leave doctor reporting a healthy
+    // environment (#71, review round 2).
+    log.fail(
+      `git could not be run against ${targetDir}: ${repo.error}. ` +
+        '`vibe run` will refuse here with exit 6, because the review phase needs a diff.',
+    );
+    bad++;
   } else {
-    log.warn(`not a git repository: ${targetDir} - no branch isolation or commits`);
+    // Reported, not failed: doctor has no run state and so no `planOnly`, and
+    // `vibe plan` works perfectly here. Naming the refusal is what the old
+    // warning was missing - it said what was lost, not that a full run would
+    // die of it (#71).
+    log.warn(
+      `not a git repository: ${targetDir} - no branch isolation or commits, and ` +
+        '`vibe run` will refuse here with exit 6 because the review phase needs a diff. ' +
+        '`vibe plan` still works.',
+    );
   }
 
   if (flags.skipProbe === true) {

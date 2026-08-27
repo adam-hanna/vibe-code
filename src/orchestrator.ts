@@ -1263,18 +1263,49 @@ async function prepareGit(
   // run - and commit - on whatever happens to be checked out.
   const owed = cfg.git.useBranch && state.branchPending === true;
 
-  if (!(await git.isRepo(cwd))) {
+  // `repoStatus`, so a git binary that cannot be resolved or spawned is an
+  // answer here rather than a throw. `isRepo` only tolerates a git that RAN and
+  // exited nonzero; a missing `VIBE_GIT_BIN` made this line take down a
+  // plan-only run - which needs nothing from git at all - with a generic error
+  // before the first planning turn (#71, review round 2). The work that reaches
+  // this function without a repository is precisely the work that does not need
+  // one: a full run has already been refused by `gitPrecondition` in the
+  // preflight gate, and a finished run returns a few lines below without
+  // dispatching a phase.
+  const { isRepo, error } = await git.repoStatus(cwd);
+  if (!isRepo) {
     if (owed) {
+      // Still a refusal, and for the same reason: a fork that cannot be put on
+      // its branch would otherwise run - and commit - on whatever is checked
+      // out. Only the cause differs, so only the cause is reworded.
       throw new Escalation(
         EXIT.ERROR,
-        `Run ${state.id} was forked onto branch "${String(state.branch)}", but ${cwd} is not a ` +
-          'git repository, so it cannot be put on it. Nothing has run. Point the run at the ' +
-          'repository it was forked in, or resume with --no-branch to run here anyway.',
+        `Run ${state.id} was forked onto branch "${String(state.branch)}", but ` +
+          (error === null
+            ? `${cwd} is not a git repository`
+            : `git could not be run against ${cwd} (${error})`) +
+          ', so it cannot be put on it. Nothing has run. Point the run at the repository it ' +
+          'was forked in, or resume with --no-branch to run here anyway.',
       );
     }
     // Only on a fresh run, as before: a resume said this once already, and
     // repeating it every pass would be new output for an unchanged situation.
-    if (!resume) log.warn('Not a git repository - running without branch isolation or commits.');
+    //
+    // Since #71 only a plan-only or already-finished run reaches this line: a
+    // full run is refused by `gitPrecondition` before the loop starts, because
+    // its review phase would have died on `git diff --cached` an hour later.
+    // The not-a-repository wording is unchanged because it stays true of the
+    // runs that still get here - they do run, and they do so without branch
+    // isolation or commits. The broken-binary case is named rather than folded
+    // into it: "not a git repository" would be a false statement about a
+    // directory that may well be one.
+    if (!resume) {
+      log.warn(
+        error === null
+          ? 'Not a git repository - running without branch isolation or commits.'
+          : `git could not be run (${error}) - running without branch isolation or commits.`,
+      );
+    }
     return;
   }
   // Fresh runs only, and not merely to keep the output identical: "they will be
@@ -2553,6 +2584,36 @@ async function runReview(
   roles: RoleTable,
   turns: AgentTurns,
 ): Promise<FindingsReport> {
+  // Before `log.step`, so the run never claims a reviewer started on a diff it
+  // could not read. The decision that a gitless run is refused rather than
+  // degraded is NOT made here - it is made by `gitPrecondition` in the preflight
+  // gate, before anything is spent. This covers only what that gate cannot see:
+  // a resume, a hand-edited state, or a repository that stopped being one
+  // mid-run. `isRepo` and not `hasCommits` for the reason recorded there - a
+  // repository with no commits reviews fine (measured 2026-08-27, #71).
+  //
+  // Without it, `diffChunks` runs `git diff --cached`, which outside a
+  // repository falls back to `--no-index` mode and dies with `unknown option
+  // 'cached'` - a git usage message about a flag vibe passed, naming nothing a
+  // user could act on.
+  // `repoStatus` rather than `isRepo` for the same reason the gate uses it: a
+  // git that cannot be resolved or spawned makes `isRepo` throw, and an
+  // unhandled throw here is a generic run error rather than the named refusal.
+  const repo = await git.repoStatus(cwd);
+  if (!repo.isRepo) {
+    throw new Escalation(
+      EXIT.PREFLIGHT,
+      (repo.error === null
+        ? `${cwd} is not a git repository`
+        : `git could not be run against ${cwd} (${repo.error})`) +
+        ", so the review phase cannot run: the reviewer's only input is a diff produced by " +
+        'git, and there is no second source for it. ' +
+        (repo.error === null
+          ? 'Point the run at the repository, or `git init` here, and resume.'
+          : 'Repair the git binary - VIBE_GIT_BIN, or git on PATH - and resume.'),
+    );
+  }
+
   log.step(`${holderLabel('reviewer', roles)} is reviewing the implementation`);
   const { chunks, files } = await git.diffChunks(cwd, state.baseSha);
 

@@ -23,7 +23,12 @@ export const EXIT = {
   NO_CONVERGENCE: 3,
   BUDGET: 4,
   RATE_LIMITED: 5,
-  /** The agents' execution environments do not satisfy the toolchain contract. */
+  /**
+   * A precondition of the phases ahead is not satisfied: the agents' execution
+   * environments do not meet the toolchain contract, or the target directory
+   * cannot host those phases at all - `vibe run` outside a git repository, whose
+   * review phase has no diff to read (#71).
+   */
   PREFLIGHT: 6,
   /**
    * The loop finished and a required verification gate never ran.
