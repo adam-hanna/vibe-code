@@ -275,6 +275,27 @@ A phase moves on when there are **no P0s and at most `loop.p1Tolerance` P1s** (d
 
 The tolerance exists because demanding a spotless verdict is unmeetable on hard work: a plan for a 1416-line parser went eight rounds and $24 without reaching implementation, every finding legitimate and every one of them answerable in 400ms by the 1977-test suite nobody had run yet. **P0 is the level the tolerance cannot swallow** — it is for findings that make the work unshippable, and it blocks on its own no matter how few there are. A failing verification is filed as a P0 for exactly that reason.
 
+### A plan says how you would know it worked
+
+A plan used to describe work without ever stating what finishing it would look like, so "done"
+was whatever the reviewer thought it was that round. Every plan now carries
+`acceptance_criteria`: each one a stable kebab-case `id`, the observable `criterion`, the
+`check` that settles it and `how` to run it. The bar is stated so that two people would agree
+whether it holds — a criterion nobody can check is not one.
+
+**A revision restates the whole bar, not a delta.** Dropping a criterion lowers the bar, so the
+planner is asked to say so and explain why it was never the right condition; adding one is how a
+revision answers a critique that the definition of done was incomplete.
+
+**It is frozen at the instant the plan is approved**, as a copy rather than a view. The
+implementer is bound by that snapshot and so is the reviewer, so a bar cannot be quietly lowered
+after the gate by a later edit to the plan. The implementer's report is keyed to the same ids,
+which is what lets a review round check a claim against the criterion it answers instead of
+against prose.
+
+An empty list is legal. It is a claim that done-ness here is unobservable, and it is meant to be
+made only when that is true.
+
 ### A finding has to cite something
 
 A blocking finding used to be able to point at nothing. One review round raised P1s having executed **zero** commands — assertions about code nobody had read, each of them bought a fix round at the same price as a finding somebody had checked.
@@ -318,7 +339,7 @@ Everything lands in `.vibe/runs/<run-id>/` in the target repo — not `/tmp`, so
 
 ```
 PLAN.md                    final approved plan
-plan-0.json ...            each plan revision, with assumptions and questions
+plan-0.json ...            each plan revision, with assumptions, questions and acceptance criteria
 plan-critique-0.json ...   Codex findings per round
 code-review-0.json ...     Codex review findings per round
 implementation-report.md   what Claude says it did — handed to the next reviewer

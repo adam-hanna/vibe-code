@@ -7,36 +7,135 @@ for a change that breaks an existing config or an existing run.
 Each entry links the pull request that made it and, where there is one, the issue it
 closes.
 
-## Unreleased
+## 1.2.0 - 2026-08-27
+
+Seventeen issues since 1.1.0. **Nothing here breaks an existing config**: every new key has a
+default that reproduces 1.1.0's behaviour and no key was renamed or removed. Three things a
+running setup can notice are listed under Upgrading.
+
+The theme is evidence. A plan now says how you would know it worked, a finding has to cite
+something, a verification gate that never ran can no longer report success, and a run that is
+killed can be told from one that is working — and can be resumed without losing what it spent.
 
 ### Added
 
-- **A run's state history, and `vibe fork`.** Each run writes a `checkpoint-<n>.json` at
-  every phase and round boundary - the whole state, valid on its own - and records the
-  commit that round produced as a full object id. `vibe fork <run-id> --at <n>` seeds a new
-  run from one of them, creating its branch with `git branch` so the working tree, HEAD and
-  the parent run are all untouched; the fork moves onto that branch when you resume it.
-  `forkedFrom` records what the parent had spent at that point as provenance only - nothing
-  in vibe computes from it - and the fork's own ceilings count the inherited totals.
+- **A plan has a structured definition of done.** `acceptance_criteria` on every plan: a stable
+  id, the observable condition, the check that settles it and how to run it. Frozen as a copy at
+  the instant the plan is approved, so the bar cannot be lowered after the gate, and the
+  implementer's report is keyed to the same ids.
+  (#44, [#58](https://github.com/adam-hanna/vibe-code/pull/58))
+- **Named verification gates.** `verify.gates` replaces a single command with an ordered list,
+  each with its own name, command and `required` flag. A required gate that never ran now exits
+  **7** instead of reporting success. A config with `verify.command` still works and is
+  synthesised into one legacy gate.
+  (#47, [#64](https://github.com/adam-hanna/vibe-code/pull/64))
+- **A finding has to cite something.** Every finding carries `evidence` naming what kind of claim
+  it makes and where. A P0 or P1 whose citations do not resolve is downgraded to P2, with the
+  reason recorded on it, rather than buying a fix round on an assertion nobody checked.
+  (#48, [#67](https://github.com/adam-hanna/vibe-code/pull/67))
+- **The implementer's report reaches the next reviewer**, framed as an untrusted and
+  non-exhaustive self-report rather than as evidence. Five fixed headings, keyed to the plan's
+  acceptance-criterion ids, rendered into every turn of the next review round.
+  (#50, [#72](https://github.com/adam-hanna/vibe-code/pull/72))
+- **The planner reads what past runs decided.** `.vibe/runs/` is named in the planning prompt as
+  evidence and explicitly not as instruction — bounded to ten rows, every field truncated, and
+  sanitised where the prompt is rendered rather than where it is read.
+  (#52, [#73](https://github.com/adam-hanna/vibe-code/pull/73))
+- **A role can name its own effort**, and then its own model. `roles.<role>` accepts
+  `{ "provider", "model", "effort" }`, so the critic and the reviewer no longer have to be one
+  mind in two conversations. A model is accepted on trust — no allowlist, no substitution — and
+  surfaced early in the `Roles:` line and by name when a turn fails.
+  (#46, [#61](https://github.com/adam-hanna/vibe-code/pull/61); #60,
+  [#79](https://github.com/adam-hanna/vibe-code/pull/79))
+- **`vibe list` and `vibe resume` can tell a dead run from a live one.** A run holds `run.lock`
+  while it works, naming its pid, host and start time. Six verdicts, and only a genuinely absent
+  lock permits a second writer; a resume over a live or unprobeable lock is refused, with
+  `--force` as the way out.
+  (#77, [#80](https://github.com/adam-hanna/vibe-code/pull/80))
+- **A killed turn's spend is recovered.** vibe watches its own stream, so a Claude turn
+  interrupted mid-flight is charged on the next resume and the ceilings see it. An interrupted
+  Codex turn is named as unattributed rather than counted, because `codex exec --json` reports
+  usage only when a turn completes.
+  (#77, [#80](https://github.com/adam-hanna/vibe-code/pull/80))
+- **A run's state has a history, and `vibe fork`.** Each run writes a `checkpoint-<n>.json` at
+  every phase and round boundary — the whole state, valid on its own — and records the commit
+  that round produced. `vibe fork <run-id> --at <n>` seeds a new run from one of them, creating
+  its branch with `git branch` so the working tree, HEAD and the parent run are untouched.
   (#78, [#81](https://github.com/adam-hanna/vibe-code/pull/81))
+- **The reviewer has its own Codex conversation**, separate from the thread that argued the plan
+  into shape and approved it.
+  (#45, [#59](https://github.com/adam-hanna/vibe-code/pull/59))
+- **The reviewer is told what deferring is for, and what not deferring costs.** Across nine runs
+  the critic deferred twice while plan revisions moved 46 items out of scope — the mechanism was
+  not unused, it was being routed around at the price of a full round.
+  (#56, [#76](https://github.com/adam-hanna/vibe-code/pull/76))
 
 ### Fixed
 
-- **A resume no longer commits to whatever branch is checked out.** `vibe resume` refuses
-  when the run records a branch that exists and HEAD is somewhere else, naming the
-  `git checkout` to run; `--no-branch` skips the check. Previously those commits landed on
-  the wrong branch silently, which forking makes easy to hit.
+- **A change too large for one review turn is reviewed in as many turns as it takes.** Above 400k
+  characters the diff is packed into whole-file parts, each its own reviewer turn, merged into one
+  findings report and one round. A single file whose own diff exceeds the limit is still cut, but
+  the reviewer is told which one and the run says so.
+  (#49, [#70](https://github.com/adam-hanna/vibe-code/pull/70))
+- **Stored run state is validated rather than cast.** A record is repaired to the empty value its
+  type implies and the repair is logged; a promise the run cannot keep is refused with the run
+  named and nothing rewritten.
+  (#23, [#55](https://github.com/adam-hanna/vibe-code/pull/55))
+- **`status`, `phase` and `planOnly` are checked together, not just individually.** A combination
+  no writer could have produced is refused or normalised toward repeating work rather than
+  skipping it.
+  (#54, [#75](https://github.com/adam-hanna/vibe-code/pull/75))
+- **Codex no longer rejects the findings schema with a 400.** Every critique and review turn was
+  failing; the rule is now asserted offline so it cannot regress silently.
+  (#68, [#69](https://github.com/adam-hanna/vibe-code/pull/69))
+- **A critique round that only defers reaches the planner.** The approving round's deferrals used
+  to be cleared without ever being stated to the implementer.
+  (#22, [#57](https://github.com/adam-hanna/vibe-code/pull/57))
+- **`state.json` is written whole or not at all.** Write-to-temp then rename, so a process killed
+  during the write leaves either the previous file or the new one. It was truncate-then-write, on
+  a ~96KB file rewritten every five seconds for the length of a run.
+  (#77, [#80](https://github.com/adam-hanna/vibe-code/pull/80))
+- **The in-turn token figure matches what the turn is charged.** It counted a message once per
+  content block, overstating by up to 99%.
+  (#77, [#80](https://github.com/adam-hanna/vibe-code/pull/80))
+- **A resume no longer commits to whatever branch is checked out.** See Upgrading.
   (#78, [#81](https://github.com/adam-hanna/vibe-code/pull/81))
 - **Two runs started in the same second on the same task no longer share a directory.** The
-  allocator claimed the run directory with a recursive `mkdir`, which succeeds on one that
-  already exists, so the second run overwrote the first. The claim is now exclusive, with a
-  bounded suffix and a refusal past it.
+  allocator claimed it with a recursive `mkdir`, which succeeds on one that already exists, so the
+  second run overwrote the first.
   (#78, [#81](https://github.com/adam-hanna/vibe-code/pull/81))
 - **A stored report pointer is checked against the names vibe actually writes.** It was a
-  character whitelist, so a stored `lastReport` of `state.json` rendered the whole state
-  file into the reviewer's prompt. `vibe resume "<id>."` is refused for the same class of
-  reason: Windows strips the trailing dot, so it named a different run than it said.
+  character whitelist, so a stored `lastReport` of `state.json` rendered the whole state file into
+  the reviewer's prompt.
   (#78, [#81](https://github.com/adam-hanna/vibe-code/pull/81))
+
+### Internal
+
+- **A full-loop integration harness**, so the phase loop itself is testable: `orchestrate` end to
+  end with injected agents, a real git repo and a real verification command. Every phase feature
+  in this release was tested through it.
+  (#43, [#51](https://github.com/adam-hanna/vibe-code/pull/51))
+- `AGENTS.md`, the working guide for changing this repo, and the README gaps 1.1.0 left.
+  ([#40](https://github.com/adam-hanna/vibe-code/pull/40),
+  [#41](https://github.com/adam-hanna/vibe-code/pull/41),
+  [#42](https://github.com/adam-hanna/vibe-code/pull/42))
+
+### Upgrading
+
+No config change is required. Three behaviours a running setup can notice:
+
+- **A required verification gate that never ran now exits 7** instead of 0. The work, its
+  artifacts and its commits are all there; what is missing is the evidence that it runs. If you
+  script on the exit code, treat 7 as "finished, unverified".
+  (#47)
+- **`vibe resume` refuses when the run records a branch that exists and something else is checked
+  out**, naming the `git checkout` to run, where it used to proceed. Those commits were landing on
+  whichever branch happened to be current. `--no-branch` skips the check.
+  (#78)
+- **A `state.json` that is internally contradictory can now be refused on load** rather than
+  resumed. Only combinations no writer could have produced are refused; everything that is merely
+  damaged is repaired to the empty value its type implies and logged.
+  (#23, #54)
 
 ## 1.1.0 - 2026-08-20
 
