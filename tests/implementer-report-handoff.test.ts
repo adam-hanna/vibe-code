@@ -183,7 +183,15 @@ test('a run with no report tells the reviewer so, and still finishes', async () 
 test('a pointer to nothing reads exactly like no pointer, and says so in the events', async () => {
   const missing = reviewingRun({ prefix: 'vibe-report-gone-', task: 'gone' });
   const absent = reviewingRun({ prefix: 'vibe-report-absent-', task: 'absent' });
-  missing.lastReport = 'gone.md';
+  // A name vibe genuinely writes, pointing at a file that is not there - which
+  // is what this case has always been about. It used to be `gone.md`; since #78
+  // `isReportBasename` is an allowlist of the three names `recordReport`
+  // produces, so `gone.md` now fails one step earlier and records
+  // `report_unusable` instead. That is a different (and also honest) event, and
+  // asserting it here would have this case guarding the name check rather than
+  // the missing-file path. The reserved-name rejections have their own cases in
+  // tests/checkpoints.test.ts.
+  missing.lastReport = 'fix-report-3.md';
   saveState(missing);
 
   const prompts = new Map<string, string>();
@@ -200,7 +208,9 @@ test('a pointer to nothing reads exactly like no pointer, and says so in the eve
   );
   // The difference lives here instead, which is where someone debugging the run
   // can find it.
-  assert.ok(missing.events.some((e) => e.type === 'report_unreadable' && e['name'] === 'gone.md'));
+  assert.ok(
+    missing.events.some((e) => e.type === 'report_unreadable' && e['name'] === 'fix-report-3.md'),
+  );
   assert.equal(absent.events.some((e) => e.type === 'report_unreadable'), false);
 });
 

@@ -164,3 +164,52 @@ test('the listing itself is unchanged: verbatim values, no options, no writes', 
   assert.equal(runs[0]?.costUsd, 1.5);
   assert.equal(readFileSync(path.join(targetDir, RUNS, 'hostile', 'state.json'), 'utf8'), before);
 });
+
+// ---- forks in the index (#78) -----------------------------------------------
+
+test('a forked run is labelled in the index, tolerantly', () => {
+  const targetDir = tempDir();
+  plant(
+    targetDir,
+    'child',
+    JSON.stringify({
+      id: 'child',
+      status: 'done',
+      task: 'the fork',
+      costUsd: 0,
+      forkedFrom: { runId: 'parent-run', checkpoint: 4 },
+    }),
+  );
+
+  const runs = listRuns(targetDir);
+  assert.deepEqual(runs[0]?.forkedFrom, { runId: 'parent-run', checkpoint: 4 });
+  const section = priorRunsSection(runs);
+  assert.ok(section.includes('fork of `parent-run` at checkpoint 4'));
+});
+
+test('an unreadable fork record costs the label and nothing else', () => {
+  const targetDir = tempDir();
+  // A listing must not fail over one bad run - which is deliberately a different
+  // rule from `loadRun`, where the same value refuses. One prints; the other acts.
+  for (const [id, forkedFrom] of [
+    ['a', 'not a record'],
+    ['b', { runId: '', checkpoint: 2 }],
+    ['c', { runId: 'p', checkpoint: 'second' }],
+  ] as const) {
+    plant(targetDir, id, JSON.stringify({ id, status: 'done', task: 't', costUsd: 0, forkedFrom }));
+  }
+
+  const runs = listRuns(targetDir);
+  assert.equal(runs.length, 3);
+  for (const run of runs) assert.equal(run.forkedFrom, undefined);
+  assert.equal(priorRunsSection(runs).includes('fork of'), false);
+});
+
+test('a repo with no forks renders the index exactly as it did before', () => {
+  const targetDir = tempDir();
+  plant(targetDir, 'plain', healthy('plain', 'no forks here'));
+
+  const section = priorRunsSection(listRuns(targetDir));
+  assert.ok(section.includes('`plain` - done - no forks here'));
+  assert.equal(section.includes('fork of'), false);
+});

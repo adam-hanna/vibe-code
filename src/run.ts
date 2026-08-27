@@ -1,5 +1,7 @@
 import {
+  closeSync,
   mkdirSync,
+  openSync,
   writeFileSync,
   readFileSync,
   existsSync,
@@ -20,15 +22,19 @@ import {
   hasFindingShape,
   isRecord,
   parseStoredState,
+  readCheckpointShape,
   summariseStored,
   validateStoredState,
 } from '@src/stored.js';
 import type {
+  CheckpointBoundary,
+  CheckpointCommitNote,
   Finding,
   GateOutcome,
   InFlightTurn,
   PendingFindings,
   RoundRecord,
+  RunCheckpointMeta,
   RunPhase,
   RunState,
   RunSummary,
@@ -90,12 +96,57 @@ export interface AllocatedRun {
  * still wrong. Allocation and initialisation are separate acts because only one
  * of them has to be inside the lock.
  */
-export function allocateRun(targetDir: string, task: string): AllocatedRun {
-  const id = `${stamp()}-${slugify(task)}`;
-  const dir = path.join(targetDir, RUNS_DIR, id);
-  mkdirSync(dir, { recursive: true });
+export function mintRunId(task: string): string {
+  return `${stamp()}-${slugify(task)}`;
+}
+
+/**
+ * Take exclusive ownership of a run directory, or null if someone else has it.
+ *
+ * The leaf is created **non-recursively** on purpose: `mkdirSync(dir, {
+ * recursive: true })` succeeds silently on a directory that already exists, so
+ * two runs started in the same second on the same task shared an id and the
+ * second overwrote the first - a real data-loss defect for `vibe run`, not just
+ * for forking. `EEXIST` is the whole mechanism; anything else is a real error
+ * and is left to throw.
+ *
+ * `.vibe/runs` itself is still recursive - that one is *meant* to be shared.
+ */
+export function claimRunDir(targetDir: string, id: string): AllocatedRun | null {
+  const root = path.join(targetDir, RUNS_DIR);
+  mkdirSync(root, { recursive: true });
+  const dir = path.join(root, id);
+  try {
+    mkdirSync(dir);
+  } catch (err: unknown) {
+    if ((err as { code?: unknown } | null)?.code === 'EEXIST') return null;
+    throw err;
+  }
   ensureVibeIgnored(targetDir);
   return { id, dir };
+}
+
+/**
+ * How many suffixed ids a collision may try before refusing.
+ *
+ * The id is a second-resolution stamp plus a task slug, so a collision means
+ * two runs on the same task within the same second. Nine is far past anything
+ * observed; the point of the bound is that a tenth **refuses** rather than
+ * quietly reusing a directory that already holds a run.
+ */
+const CLAIM_ATTEMPTS = 9;
+
+export function allocateRun(targetDir: string, task: string): AllocatedRun {
+  const id = mintRunId(task);
+  for (let attempt = 1; attempt <= CLAIM_ATTEMPTS; attempt++) {
+    const candidate = attempt === 1 ? id : `${id}-${attempt}`;
+    const claimed = claimRunDir(targetDir, candidate);
+    if (claimed !== null) return claimed;
+  }
+  throw new Error(
+    `Could not allocate a run directory: ${id} and ${CLAIM_ATTEMPTS - 1} suffixed variants of it ` +
+      'already exist. Nothing was written. Wait a second and try again.',
+  );
 }
 
 /**
@@ -505,10 +556,23 @@ function isSharingViolation(err: unknown): boolean {
  * depends on it.
  */
 export function saveState(state: RunState): void {
-  const file = path.join(state.dir, 'state.json');
-  const tmp = path.join(state.dir, `state.json.${process.pid}.tmp`);
+  writeAtomic(state.dir, 'state.json', JSON.stringify(state, null, 2));
+}
+
+/**
+ * Write one file under a run directory, whole or not at all.
+ *
+ * Extracted from `saveState` unchanged so the checkpoint snapshots get the same
+ * guarantee from the same code rather than a second implementation of it - same
+ * retry constants, same pid-carrying temp name, same cleanup. `saveState`'s
+ * contract is exactly what it was, including that it still throws whatever the
+ * write throws.
+ */
+export function writeAtomic(dir: string, name: string, body: string): void {
+  const file = path.join(dir, name);
+  const tmp = path.join(dir, `${name}.${process.pid}.tmp`);
   try {
-    writeFileSync(tmp, JSON.stringify(state, null, 2), 'utf8');
+    writeFileSync(tmp, body, 'utf8');
     for (let attempt = 0; ; attempt++) {
       try {
         renameSync(tmp, file);
@@ -637,9 +701,187 @@ export function markActivity(state: RunState, observation: ActivityObservation):
   saveState(state);
 }
 
-export function recordEvent(state: RunState, type: string, data: Record<string, unknown> = {}): void {
+/**
+ * Append an event **without** persisting it.
+ *
+ * Split out of `recordEvent` with no behaviour change, so a caller that must
+ * record a counter and the event that discloses it can land both in one write.
+ * Two writes there would leave a window in which the counter is durable and the
+ * disclosure is not - see the fork-attempt counter in `src/orchestrator.ts`.
+ */
+export function stageEvent(state: RunState, type: string, data: Record<string, unknown> = {}): void {
   state.events.push({ at: new Date().toISOString(), type, ...data });
+}
+
+export function recordEvent(state: RunState, type: string, data: Record<string, unknown> = {}): void {
+  stageEvent(state, type, data);
   saveState(state);
+}
+
+/**
+ * `recordEvent`, for a caller that must not be taken down by its own audit
+ * trail. True when the event was persisted.
+ *
+ * `saveState` rethrows, so on an unwritable directory or ENOSPC an event
+ * recorded from a best-effort path would escape and change the run's exit code -
+ * which is precisely what the checkpoint machinery must never do.
+ */
+export function tryRecordEvent(
+  state: RunState,
+  type: string,
+  data: Record<string, unknown> = {},
+): boolean {
+  try {
+    recordEvent(state, type, data);
+    return true;
+  } catch (err: unknown) {
+    log.warn(`could not record the "${type}" event: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+}
+
+const CHECKPOINT_RE = /^checkpoint-(\d+)\.json$/;
+
+const checkpointName = (n: number): string => `checkpoint-${n}.json`;
+
+/**
+ * How many numbers a reservation may try before giving up.
+ *
+ * Only two writers can ever contend here - `--force` puts a second process on
+ * one run deliberately - so this is a bound on a pathology, not a capacity.
+ */
+const RESERVE_ATTEMPTS = 50;
+
+/**
+ * Claim the next checkpoint number, by creating the file exclusively.
+ *
+ * The directory listing is the index: there is no index file to fall out of step
+ * with what is on disk. `wx` is what makes two concurrent writers get two
+ * numbers rather than one of them silently overwriting the other's snapshot, and
+ * the handle is closed immediately because Windows cannot rename over an open
+ * file - `writeAtomic` renames the body over this empty placeholder.
+ *
+ * Null on an unreadable directory: fail closed, and let the caller warn.
+ */
+function reserveCheckpoint(dir: string): { n: number; file: string } | null {
+  let next: number;
+  try {
+    let max = 0;
+    for (const entry of readdirSync(dir)) {
+      const found = CHECKPOINT_RE.exec(entry);
+      if (found?.[1] !== undefined) max = Math.max(max, Number(found[1]));
+    }
+    next = max + 1;
+  } catch {
+    return null;
+  }
+
+  for (let attempt = 0; attempt < RESERVE_ATTEMPTS; attempt++) {
+    const n = next + attempt;
+    const file = path.join(dir, checkpointName(n));
+    try {
+      // Closed at once: the reservation is the *name*, not the handle.
+      closeSync(openSync(file, 'wx'));
+      return { n, file };
+    } catch (err: unknown) {
+      if ((err as { code?: unknown } | null)?.code !== 'EEXIST') return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Snapshot the run at a phase or round boundary (#78). Never throws.
+ *
+ * The snapshot is the whole state plus its own metadata, so it is a complete,
+ * valid `RunState` that `loadRun` accepts and `vibe fork` can seed a new run
+ * from without reading anything else.
+ *
+ * Every failure is a warning and an event, never an exception: a run must not
+ * change its exit code because it could not write a file nothing has read yet.
+ * A reservation whose body never landed is unlinked by the same call, which is
+ * safe precisely because no other writer can hold that name - they would have
+ * taken `EEXIST` and moved on.
+ */
+export function writeCheckpoint(
+  state: RunState,
+  boundary: CheckpointBoundary,
+  commit: { sha: string | null; note: CheckpointCommitNote },
+): RunCheckpointMeta | null {
+  const reserved = reserveCheckpoint(state.dir);
+  if (reserved === null) {
+    log.warn(`could not reserve a checkpoint number in ${state.dir} - continuing without one`);
+    tryRecordEvent(state, 'checkpoint_failed', { boundary, stage: 'reserve' });
+    return null;
+  }
+
+  const meta: RunCheckpointMeta = {
+    n: reserved.n,
+    at: new Date().toISOString(),
+    boundary,
+    phase: resumePhase(state),
+    planRound: state.planRound,
+    reviewRound: state.reviewRound,
+    verifyRound: state.verifyRound,
+    commit: commit.sha,
+    commitNote: commit.note,
+  };
+
+  try {
+    writeAtomic(state.dir, checkpointName(reserved.n), JSON.stringify({ ...state, checkpoint: meta }, null, 2));
+    return meta;
+  } catch (err: unknown) {
+    // This call owns that name, so removing it cannot take another writer's
+    // snapshot with it. Its own failure is not worth reporting over the real one.
+    try {
+      rmSync(reserved.file, { force: true });
+    } catch {
+      // Nothing to do, and nothing this can usefully say.
+    }
+    const detail = err instanceof Error ? err.message : String(err);
+    log.warn(`could not write checkpoint ${reserved.n}: ${detail} - the run continues`);
+    tryRecordEvent(state, 'checkpoint_failed', { boundary, n: reserved.n, error: detail });
+    return null;
+  }
+}
+
+/** One checkpoint on disk. `meta` is null when the file could not be read as one. */
+export interface CheckpointEntry {
+  n: number;
+  file: string;
+  meta: RunCheckpointMeta | null;
+}
+
+/**
+ * Every checkpoint in a run directory, by number. Never throws and never writes.
+ *
+ * Read by `vibe fork` to list where a run can be forked from, which is a
+ * listing: one damaged snapshot must not hide the healthy ones beside it, so a
+ * file that cannot be read is reported with `meta: null` rather than dropped.
+ */
+export function listCheckpoints(dir: string): CheckpointEntry[] {
+  let entries: string[];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const out: CheckpointEntry[] = [];
+  for (const entry of entries) {
+    const found = CHECKPOINT_RE.exec(entry);
+    if (found?.[1] === undefined) continue;
+    const file = path.join(dir, entry);
+    let meta: RunCheckpointMeta | null = null;
+    try {
+      const raw: unknown = JSON.parse(readFileSync(file, 'utf8'));
+      const held = isRecord(raw) ? raw['checkpoint'] : undefined;
+      meta = readCheckpointShape(held);
+    } catch {
+      meta = null;
+    }
+    out.push({ n: Number(found[1]), file, meta });
+  }
+  return out.sort((a, b) => a.n - b.n);
 }
 
 export function artifact(state: RunState, name: string, content: string | object): string {

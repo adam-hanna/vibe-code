@@ -261,3 +261,96 @@ test('codex: the schema file is still written for the child to read', async () =
   const schema = JSON.parse(readFileSync(path.join(dir, 'review-0.schema.json'), 'utf8')) as unknown;
   assert.deepEqual(schema, { type: 'object' });
 });
+
+// ---- forking a conversation (#78) -------------------------------------------
+
+/** The argv a turn would have spawned, captured rather than run. */
+function capture(): { args: string[][]; exec: RunFn } {
+  const args: string[][] = [];
+  return {
+    args,
+    exec: (_bin, argv, options): Promise<RunResult> => {
+      args.push([...argv]);
+      for (const line of [ASSISTANT, SUCCESS]) options?.onLine?.(line);
+      return Promise.resolve({
+        code: 0,
+        stdout: `${ASSISTANT}\n${SUCCESS}\n`,
+        stderr: '',
+      });
+    },
+  };
+}
+
+test('claude: a fork names the parent to --resume and the child to --session-id', async () => {
+  const { options } = progressRecorder();
+  const { args, exec } = capture();
+
+  await claudeTurn({ ...claudeOptions(options), forkFrom: 'parent-session' }, exec);
+
+  const argv = args[0] ?? [];
+  const at = argv.indexOf('--resume');
+  assert.ok(at >= 0, `--resume is sent: ${argv.join(' ')}`);
+  assert.equal(argv[at + 1], 'parent-session', 'the parent is what is resumed');
+  assert.ok(argv.includes('--fork-session'), 'and forked rather than continued');
+  assert.equal(argv[argv.indexOf('--session-id') + 1], 'fixture-session', 'into vibe own id');
+});
+
+test('claude: an ordinary turn sends no fork flag at all', async () => {
+  const { options } = progressRecorder();
+  const { args, exec } = capture();
+
+  await claudeTurn(claudeOptions(options), exec);
+  assert.equal((args[0] ?? []).includes('--fork-session'), false);
+});
+
+test('claude: forking a conversation it is also resuming is a programming error', async () => {
+  const { options } = progressRecorder();
+  const { exec } = capture();
+
+  await assert.rejects(
+    () => claudeTurn({ ...claudeOptions(options), resume: true, forkFrom: 'parent' }, exec),
+    /mutually exclusive/,
+  );
+});
+
+test('codex: a fork is `exec fork <parent> ... -`, with no -s and no -C', async () => {
+  const dir = codexDir();
+  const { options } = progressRecorder();
+  const args: string[][] = [];
+  const exec: RunFn = (_bin, argv): Promise<RunResult> => {
+    args.push([...argv]);
+    writeFileSync(outPath(dir), JSON.stringify({ verdict: 'APPROVE' }), 'utf8');
+    return Promise.resolve({ code: 0, stdout: '', stderr: '' });
+  };
+
+  await codexTurn({ ...codexOptions(dir, options), forkFrom: 'parent-thread' }, exec);
+
+  const argv = args[0] ?? [];
+  assert.deepEqual(argv.slice(0, 3), ['exec', 'fork', 'parent-thread']);
+  assert.equal(argv.at(-1), '-', 'the prompt still arrives on stdin');
+  assert.ok(argv.includes('--json') && argv.includes('--skip-git-repo-check'));
+  // `fork` inherits neither, exactly as `resume` does not.
+  assert.equal(argv[argv.indexOf('-m') + 1], 'fixture-model');
+  assert.ok(argv.some((a) => a.startsWith('model_reasoning_effort=')));
+  // Neither flag is accepted by `fork`; the cwd and the sandbox come from the
+  // spawned process, as they do for a resumed thread.
+  assert.equal(argv.includes('-s'), false);
+  assert.equal(argv.includes('-C'), false);
+});
+
+test('codex: an ordinary one-shot turn is still `exec`, and a resume still `exec resume`', async () => {
+  const dir = codexDir();
+  const { options } = progressRecorder();
+  const args: string[][] = [];
+  const exec: RunFn = (_bin, argv): Promise<RunResult> => {
+    args.push([...argv]);
+    writeFileSync(outPath(dir), JSON.stringify({ verdict: 'APPROVE' }), 'utf8');
+    return Promise.resolve({ code: 0, stdout: '', stderr: '' });
+  };
+
+  await codexTurn(codexOptions(dir, options), exec);
+  await codexTurn({ ...codexOptions(dir, options), sessionId: 'thread-9' }, exec);
+
+  assert.deepEqual((args[0] ?? []).slice(0, 1), ['exec']);
+  assert.deepEqual((args[1] ?? []).slice(0, 3), ['exec', 'resume', 'thread-9']);
+});

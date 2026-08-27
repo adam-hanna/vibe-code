@@ -8,6 +8,7 @@ import {
   listRuns,
   loadRun,
   recordEvent,
+  resumePhase,
   saveState,
   statePresence,
   unavailableGates,
@@ -16,6 +17,7 @@ import {
 } from '@src/run.js';
 import type { AllocatedRun } from '@src/run.js';
 import { acquireLock, describeLiveness } from '@src/lock.js';
+import { commitFork, listForkPoints, planFork } from '@src/fork.js';
 import type { Liveness, LockHandle } from '@src/lock.js';
 import { assertUsableRunId } from '@src/stored.js';
 import { Escalation, EXIT, orchestrate, writeEscalation } from '@src/orchestrator.js';
@@ -49,11 +51,17 @@ Usage
   vibe run "<task>" [options]      Plan, critique to zero P1s, implement, review to zero P1s
   vibe plan "<task>" [options]     Stop after the plan is approved; do not implement
   vibe resume <run-id> [--force]   Continue a run that stopped for input
+  vibe fork <run-id> --at <n>      Start a new run from a point in an old one
   vibe list                        Show runs in this repo
   vibe doctor                      Verify both CLIs and the environment
 
+  "vibe fork <run-id>" with no --at lists the points that run can be forked from.
+  A fork creates its branch WITHOUT checking it out: your working tree is
+  untouched until you "vibe resume" the new run, which is when it moves.
+
 Options
   -C, --cwd <dir>            Target repository (default: cwd)
+  --at <n>                   Which checkpoint of the run to fork from
   --context <file>           Extra context file appended to the planning prompt
   --claude-model <m>         Default: opus
   --claude-effort <e>        low|medium|high|xhigh|max (default: medium)
@@ -111,6 +119,8 @@ interface ParsedArgs {
   flags: {
     cwd?: string;
     context?: string;
+    /** Which checkpoint `vibe fork` starts from. Absent lists the fork points. */
+    at?: number;
     claudeModel?: string;
     claudeEffort?: string;
     codexModel?: string;
@@ -162,6 +172,8 @@ export async function main(argv: readonly string[]): Promise<ExitCode> {
         return await cmdRun(argv.slice(1), true);
       case 'resume':
         return await cmdResume(argv.slice(1));
+      case 'fork':
+        return await cmdFork(argv.slice(1));
       case 'list':
         return cmdList(argv.slice(1));
       case 'doctor':
@@ -205,6 +217,9 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       case '-C':
       case '--cwd': out.flags.cwd = next(); break;
       case '--context': out.flags.context = next(); break;
+      // Not a config setting and deliberately absent from `buildOverrides`: it
+      // names a point in one run, not anything a run carries forward.
+      case '--at': out.flags.at = nextNum(); break;
       case '--claude-model': out.flags.claudeModel = next(); break;
       case '--claude-effort': out.flags.claudeEffort = next(); break;
       case '--codex-model': out.flags.codexModel = next(); break;
@@ -578,6 +593,99 @@ async function resumeRun(
 
   log.heading(`Resuming ${state.id}`);
   return execute(state, cfg, true, flags.skipProbe === true, runPreflight, orchestrate, handle);
+}
+
+/**
+ * `vibe fork <run-id> --at <n>` (#78).
+ *
+ * Creates the run and **stops**. It does not start it: forking and running are
+ * different decisions, and a command that did both would spend money on the
+ * strength of a `--at` typo. `vibe resume <new-id>` is the second half, and it
+ * is where the branch is finally checked out.
+ *
+ * With no `--at`, or an `--at` naming no checkpoint, this lists the fork points
+ * and exits non-zero - **without ever building a path from the positional id**,
+ * which `listForkPoints` guarantees by asserting the id first.
+ */
+async function cmdFork(args: readonly string[]): Promise<ExitCode> {
+  const { positional, flags } = parseArgs(args);
+  if (flags.help) {
+    console.log(USAGE);
+    return EXIT.OK;
+  }
+
+  const targetDir = path.resolve(flags.cwd ?? process.cwd());
+  const sourceId = positional[0];
+  if (sourceId === undefined) {
+    log.fail('A run id is required. See "vibe list".');
+    return EXIT.ERROR;
+  }
+
+  const points = listForkPoints(targetDir, sourceId);
+  const wanted = flags.at;
+  if (wanted === undefined || !points.some((p) => p.n === wanted)) {
+    if (wanted !== undefined) log.fail(`Run ${sourceId} has no checkpoint ${wanted}.`);
+    if (points.length === 0) {
+      log.info(
+        `Run ${sourceId} has no checkpoints, so there is no point to fork from. Runs recorded ` +
+          'before checkpoints existed have none, and nothing can be invented for them.',
+      );
+      return EXIT.ERROR;
+    }
+    log.heading(`Fork points in ${sourceId}`);
+    for (const { n, meta } of points) {
+      if (meta === null) {
+        console.log(`  ${String(n).padStart(3)}  (unreadable)`);
+        continue;
+      }
+      const commit = meta.commit === null ? `no commit (${meta.commitNote})` : meta.commit.slice(0, 7);
+      console.log(
+        `  ${String(n).padStart(3)}  ${meta.boundary.padEnd(14)} ${meta.phase.padEnd(12)} ` +
+          `plan ${meta.planRound} / review ${meta.reviewRound} / verify ${meta.verifyRound}  ${commit}`,
+      );
+    }
+    log.info(`Fork one with: vibe fork ${sourceId} --at <n>`);
+    return EXIT.ERROR;
+  }
+
+  const plan = await planFork(targetDir, sourceId, wanted, buildOverrides(flags));
+  const result = await commitFork(targetDir, plan);
+  const origin = result.state.forkedFrom;
+
+  log.heading(`Forked ${sourceId} at checkpoint ${wanted}`);
+  log.ok(`New run: ${result.state.id}`);
+  log.info(`From:     ${plan.meta.boundary} (${plan.meta.at})`);
+  if (origin !== undefined) {
+    log.info(
+      `Inherited: ${origin.inheritedTokens.toLocaleString()} tokens / ` +
+        `~$${origin.inheritedCostUsd.toFixed(2)}` +
+        (origin.inheritedCodexTokens === undefined
+          ? ' (the checkpoint recorded no Codex share)'
+          : ` (Codex ${origin.inheritedCodexTokens.toLocaleString()} tok)`),
+    );
+    // Said plainly rather than quietly adjusted: the fork's ceilings read its
+    // own totals, which start at the checkpoint's, so a fork of a run near its
+    // ceiling stops early - and the thing to raise is named.
+    log.info(
+      '          Those totals are the fork\'s starting point, so its budget ceilings count them. ' +
+        'Raise budget.maxTokens if the fork stops on one.',
+    );
+  }
+  if (result.branch === null) {
+    log.info('Branch:   none - the fork will run on whatever is checked out when you resume it');
+  } else {
+    log.info(`Branch:   ${result.branch} (created, NOT checked out - your working tree is untouched)`);
+  }
+  for (const loss of result.losses) log.warn(loss);
+  log.info(`Files:    ${result.state.dir}`);
+  log.info(`Next:     vibe resume ${result.state.id}`);
+  if (resumePhase(result.state) === 'complete') {
+    log.warn(
+      'That checkpoint was taken at the end of the run, so resuming the fork will report that ' +
+        'it has already finished.',
+    );
+  }
+  return EXIT.OK;
 }
 
 /**
@@ -1281,6 +1389,28 @@ function summary(state: RunState, started: number, recovery?: RecoveryReport): v
   if (state.rateLimitWaits > 0) log.info(`Waits:    ${state.rateLimitWaits} rate-limit pause(s)`);
   log.info(`Rounds:   ${state.planRound} plan revision(s), ${state.reviewRound} fix round(s)`);
   if (state.sessionRotations > 0) log.info(`Compacted: ${state.sessionRotations} time(s)`);
+  // A record of what `forkedFrom` holds, never a computation over it: the totals
+  // above include the inherited spend, and this is what says so. Nothing here
+  // subtracts - vibe does not model a run tree and does not pretend to.
+  const origin = state.forkedFrom;
+  if (origin !== undefined) {
+    log.info(
+      `Forked:   ${origin.runId} @ checkpoint ${origin.checkpoint}  ` +
+        `(it had ${origin.inheritedTokens.toLocaleString()} tok / ~$${origin.inheritedCostUsd.toFixed(2)} at that point)`,
+    );
+    log.info('          The totals above include that inherited spend, and the ceilings count it.');
+  }
+  // A duplicate provider-side thread is possible and is disclosed, because the
+  // Codex thread id is provider-minted: a process that died between the provider
+  // returning and the accounting write loses the id, and the next pass forks
+  // again. Bounded to one orphan per retry, and never silent.
+  const retried = state.events.filter((e) => e.type === 'fork_retried');
+  if (retried.length > 0) {
+    log.warn(
+      `          A conversation fork was retried ${retried.length} time(s). On the Codex side ` +
+        'that can leave a duplicate thread on the provider; nothing in this repo is affected.',
+    );
+  }
   if (state.branch) log.info(`Branch:   ${state.branch}`);
   log.info(`Files:    ${state.dir}`);
 }
@@ -1304,7 +1434,11 @@ function cmdList(args: readonly string[]): ExitCode {
     // absent value renders as `unknown` for the same reason (#77).
     const live = (r.liveness ?? 'unknown').replace('-', ' ');
     console.log(`  ${r.id.padEnd(52)} ${r.status.padEnd(12)} ${cost}  ${live}`);
-    console.log(log.dim(`    ${r.task}`));
+    // Beside the task line rather than in the columns: a fork is a fact about
+    // where the run came from, and it must not push the fixed columns around
+    // for the rows that are not forks.
+    const fork = r.forkedFrom === undefined ? '' : `  [fork of ${r.forkedFrom.runId}@${r.forkedFrom.checkpoint}]`;
+    console.log(log.dim(`    ${r.task}${fork}`));
   }
   return EXIT.OK;
 }

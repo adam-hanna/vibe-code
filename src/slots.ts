@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { AgentProvider } from '@src/runtime.js';
-import type { Config, RunState } from '@src/types.js';
+import type { Config, ForkedConversation, ForkPendingEntry, RunState } from '@src/types.js';
 
 /**
  * A managed conversation, with an explicit lifecycle.
@@ -395,6 +395,155 @@ export function resetSlot(state: RunState, slot: SlotName): void {
     throw new Error(`slot "${slot}" has no rotation mechanism; nothing may compact it`);
   }
   reset(state);
+}
+
+// ---- forking: the third lifecycle -------------------------------------------
+//
+// A slot has always had two lifecycle questions - does this run carry the
+// conversation, and has a turn ever succeeded on it. Forking adds a third: does
+// this slot's FIRST turn owe a fork of somebody else's conversation. It is
+// recorded per slot in `state.forkPending`, it is consumed by the first turn
+// that succeeds, and it is durably once-only because `slotForkParent` returns
+// null the moment the slot's own `started` marker is set.
+
+/**
+ * The parent conversation this slot's next turn must fork, or null.
+ *
+ * Null when the run carries no fork for this slot, when the config does not
+ * persist it (a one-shot conversation has nothing to inherit into), and - the
+ * durable half of "once" - when a turn has already succeeded here. The `started`
+ * marker is set by the same write that charges the forking turn, so a process
+ * killed before that write re-forks, and one killed after it never does.
+ */
+export function slotForkParent(state: RunState, cfg: Config, slot: SlotName): string | null {
+  const spec = SLOTS[slot];
+  if (!spec.persists(cfg)) return null;
+  if (spec.started(state)) return null;
+  return asId(state.forkPending?.[slot]?.parentId);
+}
+
+/** How many times a fork of this slot has been attempted. Zero when none is owed. */
+export function slotForkAttempts(state: RunState, slot: SlotName): number {
+  return state.forkPending?.[slot]?.attempts ?? 0;
+}
+
+/**
+ * Whether this turn's conversation carries the run's history - by resumption OR
+ * by the fork it is about to make.
+ *
+ * `slotHasMemory` answers the narrower question dispatch asks about `--resume`,
+ * and keeps its exact meaning. This is what the prompts must be told: a forked
+ * conversation really does arrive holding the parent's context, so greeting it
+ * with a fresh-conversation preamble would restate what it already knows and,
+ * worse, imply it knows nothing.
+ */
+export function slotContinuity(state: RunState, cfg: Config, slot: SlotName): boolean {
+  return slotHasMemory(state, cfg, slot) || slotForkParent(state, cfg, slot) !== null;
+}
+
+/**
+ * Record another attempt at this slot's fork, returning the new count. Does NOT
+ * save: the caller persists it together with the event that discloses it.
+ */
+export function noteSlotForkAttempt(state: RunState, slot: SlotName): number {
+  const entry = state.forkPending?.[slot];
+  if (entry === undefined) return 0;
+  entry.attempts += 1;
+  return entry.attempts;
+}
+
+/**
+ * Mark this slot's fork done, in memory only.
+ *
+ * The caller decides the write, and there is exactly one right answer: the
+ * accounting write that charges the turn which did the forking. Clearing this in
+ * a save of its own would make the fork durably complete while the turn it paid
+ * for was not yet charged, and a kill in that gap loses the spend entirely.
+ */
+export function clearSlotFork(state: RunState, slot: SlotName): void {
+  const pending = state.forkPending;
+  if (pending === undefined) return;
+  delete pending[slot];
+  if (Object.keys(pending).length === 0) delete state.forkPending;
+}
+
+export interface ForkedSlotFields {
+  /** Fields to set on the child. */
+  fields: Partial<RunState>;
+  /** Fields to DELETE from the child - absent is what "never ran" looks like. */
+  clear: (keyof RunState)[];
+  /** What each slot could or could not inherit, for the fork's provenance record. */
+  conversations: ForkedConversation[];
+}
+
+/**
+ * The conversation fields a forked run starts with, and the forks it owes.
+ *
+ * Every slot starts as a *fresh* run's would: an inherited conversation id would
+ * be the parent's own thread, and two runs writing turns into one conversation
+ * is precisely what forking exists to avoid. What is inherited is recorded in
+ * `forkPending` and made real by each slot's first turn.
+ */
+export function forkedSlotFields(parent: RunState, cfg: Config): ForkedSlotFields {
+  const conversations: ForkedConversation[] = [];
+  const pending: Partial<Record<SlotName, ForkPendingEntry>> = {};
+
+  for (const slot of Object.keys(SLOTS) as SlotName[]) {
+    const spec = SLOTS[slot];
+    const parentId = spec.id(parent);
+    if (!spec.persists(cfg)) {
+      conversations.push({ slot, parentId: null, why: 'not-persisted' });
+      continue;
+    }
+    if (!spec.started(parent) || parentId === null) {
+      // Nothing to fork: a conversation that never took a turn has no history,
+      // and one that never named an id cannot be pointed at.
+      conversations.push({ slot, parentId: null, why: 'never-started' });
+      continue;
+    }
+    conversations.push({ slot, parentId });
+    pending[slot] = { parentId, attempts: 0 };
+  }
+
+  const fields: Partial<RunState> = {
+    // `main` is client-minted, so the child's id is chosen here and persisted
+    // before any turn runs - which is what makes a re-fork after a crash target
+    // the same session rather than accumulating orphans.
+    ...initialSlotFields(),
+    ...(Object.keys(pending).length === 0 ? {} : { forkPending: pending }),
+  };
+  // The two Codex threads are provider-minted, so there is nothing to mint:
+  // ids, markers and per-thread measurements are DELETED rather than set to a
+  // value, because absent is what a conversation that has never run looks like
+  // everywhere else in this file, and `undefined` in a spread is a second
+  // spelling of it.
+  const clear: (keyof RunState)[] = [
+    'codexSessionStarted',
+    'judgeContextTokens',
+    'judgeContextThread',
+    'reviewSessionId',
+    'reviewSessionStarted',
+    'reviewContextTokens',
+    'reviewContextThread',
+  ];
+
+  // ONLY when a fork is actually owed for `main`. The parent's context ratio
+  // describes the parent's conversation; left in place, the child's first turn
+  // marks the slot started while reporting no usage of its own, and `shouldRotate`
+  // would rotate a conversation that was created moments ago. A fresh run's shape
+  // is exactly "nothing has been measured", which is the truth here.
+  //
+  // The handoff goes for the same reason and under the same condition, and the
+  // condition matters: a parent that rotated and never took a turn on the new
+  // session owes no fork at all, and its handoff is precisely the briefing the
+  // child still needs.
+  if (pending.main !== undefined) {
+    fields.contextRatio = 0;
+    fields.handoff = null;
+    clear.push('contextModel', 'contextWindow', 'handoffStale');
+  }
+
+  return { fields, clear, conversations };
 }
 
 /**

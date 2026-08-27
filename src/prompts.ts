@@ -460,7 +460,15 @@ function priorRunRow(run: RunSummary): string | null {
   if (id === '') return null;
   const status = promptSafeCell(run.status, PRIOR_RUN_STATUS_CHARS);
   const task = promptSafeCell(run.task, PRIOR_RUN_TASK_CHARS);
-  const head = `- \`${id}\` - ${status === '' ? 'unknown' : status}`;
+  // A fork says whose work it continues, through the same cell bounding as the
+  // id it names. A run with no readable parent renders exactly as it did before
+  // this existed, so a repo with no forks produces a byte-identical section.
+  const parent = run.forkedFrom === undefined ? '' : promptSafeCell(run.forkedFrom.runId, PRIOR_RUN_ID_CHARS);
+  const fork =
+    run.forkedFrom === undefined || parent === ''
+      ? ''
+      : ` (fork of \`${parent}\` at checkpoint ${run.forkedFrom.checkpoint})`;
+  const head = `- \`${id}\` - ${status === '' ? 'unknown' : status}${fork}`;
   // Nothing invented when the task cannot be read: an unreadable run carries an
   // empty task, and a placeholder sentence there would be a claim about what it
   // was for.

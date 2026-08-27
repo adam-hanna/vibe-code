@@ -23,13 +23,18 @@ import {
 } from '@src/roles.js';
 import type { Access, Role, RoleSpec, RoleTable } from '@src/roles.js';
 import {
+  clearSlotFork,
   ensureSlotId,
   markSlotStarted,
+  noteSlotForkAttempt,
   recordSlotOccupancy,
+  slotContinuity,
+  slotForkParent,
   slotHasMemory,
   slotId,
   slotResumeId,
 } from '@src/slots.js';
+import type { SlotName } from '@src/slots.js';
 import {
   advancePhase,
   artifact,
@@ -46,12 +51,14 @@ import {
   recordPendingFindings,
   recordRound,
   removeArtifact,
+  stageEvent,
   resumePhase,
   saveState,
   takePendingFindings,
   verificationCaveat,
+  writeCheckpoint,
 } from '@src/run.js';
-import { hasFindingShape, isArtifactBasename } from '@src/stored.js';
+import { hasFindingShape, isReportBasename } from '@src/stored.js';
 import {
   blockers as blockingFindings,
   gate,
@@ -82,6 +89,7 @@ import {
 import { describeFailure, resolveGates, runGateCommand } from '@src/verify.js';
 import type {
   Answer,
+  CheckpointCommitNote,
   ClaudeTurnResult,
   Config,
   Finding,
@@ -161,7 +169,7 @@ function latestReport(state: RunState): string | null {
   if (name === undefined) return null;
   // The same predicate `validateStoredState` applies on the way in, asked again
   // here because this is the call that turns the value into a path.
-  if (!isArtifactBasename(name)) {
+  if (!isReportBasename(name)) {
     log.warn(`The recorded report name is not one vibe will read: ${name}`);
     recordEvent(state, 'report_unusable', { name });
     return null;
@@ -178,7 +186,18 @@ function latestReport(state: RunState): string | null {
 export async function orchestrate(
   state: RunState,
   cfg: Config,
-  resume: boolean,
+  /**
+   * Whether this is a resume. **No longer consulted** (#78): it used to gate
+   * `prepareGit`, which is now called on every pass because a forked run is
+   * always started by `vibe resume` and has to be put on its branch, and because
+   * a resume whose stored branch is not checked out must be refused rather than
+   * allowed to commit elsewhere. `prepareGit` reads the state instead, which is
+   * the durable fact - the flag only ever said which command was typed.
+   *
+   * Kept in the signature: every caller passes it, and removing a positional
+   * argument from the entry point is a change for its own sake.
+   */
+  _resume: boolean,
   /**
    * The same seam `runTurn` has, hoisted to the entry point.
    *
@@ -195,7 +214,7 @@ export async function orchestrate(
     // nothing; on a resume it is the one point holding both the stored plan and
     // the artifact the previous process may have died between writing.
     reconcileFollowUps(state);
-    return await runPhases(state, cfg, resume, turns);
+    return await runPhases(state, cfg, turns);
   } finally {
     // A `finally`, not a tail call: the phases below return early at the
     // "already finished" check and at the plan-only exit, and a persistent
@@ -205,18 +224,17 @@ export async function orchestrate(
   }
 }
 
-async function runPhases(
-  state: RunState,
-  cfg: Config,
-  resume: boolean,
-  turns: AgentTurns,
-): Promise<RunState> {
+async function runPhases(state: RunState, cfg: Config, turns: AgentTurns): Promise<RunState> {
   const cwd = state.targetDir;
   // Resolved once and threaded, so no step below can answer "who does this job"
   // from the module default while holding a config that says otherwise.
   const roles = rolesFor(cfg);
 
-  if (!resume) await prepareGit(state, cfg, cwd);
+  // On every pass, not only a fresh one (#78). A forked run is always started by
+  // `vibe resume`, and it is `prepareGit` that puts it on the branch `vibe fork`
+  // created; the same call is what stops a resumed run committing to a branch it
+  // never claimed. It decides what this pass needs - see `prepareGit`.
+  await prepareGit(state, cfg, cwd);
 
   const phase = resumePhase(state);
   if (phase === 'complete') {
@@ -235,10 +253,12 @@ async function runPhases(
     if (state.planOnly) {
       state.status = 'planned';
       advancePhase(state, 'complete');
+      writeCheckpoint(state, 'complete', NO_COMMIT);
       log.ok('Plan-only run: stopping before implementation.');
       return state;
     }
     advancePhase(state, 'implementing');
+    writeCheckpoint(state, 'plan-approved', NO_COMMIT);
   } else {
     const approved = state.plan;
     if (approved === null) {
@@ -288,13 +308,22 @@ async function runPhases(
     // must not charge for it twice - which is exactly what happened when a
     // `git add` error came back as a bare 'error' status.
     advancePhase(state, 'reviewing');
-    await maybeCommit(cfg, cwd, 'vibe: implement approved plan');
+    const committed = await maybeCommit(cfg, cwd, 'vibe: implement approved plan');
 
     // Reset only on a fresh implementation. Resuming mid-review must keep the
     // histories, or the convergence assessment loses the evidence it is built
     // on and a stalled loop reads as a healthy one.
     state.p1Rounds = [];
     state.verifyRounds = [];
+    // Below the resets, and deliberately: a snapshot taken above them carries
+    // the PLANNING critique history into a state whose phase is already
+    // `reviewing`, so a fork resuming there would feed planning rounds to the
+    // review convergence assessment. The status is set here for the same reason
+    // - the snapshot has to be internally coherent - and the existing assignment
+    // below the block stays where it is.
+    state.status = 'reviewing';
+    saveState(state);
+    writeCheckpoint(state, 'implemented', committed);
   }
 
   // ---- Review --------------------------------------------------------------
@@ -305,6 +334,7 @@ async function runPhases(
 
   state.status = 'done';
   advancePhase(state, 'complete');
+  writeCheckpoint(state, 'complete', NO_COMMIT);
   return state;
 }
 
@@ -577,7 +607,11 @@ async function reviewPhase(
         roles,
       );
       recordReport(state, `verify-fix-${state.verifyRound}.md`, repair.text);
-      await maybeCommit(cfg, cwd, `vibe: fix verification failure (round ${state.verifyRound})`);
+      writeCheckpoint(
+        state,
+        'verify-round',
+        await maybeCommit(cfg, cwd, `vibe: fix verification failure (round ${state.verifyRound})`),
+      );
       continue;
     }
 
@@ -689,7 +723,11 @@ async function reviewPhase(
       );
       log.info(`Carried findings and what was done about them: ${path.relative(cwd, file)}`);
 
-      await maybeCommit(cfg, cwd, `vibe: address carried review findings (final round)`);
+      writeCheckpoint(
+        state,
+        'final-fix',
+        await maybeCommit(cfg, cwd, `vibe: address carried review findings (final round)`),
+      );
       recordEvent(state, 'review_approved', {
         findings: review.findings.length,
         carriedAndFixed: decision.tolerated.map((f) => f.id),
@@ -754,7 +792,11 @@ async function runFixRound(
   // point leaves them outstanding, which is what makes a died-mid-turn resume
   // retry the fix rather than skip it.
   clearPendingFindings(state);
-  await maybeCommit(cfg, cwd, `vibe: address review round ${state.reviewRound}`);
+  writeCheckpoint(
+    state,
+    'review-round',
+    await maybeCommit(cfg, cwd, `vibe: address review round ${state.reviewRound}`),
+  );
 }
 
 /**
@@ -1185,6 +1227,24 @@ export function guardProgress(
   if (notice !== null) log.warn(notice);
 }
 
+/**
+ * Put the run on the branch it belongs on, whatever kind of pass this is.
+ *
+ * Called on every pass since #78, not only on a fresh run, and it decides what a
+ * pass needs rather than the call site deciding for it. There are three jobs
+ * here and they used to be one:
+ *
+ * 1. **A fresh run** creates and checks out its branch - unchanged.
+ * 2. **A forked run** has a branch ref `vibe fork` created without checking out
+ *    (it must not touch the user's tree), flagged by `branchPending`. This is
+ *    where it is actually checked out, before any turn is dispatched, because
+ *    this is the first moment vibe needs the tree.
+ * 3. **Any run whose stored branch exists while HEAD is somewhere else refuses.**
+ *    Job 2 leaves HEAD on the fork's branch, so resuming the *parent* afterwards
+ *    would commit the parent's work onto the child's branch - silently, and
+ *    unrecoverably by reading the log. It is a refusal rather than a warning for
+ *    that reason, with `git checkout` and `--no-branch` both named.
+ */
 async function prepareGit(state: RunState, cfg: Config, cwd: string): Promise<void> {
   if (!(await git.isRepo(cwd))) {
     log.warn('Not a git repository - running without branch isolation or commits.');
@@ -1193,21 +1253,109 @@ async function prepareGit(state: RunState, cfg: Config, cwd: string): Promise<vo
   if (await git.isDirty(cwd)) {
     log.warn('Working tree has uncommitted changes; they will be swept into the first commit.');
   }
-  if (cfg.git.useBranch) {
+  // With branch isolation off nothing below runs, which is also what makes
+  // `vibe resume <id> --no-branch` the documented escape from the refusal.
+  if (!cfg.git.useBranch) return;
+
+  if (state.branch === null) {
     const branch = `${cfg.git.branchPrefix}${state.id}`;
     await git.createBranch(cwd, branch);
     state.branch = branch;
     saveState(state);
     log.ok(`Isolated on branch ${branch}`);
+    return;
   }
+
+  const branch = state.branch;
+  const exists = await git.branchExists(cwd, branch);
+  const owed = state.branchPending === true;
+
+  if (!exists) {
+    // Nothing to check out, and recreating it at HEAD would fabricate a base the
+    // run never had. A fork whose ref was deleted is the stronger case: it has
+    // never been on that branch, so continuing would run it somewhere it never
+    // claimed.
+    if (owed) {
+      throw new Escalation(
+        EXIT.ERROR,
+        `Run ${state.id} was forked onto branch "${branch}", which no longer exists. ` +
+          'Nothing has run. Fork again, or resume with --no-branch to run on whatever is ' +
+          'checked out.',
+      );
+    }
+    log.warn(`The branch this run recorded ("${branch}") no longer exists - continuing on HEAD.`);
+    return;
+  }
+
+  const head = await git.currentBranch(cwd);
+  if (head === branch) {
+    // Already there. A fork resumed twice takes this path the second time.
+    if (owed) {
+      delete state.branchPending;
+      saveState(state);
+    }
+    return;
+  }
+
+  if (owed) {
+    const result = await git.checkoutBranch(cwd, branch);
+    if (!result.ok) {
+      throw new Escalation(
+        EXIT.ERROR,
+        `Run ${state.id} could not be put on its branch "${branch}": ${result.error}\n` +
+          'Nothing has run and no turn was dispatched. Commit or stash the changes in the way, ' +
+          'then resume.',
+      );
+    }
+    delete state.branchPending;
+    saveState(state);
+    log.ok(`On branch ${branch}`);
+    return;
+  }
+
+  // The stored branch exists and HEAD is elsewhere - including a detached HEAD,
+  // which `currentBranch` reports as "HEAD". Committing here would put this
+  // run's work on a branch it never claimed, which no amount of reading the log
+  // afterwards can undo.
+  throw new Escalation(
+    EXIT.ERROR,
+    `Run ${state.id} records branch "${branch}", but ${head === 'HEAD' ? 'HEAD is detached' : `"${String(head)}" is checked out`}. ` +
+      'Its commits would land on the wrong branch, so nothing has run.\n' +
+      `  git checkout ${branch}\n` +
+      'then resume - or resume with --no-branch to run on what is checked out.',
+  );
 }
 
-async function maybeCommit(cfg: Config, cwd: string, message: string): Promise<void> {
-  if (!cfg.git.commitEachRound) return;
-  if (!(await git.isRepo(cwd))) return;
-  const sha = await git.commitAll(cwd, message);
-  if (sha) log.ok(`Committed ${sha}`);
+/**
+ * Commit the round, and say honestly what happened.
+ *
+ * The sha used to be discarded and `null` meant both "nothing was staged" and
+ * "the commit failed"; a checkpoint has to record which, and has to record a
+ * *full* id, because it is read months later.
+ */
+async function maybeCommit(
+  cfg: Config,
+  cwd: string,
+  message: string,
+): Promise<{ sha: string | null; note: CheckpointCommitNote }> {
+  if (!cfg.git.commitEachRound) return { sha: null, note: 'commits-disabled' };
+  if (!(await git.isRepo(cwd))) return { sha: null, note: 'not-a-repo' };
+  const result = await git.commitAll(cwd, message);
+  if (result.sha === null) {
+    return { sha: null, note: result.why === 'failed' ? 'commit-failed' : 'nothing-to-commit' };
+  }
+  // A commit that succeeded but whose id is not a 40-hex object id records the
+  // absence and why, rather than a string no later reader could resolve.
+  if (!git.isFullSha(result.sha)) {
+    log.warn(`git named the new commit "${result.sha}", which is not an object id - not recorded`);
+    return { sha: null, note: 'sha-unusable' };
+  }
+  log.ok(`Committed ${result.sha.slice(0, 7)}`);
+  return { sha: result.sha, note: 'committed' };
 }
+
+/** A boundary that never commits: the checkpoint says so rather than implying a failure. */
+const NO_COMMIT = { sha: null, note: 'no-commit-in-round' } as const;
 
 /**
  * Run the project's verification gates, in order.
@@ -1644,6 +1792,30 @@ function noteModelProvenance(err: unknown, role: Role, cfg: Config, roles: RoleT
   return err;
 }
 
+/**
+ * The parent conversation this turn must fork, or null - recording the attempt
+ * before the child is spawned.
+ *
+ * ONE write, and it happens *before* the turn: the counter and the disclosure it
+ * justifies land together, so no interruption can leave a state carrying
+ * `attempts: 2` without the `fork_retried` event beside it, or the event without
+ * the counter.
+ *
+ * The counter is not decoration. A Codex thread id is provider-minted, so a
+ * process that dies between the provider returning and the accounting write
+ * loses the id and the next pass forks again - leaving one orphaned thread on
+ * the provider's side. That is bounded and it is disclosed here, rather than
+ * being made invisible.
+ */
+function noteFork(state: RunState, cfg: Config, slot: SlotName): string | null {
+  const forkFrom = slotForkParent(state, cfg, slot);
+  if (forkFrom === null) return null;
+  const attempt = noteSlotForkAttempt(state, slot);
+  if (attempt > 1) stageEvent(state, 'fork_retried', { slot, parentId: forkFrom, attempt });
+  saveState(state);
+  return forkFrom;
+}
+
 async function claudeDispatch(
   state: RunState,
   cfg: Config,
@@ -1669,8 +1841,14 @@ async function claudeDispatch(
     await rotateSession(state, cfg, turn, roles, model);
   }
 
-  const resume = slotHasMemory(state, cfg, slot);
-  const prompt = freshConversationPrefix(state, req.role, resume) + req.prompt;
+  const forkFrom = noteFork(state, cfg, slot);
+  // A fork is not a resume: `--fork-session` copies the parent into a new
+  // session rather than continuing one, so `--resume` alone would continue the
+  // parent's own conversation and put two runs in it.
+  const resume = forkFrom === null && slotHasMemory(state, cfg, slot);
+  // Continuity, not `resume`: a forked conversation arrives holding the
+  // parent's context, so greeting it as a fresh one would be false.
+  const prompt = freshConversationPrefix(state, req.role, slotContinuity(state, cfg, slot)) + req.prompt;
 
   // The `await` a plain assignment would have done, wrapped so a failure can say
   // which setting named the model it ran. Outside the retry, so a turn that is
@@ -1682,6 +1860,7 @@ async function claudeDispatch(
         prompt,
         sessionId: ensureSlotId(state, slot),
         resume,
+        ...(forkFrom === null ? {} : { forkFrom }),
         permissionMode: claudePermission(access),
         model,
         effort: effortFor(req.role, cfg, roles),
@@ -1699,6 +1878,8 @@ async function claudeDispatch(
   // The slot's marker, not its id: this turn returning is the only evidence
   // that the conversation exists at all.
   markSlotStarted(state, cfg, slot, result.sessionId);
+  // Staged, NOT persisted here - see `clearSlotFork` and `applyCharge` below.
+  if (forkFrom !== null) clearSlotFork(state, slot);
   // Tagged with the model that produced it: the ratio is a fraction of this
   // model's window and means nothing under another one. Through the shared seam
   // so the rotation turn in context.ts cannot drift out of step with this one.
@@ -1939,6 +2120,10 @@ async function revisePlan(
   // it immediately - including deleting it when this revision dropped the last
   // out-of-scope item and nothing has been deferred.
   writeFollowUps(state, plan);
+  // After the artifact and its save, so the snapshot describes a round whose
+  // record is complete. No commit here: the planning phase does not touch the
+  // tree, and the note says that rather than implying a failure.
+  writeCheckpoint(state, 'plan-round', NO_COMMIT);
   return plan;
 }
 
@@ -1963,7 +2148,8 @@ async function codexDispatch(
   turn: CodexTurnFn,
 ): Promise<TurnOutcome> {
   const slot = slotForRole(req.role, roles);
-  const prompt = freshConversationPrefix(state, req.role, slotHasMemory(state, cfg, slot)) + req.prompt;
+  const forkFrom = noteFork(state, cfg, slot);
+  const prompt = freshConversationPrefix(state, req.role, slotContinuity(state, cfg, slot)) + req.prompt;
 
   // Through the same retry the Claude turns use, so a Codex rate limit gets the
   // wait, the maxWaitMinutes cap and the resumable exit that already exist
@@ -1993,7 +2179,11 @@ async function codexDispatch(
         sandbox: codexSandbox(spec.access, cfg),
         cwd: req.cwd,
         timeoutMs: req.timeoutMs,
-        sessionId: slotResumeId(state, cfg, slot),
+        // One or the other, never both: a fork owed outranks a resume, and a
+        // slot owing a fork has never started, so it has no id to resume.
+        ...(forkFrom === null
+          ? { sessionId: slotResumeId(state, cfg, slot) }
+          : { forkFrom }),
         // Deliberately unchanged: this resolves a *Claude* window for a Codex
         // turn, which predates #60 and is a separate defect. Handing it this
         // role's model would half-fix it - a Codex model has no entry in either
@@ -2012,8 +2202,15 @@ async function codexDispatch(
   // already stored - so the write and the line below happen exactly where they
   // always did.
   const { idChanged, first } = markSlotStarted(state, cfg, slot, sessionId ?? null);
+  // Staged, NOT persisted here. `applyCharge` below makes one write carrying the
+  // started marker, this clear, the in-flight disposal, the totals and the turn
+  // event - so a kill cannot leave the fork durably done while the turn it paid
+  // for is uncharged, which #77 established cannot be reconstructed for Codex.
+  if (forkFrom !== null) clearSlotFork(state, slot);
   if (idChanged) {
-    saveState(state);
+    // Suppressed on the fork path for the same reason: the provider-minted id
+    // rides the accounting write rather than a save of its own.
+    if (forkFrom === null) saveState(state);
     if (first) log.detail(`codex thread ${slotId(state, slot) ?? ''}`);
   }
 

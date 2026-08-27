@@ -52,6 +52,17 @@ export interface CodexTurnOptions {
   timeoutMs: number;
   /** Existing Codex thread to continue. Null starts a new one. */
   sessionId?: string | null | undefined;
+  /**
+   * A parent thread to fork, for a forked run's first turn on this conversation
+   * (#78). Mutually exclusive with `sessionId`.
+   *
+   * `codex exec fork <id>` copies the thread and runs the turn on the copy, so
+   * the parent stays resumable. The new thread id is PROVIDER-minted - there is
+   * no client-chosen equivalent of Claude's `--session-id` - which is why a
+   * Codex fork is once-only except across a process kill before the turn is
+   * charged; see the dispatch in `src/orchestrator.ts`.
+   */
+  forkFrom?: string | null | undefined;
   /** Live progress. Omitted disables it entirely, which is what preflight wants. */
   progress?: ProgressOptions | undefined;
 }
@@ -321,7 +332,7 @@ export async function codexTurn(
   options: CodexTurnOptions,
   exec: RunFn = run,
 ): Promise<CodexTurnResult> {
-  const { prompt, schema, schemaName, artifactDir, model, effort, sandbox, cwd, timeoutMs, sessionId } =
+  const { prompt, schema, schemaName, artifactDir, model, effort, sandbox, cwd, timeoutMs, sessionId, forkFrom } =
     options;
 
   const schemaFile = path.join(artifactDir, `${schemaName}.schema.json`);
@@ -355,7 +366,26 @@ export async function codexTurn(
   // same file - which is what the result path reads either way.
   const schemaArgs = schema === undefined ? [] : ['--output-schema', schemaFile];
 
-  const args: string[] = sessionId
+  // `fork` is `resume`'s shape with a different verb, and for the same reasons:
+  // it accepts neither -C nor -s, so the working directory comes from the
+  // spawned process cwd and the sandbox defaults to read-only, and it inherits
+  // neither the model nor the reasoning effort, so both are re-sent. The
+  // explicit `-` is required - the prompt arrives on stdin.
+  //
+  // Mutually exclusive with `sessionId` by construction: the dispatch asks the
+  // slot for a fork parent first and only resumes when there is none.
+  const args: string[] = forkFrom
+    ? [
+        'exec', 'fork', forkFrom,
+        '--json',
+        '-m', model,
+        '-c', `model_reasoning_effort="${effort}"`,
+        '--skip-git-repo-check',
+        ...schemaArgs,
+        '-o', outFile,
+        '-',
+      ]
+    : sessionId
     ? [
         'exec', 'resume', sessionId,
         '--json',
@@ -379,7 +409,7 @@ export async function codexTurn(
         '-',
       ];
 
-  detail(`codex ${sessionId ? 'resume' : 'exec'} -m ${model} (${effort}) -> ${schemaName}`);
+  detail(`codex ${forkFrom ? 'fork' : sessionId ? 'resume' : 'exec'} -m ${model} (${effort}) -> ${schemaName}`);
 
   const heartbeat = options.progress
     ? createHeartbeat({
