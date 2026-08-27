@@ -460,7 +460,7 @@ Some tables run with a warning rather than a refusal, and each says what it cost
 | 3 | No convergence — round cap or oscillation guard tripped |
 | 4 | Budget exceeded |
 | 5 | Rate limited — Claude's window, or Codex's above `budget.codexLimitPercent`. Resume once it resets |
-| 6 | An agent's environment fails the toolchain contract |
+| 6 | A precondition of the phases ahead is not met: an agent's environment fails the toolchain contract, or the target directory cannot host them — `vibe run` outside a git repository is refused before any turn, because the review phase's only input is a diff produced by git. `vibe plan` still works there, and `--skip-probe` does not bypass it |
 | 7 | Unverified — the run finished, but a required verification gate never ran (no command configured). The work, its artifacts and its commits are all there; the evidence that it runs is not |
 
 Suitable for `if vibe run "..."; then ...` in a wrapper script.

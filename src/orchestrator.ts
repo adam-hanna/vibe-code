@@ -1274,6 +1274,12 @@ async function prepareGit(
     }
     // Only on a fresh run, as before: a resume said this once already, and
     // repeating it every pass would be new output for an unchanged situation.
+    //
+    // Since #71 only a plan-only run reaches this line: a full run is refused by
+    // `gitPrecondition` in the preflight gate before the loop starts, because
+    // its review phase would have died on `git diff --cached` an hour later.
+    // The wording is unchanged because it stays true of the runs that still get
+    // here - they do run, and they do so without branch isolation or commits.
     if (!resume) log.warn('Not a git repository - running without branch isolation or commits.');
     return;
   }
@@ -2553,6 +2559,27 @@ async function runReview(
   roles: RoleTable,
   turns: AgentTurns,
 ): Promise<FindingsReport> {
+  // Before `log.step`, so the run never claims a reviewer started on a diff it
+  // could not read. The decision that a gitless run is refused rather than
+  // degraded is NOT made here - it is made by `gitPrecondition` in the preflight
+  // gate, before anything is spent. This covers only what that gate cannot see:
+  // a resume, a hand-edited state, or a repository that stopped being one
+  // mid-run. `isRepo` and not `hasCommits` for the reason recorded there - a
+  // repository with no commits reviews fine (measured 2026-08-27, #71).
+  //
+  // Without it, `diffChunks` runs `git diff --cached`, which outside a
+  // repository falls back to `--no-index` mode and dies with `unknown option
+  // 'cached'` - a git usage message about a flag vibe passed, naming nothing a
+  // user could act on.
+  if (!(await git.isRepo(cwd))) {
+    throw new Escalation(
+      EXIT.PREFLIGHT,
+      `${cwd} is not a git repository, so the review phase cannot run: the reviewer's only ` +
+        'input is a diff produced by git, and there is no second source for it. Point the run ' +
+        'at the repository, or `git init` here, and resume.',
+    );
+  }
+
   log.step(`${holderLabel('reviewer', roles)} is reviewing the implementation`);
   const { chunks, files } = await git.diffChunks(cwd, state.baseSha);
 

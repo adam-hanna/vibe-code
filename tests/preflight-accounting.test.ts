@@ -4,11 +4,13 @@ import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { chargePreflight, execute, runPreflight } from '@src/cli.js';
+import type { PreflightOptions } from '@src/cli.js';
 import { DEFAULTS } from '@src/config.js';
 import { Escalation, EXIT } from '@src/orchestrator.js';
 import { preflight } from '@src/preflight.js';
 import type { AgentPreflight, PreflightProbes, ProbeUsage } from '@src/preflight.js';
 import { createRun } from '@src/run.js';
+import { initGit } from './helpers/loop-harness.js';
 import type {
   AgentProvider,
   ContractViolation,
@@ -45,8 +47,21 @@ function sandboxed(sandbox: Sandbox): Config {
   return { ...config(), codex: { ...config().codex, sandbox } };
 }
 
+/**
+ * A run whose target directory is a real repository.
+ *
+ * The `git init` is not decoration. These cases are all `planOnly: false`, and
+ * since #71 preflight refuses such a run in a directory that is not a git
+ * repository - before either probe is called, which is exactly the point of
+ * that gate and exactly what would make every accounting assertion below
+ * vacuous. A bare `mkdtemp` used to be a fine fixture because nothing looked at
+ * the directory; now something does, so the fixture has to be the thing it
+ * always meant: an ordinary run in an ordinary repo.
+ */
 function runFor(task: string): RunState {
-  return createRun(mkdtempSync(path.join(tmpdir(), 'vibe-preflight-')), task, false);
+  const dir = mkdtempSync(path.join(tmpdir(), 'vibe-preflight-'));
+  initGit(dir);
+  return createRun(dir, task, false);
 }
 
 function violation(
@@ -307,9 +322,20 @@ test('an ordinary preflight refusal still returns its own exit code', async () =
   assert.equal(looped, false);
 });
 
+/**
+ * The claim moved with #71, and only in its mechanism.
+ *
+ * `--skip-probe` used to mean "execute does not call the gate at all", and this
+ * case asserted it by watching a flag the gate set. It now means "the gate does
+ * not run the probes": the gate is always called, and is handed the flag,
+ * because its other half - the deterministic preconditions on the target
+ * directory - is free, cannot be wrong, and must not be skippable. What the
+ * case was guarding is unchanged and is still asserted below: with the flag set,
+ * nothing is probed, nothing is charged, and the run proceeds.
+ */
 test('--skip-probe charges nothing, because nothing ran', async () => {
   const state = runFor('skip-probe');
-  let gated = false;
+  let asked: PreflightOptions | null = null;
 
   const { result: code } = await captureLog(() =>
     execute(
@@ -317,8 +343,8 @@ test('--skip-probe charges nothing, because nothing ran', async () => {
       config(),
       false,
       true,
-      () => {
-        gated = true;
+      (_state, _cfg, options) => {
+        asked = options;
         return Promise.resolve(null);
       },
       () => Promise.resolve(),
@@ -326,7 +352,7 @@ test('--skip-probe charges nothing, because nothing ran', async () => {
   );
 
   assert.equal(code, EXIT.OK);
-  assert.equal(gated, false);
+  assert.deepEqual(asked, { skipProbe: true }, 'the gate is told to skip, not skipped');
   assert.equal(state.tokensUsed, 0);
   assert.deepEqual(charges(state), []);
 });
