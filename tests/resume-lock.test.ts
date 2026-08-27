@@ -265,6 +265,36 @@ test('a resume over an interrupted lock needs no force', async () => {
   assert.equal(existsSync(lockPath(state.dir)), false, 'and the lock was released at the end');
 });
 
+test('a resume over an interrupted lock says the previous process was interrupted', async () => {
+  // A completed run with nothing in flight: the recovery report has nothing to
+  // say, and before this the resume was silent about the kill entirely. The
+  // fact that the last process did not finish is the lock's to report, not the
+  // accounting's, and it is true whether or not anything was left to charge.
+  const { targetDir, state } = completed();
+  const pid = deadPid();
+  plant(state.dir, { pid, startedAt: '2026-08-26T09:00:00.000Z' });
+
+  const { result, lines } = await captureLog(() =>
+    main(['resume', state.id, '-C', targetDir, '--skip-probe', '--no-progress']),
+  );
+
+  assert.equal(result, EXIT.OK);
+  const said = lines.join('\n');
+  assert.match(said, /interrupted/);
+  assert.match(said, new RegExp(`pid ${String(pid)}`), 'names who it was');
+  assert.match(said, /2026-08-26T09:00:00\.000Z/, 'and when it started');
+});
+
+test('a resume with no lock at all says nothing about a previous process', async () => {
+  const { targetDir, state } = completed();
+
+  const { lines } = await captureLog(() =>
+    main(['resume', state.id, '-C', targetDir, '--skip-probe', '--no-progress']),
+  );
+
+  assert.ok(!lines.join('\n').includes('interrupted'), 'nothing was interrupted');
+});
+
 test('a resume that takes the lock releases it on the way out', async () => {
   const { targetDir, state } = completed();
 

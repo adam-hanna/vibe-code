@@ -7,7 +7,10 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRun, saveState } from '@src/run.js';
+import { main } from '@src/cli.js';
+import { EXIT } from '@src/orchestrator.js';
 import type { RunState } from '@src/types.js';
+import { ALLOC_CONTEXT_PREFIX, ALLOC_MODEL } from './helpers/kill-markers.js';
 
 /**
  * What a process killed mid-write leaves behind.
@@ -125,17 +128,76 @@ test('a completed write leaves no temp file behind', () => {
  * user had passed. Atomicity cannot help with that: the fix is that allocation
  * and initialisation are separate, and the first state written is complete.
  */
-test('a run killed before it is initialised leaves no state at all', async () => {
+test('a run killed after allocation and before initialisation leaves no state at all', async () => {
   const targetDir = scratch();
+  // Killed without ever being told to proceed, so the child provably never
+  // reached `createRun`. This is the deterministic half: allocation writes a
+  // directory and nothing else, so there is no half-configured run to resume.
   const { child, dir } = await start(targetDir, 'alloc');
   await killed(child);
 
-  // The directory exists - `allocateRun` made it - and that is all it does.
   assert.ok(existsSync(dir), 'the run directory should have been allocated');
-  const listed = readdirSync(dir);
-  assert.ok(
-    listed.every((f) => f !== 'state.json') || existsSync(path.join(dir, 'state.json')),
-    'either no state.json, or a whole one',
+  assert.equal(
+    existsSync(path.join(dir, 'state.json')),
+    false,
+    'allocation alone must persist no state',
+  );
+});
+
+test('a run killed during its first state write keeps all of its config and context, or none of it', async () => {
+  // Spread across the first write, which is the window the old three-write
+  // start-up left open: a kill between them produced a loadable state.json with
+  // no config and no context, and the resume after it ran on the defaults and
+  // dropped the user's brief.
+  const delays = Array.from({ length: 16 }, (_, i) => i * 1.5);
+
+  for (const delay of delays) {
+    const targetDir = scratch();
+    const { child, dir } = await start(targetDir, 'alloc');
+    child.stdin.write('go\n');
+    await sleep(delay);
+    await killed(child);
+
+    const file = path.join(dir, 'state.json');
+    if (!existsSync(file)) continue; // Killed before the write reached the disk.
+
+    const text = readFileSync(file, 'utf8');
+    let parsed: Partial<RunState> = {};
+    assert.doesNotThrow(() => {
+      parsed = JSON.parse(text) as Partial<RunState>;
+    }, `state.json did not parse after a kill at ${delay}ms (${text.length} bytes)`);
+    parsed = JSON.parse(text) as Partial<RunState>;
+
+    // Both, or the state would not have existed: they go in the same write.
+    assert.equal(
+      parsed.config?.claude.model,
+      ALLOC_MODEL,
+      `a state written by a kill at ${delay}ms lost its config`,
+    );
+    assert.ok(
+      (parsed.extraContext ?? '').startsWith(ALLOC_CONTEXT_PREFIX),
+      `a state written by a kill at ${delay}ms lost its context`,
+    );
+  }
+});
+
+/**
+ * The other half of the same promise, one step earlier: a run that is refused
+ * before anything is created leaves nothing to clean up. Driven through `main`
+ * rather than `cmdRun` because the ordering being asserted - read the context
+ * file, then allocate - is a property of the command, not of a helper.
+ */
+test('a missing --context file is refused before any run directory exists', async () => {
+  const targetDir = scratch();
+  const missing = path.join(targetDir, 'no-such-brief.md');
+
+  const code = await main(['run', 'a task', '-C', targetDir, '--context', missing]);
+
+  assert.equal(code, EXIT.ERROR);
+  assert.equal(
+    existsSync(path.join(targetDir, '.vibe', 'runs')),
+    false,
+    'nothing may be created before the context file is known to exist',
   );
 });
 

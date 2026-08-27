@@ -6,6 +6,7 @@ import {
   readdirSync,
   renameSync,
   rmSync,
+  statSync,
 } from 'node:fs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
@@ -294,6 +295,29 @@ export interface ListRunsOptions {
  * rendered, in `priorRunsSection`, and this stays the listing it has always
  * been.
  */
+/**
+ * Whether a directory holds a run at all - and, when that cannot be told apart,
+ * which way to fail.
+ *
+ * `existsSync` answers `false` both for "there is no state.json" and for "there
+ * is one and this process may not look at it", and those need opposite
+ * treatment: the first is an allocated-but-uninitialised directory that was
+ * never a run and must not appear in the listing or in the planner's index, the
+ * second is a run that exists and whose row belongs in the listing as
+ * `unreadable`, with the liveness verdict the lock beside it can still give.
+ * Dropping the second is how an inaccessible run disappears entirely (#77).
+ *
+ * `throwIfNoEntry: false` is what separates them: `undefined` is `ENOENT`, and a
+ * throw is everything else.
+ */
+export function statePresence(file: string): 'absent' | 'present' | 'unknown' {
+  try {
+    return statSync(file, { throwIfNoEntry: false }) === undefined ? 'absent' : 'present';
+  } catch {
+    return 'unknown';
+  }
+}
+
 export function listRuns(targetDir: string, opts: ListRunsOptions = {}): RunSummary[] {
   const root = path.join(targetDir, RUNS_DIR);
   if (!existsSync(root)) return [];
@@ -309,7 +333,7 @@ export function listRuns(targetDir: string, opts: ListRunsOptions = {}): RunSumm
   }
 
   let ids = entries
-    .filter((d) => existsSync(path.join(root, d, 'state.json')))
+    .filter((d) => statePresence(path.join(root, d, 'state.json')) !== 'absent')
     // Before the slice: excluding the current run must never cost a listed one.
     .filter((d) => d !== opts.exclude)
     .sort()

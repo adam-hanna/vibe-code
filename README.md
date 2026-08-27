@@ -168,10 +168,15 @@ A run holds `run.lock` in its own run directory while it works, naming the pid, 
 | this host, pid gone | **interrupted** | proceeds, and recovers what that process spent |
 | another host | **unknown** | refused — vibe cannot read another machine's process table |
 | unreadable | **unknown** | refused — an unreadable lock cannot rule out a live process |
+| this host, pid unprobeable | **unknown** | refused — the probe failed for some reason other than "no such process" |
 
-The pid probe sends no signal; it only asks whether the process exists. **Pid reuse is not solved**: a recycled pid makes a dead run read as *running* and refuses a resume that should have been allowed. That is the safe direction — the alternative is two processes writing one run — and `--force` is the way out. Ctrl-C leaves the lock behind with a pid that is now dead, which reads as *interrupted*, which is exactly what happened.
+*Unreadable* means any failure to read the lock other than its absence — a permission error, a torn or hand-edited file, something that is not a lock. Only a file that is genuinely not there reads as **not running**: everywhere else, "vibe could not find out" and "there is nothing here" are different answers, and collapsing them is what would let a second process start writing over a live run.
 
-A refusal prints who holds the lock and, where the run kept the liveness timestamps, how long it has been since vibe observed anything. That figure is stated as an observation and never as a verdict, for the reason above.
+The pid probe sends no signal; it only asks whether the process exists. Its answer is three-valued for the same reason: the process is there, it is gone, or the question could not be answered — and only *gone* proceeds. **Pid reuse is not solved**: a recycled pid makes a dead run read as *running* and refuses a resume that should have been allowed. That is the safe direction — the alternative is two processes writing one run — and `--force` is the way out. Ctrl-C leaves the lock behind with a pid that is now dead, which reads as *interrupted*, which is exactly what happened.
+
+A resume over an *interrupted* lock proceeds and says so first, naming the process that did not finish — whether or not it left anything to recover.
+
+A refusal prints who holds the lock and, where the run kept the liveness timestamps, how long it has been since vibe observed anything. That line is omitted for a run whose progress heartbeat is off, including one that recorded activity before it was turned off: nothing is advancing that timestamp any more, so quoting it would report a silence nobody is measuring. That figure is stated as an observation and never as a verdict, for the reason above.
 
 ### What a resume can recover, and what it cannot
 

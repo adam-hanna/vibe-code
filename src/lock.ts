@@ -1,7 +1,8 @@
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
+import { DEFAULTS } from '@src/config.js';
 
 /**
  * Whether a run is being worked on right now, and by whom.
@@ -85,9 +86,44 @@ function isRecord(v: unknown): v is Record<string, unknown> {
  * into the same answer, because one of them licenses a second writer.
  */
 export function readLock(dir: string): RunLock | null {
+  const read = readLockFile(dir);
+  return read.kind === 'lock' ? read.lock : null;
+}
+
+/**
+ * The same read, with the distinction `readLock` cannot express in `null`.
+ *
+ * `ENOENT` is the only error that means *there is no lock*. Every other failure -
+ * `EACCES`, `EPERM`, `EBUSY`, `EIO`, a directory where the file should be - means
+ * vibe could not find out, and a lock it could not read cannot rule out a live
+ * process. Collapsing those into "absent" is precisely what would license a
+ * second writer over a running run, so they come back as `unreadable` and the
+ * caller turns that into `unknown`.
+ */
+type LockRead =
+  | { kind: 'absent' }
+  | { kind: 'unreadable' }
+  | { kind: 'lock'; lock: RunLock };
+
+function readLockFile(dir: string): LockRead {
+  let text: string;
+  try {
+    text = readFileSync(lockPath(dir), 'utf8');
+  } catch (err: unknown) {
+    return (err as { code?: unknown } | null)?.code === 'ENOENT'
+      ? { kind: 'absent' }
+      : { kind: 'unreadable' };
+  }
+  const lock = parseLock(text);
+  // Present and readable but not a lock: a torn or hand-edited file. Unreadable,
+  // never absent, for the reason above.
+  return lock === null ? { kind: 'unreadable' } : { kind: 'lock', lock };
+}
+
+function parseLock(text: string): RunLock | null {
   let raw: unknown;
   try {
-    raw = JSON.parse(readFileSync(lockPath(dir), 'utf8')) as unknown;
+    raw = JSON.parse(text) as unknown;
   } catch {
     return null;
   }
@@ -102,11 +138,14 @@ export function readLock(dir: string): RunLock | null {
 }
 
 /**
- * Whether a pid is a live process on this machine.
+ * What a pid probe can honestly conclude - three answers, not two.
  *
- * `process.kill(pid, 0)` sends no signal and only asks. `EPERM` means the
- * process exists and belongs to someone else, which is still alive; `ESRCH`
- * means it is gone. Works on Windows.
+ * `process.kill(pid, 0)` sends no signal and only asks. Success and `EPERM` both
+ * mean the process exists (`EPERM` is someone else's process, which is still
+ * alive). **Only `ESRCH` means it is gone.** Anything else - a platform that
+ * refuses the probe, an error with no code at all - is a question vibe could not
+ * answer, and answering it "gone" is what would let a resume start a second
+ * writer over a live run. Works on Windows.
  *
  * **Pid reuse is real and is not solved here.** A recycled pid makes a dead
  * run's lock read as `running`, which refuses a resume that should have been
@@ -116,17 +155,45 @@ export function readLock(dir: string): RunLock | null {
  * command line) is another platform-specific probe that can be wrong in the
  * unsafe direction.
  */
-function pidIsAlive(pid: number): boolean {
+function probePid(pid: number): 'running' | 'interrupted' | 'unknown' {
   try {
     process.kill(pid, 0);
-    return true;
+    return 'running';
   } catch (err: unknown) {
-    return (err as { code?: unknown } | null)?.code === 'EPERM';
+    const code = (err as { code?: unknown } | null)?.code;
+    if (code === 'EPERM') return 'running';
+    if (code === 'ESRCH') return 'interrupted';
+    return 'unknown';
   }
+}
+
+/**
+ * Whether the run's stored config had the progress heartbeat switched off.
+ *
+ * The quiet figure is measured from `lastActivityAt`, which only the heartbeat
+ * advances - so with progress disabled the timestamp is either absent or frozen
+ * at whenever it was last enabled, and reporting an ever-growing "quiet for 3h"
+ * off a field nothing is updating would be a measurement nobody is taking. The
+ * timestamp alone cannot say this: `resumeConfig` can turn progress off on a run
+ * that already recorded activity, leaving the stale value behind.
+ *
+ * Absent or unrecognisable config means the default, read from `DEFAULTS` rather
+ * than restated here.
+ */
+function progressDisabled(raw: unknown): boolean {
+  if (!isRecord(raw)) return !DEFAULTS.progress.enabled;
+  const config = raw['config'];
+  if (!isRecord(config)) return !DEFAULTS.progress.enabled;
+  const progress = config['progress'];
+  if (!isRecord(progress)) return !DEFAULTS.progress.enabled;
+  const enabled = progress['enabled'];
+  if (typeof enabled !== 'boolean') return !DEFAULTS.progress.enabled;
+  return !enabled;
 }
 
 function quietSince(raw: unknown): number | null {
   if (!isRecord(raw)) return null;
+  if (progressDisabled(raw)) return null;
   const last = raw['lastActivityAt'];
   if (typeof last !== 'string') return null;
   const at = Date.parse(last);
@@ -145,26 +212,28 @@ function quietSince(raw: unknown): number | null {
  * used for the quiet figure. Omitting it costs the colour, never the verdict.
  */
 export function livenessOf(dir: string, raw?: unknown): LivenessVerdict {
-  let present: boolean;
-  try {
-    present = existsSync(lockPath(dir));
-  } catch {
-    // A directory that cannot even be probed is one this cannot speak for.
-    return { liveness: 'unknown', lock: null, quietMs: null };
-  }
   const quietMs = quietSince(raw);
-  if (!present) return { liveness: 'not-running', lock: null, quietMs };
+  const read = readLockFile(dir);
 
-  const lock = readLock(dir);
-  // Present but unreadable or malformed. Fails closed: an unreadable lock cannot
-  // rule out a live process, and treating it as absent is what would let a
-  // torn write license a second writer.
-  if (lock === null) return { liveness: 'unknown', lock: null, quietMs };
+  // The only reading that means nobody claims this run: the file is genuinely
+  // not there. One read, so there is no gap between "does it exist" and "what
+  // does it say" for another process to acquire in - and no `existsSync`, which
+  // reports an unreadable file and an absent one with the same `false`.
+  if (read.kind === 'absent') return { liveness: 'not-running', lock: null, quietMs };
 
+  // Present but unreadable, unparseable or malformed. Fails closed: a lock vibe
+  // cannot read cannot rule out a live process, and treating it as absent is
+  // what would let a torn write or a permission error license a second writer.
+  if (read.kind === 'unreadable') return { liveness: 'unknown', lock: null, quietMs };
+
+  const { lock } = read;
   // Another machine cannot be probed at all, so there is no verdict to give.
   if (lock.host !== os.hostname()) return { liveness: 'unknown', lock, quietMs };
 
-  return { liveness: pidIsAlive(lock.pid) ? 'running' : 'interrupted', lock, quietMs };
+  // Tri-state on purpose: a probe that failed for any reason other than "no such
+  // process" is `unknown`, which refuses, rather than `interrupted`, which
+  // proceeds. See `probePid`.
+  return { liveness: probePid(lock.pid), lock, quietMs };
 }
 
 function formatQuiet(ms: number): string {
@@ -197,7 +266,13 @@ export function describeLiveness(verdict: LivenessVerdict): string {
   if (liveness === 'interrupted') {
     return `held by ${who}, which is no longer running - it was interrupted.${quiet}`;
   }
-  return `held by ${who}, which is on another machine and cannot be probed from here.${quiet}`;
+  // `unknown` with a readable lock has two causes: another machine, or a pid
+  // probe on this one that failed for a reason other than "no such process".
+  // They are named apart because the way out differs - one is a stale foreign
+  // lock to delete by hand, the other is a local condition to look into.
+  return lock.host === os.hostname()
+    ? `held by ${who}, and vibe could not determine whether that process is still running.${quiet}`
+    : `held by ${who}, which is on another machine and cannot be probed from here.${quiet}`;
 }
 
 /** Verdicts under which a run may be started without `--force`. */

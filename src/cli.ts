@@ -9,6 +9,7 @@ import {
   loadRun,
   recordEvent,
   saveState,
+  statePresence,
   unavailableGates,
   verificationCaveat,
   verificationIncomplete,
@@ -494,9 +495,13 @@ async function cmdResume(args: readonly string[]): Promise<ExitCode> {
   const runsRoot = path.join(targetDir, '.vibe', 'runs');
   assertUsableRunId(id, runsRoot);
   const runDir = path.join(runsRoot, id);
-  if (!existsSync(path.join(runDir, 'state.json'))) {
+  if (statePresence(path.join(runDir, 'state.json')) === 'absent') {
     // No lock, and no new message: `loadRun` already refuses this by name, and
     // writing a lock into a directory that holds no run would leave litter.
+    //
+    // Only a genuinely absent file takes this branch. A state.json that exists
+    // but cannot be read is a run - it locks like one, and `loadRun` then
+    // reports the read failure itself rather than the wrong "no run" error.
     loadRun(targetDir, id);
   }
 
@@ -511,6 +516,12 @@ async function cmdResume(args: readonly string[]): Promise<ExitCode> {
   }
   if (handle.forced) {
     log.warn(`--force: took the lock anyway. It was ${describeLiveness(verdict)}`);
+  } else if (verdict.liveness === 'interrupted') {
+    // Said here rather than left to the recovery report, which only speaks when
+    // it finds an in-flight entry: a run killed between turns, or one killed
+    // with progress disabled, has nothing to recover and would otherwise resume
+    // in silence, with no indication that the last process did not finish.
+    log.info(`Previous process was interrupted: ${describeLiveness(verdict)}`);
   }
 
   try {
