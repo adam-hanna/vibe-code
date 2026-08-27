@@ -7,7 +7,7 @@ import { execute, REAL_GATE, runPreflight } from '@src/cli.js';
 import { Escalation, EXIT, orchestrate } from '@src/orchestrator.js';
 import { gitPrecondition, repoRequiredBy } from '@src/preflight.js';
 import type { AgentPreflight, PreflightProbes } from '@src/preflight.js';
-import { createRun } from '@src/run.js';
+import { createRun, saveState } from '@src/run.js';
 import type { Phase } from '@src/runtime.js';
 import type { RunState } from '@src/types.js';
 import { agents, config, initGit, reviewingRun, work } from './helpers/loop-harness.js';
@@ -227,6 +227,44 @@ test('the run exits 6 with nothing spent and no turn dispatched', async () => {
   assert.equal(looped, false, 'refused before the first agent turn is dispatched');
   assert.equal(state.tokensUsed, 0);
   assert.equal(state.costUsd, 0);
+});
+
+test('a finished run is not refused: it has no phase ahead to need a repository', async () => {
+  // The gate asks about the phases *ahead*, not the phases the run has. A run
+  // that already completed dispatches none - `runPhases` returns on
+  // `resumePhase(state) === 'complete'` before any phase runs - so refusing it
+  // for want of a repository would stop a resume that was never going to review
+  // anything. Found in review round 1 of #71.
+  const state = runIn(plainDir(), 'already finished', false);
+  state.status = 'done';
+  state.phase = 'complete';
+  saveState(state);
+  const calls: string[] = [];
+
+  const { result: code } = await captureLog(() =>
+    execute(state, config(), true, true, REAL_GATE, (s, c, r) =>
+      orchestrate(s, c, r, agents({}, calls)),
+    ),
+  );
+
+  assert.equal(code, EXIT.OK);
+  assert.deepEqual(calls, [], 'and it still dispatched nothing');
+});
+
+test('a run still short of the review phase is refused, finished or not', async () => {
+  // The other side of the exemption above: narrowing it to "complete" must not
+  // let a run that has an implementation still to review through.
+  for (const phase of ['planning', 'implementing', 'reviewing'] as const) {
+    const state = runIn(plainDir(), `parked at ${phase}`, false);
+    state.phase = phase;
+    saveState(state);
+
+    const { result: code } = await captureLog(() =>
+      runPreflight(state, config(), countingProbes().probes, { skipProbe: true }),
+    );
+
+    assert.equal(code, EXIT.PREFLIGHT, `a run parked at ${phase} still needs a repository`);
+  }
 });
 
 // ---- the backstop, for what the gate cannot see -----------------------------

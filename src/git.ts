@@ -77,6 +77,29 @@ export async function isRepo(cwd: string): Promise<boolean> {
   return code === 0;
 }
 
+/**
+ * `isRepo`, made total: the answer, and why it could not be obtained.
+ *
+ * `isRepo` passes `allowFail`, which covers only a git that ran and exited
+ * nonzero. It still throws when the binary cannot be *resolved* - `VIBE_GIT_BIN`
+ * pointing at a missing file, or nothing named `git` on PATH - or cannot be
+ * spawned at all, because `resolveBin` throws and `run` rejects. A caller whose
+ * job is to decide an exit code cannot tell those apart from a crash, and would
+ * report a broken git as a generic error instead of as the environment fault it
+ * is (#71, review round 1).
+ *
+ * Here they are an answer rather than an exception: not a repository, and the
+ * reason. This is fail-closed and not a silent degrade - the reason is carried
+ * out for the caller to say out loud, never discarded.
+ */
+export async function repoStatus(cwd: string): Promise<{ isRepo: boolean; error: string | null }> {
+  try {
+    return { isRepo: await isRepo(cwd), error: null };
+  } catch (err) {
+    return { isRepo: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
 export async function currentBranch(cwd: string): Promise<string | null> {
   const { stdout } = await git(cwd, ['rev-parse', '--abbrev-ref', 'HEAD'], { allowFail: true });
   return stdout || null;

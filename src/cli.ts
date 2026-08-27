@@ -1139,9 +1139,18 @@ export async function runPreflight(
 ): Promise<ExitCode | null> {
   const phases: Phase[] = state.planOnly ? ['plan'] : ['plan', 'implement', 'review'];
 
+  // What is actually ahead, which is not always what the run's phases are. A
+  // finished run has none: `runPhases` recognises `resumePhase(state) ===
+  // 'complete'` and returns without dispatching one, so refusing such a resume
+  // for want of a repository would stop a run that was never going to review
+  // anything. The probe half deliberately keeps asking about all of `phases` -
+  // narrowing the toolchain contract by resume point is a separate change with
+  // its own blast radius, and this is the half that must not over-refuse.
+  const ahead: readonly Phase[] = resumePhase(state) === 'complete' ? [] : phases;
+
   // Before the probes, so a refusal costs nothing: the run that produced #71
   // spent 30M tokens before the review phase found this out for itself.
-  const blocked = await gitPrecondition(state.targetDir, phases);
+  const blocked = await gitPrecondition(state.targetDir, ahead);
   if (blocked !== null) {
     log.heading('Preflight');
     log.fail(blocked);
@@ -1614,9 +1623,19 @@ async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
     closeCodexRateLimits();
   }
 
-  if (await git.isRepo(targetDir)) {
+  // `repoStatus`, because this is the command whose whole job is to report a
+  // broken environment: `isRepo` throws when the git binary cannot be resolved
+  // or spawned, and an unhandled throw here would end `vibe doctor` on a
+  // generic error instead of the line the user came for (#71, review round 1).
+  const repo = await git.repoStatus(targetDir);
+  if (repo.isRepo) {
     log.ok(`git repo: ${targetDir} (branch ${await git.currentBranch(targetDir)})`);
     if (await git.isDirty(targetDir)) log.warn('working tree is dirty');
+  } else if (repo.error !== null) {
+    log.warn(
+      `git could not be run against ${targetDir}: ${repo.error}. ` +
+        '`vibe run` will refuse here with exit 6, because the review phase needs a diff.',
+    );
   } else {
     // Reported, not failed: doctor has no run state and so no `planOnly`, and
     // `vibe plan` works perfectly here. Naming the refusal is what the old

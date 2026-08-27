@@ -236,12 +236,23 @@ export async function gitPrecondition(
   phases: readonly Phase[],
 ): Promise<string | null> {
   if (!repoRequiredBy(phases)) return null;
-  if (await git.isRepo(targetDir)) return null;
-  return (
-    `${targetDir} is not a git repository, and the review phase cannot run without one: ` +
-    "the reviewer's only input is a diff produced by git. Run `git init` here, point -C at " +
-    'the repository, or run `vibe plan` if a plan is all you need.'
-  );
+  // `repoStatus`, not `isRepo`: a git binary that cannot be resolved or spawned
+  // makes `isRepo` throw, and a throw here would escape as a generic run error
+  // (exit 1) instead of the named environment refusal this gate exists to give
+  // (exit 6). Both answers mean the same thing for the review phase - there
+  // will be no diff - so both are refused, and each says which it was.
+  const { isRepo, error } = await git.repoStatus(targetDir);
+  if (isRepo) return null;
+  const why =
+    "the reviewer's only input is a diff produced by git, and there is no second source " +
+    'for it. ';
+  return error === null
+    ? `${targetDir} is not a git repository, and the review phase cannot run without one: ` +
+        `${why}Run \`git init\` here, point -C at the repository, or run \`vibe plan\` if a ` +
+        'plan is all you need.'
+    : `git could not be run against ${targetDir} (${error}), so the review phase cannot run: ` +
+        `${why}Repair the git binary - VIBE_GIT_BIN, or git on PATH - or run \`vibe plan\` if ` +
+        'a plan is all you need.';
 }
 
 /**

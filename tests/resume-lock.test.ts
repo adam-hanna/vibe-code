@@ -11,7 +11,6 @@ import type { RunLock } from '@src/lock.js';
 import { createRun, saveState } from '@src/run.js';
 import { DEFAULTS } from '@src/config.js';
 import type { Config, RunState } from '@src/types.js';
-import { initGit } from './helpers/loop-harness.js';
 
 /**
  * What `vibe resume` does before it has permission.
@@ -42,14 +41,6 @@ function scratch(task = 'resume lock'): { targetDir: string; state: RunState } {
  */
 function completed(task = 'resume lock'): { targetDir: string; state: RunState } {
   const targetDir = mkdtempSync(path.join(os.tmpdir(), 'vibe-resume-lock-'));
-  // A real repository, because these cases drive the real `main`: since #71
-  // preflight refuses a full run whose target directory is not one, before the
-  // command ever reaches the loop, and every assertion below about locks would
-  // then be watching a run that stopped for an unrelated reason. The gate is
-  // the same shape as the probe half it sits beside - a resume has always been
-  // refusable on the environment - so the fixture, not the claim, is what was
-  // under-specified.
-  initGit(targetDir);
   // Not plan-only: `status: 'done'` beside `phase: 'complete'` on a plan-only
   // run is one of the triples #54's cross-field pass refuses, because no writer
   // produces it. A finished full run is the legal way to say "finished".

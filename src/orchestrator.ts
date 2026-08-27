@@ -2571,12 +2571,21 @@ async function runReview(
   // repository falls back to `--no-index` mode and dies with `unknown option
   // 'cached'` - a git usage message about a flag vibe passed, naming nothing a
   // user could act on.
-  if (!(await git.isRepo(cwd))) {
+  // `repoStatus` rather than `isRepo` for the same reason the gate uses it: a
+  // git that cannot be resolved or spawned makes `isRepo` throw, and an
+  // unhandled throw here is a generic run error rather than the named refusal.
+  const repo = await git.repoStatus(cwd);
+  if (!repo.isRepo) {
     throw new Escalation(
       EXIT.PREFLIGHT,
-      `${cwd} is not a git repository, so the review phase cannot run: the reviewer's only ` +
-        'input is a diff produced by git, and there is no second source for it. Point the run ' +
-        'at the repository, or `git init` here, and resume.',
+      (repo.error === null
+        ? `${cwd} is not a git repository`
+        : `git could not be run against ${cwd} (${repo.error})`) +
+        ", so the review phase cannot run: the reviewer's only input is a diff produced by " +
+        'git, and there is no second source for it. ' +
+        (repo.error === null
+          ? 'Point the run at the repository, or `git init` here, and resume.'
+          : 'Repair the git binary - VIBE_GIT_BIN, or git on PATH - and resume.'),
     );
   }
 
