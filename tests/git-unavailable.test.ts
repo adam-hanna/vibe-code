@@ -4,10 +4,10 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { execute, REAL_GATE, runPreflight } from '@src/cli.js';
-import { EXIT } from '@src/orchestrator.js';
+import { EXIT, orchestrate } from '@src/orchestrator.js';
 import { gitPrecondition } from '@src/preflight.js';
-import { createRun } from '@src/run.js';
-import { config } from './helpers/loop-harness.js';
+import { createRun, saveState } from '@src/run.js';
+import { agents, config, freshRun, planFixture } from './helpers/loop-harness.js';
 
 /**
  * A git binary that cannot be run at all (#71, review round 1).
@@ -81,6 +81,45 @@ test('the run stops at exit 6 naming git, not at a generic error', async () => {
   assert.equal(looped, false);
   assert.equal(state.tokensUsed, 0);
   assert.match(lines.join('\n'), /git could not be run/);
+});
+
+test('a plan-only run completes through the real loop, git or no git', async () => {
+  // Not `gitPrecondition` in isolation: the loop itself calls `git.isRepo` in
+  // `prepareGit` before any phase runs, and that call used to throw here - so
+  // `vibe plan` died with a generic error on a host whose git was unresolvable,
+  // despite needing nothing from git (#71, review round 2). This drives
+  // `execute` -> `orchestrate` -> `planPhase` end to end.
+  const state = freshRun({ prefix: 'vibe-nogit-plan-', task: 'plan with no git' });
+  const calls: string[] = [];
+
+  const { result: code, lines } = await captureLog(() =>
+    execute(state, config(), false, true, REAL_GATE, (s, c, r) =>
+      orchestrate(s, c, r, agents({ claude: () => planFixture() }, calls)),
+    ),
+  );
+
+  assert.equal(code, EXIT.OK);
+  assert.deepEqual(calls, ['plan', 'critique-0'], 'the planning turns were dispatched');
+  assert.equal(state.phase, 'complete');
+  // Degraded, but never silently: the run says which of the two happened.
+  assert.match(lines.join('\n'), /git could not be run/);
+});
+
+test('a finished run resumes to a no-op, git or no git', async () => {
+  const state = freshRun({ prefix: 'vibe-nogit-done-', task: 'already finished', planOnly: false });
+  state.status = 'done';
+  state.phase = 'complete';
+  saveState(state);
+  const calls: string[] = [];
+
+  const { result: code } = await captureLog(() =>
+    execute(state, config(), true, true, REAL_GATE, (s, c, r) =>
+      orchestrate(s, c, r, agents({}, calls)),
+    ),
+  );
+
+  assert.equal(code, EXIT.OK);
+  assert.deepEqual(calls, []);
 });
 
 test('the gate refuses rather than throwing, with the probes untouched', async () => {

@@ -1632,10 +1632,17 @@ async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
     log.ok(`git repo: ${targetDir} (branch ${await git.currentBranch(targetDir)})`);
     if (await git.isDirty(targetDir)) log.warn('working tree is dirty');
   } else if (repo.error !== null) {
-    log.warn(
+    // A failure, not a warning, and it counts against the exit code. An
+    // ordinary non-repository target is a fine environment - `vibe plan` works
+    // there - but a git that cannot be run is broken, and `check('git', ...)`
+    // above only RESOLVES the binary: a path that exists but cannot be spawned
+    // passes it and would otherwise leave doctor reporting a healthy
+    // environment (#71, review round 2).
+    log.fail(
       `git could not be run against ${targetDir}: ${repo.error}. ` +
         '`vibe run` will refuse here with exit 6, because the review phase needs a diff.',
     );
+    bad++;
   } else {
     // Reported, not failed: doctor has no run state and so no `planOnly`, and
     // `vibe plan` works perfectly here. Naming the refusal is what the old
