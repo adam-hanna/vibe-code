@@ -662,8 +662,9 @@ function isSharingViolation(err: unknown): boolean {
  * guarantee this was built for. Surviving a power loss additionally needs the
  * file *and its directory* fsynced, and directory fsync is not available on
  * Windows - claiming a durability that is not there is worse than not claiming
- * it. Only state.json is written this way; `artifact()` is written a handful of
- * times per run, not every five seconds.
+ * it. That limit is unchanged by #88, which routed `artifact()` through
+ * `writeAtomic` as well: both are safe against a process kill and neither claims
+ * more.
  *
  * Still throws whatever the write throws: `chargeFailure` has a `catch` that
  * depends on it.
@@ -1007,10 +1008,36 @@ export function listCheckpoints(dir: string): CheckpointEntry[] {
   return out.sort((a, b) => a.n - b.n);
 }
 
+/**
+ * Write one of the run's documents, whole or not at all.
+ *
+ * Through `writeAtomic` since #88, for a failure that is not the one state.json
+ * had. `writeFileSync` opens `O_TRUNC`: the file is *emptied at open* and only
+ * then written, so a killed process leaves zero bytes rather than a splice - and
+ * unlike tearing it does not need a large file to appear. Measured against
+ * `develop` at `99eca2e`, 40 kills per size: a 17KB `PLAN.md` was destroyed 5
+ * times in 40, a 47KB checkpoint 2, a 1.1MB body 2. The truncate window is
+ * roughly fixed while the write after it grows, so the ordinary artifact is the
+ * one most often lost.
+ *
+ * The file that made it worth fixing is `OUTSTANDING.md`, which is read back by
+ * code on both sides and which an empty copy strands between them:
+ * `recoverOutstanding` skips it because `hasArtifact` is `existsSync` and an
+ * empty file exists, and `settlePendingOutstanding` skips it because it does not
+ * contain `OUTSTANDING_OWNED`. The run then finishes reporting carried findings
+ * into a file that says nothing, and nothing will ever correct it.
+ *
+ * Cost of the reuse, median of 400 writes: +0.44ms at 17KB, +0.32ms at 47KB.
+ * The busiest archived run wrote 29 artifacts, so this is tens of milliseconds
+ * across a run measured in hours.
+ *
+ * Still throws whatever the write throws - several callers depend on that, for
+ * the same reason `saveState` records.
+ */
 export function artifact(state: RunState, name: string, content: string | object): string {
   const file = path.join(state.dir, name);
   const body = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
-  writeFileSync(file, body, 'utf8');
+  writeAtomic(state.dir, name, body);
   return file;
 }
 
