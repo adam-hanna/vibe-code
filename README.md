@@ -419,25 +419,25 @@ Binaries can be pinned with `VIBE_CLAUDE_BIN`, `VIBE_CODEX_BIN`, `VIBE_GIT_BIN`.
 
 ### Who does what
 
-`roles` decides which agent holds each job. Omit it and you get the assignment above, which is what every run did before the key existed; name only the roles you want to move and the rest fill in. A role's value takes two forms: a provider name — `"reviewer": "codex"` — or an object naming the provider and, optionally, that role's own model and reasoning effort:
+`roles` decides which agent holds each job. Omit it and you get the assignment above, which is what every run did before the key existed; name only the roles you want to move and the rest fill in. A role's value takes two forms: a provider name — `"reviewer": "codex"` — or an object naming the provider and, optionally, that role's own model, reasoning effort and turn timeout:
 
 ```jsonc
 {
   "roles": {
     "critic":      "codex",                                              // the string form, unchanged
-    "reviewer":    { "provider": "codex", "model": "gpt-5.6-pro", "effort": "max" },
+    "reviewer":    { "provider": "codex", "model": "gpt-5.6-pro", "effort": "max", "timeoutMs": 5400000 },
     "implementer": { "provider": "claude", "model": "sonnet" }           // its own model, and only its own
   }
 }
 ```
 
-**Model and effort are the two settings a role may name**, and `claude.model`/`claude.effort` and `codex.model`/`codex.effort` remain what every other role on that provider runs. Everything else is a fact about the *job*, not a choice — whether a role may write, what schema its turn returns, and which conversation it talks through. There are three conversations, and which one a role gets follows from its provider and its job: everything on Claude shares Claude's session; a Codex reviewer holds the reviewer's thread, and every other Codex role the plan-side judge's.
+**Model, effort and timeout are the three settings a role may name**, and `claude.model`/`claude.effort` and `codex.model`/`codex.effort`, along with each provider's pair of timeout keys, remain what every other role on that provider runs. Everything else is a fact about the *job*, not a choice — whether a role may write, what schema its turn returns, and which conversation it talks through. There are three conversations, and which one a role gets follows from its provider and its job: everything on Claude shares Claude's session; a Codex reviewer holds the reviewer's thread, and every other Codex role the plan-side judge's.
 
 **A model is accepted on trust, and that is deliberate.** An effort is a closed enum and is fully checked before a turn is spawned; a model name has no such check anywhere in this tool. `preflight` is an environment contract check rather than a model validator — the Claude probe runs a small fixed model whatever `claude.model` says, and the Codex probe runs `codex.model` — so it never validated a role's model and is not made to. There is no allowlist, no default table and no per-role default: vibe does not guess whether a model exists, and it never silently substitutes one that does. What you get instead is a name you mistyped surfacing twice, early and legibly: the `Roles:` line printed before the first turn shows `reviewer=codex@gpt-5.6-pro`, and a turn that fails under it reports `roles.reviewer.model` rather than `codex.model`, so you edit the line you actually wrote.
 
 Two Codex roles can now name two models, and `codex.contextWindow` is one setting describing one of them. It stays provider-level — the Codex window is a setting rather than something vibe can derive — so a run that names two Codex models *and* sets that window is warned that at least one thread's occupancy, `ctx%` and compaction threshold are measured against a window that is not its model's.
 
-`provider` is required in the object form. A role's value is replaced *wholesale* when configs are layered, so a defaulted provider would let a later `{"effort": "max"}` hand a role you had moved to Claude back to Codex silently — the one thing this section is strict to prevent. Config errors: an unknown role name, a `roles` that is not an object, a provider that is not one of the two, an object with no `provider`, a `model` that is not a non-empty string, any other unknown key inside a role object, and an effort outside `low|medium|high|xhigh|max`. Each names the role, and the key where there is one.
+`provider` is required in the object form. A role's value is replaced *wholesale* when configs are layered, so a defaulted provider would let a later `{"effort": "max"}` hand a role you had moved to Claude back to Codex silently — the one thing this section is strict to prevent. Config errors: an unknown role name, a `roles` that is not an object, a provider that is not one of the two, an object with no `provider`, a `model` that is not a non-empty string, a `timeoutMs` that is not a positive number, any other unknown key inside a role object, and an effort outside `low|medium|high|xhigh|max`. Each names the role, and the key where there is one. `timeoutMs` is checked no more strictly than the provider key it overrides: a fractional number is legal, because `codex.timeoutMs` accepts one.
 
 The headline swap is a clean split — `{"planner": "codex", "implementer": "codex", "critic": "claude", "answerer": "claude", "reviewer": "claude"}` — and needs `codex.persistSession: false` (`--no-codex-session`). That pairing is refused rather than repaired: `codex exec resume` takes no `-s` flag, so a writing Codex role on a persisted thread can write on its first turn and silently reverts to read-only on every one after.
 
@@ -448,7 +448,16 @@ Some tables run with a warning rather than a refusal, and each says what it cost
 - A planner or implementer on a persisted Codex thread grows a context that nothing can compact, and that nothing measures either unless `codex.contextWindow` is set.
 - A planner or implementer on Codex puts the expensive half of the run beyond `budget.maxCostUsd`, which is Claude-side only. `budget.maxTokens` still counts both.
 
-`codex.timeoutMs` is the reviewing figure and `codex.implementTimeoutMs` the writing one, chosen by what the role does — the pair `claude` has always had. A provider that holds no enabled role takes no turn: it is still probed, but its findings can only warn, never stop the run.
+`codex.timeoutMs` is the reviewing figure and `codex.implementTimeoutMs` the writing one, chosen by what the role does — the pair `claude` has always had. A role may override that choice with `roles.<role>.timeoutMs`, which is one figure rather than a pair because a role only ever takes one kind of turn; the provider pair stays the fallback for every role that names none. The full order is: a timeout the code itself asked for, then the role's, then the provider's. A turn that dies under a timeout the role named says so — `codex timed out after 5400000ms [this turn ran roles.reviewer.timeoutMs = 5400000]` — because otherwise four provider keys can set that figure and the message names none of them. A provider that holds no enabled role takes no turn: it is still probed, but its findings can only warn, never stop the run.
+
+**The provider sections stay even though every setting now has a per-role form, and this is the durable reason:** not every turn has a role. The compaction handoff — the turn that summarises a Claude session before it is rotated — is dispatched directly rather than through the role table, and it reads `claude.planTimeoutMs`. For that turn the provider key is not a default that a role could supersede; it is the only setting there is. Removing the provider sections would leave it with nothing.
+
+**Four settings are deliberately not per-role**, and each is a fact about something other than a role:
+
+- `codex.sandbox` — the role's `access` already decides it: writing roles get `workspace-write` and reading roles the configured sandbox. A per-role key would be a second way to say what the job already says, and the two could disagree.
+- `codex.persistSession` — a property of a *conversation*, not a role, and the critic and the answerer share one thread. Two roles on one thread cannot hold two answers.
+- `codex.contextWindow` — a property of a model on a thread, and vibe does not derive it (see "Notes and limitations"). It stays one setting, with the warning above when two Codex models are in play.
+- `codex.readRateLimits` — a property of the account, polled once per run rather than per turn.
 
 ## Exit codes
 
