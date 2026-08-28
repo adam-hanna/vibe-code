@@ -1,5 +1,6 @@
 ﻿import {
   closeSync,
+  lstatSync,
   mkdirSync,
   openSync,
   writeFileSync,
@@ -23,6 +24,7 @@ import {
   isRecord,
   parseStoredState,
   readCheckpointShape,
+  StoredStateError,
   summariseStored,
   validateStoredState,
 } from '@src/stored.js';
@@ -229,14 +231,19 @@ export function createRun(
  * repair-or-refuse rule this enforces.
  *
  * The order is load-bearing. The id is constrained before it becomes a path, so
- * a traversal attempt never opens a file; parsing and validation are pure and
- * throw before anything is written, so a refused state file is left
- * byte-for-byte unchanged; and only once the state is known good are the
- * repairs recorded, which is the first write this function makes.
+ * a traversal attempt never opens a file; the entry is then classified before it
+ * is opened, so a linked run never has its bytes read (#53); parsing and
+ * validation are pure and throw before anything is written, so a refused state
+ * file is left byte-for-byte unchanged; and only once the state is known good
+ * are the repairs recorded, which is the first write this function makes.
  */
 export function loadRun(targetDir: string, id: string): RunState {
   const root = path.join(targetDir, RUNS_DIR);
   assertUsableRunId(id, root);
+  // One layer under the lexical check above, and the same promise: this throws
+  // before `existsSync`, before the read, and before `ensureVibeIgnored` - which
+  // is what keeps "nothing was read or written" literally true (#53).
+  assertUnlinkedRun(root, id);
   const dir = path.join(root, id);
   const file = path.join(dir, 'state.json');
   if (!existsSync(file)) throw new Error(`No run "${id}" under ${RUNS_DIR}`);
@@ -411,6 +418,13 @@ export type StatePresence = 'absent' | 'present' | 'unknown';
  *
  * `throwIfNoEntry: false` is what separates them: `undefined` is `ENOENT`, and a
  * throw is everything else.
+ *
+ * **This is a `statSync`, so it FOLLOWS links** - a symlinked or junctioned run
+ * directory is stat-ed through, and the answer describes a file outside the
+ * archive (#53). It must therefore never be the first question asked about an
+ * entry that has not been classified by `linkageOf` yet; `listRuns` classifies
+ * first and calls this only for an entry it has established is a plain
+ * directory.
  */
 export function statePresence(file: string): StatePresence {
   try {
@@ -418,6 +432,100 @@ export function statePresence(file: string): StatePresence {
   } catch {
     return 'unknown';
   }
+}
+
+/**
+ * Whether a path is a link out of the archive, and - when that cannot be told -
+ * which way to fail (#53).
+ *
+ * `lstat`, never `stat`: `statSync` follows a POSIX symlink, a Node `'junction'`
+ * and an `mklink /J` junction alike, so it cannot see any of them, while
+ * `lstat(...).isSymbolicLink()` is true for all three. That measurement is what
+ * settled the design - one predicate, no platform split.
+ *
+ * **Only the LAST component escapes the follow.** `linkageOf('<link>/state.json')`
+ * resolves `<link>` to reach the child, so a caller must classify the directory
+ * first and only ask about anything inside it once the answer is `plain`.
+ * `runEntryLinkage` is that order, written once.
+ *
+ * `plain` means "not a symlink", NOT "a directory": a regular file sitting in
+ * `.vibe/runs` is `plain`, and telling a user it is a junction would be a
+ * fabrication. Directoryness is not asked here because no caller needs it - the
+ * ones that care find out from the read that follows.
+ */
+export type PathLinkage = 'link' | 'plain' | 'missing' | 'unknown';
+
+export function linkageOf(p: string): PathLinkage {
+  try {
+    const st = lstatSync(p, { throwIfNoEntry: false });
+    if (st === undefined) return 'missing';
+    return st.isSymbolicLink() ? 'link' : 'plain';
+  } catch {
+    return 'unknown';
+  }
+}
+
+/**
+ * The status a refused entry DISPLAYS as. Not provenance - see
+ * `RunSummary.linked`, which is the field anything acting on the distinction
+ * must read.
+ */
+export const LINKED_STATUS = 'linked';
+
+/**
+ * The two questions #53 is about, asked in the only order that is safe.
+ *
+ * `state` is `null` rather than a verdict when the directory is not plain,
+ * because there is no honest answer: the path that would be probed runs through
+ * the very link being judged.
+ */
+export function runEntryLinkage(
+  root: string,
+  id: string,
+): { dir: PathLinkage; state: PathLinkage | null } {
+  const dir = linkageOf(path.join(root, id));
+  if (dir !== 'plain') return { dir, state: null };
+  return { dir, state: linkageOf(path.join(root, id, 'state.json')) };
+}
+
+/**
+ * Why this entry may not be used, or null (#53).
+ *
+ * `assertUsableRunId` closes `../` traversal lexically, which is what a CLI
+ * argument can reach. This is the layer under it: a single-component entry that
+ * is a symlink or a junction passes every lexical check and still points
+ * anywhere on disk, and both the resume path and the fork path followed it.
+ *
+ * One message builder for every refusing site - `loadRun` and `cmdResume` throw
+ * it as a `StoredStateError`, `listForkPoints`, `planFork` and `commitFork` as a
+ * `ForkError` - so the refusal reads the same whichever command hit it. It names
+ * the entry and NOT the link's target: reading the target would be another read
+ * of an attacker-controlled entry, for a path `ls -l` already shows.
+ */
+export function linkedRunReason(root: string, id: string): string | null {
+  const { dir, state } = runEntryLinkage(root, id);
+  const what = dir === 'link' ? 'the run directory' : state === 'link' ? 'its state.json' : null;
+  if (what === null) return null;
+  return (
+    `Run "${id}" cannot be used: ${what} under ${RUNS_DIR} is a symlink or a junction, so it ` +
+    'points outside the run archive. vibe never creates one - every run directory it makes is a ' +
+    'real directory - so this was not made by a run. Nothing was read and nothing was written.'
+  );
+}
+
+/**
+ * Refuse a run directory, or its state.json, that is a link (#53).
+ *
+ * `unknown` does NOT refuse here, and that asymmetry with `listRuns` is
+ * deliberate: an entry `lstat` could not classify is not evidence of a link, and
+ * the read that follows either succeeds under the existing checks or fails with
+ * the existing error - which is what #77 requires of a run that is present and
+ * unreadable. `listRuns` fails closed instead, because it is choosing whether to
+ * FOLLOW rather than which error to report.
+ */
+export function assertUnlinkedRun(root: string, id: string): void {
+  const reason = linkedRunReason(root, id);
+  if (reason !== null) throw new StoredStateError(reason);
 }
 
 /**
@@ -439,8 +547,13 @@ export function statePresence(file: string): StatePresence {
  * and friends already are.
  *
  * The per-entry decision - "is this entry a run, and may we look at it?" - is
- * deliberately in one place, the loop body, so that #53 has one site to change
- * rather than a filter chain and a loop.
+ * deliberately in one place, the loop body.
+ *
+ * #53 did NOT land here. The link check lives in the callback `listRuns` passes
+ * in and in its row builder, for two reasons: an `lstat` in this loop would run
+ * for every ordered candidate rather than only for entries `listRuns` is about
+ * to open, and this function's contract is `StatePresence`, which stays
+ * three-valued because `src/cli.ts` and `src/fork.ts` compare against it.
  */
 export function selectRunIds(
   entries: readonly string[],
@@ -501,19 +614,69 @@ export function listRuns(targetDir: string, opts: ListRunsOptions = {}): RunSumm
   // Ordering, exclusion and the presence probe all happen in there, so that the
   // stats stop at the limit rather than sweeping the archive (#85). Before the
   // map either way, so only the runs that will be shown are read and parsed.
-  const ids = selectRunIds(entries, opts, (d) =>
-    statePresence(path.join(root, d, 'state.json')),
-  );
+  const ids = selectRunIds(entries, opts, (d) => {
+    // Before `statePresence`, which is a `statSync` and follows a link - the
+    // probe itself was the leak (#53). Directory first: `<link>/state.json`
+    // resolves `<link>`, so the child may only be asked about once the parent is
+    // known plain.
+    //
+    // A link, and anything `lstat` could not classify, reports `present`: the
+    // row must reach the map so it can be listed rather than dropped. `absent`
+    // would drop it, and #78 established that a silently dropped entry is how a
+    // run disappears - a linked entry is refused, not absent. `StatePresence` is
+    // untouched and still three-valued (#77, #85); this callback simply answers
+    // without reading.
+    const { dir, state } = runEntryLinkage(root, d);
+    if (dir === 'link' || dir === 'unknown') return 'present';
+    if (dir === 'missing') return 'absent';
+    if (state === 'link' || state === 'unknown') return 'present';
+    return statePresence(path.join(root, d, 'state.json'));
+  });
 
   return ids.map((d): RunSummary => {
     const dir = path.join(root, d);
+    // Classified again rather than carried over from the probe: this is the
+    // classification immediately before the read, which is the one that has to
+    // be true.
+    //
+    // Only a CONFIRMED link gets the linked row. `plain` means "not a symlink",
+    // not "a directory", so a regular file sitting in `.vibe/runs` classifies as
+    // plain with an unclassifiable child - and calling that a junction would be
+    // a fabrication about the filesystem, as well as a regression of the
+    // `unreadable` contract (#77) that such an entry has always been listed
+    // under. It keeps `unreadable`, and gets no `linked` flag and so no
+    // do-not-open warning in the planner's index.
+    const linkage = runEntryLinkage(root, d);
+    if (linkage.dir === 'link' || linkage.state === 'link') {
+      // Nothing is read: not state.json, and not the lock either - it is a
+      // separate file INSIDE the linked directory, so `livenessOf` would leave
+      // the archive too. `liveness` is therefore left unset rather than filled
+      // in; `cmdList` renders an absent value as `unknown`, which is the honest
+      // answer to a question no measurement was taken for, where `not-running`
+      // would be a claim. `linked` is the provenance the prompt acts on;
+      // `status` is only what the row displays.
+      return { id: d, status: LINKED_STATUS, task: '', costUsd: null, linked: true };
+    }
+    if (linkage.dir === 'unknown') {
+      // Fails closed, and does not throw: an entry that cannot be classified is
+      // not one to follow. Reported as unreadable, which is what it is, and not
+      // as a link, which is not known.
+      return { id: d, status: 'unreadable', task: '', costUsd: null };
+    }
     let raw: unknown;
     let summary: RunSummary;
-    try {
-      raw = JSON.parse(readFileSync(path.join(dir, 'state.json'), 'utf8'));
-      summary = summariseStored(raw, d);
-    } catch {
+    if (linkage.state === 'unknown') {
+      // The directory is confirmed not a link, so the lock beside it is still
+      // legible and the row still gets its verdict below (#77) - but the file
+      // itself is not opened, because whether IT is a link could not be told.
       summary = { id: d, status: 'unreadable', task: '', costUsd: null };
+    } else {
+      try {
+        raw = JSON.parse(readFileSync(path.join(dir, 'state.json'), 'utf8'));
+        summary = summariseStored(raw, d);
+      } catch {
+        summary = { id: d, status: 'unreadable', task: '', costUsd: null };
+      }
     }
     // Outside the parse, so an unreadable state.json still gets a verdict: the
     // lock is a separate file, and "this run cannot be read" and "nobody is

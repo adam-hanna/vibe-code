@@ -102,11 +102,16 @@ import type {
  *    refusal messages' "the run directory is intact and no file has been
  *    rewritten" literally true.
  *
- * Containment (`assertUsableRunId`) is **lexical**: it closes `../` traversal,
- * which is what a CLI argument can reach. A symlinked or junctioned run
- * directory can still point outside the runs root, in `loadRun` and `listRuns`
- * alike; resolving that needs `realpath` on both sides plus separate POSIX and
- * Windows handling, and it is issue #53.
+ * Containment (`assertUsableRunId`) is **lexical**, and stays that way: it
+ * answers "is this string a single directory name" before a path exists, which
+ * is what a CLI argument can reach. Whether the entry that name reaches is a
+ * SYMLINK or a junction pointing outside the archive is a filesystem question,
+ * and it is asked one layer down, at the read, by `linkedRunReason` and
+ * `assertUnlinkedRun` in `src/run.ts` (#53) - which `loadRun`, `listRuns`,
+ * `cmdResume`, `listForkPoints`, `planFork` and `commitFork` each apply before
+ * they open anything. It needs no `realpath` and no platform split:
+ * `lstat(...).isSymbolicLink()` is true of a POSIX symlink, a Node junction and
+ * an `mklink /J` junction alike.
  *
  * The strict parsers in `src/validate.ts` are deliberately NOT reused. They
  * exist for model output, which is adversarial-ish and always fresh, and they
@@ -427,7 +432,8 @@ interface ReadContext {
  * A whitelist rather than a separator blacklist, so `/`, `\`, drive prefixes and
  * control characters are all covered at once, with `basename` as a second belt.
  *
- * Lexical only. Symlinks and junctions are issue #53.
+ * Lexical only, deliberately: symlinks and junctions are a filesystem question,
+ * asked by `assertUnlinkedRun` (`src/run.ts`) at each site that reads (#53).
  */
 const RUN_ID = /^[A-Za-z0-9._-]+$/;
 
@@ -1716,6 +1722,13 @@ export function validateStoredState(
  * as money here - with ONE deliberate divergence: an unrecognised `status` is
  * shown verbatim rather than refused, because resuming acts on that value while
  * listing only prints it.
+ *
+ * That verbatim rule is exactly why `RunSummary.linked` exists rather than a
+ * reserved status string: a stored `"status": "linked"` reaches the row from
+ * this function, and anything that ACTS on "vibe refused to follow this entry"
+ * has to read a field only `listRuns`'s own guard can set (#53). Nothing here
+ * sets it - the summary is built field by field from `id`, `status`, `task`,
+ * `costUsd` and `forkLabel`, so no stored value can reach it.
  */
 export function summariseStored(raw: unknown, id: string): RunSummary {
   if (!isRecord(raw)) return { id, status: 'unreadable', task: '', costUsd: null };
