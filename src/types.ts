@@ -797,10 +797,17 @@ export interface ForkOrigin {
   inheritedTokens: number;
   inheritedCostUsd: number;
   /**
-   * The checkpoint's `codexTokens`, verbatim - **absent when the checkpoint had
-   * none.** Not classified and not defaulted: an absent Codex share may mean no
-   * Codex turn ran or that none was recorded, and nothing here decides which,
-   * because nothing depends on the answer. A zero would be an invented number.
+   * The checkpoint's `codexTokens` - **absent when the checkpoint had none.**
+   * Not classified and not defaulted: an absent Codex share may mean no Codex
+   * turn ran or that none was recorded, and nothing here decides which, because
+   * nothing depends on the answer. A zero would be an invented number.
+   *
+   * Verbatim except for rule D (`checkTokenShare`, `src/consistency.ts`): a
+   * checkpoint whose Codex share exceeded its own total is **normalised down to
+   * `inheritedTokens`** before the fork copies it, because a provenance figure
+   * larger than the total beside it is the same defect one layer down. The raw
+   * figure is not lost - it is in the child's rule-D `state_repaired` event and
+   * named in `notInherited` (#87).
    */
   inheritedCodexTokens?: number;
   /** The 40-hex commit the fork's branch ref was created at, or null. */

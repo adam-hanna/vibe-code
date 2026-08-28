@@ -16,7 +16,7 @@ import * as log from '@src/log.js';
 import { livenessOf } from '@src/lock.js';
 import type { ActivityObservation } from '@src/progress.js';
 import { initialSlotFields } from '@src/slots.js';
-import { checkStoredConsistency } from '@src/consistency.js';
+import { checkStoredConsistency, checkTokenShare } from '@src/consistency.js';
 import {
   assertUsableRunId,
   hasFindingShape,
@@ -322,6 +322,48 @@ export function loadRun(targetDir: string, id: string): RunState {
         `${normalisation.resolvedPhase} phase - ${normalisation.why}. Resuming from ` +
         `${normalisation.phase} instead, which repeats work rather than skipping it. ` +
         'Nothing else was changed.',
+    );
+  }
+
+  // Rule D, the other cross-field pass (#87). Applied here rather than beside
+  // the phase one because it never refuses: it makes no promise about what has
+  // been written, so it does not need to precede `ensureVibeIgnored`.
+  //
+  // Recorded as a `state_repaired` event, NOT as a `state_normalised` one, and
+  // not by joining the `repairs` array above. The event type is the one every
+  // consumer already filters for "which stored fields did this load alter", and
+  // its payload is a superset of `StateRepair`, so a reader of
+  // `field`/`found`/`replacedWith` needs no change; the `rule`, `against` and
+  // `storedCodexTokens` keys are what tell a clamp from a per-field repair, and
+  // they are the only surviving copy of the figure the file held.
+  // `state_normalised`'s payload is phase-shaped - `storedPhase`,
+  // `resolvedPhase`, `planOnly` - and describes nothing here. Joining `repairs`
+  // was the third option and is wrong for the warning it would print: that line
+  // says each field "was replaced with the empty value its type implies", which
+  // is untrue of a clamp. Hence the separate line below.
+  //
+  // Fires once. It rewrites the field its own predicate reads, so the next load
+  // of the same run sees a consistent state - unlike rule B.
+  const share = checkTokenShare(state);
+  if (share !== null) {
+    state.codexTokens = share.codexTokens;
+    recordEvent(state, 'state_repaired', {
+      field: 'codexTokens',
+      found: String(share.storedCodexTokens),
+      replacedWith: String(share.codexTokens),
+      droppedCount: 0,
+      droppedPaths: [],
+      rule: share.rule,
+      against: 'tokensUsed',
+      storedCodexTokens: share.storedCodexTokens,
+      tokensUsed: share.tokensUsed,
+      why: share.why,
+    });
+    log.warn(
+      `state.json for ${id} recorded ${share.storedCodexTokens.toLocaleString()} Codex tokens ` +
+        `against a run total of ${share.tokensUsed.toLocaleString()} - ${share.why}. The Codex ` +
+        `share was clamped to ${share.codexTokens.toLocaleString()} and the change recorded in ` +
+        "the run's event log; the run total, the cost and nothing else were touched.",
     );
   }
   return state;

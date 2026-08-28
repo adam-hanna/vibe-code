@@ -1415,6 +1415,25 @@ function reportDeferred(state: RunState): void {
   log.info(`  Detail: ${file}`);
 }
 
+/**
+ * The Claude share, or null when the state cannot support one.
+ *
+ * The one reader of the subtraction, and belt and braces beside rule D
+ * (`checkTokenShare`, `src/consistency.ts`) rather than a duplicate of it: the
+ * rule runs in `loadRun` and `planFork`, while `summary` is also reached by a
+ * fresh in-process run that went through neither. A display that depends on an
+ * invariant holding somewhere else is one that breaks the day it does not, and
+ * what it broke into was a negative token total (#87).
+ *
+ * Null rather than a clamped figure, because this is a display: printing
+ * `tokensUsed` as Claude's share here would state a number no charge produced.
+ */
+export function claudeShare(state: Pick<RunState, 'tokensUsed' | 'codexTokens'>): number | null {
+  const codex = state.codexTokens;
+  if (codex !== undefined && codex > state.tokensUsed) return null;
+  return state.tokensUsed - (codex ?? 0);
+}
+
 function summary(state: RunState, started: number, recovery?: RecoveryReport): void {
   const mins = ((Date.now() - started) / 60000).toFixed(1);
   log.info(`Run:      ${state.id}  (${state.status})`);
@@ -1430,10 +1449,22 @@ function summary(state: RunState, started: number, recovery?: RecoveryReport): v
     `Work:     ${state.tokensUsed.toLocaleString()} tokens, ${mins} min` +
       (incomplete ? '  (incomplete - see above)' : ''),
   );
-  log.info(
-    `          Claude ${(state.tokensUsed - codex).toLocaleString()} tok ` +
-      `(~$${state.costUsd.toFixed(2)} API-equivalent)`,
-  );
+  // The dollar figure stays on both branches: `costUsd` is Claude's alone and is
+  // unaffected by whatever the Codex share says.
+  const claude = claudeShare(state);
+  if (claude === null) {
+    log.info(
+      `          Claude share not available - the recorded Codex total ` +
+        `(${codex.toLocaleString()} tok) exceeds the run total ` +
+        `(${state.tokensUsed.toLocaleString()} tok) ` +
+        `(~$${state.costUsd.toFixed(2)} API-equivalent)`,
+    );
+  } else {
+    log.info(
+      `          Claude ${claude.toLocaleString()} tok ` +
+        `(~$${state.costUsd.toFixed(2)} API-equivalent)`,
+    );
+  }
   if (codex > 0) log.info(`          Codex  ${codex.toLocaleString()} tok (cost not reported)`);
   const limit = state.codexRateLimit;
   if (limit) {

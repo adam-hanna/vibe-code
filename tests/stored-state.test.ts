@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRun, listRuns, loadRun, resumePhase } from '@src/run.js';
-import { KNOWN_KEYS, REDERIVED_KEYS, StoredStateError } from '@src/stored.js';
+import { KNOWN_KEYS, REDERIVED_KEYS, StoredStateError, validateStoredState } from '@src/stored.js';
 import type { RunState, RunStatus } from '@src/types.js';
 
 /**
@@ -596,14 +596,26 @@ test('a TERMINAL status is trusted beside any phase, complete included - see #54
   }
 });
 
-test('the token share is not policed here either - see #54', () => {
-  const loaded = load((raw) => {
+test('the token share is not policed per field - the load-path rule is D (#87)', () => {
+  // Half of this case's claim moved with #87 and half of it did not, so it
+  // asserts against `validateStoredState` directly rather than through
+  // `loadRun`. What still holds is this module's rule 5: the two values are
+  // legal apart, and the per-field validator does not ask what the pair says -
+  // no repair, both figures intact. What changed is the LOAD: `loadRun` now
+  // applies rule D from `src/consistency.ts` and clamps the Codex share to the
+  // run total. That contract is pinned in `tests/token-share.test.ts`, which is
+  // where this case's `loadRun` half now lives.
+  const run = corrupt((raw) => {
     raw['tokensUsed'] = 10;
     raw['codexTokens'] = 100;
   });
-  assert.equal(loaded.tokensUsed, 10);
-  assert.equal(loaded.codexTokens, 100);
-  assert.deepEqual(repairs(loaded), []);
+  const raw: unknown = JSON.parse(readFileSync(run.file, 'utf8'));
+
+  const { state, repairs: found } = validateStoredState(raw, run.id, path.dirname(run.file));
+
+  assert.equal(state.tokensUsed, 10);
+  assert.equal(state.codexTokens, 100);
+  assert.deepEqual(found, []);
 });
 
 // ---- the reader's domain is the writer's range ------------------------------

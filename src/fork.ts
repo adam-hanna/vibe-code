@@ -1,7 +1,8 @@
 ﻿import { copyFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { applyOverrides, loadConfig } from '@src/config.js';
-import { checkStoredConsistency } from '@src/consistency.js';
+import { checkStoredConsistency, checkTokenShare } from '@src/consistency.js';
+import type { TokenShareClamp } from '@src/consistency.js';
 import * as git from '@src/git.js';
 import { acquireLock, describeLiveness, livenessOf } from '@src/lock.js';
 import * as P from '@src/prompts.js';
@@ -12,6 +13,7 @@ import {
   mintRunId,
   resumePhase,
   saveState,
+  stageEvent,
   statePresence,
 } from '@src/run.js';
 import { forkedSlotFields } from '@src/slots.js';
@@ -70,6 +72,13 @@ export interface ForkPlan {
   cfg: Config;
   /** The canonical 40-hex commit, already resolved against this repo, or null. */
   commit: string | null;
+  /**
+   * Rule D's verdict on the checkpoint's token share (#87), or null when there
+   * was nothing to clamp. `checkpointState` above already carries the clamped
+   * value; this is the record of what it held, which `commitFork` stages on the
+   * child so the figure is not lost with the plan object.
+   */
+  tokenShare: TokenShareClamp | null;
   /** What the fork will not carry, stated rather than left to be assumed. */
   losses: string[];
 }
@@ -99,8 +108,13 @@ export function listForkPoints(targetDir: string, sourceId: string): { n: number
  * run; a fork has no such pressure - the parent is right there, untouched - and
  * a snapshot whose fields had to be corrected is not one whose boundary, round
  * numbers or commit can be trusted under a new identity. So: no repairs, no
- * consistency normalisations, metadata required, and `meta.n` must agree with
- * the number asked for.
+ * phase normalisations, metadata required, and `meta.n` must agree with the
+ * number asked for.
+ *
+ * **Rule D is the one documented exception**, and it is narrow: a Codex share
+ * larger than the checkpoint's own total is clamped rather than refused, and
+ * disclosed in `losses`. See the call to `checkTokenShare` below for why that
+ * field is not one the bar above is protecting.
  */
 export async function planFork(
   targetDir: string,
@@ -168,6 +182,21 @@ export async function planFork(
     );
   }
 
+  // Rule D (#87), clamped rather than refused - the one exception to the bar in
+  // this function's header. The bar exists to protect the fields a fork's
+  // identity rests on: the boundary, the round numbers and the commit. This is
+  // none of them. `codexTokens` is read by `summary()` and by the inherited-share
+  // line and by nothing else, the damage is one-directional, and the clamp only
+  // ever LOWERS it - `tokensUsed` and `costUsd` are inherited untouched, so the
+  // child's ceilings are exactly what they would have been. Refusing would stand
+  // a forkable run down over a display defect.
+  //
+  // Only the in-memory `checkpointState` is changed. Nothing under the parent's
+  // directory is written by this function, and `checkpoint-${n}.json` still holds
+  // what it held - which is why the losses line below says so.
+  const tokenShare = checkTokenShare(checkpointState);
+  if (tokenShare !== null) checkpointState.codexTokens = tokenShare.codexTokens;
+
   const meta = checkpointState.checkpoint;
   if (meta === undefined) {
     throw new ForkError(
@@ -191,6 +220,16 @@ export async function planFork(
       : applyOverrides(checkpointState.config, overrides);
 
   const losses: string[] = [];
+  // First, so it sits with the inherited totals rather than after the branch
+  // talk: this one is about the numbers the `Inherited:` line prints.
+  if (tokenShare !== null) {
+    losses.push(
+      `checkpoint ${n} recorded ${tokenShare.storedCodexTokens.toLocaleString()} Codex tokens ` +
+        `against a run total of ${tokenShare.tokensUsed.toLocaleString()}, which no writer ` +
+        `produces - the fork carries the Codex share clamped to ` +
+        `${tokenShare.codexTokens.toLocaleString()}, and the parent's files were not changed`,
+    );
+  }
   const isRepo = await git.isRepo(targetDir);
   let commit: string | null = null;
 
@@ -262,7 +301,15 @@ export async function planFork(
     'only PLAN.md and the last report are copied; every other artifact stays with the parent',
   );
 
-  return { source: { id: sourceId, dir: sourceDir }, checkpointState, meta, cfg, commit, losses };
+  return {
+    source: { id: sourceId, dir: sourceDir },
+    checkpointState,
+    meta,
+    cfg,
+    commit,
+    tokenShare,
+    losses,
+  };
 }
 
 export interface ForkResult {
@@ -370,9 +417,12 @@ export async function commitFork(targetDir: string, plan: ForkPlan): Promise<For
 
     // The child state, in memory. Everything not named here is the checkpoint
     // verbatim - `baseSha`, `checkpoint`, `tokensUsed`, `costUsd`, `codexTokens`
-    // included. The totals are inherited on purpose: a fork's ceilings read them
-    // exactly as an unforked run's do, and pretending otherwise would be a
-    // second, quieter accounting.
+    // included, with rule D the single exception: `planFork` clamps a Codex
+    // share larger than the checkpoint's own total before handing the state
+    // over, and records what it clamped in `plan.tokenShare` (#87). The totals
+    // are inherited on purpose: a fork's ceilings read them exactly as an
+    // unforked run's do, and pretending otherwise would be a second, quieter
+    // accounting.
     const slots = forkedSlotFields(plan.checkpointState, cfg);
     const child: RunState = {
       ...plan.checkpointState,
@@ -434,9 +484,16 @@ export async function commitFork(targetDir: string, plan: ForkPlan): Promise<For
       forkedAt: new Date().toISOString(),
       inheritedTokens: plan.checkpointState.tokensUsed,
       inheritedCostUsd: plan.checkpointState.costUsd,
-      // Verbatim, and ABSENT when the checkpoint had none. Not classified and
-      // not defaulted to zero: an absent Codex share may mean no Codex turn ran
-      // or that none was recorded, and nothing here decides which.
+      // The checkpoint's value, and ABSENT when the checkpoint had none. Not
+      // classified and not defaulted to zero: an absent Codex share may mean no
+      // Codex turn ran or that none was recorded, and nothing here decides
+      // which.
+      //
+      // Read from the clamped `checkpointState`, so when rule D fired this is
+      // the NORMALISED figure rather than the raw one - a provenance field that
+      // exceeded the `inheritedTokens` beside it would be the same defect one
+      // layer down. The raw figure survives in the staged rule-D event below and
+      // in `notInherited` (#87).
       ...(plan.checkpointState.codexTokens === undefined
         ? {}
         : { inheritedCodexTokens: plan.checkpointState.codexTokens }),
@@ -445,6 +502,27 @@ export async function commitFork(targetDir: string, plan: ForkPlan): Promise<For
       notInherited: [...losses],
     };
     child.forkedFrom = origin;
+
+    // Staged rather than recorded: `recordEvent` saves, and the child's state
+    // write has to stay last so a kill leaves either no run at all or a complete
+    // one. The payload is the same shape `loadRun` writes for rule D, so an
+    // audit of "which stored fields did something alter" reads the two paths
+    // identically (#87).
+    if (plan.tokenShare !== null) {
+      const share = plan.tokenShare;
+      stageEvent(child, 'state_repaired', {
+        field: 'codexTokens',
+        found: String(share.storedCodexTokens),
+        replacedWith: String(share.codexTokens),
+        droppedCount: 0,
+        droppedPaths: [],
+        rule: share.rule,
+        against: 'tokensUsed',
+        storedCodexTokens: share.storedCodexTokens,
+        tokensUsed: share.tokensUsed,
+        why: share.why,
+      });
+    }
 
     // The last write. Before it, the directory is not a run; after it, the run
     // is complete and its artifacts already correct.
