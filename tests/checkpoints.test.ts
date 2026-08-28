@@ -381,26 +381,92 @@ test('claimRunDir refuses a directory that already exists', () => {
   assert.equal(claimRunDir(dir, 'run-a'), null, 'it cannot adopt what somebody else claimed');
 });
 
-test('two allocations in the same second on the same task do not share a directory', () => {
-  const dir = mkdtempSync(path.join(tmpdir(), 'vibe-alloc-same-'));
-  const first = allocateRun(dir, 'same task');
-  writeFileSync(path.join(first.dir, 'state.json'), '{"marker":"first"}', 'utf8');
+/**
+ * Both allocator cases below need several ids minted inside one clock second,
+ * and neither used to check that they got one.
+ *
+ * `mintRunId` stamps to second resolution, so a fill that straddles a boundary
+ * produces two families of ids rather than n variants of one - and the collision
+ * being tested does not exist at all. That is not theory: the nine claims plus
+ * the tenth call take ~28ms, and one run in roughly twenty hit the boundary
+ * during #85. The tenth allocation minted a fresh id, found it free and returned
+ * - which is the allocator behaving correctly - and the case reported it as a
+ * missing exception. Reproduced deliberately by spinning across a second between
+ * the fill and the tenth call: `20260828-093940-crowded` filled, and the tenth
+ * came back `20260828-093941-crowded`.
+ *
+ * So the precondition is established rather than assumed, and an attempt that
+ * straddles is retried rather than judged. Retrying is not a weakened claim: an
+ * attempt whose ids are two families never posed the question. Both cases still
+ * fail, loudly, if the allocator reuses a taken id - and now they also fail if
+ * the question could not be posed at all, rather than passing vacuously.
+ *
+ * AGENTS.md bans wall-clock fixtures because a hardcoded epoch passes until it
+ * doesn't. A fixture that needs several calls to land inside one second is the
+ * same hazard wearing a different hat.
+ */
+const SECOND_ATTEMPTS = 5;
 
-  const second = allocateRun(dir, 'same task');
-  assert.notEqual(second.id, first.id, 'the second is suffixed rather than adopting the first');
-  assert.equal(
-    readFileSync(path.join(first.dir, 'state.json'), 'utf8'),
-    '{"marker":"first"}',
-    "the first run's state was never touched",
-  );
+/** Whether `id` is `base` or one of its `-n` variants, i.e. the same stamp. */
+function sameFamily(id: string, base: string): boolean {
+  return id === base || id.startsWith(`${base}-`);
+}
+
+test('two allocations in the same second on the same task do not share a directory', () => {
+  for (let attempt = 1; attempt <= SECOND_ATTEMPTS; attempt++) {
+    const dir = mkdtempSync(path.join(tmpdir(), 'vibe-alloc-same-'));
+    const first = allocateRun(dir, 'same task');
+    writeFileSync(path.join(first.dir, 'state.json'), '{"marker":"first"}', 'utf8');
+
+    const second = allocateRun(dir, 'same task');
+    assert.notEqual(second.id, first.id, 'the second is suffixed rather than adopting the first');
+    assert.equal(
+      readFileSync(path.join(first.dir, 'state.json'), 'utf8'),
+      '{"marker":"first"}',
+      "the first run's state was never touched",
+    );
+
+    // "In the same second" is the case, not scenery. On a new stamp the suffix
+    // was never exercised and `notEqual` above passes for the wrong reason, so
+    // that attempt proves nothing; on the same stamp, name the mechanism.
+    if (sameFamily(second.id, first.id)) {
+      assert.equal(second.id, `${first.id}-2`, 'suffixed, rather than given a new stamp');
+      return;
+    }
+  }
+  assert.fail(`the clock ticked in all ${SECOND_ATTEMPTS} attempts; suffixing was never exercised`);
 });
 
 test('a tenth collision refuses rather than reusing a directory', () => {
-  const dir = mkdtempSync(path.join(tmpdir(), 'vibe-alloc-full-'));
-  const taken: string[] = [];
-  for (let i = 0; i < 9; i++) taken.push(allocateRun(dir, 'crowded').id);
-  assert.equal(new Set(taken).size, 9, 'nine distinct directories');
-  assert.throws(() => allocateRun(dir, 'crowded'), /Nothing was written/);
+  for (let attempt = 1; attempt <= SECOND_ATTEMPTS; attempt++) {
+    const dir = mkdtempSync(path.join(tmpdir(), 'vibe-alloc-full-'));
+    const taken: string[] = [];
+    for (let i = 0; i < 9; i++) taken.push(allocateRun(dir, 'crowded').id);
+    assert.equal(new Set(taken).size, 9, 'nine distinct directories');
+
+    const base = taken[0] ?? '';
+    // Two families: nothing here is full, so the tenth call would be answering
+    // a different question. Start over rather than ask it.
+    if (!taken.every((id) => sameFamily(id, base))) continue;
+
+    let tenth: { id: string } | undefined;
+    try {
+      tenth = allocateRun(dir, 'crowded');
+    } catch (err) {
+      // The claim, unchanged: on a full id the tenth allocation refuses.
+      assert.match((err as Error).message, /Nothing was written/);
+      return;
+    }
+    // It did not throw. Allowed only if it was never asked - a tick between the
+    // fill and this call hands it a fresh stamp whose variants are all free.
+    // Reusing one of the nine is the defect this case exists for.
+    assert.equal(
+      sameFamily(tenth.id, base),
+      false,
+      'the tenth allocation reused an id whose nine variants were taken',
+    );
+  }
+  assert.fail(`the clock ticked in all ${SECOND_ATTEMPTS} attempts; the refusal was never exercised`);
 });
 
 // ---- reserved names ---------------------------------------------------------

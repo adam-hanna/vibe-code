@@ -381,11 +381,92 @@ export interface ListRunsOptions {
   exclude?: string | undefined;
   /**
    * Parse at most this many runs, newest first. Applied before the map, so an
-   * archive of a hundred runs costs ten reads rather than a hundred - the
-   * directory scan itself is still proportional to the archive, which is stated
-   * rather than fixed here (#52).
+   * archive of a hundred runs costs ten reads rather than a hundred.
+   *
+   * Until #85 the *scan* was still proportional to the archive: every entry was
+   * stat-ed before the limit was applied, which at 2000 runs was 74.40ms of a
+   * 77.03ms `limit: 10` call - 97% of it, against 1.46ms of `readdirSync`.
+   * `selectRunIds` now walks the sorted entries and stops at the first `limit`
+   * survivors, so the stats are proportional to the rows returned. `limit:
+   * undefined` (`vibe list`) still examines everything: there is no limit to
+   * stop at, and that listing shows every run by design.
    */
   limit?: number | undefined;
+}
+
+/** What a run directory's state.json can be told to be (#77). */
+export type StatePresence = 'absent' | 'present' | 'unknown';
+
+/**
+ * Whether a directory holds a run at all - and, when that cannot be told apart,
+ * which way to fail.
+ *
+ * `existsSync` answers `false` both for "there is no state.json" and for "there
+ * is one and this process may not look at it", and those need opposite
+ * treatment: the first is an allocated-but-uninitialised directory that was
+ * never a run and must not appear in the listing or in the planner's index, the
+ * second is a run that exists and whose row belongs in the listing as
+ * `unreadable`, with the liveness verdict the lock beside it can still give.
+ * Dropping the second is how an inaccessible run disappears entirely (#77).
+ *
+ * `throwIfNoEntry: false` is what separates them: `undefined` is `ENOENT`, and a
+ * throw is everything else.
+ */
+export function statePresence(file: string): StatePresence {
+  try {
+    return statSync(file, { throwIfNoEntry: false }) === undefined ? 'absent' : 'present';
+  } catch {
+    return 'unknown';
+  }
+}
+
+/**
+ * Which run ids to read, newest first - and only as many stats as that costs.
+ *
+ * Ordering first and probing second is what makes the scan proportional to the
+ * rows returned rather than to the archive (#85). It changes nothing about the
+ * answer: `filter` preserves order, so filtering before or after a total-order
+ * sort gives the same sequence, and taking the first `limit` of that sequence is
+ * the same list as walking it and keeping the first `limit` that pass. The stat
+ * count is bounded above by the old always-N, never higher - even in the
+ * pathological archive of 1000 uninitialised directories sorting newer than 100
+ * real runs, where the old chain probed 1100 and this probes 1010.
+ *
+ * The presence probe is a parameter rather than a direct `statSync` so that a
+ * test can count the examinations: `mock.module` is experimental and 22.3+ while
+ * `engines` is node >=20, and nothing in tests/ mocks a module. `listRuns`
+ * passes the real `statePresence`. Exported for its test, as `assessConvergence`
+ * and friends already are.
+ *
+ * The per-entry decision - "is this entry a run, and may we look at it?" - is
+ * deliberately in one place, the loop body, so that #53 has one site to change
+ * rather than a filter chain and a loop.
+ */
+export function selectRunIds(
+  entries: readonly string[],
+  opts: ListRunsOptions,
+  presence: (id: string) => StatePresence,
+): string[] {
+  // `slice(0, n)` truncated a fractional limit and returned nothing for a
+  // negative or a NaN one; the loop has to reproduce both, not approximate them.
+  // `!(limit >= 1)` is all three: zero, negative and NaN.
+  const limit = opts.limit === undefined ? undefined : Math.floor(Math.max(0, opts.limit));
+  if (limit !== undefined && !(limit >= 1)) return [];
+
+  // Copied because the parameter is readonly and `sort` mutates in place.
+  const ordered = [...entries].sort().reverse();
+  const kept: string[] = [];
+  for (const id of ordered) {
+    // Before the stat: excluding the current run must never cost a listed one,
+    // and it is the one entry guaranteed to be present, so the stat is waste.
+    if (id === opts.exclude) continue;
+    // Only 'absent' drops it. 'unknown' is a run that exists and may not be
+    // read, and its row belongs in the listing as unreadable (#77, #78).
+    if (presence(id) === 'absent') continue;
+    kept.push(id);
+    if (limit !== undefined && kept.length >= limit) break;
+  }
+  return kept;
 }
 
 /**
@@ -403,29 +484,6 @@ export interface ListRunsOptions {
  * rendered, in `priorRunsSection`, and this stays the listing it has always
  * been.
  */
-/**
- * Whether a directory holds a run at all - and, when that cannot be told apart,
- * which way to fail.
- *
- * `existsSync` answers `false` both for "there is no state.json" and for "there
- * is one and this process may not look at it", and those need opposite
- * treatment: the first is an allocated-but-uninitialised directory that was
- * never a run and must not appear in the listing or in the planner's index, the
- * second is a run that exists and whose row belongs in the listing as
- * `unreadable`, with the liveness verdict the lock beside it can still give.
- * Dropping the second is how an inaccessible run disappears entirely (#77).
- *
- * `throwIfNoEntry: false` is what separates them: `undefined` is `ENOENT`, and a
- * throw is everything else.
- */
-export function statePresence(file: string): 'absent' | 'present' | 'unknown' {
-  try {
-    return statSync(file, { throwIfNoEntry: false }) === undefined ? 'absent' : 'present';
-  } catch {
-    return 'unknown';
-  }
-}
-
 export function listRuns(targetDir: string, opts: ListRunsOptions = {}): RunSummary[] {
   const root = path.join(targetDir, RUNS_DIR);
   if (!existsSync(root)) return [];
@@ -440,14 +498,12 @@ export function listRuns(targetDir: string, opts: ListRunsOptions = {}): RunSumm
     return [];
   }
 
-  let ids = entries
-    .filter((d) => statePresence(path.join(root, d, 'state.json')) !== 'absent')
-    // Before the slice: excluding the current run must never cost a listed one.
-    .filter((d) => d !== opts.exclude)
-    .sort()
-    .reverse();
-  // Before the map, so only the runs that will be shown are read and parsed.
-  if (opts.limit !== undefined) ids = ids.slice(0, Math.max(0, opts.limit));
+  // Ordering, exclusion and the presence probe all happen in there, so that the
+  // stats stop at the limit rather than sweeping the archive (#85). Before the
+  // map either way, so only the runs that will be shown are read and parsed.
+  const ids = selectRunIds(entries, opts, (d) =>
+    statePresence(path.join(root, d, 'state.json')),
+  );
 
   return ids.map((d): RunSummary => {
     const dir = path.join(root, d);
