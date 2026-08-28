@@ -6,11 +6,16 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createRun, saveState } from '@src/run.js';
+import { artifact, createRun, saveState } from '@src/run.js';
 import { main } from '@src/cli.js';
 import { EXIT } from '@src/orchestrator.js';
 import type { RunState } from '@src/types.js';
-import { ALLOC_CONTEXT_PREFIX, ALLOC_MODEL } from './helpers/kill-markers.js';
+import {
+  ALLOC_CONTEXT_PREFIX,
+  ALLOC_MODEL,
+  ARTIFACT_BODY_A,
+  ARTIFACT_BODY_B,
+} from './helpers/kill-markers.js';
 
 /**
  * What a process killed mid-write leaves behind.
@@ -42,7 +47,7 @@ interface Started {
 }
 
 /** Spawn the helper and wait for the run directory it prints. */
-function start(targetDir: string, mode: 'save' | 'alloc'): Promise<Started> {
+function start(targetDir: string, mode: 'save' | 'alloc' | 'artifact'): Promise<Started> {
   return new Promise((resolve, reject) => {
     // All three piped so the child types as `ChildProcessWithoutNullStreams`;
     // stdin is simply never written to.
@@ -108,11 +113,63 @@ test('a state.json write killed at any point leaves a whole file', async () => {
   }
 });
 
+/**
+ * The same promise for artifacts, and a different failure to catch.
+ *
+ * state.json's was tearing. An artifact's is emptiness: `writeFileSync` opens
+ * `O_TRUNC`, so the file is zeroed at open and a kill in that window leaves no
+ * bytes at all. It is also far more common than tearing - 5 kills in 40 at a
+ * lifelike 17KB, measured against `develop` at `99eca2e` - and the file it hurts
+ * most is `OUTSTANDING.md`, which `recoverOutstanding` skips on `existsSync` and
+ * `settlePendingOutstanding` skips for want of its marker, so an empty one is
+ * never repaired by either (#88).
+ *
+ * Hence equality against a whole body rather than a marker check: a markdown
+ * artifact has no parse step, so "exists and mentions A or B" passes against a
+ * zero-byte file, which is the whole defect.
+ */
+test('an artifact write killed at any point leaves a whole file', async () => {
+  // Spread across the write loop, not aimed: same reasoning as the state.json
+  // sweep. A fresh directory and a fresh child per delay because SIGKILL ends
+  // the child - one cannot serve two kill points.
+  //
+  // Sixty rather than the state.json sweep's twenty-four, and the count was
+  // measured rather than chosen. Against develop's truncating `artifact()` on
+  // this machine a kill damaged the file 5 times in 120 - 4.2% each, well under
+  // the 12.5% the issue recorded elsewhere - which would have left twenty-four
+  // kills failing to notice the defect about a third of the time. At sixty the
+  // chance of a silent pass is ~8%, for ~8s. The modulo repeats the phase sweep
+  // twice: the window is a fraction of one write, so what raises detection is
+  // the number of kills, not how far out in time they are aimed.
+  const delays = Array.from({ length: 60 }, (_, i) => (i % 30) * 1.7 + 2);
+
+  for (const delay of delays) {
+    const targetDir = scratch();
+    const { child, dir } = await start(targetDir, 'artifact');
+    await sleep(delay);
+    await killed(child);
+
+    const file = path.join(dir, 'PLAN.md');
+    // The first write completes before the child says `ready`, so an absent
+    // file is a real failure rather than a kill that arrived early.
+    assert.ok(existsSync(file), `PLAN.md is gone after a kill at ${delay}ms`);
+    const text = readFileSync(file, 'utf8');
+    assert.ok(
+      text === ARTIFACT_BODY_A || text === ARTIFACT_BODY_B,
+      `recovered an artifact that was neither write, at ${delay}ms (${text.length} bytes)`,
+    );
+  }
+});
+
 test('a completed write leaves no temp file behind', () => {
   const targetDir = scratch();
   const state = createRun(targetDir, 'temp files', true);
   saveState(state);
   saveState(state);
+  // Artifacts go through the same atomic write since #88, so they have the same
+  // obligation to leave nothing behind.
+  artifact(state, 'PLAN.md', ARTIFACT_BODY_A);
+  artifact(state, 'PLAN.md', ARTIFACT_BODY_B);
 
   const stray = readdirSync(state.dir).filter((f) => f.includes('.tmp'));
   assert.deepEqual(stray, []);
