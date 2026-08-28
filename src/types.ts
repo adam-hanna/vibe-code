@@ -1293,4 +1293,29 @@ export interface RunSummary {
    * do - one prints, the other acts.
    */
   forkedFrom?: { runId: string; checkpoint: number };
+  /**
+   * Set only by `listRuns`, and only for an entry it refused to follow because
+   * the directory or its state.json is a symlink or a junction (#53).
+   *
+   * Separate from `status` because `status` is read off disk and displayed
+   * verbatim - `summariseStored` passes an unrecognised value straight through
+   * on purpose - so a stored `"status": "linked"` is a display coincidence, not
+   * a fact about the filesystem. Anything that must ACT on the distinction (the
+   * planner's do-not-open warning) reads this; anything that only prints reads
+   * `status`. Never set for an entry that is merely unreadable: a claim that
+   * something is a link is a measurement, not a fallback.
+   */
+  linked?: true;
+  /**
+   * Set only by `listRuns`, and only for an entry whose `lstat` threw - so
+   * whether it is a link could not be established at all (#53).
+   *
+   * The fail-closed half of `linked`. Nothing under such an entry was followed,
+   * and the planner is warned off it for the same reason, but it is a separate
+   * field because it is a separate fact: one is measured, the other is the
+   * absence of a measurement, and collapsing them would either fabricate a link
+   * or drop the warning. Distinct from an `unreadable` row, where the state.json
+   * WAS opened and the entry itself was never in doubt.
+   */
+  unverified?: true;
 }

@@ -4,6 +4,7 @@ import { applyOverrides, configDiff, EFFORTS, loadConfig } from '@src/config.js'
 import {
   allocateRun,
   artifact,
+  assertUnlinkedRun,
   createRun,
   listRuns,
   loadRun,
@@ -509,6 +510,11 @@ async function cmdResume(args: readonly string[]): Promise<ExitCode> {
   // through to `loadRun`, whose error already says what is wrong.
   const runsRoot = path.join(targetDir, '.vibe', 'runs');
   assertUsableRunId(id, runsRoot);
+  // Before the lock, not merely before `loadRun`: `statePresence` is a `statSync`
+  // and reports a linked entry's target as present, so control reaches
+  // `acquireLock` - which READS the target's state.json and WRITES `run.lock`
+  // into it - before `loadRun` ever gets the chance to refuse (#53).
+  assertUnlinkedRun(runsRoot, id);
   const runDir = path.join(runsRoot, id);
   if (statePresence(path.join(runDir, 'state.json')) === 'absent') {
     // No lock, and no new message: `loadRun` already refuses this by name, and

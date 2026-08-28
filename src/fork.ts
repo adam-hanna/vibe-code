@@ -9,6 +9,7 @@ import * as P from '@src/prompts.js';
 import {
   artifact,
   claimRunDir,
+  linkedRunReason,
   listCheckpoints,
   mintRunId,
   resumePhase,
@@ -97,6 +98,10 @@ const runsRootOf = (targetDir: string): string => path.join(targetDir, RUNS_DIR)
 export function listForkPoints(targetDir: string, sourceId: string): { n: number; meta: RunCheckpointMeta | null }[] {
   const root = runsRootOf(targetDir);
   assertUsableRunId(sourceId, root);
+  // Before `listCheckpoints`, which `readdirSync`s inside the entry: a linked
+  // entry would have its target enumerated (#53).
+  const linked = linkedRunReason(root, sourceId);
+  if (linked !== null) throw new ForkError(linked);
   return listCheckpoints(path.join(root, sourceId)).map(({ n, meta }) => ({ n, meta }));
 }
 
@@ -125,6 +130,12 @@ export async function planFork(
   const root = runsRootOf(targetDir);
   // First, before a path exists. `../other` never reaches the filesystem.
   assertUsableRunId(sourceId, root);
+  // Then the filesystem question the lexical one cannot answer, before
+  // `statePresence` (a `statSync`, which follows a link) and before `livenessOf`
+  // (which reads the lock inside it). A preflight that only reads must still
+  // refuse rather than read (#53).
+  const linked = linkedRunReason(root, sourceId);
+  if (linked !== null) throw new ForkError(linked);
   const sourceDir = path.join(root, sourceId);
 
   const statePath = path.join(sourceDir, 'state.json');
@@ -335,7 +346,26 @@ export async function commitFork(targetDir: string, plan: ForkPlan): Promise<For
   // read-only and the parent could have been picked up in between. The residual
   // window is milliseconds and closing it entirely would mean taking the
   // parent's lock, which is a write to the parent.
-  const verdict = livenessOf(plan.source.dir);
+  // `plan` is a parameter on an exported function, and `ForkPlan` is an exported
+  // interface, so `plan.source.dir` is a caller's string rather than a path this
+  // module resolved - there is no runtime provenance that it came from
+  // `planFork`. Re-derive it, check the pair agrees, and classify it, all before
+  // `livenessOf`, which reads the source's lock through whatever path it is
+  // given (#53). A plan that did come from `planFork` produces exactly this
+  // directory and passes unchanged.
+  const root = runsRootOf(targetDir);
+  assertUsableRunId(plan.source.id, root);
+  const sourceDir = path.join(root, plan.source.id);
+  if (path.resolve(plan.source.dir) !== path.resolve(sourceDir)) {
+    throw new ForkError(
+      `The fork plan names run ${plan.source.id} but points at ${plan.source.dir}, which is not ` +
+        `its directory under ${RUNS_DIR}. Nothing was created.`,
+    );
+  }
+  const linkedSource = linkedRunReason(root, plan.source.id);
+  if (linkedSource !== null) throw new ForkError(linkedSource);
+
+  const verdict = livenessOf(sourceDir);
   if (verdict.liveness === 'running' || verdict.liveness === 'unknown') {
     throw new ForkError(
       `Run ${plan.source.id} cannot be forked: ${describeLiveness(verdict)} Nothing was created.`,
@@ -450,7 +480,10 @@ export async function commitFork(targetDir: string, plan: ForkPlan): Promise<For
     if (report !== undefined) {
       // Checked on both sides. The reader already applies `isReportBasename` on
       // the way in; this is the call that turns the value into two paths.
-      const source = path.join(plan.source.dir, report);
+      // `sourceDir`, the re-derived path, not `plan.source.dir` - the check at
+      // the top of this function proved the two agree, and using the derived one
+      // keeps that true for every read this function makes (#53).
+      const source = path.join(sourceDir, report);
       if (!isReportBasename(report) || !existsSync(source)) {
         delete child.lastReport;
         losses.push(`the last report (${report}) is not in the parent's directory, so it was not copied`);
