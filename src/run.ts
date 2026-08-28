@@ -394,9 +394,18 @@ export interface ListRunsOptions {
    * stat-ed before the limit was applied, which at 2000 runs was 74.40ms of a
    * 77.03ms `limit: 10` call - 97% of it, against 1.46ms of `readdirSync`.
    * `selectRunIds` now walks the sorted entries and stops at the first `limit`
-   * survivors, so the stats are proportional to the rows returned. `limit:
-   * undefined` (`vibe list`) still examines everything: there is no limit to
-   * stop at, and that listing shows every run by design.
+   * survivors, so the probing is proportional to the entries EXAMINED - the rows
+   * returned plus whatever was skipped on the way to them - rather than to the
+   * archive. `limit: undefined` (`vibe list`) still examines everything: there
+   * is no limit to stop at, and that listing shows every run by design.
+   *
+   * What one examined entry costs changed with #53 and the figure above did not
+   * move with it: it was one `statSync`, and is now one `lstat` on the entry
+   * plus, for a real directory, one `lstat` on its state.json - which is what
+   * replaced that `statSync` rather than adding to it. The classification is
+   * kept for the row builder instead of being repeated there. A
+   * not-a-directory entry still costs the old `statSync` as well, because its
+   * platform-dependent verdict is the behaviour it has always had.
    */
   limit?: number | undefined;
 }
@@ -445,13 +454,12 @@ export function statePresence(file: string): StatePresence {
  *
  * **Only the LAST component escapes the follow.** `linkageOf('<link>/state.json')`
  * resolves `<link>` to reach the child, so a caller must classify the directory
- * first and only ask about anything inside it once the answer is `plain`.
- * `runEntryLinkage` is that order, written once.
+ * first and only ask about anything inside it once the answer is a real
+ * directory. `runEntryLinkage` is that order, written once.
  *
- * `plain` means "not a symlink", NOT "a directory": a regular file sitting in
- * `.vibe/runs` is `plain`, and telling a user it is a junction would be a
- * fabrication. Directoryness is not asked here because no caller needs it - the
- * ones that care find out from the read that follows.
+ * `plain` means "not a symlink" and nothing more. It is the verdict for
+ * `state.json`, where being a file is what is expected; the run entry itself
+ * needs the stronger question and gets `entryKind` below.
  */
 export type PathLinkage = 'link' | 'plain' | 'missing' | 'unknown';
 
@@ -466,6 +474,31 @@ export function linkageOf(p: string): PathLinkage {
 }
 
 /**
+ * What a run entry is, from one `lstat` that follows nothing.
+ *
+ * `not-a-directory` is a separate verdict from `unknown` on purpose, and the
+ * distinction is load-bearing in both directions. A regular file sitting in
+ * `.vibe/runs` is *definitively* classified: it is not a link, nothing can be
+ * reached through it, and the row it produces is the `unreadable` one it has
+ * always produced (#77) - calling it a junction would fabricate a fact about the
+ * filesystem. An `lstat` that *threw* is the opposite: nothing is known, so
+ * nothing may be followed, and the row has to say so rather than pass as
+ * ordinary.
+ */
+export type EntryKind = 'link' | 'directory' | 'not-a-directory' | 'missing' | 'unknown';
+
+export function entryKind(p: string): EntryKind {
+  try {
+    const st = lstatSync(p, { throwIfNoEntry: false });
+    if (st === undefined) return 'missing';
+    if (st.isSymbolicLink()) return 'link';
+    return st.isDirectory() ? 'directory' : 'not-a-directory';
+  } catch {
+    return 'unknown';
+  }
+}
+
+/**
  * The status a refused entry DISPLAYS as. Not provenance - see
  * `RunSummary.linked`, which is the field anything acting on the distinction
  * must read.
@@ -473,19 +506,58 @@ export function linkageOf(p: string): PathLinkage {
 export const LINKED_STATUS = 'linked';
 
 /**
- * The two questions #53 is about, asked in the only order that is safe.
+ * The status an entry displays as when `lstat` could not classify it at all.
  *
- * `state` is `null` rather than a verdict when the directory is not plain,
- * because there is no honest answer: the path that would be probed runs through
- * the very link being judged.
+ * Distinct from `unreadable`, which says a state.json was opened and could not
+ * be used, and from `linked`, which is a measurement. This one says only "vibe
+ * did not look inside this, because it could not establish what it is" - which
+ * is a different fact and the one the planner has to be told, since the
+ * do-not-open warning has to name a row the reader can pick out.
  */
-export function runEntryLinkage(
-  root: string,
-  id: string,
-): { dir: PathLinkage; state: PathLinkage | null } {
-  const dir = linkageOf(path.join(root, id));
-  if (dir !== 'plain') return { dir, state: null };
+export const UNVERIFIED_STATUS = 'unverified';
+
+/** The two questions #53 is about, asked in the only order that is safe. */
+export interface RunEntryLinkage {
+  dir: EntryKind;
+  /**
+   * `null` when the directory is not a plain directory, because there is no
+   * honest answer: the path that would be probed runs through the very entry
+   * being judged.
+   */
+  state: PathLinkage | null;
+}
+
+export function runEntryLinkage(root: string, id: string): RunEntryLinkage {
+  const dir = entryKind(path.join(root, id));
+  if (dir !== 'directory') return { dir, state: null };
   return { dir, state: linkageOf(path.join(root, id, 'state.json')) };
+}
+
+/**
+ * What a listing may do with an entry, from its classification alone.
+ *
+ * Three outcomes, and they are three because the facts are:
+ *
+ * - `linked` - measured: the entry or its state.json IS a symlink or a
+ *   junction. Refused, and the planner is told not to open it.
+ * - `unverified` - `lstat` threw (EACCES on the entry while `readdir` still
+ *   succeeded is the realistic cause). **Fails closed**: nothing is followed,
+ *   and the row carries the same do-not-open warning, because an entry that
+ *   cannot be classified cannot be ruled out as a link. It is NOT called a
+ *   link, because that was not measured.
+ * - `readable` - everything else, including a regular file or any other
+ *   not-a-directory entry, which reads and fails exactly as it always has.
+ *
+ * Pure, and exported for its test: the throwing branches need an `lstat` that
+ * fails, which no portable fixture can arrange, so the decision is tested
+ * directly and the wiring is tested with real links.
+ */
+export type EntryVerdict = 'linked' | 'unverified' | 'readable';
+
+export function entryVerdict(linkage: RunEntryLinkage): EntryVerdict {
+  if (linkage.dir === 'link' || linkage.state === 'link') return 'linked';
+  if (linkage.dir === 'unknown' || linkage.state === 'unknown') return 'unverified';
+  return 'readable';
 }
 
 /**
@@ -612,71 +684,75 @@ export function listRuns(targetDir: string, opts: ListRunsOptions = {}): RunSumm
   }
 
   // Ordering, exclusion and the presence probe all happen in there, so that the
-  // stats stop at the limit rather than sweeping the archive (#85). Before the
-  // map either way, so only the runs that will be shown are read and parsed.
+  // probing stops at the limit rather than sweeping the archive (#85). Before
+  // the map either way, so only the runs that will be shown are read and parsed.
+  //
+  // The classification each candidate costs is kept, not thrown away and
+  // repeated: the row builder needs the same answer, and probing twice would
+  // double the cost of every listed row for no extra safety - the second probe
+  // is not a fresh guarantee, only a smaller race window, and closing that race
+  // properly is a different design (open-by-handle) that #53 does not attempt.
+  const classified = new Map<string, RunEntryLinkage>();
   const ids = selectRunIds(entries, opts, (d) => {
     // Before `statePresence`, which is a `statSync` and follows a link - the
     // probe itself was the leak (#53). Directory first: `<link>/state.json`
     // resolves `<link>`, so the child may only be asked about once the parent is
-    // known plain.
+    // known to be a real directory.
     //
     // A link, and anything `lstat` could not classify, reports `present`: the
     // row must reach the map so it can be listed rather than dropped. `absent`
     // would drop it, and #78 established that a silently dropped entry is how a
-    // run disappears - a linked entry is refused, not absent. `StatePresence` is
-    // untouched and still three-valued (#77, #85); this callback simply answers
+    // run disappears - a refused entry is refused, not absent. `StatePresence`
+    // is untouched and still three-valued (#77, #85); this callback answers it
     // without reading.
-    const { dir, state } = runEntryLinkage(root, d);
+    const linkage = runEntryLinkage(root, d);
+    classified.set(d, linkage);
+    const { dir, state } = linkage;
     if (dir === 'link' || dir === 'unknown') return 'present';
     if (dir === 'missing') return 'absent';
+    // The `lstat` already answered existence for a plain state.json, so the old
+    // `statSync` would be a third probe telling us what we know. Only the
+    // not-a-directory entry still needs it, and there the answer is genuinely
+    // different per platform (ENOENT on Windows, ENOTDIR on POSIX) - which is
+    // the behaviour that entry has always had, and is left exactly as it was.
+    if (dir === 'not-a-directory') return statePresence(path.join(root, d, 'state.json'));
     if (state === 'link' || state === 'unknown') return 'present';
-    return statePresence(path.join(root, d, 'state.json'));
+    return state === 'missing' ? 'absent' : 'present';
   });
 
   return ids.map((d): RunSummary => {
     const dir = path.join(root, d);
-    // Classified again rather than carried over from the probe: this is the
-    // classification immediately before the read, which is the one that has to
-    // be true.
-    //
-    // Only a CONFIRMED link gets the linked row. `plain` means "not a symlink",
-    // not "a directory", so a regular file sitting in `.vibe/runs` classifies as
-    // plain with an unclassifiable child - and calling that a junction would be
-    // a fabrication about the filesystem, as well as a regression of the
-    // `unreadable` contract (#77) that such an entry has always been listed
-    // under. It keeps `unreadable`, and gets no `linked` flag and so no
-    // do-not-open warning in the planner's index.
-    const linkage = runEntryLinkage(root, d);
-    if (linkage.dir === 'link' || linkage.state === 'link') {
+    // Carried from the probe above, and recomputed only if this row never went
+    // through it - which it cannot today, since `selectRunIds` only returns ids
+    // it asked about. The fallback is there so that stays true by construction
+    // rather than by assumption.
+    const linkage = classified.get(d) ?? runEntryLinkage(root, d);
+    const verdict = entryVerdict(linkage);
+    if (verdict !== 'readable') {
       // Nothing is read: not state.json, and not the lock either - it is a
-      // separate file INSIDE the linked directory, so `livenessOf` would leave
-      // the archive too. `liveness` is therefore left unset rather than filled
-      // in; `cmdList` renders an absent value as `unknown`, which is the honest
+      // separate file INSIDE the entry, so `livenessOf` would leave the archive
+      // too. `liveness` is therefore left unset rather than filled in;
+      // `cmdList` renders an absent value as `unknown`, which is the honest
       // answer to a question no measurement was taken for, where `not-running`
-      // would be a claim. `linked` is the provenance the prompt acts on;
-      // `status` is only what the row displays.
-      return { id: d, status: LINKED_STATUS, task: '', costUsd: null, linked: true };
-    }
-    if (linkage.dir === 'unknown') {
-      // Fails closed, and does not throw: an entry that cannot be classified is
-      // not one to follow. Reported as unreadable, which is what it is, and not
-      // as a link, which is not known.
-      return { id: d, status: 'unreadable', task: '', costUsd: null };
+      // would be a claim.
+      //
+      // Two statuses, because there are two facts. `linked` is measured. An
+      // entry `lstat` could not classify at all is `unverified`: it fails closed
+      // - nothing under it is followed - and it carries the same do-not-open
+      // provenance, because what cannot be classified cannot be ruled out as a
+      // link. It is deliberately NOT called a link, and deliberately not folded
+      // into `unreadable`, which means a state.json that WAS opened.
+      return verdict === 'linked'
+        ? { id: d, status: LINKED_STATUS, task: '', costUsd: null, linked: true }
+        : { id: d, status: UNVERIFIED_STATUS, task: '', costUsd: null, unverified: true };
     }
     let raw: unknown;
     let summary: RunSummary;
-    if (linkage.state === 'unknown') {
-      // The directory is confirmed not a link, so the lock beside it is still
-      // legible and the row still gets its verdict below (#77) - but the file
-      // itself is not opened, because whether IT is a link could not be told.
+    try {
+      raw = JSON.parse(readFileSync(path.join(dir, 'state.json'), 'utf8'));
+      summary = summariseStored(raw, d);
+    } catch {
       summary = { id: d, status: 'unreadable', task: '', costUsd: null };
-    } else {
-      try {
-        raw = JSON.parse(readFileSync(path.join(dir, 'state.json'), 'utf8'));
-        summary = summariseStored(raw, d);
-      } catch {
-        summary = { id: d, status: 'unreadable', task: '', costUsd: null };
-      }
     }
     // Outside the parse, so an unreadable state.json still gets a verdict: the
     // lock is a separate file, and "this run cannot be read" and "nobody is

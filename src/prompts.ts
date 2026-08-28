@@ -525,13 +525,24 @@ export function priorRunsSection(runs: readonly RunSummary[]): string {
   // Keyed off the rows that actually RENDERED, not the input: `priorRunRow`
   // drops a row whose id sanitises to empty, and a warning about a row nobody
   // can see is noise the planner cannot act on.
+  //
+  // Both halves are warned about, and they are two lines because they are two
+  // facts: `linked` was measured, `unverified` is the absence of a measurement -
+  // an entry whose `lstat` threw, which vibe therefore did not follow and cannot
+  // rule out as a link. Dropping the second would leave the planner reading the
+  // "you can open any of them" sentence above over exactly the rows vibe refused
+  // to open itself.
   const hasLinked = kept.some((x) => x.run.linked === true);
+  const hasUnverified = kept.some((x) => x.run.unverified === true);
 
   // Rendered only when there IS such a row, which is what keeps every other
   // planning prompt byte-identical to the one before this existed - the same
   // compatibility bar the section itself was accepted against.
   const linkedNote = hasLinked
     ? '\n- A run marked **`linked`** is not a run: its directory or its `state.json` is a symlink or junction pointing outside `.vibe/runs/`, and vibe refused to follow it. **Do not open it** - there is no run record under it, and reading it would leave the archive.'
+    : '';
+  const unverifiedNote = hasUnverified
+    ? '\n- A run marked **`unverified`** could not be classified at all - vibe could not tell whether it is a real directory or a link out of the archive, so it did not look inside. **Do not open it either**, for the same reason.'
     : '';
 
   return `## Past runs in this repository
@@ -548,7 +559,7 @@ At most ${PRIOR_RUN_LIMIT} runs are listed here and **there may be more** - \`.v
 - It describes the code **as it was on that date**, and it may already be wrong. Check any claim it makes against the code as it is now, exactly as your own claims will be checked.
 - A severity or a decision recorded there was true of that run's argument, not of this one.
 - **Finding that something was declined before is not a reason to decline it again.** It is a reason to know why, and to say something new if you disagree.
-- If your plan relies on a past run's conclusion, **cite the run id in the assumption that rests on it**, so the critic can open the same file and check it.${linkedNote}
+- If your plan relies on a past run's conclusion, **cite the run id in the assumption that rests on it**, so the critic can open the same file and check it.${linkedNote}${unverifiedNote}
 
 `;
 }

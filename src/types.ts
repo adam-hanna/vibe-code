@@ -1306,4 +1306,16 @@ export interface RunSummary {
    * something is a link is a measurement, not a fallback.
    */
   linked?: true;
+  /**
+   * Set only by `listRuns`, and only for an entry whose `lstat` threw - so
+   * whether it is a link could not be established at all (#53).
+   *
+   * The fail-closed half of `linked`. Nothing under such an entry was followed,
+   * and the planner is warned off it for the same reason, but it is a separate
+   * field because it is a separate fact: one is measured, the other is the
+   * absence of a measurement, and collapsing them would either fabricate a link
+   * or drop the warning. Distinct from an `unreadable` row, where the state.json
+   * WAS opened and the entry itself was never in doubt.
+   */
+  unverified?: true;
 }
