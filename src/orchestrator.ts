@@ -1811,19 +1811,28 @@ function planOfRecord(state: RunState, role: Role): string | null {
 }
 
 /**
- * Say which setting named this turn's model, on the way out of a failure.
+ * Say which of the role's own settings this turn ran under, on the way out of a
+ * failure.
  *
  * A user who set `roles.reviewer.model` and is shown `codex.model` edits the
  * wrong line - and since #60 the two keys can hold different strings, so the
  * provider key is no longer a safe thing to name. Nothing here classifies the
- * failure: the note states what the turn ran and where the name came from,
+ * failure: the note states what the turn ran and where the value came from,
  * which is true of a timeout, a rate limit and an unknown model alike. There is
  * deliberately no retry and no fallback to the provider's model - a model the
  * user named and vibe silently replaced is the failure this key's design is
  * strict to prevent.
  *
- * Added only where the role named a model of its own, so no run that sets
- * nothing has its error text changed.
+ * The timeout is the second fact it states (#84), which is why this is no longer
+ * called `noteModelProvenance`. It is the same failure by another route: four
+ * provider keys can set a turn's timeout and `proc.ts` reports the figure and
+ * never the key, so a user raises the wrong one. One function rather than two,
+ * because the `stack`-before-`message` order below has to happen exactly once
+ * per error however many notes are owed.
+ *
+ * Added only where the role named a setting of its own, so no run that sets
+ * nothing has its error text changed - and a run that names only a model gets
+ * exactly the one note it got before.
  *
  * The error object itself is rethrown, never wrapped: `charge.ts` keys a failed
  * turn's spend in a WeakMap on identity, the retry loop tests `instanceof
@@ -1839,12 +1848,39 @@ function planOfRecord(state: RunState, role: Role): string | null {
  * rotation running concurrently can land in the gap. A `catch` costs nothing on
  * the path that succeeds.
  */
-function noteModelProvenance(err: unknown, role: Role, cfg: Config, roles: RoleTable): unknown {
+function noteRoleProvenance(
+  err: unknown,
+  role: Role,
+  cfg: Config,
+  roles: RoleTable,
+  /** The figure this turn actually ran with - `DispatchRequest.timeoutMs`. */
+  timeoutMs: number,
+): unknown {
+  const spec = roles[role];
   // The guard that keeps a run setting nothing byte-identical: no per-role
-  // model, no note.
-  if (roles[role].model === undefined) return err;
-  const note = `[this turn ran ${modelSource(role, roles)} = "${modelFor(role, cfg, roles)}"]`;
-  if (!(err instanceof Error) || err.message.includes(note)) return err;
+  // setting, no note.
+  const notes: string[] = [];
+  if (spec.model !== undefined) {
+    notes.push(`[this turn ran ${modelSource(role, roles)} = "${modelFor(role, cfg, roles)}"]`);
+  }
+  // A bare number, no unit: the key names the unit, and `proc.ts`'s own "timed
+  // out after 5400000ms" is already in the same message.
+  //
+  // Only where the role's figure is the one the turn ran under. A caller that
+  // passed an explicit `timeoutMs` overrode the table, and a note naming a key
+  // that did not apply sends the user to edit the wrong line - which is the
+  // failure this whole mechanism exists to prevent, committed by the mechanism
+  // itself. No orchestrator call site does that today; the tests do, and a
+  // future one that starts to gets silence rather than a false statement.
+  if (spec.timeoutMs !== undefined && spec.timeoutMs === timeoutMs) {
+    notes.push(`[this turn ran roles.${role}.timeoutMs = ${spec.timeoutMs}]`);
+  }
+  if (notes.length === 0 || !(err instanceof Error)) return err;
+  // Per note, so an error that has already been through here once - and there is
+  // no such path today - gains only what it is missing.
+  const fresh = notes.filter((each) => !err.message.includes(each));
+  if (fresh.length === 0) return err;
+  const note = fresh.join(' ');
   // Read before the message is changed, and this order is the whole of it: V8
   // builds `stack` lazily on first access, from the message as it stands at
   // that moment. Touching `message` first and `stack` second therefore appends
@@ -2001,7 +2037,7 @@ async function claudeDispatch(
       },
     );
   } catch (err: unknown) {
-    throw noteModelProvenance(err, req.role, cfg, roles);
+    throw noteRoleProvenance(err, req.role, cfg, roles, req.timeoutMs);
   }
 
   // Asked before `markSlotStarted`, which is what makes `slotForkParent` answer
@@ -2354,7 +2390,7 @@ async function codexDispatch(
       });
     });
   } catch (err: unknown) {
-    throw noteModelProvenance(err, req.role, cfg, roles);
+    throw noteRoleProvenance(err, req.role, cfg, roles, req.timeoutMs);
   }
   const { structured, raw, sessionId, tokens } = outcome;
 
