@@ -375,14 +375,14 @@ export interface ProgressConfig {
 
 export interface Config {
   /**
-   * Which agent holds each role on this run, and what model and effort it runs
-   * at.
+   * Which agent holds each role on this run, and what model, effort and turn
+   * timeout it runs under.
    *
-   * The three choices a run makes about the role table - a provider per role,
-   * and optionally that role's own effort (#46) and model (#60): `access`, the
-   * output schema and the conversation slot are facts about the job, not user
-   * settings. Absent - a config stored before this key existed - means the
-   * default assignment, which is what every run before it did.
+   * The four choices a run makes about the role table - a provider per role, and
+   * optionally that role's own effort (#46), model (#60) and timeout (#84):
+   * `access`, the output schema and the conversation slot are facts about the
+   * job, not user settings. Absent - a config stored before this key existed -
+   * means the default assignment, which is what every run before it did.
    */
   roles: RoleProviders;
   claude: ClaudeConfig;

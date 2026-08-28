@@ -17,7 +17,13 @@ import {
   turnTimeoutMs,
 } from '@src/roles.js';
 import { createRun } from '@src/run.js';
-import type { ClaudeTurnResult, Config, RunState, TokenUsage } from '@src/types.js';
+import type {
+  ClaudeTurnResult,
+  Config,
+  ConfigOverrides,
+  RunState,
+  TokenUsage,
+} from '@src/types.js';
 
 /**
  * How long a turn gets, per role.
@@ -289,22 +295,39 @@ test('a timeout that is not a positive number is a config error naming the key',
 });
 
 test('NaN and Infinity are refused, and NaN is shown as NaN', () => {
-  // Not through `loadConfig`: JSON has no NaN, and `JSON.stringify` would turn
-  // it into `null` - a different bad value. `applyOverrides` is the path a
-  // stored `state.config` takes, and `roleSetting` is what both call.
+  // Not through a config FILE: JSON has no NaN, and `JSON.stringify` would turn
+  // it into `null` - a different bad value than the one under test. It still
+  // reaches `loadConfig`, though, through the overrides argument every command
+  // passes its flags in on, so both entry points are covered here as they are
+  // in `bothPathsReject`. `roleSetting` is what all of them call.
   for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
     const roles = { ...DEFAULT_ROLE_PROVIDERS, reviewer: { provider: 'codex', timeoutMs: bad } };
     assert.throws(
       () => applyOverrides({ ...structuredClone(DEFAULTS), roles } as unknown as Config, {}),
       /roles\.reviewer\.timeoutMs/,
+      `applyOverrides: ${String(bad)}`,
+    );
+    assert.throws(
+      () => loadConfig(repoWith({}), { roles } as unknown as ConfigOverrides),
+      /roles\.reviewer\.timeoutMs/,
+      `loadConfig via overrides: ${String(bad)}`,
     );
   }
 
-  assert.throws(
-    () => roleSetting('reviewer', { provider: 'codex', timeoutMs: Number.NaN }),
-    /roles\.reviewer\.timeoutMs is NaN/,
-    'not "is null", which is what JSON.stringify(NaN) would have said',
-  );
+  // All three, not just NaN: `JSON.stringify` renders every non-finite number as
+  // `null`, because JSON has no way to write any of them. Reporting "is null"
+  // sends the user looking for a null they did not write.
+  for (const [bad, text] of [
+    [Number.NaN, 'NaN'],
+    [Number.POSITIVE_INFINITY, 'Infinity'],
+    [Number.NEGATIVE_INFINITY, '-Infinity'],
+  ] as const) {
+    assert.throws(
+      () => roleSetting('reviewer', { provider: 'codex', timeoutMs: bad }),
+      new RegExp(`roles\\.reviewer\\.timeoutMs is ${text}`),
+      `${text}, not "is null", which is what JSON.stringify would have said`,
+    );
+  }
 });
 
 test('a fractional positive is accepted, as the provider key it overrides is', async () => {

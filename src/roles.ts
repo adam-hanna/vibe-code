@@ -237,12 +237,12 @@ function defaultSlot(role: Role, provider: AgentProvider): SlotName {
 const ROLE_OBJECT_KEYS: readonly string[] = ['provider', 'model', 'effort', 'timeoutMs'];
 
 /**
- * `provider, model and effort` - a list a person would read aloud.
+ * `provider, model, effort and timeoutMs` - a list a person would read aloud.
  *
  * `join(' and ')` was fine while there were two keys and reads as
  * `provider and model and effort` with three, which is how #60 found it. Written
- * against the array's length rather than its contents, so a fourth key does not
- * need this touched again.
+ * against the array's length rather than its contents, which is why #84's fourth
+ * key needed nothing here but this sentence.
  */
 function listKeys(keys: readonly string[]): string {
   if (keys.length < 2) return keys.join('');
@@ -253,12 +253,15 @@ function listKeys(keys: readonly string[]): string {
  * A rejected value, as a message should show it back.
  *
  * The idiom the messages below use is `JSON.stringify(v) ?? String(v)`, which
- * renders `NaN` as `null` - a different mistake than the one the user made, and
- * the only value where the two differ. Scoped to the timeout check rather than
- * applied to every message, so no existing error text changes bytes.
+ * renders `NaN` as `null` - a different mistake than the one the user made.
+ * `Infinity` and `-Infinity` stringify to `null` too, and they are the only
+ * other values that do: JSON has no way to write any of the three, so the
+ * non-finite numbers are exactly the set this has to hand to `String` instead.
+ * Scoped to the timeout check rather than applied to every message, so no
+ * existing error text changes bytes.
  */
 function shown(value: unknown): string {
-  if (typeof value === 'number' && Number.isNaN(value)) return 'NaN';
+  if (typeof value === 'number' && !Number.isFinite(value)) return String(value);
   return JSON.stringify(value) ?? String(value);
 }
 

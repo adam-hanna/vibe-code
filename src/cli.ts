@@ -784,6 +784,13 @@ function reportRoles(cfg: Config): void {
       // validates a model name, so this line is where a typo is seen in the
       // first ten lines rather than after the planner and the implementer have
       // run (#60).
+      //
+      // `timeoutMs` (#84) is deliberately NOT shown, for the same reason stated
+      // the other way round: it is checked at config time - finite, positive,
+      // and refused by name - so there is no typo left for this line to catch,
+      // and a fourth segment would cost every reader something on every run to
+      // report a value that cannot be wrong by the time it is printed. Where it
+      // does matter is on a failure, and `noteRoleProvenance` names it there.
       return (
         `${role}=${spec.provider}` +
         `${spec.model === undefined ? '' : `@${spec.model}`}` +
