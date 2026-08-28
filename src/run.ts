@@ -394,21 +394,6 @@ export interface ListRunsOptions {
   limit?: number | undefined;
 }
 
-/**
- * What `vibe list` shows, and what the planner's past-run index is built from
- * (#52). Never throws, and never writes.
- *
- * A run whose state.json cannot be read at all lists as unreadable with no cost
- * figure: `$0.00` would assert that an unreadable run cost nothing, which is the
- * invented number this codebase refuses everywhere else. One corrupt run must
- * not take out the listing of every healthy one beside it.
- *
- * Values are returned exactly as they were stored - `summariseStored` passes an
- * unrecognised status through verbatim on purpose. That is safe for a terminal
- * and is not for a prompt, so the bounding happens where the prompt is
- * rendered, in `priorRunsSection`, and this stays the listing it has always
- * been.
- */
 /** What a run directory's state.json can be told to be (#77). */
 export type StatePresence = 'absent' | 'present' | 'unknown';
 
@@ -484,6 +469,21 @@ export function selectRunIds(
   return kept;
 }
 
+/**
+ * What `vibe list` shows, and what the planner's past-run index is built from
+ * (#52). Never throws, and never writes.
+ *
+ * A run whose state.json cannot be read at all lists as unreadable with no cost
+ * figure: `$0.00` would assert that an unreadable run cost nothing, which is the
+ * invented number this codebase refuses everywhere else. One corrupt run must
+ * not take out the listing of every healthy one beside it.
+ *
+ * Values are returned exactly as they were stored - `summariseStored` passes an
+ * unrecognised status through verbatim on purpose. That is safe for a terminal
+ * and is not for a prompt, so the bounding happens where the prompt is
+ * rendered, in `priorRunsSection`, and this stays the listing it has always
+ * been.
+ */
 export function listRuns(targetDir: string, opts: ListRunsOptions = {}): RunSummary[] {
   const root = path.join(targetDir, RUNS_DIR);
   if (!existsSync(root)) return [];
