@@ -25,6 +25,7 @@ import type {
   PendingFindings,
   Plan,
   QuestionKind,
+  ResolvedQuestion,
   ReviewCoverage,
   RoundRecord,
   RunCheckpointMeta,
@@ -33,6 +34,7 @@ import type {
   RunState,
   RunStatus,
   RunSummary,
+  SuppressedQuestion,
 } from '@src/types.js';
 
 /**
@@ -804,6 +806,33 @@ function readDeferredQuestion(entry: unknown): DeferredQuestion | null {
     recommended: entry['recommended'],
     reason: entry['reason'],
   };
+}
+
+/**
+ * A similarity, not a context ratio: 1 is the top of this scale.
+ *
+ * Deliberately not `isRatio`, which has no upper bound because an overfull
+ * context is a real measurement. A score above 1 is not a measurement of
+ * anything `similarity` can produce, so it is damage.
+ */
+function isUnitInterval(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1;
+}
+
+function readSuppressedQuestion(entry: unknown): SuppressedQuestion | null {
+  if (!isRecord(entry)) return null;
+  if (!isString(entry['question']) || !isString(entry['matched']) || !isUnitInterval(entry['score'])) {
+    return null;
+  }
+  return { question: entry['question'], matched: entry['matched'], score: entry['score'] };
+}
+
+function readResolvedQuestion(entry: unknown): ResolvedQuestion | null {
+  if (!isRecord(entry)) return null;
+  if (!isString(entry['question']) || !isString(entry['answered']) || !isUnitInterval(entry['score'])) {
+    return null;
+  }
+  return { question: entry['question'], answered: entry['answered'], score: entry['score'] };
 }
 
 /**
@@ -1632,6 +1661,18 @@ const READERS = {
   forkedFrom: (raw, ctx) => readForkOrigin(raw, ctx),
   forkPending: (raw, ctx) => readForkPending(raw, ctx),
   branchPending: (raw, ctx) => readBranchPending(raw, ctx),
+  // The three question-record fields (#65). Optional every one: absent is what
+  // a run that suppressed nothing and was answered by nobody looks like, and it
+  // is what every state written before they existed presents - so nothing here
+  // migrates and nothing is repaired.
+  humanAnswered: (raw, ctx) =>
+    raw === undefined ? undefined : repairedArray('humanAnswered', raw, ctx, readString),
+  suppressedQuestions: (raw, ctx) =>
+    raw === undefined
+      ? undefined
+      : repairedArray('suppressedQuestions', raw, ctx, readSuppressedQuestion),
+  resolvedByHuman: (raw, ctx) =>
+    raw === undefined ? undefined : repairedArray('resolvedByHuman', raw, ctx, readResolvedQuestion),
   carried: (raw, ctx) =>
     raw === undefined ? undefined : repairedArray('carried', raw, ctx, readFinding),
   declined: (raw, ctx) =>

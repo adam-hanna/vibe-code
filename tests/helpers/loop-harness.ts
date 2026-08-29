@@ -3,11 +3,12 @@ import { existsSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { ClaudeTurnOptions } from '@src/claude.js';
-import { parseHumanAnswers } from '@src/cli.js';
+import { parseHumanAnswers, recordHumanAnswers } from '@src/cli.js';
 import type { CodexTurnOptions } from '@src/codex.js';
 import { DEFAULTS } from '@src/config.js';
 import { Escalation, EXIT, orchestrate, writeEscalation } from '@src/orchestrator.js';
 import type { AgentTurns } from '@src/orchestrator.js';
+import { reconcileQuestionRecords } from '@src/questions.js';
 import { createRun, saveState } from '@src/run.js';
 import type {
   Answer,
@@ -522,9 +523,15 @@ export function escalationFile(state: RunState, err: Escalation): string {
  * Mirrors src/cli.ts:413-439 rather than calling it: `cmdResume` is not
  * exported and reaches `execute`, which runs the real preflight and spawns. So
  * this fills every "**Your answer:**" blockquote, parses the file through the
- * exported `parseHumanAnswers`, hangs the answers on the state and retires the
- * file so they cannot be replayed - and the CLI glue around those steps stays
- * uncovered, deliberately.
+ * exported `parseHumanAnswers`, hangs the answers on the state, records them
+ * through the exported `recordHumanAnswers` and `reconcileQuestionRecords` as
+ * `cmdResume` does on the same write, and retires the file so they cannot be
+ * replayed - and the CLI glue around those steps stays uncovered, deliberately.
+ *
+ * The two recording steps are not decoration: without them nothing reaches the
+ * `ASSUMED.md` reconciliation through the path a human actually takes, and a
+ * case that hung `humanAnswered` on the state by hand would be asserting on a
+ * fixture rather than on the flow (#65).
  */
 export function answerNeedsInput(
   state: RunState,
@@ -561,7 +568,9 @@ export function answerNeedsInput(
     );
   }
   state.pendingAnswers = answers;
+  recordHumanAnswers(state, answers);
   saveState(state);
+  reconcileQuestionRecords(state);
   renameSync(file, path.join(state.dir, `answered-${state.planRound}.md`));
   return answers;
 }
