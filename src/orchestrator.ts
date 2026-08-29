@@ -3,7 +3,7 @@ import { applyCharge, chargeFailure, enforceCeilings, Escalation, EXIT, fmtToken
 import { claudeTurn, parseStructured, RateLimitError } from '@src/claude.js';
 import { codexTurn } from '@src/codex.js';
 import type { CodexTurnOptions, CodexTurnResult } from '@src/codex.js';
-import { groundFindings } from '@src/evidence.js';
+import { downgradeInert, groundFindings } from '@src/evidence.js';
 import * as git from '@src/git.js';
 import * as log from '@src/log.js';
 import type { PathStyle } from '@src/pathstyle.js';
@@ -111,6 +111,7 @@ import type {
   RunState,
   RunSummary,
   Severity,
+  TurnActivity,
 } from '@src/types.js';
 
 // The accounting vocabulary lives in @src/charge.js, a leaf: the session
@@ -1710,6 +1711,27 @@ export interface TurnOutcome {
   text: string;
   /** Codex: its parsed structured output. Null for Claude, and for a turn with no schema. */
   structured: unknown;
+  /**
+   * What the turn did, from its heartbeat, or absent when nothing measured it.
+   *
+   * Carried out of the dispatch rather than read from state, because the caller
+   * that has to act on it - `groundAndRecord` - is judging *this* turn and a
+   * later reader could not tell which turn a stored figure belonged to (#66).
+   */
+  activity?: TurnActivity | undefined;
+}
+
+/**
+ * What a turn event says about the turn's activity, or nothing at all (#66).
+ *
+ * Two fields rather than the nested object: `items` is the kinds and `toolItems`
+ * the count the rule reads, and an event log a human greps is better served by
+ * a flat key than by `activity.tool`. Both omitted together when the turn was
+ * unmeasured - never `toolItems: 0`, which would assert an idle turn where
+ * there was only an unobserved one.
+ */
+function activityEvent(activity: TurnActivity | undefined): Record<string, unknown> {
+  return activity === undefined ? {} : { items: activity.items, toolItems: activity.tool };
 }
 
 /**
@@ -2112,6 +2134,12 @@ async function claudeDispatch(
         // the record of what a run did, and a ratio against the wrong window is
         // not it.
         contextRatio: measured === null ? null : Number(measured.toFixed(3)),
+        // What the turn did, for every role on both providers (#66) - point 2
+        // of the issue, and worth having on its own: three of its four data
+        // points had to be recovered by grepping a transcript. Omitted
+        // ENTIRELY when the turn was unmeasured, because a zero standing in for
+        // an absence is the one thing this repo never records.
+        ...activityEvent(result.activity),
       },
     },
     describe: () =>
@@ -2123,7 +2151,11 @@ async function claudeDispatch(
         : [],
   });
 
-  return { text: result.text, structured: null };
+  return {
+    text: result.text,
+    structured: null,
+    ...(result.activity === undefined ? {} : { activity: result.activity }),
+  };
 }
 
 /**
@@ -2430,7 +2462,7 @@ async function codexDispatch(
   } catch (err: unknown) {
     throw noteRoleProvenance(err, req.role, cfg, roles, req.timeoutMs);
   }
-  const { structured, raw, sessionId, tokens } = outcome;
+  const { structured, raw, sessionId, tokens, activity } = outcome;
 
   // The marker is set whatever the run does with the id: a turn either succeeded
   // or it did not. `idChanged` is false when this run is not carrying the
@@ -2485,6 +2517,9 @@ async function codexDispatch(
         // for want of a denominator.
         ...(occupancy === null ? {} : { contextTokens: occupancy.tokens }),
         ...(occupancy?.ratio == null ? {} : { contextRatio: Number(occupancy.ratio.toFixed(3)) }),
+        // See the same spread on `claude_turn`: recorded for every role, absent
+        // rather than zeroed for a turn nothing measured (#66).
+        ...activityEvent(activity),
       },
     },
     describe: () =>
@@ -2499,7 +2534,11 @@ async function codexDispatch(
   // the safe direction for a condition nothing can clear.
   if (warning !== null) markOccupancyWarned(state);
 
-  return { text: raw, structured };
+  return {
+    text: raw,
+    structured,
+    ...(activity === undefined ? {} : { activity }),
+  };
 }
 
 /**
@@ -2589,7 +2628,7 @@ function pathStyleFor(state: RunState, role: Role, roles: RoleTable): PathStyle 
 }
 
 /**
- * The grounding seam: one place, both findings-producing turns.
+ * The downgrade seam: one place, both findings-producing turns.
  *
  * Here rather than at the call sites, because everything that reads a severity
  * happens after this - the artifact, `collectDeferred`, `recordPendingFindings`
@@ -2599,6 +2638,20 @@ function pathStyleFor(state: RunState, role: Role, roles: RoleTable): PathStyle 
  * `log.warn` as well as the event: this is the run telling the user that a
  * reviewer asserted something it could not point at, which is worth seeing at
  * the time and not only in a file (#48).
+ *
+ * Two rules now, and the order matters. Grounding runs first and inertness only
+ * over the survivors, so a finding that cited nothing AND came from a turn that
+ * ran nothing is downgraded once, by grounding - which keeps `downgraded.from`
+ * naming the severity the model actually gave it, and keeps the recorded reason
+ * the more specific of the two.
+ *
+ * The inertness rule is the **reviewer's alone** (#66). The critic must not be
+ * held to it: it critiques a *plan*, before any code exists, reading the plan is
+ * in its prompt, and a plan critique that runs no shell has not failed to gather
+ * evidence. The census supports keeping it out rather than assuming - 2 of 65
+ * critique turns ran zero commands, and nothing in the archive says either was
+ * wrong. The *tally* is recorded for every role either way, so the question can
+ * be reopened later on evidence the runs themselves recorded.
  */
 function groundAndRecord(
   state: RunState,
@@ -2606,13 +2659,17 @@ function groundAndRecord(
   role: Role,
   roles: RoleTable,
   found: FindingsReport,
+  /** What the turn that produced `found` did. Absent when nothing measured it. */
+  activity: TurnActivity | undefined,
 ): FindingsReport {
-  const { report, downgraded } = groundFindings(
-    found,
-    cwd,
-    state.dir,
-    pathStyleFor(state, role, roles),
-  );
+  const grounded = groundFindings(found, cwd, state.dir, pathStyleFor(state, role, roles));
+  const inert =
+    role === 'reviewer'
+      ? downgradeInert(grounded.report, activity)
+      : { report: grounded.report, downgraded: [] as Finding[] };
+  const report = inert.report;
+  const downgraded = [...grounded.downgraded, ...inert.downgraded];
+
   for (const f of downgraded) {
     // Set by construction in `groundFindings`; narrowed rather than asserted.
     const d = f.downgraded;
@@ -2665,7 +2722,16 @@ async function runCritique(
     turns,
     roles,
   );
-  return groundAndRecord(state, cwd, 'critic', roles, parseFindings(readStructured(outcome)));
+  // The activity is passed for the record, not for a rule: `groundAndRecord`
+  // applies the inertness rule to the reviewer only. See its header.
+  return groundAndRecord(
+    state,
+    cwd,
+    'critic',
+    roles,
+    parseFindings(readStructured(outcome)),
+    outcome.activity,
+  );
 }
 
 async function runReview(
@@ -2799,7 +2865,17 @@ async function runReview(
       roles,
     );
     reports.push(
-      groundAndRecord(state, cwd, 'reviewer', roles, parseFindings(readStructured(outcome))),
+      // Per chunk turn, deliberately: a chunked round is several reviewer turns,
+      // and each one's findings are judged against what that turn did rather
+      // than against the round as a whole (#66).
+      groundAndRecord(
+        state,
+        cwd,
+        'reviewer',
+        roles,
+        parseFindings(readStructured(outcome)),
+        outcome.activity,
+      ),
     );
 
     // After the turn, never before it: this says what the reviewer was actually

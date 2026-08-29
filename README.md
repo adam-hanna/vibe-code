@@ -318,6 +318,21 @@ A citation is read in the *reporting agent's* own path convention (Codex reports
 
 The check is `existsSync`, a line count and a substring: no tokens, no second opinion. **It checks that a finding is grounded, not that it is correct.**
 
+### And the turn that raised it has to have looked
+
+Grounding asks whether a claim names a real place. It cannot ask whether anyone went and looked — a reviewer that read nothing can still cite a file that exists, which is exactly what the review turn behind this rule would do today.
+
+So **every turn, of every role, on both agents, now records what it did**: how many items of each kind its live stream emitted, and how many of those were the agent using a tool. Both land on that turn's `claude_turn` / `codex_turn` event in `state.json`, as `items` and `toolItems`. A turn nothing measured — progress disabled, or the preflight probe — records neither field rather than recording a zero.
+
+"Used a tool" is read in each provider's own vocabulary, because the two do not agree: for Claude it is a `tool_use` block, named by the tool; for Codex it is any completed stream item that is not `agent_message` or `reasoning`. An item kind `vibe` has never seen counts as a tool use — that loses a detection rather than downgrading a true finding, which is the same direction the grounding check fails in.
+
+**A P0 or P1 from a review turn that emitted items and used no tool is downgraded to P2**, through the same mechanism as an ungrounded one: kept in the artifact, reason recorded on the finding, warned about, logged as `finding_downgraded`. Two things it is deliberately not:
+
+- **Not applied to the critic.** It critiques a *plan*, before the code exists; reading the plan is its whole job, and a plan critique that runs no shell has not failed to gather evidence. The tally is still recorded for it, so the question can be reopened on evidence rather than on opinion.
+- **Not applied to a turn nothing measured.** No heartbeat, or a stream that produced no items at all, means "nothing was observed" — which is never read as "nothing was done".
+
+The threshold is zero tool items, exactly, and there is no other number in the rule. Across every review turn in this repo's own archive — 29 of them, over 23 runs — one ran nothing and the rest ran between 5 and 154 commands. That one produced the only false blocking finding in the archive, and it bought a fix round that edited working code to satisfy a premise four seconds of `tsc` would have refuted.
+
 A carried P1 is not dropped. In the plan phase it is written into the implementation prompt as a known open issue. In the review phase it gets one final fix round, which is committed and re-verified but deliberately **not** re-reviewed — a fresh review could raise something new and reopen the argument the tolerance just settled. So those findings are worked on but unconfirmed, and `OUTSTANDING.md` says so rather than calling them unfixed.
 
 Brakes, all independent:

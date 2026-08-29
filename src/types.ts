@@ -669,6 +669,26 @@ export interface TokenUsage {
   total: number;
 }
 
+/**
+ * What one turn actually did, counted from its own live stream (#66).
+ *
+ * `tool` is stored rather than re-derived on read, because the classification is
+ * the *provider's*: a Claude tally is keyed by tool name (`Read`, `Bash`) and a
+ * Codex one by item type (`command_execution`, `agent_message`), and a reader
+ * holding only `items` cannot tell which vocabulary it has. `items` is kept
+ * beside it so a human can second-guess the judgement the run made.
+ *
+ * Absent, never zeroed, for a turn nothing measured - no heartbeat at all
+ * (`progress.enabled` false, or the preflight probe, which passes none), or an
+ * injected agent in a test. "Nothing was observed" is not "nothing was done".
+ */
+export interface TurnActivity {
+  /** Item kinds this turn emitted, counted once each. Provider vocabulary. */
+  items: Record<string, number>;
+  /** How many of them were the agent using a tool rather than thinking or talking. */
+  tool: number;
+}
+
 export interface ClaudeTurnResult {
   text: string;
   costUsd: number;
@@ -679,6 +699,13 @@ export interface ClaudeTurnResult {
   usage: ContextUsage | null;
   /** Cumulative work for the turn, from the aggregated envelope. */
   tokens: TokenUsage;
+  /**
+   * What the turn did, from its heartbeat. Absent when it had none (#66).
+   *
+   * Optional so every injected fake reports an unmeasured turn rather than a
+   * fabricated empty one.
+   */
+  activity?: TurnActivity | undefined;
 }
 
 /**

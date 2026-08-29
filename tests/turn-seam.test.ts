@@ -19,7 +19,7 @@ import { createRun, recordContextMeasurement } from '@src/run.js';
 import { ANSWERS_SCHEMA, FINDINGS_SCHEMA } from '@src/schemas.js';
 import type { ClaudeTurnOptions } from '@src/claude.js';
 import type { CodexTurnOptions } from '@src/codex.js';
-import type { ClaudeTurnResult, Config, RunState, TokenUsage } from '@src/types.js';
+import type { ClaudeTurnResult, Config, RunState, TokenUsage, TurnActivity } from '@src/types.js';
 
 /**
  * The role-aware seam, driven through injected fakes.
@@ -66,7 +66,15 @@ interface Recorder {
  * where a turn was routed and what the run recorded about it, not about what
  * the agents said.
  */
-function recorder(over: { claudeCost?: number; codexTokens?: number; codexSession?: string } = {}): Recorder {
+function recorder(
+  over: {
+    claudeCost?: number;
+    codexTokens?: number;
+    codexSession?: string;
+    /** What the turn's heartbeat observed, or absent for a turn nothing measured (#66). */
+    activity?: TurnActivity;
+  } = {},
+): Recorder {
   const claudeCalls: ClaudeTurnOptions[] = [];
   const codexCalls: CodexTurnOptions[] = [];
   return {
@@ -83,6 +91,7 @@ function recorder(over: { claudeCost?: number; codexTokens?: number; codexSessio
           numTurns: 1,
           usage: null,
           tokens: tokens(1000),
+          ...(over.activity === undefined ? {} : { activity: over.activity }),
         });
       },
       codex: (options) => {
@@ -92,6 +101,7 @@ function recorder(over: { claudeCost?: number; codexTokens?: number; codexSessio
           raw: '{"findings":[]}',
           sessionId: over.codexSession ?? 'thread-1',
           tokens: tokens(over.codexTokens ?? 500),
+          ...(over.activity === undefined ? {} : { activity: over.activity }),
         });
       },
     },
@@ -246,6 +256,57 @@ test('a Codex turn is counted but never costed', async () => {
   assert.equal(event?.['tokens'], 500);
   // No invented figure: Codex reports no cost, so the event carries none.
   assert.equal('costUsd' in (event ?? {}), false);
+});
+
+test('a turn event records what the turn did, on either provider', async () => {
+  // Point 2 of #66, and worth having on its own: three of the four data points
+  // in that issue had to be recovered by grepping a transcript, because nothing
+  // about what a turn DID ever reached state.json.
+  const codexState = freshState();
+  await captureLog(() =>
+    runTurn(
+      codexState,
+      config(),
+      request('critic', { label: 'critique-0' }),
+      recorder({ activity: { items: { command_execution: 24, agent_message: 2 }, tool: 24 } }).turns,
+    ),
+  );
+
+  const codexEvent = codexState.events.at(-1);
+  assert.equal(codexEvent?.type, 'codex_turn');
+  assert.deepEqual(codexEvent?.['items'], { command_execution: 24, agent_message: 2 });
+  assert.equal(codexEvent?.['toolItems'], 24);
+
+  // Recorded for every role on both providers, not only for the one role whose
+  // findings the rule reads.
+  const claudeState = freshState();
+  await captureLog(() =>
+    runTurn(
+      claudeState,
+      config(),
+      request('planner', { label: 'plan' }),
+      recorder({ activity: { items: { Read: 3, message: 1 }, tool: 3 } }).turns,
+    ),
+  );
+
+  const claudeEvent = claudeState.events.at(-1);
+  assert.equal(claudeEvent?.type, 'claude_turn');
+  assert.deepEqual(claudeEvent?.['items'], { Read: 3, message: 1 });
+  assert.equal(claudeEvent?.['toolItems'], 3);
+});
+
+test('a turn nothing measured records no tally, rather than a zero', async () => {
+  // A zero standing in for an absence is the one thing this repo never writes:
+  // `toolItems: 0` asserts an idle turn, and an unmeasured turn is not one.
+  const state = freshState();
+
+  await captureLog(() =>
+    runTurn(state, config(), request('critic', { label: 'critique-0' }), recorder().turns),
+  );
+
+  const event = state.events.at(-1) ?? {};
+  assert.equal('items' in event, false);
+  assert.equal('toolItems' in event, false);
 });
 
 test('the detail line says what each provider does and does not report', async () => {

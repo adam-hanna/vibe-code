@@ -4,10 +4,12 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { orchestrate } from '@src/orchestrator.js';
 import {
+  active,
   agents,
   commits,
   committing,
   config,
+  inert,
   p1,
   report,
   reviewingRun,
@@ -73,6 +75,78 @@ test('the tolerated P1 is fixed, committed and re-verified, but never re-reviewe
   // reason the loop continues rather than breaking out of the tolerated branch.
   assert.equal(verifyRuns(state), 2);
   assert.equal(state.pendingFindings, null);
+});
+
+/**
+ * The #44 case, and the reason #66 exists: the SAME finding, from a turn that
+ * ran commands and from a turn that ran nothing.
+ *
+ * The finding is inside `p1Tolerance` either way, so it never blocks - what it
+ * buys is the final fix round, which `reviewPhase` buys only when
+ * `decision.tolerated` is non-empty. A P2 is never tolerated, so the inert
+ * turn's version buys nothing at all. On the real run that round cost ~1.3M
+ * tokens and edited working code to satisfy a false premise, in a round that is
+ * by design not re-reviewed.
+ *
+ * The two cases share everything except `activity`, deliberately: if the fixture
+ * differed anywhere else the comparison would prove nothing.
+ */
+test('a tolerated P1 from a turn that ran commands still buys the final fix round', async () => {
+  const state = reviewingRun({ ...RUN, commit: true });
+  const calls: string[] = [];
+
+  await orchestrate(
+    state,
+    config({}, { ...committing(), ...verifying(state) }),
+    true,
+    agents(
+      {
+        claude: (label) => work(state, `${label}.txt`),
+        codex: (() => {
+          let asked = 0;
+          return (): unknown => (asked++ > 0 ? report([]) : report([p1('tolerated-one')]));
+        })(),
+        activity: () => active(30),
+      },
+      calls,
+    ),
+  );
+
+  assert.deepEqual(calls, ['review-0', 'final-fix-1']);
+  assert.equal(state.finalFixDone, true);
+});
+
+test('the same P1 from a turn that ran nothing buys no round at all', async () => {
+  const state = reviewingRun({ ...RUN, commit: true });
+  const calls: string[] = [];
+
+  await orchestrate(
+    state,
+    config({}, { ...committing(), ...verifying(state) }),
+    true,
+    agents(
+      {
+        claude: (label) => work(state, `${label}.txt`),
+        codex: (() => {
+          let asked = 0;
+          return (): unknown => (asked++ > 0 ? report([]) : report([p1('tolerated-one')]));
+        })(),
+        activity: () => inert(3),
+      },
+      calls,
+    ),
+  );
+
+  assert.deepEqual(calls, ['review-0'], 'no final-fix turn was bought');
+  assert.notEqual(state.finalFixDone, true);
+  // Not tolerated, because it is no longer a P1: the loop ends clean rather
+  // than ending on a carried finding.
+  assert.equal(state.outstanding ?? null, null);
+  assert.equal(state.phase, 'complete');
+  // Kept, not deleted, and the run says why.
+  const downgraded = state.events.filter((e) => e.type === 'finding_downgraded');
+  assert.deepEqual(downgraded.map((e) => e['id']), ['tolerated-one']);
+  assert.match(String(downgraded[0]?.['reason']), /used no tools/);
 });
 
 test('a final fix that breaks the suite stops the run rather than finishing it', async () => {
