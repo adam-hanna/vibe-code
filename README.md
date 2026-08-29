@@ -351,6 +351,7 @@ verify-fix-1.md ...        the same, after a verification repair
 answers-N.json             Codex's answers to blocking questions
 answered-N.md              those answers as the planner received them
 ASSUMED.md                 non-blocking questions the run proceeded on, and the answer it used
+REPHRASED.md               questions treated as ones already asked or answered — what matched, and the score
 handoff-N.md               briefing carried across each session rotation
 NEEDS-INPUT.md             written when the run stops for you
 OUTSTANDING.md             carried P1s: fixed in a final round, but not re-reviewed
@@ -361,14 +362,26 @@ transcript.log
 codex/                     raw schema and output files
 ```
 
-`FOLLOW-UPS.md` and `ASSUMED.md` are the two worth reading after a clean run. The first is
-what the critic said belongs in a different change; the second is what the planner decided
-without asking you. Both are raw material for the next issue rather than a defect report.
+`FOLLOW-UPS.md`, `ASSUMED.md` and `REPHRASED.md` are the three worth reading after a clean
+run. The first is what the critic said belongs in a different change. The second is what the
+planner decided without asking you — and since #65 it excludes anything *you* answered, so
+what is left really did run on a guess. Both are raw material for the next issue rather than
+a defect report.
+
+`REPHRASED.md` is different in kind: it is the audit of every question the run decided it had
+already asked, or that an answer of yours had already settled. The run makes that call on a
+similarity score, and the threshold behind it was measured over every question this tool has
+asked in this repository — but a threshold measured on one corpus can be wrong somewhere
+else. **If two entries in that file are not the same question, that is a defect worth
+reporting**: a question went unasked, or an assumption went unreported, and this file is the
+only place the run says so.
 
 Most of the files above are conditional: `FOLLOW-UPS.md` is removed when there is nothing
 deferred and no declared out-of-scope work, `ASSUMED.md` is written only when a question ran
-on the planner's guess, and `OUTSTANDING.md` only when findings were carried. A missing one
-means that run had nothing to report, not that the record is incomplete.
+on the planner's guess *and you did not answer it yourself*, `REPHRASED.md` only when a
+re-ask was suppressed or an answer of yours disposed of a deferred question, and
+`OUTSTANDING.md` only when findings were carried. A missing one means that run had nothing
+to report, not that the record is incomplete.
 
 **Since #52 the planner reads this directory back.** See below.
 

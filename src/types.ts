@@ -290,6 +290,41 @@ export interface DeferredQuestion {
   reason: string;
 }
 
+/**
+ * A question the re-ask guard suppressed as a rephrasing of one already asked
+ * (#65).
+ *
+ * `matched` is the *normalized* earlier question, because `answeredQuestions`
+ * has only ever held normalized keys and the original wording cannot be
+ * recovered from one. Said plainly in `REPHRASED.md` rather than dressed up as
+ * the wording the planner used.
+ */
+export interface SuppressedQuestion {
+  /** The new wording, verbatim, as the planner asked it. */
+  question: string;
+  /** The `answeredQuestions` key it matched. Normalized, not the original. */
+  matched: string;
+  /** Jaccard over `normalize`'s tokens: 0..1. */
+  score: number;
+}
+
+/**
+ * A deferred question a human's answer disposed of, matched by rephrasing
+ * (#65).
+ *
+ * Recorded because the alternative is a silent omission: the entry leaves
+ * `ASSUMED.md` on the strength of a similarity score, and a wrong match must
+ * cost a line someone can check rather than a question nobody hears about
+ * again.
+ */
+export interface ResolvedQuestion {
+  /** The deferred wording, as `ASSUMED.md` would have printed it. */
+  question: string;
+  /** The question the human answered, verbatim. */
+  answered: string;
+  score: number;
+}
+
 export interface GitConfig {
   useBranch: boolean;
   branchPrefix: string;
@@ -1000,6 +1035,30 @@ export interface RunState {
   planOnly: boolean;
   answeredQuestions: string[];
   deferredQuestions: DeferredQuestion[];
+  /**
+   * Questions a human actually answered, verbatim as the `### ` headings of
+   * `NEEDS-INPUT.md` gave them (#65).
+   *
+   * Neither existing field can do this job. `pendingAnswers` is *consumed* by
+   * the loop the moment it revises against them, so it is gone by the time
+   * anything reports; `answeredQuestions` is marked for every question **asked**
+   * whatever came back, so reconciling `ASSUMED.md` against it would empty the
+   * file including the entries that are true.
+   *
+   * Optional, so a state written before this existed loads with no repair and a
+   * run nobody answered writes no field at all.
+   */
+  humanAnswered?: string[];
+  /**
+   * Re-asks the guard suppressed as rephrasings, with what each matched.
+   *
+   * Written the moment a suppression happens rather than at the end of the run:
+   * the run that motivated this stopped at the round cap, and a record that
+   * only exists on the success path is missing exactly when it is wanted.
+   */
+  suppressedQuestions?: SuppressedQuestion[];
+  /** Deferred questions a human's answer disposed of - see `ResolvedQuestion`. */
+  resolvedByHuman?: ResolvedQuestion[];
   sessionRotations: number;
   /**
    * The plan-side judge's Codex thread id, reused across critique and answer

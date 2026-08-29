@@ -811,6 +811,60 @@ test('dir and targetDir are re-derived, and the stored ones are ignored', () => 
   assert.deepEqual(repairs(loaded), []);
 });
 
+// ---- the question record (#65) ----------------------------------------------
+
+test('a state written before the question-record fields existed loads with no repair', () => {
+  const loaded = load(() => {
+    // Nothing to delete: these three have never been written by an older vibe,
+    // and absent is exactly what "nobody answered, nothing was suppressed"
+    // looks like. Repairing them into `[]` would be inventing a record.
+  });
+  assert.equal(loaded.humanAnswered, undefined);
+  assert.equal(loaded.suppressedQuestions, undefined);
+  assert.equal(loaded.resolvedByHuman, undefined);
+  assert.deepEqual(repairs(loaded), []);
+});
+
+test('a similarity score outside 0..1 is damage, not a measurement', () => {
+  const good = { question: 'q', matched: 'm', score: 0.81 };
+  const loaded = load((raw) => {
+    raw['humanAnswered'] = ['ok', 5];
+    raw['suppressedQuestions'] = [
+      good,
+      { question: 'q', matched: 'm', score: 2 },
+      { question: 'q', matched: 'm', score: -1 },
+      // `JSON.stringify` writes NaN as null, which is what a real damaged file
+      // would hold - so this is the shape the reader actually meets.
+      { question: 'q', matched: 'm', score: Number.NaN },
+      { question: 'q', matched: 'm', score: 'high' },
+      { question: 'q', matched: 'm' },
+      { question: 7, matched: 'm', score: 0.9 },
+      'junk',
+    ];
+    raw['resolvedByHuman'] = [
+      { question: 'q', answered: 'a', score: 1 },
+      { question: 'q', answered: 'a', score: 1.0001 },
+      { question: 'q', score: 0.7 },
+    ];
+  });
+
+  // `isRatio` would have kept the 2 and the 1.0001: it has no upper bound on
+  // purpose, because an overfull context ratio is a real measurement. A
+  // similarity above 1 is not.
+  assert.deepEqual(loaded.humanAnswered, ['ok']);
+  assert.deepEqual(loaded.suppressedQuestions, [good]);
+  assert.deepEqual(loaded.resolvedByHuman, [{ question: 'q', answered: 'a', score: 1 }]);
+  for (const field of ['humanAnswered', 'suppressedQuestions', 'resolvedByHuman']) {
+    assert.ok(repairs(loaded).includes(field), `${field} said what it dropped`);
+  }
+});
+
+test('the three question-record fields are keys the validator decides', () => {
+  for (const key of ['humanAnswered', 'suppressedQuestions', 'resolvedByHuman']) {
+    assert.equal(KNOWN_KEYS.has(key), true, `${key} is in the registry`);
+  }
+});
+
 // ---- the registry cannot drift ----------------------------------------------
 
 test('every field a fresh run writes is one the validator decides', () => {

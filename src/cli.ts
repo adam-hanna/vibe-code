@@ -9,7 +9,6 @@ import {
 } from '@src/config.js';
 import {
   allocateRun,
-  artifact,
   assertUnlinkedRun,
   createRun,
   listRuns,
@@ -26,6 +25,7 @@ import type { AllocatedRun } from '@src/run.js';
 import { acquireLock, describeLiveness } from '@src/lock.js';
 import { commitFork, listForkPoints, planFork } from '@src/fork.js';
 import type { Liveness, LockHandle } from '@src/lock.js';
+import { reconcileAssumed, reconcileQuestionRecords } from '@src/questions.js';
 import { assertUsableRunId } from '@src/stored.js';
 import { Escalation, EXIT, orchestrate, writeEscalation } from '@src/orchestrator.js';
 import type { ExitCode } from '@src/orchestrator.js';
@@ -729,7 +729,16 @@ async function resumeRun(
     }
     log.ok(`Picked up ${answers.length} answer(s) from NEEDS-INPUT.md`);
     state.pendingAnswers = answers;
+    // On the same write that stores them, so there is no window where the run
+    // is holding answers it has no durable record of having been given (#65).
+    // `pendingAnswers` is consumed by the loop and cannot be that record.
+    recordHumanAnswers(state, answers);
     saveState(state);
+    // Immediately, and before preflight: `ASSUMED.md` is authored at the end of
+    // a successful run, but this resume may exit at the preflight gate or stop
+    // for input again, and a file left claiming an answered question was a
+    // guess outlives every one of those paths.
+    reconcileQuestionRecords(state);
     // Retire the file so a later escalation writes a fresh one and these
     // answers are not silently replayed.
     renameSync(answersFile, path.join(state.dir, `answered-${state.planRound}.md`));
@@ -872,6 +881,23 @@ export function parseHumanAnswers(md: string): Answer[] {
     }
   }
   return answers;
+}
+
+/**
+ * The durable record of what a human actually answered (#65).
+ *
+ * Verbatim, not normalized: `ASSUMED.md` quotes questions and the audit file
+ * quotes what matched what, and `normalize` is idempotent so nothing is lost by
+ * keeping the wording a person will recognise.
+ *
+ * Appended, never replaced - a run can stop for input more than once - and
+ * empty headings are dropped rather than stored as a question that matches
+ * nothing.
+ */
+export function recordHumanAnswers(state: RunState, answers: readonly Answer[]): void {
+  const fresh = answers.map((a) => a.question).filter((q) => q.trim() !== '');
+  if (fresh.length === 0) return;
+  state.humanAnswered = [...(state.humanAnswered ?? []), ...fresh];
 }
 
 /**
@@ -1578,28 +1604,36 @@ function reportReviewCoverage(state: RunState): void {
 /**
  * Advisory questions Codex declined ran on the planner's guess. That is a
  * deliberate choice, not a silent one - it gets reported every time.
+ *
+ * Every time, but not about every question: one a human answered was not a
+ * guess, and calling it one is what #65 reported. The filter, the file and the
+ * count all come out of `reconcileAssumed`, so the number in the log line and
+ * the number of entries in the file cannot disagree - the old code counted the
+ * whole list and rendered the whole list, and both were wrong together.
+ *
+ * `create` because this is the one caller that *authors* the file. The repair
+ * callers only bring an existing one back into line.
+ *
+ * Exported for the reason `parseHumanAnswers` is: `execute` cannot be reached
+ * from a test without spawning real agents.
  */
-function reportDeferred(state: RunState): void {
+export function reportDeferred(state: RunState): void {
   if (state.deferredQuestions.length === 0) return;
+  const { remaining, resolved, file } = reconcileAssumed(state, { create: true });
 
-  const lines: string[] = [
-    '# Questions answered by assumption\n',
-    `**Run:** \`${state.id}\``,
-    '',
-    'Codex declined these and they were not blocking, so the run continued on the',
-    "planner's fallback. Nothing is wrong with the run - but these are the points",
-    'where the result rests on a guess rather than a decision.\n',
-  ];
-  for (const [i, q] of state.deferredQuestions.entries()) {
-    lines.push(`### ${i + 1}. ${q.question}`);
-    lines.push(`*Kind:* ${q.kind}`);
-    lines.push(`*Proceeded with:* ${q.recommended}`);
-    lines.push(`*Why Codex declined:* ${q.reason}\n`);
+  for (const r of resolved) {
+    log.warn(
+      `Not calling this an assumption - you answered what the run judged to be the same ` +
+        `question (${r.score.toFixed(2)}): ${r.question}`,
+    );
+    log.info(`  You answered: ${r.answered}`);
+    log.info('  See REPHRASED.md. If those are two different questions, that is a defect.');
   }
-  const file = artifact(state, 'ASSUMED.md', lines.join('\n'));
 
-  log.warn(`${state.deferredQuestions.length} question(s) ran on the planner's default:`);
-  for (const q of state.deferredQuestions) log.info(`  - ${q.question}`);
+  if (remaining.length === 0 || file === null) return;
+
+  log.warn(`${remaining.length} question(s) ran on the planner's default:`);
+  for (const q of remaining) log.info(`  - ${q.question}`);
   log.info(`  Detail: ${file}`);
 }
 

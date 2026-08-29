@@ -61,6 +61,13 @@ import {
   verificationCaveat,
   writeCheckpoint,
 } from '@src/run.js';
+import {
+  findRephrase,
+  isSameQuestion,
+  normalize,
+  reconcileQuestionRecords,
+  recordSuppressed,
+} from '@src/questions.js';
 import { hasFindingShape, isReportBasename } from '@src/stored.js';
 import {
   blockers as blockingFindings,
@@ -216,6 +223,13 @@ export async function orchestrate(
     // nothing; on a resume it is the one point holding both the stored plan and
     // the artifact the previous process may have died between writing.
     reconcileFollowUps(state);
+    // Beside it, for the same reason and against the same hazard: the record of
+    // a suppressed re-ask or a disposed-of deferral lives in `state.json`, and
+    // the file that reports it is a second write a kill can land between. A
+    // fork is the same shape - the child inherits the state and none of the
+    // parent's artifacts - and a forked run is always started by `vibe resume`,
+    // so this pass is where it gets its copy (#65).
+    reconcileQuestionRecords(state);
     return await runPhases(state, cfg, resume, turns);
   } finally {
     // A `finally`, not a tail call: the phases below return early at the
@@ -404,9 +418,33 @@ async function planPhase(
 
     // A question already put to Codex never comes back, however the revised plan
     // rephrases it - otherwise an insistent planner loops the run forever.
-    const pending = plan.open_questions.filter(
-      (q) => (q.blocking || cfg.questions.answerNonBlocking) && !isAnswered(state, q.question),
+    //
+    // "However it rephrases it" used to mean "however it repunctuates it": the
+    // guard was exact equality over `normalize`, and a genuine rewording walked
+    // straight past it. Four wordings of one question cost the #47 run three
+    // extra answer turns and drove it into `loop.maxQuestionRounds`. So the
+    // filter is now exact-then-fuzzy, and the two halves cost different things:
+    // an exact repeat is dropped in silence, exactly as it always was, while a
+    // rephrasing is recorded with what it matched and its score before it is
+    // dropped. See `src/questions.ts` for the threshold and its measurement.
+    const askable = plan.open_questions.filter(
+      (q) => q.blocking || cfg.questions.answerNonBlocking,
     );
+    const pending: OpenQuestion[] = [];
+    for (const q of askable) {
+      if (isAnswered(state, q.question)) continue;
+      const near = findRephrase(q.question, state.answeredQuestions);
+      if (near === null) {
+        pending.push(q);
+        continue;
+      }
+      recordSuppressed(state, q.question, near);
+      log.warn(
+        `Not asking again - this is the same question as one already put to the answerer ` +
+          `(${near.score.toFixed(2)}): ${q.question}`,
+      );
+      log.info('  See REPHRASED.md. If those are two different questions, that is a defect.');
+    }
     if (pending.length > 0) {
       // The planner gets a bounded number of goes at resolving its own
       // questions. Without this the path re-plans forever on newly-invented
@@ -2931,8 +2969,15 @@ async function resolveQuestions(
   return usable;
 }
 
-const normalize = (s: string): string => s.toLowerCase().replace(/\W+/g, ' ').trim();
-
+/**
+ * Every question actually put to the answerer, and every answer that came back.
+ *
+ * That is the whole meaning of the list, and #65 left it there: a re-ask the
+ * guard suppresses was never sent, so it is not marked here. The cost is that a
+ * suppressed wording recurring in a later round is caught by the fuzzy scan
+ * against the original rather than by the exact path below - which is what the
+ * scores in `src/questions.ts` leave room for.
+ */
 function markAnswered(state: RunState, question: string): void {
   const key = normalize(question);
   if (key && !state.answeredQuestions.includes(key)) state.answeredQuestions.push(key);
@@ -2940,7 +2985,7 @@ function markAnswered(state: RunState, question: string): void {
 }
 
 function isAnswered(state: RunState, question: string): boolean {
-  return state.answeredQuestions.includes(normalize(question));
+  return state.answeredQuestions.some((key) => isSameQuestion(key, question));
 }
 
 /** Human-facing handoff written whenever a run stops for input. */
