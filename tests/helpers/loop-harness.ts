@@ -498,22 +498,35 @@ export function unlaunchableVerify(): Partial<Config> {
  * fail while `test` never runs - which is the whole point of an ordered list.
  * Same shape of script for the same reasons: relative, no spaces, and a marker
  * file rather than a stub, so "did this gate execute" is an observation.
+ *
+ * `produces` names a directory the command WRITES before it exits, holding one
+ * file whose content is the execution number - which is what makes "round 1 kept
+ * round 1's evidence" checkable rather than assumed (#62). It is rewritten every
+ * run, exactly as a real reporter's output directory is, which is the reason
+ * recording a path instead of copying would have been a wrong answer.
  */
 export function gateScript(
   state: RunState,
   name: string,
-  options: { failures?: number; failRuns?: readonly number[] } = {},
+  options: { failures?: number; failRuns?: readonly number[]; produces?: string } = {},
 ): string {
   const script = `vibe-gate-${name}.mjs`;
   const logFile = `vibe-gate-${name}-runs.txt`;
   const failing =
     options.failRuns ?? Array.from({ length: options.failures ?? 0 }, (_unused, i) => i + 1);
+  const produces =
+    options.produces === undefined
+      ? ''
+      : `mkdirSync(${JSON.stringify(options.produces)}, { recursive: true });\n` +
+        `writeFileSync(${JSON.stringify(`${options.produces}/report.txt`)}, ` +
+        "`run ${runs}`, 'utf8');\n";
   writeFileSync(
     path.join(state.targetDir, script),
-    "import { appendFileSync, readFileSync } from 'node:fs';\n" +
+    "import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';\n" +
       `const log = ${JSON.stringify(logFile)};\n` +
       "appendFileSync(log, 'ran\\n');\n" +
       "const runs = readFileSync(log, 'utf8').split('\\n').filter(Boolean).length;\n" +
+      produces +
       `process.exit(${JSON.stringify([...failing])}.includes(runs) ? 1 : 0);\n`,
     'utf8',
   );

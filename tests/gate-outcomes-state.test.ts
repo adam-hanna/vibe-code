@@ -110,3 +110,86 @@ test('a malformed verifyGates entry is dropped without taking the environment wi
   assert.deepEqual(repairs.map((r) => r.field), ['environment']);
   assert.equal(typeof state.environment?.verifyRuns, 'number');
 });
+
+// ---- the artifacts a failing gate preserved (#62) ---------------------------
+
+/** One gate outcome carrying a well-formed artifact record. */
+function withArtifacts(artifacts: unknown): Record<string, unknown> {
+  return {
+    ...widest(),
+    gateOutcomes: [
+      { name: 'qa', status: 'failed', command: 'npx playwright test', runs: 1, required: true, artifacts },
+      { name: 'test', status: 'passed', command: 'npm test', runs: 3, required: true },
+    ],
+  };
+}
+
+const GOOD_ARTIFACTS = {
+  dir: 'artifacts/qa/round-1',
+  bytes: 2048,
+  entries: [
+    { path: 'playwright-report', status: 'copied', files: 12, bytes: 2048, skippedLinks: ['trace/link'] },
+    { path: 'test-results/summary.json', status: 'missing', reason: '"test-results/summary.json" was not produced' },
+  ],
+};
+
+test('an artifact record survives the round trip whole', () => {
+  const { state, repairs } = read(withArtifacts(GOOD_ARTIFACTS));
+
+  assert.deepEqual(repairs, []);
+  const artifacts = state.gateOutcomes?.[0]?.artifacts;
+  assert.equal(artifacts?.dir, 'artifacts/qa/round-1');
+  assert.equal(artifacts?.bytes, 2048);
+  assert.deepEqual(artifacts?.entries.map((e) => e.status), ['copied', 'missing']);
+  assert.deepEqual(artifacts?.entries[0]?.skippedLinks, ['trace/link']);
+  // Absent stays absent on the gate that preserved nothing: "nothing was asked
+  // for" is not an empty record.
+  assert.equal(state.gateOutcomes?.[1]?.artifacts, undefined);
+});
+
+test('a malformed artifact record costs that field alone, and is logged', () => {
+  // The one field on a gate outcome that does NOT cost the whole list. The
+  // all-or-nothing rule above exists because the exit code is computed from
+  // `status` and `required`; nothing computes anything from this, so discarding
+  // a run's gate record over a damaged pointer to a report would be the same
+  // mistake pointing the other way.
+  const { state, repairs } = read(withArtifacts('nonsense'));
+
+  assert.equal(state.gateOutcomes?.length, 2);
+  assert.equal(state.gateOutcomes?.[0]?.status, 'failed');
+  assert.equal(state.gateOutcomes?.[0]?.artifacts, undefined);
+  // Logged, so `loadRun`'s `state_repaired` event makes the loss visible even
+  // though the field is not.
+  assert.deepEqual(repairs.map((r) => r.field), ['gateOutcomes[0].artifacts']);
+});
+
+test('one damaged entry inside the record is dropped, keeping the rest', () => {
+  const { state, repairs } = read(
+    withArtifacts({
+      ...GOOD_ARTIFACTS,
+      entries: [GOOD_ARTIFACTS.entries[0], { path: 'x', status: 'invented' }],
+    }),
+  );
+
+  assert.deepEqual(state.gateOutcomes?.[0]?.artifacts?.entries.map((e) => e.path), [
+    'playwright-report',
+  ]);
+  assert.deepEqual(repairs.map((r) => r.field), ['gateOutcomes[0].artifacts.entries']);
+});
+
+test('a malformed optional member is dropped without costing its entry', () => {
+  const { state, repairs } = read(
+    withArtifacts({
+      ...GOOD_ARTIFACTS,
+      entries: [{ path: 'playwright-report', status: 'copied', files: 'lots', bytes: 2048 }],
+    }),
+  );
+
+  const first = state.gateOutcomes?.[0]?.artifacts?.entries[0];
+  assert.equal(first?.status, 'copied');
+  assert.equal(first?.files, undefined);
+  // Never guessed at a number: "lots" is not a count, and inventing one here is
+  // exactly what this repo refuses everywhere else.
+  assert.equal(first?.bytes, 2048);
+  assert.deepEqual(repairs.map((r) => r.field), ['gateOutcomes[0].artifacts.entries[0].files']);
+});

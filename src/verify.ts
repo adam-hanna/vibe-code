@@ -18,6 +18,14 @@ export interface ResolvedGate {
   runs: number;
   timeoutMs: number;
   required: boolean;
+  /**
+   * What to preserve when this gate FAILS. Empty for a gate that named nothing
+   * and for the synthesized legacy gate, which has no key that could name any.
+   *
+   * Resolved here rather than looked up again in the orchestrator, so a gate's
+   * effective settings still come from exactly one place (#47).
+   */
+  artifacts: readonly string[];
 }
 
 export interface VerifyResult {
@@ -156,6 +164,9 @@ export function resolveGates(cfg: VerifyConfig, cwd: string): ResolvedGate[] {
         runs: cfg.runs,
         timeoutMs: cfg.timeoutMs,
         required: true,
+        // Nothing: a legacy config has no key that could name an artifact, so
+        // an empty list is the observation rather than a default (#62).
+        artifacts: [],
       },
     ];
   }
@@ -166,6 +177,7 @@ export function resolveGates(cfg: VerifyConfig, cwd: string): ResolvedGate[] {
     runs: gate.runs ?? cfg.runs,
     timeoutMs: gate.timeoutMs ?? cfg.timeoutMs,
     required: gate.required ?? true,
+    artifacts: gate.artifacts ?? [],
   }));
 }
 

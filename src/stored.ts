@@ -12,9 +12,11 @@ import type {
   CheckpointBoundary,
   CheckpointCommitNote,
   CodexRateLimitRecord,
+  ArtifactEntryOutcome,
   Confidence,
   DeferredQuestion,
   Finding,
+  GateArtifacts,
   ForkedConversation,
   ForkOrigin,
   ForkPendingEntry,
@@ -1025,19 +1027,84 @@ const GATE_STATUSES = {
  * from them: a record whose `required` cannot be read must not be guessed into
  * `false`, which would turn an unverified run into a clean one.
  */
-function readGateOutcome(entry: unknown): GateOutcome | null {
+function readGateOutcome(entry: unknown, at: string, ctx: ReadContext): GateOutcome | null {
   if (!isRecord(entry)) return null;
   const status = enumOf(entry['status'], GATE_STATUSES);
   const command = entry['command'];
   if (status === null || !isString(entry['name'])) return null;
   if (!(command === null || isString(command))) return null;
   if (!isCounter(entry['runs']) || !isBool(entry['required'])) return null;
+  const artifacts = readGateArtifacts(`${at}.artifacts`, entry['artifacts'], ctx);
   return {
     name: entry['name'],
     status,
     command,
     runs: entry['runs'],
     required: entry['required'],
+    ...(artifacts === undefined ? {} : { artifacts }),
+  };
+}
+
+// The same member-to-member table, for the same reason: a new artifact status
+// has to fail the build rather than fail to read back.
+const GATE_ARTIFACT_STATUSES = {
+  copied: 'copied',
+  missing: 'missing',
+  refused: 'refused',
+  'too-large': 'too-large',
+  failed: 'failed',
+} satisfies Record<ArtifactEntryOutcome['status'], ArtifactEntryOutcome['status']>;
+
+/** One preserved path's outcome, or null so the array reader drops just this one. */
+function readArtifactEntry(raw: unknown, at: string, ctx: ReadContext): ArtifactEntryOutcome | null {
+  if (!isRecord(raw)) return null;
+  const status = enumOf(raw['status'], GATE_ARTIFACT_STATUSES);
+  if (status === null || !isString(raw['path'])) return null;
+  const files = optionalNumber(`${at}.files`, raw['files'], ctx, isCounter);
+  const bytes = optionalNumber(`${at}.bytes`, raw['bytes'], ctx, isCounter);
+  const why = optionalString(`${at}.reason`, raw['reason'], ctx);
+  const links =
+    raw['skippedLinks'] === undefined
+      ? undefined
+      : repairedArray(`${at}.skippedLinks`, raw['skippedLinks'], ctx, (v) =>
+          isString(v) ? v : null,
+        );
+  return {
+    path: raw['path'],
+    status,
+    ...(files === undefined ? {} : { files }),
+    ...(bytes === undefined ? {} : { bytes }),
+    ...(why === undefined ? {} : { reason: why }),
+    ...(links === undefined ? {} : { skippedLinks: links }),
+  };
+}
+
+/**
+ * A gate's preserved artifacts, or nothing.
+ *
+ * The one field on a gate outcome that is repaired ELEMENT BY ELEMENT rather
+ * than costing the whole list, and the distinction is what the value is for.
+ * `readGateOutcomes` below discards everything on a single bad entry because the
+ * exit code is computed from `status` and `required` - a partial gate record
+ * would read as a clean run. Nothing computes anything from this field: it tells
+ * a human where to look. Discarding a run's whole gate record over a damaged
+ * pointer to a report would be the wrong trade in the other direction.
+ *
+ * Every drop still goes through `ctx.repairs`, which `loadRun` turns into a
+ * `state_repaired` event, so the loss is visible even though the field is not.
+ */
+function readGateArtifacts(field: string, raw: unknown, ctx: ReadContext): GateArtifacts | undefined {
+  if (raw === undefined) return undefined;
+  if (!isRecord(raw) || !isString(raw['dir']) || !isCounter(raw['bytes'])) {
+    ctx.repairs.replaced(field, raw, 'nothing');
+    return undefined;
+  }
+  return {
+    dir: raw['dir'],
+    bytes: raw['bytes'],
+    entries: repairedArray(`${field}.entries`, raw['entries'], ctx, (entry, at) =>
+      readArtifactEntry(entry, at, ctx),
+    ),
   };
 }
 
@@ -1064,7 +1131,7 @@ function readGateOutcomes(raw: unknown, ctx: ReadContext): GateOutcome[] | undef
 
   const outcomes: GateOutcome[] = [];
   for (const [i, entry] of raw.entries()) {
-    const outcome = readGateOutcome(entry);
+    const outcome = readGateOutcome(entry, `gateOutcomes[${i}]`, ctx);
     if (outcome === null) {
       ctx.repairs.dropped('gateOutcomes', `gateOutcomes[${i}]`);
       ctx.repairs.replaced(
