@@ -123,3 +123,77 @@ test('filling in defaults for an older config is not reported as a user change',
 
   assert.deepEqual(resumeEvents(resumed), []);
 });
+
+/**
+ * A per-role flag on resume, and what it takes with it (#89).
+ *
+ * `--role` is the first thing that can move a run's role table after the run
+ * exists: a resume reads `state.config`, not the file, so before this the table
+ * was fixed for the life of a run. Two consequences follow, and both are here -
+ * the diff already names the role at role granularity, and the probed
+ * environment facts stop describing the run.
+ */
+test('a per-role flag is named in the resume diff, at role granularity', () => {
+  const { dir, state } = runWith('resume role diff', structuredClone(DEFAULTS) as Config);
+
+  const { cfg } = resume(dir, state.id, ['--role', 'reviewer:effort=max']);
+
+  assert.deepEqual(cfg.roles.reviewer, { provider: 'codex', effort: 'max' });
+  assert.deepEqual(loadRun(dir, state.id).events.at(-1)?.['changed'], ['roles.reviewer']);
+});
+
+/** Probed facts, as a successful preflight would have left them. */
+function withEnvironment(state: RunState): RunState {
+  state.environment = {
+    agents: [
+      {
+        provider: 'claude',
+        shell: 'bash',
+        pathStyle: 'msys',
+        repaired: false,
+        tools: [{ name: 'node', available: true, version: 'v24.18.0' }],
+      },
+    ],
+    verifyCommand: 'npm test',
+    verifyRuns: 3,
+  };
+  saveState(state);
+  return state;
+}
+
+test('a resume that moves a provider drops the environment facts the probe took', () => {
+  // They describe the agents the OLD contract asked about, and `environmentBlock`
+  // labels each of them through the CURRENT table - so keeping them would state,
+  // as verified fact, that the agent now called "the implementer" was observed
+  // with the tools some other role's provider needed. Nothing can recompute a
+  // probe, so they go; preflight rewrites them, or the prompt omits the section.
+  const stored = structuredClone(DEFAULTS) as Config;
+  stored.codex.persistSession = false;
+  const { dir, state } = runWith('resume moves implementer', stored);
+  withEnvironment(state);
+
+  const { cfg } = resume(dir, state.id, ['--role', 'implementer:provider=codex']);
+
+  assert.deepEqual(cfg.roles.implementer, { provider: 'codex' });
+  assert.deepEqual(cfg.toolchain['node']?.agents, ['codex'], 'the contract moved with the role');
+  const reloaded = loadRun(dir, state.id);
+  assert.equal(reloaded.environment, undefined, 'the stale facts are gone');
+  const event = reloaded.events.at(-1);
+  assert.deepEqual(event?.['changed'], ['roles.implementer', 'toolchain']);
+  assert.equal(event?.['environmentCleared'], true);
+});
+
+test('a resume that changes only an effort keeps the environment facts', () => {
+  // The narrow half of the trigger, and the one that costs something if it is
+  // wrong: a run with no environment block re-opens the false "no Node runtime"
+  // findings that block exists to prevent. A model, effort or timeout appears
+  // nowhere in it.
+  const { dir, state } = runWith('resume keeps facts', structuredClone(DEFAULTS) as Config);
+  const before = structuredClone(withEnvironment(state).environment);
+
+  resume(dir, state.id, ['--role', 'reviewer:effort=max']);
+
+  const reloaded = loadRun(dir, state.id);
+  assert.deepEqual(reloaded.environment, before);
+  assert.equal(reloaded.events.at(-1)?.['environmentCleared'], undefined);
+});

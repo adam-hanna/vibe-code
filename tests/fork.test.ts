@@ -7,8 +7,9 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSy
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { main } from '@src/cli.js';
 import { commitFork, ForkError, listForkPoints, planFork } from '@src/fork.js';
-import { orchestrate } from '@src/orchestrator.js';
+import { EXIT, orchestrate } from '@src/orchestrator.js';
 import { artifact, listCheckpoints, listRuns, loadRun, mintRunId, saveState } from '@src/run.js';
 import { StoredStateError } from '@src/stored.js';
 import { renderPlanDoc } from '@src/prompts.js';
@@ -666,4 +667,109 @@ test('a branching fork does state what its branch is and is not', async () => {
   assert.ok(stated.some((l) => l.includes("fork's branch is a new ref")));
   assert.ok(stated.some((l) => l.includes('the repository may have moved on')));
   assert.equal(stated.some((l) => l.includes('--no-branch')), false);
+});
+
+// ---- per-role flags through the fork command (#89) --------------------------
+
+/**
+ * `vibe fork ... --role <role>:<key>=<value>`.
+ *
+ * Driven through `main` rather than through `planFork`, because the defaulted
+ * parameter this feature adds is exactly the kind a call site can forget without
+ * anything failing to compile. Fork spawns no agent - it reads state, resolves
+ * config and writes a branch ref - so the command itself is reachable from a
+ * test.
+ */
+async function quietly<T>(work: () => Promise<T>): Promise<T> {
+  const original = { log: console.log, error: console.error };
+  console.log = (): void => {};
+  console.error = (): void => {};
+  try {
+    return await work();
+  } finally {
+    console.log = original.log;
+    console.error = original.error;
+  }
+}
+
+/** The one run under `.vibe/runs` that is not the parent. */
+function childOf(parent: RunState): RunState {
+  const ids = runDirs(parent).filter((id) => id !== parent.id);
+  assert.equal(ids.length, 1, 'the fork created exactly one run');
+  return loadRun(parent.targetDir, ids[0] as string);
+}
+
+/** Probed facts on the checkpoint, as a run whose preflight succeeded would have. */
+function checkpointWithEnvironment(parent: RunState, n: number): unknown {
+  const file = path.join(parent.dir, `checkpoint-${n}.json`);
+  const snapshot = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
+  snapshot['environment'] = {
+    agents: [
+      {
+        provider: 'claude',
+        shell: 'bash',
+        pathStyle: 'msys',
+        repaired: false,
+        tools: [{ name: 'node', available: true, version: 'v24.18.0' }],
+      },
+    ],
+    verifyCommand: 'npm test',
+    verifyRuns: 3,
+  };
+  writeFileSync(file, JSON.stringify(snapshot), 'utf8');
+  return snapshot['environment'];
+}
+
+test('vibe fork --role moves the role and re-derives the contract, through the command', async () => {
+  const parent = await parentRun('fork role flag');
+  const n = committedPoint(parent);
+
+  const code = await quietly(() =>
+    main([
+      'fork',
+      parent.id,
+      '--at',
+      String(n),
+      '-C',
+      parent.targetDir,
+      '--role',
+      'implementer:provider=codex',
+      // A writing Codex role on a persisted thread is a refusal, not a repair.
+      '--no-codex-session',
+    ]),
+  );
+
+  assert.equal(code, EXIT.OK);
+  const child = childOf(parent);
+  assert.deepEqual(child.config?.roles.implementer, { provider: 'codex' });
+  assert.deepEqual(child.config?.toolchain['node']?.agents, ['codex']);
+  assert.deepEqual(child.config?.toolchain['npm']?.agents, ['codex']);
+});
+
+test('a fork that moves a provider does not carry the parent\'s environment facts', async () => {
+  const parent = await parentRun('fork drops facts');
+  const n = committedPoint(parent);
+  checkpointWithEnvironment(parent, n);
+
+  await quietly(() =>
+    main([
+      'fork', parent.id, '--at', String(n), '-C', parent.targetDir,
+      '--role', 'implementer:provider=codex', '--no-codex-session',
+    ]),
+  );
+
+  // The probe ran against a contract this child no longer has, and a fork cannot
+  // re-probe. Preflight will write fresh ones; until then the prompts say nothing
+  // about the environment, which is the honest answer.
+  assert.equal(childOf(parent).environment, undefined);
+});
+
+test('a fork with no --role carries the parent\'s environment facts through', async () => {
+  const parent = await parentRun('fork keeps facts');
+  const n = committedPoint(parent);
+  const facts = checkpointWithEnvironment(parent, n);
+
+  const { child } = await fork(parent, n);
+
+  assert.deepEqual(child.environment, facts);
 });

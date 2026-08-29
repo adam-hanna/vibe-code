@@ -2,13 +2,15 @@ import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import {
   DEFAULT_ROLE_PROVIDERS,
+  patchRoles,
   providersForRoles,
   ROLE_NAMES,
   roleRefusals,
   roleSetting,
   rolesFor,
+  tableFor,
 } from '@src/roles.js';
-import type { Role, RoleProviders } from '@src/roles.js';
+import type { Role, RoleProviders, RolePatches, RoleTable } from '@src/roles.js';
 import { setOwn } from '@src/runtime.js';
 import type { AgentProvider, ToolchainContract, ToolRequirement, Phase } from '@src/runtime.js';
 import { EFFORTS } from '@src/types.js';
@@ -267,6 +269,51 @@ function mergeToolchain(base: ToolchainContract, override: unknown): ToolchainCo
 }
 
 /**
+ * The config with per-role CLI settings applied to its role table (#89).
+ *
+ * Returns the config itself when there are none, so the no-flag path allocates
+ * nothing and cannot differ by so much as an object identity. Applied INSIDE
+ * both entry points rather than layered on afterwards, and that placement is the
+ * whole of #89: `resolveRoleScopedAgents` derives `toolchain.<tool>.agents` from
+ * the table, and it skips any tool a *layer* pinned - so handing a resolved
+ * config back as a layer makes every role-scoped tool look like a user pin and
+ * the second pass declines to re-derive. Preflight would then enforce a runtime
+ * against an agent no role holds.
+ */
+function withRolePatches(cfg: Config, roles: RolePatches): Config {
+  if (Object.keys(roles).length === 0) return cfg;
+  return { ...cfg, roles: patchRoles(cfg.roles, roles) };
+}
+
+/**
+ * Whether probed environment facts recorded under `before` still describe
+ * `after` (#89).
+ *
+ * Two things in `EnvironmentFacts` are not restated from config and cannot be
+ * recomputed without re-probing: which provider holds which role - the label
+ * `environmentBlock` prints, via `describedRole` - and which tools were
+ * contracted of each agent, which is the probe's own question. Both move when a
+ * role changes provider or when the contract does, and the contract half catches
+ * the explicit-pin case too, where `resolveRoleScopedAgents` deliberately did
+ * NOT re-derive.
+ *
+ * Deliberately not triggered by a model, effort or timeout change: none of those
+ * is stated in the environment block, and clearing on them would throw away
+ * probed facts whose absence costs three plan rounds of false "no Node runtime"
+ * findings - the failure that block exists to prevent.
+ *
+ * Both sides are resolved, validated configs, so `tableFor` cannot throw here.
+ */
+export function environmentStale(before: Config, after: Config): boolean {
+  const b = tableFor(before.roles);
+  const a = tableFor(after.roles);
+  return (
+    ROLE_NAMES.some((role) => b[role].provider !== a[role].provider) ||
+    JSON.stringify(before.toolchain) !== JSON.stringify(after.toolchain)
+  );
+}
+
+/**
  * Layer CLI overrides onto an already-resolved config.
  *
  * Used on resume, where the base is the config the run started with rather
@@ -280,13 +327,41 @@ function mergeToolchain(base: ToolchainContract, override: unknown): ToolchainCo
  * given now still beat both. This is not specific to any one setting; without
  * it, the next key added breaks resume for every run already on disk.
  */
-export function applyOverrides(base: Config, overrides: ConfigOverrides): Config {
-  const merged = mergeConfig(mergeConfig(DEFAULTS, base), overrides);
+export function applyOverrides(
+  base: Config,
+  overrides: ConfigOverrides,
+  roles: RolePatches = {},
+): Config {
+  const layered = mergeConfig(mergeConfig(DEFAULTS, base), overrides);
+  const merged = withRolePatches(layered, roles);
   // The table is checked before anything derives from it - see loadConfig.
   validateRoles(merged.roles);
-  const cfg = resolveRoleScopedAgents(merged, [base, overrides]);
+  // `base` here is a resolved config, so its `toolchain.node.agents` is always
+  // defined and `pinnedByAnyLayer` reports it as a pin - on EVERY resume. Without
+  // a prior table to compare against, a role patch that moves a provider would
+  // change the table and leave the contract behind it. Computed only when there
+  // are patches, so a resume with no `--role` behaves exactly as it did.
+  const priorTable = Object.keys(roles).length === 0 ? undefined : tableOrUndefined(layered.roles);
+  const cfg = resolveRoleScopedAgents(merged, [base, overrides], priorTable);
   validate(cfg);
   return cfg;
+}
+
+/**
+ * The table this assignment describes, or nothing when it does not describe one.
+ *
+ * `state.config` is the one field `validateStoredState` passes through
+ * unchecked, so a stored table can be malformed - and a stored config that no
+ * longer validates has to be refused by `validateRoles`' message rather than by
+ * `tableFor` throwing three frames earlier, from a comparison that is only an
+ * optimisation. Absent means "cannot say", which leaves every pin standing.
+ */
+function tableOrUndefined(roles: RoleProviders): RoleTable | undefined {
+  try {
+    return tableFor(roles);
+  } catch {
+    return undefined;
+  }
 }
 
 const SECTIONS = [
@@ -328,7 +403,11 @@ export function configDiff(before: Config, after: Config): string[] {
 }
 
 /** Precedence: defaults < vibe.config.json in the target repo < CLI flags. */
-export function loadConfig(targetDir: string, overrides: ConfigOverrides = {}): LoadedConfig {
+export function loadConfig(
+  targetDir: string,
+  overrides: ConfigOverrides = {},
+  roles: RolePatches = {},
+): LoadedConfig {
   const configPath = path.join(targetDir, 'vibe.config.json');
   let fromFile: unknown = {};
 
@@ -341,11 +420,14 @@ export function loadConfig(targetDir: string, overrides: ConfigOverrides = {}): 
     }
   }
 
-  const merged = mergeConfig(mergeConfig(DEFAULTS, fromFile), overrides);
+  const merged = withRolePatches(mergeConfig(mergeConfig(DEFAULTS, fromFile), overrides), roles);
   // Order matters. `resolveRoleScopedAgents` reads the table, so a bad role
   // value checked afterwards would surface as an empty `toolchain.node.agents`
   // - a toolchain error for what is a `roles` mistake.
   validateRoles(merged.roles);
+  // No prior table, unlike `applyOverrides`: these layers are raw file and flag
+  // input, so any `agents` in one is a contract the user wrote by hand and keeps
+  // winning over the role table, exactly as it did before per-role flags.
   const cfg = resolveRoleScopedAgents(merged, [fromFile, overrides]);
   validate(cfg);
   return { ...cfg, configPath: existsSync(configPath) ? configPath : null };
@@ -388,19 +470,52 @@ function pinnedByAnyLayer(layers: readonly unknown[], tool: string): boolean {
  * a stored `state.config` - which always carries concrete agents - authoritative
  * on resume.
  *
+ * `priorTable` is the one exception, and it exists because a *resolved* config
+ * used as a layer is indistinguishable from a hand-written pin: every one of
+ * them carries `agents`, so before #89 a role table could never change after a
+ * run was created and the ambiguity was unreachable. A caller that is about to
+ * change the table passes the table as it was, and a pin equal to what THAT
+ * table would have derived is treated as derived and re-derived. A pin that
+ * differs is a contract the user wrote and is left alone.
+ *
+ * The residual trade, stated rather than hidden: a hand-written pin that happens
+ * to equal the pre-change derived value is re-derived too. That is the safer of
+ * the two errors - the alternative is preflight probing and enforcing a runtime
+ * against an agent no role holds.
+ *
  * Runs after `validateRoles`, so the table is well formed and `agents` is never
  * resolved to an empty list.
  */
-function resolveRoleScopedAgents(cfg: Config, layers: readonly unknown[]): Config {
+function resolveRoleScopedAgents(
+  cfg: Config,
+  layers: readonly unknown[],
+  priorTable?: RoleTable,
+): Config {
   const table = rolesFor(cfg);
   const toolchain: Record<string, ToolRequirement> = { ...cfg.toolchain };
   for (const [tool, wanted] of Object.entries(ROLE_SCOPED_TOOLS)) {
     const requirement = toolchain[tool];
     if (requirement === undefined) continue;
-    if (pinnedByAnyLayer(layers, tool)) continue;
+    if (pinnedByAnyLayer(layers, tool) && !pinWasDerived(requirement, wanted, priorTable)) continue;
     toolchain[tool] = { ...requirement, agents: providersForRoles(wanted, table) };
   }
   return { ...cfg, toolchain };
+}
+
+/**
+ * Whether a pin is one this function itself derived, under the prior table.
+ *
+ * False with no prior table, which is every caller that is not changing the
+ * table - so the pin wins, as it always has. `providersForRoles` emits a fixed
+ * order, so comparing the rendered lists is stable.
+ */
+function pinWasDerived(
+  requirement: ToolRequirement,
+  wanted: readonly Role[],
+  priorTable: RoleTable | undefined,
+): boolean {
+  if (priorTable === undefined) return false;
+  return JSON.stringify(requirement.agents) === JSON.stringify(providersForRoles(wanted, priorTable));
 }
 
 /**
