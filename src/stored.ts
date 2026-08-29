@@ -1095,16 +1095,29 @@ function readArtifactEntry(raw: unknown, at: string, ctx: ReadContext): Artifact
  */
 function readGateArtifacts(field: string, raw: unknown, ctx: ReadContext): GateArtifacts | undefined {
   if (raw === undefined) return undefined;
-  if (!isRecord(raw) || !isString(raw['dir']) || !isCounter(raw['bytes'])) {
+  // `entries` is checked HERE, with the rest of the record, rather than being
+  // handed to `repairedArray`: that helper turns a non-array into `[]`, which
+  // would leave `{dir, bytes, entries: "bad"}` reading as a complete record of a
+  // preservation that copied nothing - a record contradicting a directory that
+  // may hold a whole report. The container is part of what makes this record
+  // one, so it fails with it.
+  if (
+    !isRecord(raw) ||
+    !isString(raw['dir']) ||
+    !isCounter(raw['bytes']) ||
+    !Array.isArray(raw['entries'])
+  ) {
     ctx.repairs.replaced(field, raw, 'nothing');
     return undefined;
   }
+  const unresolved = optionalString(`${field}.unresolved`, raw['unresolved'], ctx);
   return {
     dir: raw['dir'],
     bytes: raw['bytes'],
     entries: repairedArray(`${field}.entries`, raw['entries'], ctx, (entry, at) =>
       readArtifactEntry(entry, at, ctx),
     ),
+    ...(unresolved === undefined ? {} : { unresolved }),
   };
 }
 

@@ -651,6 +651,32 @@ const VIBE_DIR = '.vibe';
  */
 const WINDOWS_DRIVE_RE = /^[A-Za-z]:/;
 const UNC_RE = /^[\\/]{2}/;
+/**
+ * A leading separator of either flavour, refused on every host too.
+ *
+ * `path.isAbsolute('\\x')` is true on win32 and FALSE on POSIX, so without this
+ * the same config is rooted on one host and a directory literally named `\x` on
+ * the other. Same rule as above: what the user may write cannot depend on where
+ * it is read.
+ */
+const LEADING_SEPARATOR_RE = /^[\\/]/;
+
+/**
+ * A segment Windows would canonicalize into a different one.
+ *
+ * The Win32 layer strips trailing dots and spaces from every component, so
+ * `".. "` IS `..` there, and `"foo."` IS `foo`. A `..` check that compares raw
+ * segments therefore passes `foo/.. /secret` straight through while the
+ * filesystem walks it out of the project - which is a containment hole, not a
+ * cosmetic one. Refusing the whole shape on EVERY host is one rule instead of a
+ * canonicalization the rest of the code would then have to agree with, and it
+ * costs only the ability to name a POSIX file with a trailing dot or space.
+ *
+ * The repo's existing answer to the same hole, and the reason this one is
+ * spelled the same way: `assertUsableRunId` refuses a run id ending in a dot or
+ * a space, and `isReportBasename` refuses the same shape one field along.
+ */
+const TRAILING_DOT_OR_SPACE_RE = /[. ]$/;
 
 /**
  * One artifact path's segments, in the form the comparison rules use.
@@ -685,15 +711,29 @@ export function refuseArtifactPath(entry: unknown): string | null {
   if (typeof entry !== 'string' || entry.trim() === '') {
     return 'must be a non-empty path string';
   }
-  if (path.isAbsolute(entry) || WINDOWS_DRIVE_RE.test(entry) || UNC_RE.test(entry)) {
+  if (
+    path.isAbsolute(entry) ||
+    LEADING_SEPARATOR_RE.test(entry) ||
+    WINDOWS_DRIVE_RE.test(entry) ||
+    UNC_RE.test(entry)
+  ) {
     return `"${entry}" is absolute; artifact paths are relative to the project`;
   }
-  const raw = entry.split(/[\\/]+/);
+  const raw = entry.split(/[\\/]+/).filter((s) => s !== '' && s !== '.');
   if (raw.includes('..')) {
     // Refused even where it resolves back inside - `sub/../file` is the same
     // file as `file` and has no reason to be written that way, and one rule
     // that is easy to state beats two that nearly agree.
     return `"${entry}" contains a ".." segment; artifact paths may not walk upwards`;
+  }
+  // AFTER the `..` check, which is exact: `..` itself ends in a dot, and the two
+  // refusals mean different things to whoever reads them.
+  const ambiguous = raw.find((s) => TRAILING_DOT_OR_SPACE_RE.test(s));
+  if (ambiguous !== undefined) {
+    return (
+      `"${entry}" has a segment ending in a dot or space ("${ambiguous}"), which Windows ` +
+      'strips - so the path names something different there than it reads as here'
+    );
   }
   const segments = artifactSegments(entry);
   if (segments.length === 0) {

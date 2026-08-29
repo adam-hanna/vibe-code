@@ -16,7 +16,16 @@ import path from 'node:path';
 import { preserveGateArtifacts } from '@src/artifacts.js';
 import { createRun } from '@src/run.js';
 import type { ArtifactEntryOutcome, GateArtifacts, RunState } from '@src/types.js';
-import { FILE_LINK_SKIP, JUNCTION_SKIP, linkDir, linkFile } from './helpers/links.js';
+import {
+  DIR_SYMLINK_SKIP,
+  FILE_LINK_SKIP,
+  JUNCTION_SKIP,
+  MKLINK_SKIP,
+  linkDir,
+  linkDirSymlink,
+  linkFile,
+  mklinkJunction,
+} from './helpers/links.js';
 
 /**
  * Preserving what a failing gate produced (#62).
@@ -172,15 +181,23 @@ test('every link shape inside the tree is refused, named, and its target left be
   const dir = report(f.cwd);
   const made: string[] = [];
 
-  if (linkDir(f.outside, path.join(dir, 'dir-symlink'))) made.push('dir-symlink');
-  else t.diagnostic(JUNCTION_SKIP);
-  if (linkDir(f.outside, path.join(dir, 'node-junction'))) made.push('node-junction');
-  if (linkFile(path.join(f.outside, 'SECRET.txt'), path.join(dir, 'file-symlink.txt'))) {
-    made.push('file-symlink.txt');
-  } else t.diagnostic(FILE_LINK_SKIP);
+  // Four DISTINCT shapes, each asked for by the call that makes that shape -
+  // not one helper called four times. The whole design rests on one predicate
+  // covering all four, and a test that created the same object twice would be
+  // asserting that claim rather than checking it.
+  const shapes: [string, (target: string, at: string) => boolean, string][] = [
+    ['file-symlink.txt', (t2, at) => linkFile(path.join(t2, 'SECRET.txt'), at), FILE_LINK_SKIP],
+    ['dir-symlink', linkDirSymlink, DIR_SYMLINK_SKIP],
+    ['node-junction', linkDir, JUNCTION_SKIP],
+    ['mklink-j', mklinkJunction, MKLINK_SKIP],
+  ];
+  for (const [name, make, skip] of shapes) {
+    if (make(f.outside, path.join(dir, name))) made.push(name);
+    else t.diagnostic(`${name}: ${skip}`);
+  }
 
   if (made.length === 0) {
-    t.skip(`${JUNCTION_SKIP}; ${FILE_LINK_SKIP}`);
+    t.skip('no link shape could be created on this platform');
     return;
   }
 
@@ -201,20 +218,33 @@ test('every link shape inside the tree is refused, named, and its target left be
 });
 
 test('a junction in the tree does not put its target INTO the destination', (t) => {
-  const f = fixture();
-  const dir = report(f.cwd);
-  if (!linkDir(f.outside, path.join(dir, 'trace-junction'))) {
-    t.skip(JUNCTION_SKIP);
-    return;
+  // Both junction spellings: the Node one and the one a user types. They were
+  // measured to be the same reparse point, and this is where that is checked
+  // rather than assumed.
+  let ran = 0;
+  for (const [name, make, skip] of [
+    ['node-junction', linkDir, JUNCTION_SKIP],
+    ['mklink-j', mklinkJunction, MKLINK_SKIP],
+  ] as const) {
+    const f = fixture();
+    const dir = report(f.cwd);
+    if (!make(f.outside, path.join(dir, name))) {
+      t.diagnostic(`${name}: ${skip}`);
+      continue;
+    }
+    ran += 1;
+
+    preserve(f, ['report']);
+
+    // The regression the measurement found: cpSync FOLLOWS a junction and writes
+    // the target's bytes in. `SECRET.txt` from outside the project landed inside
+    // the archive, and neither `dereference` nor `verbatimSymlinks` prevented it.
+    // Asserted on content, because a followed junction leaves no entry to be
+    // absent - only the bytes it copied.
+    assert.equal(existsSync(path.join(roundDir(f), 'report', name, 'SECRET.txt')), false, name);
+    assert.equal(sentinelLeaked(f), false, name);
   }
-
-  preserve(f, ['report']);
-
-  // The regression the measurement found: cpSync follows a junction and writes
-  // the target's bytes in. `SECRET.txt` from outside the project landed inside
-  // the archive, and neither `dereference` nor `verbatimSymlinks` prevented it.
-  assert.equal(existsSync(path.join(roundDir(f), 'report', 'trace-junction', 'SECRET.txt')), false);
-  assert.equal(sentinelLeaked(f), false);
+  if (ran === 0) t.skip(JUNCTION_SKIP);
 });
 
 test('a configured path that is itself a link is refused, and copies nothing', (t) => {
@@ -233,21 +263,29 @@ test('a configured path that is itself a link is refused, and copies nothing', (
 });
 
 test('a LINKED ANCESTOR is refused, even though the final component is an ordinary file', (t) => {
-  // The case a lexical containment check cannot see: `reports` is a junction on
-  // Windows and a symlink on POSIX - `linkDir` is both - so
+  // The case a lexical containment check cannot see: `reports` is a link, so
   // `reports/SECRET.txt` lstats as an ordinary file and cpSync would copy
-  // straight through the link.
-  const f = fixture();
-  if (!linkDir(f.outside, path.join(f.cwd, 'reports'))) {
-    t.skip(JUNCTION_SKIP);
-    return;
+  // straight through it. Asked of a directory symlink AND a junction, which are
+  // different objects on Windows.
+  let ran = 0;
+  for (const [shape, make, skip] of [
+    ['symlink', linkDirSymlink, DIR_SYMLINK_SKIP],
+    ['junction', linkDir, JUNCTION_SKIP],
+  ] as const) {
+    const f = fixture();
+    if (!make(f.outside, path.join(f.cwd, 'reports'))) {
+      t.diagnostic(`${shape}: ${skip}`);
+      continue;
+    }
+    ran += 1;
+
+    const result = preserve(f, ['reports/SECRET.txt']);
+
+    assert.equal(entry(result, 'reports/SECRET.txt').status, 'refused', shape);
+    assert.match(entry(result, 'reports/SECRET.txt').reason ?? '', /link/);
+    assert.equal(sentinelLeaked(f), false, shape);
   }
-
-  const result = preserve(f, ['reports/SECRET.txt']);
-
-  assert.equal(entry(result, 'reports/SECRET.txt').status, 'refused');
-  assert.match(entry(result, 'reports/SECRET.txt').reason ?? '', /link/);
-  assert.equal(sentinelLeaked(f), false);
+  if (ran === 0) t.skip(`${DIR_SYMLINK_SKIP}; ${JUNCTION_SKIP}`);
 });
 
 // ---- the destination -------------------------------------------------------
@@ -310,6 +348,22 @@ test('copy time refuses exactly what config validation refuses', () => {
   assert.equal(entry(result, 'report/../report/index.html').status, 'refused');
   assert.match(entry(result, 'report/../report/index.html').reason ?? '', /\.\./);
   // And a good entry beside them still copies.
+  assert.equal(entry(result, 'report').status, 'copied');
+});
+
+test('a segment Windows would canonicalize away is refused before it is walked', () => {
+  const f = fixture();
+  report(f.cwd);
+
+  // `.. ` is `..` on Windows, so this walks out of the project there while
+  // reading as an ordinary relative path everywhere. Refused at copy time by
+  // the same `refuseArtifactPath` config validation calls, so the two cannot
+  // disagree about it.
+  const result = preserve(f, ['report/.. /.. /SECRET.txt', 'report. /x', 'report']);
+
+  assert.equal(entry(result, 'report/.. /.. /SECRET.txt').status, 'refused');
+  assert.equal(entry(result, 'report. /x').status, 'refused');
+  assert.equal(sentinelLeaked(f), false);
   assert.equal(entry(result, 'report').status, 'copied');
 });
 
@@ -528,9 +582,32 @@ test('two backups are left alone rather than one being chosen', () => {
   const result = preserve(f, ['report']);
 
   // Two backups mean two interrupted attempts and no fact about which is
-  // current; picking one would fabricate that fact. Both stay, under names that
-  // say what they are, and the new round is still installed.
+  // current; picking one to RESTORE would fabricate that fact. Both stay, under
+  // names that say what they are, and the new round is still installed.
   assert.equal(entry(result, 'report').status, 'copied');
   assert.equal(existsSync(path.join(gateDir, 'round-1.superseded-1', 'report', 'index.html')), true);
   assert.equal(existsSync(path.join(gateDir, 'round-1.superseded-2', 'other.txt')), true);
+  // And they are NAMED in the record: a directory left beside the round that
+  // nothing explains is a puzzle for whoever opens the run.
+  assert.match(result.unresolved ?? '', /round-1\.superseded-1/);
+  assert.match(result.unresolved ?? '', /round-1\.superseded-2/);
+
+  // Deterministically cleared next time: the round is installed now, so every
+  // backup beside it is stale whatever their number, and deleting is a
+  // different question from restoring.
+  const again = preserve(f, ['report']);
+  assert.equal(again.unresolved, undefined);
+  assert.deepEqual(readdirSync(gateDir), ['round-1']);
+});
+
+test('a clean preservation records no unresolved housekeeping', () => {
+  const f = fixture();
+  report(f.cwd);
+
+  const result = preserve(f, ['report']);
+
+  // Absent, not an empty string: absence is what lets a reader take "the gate
+  // directory holds the rounds and nothing else" from the record alone.
+  assert.equal(result.unresolved, undefined);
+  assert.deepEqual(readdirSync(path.join(f.state.dir, 'artifacts', 'qa')), ['round-1']);
 });

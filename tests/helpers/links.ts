@@ -1,4 +1,5 @@
-import { symlinkSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, symlinkSync } from 'node:fs';
 
 /**
  * Making the link shapes #53 and #62 are about, on either platform.
@@ -22,7 +23,13 @@ export const FILE_LINK_SKIP =
  * rethrown: a silent pass on a machine that cannot make links looks exactly
  * like a passing test, which is the failure mode that matters here.
  */
-export function tryLink(target: string, at: string, type: 'junction' | 'file'): boolean {
+export const DIR_SYMLINK_SKIP =
+  'this platform refuses to create DIRECTORY symlinks (EPERM/EACCES) - which on Windows is a ' +
+  'different privilege from a junction, so the two are asked for separately';
+export const MKLINK_SKIP =
+  'mklink /J is a Windows shell builtin; a Node junction is the same reparse point everywhere else';
+
+export function tryLink(target: string, at: string, type: 'junction' | 'file' | 'dir'): boolean {
   try {
     symlinkSync(target, at, type);
     return true;
@@ -49,3 +56,37 @@ export const linkDir = (target: string, at: string): boolean => tryLink(target, 
  * ran".
  */
 export const linkFile = (target: string, at: string): boolean => tryLink(target, at, 'file');
+
+/**
+ * A directory SYMLINK, which on Windows is a different object from a junction
+ * and needs a different privilege - Developer Mode or Administrator, where a
+ * junction needs neither. Asked for separately so "junctions work here" is never
+ * mistaken for "the directory-symlink shape ran". On POSIX it is the same
+ * ordinary symlink `linkDir` produces, which is the point: one predicate has to
+ * cover both.
+ */
+export const linkDirSymlink = (target: string, at: string): boolean => tryLink(target, at, 'dir');
+
+/**
+ * A junction made by `mklink /J` rather than by Node.
+ *
+ * Node's `'junction'` and the shell's `mklink /J` were measured to produce the
+ * same reparse point - `lstat(...).isSymbolicLink()` is true of both, `statSync`
+ * sees through both, and `cpSync` follows both - but that IS the measurement
+ * behind #53 and #62, so the shape the user actually types is created by the
+ * command the user actually types rather than assumed equivalent.
+ *
+ * Windows only: there is no such command elsewhere, and `linkDir` already covers
+ * the POSIX shape.
+ */
+export function mklinkJunction(target: string, at: string): boolean {
+  if (process.platform !== 'win32') return false;
+  try {
+    execFileSync('cmd', ['/d', '/c', 'mklink', '/J', at, target], { stdio: 'ignore' });
+    return existsSync(at);
+  } catch {
+    // Only a refusal to create it, like `tryLink`: nothing else about this call
+    // can fail in a way a test should pass over.
+    return false;
+  }
+}

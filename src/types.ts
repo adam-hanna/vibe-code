@@ -794,6 +794,19 @@ export interface GateArtifacts {
   entries: ArtifactEntryOutcome[];
   /** Bytes actually written. The sum of the entries that were copied. */
   bytes: number;
+  /**
+   * Housekeeping this attempt could not finish, named.
+   *
+   * Deleting the superseded round after the new one is installed is the last
+   * step and the only one that can fail without costing anything - the snapshot
+   * is already in place, so reporting the entries as failed would make the
+   * record contradict a filesystem holding exactly what was asked for. But a
+   * `round-1.superseded-*` directory nobody explained is a puzzle for whoever
+   * opens the run, so what is left over is said here instead of only in a log
+   * line that has long since scrolled away. Absent means the directory holds
+   * exactly the round and nothing else.
+   */
+  unresolved?: string;
 }
 
 /**

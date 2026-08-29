@@ -1,4 +1,12 @@
-import { cpSync, lstatSync, mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs';
+import {
+  cpSync,
+  lstatSync,
+  mkdirSync,
+  readdirSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+} from 'node:fs';
 import path from 'node:path';
 import { refuseArtifactPath } from '@src/config.js';
 import * as log from '@src/log.js';
@@ -67,6 +75,37 @@ function componentOf(p: string): 'ok' | 'missing' | 'refused' {
   const linkage = linkageOf(p);
   if (linkage === 'missing') return 'missing';
   return linkage === 'plain' ? 'ok' : 'refused';
+}
+
+/**
+ * Whether a path the walk reached is still inside the tree it started from, or
+ * why it is not.
+ *
+ * The belt behind the lexical rule and the component walk, and it asks the
+ * filesystem rather than the string: `realpath` applies the host's own
+ * canonicalization, which is the step a lexical check cannot reproduce - Windows
+ * strips trailing dots and spaces from every component, so a path that reads as
+ * inside can resolve outside. Anything that cannot be resolved is refused: an
+ * entry whose location cannot be established cannot be shown to be contained.
+ *
+ * Case-insensitive on win32, where two spellings of one directory are one
+ * directory, and case-sensitive elsewhere, where they are two.
+ */
+function outsideOf(base: string, candidate: string): string | null {
+  let realBase: string;
+  let realCandidate: string;
+  try {
+    realBase = realpathSync.native(base);
+    realCandidate = realpathSync.native(candidate);
+  } catch (err: unknown) {
+    return `could not be resolved (${reason(err)})`;
+  }
+  const fold = (p: string): string => (process.platform === 'win32' ? p.toLowerCase() : p);
+  const root = fold(realBase);
+  const at = fold(realCandidate);
+  const prefix = root.endsWith(path.sep) ? root : root + path.sep;
+  if (at === root || at.startsWith(prefix)) return null;
+  return `resolves to ${realCandidate}, which is outside ${realBase}`;
 }
 
 /**
@@ -188,14 +227,16 @@ function measure(root: string): Measurement {
 
 const reason = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
-/** Best-effort delete of something this module created. Never throws. */
-function discard(p: string): void {
+/**
+ * Best-effort delete of something this module created. Never throws; says
+ * whether the thing is gone, so a caller that has to report leftovers can.
+ */
+function discard(p: string): boolean {
   try {
     rmSync(p, { recursive: true, force: true });
+    return true;
   } catch {
-    // Nothing to do and nothing to report: the caller is already handling a
-    // failure, and a temp directory that outlives it is cleaned up by the next
-    // attempt's staging sweep.
+    return false;
   }
 }
 
@@ -213,42 +254,65 @@ const STAGING = '.staging-';
  * previous evidence. Renaming it back is the only way that evidence survives.
  *
  * More than one backup means more than one interrupted attempt and no fact about
- * which is current, so nothing is touched and nothing is guessed - both stay on
- * disk under names that say what they are.
+ * which is current, so the RESTORE is not guessed at - both stay on disk under
+ * names that say what they are, and the caller names them in the record rather
+ * than leaving a reader to find them.
+ *
+ * Deleting is a different question from restoring and is answered separately:
+ * once `round-N` is installed it is authoritative, so every backup beside it is
+ * stale whatever their number, and they all go. That is deterministic on the
+ * next attempt rather than accumulating.
  */
-function recoverInterrupted(gateDir: string, round: number): void {
+function recoverInterrupted(gateDir: string, round: number): string[] {
   const target = path.join(gateDir, `round-${round}`);
   const prefix = `round-${round}${SUPERSEDED}`;
-  const backups = readdirSync(gateDir, { withFileTypes: true })
+  const matching = readdirSync(gateDir, { withFileTypes: true })
     .filter((e) => e.name.startsWith(prefix))
-    .map((e) => path.join(gateDir, e.name))
-    .filter((p) => entryKind(p) === 'directory');
+    .map((e) => path.join(gateDir, e.name));
+  const backups = matching.filter((p) => entryKind(p) === 'directory');
+  // Named, not silently filtered: a matching entry that is a link or that lstat
+  // could not classify is exactly the thing a reader has to be told about,
+  // since nothing here will touch it and nothing else will explain it.
+  const unclassifiable = matching.filter((p) => entryKind(p) !== 'directory');
 
   const installed = entryKind(target);
   if (installed === 'missing' && backups.length === 1 && backups[0] !== undefined) {
     renameSync(backups[0], target);
     log.warn(`recovered an interrupted artifact swap: restored ${path.basename(backups[0])}`);
-    return;
+    return unclassifiable.map((p) => path.basename(p));
   }
-  // The install completed and the backup is simply left over - or there are
-  // several and none may be chosen. Only the unambiguous case is cleaned up.
-  if (installed === 'directory' && backups.length === 1 && backups[0] !== undefined) {
-    discard(backups[0]);
+
+  const left = [...unclassifiable];
+  if (installed === 'directory') {
+    for (const backup of backups) {
+      if (!discard(backup)) left.push(backup);
+    }
+  } else if (backups.length > 1) {
+    // The round is missing and there is more than one candidate. Restoring one
+    // would fabricate the fact that it is the current one.
+    left.push(...backups);
   }
+  return left.map((p) => path.basename(p));
 }
 
-/** Remove staging directories a previous attempt left behind. */
-function clearStaging(gateDir: string, round: number): void {
+/**
+ * Remove staging directories a previous attempt left behind, naming any that
+ * will not go.
+ */
+function clearStaging(gateDir: string, round: number): string[] {
   // The trailing hyphen matters: without it, round 1's sweep would also match
   // `round-10`'s staging.
   const prefix = `${STAGING}round-${round}-`;
+  const left: string[] = [];
   for (const child of readdirSync(gateDir, { withFileTypes: true })) {
     if (!child.name.startsWith(prefix)) continue;
     const at = path.join(gateDir, child.name);
     // Only a plain directory is removed. Anything else there was not written by
-    // this module, and this module deletes nothing it did not create.
-    if (entryKind(at) === 'directory') discard(at);
+    // this module, and this module deletes nothing it did not create - but it is
+    // still a leftover, and the record says so.
+    if (entryKind(at) !== 'directory' || !discard(at)) left.push(child.name);
   }
+  return left;
 }
 
 /**
@@ -264,7 +328,7 @@ function clearStaging(gateDir: string, round: number): void {
  * module deletes nothing it did not create, and an unexpected file there is a
  * fact for a human.
  */
-function install(staging: string, target: string, stamp: number): void {
+function install(staging: string, target: string, stamp: number): string[] {
   const existing = entryKind(target);
   if (existing === 'link' || existing === 'unknown') {
     throw new Error(`${path.basename(target)} is a link, or could not be classified`);
@@ -276,7 +340,7 @@ function install(staging: string, target: string, stamp: number): void {
   }
   if (existing === 'missing') {
     renameSync(staging, target);
-    return;
+    return [];
   }
 
   // A name nothing else holds: `recoverInterrupted` refuses to choose between
@@ -304,14 +368,13 @@ function install(staging: string, target: string, stamp: number): void {
   // the failure path above. The snapshot is already in place, so a cleanup that
   // fails has not cost anything: reporting the entries as failed here would make
   // state.json contradict a filesystem that holds exactly what was asked for.
-  // The next round's `recoverInterrupted` removes the leftover.
-  try {
-    rmSync(backup, { recursive: true, force: true });
-  } catch (err: unknown) {
-    log.warn(
-      `kept the superseded artifact round at ${path.basename(backup)}: ${reason(err)}`,
-    );
-  }
+  // What it does cost is a directory nobody can explain, so the name is returned
+  // and ends up in the record - and the next attempt's `recoverInterrupted`
+  // deletes it, since a round that is installed makes every backup beside it
+  // stale.
+  if (discard(backup)) return [];
+  log.warn(`kept the superseded artifact round at ${path.basename(backup)}`);
+  return [path.basename(backup)];
 }
 
 /** Every entry reported as failed for one shared reason. Used when nothing could run. */
@@ -349,8 +412,7 @@ export function preserveGateArtifacts(
 
   try {
     const gateDir = prepareGateDir(state, gate);
-    recoverInterrupted(gateDir, round);
-    clearStaging(gateDir, round);
+    const leftovers = [...recoverInterrupted(gateDir, round), ...clearStaging(gateDir, round)];
 
     const staging = path.join(gateDir, `${STAGING}round-${round}-${stamp}`);
     ensureDirectory(staging);
@@ -372,7 +434,7 @@ export function preserveGateArtifacts(
     });
 
     try {
-      install(staging, path.join(gateDir, `round-${round}`), stamp);
+      leftovers.push(...install(staging, path.join(gateDir, `round-${round}`), stamp));
     } catch (err: unknown) {
       discard(staging);
       // Nothing landed, so nothing may be reported as landed - a `copied` entry
@@ -380,7 +442,20 @@ export function preserveGateArtifacts(
       return allFailed(dir, paths, `the artifacts could not be installed: ${reason(err)}`);
     }
 
-    return { dir, entries, bytes };
+    return {
+      dir,
+      entries,
+      bytes,
+      // Present only when something is actually there, so a reader can take its
+      // absence as "the gate directory holds the rounds and nothing else".
+      ...(leftovers.length > 0
+        ? {
+            unresolved:
+              `left beside the round and not removed: ${leftovers.join(', ')} - the next ` +
+              'preservation for this round clears what it can',
+          }
+        : {}),
+    };
   } catch (err: unknown) {
     return allFailed(dir, paths, reason(err));
   }
@@ -422,6 +497,12 @@ function copyOne(
       };
     }
 
+    // The third belt, and the only one that asks the host to canonicalize:
+    // the lexical rule and the component walk both reason about the path as
+    // written, and Windows does not.
+    const escaped = outsideOf(root, descent.path);
+    if (escaped !== null) return { path: entry, status: 'refused', reason: `"${entry}" ${escaped}` };
+
     const measured = measure(descent.path);
     if (maxBytes !== null && measured.bytes > maxBytes) {
       // Nothing at all, never a prefix of the tree: a truncated report that
@@ -450,6 +531,11 @@ function copyOne(
     const segments = entry.split(/[\\/]+/).filter((s) => s !== '' && s !== '.');
     const destination = path.join(staging, ...segments);
     mkdirParents(staging, path.dirname(destination));
+    // The same belt on the way out. The segments here are the ones the entry was
+    // written with, so anything the host canonicalizes differently would place
+    // the copy outside the tree that is about to be installed.
+    const strayed = outsideOf(staging, path.dirname(destination));
+    if (strayed !== null) throw new Error(`the destination for "${entry}" ${strayed}`);
     renameSync(partial, destination);
 
     return {

@@ -103,9 +103,21 @@ test('an artifacts entry that cannot safely be copied is refused, by name', () =
   assert.throws(refused('/tmp/report'), { message: /verify\.gates\[0\]\.artifacts\[0\].*absolute/ });
   assert.throws(refused('C:\\reports'), { message: /"C:\\reports" is absolute/ });
   assert.throws(refused('\\\\server\\share'), { message: /is absolute/ });
+  // A leading separator of either flavour, on every host: `path.isAbsolute` says
+  // true for `\x` on win32 and false on POSIX, so without the extra check the
+  // same config is rooted on one host and a directory named `\x` on the other.
+  assert.throws(refused('\\reports'), { message: /is absolute/ });
   // `..` even where it resolves back inside: one rule that is easy to state.
   assert.throws(refused('../outside'), { message: /"\.\.\/outside" contains a "\.\." segment/ });
   assert.throws(refused('sub/../file'), { message: /contains a "\.\." segment/ });
+  // The Windows canonicalization hole: the Win32 layer strips trailing dots and
+  // spaces, so `.. ` IS `..` there and an exact-match `..` check walks straight
+  // past `foo/.. /secret`. Refused on every host, since a config is written on
+  // one machine and run on another.
+  assert.throws(refused('foo/.. /secret'), { message: /ending in a dot or space/ });
+  assert.throws(refused('foo/... /secret'), { message: /ending in a dot or space/ });
+  assert.throws(refused('report./index.html'), { message: /ending in a dot or space/ });
+  assert.throws(refused('report /index.html'), { message: /ending in a dot or space/ });
   // The project root itself, which would copy the whole tree into itself.
   assert.throws(refused('.'), { message: /names the project root/ });
   assert.throws(refused('./'), { message: /names the project root/ });
@@ -128,10 +140,15 @@ test('the .vibe refusal follows the host filesystem, case included', (t) => {
     t.skip('.VIBE is a different directory from .vibe on this platform, and must stay allowed');
     return;
   }
-  // Windows folds case and strips trailing dots and spaces, so all three of
-  // these NAME the run directory and must not become a way into it.
+  // Windows folds case, so `.VIBE` NAMES the run directory and must not become
+  // a way into it.
   assert.throws(spelled('.VIBE/x'), { message: /is under \.vibe/ });
-  assert.throws(spelled('.vibe./x'), { message: /is under \.vibe/ });
+  // `.vibe.` names it too, by the trailing-dot stripping - and that shape is
+  // refused one rule earlier, on every host, precisely because the stripping
+  // makes the written path and the walked path two different things. Different
+  // message, same refusal, and the general rule is the one worth stating.
+  assert.throws(spelled('.vibe./x'), { message: /ending in a dot or space/ });
+  assert.throws(spelled('.vibe /x'), { message: /ending in a dot or space/ });
 });
 
 test('overlapping artifact paths are refused, naming both', () => {
@@ -151,6 +168,19 @@ test('overlapping artifact paths are refused, naming both', () => {
     withVerify({ gates: [{ name: 'qa', command: 'x', artifacts: ['a', 'a/b/c'] }] }),
     { message: /counted twice/ },
   );
+});
+
+test('on Windows two spellings of one directory overlap; elsewhere they are two', (t) => {
+  const pair = withVerify({ gates: [{ name: 'qa', command: 'x', artifacts: ['A', 'a'] }] });
+  if (process.platform === 'win32') {
+    // One directory under two names: copying both would copy it twice.
+    assert.throws(pair, { message: /"A" and "a" overlap/ });
+    return;
+  }
+  // And genuinely two directories here, so refusing them would refuse a legal
+  // configuration - the same reason the `.vibe` check is not folded off win32.
+  t.diagnostic('A and a are distinct directories on this platform');
+  assert.doesNotThrow(pair);
 });
 
 test('any other unknown key inside a gate is refused by name', () => {
