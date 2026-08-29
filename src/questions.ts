@@ -40,10 +40,19 @@ export const normalize = (s: string): string => s.toLowerCase().replace(/\W+/g, 
  * Not a guessed number. Every `plan-<n>.json` in this repository's 22 archived
  * runs was read on 2026-08-28 against `develop` at `45cda5e` - 115 open
  * questions, 335 within-run pairs - and each pair scored by `similarity` below.
- * The band from 0.4 to 0.8 held **nothing at all**: 247 pairs sat at or below
- * 0.4, 88 at or above 0.8, and the 8 in the 0.81-0.90 band were every one a
- * rephrasing on inspection. 0.6 is the midpoint of that empty region, ~0.2
- * clear of the nearest pair either side.
+ * 247 pairs sat at or below 0.4, 88 at or above 0.8, and the 8 in the 0.81-0.90
+ * band were every one a rephrasing on inspection. Nothing at all fell between.
+ *
+ * **The gap is not literally empty, and the run that wrote this file proved it.**
+ * That run asked one question twice - under the old build, so it was not
+ * suppressed - and the pair scores **0.708**. It is a genuine rephrasing, out of
+ * sample, and it lands inside the band the census found bare. What survives is
+ * the claim that matters and it survives *strengthened*: the highest-scoring
+ * pair that is NOT the same question is 0.4 across the census and 0.219 within
+ * that run, while the lowest-scoring pair that IS the same question is now
+ * 0.708. 0.6 separates them with ~0.2 of margin on one side and ~0.1 on the
+ * other. Do not restate the band as empty; state the two extremes, which are
+ * what the number rests on.
  *
  * The number belongs to *this* metric. A different similarity measure - cosine,
  * edit distance, a different tokenisation - has not been measured and cannot
