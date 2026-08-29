@@ -199,6 +199,45 @@ test('the suppression is on disk even when the run stops rather than finishing',
   assert.ok(read(state, REPHRASED).includes(W2));
 });
 
+test('a re-punctuated repeat of a suppressed wording is one decision, not two', async () => {
+  const state = runState();
+  // The guard decides identity with `normalize`. If the record deduped on raw
+  // text instead, a planner that moved a comma would put a second line in
+  // REPHRASED.md for a suppression that already happened - and "no second
+  // entry" would be a property of the planner's formatting rather than of the
+  // rule.
+  const shouted = `  ${W2.toUpperCase()}  `;
+  let critiques = 0;
+
+  await orchestrate(
+    state,
+    config(),
+    false,
+    agents(
+      {
+        claude: (label) =>
+          label === 'plan'
+            ? planFixture({ open_questions: [questionFixture({ question: W1 })] })
+            : label === 'revise-1'
+              ? planFixture({ open_questions: [questionFixture({ question: W2 })] })
+              : label === 'revise-2'
+                ? planFixture({ open_questions: [questionFixture({ question: shouted })] })
+                : planFixture(),
+        codex: (label, options) => {
+          if (label.startsWith('answers-')) return answering()(label, options);
+          critiques += 1;
+          return report(critiques === 1 ? BLOCKING.slice(0, 1) : []);
+        },
+      },
+      [],
+    ),
+  );
+
+  const suppressed = state.suppressedQuestions ?? [];
+  assert.equal(suppressed.length, 1);
+  assert.equal(suppressed[0]?.question, W2, 'the wording the run actually acted on is kept');
+});
+
 test('a verbatim repeat is still suppressed in silence', async () => {
   const state = runState();
   const calls: string[] = [];
@@ -308,8 +347,29 @@ test('a deferred question a human answered in other words is not called an assum
   const file = escalationFile(state, stop);
   assert.ok(readFileSync(file, 'utf8').includes(W4));
 
-  answerNeedsInput(state, () => 'Only in the run log.');
-  await finishAndReport(state);
+  const transcript = at(state, 'audit.log');
+  log.attachTranscript(transcript);
+  let announced = '';
+  try {
+    // The disposal happens here, on the resume that reads the answer - not at
+    // the end of a run that may never come. So this is where it has to be said.
+    answerNeedsInput(state, () => 'Only in the run log.');
+    announced = readFileSync(transcript, 'utf8');
+    await finishAndReport(state);
+  } finally {
+    log.attachTranscript(at(state, 'transcript.log'));
+  }
+
+  const warning = /WARN {2}Not calling this an assumption[^\n]*/;
+  const line = warning.exec(announced)?.[0] ?? '';
+  assert.notEqual(line, '', 'the fuzzy disposal was announced before the run finished');
+  assert.ok(line.includes(W1), 'the warning names the deferred wording');
+  assert.ok(line.includes(W4), 'and the wording you answered');
+  assert.ok(line.includes('0.81'), 'and the score it matched on');
+  // Announced once, by whichever pass recorded it. `reportDeferred` runs the
+  // same reconciliation later and must not repeat the line.
+  const all = [...readFileSync(transcript, 'utf8').matchAll(/WARN {2}Not calling this/g)];
+  assert.equal(all.length, 1, 'one warning per disposal, however many passes see it');
 
   assert.equal(has(state, ASSUMED), false, 'the only entry was answered, so there is no file');
   const resolved = state.resolvedByHuman ?? [];

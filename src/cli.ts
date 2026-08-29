@@ -1614,21 +1614,17 @@ function reportReviewCoverage(state: RunState): void {
  * `create` because this is the one caller that *authors* the file. The repair
  * callers only bring an existing one back into line.
  *
+ * The disposals are not warned about here: `reconcileAssumed` announces each
+ * one on the pass that records it, which is usually the resume that read the
+ * answer rather than this one, and warning again forty minutes later would
+ * double every line. What is left to say is what the file now covers.
+ *
  * Exported for the reason `parseHumanAnswers` is: `execute` cannot be reached
  * from a test without spawning real agents.
  */
 export function reportDeferred(state: RunState): void {
   if (state.deferredQuestions.length === 0) return;
-  const { remaining, resolved, file } = reconcileAssumed(state, { create: true });
-
-  for (const r of resolved) {
-    log.warn(
-      `Not calling this an assumption - you answered what the run judged to be the same ` +
-        `question (${r.score.toFixed(2)}): ${r.question}`,
-    );
-    log.info(`  You answered: ${r.answered}`);
-    log.info('  See REPHRASED.md. If those are two different questions, that is a defect.');
-  }
+  const { remaining, file } = reconcileAssumed(state, { create: true });
 
   if (remaining.length === 0 || file === null) return;
 

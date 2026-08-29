@@ -208,13 +208,20 @@ export function reconcileRephrased(state: RunState): void {
  * Record a re-ask the guard suppressed, and publish it.
  *
  * The pair is the identity: the same wording matched against the same earlier
- * key is one decision however many rounds repeat it. The artifact is rewritten
- * even when the pair is already recorded, so a file lost to a kill is restored
- * by the next suppression as well as by the next resume.
+ * key is one decision however many rounds repeat it. "The same wording" by the
+ * rule the guard itself uses - `isSameQuestion`, not raw equality. A planner
+ * that re-asks its rephrasing with a comma moved has not made a second
+ * decision, and recording it twice would put two lines in `REPHRASED.md` for
+ * one suppression. The first verbatim wording is the one kept, because it is
+ * the one the run acted on.
+ *
+ * The artifact is rewritten even when the pair is already recorded, so a file
+ * lost to a kill is restored by the next suppression as well as by the next
+ * resume.
  */
 export function recordSuppressed(state: RunState, question: string, near: Rephrase): void {
   const known = suppressions(state).some(
-    (s) => s.question === question && s.matched === near.candidate,
+    (s) => isSameQuestion(s.question, question) && isSameQuestion(s.matched, near.candidate),
   );
   if (!known) {
     state.suppressedQuestions = [
@@ -231,8 +238,17 @@ export function recordSuppressed(state: RunState, question: string, near: Rephra
 export interface DeferredOutcome {
   /** Deferred questions no human answer disposed of - what `ASSUMED.md` says. */
   remaining: DeferredQuestion[];
-  /** Fuzzy disposals recorded this call, in the order they were found. */
+  /** Every fuzzy disposal in force, whichever pass first found it. */
   resolved: ResolvedQuestion[];
+  /**
+   * The subset this call recorded for the first time, and warned about.
+   *
+   * The warning belongs to the moment the decision is taken, not to the end of
+   * a run that may never come - so it is emitted here rather than by the
+   * reporter, and a second pass over the same state stays quiet. A caller that
+   * wants to say more about the disposals reads this rather than warning again.
+   */
+  announced: ResolvedQuestion[];
   /** Where `ASSUMED.md` was written, or null when there is none to write. */
   file: string | null;
 }
@@ -254,12 +270,18 @@ export interface DeferredOutcome {
  * Matching is exact-then-fuzzy for the reason §4 of the brief gives: in the run
  * that motivated this the human answered the *fourth* wording of a question
  * whose first wording is the one sitting in `ASSUMED.md`.
+ *
+ * A fuzzy disposal is announced here, on the pass that first records it, and
+ * that is deliberate. This runs before preflight and at the top of every
+ * `orchestrate` pass; the run may then exit at the preflight gate or stop for
+ * input and never reach the reporter, and an entry that left `ASSUMED.md` on
+ * the strength of a similarity score must not be able to leave in silence.
  */
 export function reconcileAssumed(
   state: RunState,
   options: { create?: boolean } = {},
 ): DeferredOutcome {
-  const outcome: DeferredOutcome = { remaining: [], resolved: [], file: null };
+  const outcome: DeferredOutcome = { remaining: [], resolved: [], announced: [], file: null };
   if (state.deferredQuestions.length === 0) return outcome;
 
   const answered = state.humanAnswered ?? [];
@@ -274,12 +296,29 @@ export function reconcileAssumed(
     outcome.resolved.push({ question: q.question, answered: near.candidate, score: near.score });
   }
 
+  // By question identity, not by raw text, for the reason `recordSuppressed`
+  // dedupes that way: the same disposal reached through a differently
+  // punctuated wording is still one disposal.
   const fresh = outcome.resolved.filter(
-    (r) => !resolutions(state).some((s) => s.question === r.question && s.answered === r.answered),
+    (r) =>
+      !resolutions(state).some(
+        (s) => isSameQuestion(s.question, r.question) && isSameQuestion(s.answered, r.answered),
+      ),
   );
   if (fresh.length > 0) {
     state.resolvedByHuman = [...resolutions(state), ...fresh];
     saveState(state);
+    outcome.announced = fresh;
+    for (const r of fresh) {
+      // One line, carrying both wordings and the score: this is the whole
+      // audit a human gets at the moment the entry leaves ASSUMED.md, and it
+      // has to stand on its own wherever the run stops afterwards.
+      log.warn(
+        `Not calling this an assumption - you answered what the run judged to be the same ` +
+          `question (${pct(r.score)}). Deferred: "${r.question}" / you answered: "${r.answered}". ` +
+          `See ${REPHRASED_FILE}; if those are two different questions, that is a defect.`,
+      );
+    }
   }
   // Every disposal is auditable, not just the first pass that found it: the
   // entry is gone from ASSUMED.md and this file is where it says why.
@@ -318,16 +357,13 @@ function renderAssumed(state: RunState, remaining: readonly DeferredQuestion[]):
  * The repair call, for every entry point that is not the end of a run.
  *
  * Silent unless something moved: a resume that changes nothing about the record
- * says nothing about it.
+ * says nothing about it, and `reconcileAssumed` has already warned about
+ * anything it disposed of.
  */
 export function reconcileQuestionRecords(state: RunState): void {
   reconcileRephrased(state);
-  const before = resolutions(state).length;
   const outcome = reconcileAssumed(state);
-  if (resolutions(state).length > before) {
-    log.detail(
-      `${outcome.resolved.length} deferred question(s) match answers you gave - ${ASSUMED_FILE} ` +
-        `now covers ${outcome.remaining.length}.`,
-    );
+  if (outcome.announced.length > 0) {
+    log.info(`  ${ASSUMED_FILE} now covers ${outcome.remaining.length} question(s).`);
   }
 }
