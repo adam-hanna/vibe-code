@@ -202,11 +202,19 @@ export async function claudeTurn(
       warn(`claude exited ${String(code)} but returned a complete successful result; accepting it.`);
     }
 
+    // Read here, inside the heartbeat's work and after the output was accepted:
+    // this is a fact about a turn that completed, and the object is stored from
+    // this point on rather than watched (#66). Spread conditionally because
+    // `exactOptionalPropertyTypes` distinguishes an absent field from an
+    // explicit undefined, and "no heartbeat" must be the absent one.
+    const activity = heartbeat?.activity();
+
     return {
       text,
       costUsd: num(parsed['total_cost_usd']),
       sessionId: typeof parsed['session_id'] === 'string' ? parsed['session_id'] : sessionId,
       denials: Array.isArray(denialsRaw) ? denialsRaw : [],
+      ...(activity === undefined ? {} : { activity }),
       numTurns: num(parsed['num_turns']),
       usage: extractUsage(parsed, lastAssistantUsage),
       tokens: extractTokens(parsed),

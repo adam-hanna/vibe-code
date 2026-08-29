@@ -6,7 +6,7 @@ import type { RunFn } from '@src/proc.js';
 import { detail, warn } from '@src/log.js';
 import { createHeartbeat, parseCodexLine, withHeartbeat } from '@src/progress.js';
 import type { ProgressOptions } from '@src/progress.js';
-import type { Effort, Sandbox, TokenUsage } from '@src/types.js';
+import type { Effort, Sandbox, TokenUsage, TurnActivity } from '@src/types.js';
 
 let cachedBin: string | null = null;
 
@@ -80,6 +80,13 @@ export interface CodexTurnResult {
    * so `budget.maxCostUsd` remains a Claude-only ceiling.
    */
   tokens: TokenUsage;
+  /**
+   * What the turn did, from its heartbeat. Absent when it had none (#66).
+   *
+   * Optional so every injected fake reports an unmeasured turn rather than a
+   * fabricated empty one.
+   */
+  activity?: TurnActivity | undefined;
 }
 
 /**
@@ -628,6 +635,16 @@ export async function codexTurn(
       warn(`codex exited ${String(code)} but wrote schema-conformant output; accepting it.`);
     }
 
-    return { structured, raw, sessionId: returnedSession, tokens: events.tokens };
+    // See the note at the same point in claude.ts: read after the output was
+    // accepted, stored rather than watched, absent when there was no heartbeat.
+    const activity = heartbeat?.activity();
+
+    return {
+      structured,
+      raw,
+      sessionId: returnedSession,
+      tokens: events.tokens,
+      ...(activity === undefined ? {} : { activity }),
+    };
   });
 }

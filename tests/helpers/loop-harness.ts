@@ -22,6 +22,7 @@ import type {
   Plan,
   RunState,
   TokenUsage,
+  TurnActivity,
 } from '@src/types.js';
 
 /**
@@ -190,6 +191,30 @@ export interface Handlers {
    * no way for an injected turn to report any.
    */
   usage?: (label: string, options: ClaudeTurnOptions) => ContextUsage | null;
+  /**
+   * What this turn's heartbeat observed it doing, or undefined for a turn
+   * nothing measured (#66).
+   *
+   * Keyed by label alone, and applied to both providers, because that is what
+   * every case needs to say: "the turn labelled `review-0` ran nothing". The
+   * default is undefined, which is what these fakes reported before the hook
+   * existed - so every case that does not set it dispatches and records exactly
+   * what it did, and none of them can be downgraded for inertness.
+   */
+  activity?: (label: string) => TurnActivity | undefined;
+}
+
+/** A turn that used tools: the ordinary case, and the control in every inertness case. */
+export function active(commands = 3): TurnActivity {
+  return { items: { command_execution: commands, agent_message: 1 }, tool: commands };
+}
+
+/**
+ * A turn that emitted items and used no tool - the #44 reviewer, in the shape
+ * `parseCodexLine` would have recorded it.
+ */
+export function inert(messages = 3): TurnActivity {
+  return { items: { agent_message: messages }, tool: 0 };
 }
 
 /**
@@ -209,6 +234,7 @@ export function agents(handlers: Handlers, calls: string[]): AgentTurns {
       const label = options.progress?.label ?? '(unlabelled)';
       calls.push(label);
       const produced = handlers.claude?.(label, options) ?? 'claude said so';
+      const activity = handlers.activity?.(label);
       return Promise.resolve({
         text: typeof produced === 'string' ? produced : JSON.stringify(produced),
         costUsd: 0.01,
@@ -217,12 +243,18 @@ export function agents(handlers: Handlers, calls: string[]): AgentTurns {
         numTurns: 1,
         usage: handlers.usage?.(label, options) ?? null,
         tokens: tokens(1000),
+        // Spread rather than assigned: `exactOptionalPropertyTypes` makes an
+        // absent field and an explicit undefined different things, and a turn
+        // nothing measured must produce the absent one.
+        ...(activity === undefined ? {} : { activity }),
       });
     },
     codex: (options) => {
       calls.push(options.schemaName);
       const structured = handlers.codex?.(options.schemaName, options) ?? report([]);
+      const activity = handlers.activity?.(options.schemaName);
       return Promise.resolve({
+        ...(activity === undefined ? {} : { activity }),
         structured,
         raw: JSON.stringify(structured),
         // Not `?? 'thread-1'`: a handler that returns null is saying this turn

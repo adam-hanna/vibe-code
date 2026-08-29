@@ -582,6 +582,10 @@ function recordingHeartbeat(): { heartbeat: Heartbeat; calls: string[] } {
       onLine: () => calls.push('line'),
       flush: () => calls.push('flush'),
       fail: () => calls.push('fail'),
+      // Not recorded: these cases are about the lifecycle order, and `activity`
+      // is a read that `withHeartbeat` never makes - the adapters do, inside the
+      // work callback.
+      activity: () => undefined,
       stop: () => calls.push('stop'),
     },
   };

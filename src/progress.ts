@@ -1,7 +1,7 @@
 import { detail } from '@src/log.js';
 import { markActivity, measuredWindow } from '@src/run.js';
 import type { AgentProvider } from '@src/runtime.js';
-import type { Config, InFlightTurn, RunState } from '@src/types.js';
+import type { Config, InFlightTurn, RunState, TurnActivity } from '@src/types.js';
 
 /**
  * In-turn progress: what the live event stream says, and how often to say it.
@@ -12,11 +12,37 @@ import type { Config, InFlightTurn, RunState } from '@src/types.js';
  * then went silent - indistinguishable from a hung run, and diagnosing it took
  * `Get-Process` plus reading state.json. Everything here is display: nothing in
  * this file decides anything about the run.
+ *
+ * Since #66 that last sentence has one exception, and it is deliberately narrow:
+ * the per-turn *tally* gathered here (`items`, `toolItems`) is carried out
+ * through `Heartbeat.activity` and does reach a decision - `downgradeInert` in
+ * evidence.ts. Everything else remains display.
  */
 
 export interface ProgressSnapshot {
-  /** Tool uses (Claude) or stream items (Codex) seen so far. */
+  /**
+   * Tool uses (Claude) or stream items (Codex) seen so far.
+   *
+   * A *liveness* counter, and deliberately not the same number as `items` below.
+   * It counts `item.started` AND `item.completed`, because a three-minute
+   * `npm test` emits the start and then nothing at all - under a
+   * completions-only counter the heartbeat would sit frozen through it, and
+   * silence is the exact failure `createHeartbeat` exists to fix. On the #65
+   * run's review turn the last heartbeat line read `61 events` for a turn whose
+   * rollout records 30 commands: 61 = 2 x 30 + 1. Both numbers are truthful
+   * about what they are; only the tally is a record of what happened.
+   */
   activities: number;
+  /**
+   * How many items of each kind this turn emitted, counted once each (#66).
+   *
+   * The provider's own vocabulary: Claude's tool names plus `message`, Codex's
+   * item types. Empty means nothing was observed, which is not the same fact as
+   * "nothing was done" - see `activity()`.
+   */
+  items: Map<string, number>;
+  /** How many of `items` were the agent using a tool. See `NON_TOOL_CODEX_ITEMS`. */
+  toolItems: number;
   /** Most recent activity, already trimmed: "Read src/orchestrator.ts". */
   lastActivity: string | null;
   /** Turn tokens so far, summed the way claude.ts extractTokens sums them. */
@@ -36,11 +62,19 @@ export interface ProgressSnapshot {
 export function emptySnapshot(): ProgressSnapshot {
   return {
     activities: 0,
+    items: new Map(),
+    toolItems: 0,
     lastActivity: null,
     tokens: 0,
     promptTokens: 0,
     countedMessages: new Set(),
   };
+}
+
+/** One item into the tally. `isTool` is the parse site's judgement, not a guess here. */
+function tally(snapshot: ProgressSnapshot, kind: string, isTool: boolean): void {
+  snapshot.items.set(kind, (snapshot.items.get(kind) ?? 0) + 1);
+  if (isTool) snapshot.toolItems += 1;
 }
 
 /** Returns true when the line was recognised. Never throws. */
@@ -126,6 +160,9 @@ export const parseClaudeLine: LineParser = (snapshot, line) => {
       const name = typeof block['name'] === 'string' ? block['name'] : 'tool';
       const target = toolTarget(block['input']);
       snapshot.activities += 1;
+      // Every `tool_use` block is by definition the agent using a tool, so the
+      // Claude side needs no vocabulary at all - the kind IS the tool name (#66).
+      tally(snapshot, name, true);
       snapshot.lastActivity = target === null ? name : `${name} ${target}`;
       recognised = true;
     }
@@ -141,6 +178,13 @@ export const parseClaudeLine: LineParser = (snapshot, line) => {
     // Only the arithmetic is skipped, `promptTokens` included - a repeat carries
     // the same prompt size, so re-assigning it would be a no-op with a hazard.
     if (!seen) {
+      // One non-tool `message` item per deduplicated message, through the SAME
+      // dedupe the tokens use and for the same reason (#66). Without it a Claude
+      // turn that used no tools would leave an empty tally, indistinguishable
+      // from a turn nothing measured - and "unmeasured" is never inert, so the
+      // detection this whole tally exists for would be lost on that provider.
+      // A message carrying no id counts each time, exactly as its tokens do.
+      tally(snapshot, 'message', false);
       const input = num(usage['input_tokens']);
       const output = num(usage['output_tokens']);
       const cacheRead = num(usage['cache_read_input_tokens']);
@@ -153,6 +197,28 @@ export const parseClaudeLine: LineParser = (snapshot, line) => {
 
   return recognised;
 };
+
+/**
+ * Codex item types that are the model thinking or talking, not using a tool.
+ *
+ * A deny-list over an *observed* set, never an allow-list of tools, because the
+ * two vocabularies in play do not agree. Across all 23 archived `transcript.log`
+ * files `lastActivity` has ever taken exactly three values - `command_execution`
+ * (1628), `agent_message` (58), `web_search` (10) - while the rollouts under
+ * `~/.codex/sessions` name `Reasoning`, `CommandExecution`, `AgentMessage`,
+ * `UserMessage`, `ContextCompaction` and `Extension` in PascalCase, and record
+ * no `web_search` at all. So neither set can be enumerated from the other, and
+ * an allow-list would silently classify a kind vibe has never seen as "not a
+ * tool" - which is a false downgrade.
+ *
+ * Both entries here are observed: `agent_message` on the stream, `reasoning` in
+ * the rollout. `context_compaction` is a known candidate and is deliberately
+ * NOT listed - its stream spelling has never been seen here, and inventing one
+ * would be guessing at a mapping. Leaving it off fails open: an unrecognised
+ * kind makes a turn look active, which loses a detection rather than downgrading
+ * a true finding, and evidence.ts records why that is the right direction.
+ */
+const NON_TOOL_CODEX_ITEMS = new Set(['agent_message', 'reasoning']);
 
 /**
  * Codex's `--json` stream, which is sparser: it names item types but reports no
@@ -171,6 +237,12 @@ export const parseCodexLine: LineParser = (snapshot, line) => {
     const itemType = isRecord(item) ? item['type'] : undefined;
     snapshot.activities += 1;
     if (typeof itemType === 'string' && itemType !== '') snapshot.lastActivity = itemType;
+    // The tally counts completions only, where `activities` counts both: an item
+    // that started and never finished happened once, not twice, and the record
+    // has no reason to double it the way the liveness counter must (#66).
+    if (type === 'item.completed' && typeof itemType === 'string' && itemType !== '') {
+      tally(snapshot, itemType, !NON_TOOL_CODEX_ITEMS.has(itemType));
+    }
     return true;
   }
 
@@ -347,6 +419,18 @@ export interface Heartbeat {
    * that follows reads the figure the stream actually reached (#77).
    */
   fail: () => void;
+  /**
+   * What this turn did, or undefined when nothing was observed (#66).
+   *
+   * A copy, never a live view: the adapter reads it once at the end of the turn
+   * and the object is then stored on the result, in the event log and - for a
+   * reviewer - in the downgrade decision. A view would let a line arriving after
+   * the read edit a fact already recorded.
+   *
+   * Undefined on an empty tally, which is what makes "unmeasured" and "used no
+   * tools" different answers rather than the same zero.
+   */
+  activity: () => TurnActivity | undefined;
   stop: () => void;
 }
 
@@ -569,6 +653,13 @@ export function createHeartbeat(
     fail: () => {
       if (!stopped) notify('failed');
     },
+    // Deliberately not gated on `stopped`: this is a read of what already
+    // happened, and a caller reading it after the turn has been torn down must
+    // get the same answer it would have got a moment earlier.
+    activity: () =>
+      snapshot.items.size === 0
+        ? undefined
+        : { items: Object.fromEntries(snapshot.items), tool: snapshot.toolItems },
     stop: () => {
       if (stopped) return;
       stopped = true;

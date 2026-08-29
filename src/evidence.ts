@@ -2,7 +2,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fromAgentPath } from '@src/pathstyle.js';
 import type { PathStyle } from '@src/pathstyle.js';
-import type { Evidence, Finding, FindingsReport, Severity } from '@src/types.js';
+import type { Evidence, Finding, FindingsReport, Severity, TurnActivity } from '@src/types.js';
 import { readEvidenceEntry } from '@src/validate.js';
 
 /**
@@ -20,10 +20,11 @@ import { readEvidenceEntry } from '@src/validate.js';
  * block; it bought a final fix round that edited working code to satisfy a
  * false premise, in a round that is by design not re-reviewed.
  *
- * (Stated as item counts, not as "zero `command_execution` events": the
- * heartbeat counts every `item.started` AND `item.completed` and reports only
- * the *last* item's type, so it cannot count commands. #66 is where that signal
- * gets made precise, and this module deliberately does not depend on it.)
+ * (It was stated as item counts, not as "zero `command_execution` events",
+ * because the heartbeat counted every `item.started` AND `item.completed` and
+ * reported only the *last* item's type, so it could not count commands. #66
+ * made that signal precise - see `isInert` below, which is the second guard
+ * this module now holds.)
  *
  * A P0 or P1 with no evidence entry that passes its check is downgraded to P2
  * before anything reads its severity: it stops forcing a round, it stays in the
@@ -235,6 +236,18 @@ function citedBy(f: Finding): unknown[] {
 }
 
 /**
+ * A blocking finding, kept but no longer blocking, with the reason on it.
+ *
+ * The one construction both guards share, so `downgraded.from` always names the
+ * severity the model actually gave and the shape `groundAndRecord`,
+ * `OUTSTANDING.md` and `FOLLOW-UPS.md` read cannot drift between them.
+ */
+function toP2(f: Finding, extra: Partial<Finding>, reason: string): Finding {
+  const from: Severity = f.severity;
+  return { ...f, ...extra, severity: 'P2', downgraded: { from, reason } };
+}
+
+/**
  * Downgrade every blocking finding that cites nothing that resolves, and
  * canonicalise the citations that do.
  *
@@ -285,14 +298,98 @@ export function groundFindings(
     if (f.severity !== 'P0' && f.severity !== 'P1') return { ...f, ...cited };
     if (seen.some((s) => s.reason === null)) return { ...f, ...cited };
 
-    const from: Severity = f.severity;
     const reason =
       seen.length === 0
         ? 'it cited no evidence'
         : `no citation resolved: ${seen.map((s) => s.reason).join('; ')}`;
     // Kept, not deleted. The finding may well be right; what it is not is
     // grounded, and an ungrounded claim is not one the loop should stop for.
-    const next: Finding = { ...f, ...cited, severity: 'P2', downgraded: { from, reason } };
+    const next = toP2(f, cited, reason);
+    downgraded.push(next);
+    return next;
+  });
+
+  return { report: { ...report, findings }, downgraded };
+}
+
+/**
+ * Did the turn that produced this report emit items, none of which was a tool?
+ *
+ * Zero tool items exactly, with no threshold anywhere: `0` is the only number
+ * here that was not invented, and anything above it would be. The census #66
+ * was decided on is the whole argument. Every review turn vibe has ever run -
+ * 29 of them, across 23 runs - ran between 5 and 154 commands, median 32, with
+ * exactly one exception: the #44 run's reviewer on 2026-08-25, which emitted
+ * three items, all `agent_message`, spent 41 reasoning items in the rollout, had
+ * a shell and never used it. That one turn produced the only false blocking
+ * finding in the archive. There is no near-boundary case in the data; the gap
+ * between "ran nothing" and the next quietest review turn is 0 to 5.
+ *
+ * Orthogonal to `groundFindings` by construction, and the #44 finding is why
+ * both are needed: it cited nothing because the schema then had no `evidence`
+ * field, and today's reviewer would cite `tests/acceptance-criteria.test.ts`
+ * with an excerpt that exists and resolves - so grounding would pass it and the
+ * P1 would stand. Grounding asks whether a claim names a real place. This asks
+ * whether the turn looked.
+ *
+ * Three answers, and two of them are false:
+ * - `undefined` - nothing measured this turn (no heartbeat, or an injected
+ *   agent). Never inert: an unobserved turn is not an idle one.
+ * - items present, `tool > 0` - the turn used its tools. Not inert.
+ * - items present, `tool === 0` - the turn talked or thought and did nothing
+ *   else. Inert.
+ *
+ * An empty tally is the first case, not the third, for the same reason.
+ */
+export function isInert(activity: TurnActivity | undefined): boolean {
+  if (activity === undefined) return false;
+  const kinds = Object.keys(activity.items);
+  if (kinds.length === 0) return false;
+  return activity.tool === 0;
+}
+
+/** "3 items, none of them a tool: agent_message x3" - the fact, not a judgement. */
+function describeActivity(activity: TurnActivity): string {
+  // Sorted by kind so the recorded reason is deterministic: it lands in the
+  // event log and in the artifact, and a reason that reorders between runs is a
+  // diff nobody can read.
+  const kinds = Object.entries(activity.items).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  const total = kinds.reduce((sum, [, n]) => sum + n, 0);
+  const listed = kinds.map(([kind, n]) => `${kind} x${n}`).join(', ');
+  return `${total} item${total === 1 ? '' : 's'}, none of them a tool: ${listed}`;
+}
+
+/**
+ * Downgrade a report's blocking findings when the turn that produced them used
+ * no tools (#66).
+ *
+ * Option 1 of the three the issue offered, and it is the one that prevents the
+ * measured cost: the #44 P1 was inside `p1Tolerance`, so it did not block - it
+ * bought the final fix round, which `reviewPhase` buys *only* when
+ * `decision.tolerated` is non-empty. A P2 is never tolerated, so
+ * `tolerated.length === 0`, the loop ends clean, and the ~1.3M-token round that
+ * edited working code to satisfy a false premise - in a round that is by design
+ * not re-reviewed - never happens. Re-running the review instead would cost a
+ * full reviewer turn (3M tokens on #47) and re-run the model that just declined
+ * to use its shell; warning only would not have prevented anything.
+ *
+ * Applied by `groundAndRecord` to the **reviewer only**, and after grounding, so
+ * a finding already downgraded for citing nothing is not downgraded twice.
+ *
+ * Pure with respect to its input, for the reason `groundFindings` gives: the
+ * artifact and `state.pendingFindings` are written from these objects.
+ */
+export function downgradeInert(
+  report: FindingsReport,
+  activity: TurnActivity | undefined,
+): { report: FindingsReport; downgraded: Finding[] } {
+  if (!isInert(activity) || activity === undefined) return { report, downgraded: [] };
+
+  const downgraded: Finding[] = [];
+  const reason = `the turn that produced it used no tools (${describeActivity(activity)})`;
+  const findings = report.findings.map((f) => {
+    if (f.severity !== 'P0' && f.severity !== 'P1') return f;
+    const next = toP2(f, {}, reason);
     downgraded.push(next);
     return next;
   });
