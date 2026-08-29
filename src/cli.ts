@@ -1,6 +1,12 @@
 import { readFileSync, existsSync, renameSync } from 'node:fs';
 import path from 'node:path';
-import { applyOverrides, configDiff, EFFORTS, loadConfig } from '@src/config.js';
+import {
+  applyOverrides,
+  configDiff,
+  EFFORTS,
+  environmentStale,
+  loadConfig,
+} from '@src/config.js';
 import {
   allocateRun,
   artifact,
@@ -26,10 +32,15 @@ import type { ExitCode } from '@src/orchestrator.js';
 import {
   codexConversations,
   DEFAULT_ROLE_PROVIDERS,
+  effortFor,
+  modelFor,
   ROLE_NAMES,
   rolesFor,
   roleWarnings,
+  turnTimeoutMs,
 } from '@src/roles.js';
+import type { RolePatches } from '@src/roles.js';
+import { setOwn } from '@src/runtime.js';
 import { claudeBin, setSessionArgs } from '@src/claude.js';
 import { codexBin } from '@src/codex.js';
 // The accounting seam, from the leaf it lives in: orchestrator.js re-exports
@@ -43,7 +54,14 @@ import type { AgentPreflight } from '@src/preflight.js';
 import * as git from '@src/git.js';
 import * as log from '@src/log.js';
 import type { EnvironmentFacts, Phase } from '@src/runtime.js';
-import type { Answer, Config, ConfigOverrides, Effort, RunState } from '@src/types.js';
+import type {
+  Answer,
+  Config,
+  ConfigOverrides,
+  Effort,
+  LoadedConfig,
+  RunState,
+} from '@src/types.js';
 
 const USAGE = `
 vibe - automated plan/critique/implement/review loop (Claude Code + Codex)
@@ -68,6 +86,12 @@ Options
   --claude-effort <e>        low|medium|high|xhigh|max (default: medium)
   --codex-model <m>          Default: gpt-5.6-luna
   --codex-effort <e>         Default: xhigh
+  --role <r>:<k>=<v>         Per-role setting, repeatable. The role is one of planner,
+                             implementer, critic, answerer, reviewer; the key is provider,
+                             model, effort or timeoutMs (milliseconds). It PATCHES the role
+                             rather than replacing it, so --role reviewer:effort=max keeps a
+                             model vibe.config.json named, and provider is not required.
+                             e.g. --role reviewer:model=gpt-5.6-pro --role critic:timeoutMs=600000
   --codex-context-window <n> The Codex model's context window in tokens. Unset by default:
                              the protocol never reports it for a codex exec thread, so
                              occupancy is reported in tokens with no ratio until you say
@@ -154,6 +178,14 @@ interface ParsedArgs {
     implementTimeout?: number;
     codexTimeout?: number;
     verifyTimeout?: number;
+    /**
+     * Raw `--role <role>:<key>=<value>` arguments, in the order given (#89).
+     *
+     * Unparsed here on purpose: "last wins" is one rule, and resolving it in one
+     * place - `buildRoleOverrides` - keeps it from being half-implemented in the
+     * parser and half in the consumer.
+     */
+    role?: string[];
     help?: boolean;
   };
 }
@@ -226,6 +258,8 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       case '--codex-model': out.flags.codexModel = next(); break;
       case '--codex-effort': out.flags.codexEffort = next(); break;
       case '--codex-context-window': out.flags.codexContextWindow = nextNum(); break;
+      // Repeatable, and collected raw: see the field's comment.
+      case '--role': (out.flags.role ??= []).push(next()); break;
       case '--max-plan-rounds': out.flags.maxPlanRounds = nextNum(); break;
       case '--max-review-rounds': out.flags.maxReviewRounds = nextNum(); break;
       case '--max-verify-rounds': out.flags.maxVerifyRounds = nextNum(); break;
@@ -269,6 +303,94 @@ function asEffort(value: string, flagName: string): Effort {
     throw new Error(`${flagName} must be one of ${EFFORTS.join(', ')}`);
   }
   return value as Effort;
+}
+
+/** What `--role` takes, for the message a mistyped one gets. */
+const ROLE_FLAG_KEYS = 'provider, model, effort or timeoutMs';
+
+/**
+ * The `timeoutMs` value as `roleSetting` must see it (#89).
+ *
+ * Values arrive from a command line as strings, and `roleSetting` tests `typeof`
+ * before `Number.isFinite` on purpose (#84) - so an uncoerced `"600000"` would be
+ * refused as a string. Only a finite number is coerced, and everything else is
+ * passed through UNCHANGED rather than rejected here: that is what makes
+ * `--role critic:timeoutMs=abc` produce the same message, byte for byte, as
+ * `"timeoutMs": "abc"` in the config file. One vocabulary, not two.
+ *
+ * The empty check is not decoration: `Number('')` and `Number(' ')` are 0, so
+ * coercing them would report `is 0` for a figure the user never typed.
+ */
+function roleFlagValue(key: string, raw: string): string | number {
+  if (key !== 'timeoutMs' || raw.trim() === '') return raw;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : raw;
+}
+
+/**
+ * Per-role settings from `--role <role>:<key>=<value>`, last wins (#89).
+ *
+ * Split on the FIRST `:` and then the FIRST `=`, so a value may contain either -
+ * a model name with a colon in it is a value, not a shape error.
+ *
+ * Nothing here checks the role name or the key. An unknown, inherited or
+ * `__proto__` role name and an unknown key are both refused downstream by
+ * `validateRoles`/`roleSetting`, naming what is legal - which is the same
+ * message the config file gets for the same mistake.
+ *
+ * Exported for the flag tests, alongside `parseArgs`.
+ */
+export function buildRoleOverrides(flags: ParsedArgs['flags']): RolePatches {
+  const out: Record<string, Record<string, unknown>> = {};
+  for (const raw of flags.role ?? []) {
+    const colon = raw.indexOf(':');
+    const rest = colon < 0 ? '' : raw.slice(colon + 1);
+    const eq = rest.indexOf('=');
+    if (colon < 0 || eq < 0) {
+      throw new Error(
+        `--role expects <role>:<key>=<value>, got "${raw}". The role is one of ` +
+          `${ROLE_NAMES.join(', ')} and the key is one of ${ROLE_FLAG_KEYS} - for example ` +
+          `--role reviewer:model=gpt-5.6-pro`,
+      );
+    }
+    const role = raw.slice(0, colon);
+    const key = rest.slice(0, eq);
+    // `hasOwnProperty`, not `out[role]`: before the first write `out['__proto__']`
+    // is `Object.prototype` and `out['toString']` is a function, and spreading
+    // either would build a patch off the prototype chain. `setOwn` guards the
+    // write, this guards the read - and the local satisfies
+    // `noUncheckedIndexedAccess` without a non-null assertion.
+    const existing = Object.prototype.hasOwnProperty.call(out, role) ? out[role] : undefined;
+    const bucket = existing ?? {};
+    // Last wins, per role and per key, exactly as every other flag does.
+    setOwn(bucket, key, roleFlagValue(key, rest.slice(eq + 1)));
+    setOwn(out, role, bucket);
+  }
+  return out;
+}
+
+/**
+ * The config a `vibe run` on these flags produces.
+ *
+ * Exported for the flag tests: `cmdRun` goes on to allocate a run, take a lock
+ * and spawn agents, so this is the seam that can be asserted on. It is also the
+ * ONLY place `cmdRun` builds a config, which is what keeps a flag from reaching
+ * one command and not another.
+ */
+export function configFromFlags(targetDir: string, flags: ParsedArgs['flags']): LoadedConfig {
+  return loadConfig(targetDir, buildOverrides(flags), buildRoleOverrides(flags));
+}
+
+/**
+ * Doctor's config, which applies the role settings and no other flag.
+ *
+ * `vibe doctor` has never applied `buildOverrides` - `--claude-model` does not
+ * change what it reports - and widening that is a change to flags #89 does not
+ * add. Named as its own function so the difference is a decision on the page
+ * rather than an omission at a call site.
+ */
+export function doctorConfig(targetDir: string, flags: ParsedArgs['flags']): LoadedConfig {
+  return loadConfig(targetDir, {}, buildRoleOverrides(flags));
 }
 
 /** Exported for the flag tests, alongside parseArgs. */
@@ -336,7 +458,7 @@ async function cmdRun(args: readonly string[], planOnly: boolean): Promise<ExitC
   }
 
   const targetDir = path.resolve(flags.cwd ?? process.cwd());
-  const cfg = loadConfig(targetDir, buildOverrides(flags));
+  const cfg = configFromFlags(targetDir, flags);
 
   // Read before anything is created. A missing context file used to be found two
   // state writes into a run that then existed on disk, half-configured, for the
@@ -459,15 +581,19 @@ async function startRun(
  */
 export function resumeConfig(targetDir: string, state: RunState, flags: ParsedArgs['flags']): Config {
   const stored = state.config;
-  const overrides = buildOverrides(flags);
+  // One loader for both halves below, rather than the same ternary written
+  // twice: which source a resume reads is one decision, and the two calls have
+  // to agree about it or the diff compares configs built different ways.
+  const load = (overrides: ConfigOverrides, roles: RolePatches): Config =>
+    stored === undefined
+      ? loadConfig(targetDir, overrides, roles)
+      : applyOverrides(stored, overrides, roles);
+
   // What this resume would have run on with no flags at all. Compared against
   // the effective config so the event below records the user's change, and not
   // the defaults applyOverrides fills in for keys an older vibe never stored.
-  const base = stored === undefined ? loadConfig(targetDir) : applyOverrides(stored, {});
-  const cfg =
-    stored === undefined
-      ? loadConfig(targetDir, overrides)
-      : applyOverrides(stored, overrides);
+  const base = load({}, {});
+  const cfg = load(buildOverrides(flags), buildRoleOverrides(flags));
 
   // state.config holds only the latest snapshot, so on its own it cannot say
   // when a setting changed or what it was before. The resume line printed by
@@ -478,9 +604,21 @@ export function resumeConfig(targetDir: string, state: RunState, flags: ParsedAr
   // either way: a save between the two would leave a window in which the new
   // settings are persisted and the record of the change is not.
   const changed = configDiff(base, cfg);
+  // The probed facts describe the table and the contract the probe ran against,
+  // and `--role` is the first thing that can move either after a run exists
+  // (#89). `environmentBlock` labels each agent through the CURRENT table, so
+  // keeping them would state, as verified fact, that the agent now called "the
+  // implementer" was observed with the tools the old contract asked of it. There
+  // is no way to recompute a probe, so they go, and preflight rewrites them -
+  // or, under --skip-probe, the prompts omit the section, which is honest.
+  const stale = state.environment != null && environmentStale(base, cfg);
+  if (stale) delete state.environment;
   state.config = cfg;
-  if (changed.length > 0) recordEvent(state, 'resume_config', { changed });
-  else saveState(state);
+  // Still a single write, and the reason the facts went travels with the change
+  // that caused it rather than in an event of its own.
+  if (changed.length > 0) {
+    recordEvent(state, 'resume_config', { changed, ...(stale ? { environmentCleared: true } : {}) });
+  } else saveState(state);
   return cfg;
 }
 
@@ -654,7 +792,13 @@ async function cmdFork(args: readonly string[]): Promise<ExitCode> {
     return EXIT.ERROR;
   }
 
-  const plan = await planFork(targetDir, sourceId, wanted, buildOverrides(flags));
+  const plan = await planFork(
+    targetDir,
+    sourceId,
+    wanted,
+    buildOverrides(flags),
+    buildRoleOverrides(flags),
+  );
   const result = await commitFork(targetDir, plan);
   const origin = result.state.forkedFrom;
 
@@ -800,6 +944,37 @@ function reportRoles(cfg: Config): void {
     log.info(`Roles:   ${named.join(' ')}`);
   }
   for (const warning of roleWarnings(cfg)) log.warn(warning);
+}
+
+/**
+ * Every seat, and what it resolved to - `vibe doctor`'s answer to "what will
+ * this run do" (#89).
+ *
+ * Unlike `reportRoles`, which is silent under the default table and prints only
+ * what a role named for itself, this is unconditional and shows the resolved
+ * value for all four settings. Doctor is the command whose whole job is to state
+ * the configuration, and a seat running its provider's model is as much a fact
+ * as one naming its own.
+ *
+ * Read through `modelFor`, `effortFor` and `turnTimeoutMs` rather than by
+ * reaching into the table, so the numbers here are the ones a turn will actually
+ * be spawned with - including the access-based pick between a provider's two
+ * timeout keys, which is why the planner and the implementer differ.
+ *
+ * Milliseconds, unconverted: the key names the unit, which is the rule
+ * `noteRoleProvenance` already prints by.
+ */
+function reportResolvedRoles(cfg: Config): void {
+  const table = rolesFor(cfg);
+  log.info('  roles:');
+  const width = Math.max(...ROLE_NAMES.map((role) => role.length));
+  for (const role of ROLE_NAMES) {
+    log.info(
+      `    ${role.padEnd(width)}  ${table[role].provider.padEnd(6)}  ` +
+        `${modelFor(role, cfg, table)} / ${effortFor(role, cfg, table)} / ` +
+        `${turnTimeoutMs(role, cfg, table)}ms`,
+    );
+  }
 }
 
 /**
@@ -1610,10 +1785,16 @@ async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
   check('codex', codexBin);
   check('git', git.gitBin);
 
+  // Loaded ONCE, and every block below reads this one value. It used to be
+  // loaded three times - here, for the rate-limit read and for the probe - which
+  // made "the flags reached the display but not the contract preflight enforces"
+  // a state the code could be in (#89).
+  let cfg: LoadedConfig | null = null;
   try {
-    const cfg = loadConfig(targetDir);
+    cfg = doctorConfig(targetDir, flags);
     log.ok(`config: ${cfg.configPath ?? 'defaults'}`);
     log.info(`  claude ${cfg.claude.model}/${cfg.claude.effort} - codex ${cfg.codex.model}/${cfg.codex.effort}`);
+    reportResolvedRoles(cfg);
     log.info(
       `  budget $${cfg.budget.maxCostUsd} (Claude) / ` +
         `${cfg.budget.maxTokens > 0 ? `${cfg.budget.maxTokens.toLocaleString()} tokens (both)` : 'no token ceiling'}` +
@@ -1653,12 +1834,18 @@ async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
   // app-server is experimental and absent on older Codex builds, and a machine
   // without it is not a broken environment.
   try {
-    const cfg = loadConfig(targetDir);
-    const limits = await readCodexRateLimits(cfg, targetDir);
-    if (limits === null) {
-      log.info('codex rate limits: not available (codex app-server did not answer)');
+    if (cfg === null) {
+      // Through `log.detail` like every other outcome of this block: an
+      // unreadable config is already a counted failure above, and counting it
+      // twice here would say the account was the problem.
+      log.detail('codex rate limits: not read (the config above could not be read)');
     } else {
-      log.ok(`codex rate limits: ${describeLimits(limits)}`);
+      const limits = await readCodexRateLimits(cfg, targetDir);
+      if (limits === null) {
+        log.info('codex rate limits: not available (codex app-server did not answer)');
+      } else {
+        log.ok(`codex rate limits: ${describeLimits(limits)}`);
+      }
     }
   } catch (err) {
     log.detail(`codex rate limits: ${err instanceof Error ? err.message : String(err)}`);
@@ -1699,6 +1886,16 @@ async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
     );
   }
 
+  // Ahead of the --skip-probe return, deliberately: "skipped" would claim a
+  // choice the user made, when the truth is that doctor never had a contract to
+  // probe against. Counted, as the unreadable config was before this block
+  // repeated its message - the exit code is unchanged either way.
+  if (cfg === null) {
+    log.fail('agent environments: not checked - the config above could not be read');
+    bad++;
+    return EXIT.ERROR;
+  }
+
   if (flags.skipProbe === true) {
     log.info('agent environments: skipped (--skip-probe)');
     return bad > 0 ? EXIT.ERROR : EXIT.OK;
@@ -1706,7 +1903,6 @@ async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
 
   log.heading('agent environments');
   try {
-    const cfg = loadConfig(targetDir);
     const report = await preflight(
       targetDir,
       cfg,

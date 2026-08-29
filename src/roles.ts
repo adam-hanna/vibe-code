@@ -1,6 +1,7 @@
 import { ANSWERS_SCHEMA, FINDINGS_SCHEMA, PLAN_SCHEMA } from '@src/schemas.js';
 import { SLOTS, slotMeasured, slotRotatable } from '@src/slots.js';
 import type { SlotName } from '@src/slots.js';
+import { setOwn } from '@src/runtime.js';
 import type { AgentProvider } from '@src/runtime.js';
 import { EFFORTS } from '@src/types.js';
 import type { Config, Effort, PermissionMode, Sandbox } from '@src/types.js';
@@ -168,6 +169,17 @@ export type RoleValue = AgentProvider | RoleSetting;
  * strings are all that is on disk.
  */
 export type RoleProviders = Record<Role, RoleValue>;
+
+/**
+ * One role's flag-set keys, as `--role <role>:<key>=<value>` produced them (#89).
+ *
+ * Keyed by `string` rather than by `Role`, and valued as `unknown`, because both
+ * halves are user input: an unknown role name and an unknown key have to *reach*
+ * `validateRoles`/`roleSetting` to be refused by name, and a type that could not
+ * carry them would have to invent a second refusal vocabulary. Nothing here is
+ * validated; see `patchRoles`.
+ */
+export type RolePatches = Readonly<Record<string, Readonly<Record<string, unknown>>>>;
 
 /**
  * Who does what when a run says nothing: Claude plans and implements, Codex
@@ -361,6 +373,66 @@ export function roleSetting(role: Role, value: unknown): RoleSetting {
     ...(model === undefined ? {} : { model }),
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
   };
+}
+
+/**
+ * Apply per-role CLI settings to a role table, key by key (#89).
+ *
+ * Deliberately NOT `mergeRoles`' semantics, and the difference is the whole of
+ * the flag's design. A config *layer* replaces a role's value wholesale, which
+ * is why `provider` is required inside a role object: a partial object could
+ * otherwise hand a role back to the default agent silently. A flag is not a
+ * layer. `--role reviewer:effort=max` over a file that named the reviewer's
+ * model must keep that model, so this patches the *resolved* value - and
+ * `provider` is not required from a flag, because the base always supplies one
+ * (`validateRoles` refuses a table missing any role, so after
+ * `mergeConfig(DEFAULTS, ...)` every role has a value). Patching is strictly
+ * safer than wholesale here: it never changes the provider unless the flag says
+ * `provider=`.
+ *
+ * Validates nothing. Every bad value is refused by `roleSetting` or
+ * `validateRoles`, which is what makes `--role reviewer:effort=maximum` produce
+ * the same message as `roles.reviewer.effort` in the config file.
+ */
+export function patchRoles(base: RoleProviders, patches: RolePatches): RoleProviders {
+  // Identity, so a run passing no `--role` is byte-identical to one from before
+  // the flag existed - the object is not even copied.
+  if (Object.keys(patches).length === 0) return base;
+  // `"roles": null` still has to reach `validateRoles` and get its own message.
+  if (!isRecord(base)) return base;
+
+  // The `Record<string, unknown>` view is `mergeRoles`' own idiom in
+  // src/config.ts: a role name off a flag is a `string`, `RoleProviders` is keyed
+  // by the `Role` union, and the ownership check below narrows nothing for the
+  // type checker. Cast once in, cast once out.
+  const src = base as unknown as Record<string, unknown>;
+  const out: Record<string, unknown> = { ...src };
+
+  for (const [roleName, keys] of Object.entries(patches)) {
+    // `hasOwnProperty`, not `src[roleName] !== undefined`: `toString`,
+    // `constructor` and `valueOf` are inherited and would read as roles that
+    // already exist, so `--role toString:effort=max` would be silently SKIPPED
+    // rather than refused - the same swallow `mergeRoles` uses `setOwn` to
+    // prevent, by the other direction. `__proto__` would read as
+    // `Object.prototype`. `setOwn` guards the write; this guards the read.
+    const has = Object.prototype.hasOwnProperty.call(src, roleName);
+    const current = has ? src[roleName] : undefined;
+    const next =
+      typeof current === 'string'
+        ? { provider: current }
+        : isRecord(current)
+          ? { ...current }
+          : undefined;
+    // A stored value that is neither form (`roles.reviewer: 42`) is left exactly
+    // as it is, so `validateRoles` names the config's error rather than this
+    // patch hiding it behind "an object with no provider". An unknown role name
+    // takes the other branch and becomes an own key, so it is refused BY NAME.
+    if (next === undefined && has) continue;
+    const target: Record<string, unknown> = next ?? {};
+    for (const [key, value] of Object.entries(keys)) setOwn(target, key, value);
+    setOwn(out, roleName, target);
+  }
+  return out as unknown as RoleProviders;
 }
 
 /**

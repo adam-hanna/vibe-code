@@ -60,6 +60,9 @@ vibe plan "Migrate the session store to Redis"
 # Target another directory
 vibe run "Fix the flaky auth tests" -C ../my-service
 
+# Give one seat its own model, effort or timeout — repeatable, and it works on resume too
+vibe run "Port the parser to the new AST" --role reviewer:model=gpt-5.6-pro --role reviewer:effort=max
+
 # Continue a run that stopped for your input
 vibe resume 20260811-142530-add-rate-limiting
 
@@ -430,6 +433,16 @@ Binaries can be pinned with `VIBE_CLAUDE_BIN`, `VIBE_CODEX_BIN`, `VIBE_GIT_BIN`.
   }
 }
 ```
+
+**Every key of that object is settable from the command line**, with `--role <role>:<key>=<value>` — repeatable, one role per flag, last wins. It splits on the *first* `:` and then the *first* `=`, so a value may contain either. An unknown role name or key is refused in the words `vibe.config.json` would use for the same mistake, because it is the same check.
+
+```bash
+vibe run "..." --role reviewer:model=gpt-5.6-pro --role reviewer:effort=max --role critic:timeoutMs=600000
+```
+
+**The flag patches a role; it does not replace it.** `--role reviewer:effort=max` over a config file that named the reviewer's model *keeps that model* — which is why `provider` is not required from a flag, unlike the object form: the table underneath always supplies one, and a patch never changes the provider unless the flag says `provider=`. Config *layering* is unchanged and still replaces a role wholesale; the flags sit on top of the resolved table. A provider you move by flag keeps a model the file named, verbatim and unrepaired: `--role reviewer:provider=claude` over a file's `gpt-5.6-pro` gives you `reviewer=claude@gpt-5.6-pro`, which the `Roles:` line prints before the first turn. Models are accepted on trust everywhere, and a flag is not the exception.
+
+`--role` works on `vibe resume` and `vibe fork` too, and that is the one place a run's table can change after the run exists — so two things follow. Toolchain entries *derived from the table* (`node` and `npm`, required of whoever implements) are re-derived for the new table; a `toolchain.<tool>.agents` you wrote yourself stays authoritative and is not touched. And the verified-environment block the agents are given is dropped, in both cases, until the next successful preflight: those facts came from probing the *previous* table's agents against the previous contract, nothing can recompute a probe, and stating them under new labels would be a confident lie about a shell nobody looked in. A `--role` flag that changes only a model, an effort or a timeout keeps them, because none of the three appears in that block.
 
 **Model, effort and timeout are the three settings a role may name**, and `claude.model`/`claude.effort` and `codex.model`/`codex.effort`, along with each provider's pair of timeout keys, remain what every other role on that provider runs. Everything else is a fact about the *job*, not a choice — whether a role may write, what schema its turn returns, and which conversation it talks through. There are three conversations, and which one a role gets follows from its provider and its job: everything on Claude shares Claude's session; a Codex reviewer holds the reviewer's thread, and every other Codex role the plan-side judge's.
 

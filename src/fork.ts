@@ -1,6 +1,6 @@
 ﻿import { copyFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
-import { applyOverrides, loadConfig } from '@src/config.js';
+import { applyOverrides, environmentStale, loadConfig } from '@src/config.js';
 import { checkStoredConsistency, checkTokenShare } from '@src/consistency.js';
 import type { TokenShareClamp } from '@src/consistency.js';
 import * as git from '@src/git.js';
@@ -25,6 +25,7 @@ import {
   parseStoredState,
   validateStoredState,
 } from '@src/stored.js';
+import type { RolePatches } from '@src/roles.js';
 import type {
   Config,
   ConfigOverrides,
@@ -80,6 +81,17 @@ export interface ForkPlan {
    * child so the figure is not lost with the plan object.
    */
   tokenShare: TokenShareClamp | null;
+  /**
+   * Whether the parent's probed environment facts describe a table or a contract
+   * this fork no longer has, because a `--role` flag moved one (#89).
+   *
+   * Optional, and absent means false. `ForkPlan` is exported and built by hand
+   * elsewhere - `linked-run-entry.test.ts` constructs one to prove `commitFork`
+   * refuses a linked source - so a required field would break a caller that has
+   * nothing to do with per-role flags. Absent therefore means what every fork
+   * before this key did: carry the parent's facts.
+   */
+  environmentStale?: boolean | undefined;
   /** What the fork will not carry, stated rather than left to be assumed. */
   losses: string[];
 }
@@ -126,6 +138,7 @@ export async function planFork(
   sourceId: string,
   n: number,
   overrides: ConfigOverrides,
+  roles: RolePatches = {},
 ): Promise<ForkPlan> {
   const root = runsRootOf(targetDir);
   // First, before a path exists. `../other` never reaches the filesystem.
@@ -225,10 +238,17 @@ export async function planFork(
   // The same validation `resumeConfig` performs, and for the same reason:
   // `state.config` is the one field `validateStoredState` deliberately does not
   // check, so this is where a stored config that no longer validates refuses.
-  const cfg =
+  const load = (o: ConfigOverrides, r: RolePatches): Config =>
     checkpointState.config === undefined
-      ? loadConfig(targetDir, overrides)
-      : applyOverrides(checkpointState.config, overrides);
+      ? loadConfig(targetDir, o, r)
+      : applyOverrides(checkpointState.config, o, r);
+  const cfg = load(overrides, roles);
+
+  // Only when a `--role` flag could have moved something: with no patches the
+  // baseline is not built and no fork that exists today changes. See
+  // `environmentStale` for why a model or an effort is deliberately not enough.
+  const staleEnvironment =
+    Object.keys(roles).length > 0 && environmentStale(load(overrides, {}), cfg);
 
   const losses: string[] = [];
   // First, so it sits with the inherited totals rather than after the branch
@@ -319,6 +339,7 @@ export async function planFork(
     cfg,
     commit,
     tokenShare,
+    environmentStale: staleEnvironment,
     losses,
   };
 }
@@ -464,6 +485,12 @@ export async function commitFork(targetDir: string, plan: ForkPlan): Promise<For
       config: cfg,
     };
     for (const key of slots.clear) delete child[key];
+    // Beside the session ids, for the same reason they clear: a field that
+    // describes the parent and would be false of the child. The probe ran against
+    // a table or a contract this fork no longer has, and nothing can recompute a
+    // probe - so the facts go and preflight rewrites them (#89). `=== true` is
+    // what makes a plan built by hand, carrying no such field, keep them.
+    if (plan.environmentStale === true) delete child.environment;
     if (branch === null) delete child.branchPending;
     else child.branchPending = true;
 
