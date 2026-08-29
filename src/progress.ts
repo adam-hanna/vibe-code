@@ -57,6 +57,20 @@ export interface ProgressSnapshot {
    * text plus two tool_use blocks. See `parseClaudeLine`.
    */
   countedMessages: Set<string>;
+  /**
+   * Assistant message ids already counted as a `message` item in `items`.
+   *
+   * Deliberately a second set rather than a reuse of `countedMessages`, because
+   * the two record different facts and one event can establish either without
+   * the other. An assistant message may arrive with no `usage` at all - the
+   * adapter accepts such a turn, `extractUsage` returns null for it - and that
+   * message still happened, so it belongs in the tally. If it were added to
+   * `countedMessages` to dedupe the item, a later usage-bearing event repeating
+   * the same id would read as already counted and its tokens would be dropped,
+   * which is the undercount #77 depends on not happening. So: one set for "its
+   * tokens are in", one for "it is in the tally" (#66).
+   */
+  itemisedMessages: Set<string>;
 }
 
 export function emptySnapshot(): ProgressSnapshot {
@@ -68,6 +82,7 @@ export function emptySnapshot(): ProgressSnapshot {
     tokens: 0,
     promptTokens: 0,
     countedMessages: new Set(),
+    itemisedMessages: new Set(),
   };
 }
 
@@ -168,23 +183,45 @@ export const parseClaudeLine: LineParser = (snapshot, line) => {
     }
   }
 
+  const rawId = message['id'];
+  const id = typeof rawId === 'string' && rawId !== '' ? rawId : null;
   const usage = message['usage'];
-  if (isRecord(usage)) {
-    const id = message['id'];
-    const seen = typeof id === 'string' && id !== '' && snapshot.countedMessages.has(id);
-    if (typeof id === 'string' && id !== '') snapshot.countedMessages.add(id);
+  const hasUsage = isRecord(usage);
+
+  // One non-tool `message` item per message, and NOT gated on usage (#66).
+  //
+  // Gating it on usage was a hole: `parseStream` accepts a turn whose assistant
+  // events carry none - `extractUsage` returns null and the run proceeds - so a
+  // Claude reviewer that wrote one text-only message and used no tools would
+  // leave an empty tally. An empty tally is "nothing observed", which is never
+  // inert, so exactly the turn this rule exists to catch would have escaped it
+  // on that provider.
+  //
+  // An id is required, because that is what separates a real message from the
+  // malformed shapes the parser must leave alone - the module comment above
+  // records that the real stream always carries one. A usage-bearing message
+  // without one is still tallied per event, matching how its tokens are counted.
+  if (id !== null) {
+    if (!snapshot.itemisedMessages.has(id)) {
+      snapshot.itemisedMessages.add(id);
+      tally(snapshot, 'message', false);
+    }
+    recognised = true;
+  } else if (hasUsage) {
+    tally(snapshot, 'message', false);
+  }
+
+  if (hasUsage) {
+    // Its own dedupe, over its own set: a usage-less event must not mark this id
+    // as counted, or the usage-bearing event that follows it would be read as a
+    // repeat and its tokens dropped. See `itemisedMessages`.
+    const seen = id !== null && snapshot.countedMessages.has(id);
+    if (id !== null) snapshot.countedMessages.add(id);
     // Recognised either way: this event WAS a usage-bearing assistant event, and
     // saying otherwise would make the parser's return value mean something new.
     // Only the arithmetic is skipped, `promptTokens` included - a repeat carries
     // the same prompt size, so re-assigning it would be a no-op with a hazard.
     if (!seen) {
-      // One non-tool `message` item per deduplicated message, through the SAME
-      // dedupe the tokens use and for the same reason (#66). Without it a Claude
-      // turn that used no tools would leave an empty tally, indistinguishable
-      // from a turn nothing measured - and "unmeasured" is never inert, so the
-      // detection this whole tally exists for would be lost on that provider.
-      // A message carrying no id counts each time, exactly as its tokens do.
-      tally(snapshot, 'message', false);
       const input = num(usage['input_tokens']);
       const output = num(usage['output_tokens']);
       const cacheRead = num(usage['cache_read_input_tokens']);

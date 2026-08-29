@@ -250,6 +250,23 @@ test('claude: an accepted turn carries out its tool uses and its message', async
   assert.deepEqual(result.activity, { items: { Read: 1, message: 1 }, tool: 1 });
 });
 
+test('claude: a text-only turn reporting no usage is still measured as inert', async () => {
+  // The whole stream for a turn that said one thing and did nothing, in the
+  // shape that carries no `usage` - which the adapter accepts (`usage: null` on
+  // the result). The tally must still describe it, or the reviewer rule cannot
+  // see a Claude review turn that ran nothing.
+  const { options } = progressRecorder();
+  const textOnly = JSON.stringify({
+    type: 'assistant',
+    message: { id: 'msg_1', content: [{ type: 'text', text: 'Looks wrong to me.' }] },
+  });
+
+  const result = await claudeTurn(claudeOptions(options), fakeExec(0, [textOnly, SUCCESS]));
+
+  assert.equal(result.usage, null, 'the turn really did report no usage');
+  assert.deepEqual(result.activity, { items: { message: 1 }, tool: 0 });
+});
+
 test('codex: a non-zero exit whose output file parses is accepted', async () => {
   const dir = codexDir();
   const { options, sources } = progressRecorder();

@@ -142,6 +142,51 @@ test('one message id across several assistant events adds one message item, not 
   assert.equal(snapshot.items.get('message'), 1);
 });
 
+test('a text-only claude message with no usage is still measured', () => {
+  const snapshot = emptySnapshot();
+
+  // The hole the tally had while it was gated on `message.usage`: the adapter
+  // accepts a turn whose assistant events carry none - `extractUsage` returns
+  // null and `usage` on the result is null - so this shape reaches a real run.
+  // Unmeasured is never inert, so a reviewer that wrote one message and ran
+  // nothing would have escaped the rule entirely on this provider.
+  const recognised = parseClaudeLine(
+    snapshot,
+    assistantLine({ id: 'msg_1', content: [{ type: 'text', text: 'Looks wrong to me.' }] }),
+  );
+
+  assert.equal(recognised, true);
+  assert.deepEqual(Object.fromEntries(snapshot.items), { message: 1 });
+  assert.equal(snapshot.toolItems, 0);
+  // Nothing invented about what it spent: no usage was reported, so none is.
+  assert.equal(snapshot.tokens, 0);
+});
+
+test('a usage-less event does not stop the usage-bearing repeat of it counting', () => {
+  const snapshot = emptySnapshot();
+
+  // The dedupes are separate sets because they record different facts. Sharing
+  // one would have this second event read as an already-counted repeat, and its
+  // tokens would vanish - the undercount #77 depends on not happening.
+  parseClaudeLine(snapshot, assistantLine({ id: 'msg_1', content: [{ type: 'text', text: 'hm' }] }));
+  parseClaudeLine(snapshot, assistantLine({ id: 'msg_1', usage: USAGE, content: [] }));
+
+  assert.equal(snapshot.tokens, 15);
+  assert.equal(snapshot.items.get('message'), 1, 'and it is still one message, not two');
+});
+
+test('a tool-only claude message with no usage tallies the tool and the message', () => {
+  const snapshot = emptySnapshot();
+
+  parseClaudeLine(
+    snapshot,
+    assistantLine({ id: 'msg_1', content: [{ type: 'tool_use', name: 'Bash', input: { command: 'ls' } }] }),
+  );
+
+  assert.deepEqual(Object.fromEntries(snapshot.items), { Bash: 1, message: 1 });
+  assert.equal(snapshot.toolItems, 1);
+});
+
 test('a claude turn that used no tools is measured and inert, not unmeasured', () => {
   const snapshot = emptySnapshot();
 
