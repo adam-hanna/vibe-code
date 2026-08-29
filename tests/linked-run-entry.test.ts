@@ -8,7 +8,6 @@ import {
   readdirSync,
   readFileSync,
   statSync,
-  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -22,6 +21,7 @@ import { priorRunsSection } from '@src/prompts.js';
 import { createRun, entryVerdict, listRuns, loadRun } from '@src/run.js';
 import type { ForkPlan } from '@src/fork.js';
 import type { RunSummary } from '@src/types.js';
+import { FILE_LINK_SKIP, JUNCTION_SKIP, linkDir, linkFile } from './helpers/links.js';
 
 /**
  * A run entry under `.vibe/runs` that is a link out of the run root (#53).
@@ -60,51 +60,11 @@ const LINK_MESSAGE = /symlink or a junction/;
 /** `cmdResume`'s lock refusal, which is what a guard-less implementation prints instead. */
 const LOCK_MESSAGE = /cannot be resumed/;
 
-const JUNCTION_SKIP = 'this platform refuses to create directory junctions (EPERM/EACCES)';
-const FILE_LINK_SKIP =
-  'this platform refuses to create FILE symlinks (EPERM/EACCES) - a junction cannot stand in, ' +
-  'since junctions point only at directories';
-
 function tempDir(): string {
   const dir = mkdtempSync(path.join(tmpdir(), 'vibe-linked-'));
   mkdirSync(path.join(dir, RUNS), { recursive: true });
   return dir;
 }
-
-/**
- * A link, or `false` if this machine may not make one.
- *
- * Only a privilege refusal skips. Anything else is a real failure and is
- * rethrown: a silent pass on a machine that cannot make links looks exactly
- * like a passing test, which is the failure mode that matters here.
- */
-function tryLink(target: string, at: string, type: 'junction' | 'file'): boolean {
-  try {
-    symlinkSync(target, at, type);
-    return true;
-  } catch (err) {
-    const code = (err as { code?: string } | null)?.code;
-    if (code === 'EPERM' || code === 'EACCES' || code === 'ENOSYS') return false;
-    throw err;
-  }
-}
-
-/**
- * A directory link. `'junction'` is a real junction on Windows - which needs
- * neither Administrator nor Developer Mode, as `mklink /J` from an ordinary
- * shell confirmed - and Node ignores the type argument on POSIX, giving an
- * ordinary symlink. One call, both platforms, no privilege.
- */
-const linkDir = (target: string, at: string): boolean => tryLink(target, at, 'junction');
-
-/**
- * A FILE link. `'junction'` cannot stand in: NTFS junctions point only at
- * directories, so this needs a real symlink, which on Windows needs Developer
- * Mode or Administrator. Its own helper and its own skip reason, so that
- * "directory junctions work here" is never mistaken for "the state.json case
- * ran".
- */
-const linkFile = (target: string, at: string): boolean => tryLink(target, at, 'file');
 
 /** A directory outside the archive, with a state.json a reader would find valid. */
 function outside(root: string, name = 'outside'): string {

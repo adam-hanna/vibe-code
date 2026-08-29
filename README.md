@@ -242,12 +242,29 @@ One command can only fail one way. `verify.gates` names as many as the project n
   "gates": [
     { "name": "typecheck", "command": "npm run typecheck", "runs": 1 },
     { "name": "test",      "command": "npm test",          "runs": 3 },
-    { "name": "qa",        "command": null, "runs": 1, "timeoutMs": 1800000, "required": false }
+    { "name": "qa",        "command": "npx playwright test", "runs": 1, "timeoutMs": 1800000,
+      "artifacts": ["playwright-report", "test-results/summary.json"] }
   ]
 }
 ```
 
 `runs` and `timeoutMs` default to `verify.runs` and `verify.timeoutMs`; `required` defaults to true; `command` is a **required key that may hold null**, so "there is deliberately nothing to run here" cannot be spelled by forgetting to write it. Each gate files its failure as `${name}-failing`, which is what lets the oscillation guard tell a typecheck that keeps failing from a test suite that keeps failing.
+
+### What a failing gate produced
+
+A failing suite usually writes something a human would want to read — a Playwright report, a `test-results/` tree — and nothing kept it: the next fix round runs the same command, the reporter rewrites its own output directory, and by the time anyone looks, round 1's evidence is round 3's. `artifacts` copies it instead, into `<run>/artifacts/<gate>/round-<n>/`, **one directory per round**, so a gate that failed three times leaves three pieces of evidence rather than one.
+
+**On failure only.** A passing report is evidence nothing consumes, and copying always would turn every green run into a copy.
+
+**Paths, not globs.** Each entry is a project-relative directory or file. `fs.glob` arrived in Node 22 and `vibe` supports Node 20 with no dependencies, so a glob would mean hand-writing a matcher — and that matcher would have to be link-aware while it expanded (does it descend into `playwright-report/junction/**`?), which puts the containment rule in a second place. A path needs none of that.
+
+**Every link is refused, and named.** This was measured, not assumed: `cpSync` preserves a symlink *as a symlink* — a pointer out of the archive that outlives the copy — and silently **follows a junction**, writing the target's bytes into the run directory. `dereference` and `verbatimSymlinks` change nothing; only a `filter` refuses anything. So every link is refused, in all four shapes (POSIX symlink, directory symlink, Node junction, `mklink /J`), at all three places one can appear: the configured path itself, **any ancestor of it** — `reports/output.json` where `reports` is a junction — and anything inside the tree. Each refusal is listed in the run record: a report that quietly lost half its files would look complete while being partial.
+
+Refused at config load, too: an absolute path (in every spelling, on every host), any `..` segment, the project root, anything under `.vibe` (which would copy the run directory into itself), and any segment ending in a **dot or a space** — Windows strips those, so `foo/.. /secret` reads as an ordinary relative path here and walks out of the project there. The same rule already governs run ids. **Overlapping entries are refused as well** — `["reports", "reports/output.json"]` would copy the same bytes twice and count them twice, and a child reported `missing` would still be on disk because its parent copied it.
+
+**The size is always reported**, in the console line and in the run record, whether or not you set a ceiling — copying into your repository is never silent. `verify.artifactMaxBytes` is that ceiling and defaults to **null**, deliberately: the only measurement available bounds what `vibe` itself writes (11.6MB across 24 archived runs), which says nothing about what a reporter writes, and a default here would be a number nobody measured. Over the ceiling, the entry copies **nothing** and says so — a truncated report that looks whole is worse than an absent one that says it is absent.
+
+Nothing copied can reach a commit: `.vibe/` contains a `.gitignore` holding `*`, so the whole subtree is self-ignoring whatever the project's own ignore rules say.
 
 **Ordering.** A **failure stops the sequence** — the fixer gets one problem, and running a suite against code that does not typecheck buys an opinion about the wrong thing. An **unavailable gate does not** stop it: a `typecheck` gate nobody configured must not prevent `test` from running.
 
@@ -421,7 +438,8 @@ defaults rather than a sample — omit any section and you get exactly what is p
               "convergenceWindow": 3 },
   "budget": { "maxCostUsd": 25, "maxTokens": 25000000, "planShare": 0.4,
               "codexLimitPercent": 95, "waitOnRateLimit": true, "maxWaitMinutes": 360 },
-  "verify": { "enabled": true, "command": null, "runs": 3, "timeoutMs": 900000, "gates": null },
+  "verify": { "enabled": true, "command": null, "runs": 3, "timeoutMs": 900000, "gates": null,
+              "artifactMaxBytes": null },
   "questions": { "askCodex": true, "answerNonBlocking": true,
                  "escalateOnDefer": true, "escalateOnLowConfidence": true },
   "git": { "useBranch": true, "branchPrefix": "vibe/", "commitEachRound": true },

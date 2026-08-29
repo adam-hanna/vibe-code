@@ -3,6 +3,7 @@ import { applyCharge, chargeFailure, enforceCeilings, Escalation, EXIT, fmtToken
 import { claudeTurn, parseStructured, RateLimitError } from '@src/claude.js';
 import { codexTurn } from '@src/codex.js';
 import type { CodexTurnOptions, CodexTurnResult } from '@src/codex.js';
+import { preserveGateArtifacts } from '@src/artifacts.js';
 import { downgradeInert, groundFindings } from '@src/evidence.js';
 import * as git from '@src/git.js';
 import * as log from '@src/log.js';
@@ -58,6 +59,7 @@ import {
   resumePhase,
   saveState,
   takePendingFindings,
+  tryRecordEvent,
   verificationCaveat,
   writeCheckpoint,
 } from '@src/run.js';
@@ -1565,13 +1567,14 @@ async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Findi
     log.warn(
       `Gate ${gate.name} failed: ${result.command} (attempt ${result.failedRun} of ${result.runs})`,
     );
-    outcomes.push({
+    const failed: GateOutcome = {
       name: gate.name,
       status: 'failed',
       command: result.command,
       runs: result.runs,
       required: gate.required,
-    });
+    };
+    outcomes.push(failed);
     recordEvent(state, 'verify_failed', {
       gate: gate.name,
       command: result.command,
@@ -1579,6 +1582,44 @@ async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Findi
       exitCode: result.exitCode,
     });
     artifact(state, `verify-failure-${state.reviewRound}.txt`, result.output);
+
+    // What the failing command PRODUCED, on the failing branch only (#62). Not
+    // on the unavailable or unlaunchable paths above: nothing ran there, so
+    // there is nothing the command produced. `verifyRound + 1` because the
+    // counter is incremented after this function returns, which makes this the
+    // same number as the `verify-fix-<n>.md` report that answers this failure.
+    if (gate.artifacts.length > 0) {
+      const preserved = preserveGateArtifacts(
+        state,
+        cwd,
+        gate.name,
+        state.verifyRound + 1,
+        gate.artifacts,
+        cfg.verify.artifactMaxBytes,
+      );
+      failed.artifacts = preserved;
+      const copied = preserved.entries.filter((e) => e.status === 'copied').length;
+      const links = preserved.entries.reduce((n, e) => n + (e.skippedLinks?.length ?? 0), 0);
+      // The size is reported whether or not a ceiling is set: copying a report
+      // into the user's repository is never silent.
+      log.info(
+        `Gate ${gate.name}: kept ${copied} of ${preserved.entries.length} artifact paths ` +
+          `(${preserved.bytes} bytes) under ${preserved.dir}` +
+          (links > 0 ? `; ${links} link${links === 1 ? '' : 's'} refused` : ''),
+      );
+      // tryRecordEvent, never recordEvent: `saveState` rethrows, and a throw
+      // here would replace a gate failure the loop knows how to fix with
+      // EXIT.ERROR - the audit trail of a side effect destroying the thing it is
+      // about. `verify_failed` above is already persisted, so the exit rule's
+      // input is safe whatever this write does.
+      tryRecordEvent(state, 'gate_artifacts', {
+        gate: gate.name,
+        round: state.verifyRound + 1,
+        dir: preserved.dir,
+        bytes: preserved.bytes,
+        entries: preserved.entries,
+      });
+    }
 
     return {
       // A stable id, and one PER GATE: an identical failure across rounds is what

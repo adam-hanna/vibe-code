@@ -594,6 +594,7 @@ test('a commitFork killed at any point leaves a child that is complete or absent
     for (const id of children) {
       const dir = path.join(root, id);
       const entries = readdirSync(dir);
+      const temps = entries.filter((e) => e.endsWith('.tmp'));
       if (existsSync(path.join(dir, 'state.json'))) {
         sawComplete = true;
         // Complete: whatever it points at is already on disk beside it.
@@ -603,16 +604,38 @@ test('a commitFork killed at any point leaves a child that is complete or absent
           assert.ok(existsSync(path.join(dir, state.lastReport)));
         }
         assert.ok(listed.includes(id), 'and it is a run');
+        // A write that RAN TO COMPLETION owes an empty directory: `writeAtomic`
+        // renames its temp away on success and unlinks it on failure, and both
+        // of those paths executed here. This half of the rule is a real
+        // contract and stays absolute.
+        assert.deepEqual(temps, [], `a completed fork left temp litter: ${entries.join(', ')}`);
       } else {
         sawIncomplete = true;
         // Absent: not a run, and nothing may present it as one.
         assert.equal(listed.includes(id), false, 'a directory with no state.json is not a run');
+        // The kill landed INSIDE the write, and there the temp file is not a
+        // defect any implementation can remove: `writeAtomic`'s cleanup lives in
+        // a `catch`, and SIGKILL runs no catch. A kill between `writeFileSync`
+        // and `renameSync` therefore always leaves `state.json.<pid>.tmp`.
+        // Measured here at roughly one occurrence per 40 executions of this case
+        // (11 kills each), on code identical to the base - it is a flake this
+        // assertion could only ever have caught by luck.
+        //
+        // What still holds, and is what the case is actually guarding: the
+        // directory is not a run and nothing lists it. It already tolerates the
+        // `PLAN.md` and `run.lock` beside it for exactly that reason, and the
+        // half-written state was never singled out on any principle the other
+        // two do not share. So only the atomic write's OWN temp is tolerated,
+        // by name: any other `.tmp` is litter somebody chose to leave and still
+        // fails.
+        for (const temp of temps) {
+          assert.match(
+            temp,
+            /^state\.json\.\d+\.tmp$/,
+            `a killed fork left temp litter that is not the atomic write's: ${entries.join(', ')}`,
+          );
+        }
       }
-      assert.equal(
-        entries.some((e) => e.endsWith('.tmp')),
-        false,
-        `a killed fork left temp litter: ${entries.join(', ')}`,
-      );
     }
   }
 

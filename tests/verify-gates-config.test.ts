@@ -62,18 +62,125 @@ test('two gates may not share a name', () => {
   );
 });
 
-test('an artifacts key is refused with the reason, not as an unknown key', () => {
+/**
+ * This case used to assert that `artifacts` was refused *with its reason* -
+ * "gate artifacts are not implemented ... waits on #53". #53 shipped (PR #101)
+ * and #62 implemented the copy, so that reason is now false and the behaviour
+ * genuinely moved (AGENTS.md case 2). What it was really guarding - that a
+ * key out of #47's own example gets a real answer rather than a generic
+ * "unknown key" - still holds and is what the rewritten case pins: the key is
+ * accepted, and every way of writing a path that cannot safely be copied is
+ * refused by a message that names it.
+ */
+test('an artifacts list of project-relative paths is accepted', () => {
+  assert.doesNotThrow(
+    withVerify({
+      gates: [
+        {
+          name: 'qa',
+          command: 'npx playwright test',
+          artifacts: ['playwright-report', 'test-results/summary.json'],
+        },
+      ],
+    }),
+  );
+  // Disjoint entries sharing a basename are fine: destinations mirror the
+  // configured path, so they cannot collide.
+  assert.doesNotThrow(
+    withVerify({ gates: [{ name: 'qa', command: 'x', artifacts: ['a/report', 'b/report'] }] }),
+  );
+  // An empty list is a list, and it asks for nothing - which is not an error.
+  assert.doesNotThrow(withVerify({ gates: [{ name: 'qa', command: null, artifacts: [] }] }));
+});
+
+test('an artifacts entry that cannot safely be copied is refused, by name', () => {
+  const refused = (entry: unknown): (() => Config) =>
+    withVerify({ gates: [{ name: 'qa', command: 'x', artifacts: [entry] }] });
+
+  // Absolute in every spelling, and each is refused on EVERY host: a config
+  // written on Windows and validated on CI must not have `C:\x` read as a
+  // relative directory named `C:`.
+  assert.throws(refused('/tmp/report'), { message: /verify\.gates\[0\]\.artifacts\[0\].*absolute/ });
+  assert.throws(refused('C:\\reports'), { message: /"C:\\reports" is absolute/ });
+  assert.throws(refused('\\\\server\\share'), { message: /is absolute/ });
+  // A leading separator of either flavour, on every host: `path.isAbsolute` says
+  // true for `\x` on win32 and false on POSIX, so without the extra check the
+  // same config is rooted on one host and a directory named `\x` on the other.
+  assert.throws(refused('\\reports'), { message: /is absolute/ });
+  // `..` even where it resolves back inside: one rule that is easy to state.
+  assert.throws(refused('../outside'), { message: /"\.\.\/outside" contains a "\.\." segment/ });
+  assert.throws(refused('sub/../file'), { message: /contains a "\.\." segment/ });
+  // The Windows canonicalization hole: the Win32 layer strips trailing dots and
+  // spaces, so `.. ` IS `..` there and an exact-match `..` check walks straight
+  // past `foo/.. /secret`. Refused on every host, since a config is written on
+  // one machine and run on another.
+  assert.throws(refused('foo/.. /secret'), { message: /ending in a dot or space/ });
+  assert.throws(refused('foo/... /secret'), { message: /ending in a dot or space/ });
+  assert.throws(refused('report./index.html'), { message: /ending in a dot or space/ });
+  assert.throws(refused('report /index.html'), { message: /ending in a dot or space/ });
+  // The project root itself, which would copy the whole tree into itself.
+  assert.throws(refused('.'), { message: /names the project root/ });
+  assert.throws(refused('./'), { message: /names the project root/ });
+  // The run directory, which would copy the archive into a descendant of itself.
+  assert.throws(refused('.vibe/runs'), { message: /is under \.vibe/ });
+  assert.throws(refused('reports/.vibe'), { message: /is under \.vibe/ });
+  // Shapes that are not a path at all.
+  assert.throws(refused(''), { message: /must be a non-empty path string/ });
+  assert.throws(refused('   '), { message: /must be a non-empty path string/ });
+  assert.throws(refused(7), { message: /must be a non-empty path string/ });
+  assert.throws(withVerify({ gates: [{ name: 'qa', command: 'x', artifacts: 'report' }] }), {
+    message: /verify\.gates\[0\]\.artifacts must be a list/,
+  });
+});
+
+test('the .vibe refusal follows the host filesystem, case included', (t) => {
+  const spelled = (entry: string): (() => Config) =>
+    withVerify({ gates: [{ name: 'qa', command: 'x', artifacts: [entry] }] });
+  if (process.platform !== 'win32') {
+    t.skip('.VIBE is a different directory from .vibe on this platform, and must stay allowed');
+    return;
+  }
+  // Windows folds case, so `.VIBE` NAMES the run directory and must not become
+  // a way into it.
+  assert.throws(spelled('.VIBE/x'), { message: /is under \.vibe/ });
+  // `.vibe.` names it too, by the trailing-dot stripping - and that shape is
+  // refused one rule earlier, on every host, precisely because the stripping
+  // makes the written path and the walked path two different things. Different
+  // message, same refusal, and the general rule is the one worth stating.
+  assert.throws(spelled('.vibe./x'), { message: /ending in a dot or space/ });
+  assert.throws(spelled('.vibe /x'), { message: /ending in a dot or space/ });
+});
+
+test('overlapping artifact paths are refused, naming both', () => {
   assert.throws(
     withVerify({
-      gates: [{ name: 'qa', command: null, artifacts: ['playwright-report/**'] }],
+      gates: [{ name: 'qa', command: 'x', artifacts: ['reports', 'reports/output.json'] }],
     }),
-    { message: /artifacts is not supported/ },
+    { message: /"reports" and "reports\/output\.json" overlap/ },
   );
-  // It is a real request out of #47's own example, so it gets a real answer.
+  // The same entry twice, spelled two ways.
   assert.throws(
-    withVerify({ gates: [{ name: 'qa', command: null, artifacts: [] }] }),
-    { message: /#53/ },
+    withVerify({ gates: [{ name: 'qa', command: 'x', artifacts: ['a', './a'] }] }),
+    { message: /overlap/ },
   );
+  // Why it matters, stated in the message: the bytes would be counted twice.
+  assert.throws(
+    withVerify({ gates: [{ name: 'qa', command: 'x', artifacts: ['a', 'a/b/c'] }] }),
+    { message: /counted twice/ },
+  );
+});
+
+test('on Windows two spellings of one directory overlap; elsewhere they are two', (t) => {
+  const pair = withVerify({ gates: [{ name: 'qa', command: 'x', artifacts: ['A', 'a'] }] });
+  if (process.platform === 'win32') {
+    // One directory under two names: copying both would copy it twice.
+    assert.throws(pair, { message: /"A" and "a" overlap/ });
+    return;
+  }
+  // And genuinely two directories here, so refusing them would refuse a legal
+  // configuration - the same reason the `.vibe` check is not folded off win32.
+  t.diagnostic('A and a are distinct directories on this platform');
+  assert.doesNotThrow(pair);
 });
 
 test('any other unknown key inside a gate is refused by name', () => {
@@ -140,6 +247,30 @@ test('verify.runs and verify.timeoutMs compose as per-gate defaults a gate may o
   assert.equal(cfg.verify.gates?.[1]?.runs, undefined);
   assert.equal(cfg.verify.runs, 5);
   assert.equal(cfg.verify.timeoutMs, 1000);
+});
+
+test('artifactMaxBytes is checked on the legacy path too, not only behind a gate list', () => {
+  // The legacy shape - `gates` absent or null - is what most configs still are,
+  // and `validateVerify` returns early for it. A ceiling validated after that
+  // return would accept "10" in silence for exactly those runs.
+  for (const gates of [null, undefined]) {
+    assert.doesNotThrow(withVerify({ gates, artifactMaxBytes: null }));
+    assert.doesNotThrow(withVerify({ gates, artifactMaxBytes: 1 }));
+    assert.doesNotThrow(withVerify({ gates, artifactMaxBytes: 50_000_000 }));
+    for (const bad of [0, -1, 1.5, '10']) {
+      assert.throws(withVerify({ gates, artifactMaxBytes: bad }), {
+        message: /verify\.artifactMaxBytes must be a positive integer/,
+      });
+    }
+  }
+
+  // And with a gate list, where the same rule has to still apply.
+  assert.doesNotThrow(
+    withVerify({ gates: [{ name: 'qa', command: 'x' }], artifactMaxBytes: 1024 }),
+  );
+  assert.throws(withVerify({ gates: [{ name: 'qa', command: 'x' }], artifactMaxBytes: 0 }), {
+    message: /positive integer/,
+  });
 });
 
 test('a 1.1.0 config with no gates key still resolves and still validates', () => {

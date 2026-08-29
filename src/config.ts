@@ -152,6 +152,11 @@ export const DEFAULTS: Config = {
     // written before #47 has - and anything that spreads `DEFAULTS.verify` and
     // sets `command` keeps producing a legacy config rather than an illegal one.
     gates: null,
+    // No ceiling by default, and deliberately no number. The archive measurement
+    // that exists (11.6MB over 24 runs) bounds what vibe writes, not what a test
+    // reporter writes, so any default would be invented - and a user who named
+    // an artifact path opted in to it being copied (#62).
+    artifactMaxBytes: null,
   },
   progress: {
     enabled: true,
@@ -631,7 +636,151 @@ const PROVIDERS: readonly AgentProvider[] = ['claude', 'codex'];
 
 /** A gate name has to survive being a finding id, so it is kept to one alphabet. */
 const GATE_NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
-const GATE_KEYS = ['name', 'command', 'runs', 'timeoutMs', 'required'] as const;
+const GATE_KEYS = ['name', 'command', 'runs', 'timeoutMs', 'required', 'artifacts'] as const;
+
+/** The run directory's own name. Copying it into itself is the one self-reference to refuse. */
+const VIBE_DIR = '.vibe';
+
+/**
+ * Every absolute spelling, checked on EVERY host rather than per platform.
+ *
+ * `path.isAbsolute` answers for the host it runs on and nothing else, so a
+ * config written on Windows and validated on CI would have `C:\reports` read as
+ * a relative directory literally named `C:`. A rule about what the user may
+ * write must not depend on where it is read.
+ */
+const WINDOWS_DRIVE_RE = /^[A-Za-z]:/;
+const UNC_RE = /^[\\/]{2}/;
+/**
+ * A leading separator of either flavour, refused on every host too.
+ *
+ * `path.isAbsolute('\\x')` is true on win32 and FALSE on POSIX, so without this
+ * the same config is rooted on one host and a directory literally named `\x` on
+ * the other. Same rule as above: what the user may write cannot depend on where
+ * it is read.
+ */
+const LEADING_SEPARATOR_RE = /^[\\/]/;
+
+/**
+ * A segment Windows would canonicalize into a different one.
+ *
+ * The Win32 layer strips trailing dots and spaces from every component, so
+ * `".. "` IS `..` there, and `"foo."` IS `foo`. A `..` check that compares raw
+ * segments therefore passes `foo/.. /secret` straight through while the
+ * filesystem walks it out of the project - which is a containment hole, not a
+ * cosmetic one. Refusing the whole shape on EVERY host is one rule instead of a
+ * canonicalization the rest of the code would then have to agree with, and it
+ * costs only the ability to name a POSIX file with a trailing dot or space.
+ *
+ * The repo's existing answer to the same hole, and the reason this one is
+ * spelled the same way: `assertUsableRunId` refuses a run id ending in a dot or
+ * a space, and `isReportBasename` refuses the same shape one field along.
+ */
+const TRAILING_DOT_OR_SPACE_RE = /[. ]$/;
+
+/**
+ * One artifact path's segments, in the form the comparison rules use.
+ *
+ * Windows folds case AND strips trailing dots and spaces at the Win32 layer, so
+ * `.VIBE`, `.vibe.` and `.vibe ` all name the same directory there while a naive
+ * `=== '.vibe'` sees three different strings - which would be a way to copy the
+ * run archive into a descendant of itself. POSIX does none of that folding, and
+ * pretending it does would refuse paths that are genuinely distinct.
+ */
+function artifactSegments(entry: string): string[] {
+  return entry
+    .split(/[\\/]+/)
+    .filter((s) => s !== '' && s !== '.')
+    .map((s) => (process.platform === 'win32' ? s.toLowerCase().replace(/[. ]+$/, '') : s));
+}
+
+/**
+ * Why this artifact path may not be copied, or null.
+ *
+ * The ONE lexical rule for an artifact path, exported so `src/artifacts.ts` can
+ * apply the identical rule at copy time (#62). Two nearly-agreeing checks in two
+ * files is how a validation rule and the thing it guards drift apart: an earlier
+ * draft of this change had the copy-time check mirror `resolveInside`, which
+ * permits an absolute path *inside* the root and a `sub/../file` alias - both of
+ * which this refuses.
+ *
+ * Lexical only. Links are a filesystem question, asked component by component in
+ * `src/artifacts.ts` with #53's predicate.
+ */
+export function refuseArtifactPath(entry: unknown): string | null {
+  if (typeof entry !== 'string' || entry.trim() === '') {
+    return 'must be a non-empty path string';
+  }
+  if (
+    path.isAbsolute(entry) ||
+    LEADING_SEPARATOR_RE.test(entry) ||
+    WINDOWS_DRIVE_RE.test(entry) ||
+    UNC_RE.test(entry)
+  ) {
+    return `"${entry}" is absolute; artifact paths are relative to the project`;
+  }
+  const raw = entry.split(/[\\/]+/).filter((s) => s !== '' && s !== '.');
+  if (raw.includes('..')) {
+    // Refused even where it resolves back inside - `sub/../file` is the same
+    // file as `file` and has no reason to be written that way, and one rule
+    // that is easy to state beats two that nearly agree.
+    return `"${entry}" contains a ".." segment; artifact paths may not walk upwards`;
+  }
+  // AFTER the `..` check, which is exact: `..` itself ends in a dot, and the two
+  // refusals mean different things to whoever reads them.
+  const ambiguous = raw.find((s) => TRAILING_DOT_OR_SPACE_RE.test(s));
+  if (ambiguous !== undefined) {
+    return (
+      `"${entry}" has a segment ending in a dot or space ("${ambiguous}"), which Windows ` +
+      'strips - so the path names something different there than it reads as here'
+    );
+  }
+  const segments = artifactSegments(entry);
+  if (segments.length === 0) {
+    return `"${entry}" names the project root; artifact paths must name something inside it`;
+  }
+  // `segments` is already folded on win32 and `.vibe` is already lower case, so
+  // one comparison covers `.VIBE`, `.vibe.` and `.vibe ` there.
+  if (segments.includes(VIBE_DIR)) {
+    return `"${entry}" is under ${VIBE_DIR}, which is the run directory itself`;
+  }
+  return null;
+}
+
+/**
+ * Why these two artifact paths may not both be copied, or null.
+ *
+ * `["reports", "reports/output.json"]` copies the same bytes twice, so the
+ * reported total double-counts them; worse, a child refused as `too-large` or
+ * reported `missing` would still be sitting in the run directory because its
+ * parent copied it. Both are records that contradict the filesystem, which is
+ * the failure this whole change exists to prevent - so the config is refused
+ * rather than given an aggregation rule nobody has asked for.
+ *
+ * Disjoint entries sharing a basename are fine: destinations mirror the
+ * configured path, so `a/report` and `b/report` cannot collide.
+ */
+export function refuseOverlappingArtifacts(entries: readonly string[]): string | null {
+  const seen: { entry: string; segments: string[] }[] = [];
+  for (const entry of entries) {
+    const segments = artifactSegments(entry);
+    for (const prior of seen) {
+      const [shorter, longer] =
+        prior.segments.length <= segments.length
+          ? [prior, { entry, segments }]
+          : [{ entry, segments }, prior];
+      const nested = shorter.segments.every((s, i) => longer.segments[i] === s);
+      if (nested) {
+        return (
+          `"${prior.entry}" and "${entry}" overlap; one contains the other, so the same ` +
+          'files would be copied twice and counted twice'
+        );
+      }
+    }
+    seen.push({ entry, segments });
+  }
+  return null;
+}
 
 /**
  * The verification section, including the gate list.
@@ -651,6 +800,20 @@ function validateVerify(verify: VerifyConfig): void {
     throw new Error(
       'verify.command must be a non-empty command string, or null to auto-detect',
     );
+  }
+
+  // Above the `gates === null` return below, deliberately: this key is a
+  // property of the whole verify section, and a legacy config - which is the
+  // shape most runs still have - would otherwise skip its validation entirely
+  // and accept `artifactMaxBytes: "10"` in silence.
+  const maxBytes: unknown = verify.artifactMaxBytes;
+  if (maxBytes !== null && maxBytes !== undefined) {
+    if (!Number.isInteger(maxBytes) || (maxBytes as number) < 1) {
+      throw new Error(
+        'verify.artifactMaxBytes must be a positive integer number of bytes, or null for no ' +
+          'ceiling',
+      );
+    }
   }
 
   const gates: unknown = verify.gates;
@@ -681,16 +844,6 @@ function validateVerify(verify: VerifyConfig): void {
     const where = `verify.gates[${i}]`;
     if (!isRecord(entry)) throw new Error(`${where} must be an object with a name and a command`);
 
-    // Asked before the field checks, as `roleSetting` does: `{"artifacts": [...]}`
-    // is a real request out of #47's own example, and answering it with "gate has
-    // no command" would send the reader the wrong way.
-    if (Object.prototype.hasOwnProperty.call(entry, 'artifacts')) {
-      throw new Error(
-        `${where}.artifacts is not supported: gate artifacts are not implemented. The gate ` +
-          'list ships without them (#47); copying project-controlled paths into the run ' +
-          'directory waits on #53.',
-      );
-    }
     for (const key of Object.keys(entry)) {
       if (!(GATE_KEYS as readonly string[]).includes(key)) {
         throw new Error(
@@ -737,6 +890,25 @@ function validateVerify(verify: VerifyConfig): void {
     const required = entry['required'];
     if (required !== undefined && typeof required !== 'boolean') {
       throw new Error(`${where}.required must be true or false`);
+    }
+
+    // The shape settles these, so they are refused HERE rather than mid-run:
+    // a typo in a path is a config error, not a surprise forty minutes in when
+    // the gate finally fails and there is nothing to preserve (#62).
+    const artifacts = entry['artifacts'];
+    if (artifacts !== undefined) {
+      if (!Array.isArray(artifacts)) {
+        throw new Error(
+          `${where}.artifacts must be a list of project-relative paths (a directory or a file ` +
+            'each), or absent',
+        );
+      }
+      artifacts.forEach((candidate: unknown, j) => {
+        const refusal = refuseArtifactPath(candidate);
+        if (refusal !== null) throw new Error(`${where}.artifacts[${j}] ${refusal}`);
+      });
+      const overlap = refuseOverlappingArtifacts(artifacts as string[]);
+      if (overlap !== null) throw new Error(`${where}.artifacts: ${overlap}`);
     }
   });
 }

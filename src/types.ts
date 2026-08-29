@@ -372,6 +372,19 @@ export interface VerifyGate {
    * blocks, whatever this says.
    */
   required?: boolean;
+  /**
+   * What the command produced, preserved when this gate FAILS (#62).
+   *
+   * Project-relative paths, each a directory or a file - not globs. `fs.glob`
+   * arrived in Node 22 and `engines` is node >=20 with no dependencies, so a
+   * glob would mean hand-rolling a matcher; worse, the matcher would have to be
+   * link-aware while it expanded, which puts the containment rule in a second
+   * place. A path needs neither.
+   *
+   * Absolute paths, `..` segments and anything under `.vibe` are refused by
+   * `refuseArtifactPath`, and overlapping entries by `refuseOverlappingArtifacts`.
+   */
+  artifacts?: string[];
 }
 
 export interface VerifyConfig {
@@ -400,6 +413,20 @@ export interface VerifyConfig {
    * per-gate defaults a gate may override.
    */
   gates: VerifyGate[] | null;
+  /**
+   * A ceiling on what one gate artifact entry may copy, in bytes. Null is no
+   * ceiling, and it is the default (#62).
+   *
+   * Null rather than a number because there is nothing to derive a number from.
+   * The only measurement available bounds what *vibe* writes - 11.6MB across 24
+   * archived runs, largest single record 1.14MB - and says nothing about what a
+   * test reporter writes, which is the thing a ceiling is about. A default here
+   * would be invented, and the user opted in by naming the path.
+   *
+   * One setting for all gates rather than a per-gate key: the surface is smaller
+   * and nothing yet wants two.
+   */
+  artifactMaxBytes: number | null;
 }
 
 export interface ProgressConfig {
@@ -722,6 +749,64 @@ export interface GateOutcome {
   /** Executions actually performed. Zero for unavailable and disabled. */
   runs: number;
   required: boolean;
+  /**
+   * What was preserved of what the failing command produced (#62).
+   *
+   * Absent when the gate passed, when it named no `artifacts`, and when
+   * verification is disabled. Absent is NOT an empty record: "nothing was asked
+   * for" and "something was asked for and nothing survived" are different facts,
+   * and only the second one is a report a human has to go and read.
+   */
+  artifacts?: GateArtifacts | undefined;
+}
+
+/**
+ * What happened to ONE configured artifact path.
+ *
+ * Every status other than `copied` carries its `reason`, because a run record
+ * that quietly omits half a report looks complete - and looking complete while
+ * being partial is the fabrication this repo's rules exist to prevent.
+ */
+export interface ArtifactEntryOutcome {
+  /** The path exactly as configured, so a reader can match it to their config. */
+  path: string;
+  status: 'copied' | 'missing' | 'refused' | 'too-large' | 'failed';
+  files?: number;
+  bytes?: number;
+  /** Why, for anything that is not `copied`. Present for every other status. */
+  reason?: string;
+  /** Links refused inside the tree, relative to the entry, in walk order. */
+  skippedLinks?: string[];
+}
+
+/** One gate's preserved evidence for one verification round. */
+export interface GateArtifacts {
+  /**
+   * Where they went, RELATIVE to the run directory and with POSIX separators -
+   * `artifacts/qa/round-1`.
+   *
+   * Relative for the reason `loadRun` re-derives `dir` and `targetDir` rather
+   * than trusting the stored ones: a run record has to stay readable when the
+   * repository moves, and an absolute host-native path stored in state.json
+   * would be wrong the moment it did.
+   */
+  dir: string;
+  entries: ArtifactEntryOutcome[];
+  /** Bytes actually written. The sum of the entries that were copied. */
+  bytes: number;
+  /**
+   * Housekeeping this attempt could not finish, named.
+   *
+   * Deleting the superseded round after the new one is installed is the last
+   * step and the only one that can fail without costing anything - the snapshot
+   * is already in place, so reporting the entries as failed would make the
+   * record contradict a filesystem holding exactly what was asked for. But a
+   * `round-1.superseded-*` directory nobody explained is a puzzle for whoever
+   * opens the run, so what is left over is said here instead of only in a log
+   * line that has long since scrolled away. Absent means the directory holds
+   * exactly the round and nothing else.
+   */
+  unresolved?: string;
 }
 
 /**
