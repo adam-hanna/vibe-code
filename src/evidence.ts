@@ -535,3 +535,51 @@ export function refusePlaceholderPlan(
 
   return { report: { ...report, findings: [raised, ...report.findings] }, raised };
 }
+
+/**
+ * Item kinds that are an agent answering or thinking, never one looking at
+ * anything.
+ *
+ * A deny-list over an *observed* set, never an allow-list of tools, for the
+ * reason `NON_TOOL_CODEX_ITEMS` in `src/progress.ts` gives: the two providers'
+ * vocabularies do not agree and neither can be enumerated from the other. Every
+ * kind ever recorded in this repository's archive, 2026-09-02, across the 34
+ * turn events that carry a tally:
+ *
+ *   command_execution 635, message 244, Bash 130, Edit 78, agent_message 37,
+ *   PowerShell 34, Read 18, StructuredOutput 15, Write 3
+ *
+ * `message` and `StructuredOutput` are Claude writing prose and returning its
+ * schema-shaped answer; `agent_message` and `reasoning` are the Codex twins.
+ * Everything else touched something. `reasoning` is listed though it has never
+ * appeared on the stream here - it does appear in the rollouts, and
+ * `progress.ts` already treats it as non-tool, so leaving it out would make the
+ * two disagree.
+ *
+ * It fails open in the same direction: an unrecognised kind makes a turn look as
+ * though it inspected something, which loses a detection rather than putting a
+ * false accusation in a prompt.
+ */
+const NON_INSPECTING_ITEMS = new Set(['message', 'StructuredOutput', 'agent_message', 'reasoning']);
+
+/**
+ * How many things this turn did that were not answering or talking - or null
+ * when nothing measured it (#63).
+ *
+ * `isInert` cannot answer this question for a Claude turn. It reads
+ * `activity.tool === 0`, and on the Claude side every `tool_use` block counts,
+ * `StructuredOutput` included - so a planner that returns a plan and opens
+ * nothing scores 1, not 0. Measured over the archive, all six planner turns that
+ * looked at nothing recorded exactly `{message: 1, StructuredOutput: 1}`; four
+ * of the six are the stalled #63 run, among them its last three revisions.
+ *
+ * Null and not zero for an unmeasured turn, for the reason `activityEvent`
+ * omits its fields entirely: a zero standing in for an absence is the one thing
+ * this repo never records.
+ */
+export function inspectedItems(activity: TurnActivity | undefined): number | null {
+  if (activity === undefined) return null;
+  const kinds = Object.entries(activity.items);
+  if (kinds.length === 0) return null;
+  return kinds.reduce((sum, [kind, n]) => (NON_INSPECTING_ITEMS.has(kind) ? sum : sum + n), 0);
+}

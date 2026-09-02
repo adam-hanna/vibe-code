@@ -372,11 +372,21 @@ async function planPhase(
   turns: AgentTurns,
 ): Promise<Plan> {
   let plan: Plan;
+  /**
+   * What the plan turn *this process ran* did, or absent (#63).
+   *
+   * Reassigned by every turn that produces a plan, so the critique below is told
+   * about the turn that wrote the plan it is critiquing and never about an
+   * earlier one. A plan restored from `state.plan` on a resume leaves this
+   * absent: no turn ran here, so there is nothing to say about one, and absent
+   * is what "unmeasured" has always meant.
+   */
+  let planActivity: TurnActivity | undefined;
   if (state.plan) {
     plan = state.plan;
   } else {
     log.heading('Planning');
-    plan = await runPlan(state, cfg, cwd, roles, turns);
+    ({ plan, activity: planActivity } = await runPlan(state, cfg, cwd, roles, turns));
   }
 
   // Answers supplied by a human in NEEDS-INPUT.md, picked up on resume.
@@ -388,7 +398,14 @@ async function planPhase(
   // path where both are present.
   if (state.pendingAnswers && state.pendingAnswers.length > 0) {
     for (const a of state.pendingAnswers) markAnswered(state, a.question);
-    plan = await revisePlan(state, cfg, cwd, { answers: state.pendingAnswers }, roles, turns);
+    ({ plan, activity: planActivity } = await revisePlan(
+      state,
+      cfg,
+      cwd,
+      { answers: state.pendingAnswers },
+      roles,
+      turns,
+    ));
     state.pendingAnswers = null;
     saveState(state);
   }
@@ -415,7 +432,14 @@ async function planPhase(
       // the plan answering them - not here, where a second write would reopen a
       // window between the two. A revision that throws, is rate-limited or dies
       // mid-flight never reaches that write, so the findings stay outstanding.
-      plan = await revisePlan(state, cfg, cwd, { findings: carried }, roles, turns);
+      ({ plan, activity: planActivity } = await revisePlan(
+        state,
+        cfg,
+        cwd,
+        { findings: carried },
+        roles,
+        turns,
+      ));
       continue;
     }
     firstPass = false;
@@ -466,9 +490,19 @@ async function planPhase(
       saveState(state);
 
       const answers = await resolveQuestions(state, cfg, cwd, pending, plan, roles, turns);
-      // The answerer may have declined every one; only revise if something came back.
-      plan =
-        answers.length > 0 ? await revisePlan(state, cfg, cwd, { answers }, roles, turns) : plan;
+      // The answerer may have declined every one; only revise if something came
+      // back - and when nothing did, the plan and the turn that wrote it are
+      // both still the ones already in hand.
+      if (answers.length > 0) {
+        ({ plan, activity: planActivity } = await revisePlan(
+          state,
+          cfg,
+          cwd,
+          { answers },
+          roles,
+          turns,
+        ));
+      }
       continue;
     }
 
@@ -482,7 +516,7 @@ async function planPhase(
       state,
       cfg,
       async () => {
-        const critiqued = await runCritique(state, cfg, cwd, plan, roles, turns);
+        const critiqued = await runCritique(state, cfg, cwd, plan, roles, turns, planActivity);
         // Before the artifact and before `recordPendingFindings`, so the round's
         // record shows what the run refused on and the next revision is told
         // about it. A mechanical fact about the artifact on disk, added to the
@@ -2334,13 +2368,28 @@ function priorRuns(state: RunState): readonly RunSummary[] {
   }
 }
 
+/**
+ * A plan, and what the turn that wrote it did.
+ *
+ * The activity is carried out of the turn rather than read back from state, for
+ * the reason `TurnOutcome.activity` gives: the caller that acts on it is judging
+ * *this* turn, and a later reader could not tell which turn a stored figure
+ * belonged to (#66). Absent when nothing measured the turn, and absent for a
+ * plan that came from `state.plan` on a resume - this process ran no plan turn,
+ * so it has nothing to say about one (#63).
+ */
+interface PlannedTurn {
+  plan: Plan;
+  activity?: TurnActivity | undefined;
+}
+
 async function runPlan(
   state: RunState,
   cfg: Config,
   cwd: string,
   roles: RoleTable,
   turns: AgentTurns,
-): Promise<Plan> {
+): Promise<PlannedTurn> {
   log.step(`${holderLabel('planner', roles)} is planning (read-only)`);
   const outcome = await runTurn(
     state,
@@ -2373,7 +2422,7 @@ async function runPlan(
   log.ok(
     `Plan drafted - ${plan.assumptions.length} assumption(s), ${plan.open_questions.length} open question(s)`,
   );
-  return plan;
+  return { plan, ...(outcome.activity === undefined ? {} : { activity: outcome.activity }) };
 }
 
 interface ReviseArgs {
@@ -2388,7 +2437,7 @@ async function revisePlan(
   args: ReviseArgs,
   roles: RoleTable,
   turns: AgentTurns,
-): Promise<Plan> {
+): Promise<PlannedTurn> {
   state.planRound += 1;
   saveState(state);
   log.step(`${holderLabel('planner', roles)} is revising the plan (round ${state.planRound})`);
@@ -2439,7 +2488,7 @@ async function revisePlan(
   // record is complete. No commit here: the planning phase does not touch the
   // tree, and the note says that rather than implying a failure.
   writeCheckpoint(state, 'plan-round', NO_COMMIT);
-  return plan;
+  return { plan, ...(outcome.activity === undefined ? {} : { activity: outcome.activity }) };
 }
 
 /**
@@ -2762,6 +2811,12 @@ async function runCritique(
   plan: Plan,
   roles: RoleTable,
   turns: AgentTurns,
+  /**
+   * What the turn that wrote `plan` did, or absent when nothing measured it, or
+   * when this process did not run one. Named in the prompt only when it inspected
+   * nothing, so every other run's prompt is byte-identical to before (#63).
+   */
+  planActivity?: TurnActivity | undefined,
 ): Promise<FindingsReport> {
   log.step(`${holderLabel('critic', roles)} is critiquing the plan`);
   const outcome = await runTurn(
@@ -2780,6 +2835,7 @@ async function runCritique(
         // The plan's own bar, not a snapshot: this runs before the gate, and
         // the critic is what decides whether the bar is any good.
         plan.acceptance_criteria,
+        planActivity,
       ),
       cwd,
       label: `critique-${state.planRound}`,
