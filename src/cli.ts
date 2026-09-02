@@ -1377,6 +1377,29 @@ export async function runPreflight(
     return EXIT.PREFLIGHT;
   }
 
+  // Nothing ahead, nothing to establish. Preflight verifies that the agents can
+  // run the phases that are still to come, and a finished run has none - the
+  // same fact `ahead` is built from, and the same one `runPhases` returns on
+  // before dispatching anything. Probing anyway spent ~60,000 agent tokens per
+  // resume (~15k Claude, ~41k Codex; measured 2026-08-27 on `develop` and on
+  // #87's branch, so not caused by either) verifying an environment for work
+  // that will not happen - and CHARGED them, so a completed run's recorded
+  // totals grew every time somebody looked at it. A run that says what it cost
+  // has to keep saying the same thing afterwards (#97).
+  //
+  // Reusing `ahead` rather than asking a second time: `resumePhase` and the
+  // consistency rules own what "this run is over" means, and a second reading of
+  // it is precisely the hazard `src/consistency.ts` exists to prevent. `phases`
+  // is never empty, so an empty `ahead` is exactly that one derivation saying
+  // the run is complete.
+  //
+  // Below the precondition and not above it, so the two halves stay separately
+  // decided (#71): a finished run skips the probes, not the free deterministic
+  // checks. Silent, exactly as `--skip-probe` is - the loop prints "This run
+  // already finished - there is nothing to resume" a moment later, which is the
+  // explanation a user needs.
+  if (ahead.length === 0) return null;
+
   // After the preconditions, before the heading: a skipped probe printed
   // nothing before #71 and still prints nothing now.
   if (options.skipProbe === true) return null;
