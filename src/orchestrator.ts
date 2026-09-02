@@ -1392,6 +1392,76 @@ export function guardProgress(
  *    unrecoverably by reading the log. It is a refusal rather than a warning for
  *    that reason, with `git checkout` and `--no-branch` both named.
  */
+/**
+ * Say so when a killed turn's work is sitting in a git stash (#96).
+ *
+ * #77 made a killed run recover its accounting. Nothing recovers its working
+ * tree, and an implementer that stashes to get a clean test run defeats every
+ * guard at once: `maybeCommit` runs at round boundaries and a turn killed
+ * mid-round has committed nothing, `state.baseSha` is correct and says nothing
+ * about where the work went, `inFlight` is accounting and deliberately records
+ * only what a turn spent, and `prepareGit` checks the branch, not the tree - a
+ * stashed tree is CLEAN, so `isDirty` is false. The #87 run left 11.3M tokens of
+ * implementation in a stash while every guard reported healthy; it was recovered
+ * by hand.
+ *
+ * Notice, not recover and not refuse. Recovering means popping, a pop can
+ * conflict, and a run that pops a stash a human made for their own reasons has
+ * taken something that was not its. Refusing is heavier than the problem: the
+ * work is safe where it is, and the only thing missing is that anyone knows.
+ * This turns a silent loss into a line of output, cannot itself destroy
+ * anything, and composes with either of the others later.
+ *
+ * Fires only where `state.branch` is set, which is what makes it inert on a
+ * fresh run without a second fact to store: the branch is created a few lines
+ * below, so a run in its first process has none to match against - and a branch
+ * this process did not create is exactly a resume or a fork. The match is on the
+ * branch name git itself wrote into the entry, so a stash belonging to somebody
+ * else is left alone by construction rather than by a heuristic.
+ *
+ * Not prompted against, either: the implementer was doing the right thing.
+ * Establishing whether a flaky test predates your change means testing without
+ * your change, and `git stash` is the obvious way. Two runs in this repo have
+ * needed the manoeuvre.
+ */
+async function noticeStrandedWork(state: RunState, cwd: string): Promise<void> {
+  const branch = state.branch;
+  if (branch === null) return;
+
+  const stashes = await git.stashesFor(cwd, branch);
+  if (stashes.length === 0) return;
+
+  log.warn(
+    `git stash holds ${stashes.length} entr${stashes.length === 1 ? 'y' : 'ies'} made on this ` +
+      `run's branch "${branch}". A turn killed between "git stash push" and "git stash pop" ` +
+      'leaves its work there, where nothing else in this run can see it: the tree reads clean ' +
+      'and there are no commits, while the accounting says the turn ran.',
+  );
+  for (const entry of stashes) {
+    log.warn(`  ${entry.ref}  ${entry.subject}`);
+    // The stat is the evidence that makes this worth acting on - "7 files
+    // changed, 319 insertions" is what says a turn's output is in there. Where
+    // there is none, the command is named rather than an emptiness asserted.
+    log.warn(
+      entry.stat === null
+        ? `    contents not summarised - run: git stash show -p ${entry.ref}`
+        : entry.stat
+            .split('\n')
+            .map((l) => `    ${l.trim()}`)
+            .join('\n'),
+    );
+  }
+  log.warn(
+    'Check it before this run does more work. Nothing has been popped - vibe does not touch ' +
+      'the stash.',
+  );
+
+  recordEvent(state, 'stash_noticed', {
+    branch,
+    refs: stashes.map((e) => e.ref),
+  });
+}
+
 async function prepareGit(
   state: RunState,
   cfg: Config,
@@ -1454,6 +1524,11 @@ async function prepareGit(
   if (!resume && (await git.isDirty(cwd))) {
     log.warn('Working tree has uncommitted changes; they will be swept into the first commit.');
   }
+  // Before the branch work below, and before `useBranch` can return: a run
+  // resumed with `--no-branch` to escape the refusal is one whose stranded work
+  // is if anything more likely to be missed.
+  await noticeStrandedWork(state, cwd);
+
   // With branch isolation off nothing below runs, which is also what makes
   // `vibe resume <id> --no-branch` the documented escape from the refusal.
   if (!cfg.git.useBranch) return;
