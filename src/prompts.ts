@@ -1,5 +1,6 @@
 import { describedRole, ROLES } from '@src/roles.js';
 import { EVIDENCE_RULE } from '@src/schemas.js';
+import { inspectedItems } from '@src/evidence.js';
 import { readEvidence } from '@src/validate.js';
 import type { RoleTable } from '@src/roles.js';
 import type { EnvironmentFacts } from '@src/runtime.js';
@@ -12,6 +13,7 @@ import type {
   OutOfScopeItem,
   Plan,
   RunSummary,
+  TurnActivity,
 } from '@src/types.js';
 
 const RESPOND_WITH_JSON =
@@ -608,6 +610,36 @@ Do not inflate either list. A plan with fifteen trivial questions is as unreview
 ${RESPOND_WITH_JSON}`;
 }
 
+/**
+ * One named fact about the turn that wrote the plan, when it opened nothing
+ * (#63).
+ *
+ * The measurement this exists for: of 276 critique findings across 25 archived
+ * runs, 75% dispute a *fact about the existing code* rather than a decision, and
+ * 52% would be settled by one command or one file read. Meanwhile the critic
+ * turns ran 150-170 command executions each while planner revision turns ran
+ * two. Six planner turns in the archive inspected nothing at all, and four of
+ * them are the run that spent 67.2M tokens over eleven rounds and produced no
+ * code - including its last three revisions, each rewriting a 45,000-character
+ * plan without opening a file.
+ *
+ * A fact, not a threshold and not a verdict. "More than N assertions with fewer
+ * than M commands is suspicious" is the invented number AGENTS.md forbids, and
+ * whether a claim about `git diff --stat` is *wrong* is not observable - that a
+ * turn ran nothing is. The critic already does the checking; this tells it where
+ * to look first, the way #47 made a gate outcome named rather than implied.
+ *
+ * Empty string in every other case, so a plan turn that looked at something -
+ * and a turn nothing measured, which is every run before #66 - produces a prompt
+ * byte-identical to today's.
+ */
+function planInspectionNote(activity: TurnActivity | undefined): string {
+  if (inspectedItems(activity) !== 0) return '';
+  return `
+
+**The turn that wrote this plan ran no commands and opened no files.** It emitted only its own message and its answer. That is a fact about the turn, not a verdict on the plan: a plan can be right without the turn having checked anything. But every claim it makes about this repository was made from memory, so check them against the repository first, and be specific about which ones you verified.`;
+}
+
 export function critiquePrompt(
   planMd: string,
   assumptions: readonly Assumption[],
@@ -622,10 +654,15 @@ export function critiquePrompt(
    * inserted parameter would silently reinterpret one of them.
    */
   acceptanceCriteria?: readonly AcceptanceCriterion[] | undefined,
+  /**
+   * What the plan turn that produced this plan did, or absent when nothing
+   * measured it. Appended for the reason `acceptanceCriteria` was.
+   */
+  planActivity?: TurnActivity | undefined,
 ): string {
   return `You are a senior engineer reviewing an implementation plan before any code is written. Be adversarial: your job is to find what is wrong with it, not to praise it.${
     round > 1 ? continuityNote(round, hasMemory, 'plan') : ''
-  }
+  }${planInspectionNote(planActivity)}
 
 Read the actual repository to check the plan's claims against reality. A plan that references a file, function, or API that does not exist is a P1.
 
