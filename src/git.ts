@@ -115,6 +115,125 @@ export async function isDirty(cwd: string): Promise<boolean> {
   return stdout.length > 0;
 }
 
+/** One entry of `git stash list`, and what it holds. */
+export interface StashEntry {
+  /** The ref, exactly as a person would type it: `stash@{0}`. For display only - see `commit`. */
+  ref: string;
+  /**
+   * The stash commit's object id, and what every command this module runs
+   * against the entry is given.
+   *
+   * NOT the ref, which is unusable as an argument here. Cygwin's `git.exe` -
+   * `C:\cygwin64\bin\git.exe`, which is what `resolveBin` finds on the machine
+   * this was written on - re-parses the raw Windows command line of a native
+   * parent and glob-expands it, and that expansion eats braces: `stash@{0}`
+   * arrives as `stash@0` and git answers `is not a valid reference`. Measured,
+   * not guessed - the same call through Git-for-Windows' `mingw64\git.exe`,
+   * which does not mangle, succeeds, which is exactly how a bug like this hides.
+   * A 40-character object id has nothing for any shell or runtime to expand.
+   */
+  commit: string;
+  /** The reflog subject: `WIP on <branch>: <sha> <subject>`, or `On <branch>: <message>`. */
+  subject: string;
+  /**
+   * What `git stash show --stat` says is in it, or null when there is no answer
+   * to give - the command failed, or it printed nothing.
+   *
+   * Null is not "empty". A stash holding only untracked files prints nothing
+   * under a plain `--stat`, and reporting that as the contents would state an
+   * absence this cannot establish. The caller names the command instead.
+   */
+  stat: string | null;
+}
+
+/**
+ * Whether this stash entry was made on `branch`.
+ *
+ * `[^:]+` is exact rather than approximate: `git check-ref-format` forbids `:`
+ * in a ref name, so the first colon after the prefix is always the one that ends
+ * the recorded name. A stash made on a detached HEAD reads
+ * `WIP on (no branch): ...`, which parses fine and matches no branch this tool
+ * can be on - `(no branch)` contains spaces and parentheses, so no real ref is
+ * ever called that.
+ *
+ * **The recorded name is not always the whole branch name, and #96 assumed it
+ * was.** Measured against the git in this repo - 2.31.1, the same binary an
+ * implementer stashing in a worktree here would run - `git stash` on
+ * `vibe/20260827-141835-implement` writes `WIP on 20260827-141835-implement`:
+ * the last path component only. Later versions record the full name, which is
+ * what #96's own transcript shows. Both forms are git's own, so both are
+ * accepted.
+ *
+ * The leaf form is no weaker than the full one for the branch this is asked
+ * about: `git.branchPrefix` supplies the only `/`, so the leaf IS the run id - a
+ * second-resolution stamp plus a task slug, containing no `/` by construction.
+ * Where a prefix or a repository makes it genuinely ambiguous, the asymmetry
+ * decides it: a false positive costs one line of output naming a stash whose
+ * full subject is printed beside it for the reader to judge, and a false
+ * negative is the 11.3M tokens of #87 disappearing silently.
+ */
+function namesBranch(subject: string, branch: string): boolean {
+  const recorded = /^(?:WIP on|On) ([^:]+):/.exec(subject)?.[1];
+  if (recorded === undefined) return false;
+  if (recorded === branch) return true;
+  const leaf = branch.slice(branch.lastIndexOf('/') + 1);
+  return leaf !== '' && recorded === leaf;
+}
+
+/**
+ * The stash entries made on `branch`, newest first - the order `git stash list`
+ * prints and the order the refs are numbered in.
+ *
+ * A read, and only a read (#96). Nothing here pops, drops or creates: a stash a
+ * human made for their own reasons is not this tool's to take, and a pop can
+ * conflict.
+ *
+ * Every failure answers `[]`, including a git that cannot be spawned. That is
+ * the fail-closed direction for a notice: the caller says nothing when the list
+ * is empty, so an unreadable stash list produces silence rather than a claim
+ * that there is nothing there.
+ *
+ * Line-separated rather than `-z`, which is safe here and nowhere else in this
+ * file: a reflog subject cannot contain a newline, because the reflog is a
+ * line-oriented file. `\x1f` separates the three fields for the same reason - a
+ * subject may contain anything else, including the `: ` a naive split would cut
+ * on.
+ */
+export async function stashesFor(cwd: string, branch: string): Promise<StashEntry[]> {
+  let listed: string;
+  try {
+    const { code, stdout } = await git(cwd, ['stash', 'list', '--format=%gd%x1f%H%x1f%gs'], {
+      allowFail: true,
+    });
+    if (code !== 0) return [];
+    listed = stdout;
+  } catch {
+    return [];
+  }
+
+  const out: StashEntry[] = [];
+  for (const line of listed.split(/\r?\n/)) {
+    const [ref, commit, ...rest] = line.split('\x1f');
+    // Three fields or it is not one of ours. `rest` is rejoined rather than
+    // taken as `[0]`: `%gs` is the last field precisely so that a subject
+    // containing the separator cannot truncate it.
+    if (ref === undefined || commit === undefined || rest.length === 0) continue;
+    const subject = rest.join('\x1f');
+    if (ref === '' || !isFullSha(commit) || !namesBranch(subject, branch)) continue;
+
+    let stat: string | null = null;
+    try {
+      const shown = await git(cwd, ['stash', 'show', '--stat', commit], { allowFail: true });
+      if (shown.code === 0 && shown.stdout !== '') stat = shown.stdout;
+    } catch {
+      // Left null: the entry itself is the finding, and a summary that could not
+      // be read must not take the notice down with it.
+    }
+    out.push({ ref, commit, subject, stat });
+  }
+  return out;
+}
+
 export async function createBranch(cwd: string, name: string): Promise<void> {
   await git(cwd, ['checkout', '-b', name]);
   detail(`on branch ${name}`);
