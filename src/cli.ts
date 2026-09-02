@@ -72,7 +72,7 @@ Usage
   vibe resume <run-id> [--force]   Continue a run that stopped for input
   vibe fork <run-id> --at <n>      Start a new run from a point in an old one
   vibe list                        Show runs in this repo
-  vibe doctor                      Verify both CLIs and the environment
+  vibe doctor [options]            Verify both CLIs, and preview the config those options give
 
   "vibe fork <run-id>" with no --at lists the points that run can be forked from.
   A fork creates its branch WITHOUT checking it out: your working tree is
@@ -374,23 +374,48 @@ export function buildRoleOverrides(flags: ParsedArgs['flags']): RolePatches {
  *
  * Exported for the flag tests: `cmdRun` goes on to allocate a run, take a lock
  * and spawn agents, so this is the seam that can be asserted on. It is also the
- * ONLY place `cmdRun` builds a config, which is what keeps a flag from reaching
- * one command and not another.
+ * ONLY place a config is built from flags, which is what keeps a flag from
+ * reaching one command and not another.
+ *
+ * `vibe doctor` shares it since #106 - it used to have a `doctorConfig` of its
+ * own that applied the role patches and no other flag, so its report was a
+ * SUBSET of the run's: some values reflected the flags and some did not, and
+ * nothing on the page said which were which. That was the worst of the three
+ * available positions. Doctor answers "what will this run do" now, or it
+ * answers nothing; a separate function was where the two could drift, so there
+ * is no longer one to drift.
  */
 export function configFromFlags(targetDir: string, flags: ParsedArgs['flags']): LoadedConfig {
   return loadConfig(targetDir, buildOverrides(flags), buildRoleOverrides(flags));
 }
 
 /**
- * Doctor's config, which applies the role settings and no other flag.
+ * Which settings the command line moved, named as config keys (#106).
  *
- * `vibe doctor` has never applied `buildOverrides` - `--claude-model` does not
- * change what it reports - and widening that is a change to flags #89 does not
- * add. Named as its own function so the difference is a decision on the page
- * rather than an omission at a call site.
+ * `vibe doctor` reports the config a run would use, so the one thing a reader
+ * cannot work out from the report itself is whether a value came from the file
+ * or from a flag. This answers that, in the vocabulary the report is printed in
+ * rather than in flag spellings - `codex.model`, not `--codex-model` - because
+ * the lines underneath print config keys and a reader is matching them up.
+ *
+ * Both kinds, because since #106 both reach the report and naming only one would
+ * leave the other looking like the file's doing.
+ *
+ * Empty when no flag moved anything, which is the ordinary case and prints
+ * nothing at all.
  */
-export function doctorConfig(targetDir: string, flags: ParsedArgs['flags']): LoadedConfig {
-  return loadConfig(targetDir, {}, buildRoleOverrides(flags));
+export function flagOverrideNames(flags: ParsedArgs['flags']): string[] {
+  const out: string[] = [];
+  for (const [section, patch] of Object.entries(buildOverrides(flags))) {
+    if (typeof patch !== 'object' || patch === null) continue;
+    for (const [key, value] of Object.entries(patch)) {
+      if (value !== undefined) out.push(`${section}.${key}`);
+    }
+  }
+  for (const [role, patch] of Object.entries(buildRoleOverrides(flags))) {
+    for (const key of Object.keys(patch)) out.push(`roles.${role}.${key}`);
+  }
+  return out.sort();
 }
 
 /** Exported for the flag tests, alongside parseArgs. */
@@ -1851,8 +1876,20 @@ async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
   // a state the code could be in (#89).
   let cfg: LoadedConfig | null = null;
   try {
-    cfg = doctorConfig(targetDir, flags);
-    log.ok(`config: ${cfg.configPath ?? 'defaults'}`);
+    // The run's config, flags and all (#106). A flag that was silently ignored
+    // here now matters, and that includes an invalid one: `--codex-context-window 0`
+    // fails this check rather than being dropped, which is the same answer
+    // `vibe run` gives it and the whole point of a preview.
+    cfg = configFromFlags(targetDir, flags);
+    const moved = flagOverrideNames(flags);
+    // Named rather than counted, and in config keys: the question a reader has
+    // is "did a flag reach the value I am looking at", and only the names answer
+    // it. Silent where no flag moved anything, which is every ordinary run of
+    // this command.
+    log.ok(
+      `config: ${cfg.configPath ?? 'defaults'}` +
+        (moved.length === 0 ? '' : ` (command line also sets ${moved.join(', ')})`),
+    );
     log.info(`  claude ${cfg.claude.model}/${cfg.claude.effort} - codex ${cfg.codex.model}/${cfg.codex.effort}`);
     reportResolvedRoles(cfg);
     log.info(

@@ -27,6 +27,8 @@ vibe doctor
 
 **`vibe` drives two CLIs it does not install.** You need `claude` and `codex` already installed *and logged in* — this tool shells out to them and inherits your existing subscriptions. npm cannot express that as a dependency, so it is on you. `vibe doctor` checks for both, prints the resolved paths, and verifies each agent can actually run the tools it needs; run it first.
 
+**`vibe doctor` takes the same options `vibe run` does, and previews the config they give you.** Models, efforts, timeouts, budgets, round caps, compaction, the verification gates and the role table — the report is the configuration a run under those flags would use, not the file's version of it. Where a flag moved something, the config line names what: `config: ./vibe.config.json (command line also sets codex.model, loop.maxPlanRounds)`. The corollary is worth knowing before you put it in a script: a flag that doctor used to ignore now matters, so an *invalid* one fails doctor rather than being dropped — which is the point, since it would also stop the run.
+
 Node 20+ is required and is enforced via `engines`.
 
 Installing globally puts `vibe` on your PATH — rename the bin or use `npx @adam-hanna/vibe-code` if that collides with something you already have.
