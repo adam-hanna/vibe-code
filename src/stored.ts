@@ -29,6 +29,7 @@ import type {
   QuestionKind,
   ResolvedQuestion,
   ReviewCoverage,
+  RoundClaim,
   RoundRecord,
   RunCheckpointMeta,
   RunEvent,
@@ -774,11 +775,12 @@ const roundReader =
     if (signature !== null && !isString(signature)) return null;
     const count = entry['count'];
     if (!isCounter(count)) return null;
+    const claims = readClaims(ctx, entry['claims'], at);
     const rawIds = entry['ids'];
-    if (rawIds === undefined) return { signature, count };
+    if (rawIds === undefined) return { signature, count, ...claims };
     if (!Array.isArray(rawIds)) {
       ctx.repairs.replaced(`${at}.ids`, rawIds, 'nothing');
-      return { signature, count };
+      return { signature, count, ...claims };
     }
     const ids: string[] = [];
     rawIds.forEach((id, i) => {
@@ -788,8 +790,43 @@ const roundReader =
       if (isString(id)) ids.push(id);
       else ctx.repairs.dropped(`${at}.ids`, `${at}.ids[${i}]`);
     });
-    return { signature, count, ids };
+    return { signature, count, ids, ...claims };
   };
+
+/**
+ * The claims of one round, on the same terms as its ids.
+ *
+ * Absent stays absent, and an unusable `claims` becomes absent rather than an
+ * empty list - because absent is what every guard reads as "recorded before
+ * claims existed", and it makes them fall back to `ids`/`signature`. An empty
+ * list would instead assert that the round had no blocking findings, which is a
+ * claim about a run nobody measured (#116).
+ *
+ * A partial drop is deliberately fatal to the whole field, unlike `ids`. A round
+ * missing one claim would be compared as a *shorter* round, and `claimsMatch`
+ * requires equal lengths - so a single dropped entry would silently turn a
+ * repeated round into a differing one and disable the brake for that window.
+ */
+function readClaims(
+  ctx: ReadContext,
+  raw: unknown,
+  at: string,
+): { claims?: RoundClaim[] } {
+  if (raw === undefined) return {};
+  if (!Array.isArray(raw)) {
+    ctx.repairs.replaced(`${at}.claims`, raw, 'nothing');
+    return {};
+  }
+  const claims: RoundClaim[] = [];
+  for (const entry of raw) {
+    if (!isRecord(entry) || !isString(entry['id']) || !isString(entry['title'])) {
+      ctx.repairs.replaced(`${at}.claims`, raw, 'nothing');
+      return {};
+    }
+    claims.push({ id: entry['id'], title: entry['title'] });
+  }
+  return { claims };
+}
 
 function readDeferredQuestion(entry: unknown): DeferredQuestion | null {
   if (!isRecord(entry)) return null;

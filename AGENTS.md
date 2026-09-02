@@ -36,6 +36,7 @@ src/cli.ts           argument parsing, the five commands, run summary
 src/orchestrator.ts  the loop: planPhase, reviewPhase, the guards, the prompt dispatch
 src/run.ts           run state, artifacts, checkpoints, convergence maths (assessConvergence et al)
 src/fork.ts          `vibe fork`: preflight that only reads, then a commit phase that creates
+src/similarity.ts    the one similarity metric, its threshold, and the censuses behind it
 src/questions.ts     when two wordings are one question: the threshold, and REPHRASED.md
 src/roles.ts         who does what: the role table, refusals, warnings
 src/config.ts        DEFAULTS, config merge, validation

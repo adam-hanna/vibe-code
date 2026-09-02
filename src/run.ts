@@ -18,6 +18,7 @@ import { livenessOf } from '@src/lock.js';
 import type { ActivityObservation } from '@src/progress.js';
 import { initialSlotFields } from '@src/slots.js';
 import { checkStoredConsistency, checkTokenShare } from '@src/consistency.js';
+import { normalize, REPHRASE_THRESHOLD, similarity } from '@src/similarity.js';
 import {
   assertUsableRunId,
   hasFindingShape,
@@ -35,6 +36,7 @@ import type {
   GateOutcome,
   InFlightTurn,
   PendingFindings,
+  RoundClaim,
   RoundRecord,
   RunCheckpointMeta,
   RunPhase,
@@ -1479,17 +1481,105 @@ const LATE_ROUND_FRACTION = 0.75;
 const TREND_FLOOR = 8;
 
 /**
+ * When two findings are one finding (#116).
+ *
+ * Not the id. An id is a model-authored slug, nothing enforces its stability,
+ * and across 25 archived runs an id came back in more than one round 21 times
+ * carrying a different claim **21 times out of 21** - the critic reuses a label
+ * for the next defect in the same area while the planner closes the last one.
+ * Three guards read id equality as claim equality and all three were wrong every
+ * time they fired.
+ *
+ * So: the same id AND the same claim, where "the same claim" is the rule
+ * `src/questions.ts` already uses for two wordings of one question, over the
+ * same metric and the same threshold. The census that licenses it for titles is
+ * with the constant in `src/similarity.ts`; the short version is that the 28
+ * recycled-label pairs top out at 0.286 and nothing in the corpus reaches 0.6.
+ *
+ * **The citation was measured and rejected**, though the issue proposed it
+ * first: two of the 21 recycled ids kept an identical citation set across the
+ * rounds that changed their claim - one of them cited nothing at all, three
+ * rounds running - so a citation-based identity gets 19 of 21 where the claim
+ * gets 21. Adding it as a further conjunct would make findings *less* likely to
+ * be judged the same, which loosens the brake further, for no measured gain.
+ *
+ * **An untitled finding degrades to id-only**, which is today's behaviour: with
+ * nothing to compare, the honest answer is the one the loop has always given,
+ * and it is the answer that keeps the brake firing rather than the one that
+ * silently disables it.
+ */
+export function sameClaim(a: RoundClaim, b: RoundClaim): boolean {
+  if (a.id !== b.id) return false;
+  const left = normalize(a.title);
+  const right = normalize(b.title);
+  if (left === '' || right === '') return true;
+  return left === right || similarity(a.title, b.title) >= REPHRASE_THRESHOLD;
+}
+
+/** A round's claims, or null when it was recorded before they existed. */
+function claimsOf(record: RoundRecord | undefined): readonly RoundClaim[] | null {
+  const claims = record?.claims;
+  return claims === undefined ? null : claims;
+}
+
+/**
+ * Do two rounds hold the same findings?
+ *
+ * A bijection, not a set-difference: two rounds of the same length whose claims
+ * pair off one-for-one. Greedy with removal, which is exact whenever an id
+ * appears once in a round - every round in the archive - and a defensible
+ * approximation when one does not.
+ */
+function claimsMatch(a: readonly RoundClaim[], b: readonly RoundClaim[]): boolean {
+  if (a.length !== b.length) return false;
+  const pool = [...b];
+  for (const claim of a) {
+    const i = pool.findIndex((other) => sameClaim(claim, other));
+    if (i === -1) return false;
+    pool.splice(i, 1);
+  }
+  return true;
+}
+
+/**
+ * Did this round repeat the one before it?
+ *
+ * Claims when both rounds have them, signatures when either does not. The
+ * fallback is what leaves a resumed legacy history behaving exactly as it did:
+ * such a round has only a hash of its ids, and inventing claims for it would be
+ * asserting something about a run nobody measured.
+ */
+function roundRepeated(a: RoundRecord, b: RoundRecord): boolean {
+  const left = claimsOf(a);
+  const right = claimsOf(b);
+  if (left === null || right === null) {
+    return a.signature != null && a.signature === b.signature;
+  }
+  return left.length > 0 && claimsMatch(left, right);
+}
+
+/**
  * Histories are passed in rather than read from a fixed field: the review loop
  * and the verification loop converge independently, and mixing their rounds
  * makes each look less stable than it is.
+ *
+ * `claims` is trailing and optional for the reason `ids` was: every existing
+ * caller compiles unchanged, and a caller that passes none records a round the
+ * guards read the legacy way.
  */
 export function recordRound(
   history: RoundRecord[],
   signature: string | null,
   count: number,
   ids: readonly string[] = [],
+  claims?: readonly RoundClaim[],
 ): void {
-  history.push({ signature, count, ids: [...ids] });
+  history.push({
+    signature,
+    count,
+    ids: [...ids],
+    ...(claims === undefined ? {} : { claims: claims.map((c) => ({ ...c })) }),
+  });
 }
 
 /**
@@ -1561,6 +1651,24 @@ export function clearPendingFindings(state: RunState): void {
  * run. Such a window falls back to the count-only verdict.
  */
 function windowTurnedOver(recent: readonly RoundRecord[]): boolean {
+  // Claims when every round in the window has them; ids when any round does not.
+  // Mixing the two would compare a claim against a bare id, which is not a
+  // comparison - and a window spanning the upgrade is exactly what a resumed run
+  // produces.
+  const claims = recent.map((r) => claimsOf(r));
+  if (claims.every((c) => c !== null)) {
+    const rounds = claims as readonly (readonly RoundClaim[])[];
+    if (rounds.some((c) => c.length === 0)) return false;
+    for (let i = 0; i < rounds.length; i += 1) {
+      for (const claim of rounds[i] ?? []) {
+        for (let j = i + 1; j < rounds.length; j += 1) {
+          if ((rounds[j] ?? []).some((other) => sameClaim(claim, other))) return false;
+        }
+      }
+    }
+    return true;
+  }
+
   const seen = new Map<string, number>();
   for (const r of recent) {
     const ids = r.ids;
@@ -1611,12 +1719,19 @@ export function assessConvergence(
 
   // Identical findings N rounds running means no new information is being
   // produced at all. More rounds cannot help, whenever it happens.
+  //
+  // "Identical" is claim identity since #116, not id identity. The premise here
+  // was always right - it is the measurement of sameness underneath it that was
+  // wrong, 21 times out of 21 - so the arm is unchanged and only what it
+  // compares has moved. `roundRepeated` falls back to the signature for a round
+  // recorded before claims existed, which is what leaves a resumed legacy
+  // history stopping exactly where it always did.
   const repeats = history.slice(-repeatThreshold);
   const first = repeats[0];
   if (
     repeats.length === repeatThreshold &&
-    first?.signature != null &&
-    repeats.every((r) => r.signature === first.signature)
+    first !== undefined &&
+    repeats.every((r) => roundRepeated(first, r))
   ) {
     return `the same P1 set came back ${repeatThreshold} rounds running`;
   }
@@ -1682,7 +1797,31 @@ export function assessConvergence(
 export function persistentStreak(
   history: readonly RoundRecord[],
 ): { id: string; rounds: number } | null {
-  const last = history[history.length - 1]?.ids;
+  const lastRecord = history[history.length - 1];
+  const lastClaims = claimsOf(lastRecord);
+
+  // The claim, not the label. The notice this feeds told a user that
+  // "unanswered-fact-unknowns-proceed" had been blocking for four rounds; it was
+  // four separate defects with four separate fixes, wearing one label, and the
+  // line was read as evidence the loop was stuck when it was evidence of the
+  // loop working (#116).
+  if (lastClaims !== null) {
+    if (lastClaims.length === 0) return null;
+    let best: { id: string; rounds: number } | null = null;
+    for (const claim of lastClaims) {
+      let rounds = 0;
+      for (let i = history.length - 1; i >= 0; i -= 1) {
+        const claims = claimsOf(history[i]);
+        // A round with no claims recorded cannot be said to hold this one.
+        if (claims === null || !claims.some((other) => sameClaim(claim, other))) break;
+        rounds += 1;
+      }
+      if (best === null || rounds > best.rounds) best = { id: claim.id, rounds };
+    }
+    return best;
+  }
+
+  const last = lastRecord?.ids;
   if (last === undefined || last.length === 0) return null;
 
   let best: { id: string; rounds: number } | null = null;
@@ -1695,6 +1834,51 @@ export function persistentStreak(
     if (best === null || rounds > best.rounds) best = { id, rounds };
   }
   return best;
+}
+
+/**
+ * What to say when the old rule would have stopped the run and the new one did
+ * not (#116).
+ *
+ * The mitigation for the one thing the title census could not measure. It has no
+ * positive samples - no genuine repeat exists in the archive - so it bounds the
+ * false-positive side and says nothing about a real repeat worded below the
+ * threshold. This is the same answer `writeRephrased` gives for questions: the
+ * decision is reported, so a loosened brake costs a visible, checkable line
+ * rather than a silent omission.
+ *
+ * Fires only where the two rules disagree, which is a run that would have been
+ * stopped and no longer is. Null when they agree, which is almost always.
+ */
+export function recycledLabelNotice(
+  history: readonly RoundRecord[],
+  repeatThreshold: number,
+): string | null {
+  const repeats = history.slice(-repeatThreshold);
+  const first = repeats[0];
+  if (repeats.length !== repeatThreshold || first?.signature == null) return null;
+  // The old rule: an identical id set, N rounds running.
+  if (!repeats.every((r) => r.signature === first.signature)) return null;
+  // The new rule agrees, and the run is stopping. Nothing to report.
+  if (repeats.every((r) => roundRepeated(first, r))) return null;
+
+  const moved: string[] = [];
+  for (const claim of claimsOf(first) ?? []) {
+    const later = repeats[repeats.length - 1];
+    const other = (claimsOf(later) ?? []).find((c) => c.id === claim.id);
+    if (other === undefined || sameClaim(claim, other)) continue;
+    moved.push(
+      `"${claim.id}" (${similarity(claim.title, other.title).toFixed(2)}): ` +
+        `"${claim.title}" -> "${other.title}"`,
+    );
+  }
+  if (moved.length === 0) return null;
+
+  return (
+    `Not stopping: the same finding ids came back ${repeatThreshold} rounds running, but the ` +
+    `claims under them changed, so the loop is producing new information. ${moved.join('; ')}. ` +
+    'If those are the same finding restated, that is a defect worth reporting.'
+  );
 }
 
 export interface PersistenceNoticeArgs {
