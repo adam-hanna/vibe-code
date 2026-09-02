@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { RateLimitError } from '@src/claude.js';
+import { failureSparedConversation, RateLimitError } from '@src/claude.js';
 import { DEFAULTS } from '@src/config.js';
-import { runTurn } from '@src/orchestrator.js';
+import { Escalation, EXIT, runTurn } from '@src/orchestrator.js';
 import type { AgentTurns, Role, TurnRequest } from '@src/orchestrator.js';
 import { handoffContext } from '@src/prompts.js';
 import { createRun } from '@src/run.js';
@@ -313,19 +313,42 @@ test('a rate-limit retry does not re-issue a spent id', async () => {
   // makes the request the limit is raised on. Re-issuing `--session-id` against
   // it would fail with "already in use" - which is not a rate limit, so the
   // wait would have bought nothing.
-  assert.notEqual(rec.calls[1]?.sessionId, rec.calls[0]?.sessionId, 'a fresh id, not the spent one');
-  assert.equal(rec.calls[1]?.resume, false);
+  //
+  // The claim, unchanged by #91: nothing hands `--session-id` a spent id. What
+  // changed is which of the two lawful ways of honouring it the retry takes. It
+  // used to mint a fresh id; it now RESUMES the spent one, which is the other
+  // form the adapter offers (`resume ? '--resume' : '--session-id'`) and the
+  // only one that keeps the work the first attempt paid for.
+  assert.equal(rec.calls[1]?.resume, true, 'the spent id is resumed, not re-issued');
+  assert.equal(rec.calls[1]?.sessionId, rec.calls[0]?.sessionId, 'and it is the same conversation');
   assert.equal(state.sessionId, rec.calls[1]?.sessionId);
   assert.equal(state.rateLimitWaits, 1);
   assert.equal(state.sessionRotations, 0, 'and still not a rotation');
+
+  // The prompt is rebuilt per attempt, and #91 is what makes that load-bearing
+  // in this direction rather than the other. Attempt 1 is a genuinely fresh
+  // conversation and is told so; attempt 2 resumes what attempt 1 registered, so
+  // the same preamble would restate a briefing the session already holds.
+  assert.equal(rec.calls[0]?.resume, false);
+  assert.equal(rec.calls[0]?.prompt, FRESH_PREFIX + 'do the thing');
+  assert.equal(rec.calls[1]?.prompt, 'do the thing');
 });
 
-test('a rate-limited recovery retries as a fresh conversation, told so', async () => {
-  // The transition the plain retry case cannot reach: attempt 1 RESUMES a dead
-  // session, so it is rightly given no fresh-conversation prefix; the limit then
-  // discards that session, and attempt 2 is a genuinely fresh one. A prompt
-  // captured once, outside the retry, would start that fresh session without the
-  // briefing or the plan of record and imply it already had them.
+test('a rate-limited recovery resumes the same conversation, and is not told it is fresh', async () => {
+  // Attempt 1 RESUMES a dead session and is rightly given no fresh-conversation
+  // prefix. Before #91 the limit then discarded that session and attempt 2 was a
+  // genuinely fresh one; the case existed to prove the prompt is rebuilt per
+  // attempt rather than captured once outside the retry.
+  //
+  // The limit no longer discards anything, so attempt 2 is the same conversation
+  // a second time and the prefix stays off - which is the claim now. The rebuild
+  // itself did not lose its witness, it moved one case up: in `a rate-limit retry
+  // does not re-issue a spent id` the two attempts now differ in the opposite
+  // direction, fresh then resumed, which a prompt captured once cannot produce.
+  // A reset BETWEEN two attempts of one turn is no longer reachable at all - the
+  // only failure the loop retries is the one that stopped resetting - so the
+  // reset's own effect on the prompt is pinned across two turns instead, by `an
+  // observed failure discards the spent id`.
   const state = died(freshState());
   const cfg = config({ budget: { ...DEFAULTS.budget, maxWaitMinutes: 0.005 } });
   const spent = state.sessionId;
@@ -340,12 +363,171 @@ test('a rate-limited recovery retries as a fresh conversation, told so', async (
   assert.equal(rec.calls[0]?.sessionId, spent);
   assert.equal(rec.calls[0]?.prompt, 'do the thing', 'which needed no rehydration');
 
-  assert.equal(rec.calls[1]?.resume, false, 'the retry is a fresh conversation');
-  assert.notEqual(rec.calls[1]?.sessionId, spent);
+  assert.equal(rec.calls[1]?.resume, true, 'and the retry recovers it again');
+  assert.equal(rec.calls[1]?.sessionId, spent, 'the limit gave up nothing');
   assert.equal(
     rec.calls[1]?.prompt,
-    FRESH_PREFIX + 'do the thing',
-    'and is told so, rather than carrying the resumed attempt prompt',
+    'do the thing',
+    'so it is not greeted as a conversation that has never seen this run',
+  );
+  assert.equal(state.sessionStarted, true);
+});
+
+// ---- A rate limit is not damage (#91) ---------------------------------------
+//
+// #74 reset the slot on EVERY observed failure, which made the dispatch rule
+// need no counter but discarded a session on the one failure class known not to
+// have harmed it. A `RateLimitError` is raised only from `claude.ts`'s `is_error`
+// branch, which is reached after a complete result envelope has been parsed: the
+// CLI ran to completion and declined the request. #74 measured that even a
+// hard-killed session resumes cleanly and carries its work, so this one is
+// strictly less damaged than that.
+//
+// The cost was highest where it was paid most often. The first Claude turn of a
+// run is the plan turn - the longest and most expensive one a run makes - and a
+// limit there meant waiting up to `budget.maxWaitMinutes` and then redoing it.
+
+test('the classification is made on the type, not on the message', () => {
+  assert.equal(failureSparedConversation(new RateLimitError('usage limit reached', null)), true);
+  // Everything else fails closed, including a plain error whose text would match
+  // `detectRateLimit`'s vocabulary. The class is decided where the envelope is
+  // read; a string that reaches this point unclassified is not evidence.
+  assert.equal(failureSparedConversation(new Error('usage limit reached')), false);
+  assert.equal(failureSparedConversation(new Error('the process died here')), false);
+  assert.equal(failureSparedConversation(new Escalation(EXIT.RATE_LIMITED, 'gave up waiting')), false);
+  assert.equal(failureSparedConversation('rate limit'), false);
+  assert.equal(failureSparedConversation(undefined), false);
+});
+
+test('a limit past the wait cap exits resumable on a session it kept', async () => {
+  // The trap in the obvious fix. Moving the reset to the outer catch - "only a
+  // failure that ESCAPES the retry loop discards the id" - looks equivalent and
+  // is not: past the cap the loop throws, so the catch would give up an intact
+  // session at the exact moment the run is exiting resumable on it, destroying
+  // the work the resume below recovers. The predicate is what the failure did to
+  // the conversation, and that holds on both paths.
+  const state = freshState();
+  const cfg = config({ budget: { ...DEFAULTS.budget, maxWaitMinutes: 0.005 } });
+  const minted = state.sessionId;
+  const soon = new Date(Date.now() + 60 * 60_000);
+  const rec = recorder(() => new RateLimitError('usage limit reached', soon));
+
+  await captureLog(async () => {
+    await assert.rejects(
+      () => runTurn(state, cfg, request('planner'), rec.turns),
+      (err: unknown) => {
+        assert.ok(err instanceof Escalation, `expected an Escalation, got ${String(err)}`);
+        assert.equal(err.code, EXIT.RATE_LIMITED);
+        return true;
+      },
+    );
+    return null;
+  });
+
+  assert.equal(rec.calls.length, 1, 'the reset was too far off to wait for');
+  assert.equal(state.sessionId, minted, 'and the session it paid for is still named');
+  assert.equal(state.sessionRegistered, true);
+  assert.equal(state.sessionStarted, false);
+  assert.equal(slotHasDeadTurn(state, 'main'), true, 'so the next process has something to recover');
+
+  // Which is the whole point: the resume continues that conversation.
+  const next = recorder();
+  await captureLog(() => runTurn(state, cfg, request('planner'), next.turns));
+  assert.equal(next.calls[0]?.resume, true);
+  assert.equal(next.calls[0]?.sessionId, minted);
+  assert.equal(next.calls[0]?.prompt, 'do the thing', 'holding the work the limited turn did');
+});
+
+test('a run configured not to wait keeps the session too', async () => {
+  // The other way out of the loop without a retry. Same reasoning, and it is the
+  // reason the gate sits in `onFailure` rather than around the wait: nothing
+  // about whether this run waits changes what the failure did to the session.
+  const state = freshState();
+  const cfg = config({ budget: { ...DEFAULTS.budget, waitOnRateLimit: false } });
+  const minted = state.sessionId;
+  const rec = recorder(() => new RateLimitError('usage limit reached', null));
+
+  await captureLog(async () => {
+    await assert.rejects(() => runTurn(state, cfg, request('planner'), rec.turns));
+    return null;
+  });
+
+  assert.equal(state.sessionId, minted);
+  assert.equal(state.sessionRegistered, true);
+  assert.equal(slotHasDeadTurn(state, 'main'), true);
+});
+
+test('a limit that is followed by real damage still gives the id up', async () => {
+  // Self-correcting, and the reason keeping an intact session costs nothing even
+  // where the judgement is wrong: whatever the limit spared, a resume of a
+  // conversation that turns out to be unusable fails with something that is not
+  // a rate limit - and that does reset.
+  const state = freshState();
+  const cfg = config({ budget: { ...DEFAULTS.budget, maxWaitMinutes: 0.005 } });
+  const minted = state.sessionId;
+  const rec = recorder((call) =>
+    call === 1
+      ? new RateLimitError('usage limit reached', null)
+      : new Error('Session ID is corrupt'),
+  );
+
+  await captureLog(async () => {
+    await assert.rejects(() => runTurn(state, cfg, request('planner'), rec.turns));
+    return null;
+  });
+
+  assert.equal(rec.calls.length, 2, 'the limit was waited out');
+  assert.equal(rec.calls[1]?.sessionId, minted, 'and the retry resumed the kept session');
+  assert.equal(rec.calls[1]?.resume, true);
+  assert.notEqual(state.sessionId, minted, 'which the second failure then discarded');
+  assert.equal(state.sessionRegistered, undefined);
+  assert.equal(state.sessionStarted, false);
+});
+
+test('a rate-limited fork is resumed on the retry, not forked a second time', async () => {
+  // #78 and #91 composing. `--fork-session` copies the parent at session
+  // creation, so attempt 1 has already made the child; forking again would make
+  // a second child from a parent this run has left, and the attempt counter would
+  // disclose a retry that never needed to happen.
+  const state = owesFork(freshState());
+  const cfg = config({ budget: { ...DEFAULTS.budget, maxWaitMinutes: 0.005 } });
+  const child = state.sessionId;
+  const rec = recorder((call, options) =>
+    call === 1 ? new RateLimitError('usage limit reached', null) : claudeResult(options),
+  );
+
+  await captureLog(() => runTurn(state, cfg, request('planner'), rec.turns));
+
+  assert.equal(rec.calls[0]?.forkFrom, 'parent-session', 'the first attempt forked');
+  assert.equal(rec.calls[0]?.sessionId, child);
+
+  assert.equal(rec.calls[1]?.forkFrom, undefined, 'the fork had already happened');
+  assert.equal(rec.calls[1]?.resume, true);
+  assert.equal(rec.calls[1]?.sessionId, child, 'into the same child');
+  assert.equal(state.forkPending, undefined, 'and the turn that resumed it clears the debt');
+  assert.equal(state.sessionStarted, true);
+});
+
+test('keeping a session is said out loud', async () => {
+  const state = freshState();
+  const cfg = config({ budget: { ...DEFAULTS.budget, maxWaitMinutes: 0.005 } });
+  const minted = state.sessionId;
+  const rec = recorder((call, options) =>
+    call === 1 ? new RateLimitError('usage limit reached', null) : claudeResult(options),
+  );
+
+  const { lines } = await captureLog(() => runTurn(state, cfg, request('planner'), rec.turns));
+
+  // Otherwise invisible: the run is about to wait, and what it will resume when
+  // the wait ends is the conversation this attempt already paid for.
+  assert.ok(
+    lines.some((l) => l.includes(minted) && /intact/.test(l)),
+    `the kept session is disclosed: ${lines.join('\n')}`,
+  );
+  // And the discard line, which says the opposite thing, is not also printed.
+  assert.equal(
+    lines.some((l) => l.includes('starting a fresh conversation')),
+    false,
   );
 });
 
