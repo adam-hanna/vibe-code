@@ -1,6 +1,11 @@
 ﻿import path from 'node:path';
 import { applyCharge, chargeFailure, enforceCeilings, Escalation, EXIT, fmtTokens } from '@src/charge.js';
-import { claudeTurn, parseStructured, RateLimitError } from '@src/claude.js';
+import {
+  claudeTurn,
+  failureSparedConversation,
+  parseStructured,
+  RateLimitError,
+} from '@src/claude.js';
 import { codexTurn } from '@src/codex.js';
 import type { CodexTurnOptions, CodexTurnResult } from '@src/codex.js';
 import { preserveGateArtifacts, sweepGateArtifacts } from '@src/artifacts.js';
@@ -2186,9 +2191,12 @@ async function claudeDispatch(
         // fresh session without the handoff or the plan of record.
         const prompt =
           freshConversationPrefix(state, req.role, slotContinuity(state, cfg, slot)) + req.prompt;
-        // A registered id with no successful turn means a previous process died
-        // here - an observed failure resets the slot, so it cannot mean anything
-        // else. That session is resumable and holds the dead turn's work; and
+        // A registered id with no successful turn means an attempt was made here
+        // and never returned: a previous process died on it, or - since #91 - an
+        // earlier attempt of this very turn was rate limited. A failure that left
+        // the conversation unusable resets the slot, so it cannot mean anything
+        // else. Both readings want the same thing and that is why one rule
+        // serves them: the session is resumable and holds the attempt's work; and
         // where a fork was owed, the child already holds the parent's whole
         // history, because `--fork-session` copies at session creation rather
         // than at turn completion. So the fork is already made: resume it, and
@@ -2213,15 +2221,47 @@ async function claudeDispatch(
           progress: progressOptions(state, cfg, req.label, model, 'claude'),
         });
       },
-      // Every OBSERVED failure, including one about to be waited out and retried
-      // - which is what makes the resume above unambiguous, because a slot still
-      // registered-and-unstarted at dispatch time can then only be one a killed
-      // process left behind. Exactly registered-and-unstarted: an id never
-      // handed over has no evidence of having been spent.
+      // Every observed failure that left the conversation UNUSABLE (#91).
+      //
+      // #74 reset on every observed failure, full stop, which bought the
+      // dispatch rule its unambiguity - a slot still registered-and-unstarted
+      // could then only be one a killed process left behind - at the price of
+      // discarding a session on the one failure class that is known not to have
+      // damaged it. That price is highest exactly where it is paid most often:
+      // the first Claude turn of a run is the plan turn, and a rate limit there
+      // made the run wait as much as `budget.maxWaitMinutes` and then REDO the
+      // work in a fresh conversation instead of resuming the one it had paid
+      // for. `failureSparedConversation` is where that class is named, on the
+      // error's type rather than on its text.
+      //
+      // Gated here rather than moved to the outer catch, which is the shape that
+      // looks right and is not: past the wait cap the loop THROWS, so a reset in
+      // the catch would give up an intact session at the exact moment the run is
+      // exiting resumable on it - throwing away the work a later `vibe resume`
+      // would have recovered. "Escapes the loop" is the wrong predicate; "left
+      // the conversation unusable" is the right one, and it holds on both paths.
+      //
+      // Exactly registered-and-unstarted: an id never handed over has no
+      // evidence of having been spent.
       //
       // Passed to the retry loop rather than wrapped around the turn, so the
       // path that succeeds gains no await at all.
-      () => {
+      (err: unknown) => {
+        if (failureSparedConversation(err)) {
+          // Said out loud, because it is the whole point and it is otherwise
+          // invisible: the run is about to wait, possibly for hours, and what it
+          // will resume is the conversation this attempt already paid for. Only
+          // where there is something to keep - a slot that never registered had
+          // nothing at stake.
+          const kept = slotHasDeadTurn(state, slot) ? slotId(state, slot) : null;
+          if (kept !== null) {
+            log.detail(
+              `"${req.label}" was rate limited on session ${kept}; the conversation is intact ` +
+                'and the retry resumes it rather than starting over.',
+            );
+          }
+          return;
+        }
         const discarded = recoverDeadSlot(state, slot);
         if (discarded !== null) {
           log.warn(
@@ -2303,7 +2343,9 @@ async function claudeDispatch(
  *
  * `onFailure` runs once per failed attempt, before the charge and before the
  * decision to wait, and it is where a caller repairs whatever that attempt spoiled
- * (#74: a Claude session id spent by an attempt that then failed). It mutates
+ * (#74: a Claude session id spent by an attempt that then failed). It is handed
+ * the error, because what an attempt spoiled depends on how it failed and the
+ * caller is the only one that knows what it has at stake (#91). It mutates
  * state in memory only, so the charge below persists the repair in the same write
  * as the account of what the failure cost. A callback rather than a wrapper around
  * `work`, because the path that succeeds must not gain an await - see

@@ -259,6 +259,32 @@ export class RateLimitError extends Error {
   }
 }
 
+/**
+ * Whether this failure left the conversation it ran in usable (#91).
+ *
+ * The one question the slot recovery needs and the codebase did not model.
+ * `chargeFailure` already separates retryable from terminal, but for the purpose
+ * of deciding whether to *wait* - which says nothing about what the conversation
+ * is worth afterwards.
+ *
+ * A rate limit is the only class that answers yes, and it does so on evidence
+ * rather than on optimism. On the Claude path a `RateLimitError` is raised from
+ * exactly one place: the `is_error` branch above, which is reached only after a
+ * complete `result` envelope has been parsed. The CLI ran to completion and
+ * declined the request; nothing was killed mid-write. #74 measured that even a
+ * HARD-KILLED session resumes cleanly and carries its work, and a rate-limited
+ * one is strictly less damaged than that.
+ *
+ * Everything else answers no, including errors nobody has classified. That is
+ * the fail-closed direction: giving up an intact conversation costs the work of
+ * one turn, and re-using a broken one costs the run. And it is self-correcting
+ * either way - a resume of a conversation that turns out to be unusable fails
+ * with something that is not a rate limit, which does give the id up.
+ */
+export function failureSparedConversation(err: unknown): boolean {
+  return err instanceof RateLimitError;
+}
+
 const RATE_LIMIT_RE =
   /usage limit reached|rate.?limit|429|too many requests|quota exceeded|limit will reset/i;
 /** Claude reports the reset as a unix epoch (seconds) in the limit message. */

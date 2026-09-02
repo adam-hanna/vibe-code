@@ -33,9 +33,16 @@ import type { Config, ForkedConversation, ForkPendingEntry, RunState } from '@sr
  * `claude --session-id X` spends X on *attempt*, so "has a turn succeeded here"
  * cannot also answer "is this id still free". A process killed between the two
  * left a state that re-issued a spent id forever. Registered-and-not-started is
- * therefore a state with a meaning of its own - a previous process died here -
- * and it is recoverable rather than fatal, because that session is resumable and
- * holds the dead turn's work.
+ * therefore a state with a meaning of its own - an attempt was made here and
+ * never returned - and it is recoverable rather than fatal, because that session
+ * is resumable and holds the attempt's work.
+ *
+ * "Never returned" covers two histories since #91, and deliberately does not
+ * distinguish them: a previous process died on this conversation, or an earlier
+ * attempt of the turn now running was rate limited and the failure was one that
+ * is known not to have damaged it. The recovery is the same in both - resume -
+ * so one marker is enough, and a counter distinguishing them would be storage
+ * nothing reads.
  *
  * `hasMemory` is the only question dispatch asks. The `id !== null` clause is
  * not a second marker: it is "there is something to resume". It is vacuously
@@ -325,11 +332,16 @@ export function slotRegistered(state: RunState, slot: SlotName): boolean {
 }
 
 /**
- * A previous process died on this conversation (#74).
+ * An attempt was made on this conversation and never returned (#74).
  *
  * The id was handed over and nothing has ever succeeded on it, which - once an
- * *observed* failure resets the slot - can mean nothing else. That is what makes
- * the recovery need no retry budget and no error-string matching.
+ * observed failure that left the conversation *unusable* resets the slot - can
+ * mean nothing else. That is what makes the recovery need no retry budget and no
+ * error-string matching.
+ *
+ * Two histories produce it and neither needs telling apart (#91): a process died
+ * here, or an earlier attempt of the turn now running was rate limited. See the
+ * header.
  *
  * Registration, never `!started` alone: an id that has not been handed over has
  * no evidence of having been spent, and discarding one would throw away a
@@ -359,9 +371,15 @@ export function noteSlotRegistered(state: RunState, slot: SlotName): boolean {
  * Abandon a conversation whose id is spent and on which nothing ever succeeded,
  * returning the id given up - or null when there was nothing to recover.
  *
- * Called on an OBSERVED failure, which is what makes the dispatch rule beside it
- * unambiguous: a slot still registered-and-unstarted at dispatch time can only
- * be one this run never saw fail, i.e. one a killed process left behind.
+ * Called on an observed failure that left the conversation UNUSABLE - which is
+ * what keeps the dispatch rule beside it decidable: a slot still
+ * registered-and-unstarted at dispatch time is one whose attempt never returned,
+ * and every such slot wants resuming. Not every observed failure (#91): a rate
+ * limit is raised from a completed result envelope, so the conversation behind it
+ * is intact and giving it up is loss with nothing bought. `claude.ts` owns that
+ * classification, beside the error type it is made on; this module cannot import
+ * it - `types.ts` imports this file, so the edge would close a cycle - and the
+ * one call site composes them.
  *
  * Mutates memory only. The caller persists it in the write that records the
  * failure, so a kill cannot land between a fresh id and the account of what
