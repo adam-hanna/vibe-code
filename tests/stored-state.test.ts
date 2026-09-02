@@ -315,6 +315,35 @@ test('a present non-array becomes the empty list, with an event naming the field
   }
 });
 
+test("a round's claims survive a load, and an unusable list reads as absent (#116)", () => {
+  const loaded = load((raw) => {
+    raw['p1Rounds'] = [
+      { signature: 'abc', count: 1, ids: ['one'], claims: [{ id: 'one', title: 'A claim' }] },
+      { signature: 'def', count: 1, ids: ['two'], claims: 'nope' },
+      {
+        signature: 'ghi',
+        count: 2,
+        ids: ['a', 'b'],
+        claims: [{ id: 'a', title: 'A' }, { id: 'b' }],
+      },
+    ];
+  });
+
+  assert.deepEqual(loaded.p1Rounds[0]?.claims, [{ id: 'one', title: 'A claim' }]);
+  // Absent, never `[]`: absent is what the guards read as "recorded before
+  // claims existed" and fall back to `ids`/`signature` for. An empty list would
+  // instead assert the round had no blocking findings.
+  assert.equal(loaded.p1Rounds[1]?.claims, undefined);
+  // One bad entry costs the whole field, unlike `ids`. A round missing one claim
+  // would compare as a *shorter* round, and `claimsMatch` requires equal
+  // lengths - so a single silent drop would turn a repeated round into a
+  // differing one and switch the repeat brake off for that window.
+  assert.equal(loaded.p1Rounds[2]?.claims, undefined);
+  assert.deepEqual(loaded.p1Rounds[2]?.ids, ['a', 'b'], 'and the ids beside it are untouched');
+  assert.ok(repairs(loaded).includes('p1Rounds[1].claims'));
+  assert.ok(repairs(loaded).includes('p1Rounds[2].claims'));
+});
+
 test('a wrong-typed nullable becomes null, and a stored null is left alone', () => {
   for (const field of ['baseSha', 'branch', 'handoff', 'extraContext', 'codexSessionId']) {
     const repaired = load((raw) => {

@@ -144,8 +144,29 @@ export interface CodexRateLimitRecord {
 }
 
 /** What one review round produced: which blocking findings, and how many. */
+/**
+ * One blocking finding, as much of it as the convergence guards need.
+ *
+ * The title rides along because the id does not mean what three guards took it
+ * to mean. Across 25 archived runs an id came back in more than one round 21
+ * times, and all 21 carried a different claim - the critic reuses a label for
+ * the next defect in the same area while the planner closes the last one (#116).
+ * The id alone is a model-authored slug and nothing enforces its stability.
+ */
+export interface RoundClaim {
+  id: string;
+  title: string;
+}
+
 export interface RoundRecord {
-  /** Fingerprint of the blocking id set, or null when the round had none. */
+  /**
+   * Fingerprint of the blocking id set, or null when the round had none.
+   *
+   * Kept, and still written, but only *read* for a record that predates
+   * `claims`: it hashes ids, so it inherits exactly the defect `claims` exists
+   * to fix. A resumed legacy history has nothing else to compare, and falling
+   * back to it leaves such a run behaving precisely as it did before (#116).
+   */
   signature: string | null;
   count: number;
   /**
@@ -159,8 +180,20 @@ export interface RoundRecord {
    * history survived rounds 3 through 8 and was cleared at round 9, in a run
    * that then passed 1977/1977 tests. Optional so runs recorded before this
    * field loaded still parse.
+   *
+   * Superseded as an identity by `claims`, and retained as the legacy fallback
+   * for the same reason `signature` is.
    */
   ids?: string[];
+  /**
+   * What each blocking finding actually claimed, which is what the guards
+   * compare since #116.
+   *
+   * Optional, and absent means "this round was recorded before finding identity
+   * meant anything": every guard falls back to `ids`/`signature` for such a
+   * round rather than inventing claims for it.
+   */
+  claims?: RoundClaim[];
 }
 
 export interface LoopConfig {

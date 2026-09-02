@@ -54,6 +54,7 @@ import {
   recordEvent,
   recordPendingFindings,
   recordRound,
+  recycledLabelNotice,
   removeArtifact,
   stageEvent,
   resumePhase,
@@ -1252,6 +1253,10 @@ export function guardProgress(
     p1Signature(all),
     blockers.length,
     blockers.map((f) => f.id),
+    // The claim, not only the label. `ids` and `signature` are still written for
+    // a process that reads this history on an older build, and are what the
+    // guards fall back to for a round recorded before this existed (#116).
+    blockers.map((f) => ({ id: f.id, title: f.title })),
   );
 
   const stall = assessConvergence(history, {
@@ -1276,6 +1281,15 @@ export function guardProgress(
       [...blockers],
     );
   }
+
+  // Beside the persistence notice and for the same reason - the run is
+  // continuing, and every stop above has declined to fire. This one reports a
+  // brake that did NOT fire because the claims under a repeated set of ids had
+  // changed. It is the mitigation for the one thing the title census could not
+  // measure, and it is the same answer `REPHRASED.md` gives for questions: a
+  // loosened brake costs a visible line rather than a silent omission (#116).
+  const recycled = recycledLabelNotice(history, cfg.loop.oscillationThreshold);
+  if (recycled !== null) log.warn(recycled);
 
   // Last, deliberately: the notice tells the user the run is continuing, which
   // is only true once every stop above has declined to fire. Emitted earlier it

@@ -8,6 +8,9 @@
  * imports either of them; `@src/run.js` is the deepest it reaches, so there is
  * no cycle.
  *
+ * The metric itself moved to `src/similarity.ts` in #116 and is re-exported
+ * below; the census that produced its threshold lives with it.
+ *
  * The rule is exact-then-fuzzy, and the two halves are deliberately different in
  * what they cost:
  *
@@ -21,72 +24,23 @@
  */
 import * as log from '@src/log.js';
 import { artifact, hasArtifact, removeArtifact, saveState } from '@src/run.js';
+import { normalize, REPHRASE_THRESHOLD, similarity } from '@src/similarity.js';
 import type { DeferredQuestion, ResolvedQuestion, RunState, SuppressedQuestion } from '@src/types.js';
 
 /**
- * The key `answeredQuestions` is stored under, and the token source for every
- * score below.
- *
- * Moved here from `src/orchestrator.ts` unchanged, and it must stay unchanged:
- * it is the key of a persisted list, and it is the function the threshold was
- * measured over. Altering it silently reclassifies every stored key and
- * invalidates the number.
+ * The metric, the threshold and the token rule live in `src/similarity.ts` since
+ * #116, unchanged, because `src/run.ts` needs the same rule for finding identity
+ * and cannot import this module - this one imports it. Re-exported here so every
+ * existing import site is untouched, and so the census that produced the number
+ * stays one document.
  */
-export const normalize = (s: string): string => s.toLowerCase().replace(/\W+/g, ' ').trim();
-
-/**
- * Above this, two questions are the same question.
- *
- * Not a guessed number. Every `plan-<n>.json` in this repository's 22 archived
- * runs was read on 2026-08-28 against `develop` at `45cda5e` - 115 open
- * questions, 335 within-run pairs - and each pair scored by `similarity` below.
- * 247 pairs sat at or below 0.4, 88 at or above 0.8, and the 8 in the 0.81-0.90
- * band were every one a rephrasing on inspection. Nothing at all fell between.
- *
- * **The gap is not literally empty, and the run that wrote this file proved it.**
- * That run asked one question twice - under the old build, so it was not
- * suppressed - and the pair scores **0.708**. It is a genuine rephrasing, out of
- * sample, and it lands inside the band the census found bare. What survives is
- * the claim that matters and it survives *strengthened*: the highest-scoring
- * pair that is NOT the same question is 0.4 across the census and 0.219 within
- * that run, while the lowest-scoring pair that IS the same question is now
- * 0.708. 0.6 separates them with ~0.2 of margin on one side and ~0.1 on the
- * other. Do not restate the band as empty; state the two extremes, which are
- * what the number rests on.
- *
- * The number belongs to *this* metric. A different similarity measure - cosine,
- * edit distance, a different tokenisation - has not been measured and cannot
- * inherit this constant: re-run the census before changing either.
- *
- * Honest limitation: 115 questions from one repository. Every one is a full
- * sentence, which matters because Jaccard is jumpy on very short strings. The
- * record written by `writeRephrased` is the mitigation for both, rather than a
- * second invented number.
- */
-export const REPHRASE_THRESHOLD = 0.6;
+export { normalize, REPHRASE_THRESHOLD, similarity };
 
 /** The artifact both fuzzy decisions are recorded in. */
 export const REPHRASED_FILE = 'REPHRASED.md';
 
 /** The artifact the deferred questions are reported in. */
 export const ASSUMED_FILE = 'ASSUMED.md';
-
-const tokens = (s: string): Set<string> => new Set(normalize(s).split(' ').filter(Boolean));
-
-/**
- * Jaccard over `normalize`'s token set: shared tokens over the union.
- *
- * Zero when either side has no tokens, so an empty question can never divide by
- * zero and can never match anything.
- */
-export function similarity(a: string, b: string): number {
-  const left = tokens(a);
-  const right = tokens(b);
-  if (left.size === 0 || right.size === 0) return 0;
-  let shared = 0;
-  for (const t of left) if (right.has(t)) shared += 1;
-  return shared / (left.size + right.size - shared);
-}
 
 /** The exact rule: what `answeredQuestions` has always keyed on. */
 export function isSameQuestion(a: string, b: string): boolean {
