@@ -244,6 +244,42 @@ const SUPERSEDED = '.superseded-';
 const STAGING = '.staging-';
 
 /**
+ * What a scratch entry is, finer than `entryKind` and only where it matters.
+ *
+ * `entryKind` answers "is this a directory", so a regular file and a fifo are
+ * both `not-a-directory` - which is the right answer for a run entry and the
+ * wrong one here. This module creates scratch of BOTH shapes: the staging tree
+ * is a directory, and `.partial-<i>` is whatever `cpSync` made of the source, so
+ * a configured entry that is a single file produces a scratch FILE. Deleting on
+ * `not-a-directory` would also delete a socket or a device node this module
+ * never wrote; refusing to delete anything but a directory leaves those partial
+ * files on disk for ever, which is half of #111.
+ *
+ * So: the two shapes this module actually creates are removable, everything else
+ * is named and left. Links are `other` and are never removed - #53's rule, and
+ * `linkageOf` is its predicate.
+ */
+function scratchKind(p: string): 'directory' | 'file' | 'missing' | 'other' {
+  try {
+    const st = lstatSync(p, { throwIfNoEntry: false });
+    if (st === undefined) return 'missing';
+    if (st.isSymbolicLink()) return 'other';
+    if (st.isDirectory()) return 'directory';
+    return st.isFile() ? 'file' : 'other';
+  } catch {
+    return 'other';
+  }
+}
+
+/** Removable only if this module could have created it. Never follows a link. */
+function removeScratch(at: string): boolean {
+  const kind = scratchKind(at);
+  if (kind === 'missing') return true;
+  if (kind !== 'directory' && kind !== 'file') return false;
+  return discard(at);
+}
+
+/**
  * Finish a swap that a kill interrupted, before anything else touches the round.
  *
  * `state.verifyRound` is incremented only AFTER `runGate` returns, so a process
@@ -306,13 +342,118 @@ function clearStaging(gateDir: string, round: number): string[] {
   const left: string[] = [];
   for (const child of readdirSync(gateDir, { withFileTypes: true })) {
     if (!child.name.startsWith(prefix)) continue;
-    const at = path.join(gateDir, child.name);
-    // Only a plain directory is removed. Anything else there was not written by
-    // this module, and this module deletes nothing it did not create - but it is
-    // still a leftover, and the record says so.
-    if (entryKind(at) !== 'directory' || !discard(at)) left.push(child.name);
+    // Only what this module could have written is removed - a directory or a
+    // regular file. Anything else there was not written by this module, and this
+    // module deletes nothing it did not create; it is still a leftover, and the
+    // record says so. `scratchKind` rather than `entryKind` so the `.partial-<i>`
+    // FILE a single-file entry produces is swept rather than kept for ever
+    // (#111), and so the sweep at run start cannot drift from this one.
+    if (!removeScratch(path.join(gateDir, child.name))) left.push(child.name);
   }
   return left;
+}
+
+/** One thing the sweep would not remove, and why a reader is being told. */
+interface KeptEntry {
+  /** Run-relative, POSIX, so it is a path a reader can act on. */
+  at: string;
+  why: string;
+}
+
+export interface ArtifactSweep {
+  removed: string[];
+  kept: KeptEntry[];
+}
+
+/**
+ * Remove the scratch a killed preservation left behind, anywhere in the run
+ * (#111).
+ *
+ * `recoverInterrupted` and `clearStaging` only run inside `preserveGateArtifacts`,
+ * and only for the gate and round it was called for. A run killed during a
+ * preserve that then resumes and never fails that gate again - or that never
+ * resumes at all - keeps its staging tree for ever. That litter is not small: it
+ * is a copy of what the gate produced, the motivating example is a Playwright
+ * report, and `verify.artifactMaxBytes` is `null` by default so there is no
+ * ceiling on it. The stamp is `state.events.length`, so two kills leave two.
+ *
+ * **This is option 1 of the two the issue named, and it is knowingly partial.**
+ * It fixes the run that resumes. It cannot fix the run that never resumes again,
+ * because that run never executes anything - only a pass over `.vibe/runs`
+ * would, and archive-wide retention is a bigger question that #62 ruled out of
+ * scope and that applies to every artifact rather than to this one. Said here
+ * rather than implied: the never-resumed case is not covered.
+ *
+ * **Never throws.** It runs at the top of a pass, and failing to tidy must not
+ * stop a run - the same rule `preserveGateArtifacts` itself follows.
+ *
+ * **Deletes nothing it cannot classify.** This runs inside `.vibe/runs`, which
+ * #53 established is a directory whose entries cannot be assumed to be what they
+ * look like. A `.staging-` entry that is a link, or that `lstat` could not read,
+ * is named and left.
+ */
+export function sweepGateArtifacts(state: RunState): ArtifactSweep {
+  const sweep: ArtifactSweep = { removed: [], kept: [] };
+  const artifactsDir = path.join(state.dir, 'artifacts');
+  if (entryKind(artifactsDir) === 'missing') return sweep;
+  if (entryKind(artifactsDir) !== 'directory') {
+    sweep.kept.push({ at: 'artifacts', why: 'is not a plain directory; nothing was swept' });
+    return sweep;
+  }
+
+  let gates: string[];
+  try {
+    gates = readdirSync(artifactsDir, { withFileTypes: true }).map((e) => e.name);
+  } catch (err: unknown) {
+    sweep.kept.push({ at: 'artifacts', why: `could not be read (${reason(err)})` });
+    return sweep;
+  }
+
+  for (const gate of gates) {
+    const gateDir = path.join(artifactsDir, gate);
+    if (entryKind(gateDir) !== 'directory') {
+      sweep.kept.push({ at: `artifacts/${gate}`, why: 'is not a plain directory' });
+      continue;
+    }
+    let names: string[];
+    try {
+      names = readdirSync(gateDir, { withFileTypes: true }).map((e) => e.name);
+    } catch (err: unknown) {
+      sweep.kept.push({ at: `artifacts/${gate}`, why: `could not be read (${reason(err)})` });
+      continue;
+    }
+
+    for (const name of names) {
+      const rel = `artifacts/${gate}/${name}`;
+      const at = path.join(gateDir, name);
+
+      if (name.startsWith(STAGING)) {
+        if (removeScratch(at)) sweep.removed.push(rel);
+        else sweep.kept.push({ at: rel, why: 'is a link, or could not be classified' });
+        continue;
+      }
+
+      // `round-<n>.superseded-<stamp>`: the previous round, held while a swap
+      // was in flight. It is deleted only once the round it backs up is
+      // installed, which is the same rule `recoverInterrupted` applies and for
+      // the same reason - with no `round-<n>` beside it, this may be the ONLY
+      // copy of that evidence, and the ambiguity is not one a sweep may resolve.
+      const backup = /^(round-\d+)\.superseded-/.exec(name);
+      if (backup === null) continue;
+      const installed = path.join(gateDir, backup[1] ?? '');
+      if (entryKind(installed) !== 'directory') {
+        sweep.kept.push({
+          at: rel,
+          why: `${backup[1] ?? ''} is not installed beside it, so this may be the only copy`,
+        });
+        continue;
+      }
+      if (removeScratch(at)) sweep.removed.push(rel);
+      else sweep.kept.push({ at: rel, why: 'is a link, or could not be classified' });
+    }
+  }
+
+  return sweep;
 }
 
 /**

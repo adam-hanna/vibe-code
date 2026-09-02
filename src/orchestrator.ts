@@ -3,7 +3,7 @@ import { applyCharge, chargeFailure, enforceCeilings, Escalation, EXIT, fmtToken
 import { claudeTurn, parseStructured, RateLimitError } from '@src/claude.js';
 import { codexTurn } from '@src/codex.js';
 import type { CodexTurnOptions, CodexTurnResult } from '@src/codex.js';
-import { preserveGateArtifacts } from '@src/artifacts.js';
+import { preserveGateArtifacts, sweepGateArtifacts } from '@src/artifacts.js';
 import { downgradeInert, groundFindings, refusePlaceholderPlan } from '@src/evidence.js';
 import * as git from '@src/git.js';
 import * as log from '@src/log.js';
@@ -234,6 +234,13 @@ export async function orchestrate(
     // parent's artifacts - and a forked run is always started by `vibe resume`,
     // so this pass is where it gets its copy (#65).
     reconcileQuestionRecords(state);
+    // Beside them, and for the same shape of reason: a process killed inside
+    // `preserveGateArtifacts` leaves a staging tree that only the next preserve
+    // FOR THAT GATE AND ROUND would have cleared, so a run that resumes and
+    // never fails that gate again keeps a full copy of what the gate produced
+    // for ever. Here rather than in `createRun`/`loadRun` because that would put
+    // `run.ts` in a cycle with this module's - `artifacts.ts` imports it (#111).
+    sweepArtifacts(state);
     return await runPhases(state, cfg, resume, turns);
   } finally {
     // A `finally`, not a tail call: the phases below return early at the
@@ -242,6 +249,35 @@ export async function orchestrate(
     // paths.
     closeCodexRateLimits();
   }
+}
+
+/**
+ * Tidy the gate-artifact scratch, and say so only when there was something to
+ * say (#111).
+ *
+ * Silent and eventless on a run with nothing stranded, which is every ordinary
+ * run: a pass that removed nothing must leave the record byte-identical to what
+ * it was before this existed. What it did remove is named rather than counted -
+ * these are potentially the largest objects in `.vibe/`, and "swept 2 entries"
+ * is not something a user can check.
+ */
+function sweepArtifacts(state: RunState): void {
+  const sweep = sweepGateArtifacts(state);
+  if (sweep.removed.length > 0) {
+    log.info(
+      `Removed ${sweep.removed.length} leftover artifact staging entr` +
+        `${sweep.removed.length === 1 ? 'y' : 'ies'} from an interrupted preservation: ` +
+        sweep.removed.join(', '),
+    );
+  }
+  for (const kept of sweep.kept) {
+    log.warn(`Left in place: ${kept.at} ${kept.why}`);
+  }
+  if (sweep.removed.length === 0 && sweep.kept.length === 0) return;
+  recordEvent(state, 'artifact_staging_swept', {
+    removed: sweep.removed,
+    kept: sweep.kept.map((k) => k.at),
+  });
 }
 
 async function runPhases(
