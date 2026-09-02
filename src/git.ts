@@ -295,12 +295,17 @@ export interface DiffChunk {
 /**
  * The diff mode, decided ONCE, plus the whole diff it produced.
  *
- * `diffSince` and `changedFiles` can describe different changes: `diffSince`
- * falls back to the working tree when `baseSha..HEAD` is empty, `changedFiles`
- * does not, so with `git.commitEachRound: false` the reviewer used to be handed
- * a working-tree diff beside an EMPTY file list. Harmless while the list was
- * decoration; fatal once the list is what the change is chunked by, since the
- * reviewer would be handed nothing at all (#49).
+ * A diff and a separately-taken `--name-only` read can describe different
+ * changes: `diffSince` falls back to the working tree when `baseSha..HEAD` is
+ * empty, and the file list `changedFiles` took did not, so with
+ * `git.commitEachRound: false` the reviewer used to be handed a working-tree
+ * diff beside an EMPTY file list. Harmless while the list was decoration; fatal
+ * once the list is what the change is chunked by, since the reviewer would be
+ * handed nothing at all (#49). That is why the mode is decided here, once, and
+ * why both reads below are built from the same `prefix`.
+ *
+ * `changedFiles` itself is gone (#93): it was left behind by #49 with no caller,
+ * still diverging, and still answering `[]` where it meant "I could not look".
  *
  * The whole diff comes back through the trimming read on purpose: it is what
  * the single-chunk path returns verbatim, and it has to stay byte-identical to
@@ -413,10 +418,3 @@ export async function diffChunks(
   return { chunks, files };
 }
 
-export async function changedFiles(cwd: string, baseSha: string | null): Promise<string[]> {
-  const args = baseSha
-    ? ['diff', '--name-only', `${baseSha}..HEAD`]
-    : ['diff', '--cached', '--name-only'];
-  const { stdout } = await git(cwd, args, { allowFail: true });
-  return stdout ? stdout.split(/\r?\n/).filter(Boolean) : [];
-}
