@@ -9,6 +9,7 @@ import * as P from '@src/prompts.js';
 import {
   artifact,
   claimRunDir,
+  linkedCheckpointReason,
   linkedRunReason,
   listCheckpoints,
   mintRunId,
@@ -107,14 +108,24 @@ const runsRootOf = (targetDir: string): string => path.join(targetDir, RUNS_DIR)
  * ../other` with no `--at` takes the listing path, and a positional argument
  * must never reach `readdirSync` unchecked.
  */
-export function listForkPoints(targetDir: string, sourceId: string): { n: number; meta: RunCheckpointMeta | null }[] {
+export function listForkPoints(
+  targetDir: string,
+  sourceId: string,
+): { n: number; meta: RunCheckpointMeta | null; linked?: true | undefined }[] {
   const root = runsRootOf(targetDir);
   assertUsableRunId(sourceId, root);
   // Before `listCheckpoints`, which `readdirSync`s inside the entry: a linked
   // entry would have its target enumerated (#53).
   const linked = linkedRunReason(root, sourceId);
   if (linked !== null) throw new ForkError(linked);
-  return listCheckpoints(path.join(root, sourceId)).map(({ n, meta }) => ({ n, meta }));
+  // `linked` carried through rather than flattened away: the row it produces
+  // has to say the file was not opened, which is a different fact from the
+  // `(unreadable)` row a damaged snapshot produces (#102).
+  return listCheckpoints(path.join(root, sourceId)).map(({ n, meta, linked: isLink }) => ({
+    n,
+    meta,
+    ...(isLink === undefined ? {} : { linked: isLink }),
+  }));
 }
 
 /**
@@ -171,6 +182,16 @@ export async function planFork(
     throw new ForkError(
       `Run ${sourceId} cannot be forked: ${describeLiveness(verdict)} Nothing was read further ` +
         'and nothing was written. Wait for it to finish, then fork.',
+    );
+  }
+
+  // Before `existsSync`, which FOLLOWS a link: a checkpoint that is a symlink
+  // would otherwise be reported as present or absent according to what it points
+  // at, and then read through. #53's rule, one level deeper (#102).
+  const linkedCheckpoint = linkedCheckpointReason(sourceDir, n);
+  if (linkedCheckpoint !== null) {
+    throw new ForkError(
+      `${linkedCheckpoint} Run "vibe fork ${sourceId}" to see its fork points.`,
     );
   }
 
