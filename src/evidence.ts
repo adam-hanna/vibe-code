@@ -396,3 +396,142 @@ export function downgradeInert(
 
   return { report: { ...report, findings }, downgraded };
 }
+
+/**
+ * A plan body that says the plan is somewhere else - and the third guard that
+ * rewrites a report before the gate reads it (#108).
+ *
+ * What happened: run `20260829-083852-issue-66-...` stored a 130-byte
+ * `plan-0.json` whose `plan_md` was the literal `« see below »` and whose every
+ * planning array was empty. The turn had just run `mkdir -p
+ * "~/.claude/plans"` - Claude Code's own plan-mode artifact directory - so the
+ * model appears to have written its plan where plan mode puts plans and returned
+ * a pointer in the schema field. The critic caught it exactly, at P1. Then
+ * `gate` compared one P1 against `loop.p1Tolerance: 1`, passed, and the run
+ * implemented.
+ *
+ * `p1Tolerance` ends an argument ABOUT a plan - the measured case in
+ * `validate.ts` is "eight rounds and $24 without ever reaching implementation".
+ * It was never meant to authorise proceeding WITHOUT one, and `gate` cannot tell
+ * the difference because every P1 is one P1. So the severity is P0, which is
+ * never carried and never tolerated, whatever the tolerance is set to.
+ *
+ * The run downstream of that plan got the placeholder everywhere:
+ * `acceptanceCriteria` was `[]` so both review rounds ran with no bar, the
+ * reviewer was handed `« see below »` as the plan the change is measured
+ * against, and a session rotation - which did not happen, at 20% context - would
+ * have handed a fresh session thirteen characters as its plan of record.
+ */
+
+/**
+ * Whole-body pointers and non-answers, matched exactly after normalisation.
+ *
+ * Exact whole-line equality, never `includes`: a real plan may well contain the
+ * words "see below" in a sentence, and a substring rule would refuse it. What no
+ * real plan can be is a body every one of whose lines is one of these.
+ *
+ * Deliberately not a length rule. "Shorter than N characters is not a plan" is
+ * the invented number AGENTS.md forbids, and it would refuse a genuinely terse
+ * plan for a one-line change while still passing a padded stub.
+ */
+const POINTER_BODIES = new Set([
+  'see below',
+  'see above',
+  'as below',
+  'as above',
+  'as described',
+  'as described above',
+  'as described below',
+  'see the plan',
+  'see the plan above',
+  'see the plan below',
+  'see attached',
+  'see the attached plan',
+  'plan',
+  'the plan',
+  'implementation plan',
+  'tbd',
+  'to be determined',
+  'todo',
+  'n/a',
+  'none',
+]);
+
+/**
+ * One line of a plan body, reduced to the words it actually says.
+ *
+ * Markdown structure is stripped rather than parsed: a heading, a bullet, a
+ * blockquote marker or a code fence carries no claim of its own, so a body of
+ * `# Plan` followed by `« see below »` is two pieces of scaffolding around one
+ * pointer. The guillemets are stripped for the same reason - they are how the
+ * observed stub quoted itself.
+ */
+function planLine(line: string): string {
+  return line
+    .replace(/^[\s>#*+\-.\d)]+/, '')
+    .replace(/[*_`~]/g, '')
+    .replace(/[«»"'\u201c\u201d\u2018\u2019]/g, '')
+    .replace(/\s+/g, ' ')
+    .replace(/[.!:\u2026]+$/, '')
+    .trim()
+    .toLowerCase();
+}
+
+/**
+ * Is this body a plan at all, or a note saying where the plan went?
+ *
+ * True when nothing is left after the scaffolding, or when every line that IS
+ * left is a pointer. A body with one line of real content is not a placeholder,
+ * however short - judging whether it is a GOOD plan is the critic's job, and
+ * this guard deliberately does not have an opinion about it.
+ */
+export function isPlaceholderPlan(planMd: string): boolean {
+  const lines = planMd.split(/\r?\n/).map(planLine).filter((l) => l !== '');
+  if (lines.length === 0) return true;
+  return lines.every((l) => POINTER_BODIES.has(l));
+}
+
+/**
+ * Raise a P0 when the plan about to be critiqued is not a plan.
+ *
+ * Added to the report rather than thrown, so every mechanism that already exists
+ * for a blocking finding does its job: the gate refuses, `guardProgress` applies
+ * `loop.maxPlanRounds` so a planner that keeps returning a stub cannot loop
+ * forever, the finding reaches the next revision through `pendingFindings`, and
+ * the round's artifact records why the run refused. No new control flow, no new
+ * cap, and no new number.
+ *
+ * The critic's own finding, when it raises one, is left exactly as it is. Two
+ * findings about one defect is the honest record: one is the critic's judgement
+ * and one is a mechanical fact about the artifact on disk.
+ *
+ * Pure with respect to its input, as the two guards above are: the artifact and
+ * `state.pendingFindings` are written from these objects.
+ */
+export function refusePlaceholderPlan(
+  report: FindingsReport,
+  planMd: string,
+  artifactName: string,
+): { report: FindingsReport; raised: Finding | null } {
+  if (!isPlaceholderPlan(planMd)) return { report, raised: null };
+
+  const shown = planMd.trim();
+  const raised: Finding = {
+    id: 'plan-body-is-a-placeholder',
+    severity: 'P0',
+    title: 'The plan artifact holds a pointer, not a plan',
+    detail:
+      `\`plan_md\` in \`${artifactName}\` is ${shown === '' ? 'empty' : `\`${shown}\``}, which ` +
+      'names no work. There is nothing here to implement, nothing for the reviewer to measure ' +
+      'the change against, and nothing a rotated session could be handed as the plan of record. ' +
+      'This is P0 rather than P1 because `loop.p1Tolerance` ends an argument about a plan and ' +
+      'cannot be allowed to authorise proceeding without one.',
+    suggested_fix:
+      'Return the whole implementation plan in the `plan_md` field itself. It is the only place ' +
+      'the rest of the run reads it from: nothing downstream opens a file you wrote elsewhere, ' +
+      'and a plan left in `~/.claude/plans` is invisible to every later turn.',
+    evidence: [{ kind: 'artifact', path: artifactName }],
+  };
+
+  return { report: { ...report, findings: [raised, ...report.findings] }, raised };
+}

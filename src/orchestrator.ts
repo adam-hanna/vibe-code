@@ -4,7 +4,7 @@ import { claudeTurn, parseStructured, RateLimitError } from '@src/claude.js';
 import { codexTurn } from '@src/codex.js';
 import type { CodexTurnOptions, CodexTurnResult } from '@src/codex.js';
 import { preserveGateArtifacts } from '@src/artifacts.js';
-import { downgradeInert, groundFindings } from '@src/evidence.js';
+import { downgradeInert, groundFindings, refusePlaceholderPlan } from '@src/evidence.js';
 import * as git from '@src/git.js';
 import * as log from '@src/log.js';
 import type { PathStyle } from '@src/pathstyle.js';
@@ -481,7 +481,17 @@ async function planPhase(
       state,
       cfg,
       async () => {
-        const found = await runCritique(state, cfg, cwd, plan, roles, turns);
+        const critiqued = await runCritique(state, cfg, cwd, plan, roles, turns);
+        // Before the artifact and before `recordPendingFindings`, so the round's
+        // record shows what the run refused on and the next revision is told
+        // about it. A mechanical fact about the artifact on disk, added to the
+        // critic's judgement rather than replacing it (#108).
+        const planFile = `plan-${state.planRound}.json`;
+        const { report: found, raised } = refusePlaceholderPlan(critiqued, plan.plan_md, planFile);
+        if (raised !== null) {
+          log.fail(`${planFile} holds a pointer, not a plan - refusing to implement it.`);
+          recordEvent(state, 'plan_placeholder_refused', { artifact: planFile, id: raised.id });
+        }
         artifact(state, `plan-critique-${state.planRound}.json`, found);
         collectDeferred(state, found.findings);
         writeFollowUps(state, plan);
