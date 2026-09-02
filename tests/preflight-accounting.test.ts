@@ -4,11 +4,13 @@ import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { chargePreflight, execute, runPreflight } from '@src/cli.js';
+import type { PreflightOptions } from '@src/cli.js';
 import { DEFAULTS } from '@src/config.js';
-import { Escalation, EXIT } from '@src/orchestrator.js';
+import { Escalation, EXIT, orchestrate } from '@src/orchestrator.js';
 import { preflight } from '@src/preflight.js';
 import type { AgentPreflight, PreflightProbes, ProbeUsage } from '@src/preflight.js';
 import { createRun } from '@src/run.js';
+import { agents, initGit } from './helpers/loop-harness.js';
 import type {
   AgentProvider,
   ContractViolation,
@@ -45,8 +47,21 @@ function sandboxed(sandbox: Sandbox): Config {
   return { ...config(), codex: { ...config().codex, sandbox } };
 }
 
+/**
+ * A run whose target directory is a real repository.
+ *
+ * The `git init` is not decoration. These cases are all `planOnly: false`, and
+ * since #71 preflight refuses such a run in a directory that is not a git
+ * repository - before either probe is called, which is exactly the point of
+ * that gate and exactly what would make every accounting assertion below
+ * vacuous. A bare `mkdtemp` used to be a fine fixture because nothing looked at
+ * the directory; now something does, so the fixture has to be the thing it
+ * always meant: an ordinary run in an ordinary repo.
+ */
 function runFor(task: string): RunState {
-  return createRun(mkdtempSync(path.join(tmpdir(), 'vibe-preflight-')), task, false);
+  const dir = mkdtempSync(path.join(tmpdir(), 'vibe-preflight-'));
+  initGit(dir);
+  return createRun(dir, task, false);
 }
 
 function violation(
@@ -307,9 +322,20 @@ test('an ordinary preflight refusal still returns its own exit code', async () =
   assert.equal(looped, false);
 });
 
+/**
+ * The claim moved with #71, and only in its mechanism.
+ *
+ * `--skip-probe` used to mean "execute does not call the gate at all", and this
+ * case asserted it by watching a flag the gate set. It now means "the gate does
+ * not run the probes": the gate is always called, and is handed the flag,
+ * because its other half - the deterministic preconditions on the target
+ * directory - is free, cannot be wrong, and must not be skippable. What the
+ * case was guarding is unchanged and is still asserted below: with the flag set,
+ * nothing is probed, nothing is charged, and the run proceeds.
+ */
 test('--skip-probe charges nothing, because nothing ran', async () => {
   const state = runFor('skip-probe');
-  let gated = false;
+  let asked: PreflightOptions | null = null;
 
   const { result: code } = await captureLog(() =>
     execute(
@@ -317,8 +343,8 @@ test('--skip-probe charges nothing, because nothing ran', async () => {
       config(),
       false,
       true,
-      () => {
-        gated = true;
+      (_state, _cfg, options) => {
+        asked = options;
         return Promise.resolve(null);
       },
       () => Promise.resolve(),
@@ -326,9 +352,126 @@ test('--skip-probe charges nothing, because nothing ran', async () => {
   );
 
   assert.equal(code, EXIT.OK);
-  assert.equal(gated, false);
+  assert.deepEqual(asked, { skipProbe: true }, 'the gate is told to skip, not skipped');
   assert.equal(state.tokensUsed, 0);
   assert.deepEqual(charges(state), []);
+});
+
+// ---- A resume with nothing ahead -------------------------------------------
+
+/**
+ * Probes that record whether they were reached, so "nothing ran" is observable
+ * rather than inferred from a total that happens not to have moved.
+ */
+function counted(
+  claude: AgentPreflight,
+  codex: AgentPreflight,
+): { probes: PreflightProbes; calls: () => number } {
+  let calls = 0;
+  return {
+    probes: {
+      claude: () => {
+        calls += 1;
+        return Promise.resolve(claude);
+      },
+      codex: () => {
+        calls += 1;
+        return Promise.resolve(codex);
+      },
+    },
+    calls: () => calls,
+  };
+}
+
+/** A run that is over, with the totals it finished holding. */
+function finishedRun(task: string): RunState {
+  const state = runFor(task);
+  state.status = 'done';
+  state.phase = 'complete';
+  state.tokensUsed = 61_885;
+  state.codexTokens = 41_000;
+  state.costUsd = 1.24;
+  return state;
+}
+
+/** What a real pair of preflight probes cost, measured 2026-08-27 (#97). */
+const CLAUDE_PROBE = spent(0.51, 15_000);
+const CODEX_PROBE = spent(null, 41_000);
+
+test('a finished run is not probed: there are no phases ahead to establish an environment for', async () => {
+  const state = finishedRun('nothing to resume');
+  const asked = counted(CLAUDE_PROBE, CODEX_PROBE);
+
+  const { result: code } = await captureLog(() => runPreflight(state, config(), asked.probes));
+
+  assert.equal(code, null, 'and the gate still lets the run through to say so itself');
+  assert.equal(asked.calls(), 0, 'no agent was spawned to verify work that will not happen');
+});
+
+test("a finished run's recorded totals do not move when somebody looks at it", async () => {
+  // The honesty half, and the reason this is not merely a saving: the probes
+  // were CHARGED, so `state.tokensUsed` grew on every resume of a completed run
+  // and the figure a user read was no longer what the run cost. Measured at
+  // ~60,000 tokens a look - 10,212 after one, 20,424 after two, 30,639 after
+  // three, on the Claude side alone.
+  const state = finishedRun('totals stay put');
+  const asked = counted(CLAUDE_PROBE, CODEX_PROBE);
+
+  await captureLog(() => runPreflight(state, config(), asked.probes));
+
+  assert.equal(state.tokensUsed, 61_885);
+  assert.equal(state.codexTokens, 41_000);
+  assert.equal(state.costUsd, 1.24);
+  assert.deepEqual(charges(state), []);
+});
+
+test('a resume with work left still probes, and is still charged for it', async () => {
+  // The control. What changed is "no phases ahead", not "this is a resume": a
+  // run parked anywhere short of complete needs its environment established
+  // exactly as it always did.
+  for (const phase of ['planning', 'implementing', 'reviewing'] as const) {
+    const state = runFor(`parked at ${phase}`);
+    state.phase = phase;
+    const asked = counted(CLAUDE_PROBE, CODEX_PROBE);
+
+    await captureLog(() => runPreflight(state, config(), asked.probes));
+
+    assert.equal(asked.calls(), 2, `a run parked at ${phase} is still probed`);
+    assert.equal(state.tokensUsed, 56_000, `and still charged at ${phase}`);
+    assert.equal(state.codexTokens, 41_000);
+  }
+});
+
+test('resuming a finished run through the whole path spends nothing and still says it is finished', async () => {
+  // End to end, because the claim is about `vibe resume` and not about one
+  // function: the real gate wrapped around injected probes, the real loop with
+  // the harness's turns, and the acceptance the issue set - no turn dispatched,
+  // the totals byte-identical to what the run recorded, and the same summary.
+  const state = finishedRun('resume the finished run');
+  const asked = counted(CLAUDE_PROBE, CODEX_PROBE);
+  const calls: string[] = [];
+
+  const { result: code, lines } = await captureLog(() =>
+    execute(
+      state,
+      config({ context: { ...DEFAULTS.context, enabled: false } }),
+      true,
+      false,
+      (s, c, options) => runPreflight(s, c, asked.probes, options),
+      (s, c, r) => orchestrate(s, c, r, agents({}, calls)),
+    ),
+  );
+
+  assert.equal(code, EXIT.OK);
+  assert.equal(asked.calls(), 0, 'no probe');
+  assert.deepEqual(calls, [], 'and no turn');
+  assert.equal(state.tokensUsed, 61_885);
+  assert.equal(state.codexTokens, 41_000);
+  assert.equal(state.costUsd, 1.24);
+  assert.ok(
+    lines.some((l) => l.includes('already finished')),
+    'and it still reports why it did nothing',
+  );
 });
 
 // ---- What preflight blocks on is unchanged ---------------------------------

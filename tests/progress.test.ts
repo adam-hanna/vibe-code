@@ -582,6 +582,10 @@ function recordingHeartbeat(): { heartbeat: Heartbeat; calls: string[] } {
       onLine: () => calls.push('line'),
       flush: () => calls.push('flush'),
       fail: () => calls.push('fail'),
+      // Not recorded: these cases are about the lifecycle order, and `activity`
+      // is a read that `withHeartbeat` never makes - the adapters do, inside the
+      // work callback.
+      activity: () => undefined,
       stop: () => calls.push('stop'),
     },
   };
@@ -752,11 +756,14 @@ function config(over: Partial<Config['progress']> = {}, model = 'opus'): Config 
 }
 
 test('progress options are undefined when progress is switched off', () => {
-  assert.equal(progressOptions(state(), config({ enabled: false }), 'plan'), undefined);
+  assert.equal(
+    progressOptions(state(), config({ enabled: false }), 'plan', 'opus', 'claude'),
+    undefined,
+  );
 });
 
 test('progress options carry the label and the configured cadence', () => {
-  const options = progressOptions(state(), config({ intervalMs: 5_000 }), 'plan-0');
+  const options = progressOptions(state(), config({ intervalMs: 5_000 }), 'plan-0', 'opus', 'claude');
 
   assert.equal(options?.label, 'plan-0');
   assert.equal(options?.intervalMs, 5_000);
@@ -767,14 +774,26 @@ test('a context window is offered only for the model it was measured under', () 
   // so tests must not depend on being able to reset it.
   rememberContextWindow('fixture-measured', 200_000);
 
-  assert.equal(progressOptions(state(), config({}, 'fixture-measured'), 'plan')?.contextWindow, 200_000);
-  assert.equal(progressOptions(state(), config({}, 'fixture-other'), 'plan')?.contextWindow, undefined);
+  assert.equal(
+    progressOptions(state(), config({}, 'fixture-measured'), 'plan', 'fixture-measured', 'claude')
+      ?.contextWindow,
+    200_000,
+  );
+  assert.equal(
+    progressOptions(state(), config({}, 'fixture-other'), 'plan', 'fixture-other', 'claude')
+      ?.contextWindow,
+    undefined,
+  );
 });
 
 test('a window of zero is not remembered: it would render as ctx 0%', () => {
   rememberContextWindow('fixture-zero', 0);
 
-  assert.equal(progressOptions(state(), config({}, 'fixture-zero'), 'plan')?.contextWindow, undefined);
+  assert.equal(
+    progressOptions(state(), config({}, 'fixture-zero'), 'plan', 'fixture-zero', 'claude')
+      ?.contextWindow,
+    undefined,
+  );
 });
 
 /** A resumed run: nothing measured in this process, a window on the run. */
@@ -787,6 +806,8 @@ test('the window persisted with the run is used when it names the model in use',
     persistedState('fixture-persisted'),
     config({}, 'fixture-persisted'),
     'plan',
+    'fixture-persisted',
+    'claude',
   );
 
   assert.equal(options?.contextWindow, 300_000);
@@ -797,6 +818,8 @@ test('a persisted window measured under another model is still omitted', () => {
     persistedState('fixture-persisted'),
     config({}, 'fixture-persisted-other'),
     'plan',
+    'fixture-persisted-other',
+    'claude',
   );
 
   assert.equal(options?.contextWindow, undefined);

@@ -1,10 +1,12 @@
-import { allocateRun, createRun, saveState, writeCheckpoint } from '@src/run.js';
+import { allocateRun, artifact, createRun, saveState, writeCheckpoint } from '@src/run.js';
 import { commitFork, planFork } from '@src/fork.js';
 import { DEFAULTS } from '@src/config.js';
 import {
   ALLOC_CONTEXT_PADDING,
   ALLOC_CONTEXT_PREFIX,
   ALLOC_MODEL,
+  ARTIFACT_BODY_A,
+  ARTIFACT_BODY_B,
 } from './kill-markers.js';
 
 /**
@@ -27,6 +29,11 @@ import {
  *             helper called `createRun` before printing `ready`, so every kill
  *             landed after the state was already whole and the assertion held
  *             for reasons that had nothing to do with the code under test.
+ *   `artifact` - the same shape as `save`, but through `artifact()` and at a
+ *             lifelike size. A different failure mode; see `artifactMode`.
+ *   `hang`  - never prints `ready` and never exits. Not a kill window: it is the
+ *             third outcome the parent's readiness wait has to survive (#100),
+ *             and the only way to assert that is a child that really does hang.
  *
  * Each save carries a marker: the parent asserts the file it recovers parses AND
  * holds one of the two legal markers, which is what "the whole previous file or
@@ -73,6 +80,40 @@ function saveMode(targetDir: string): void {
   for (let i = 0; ; i++) {
     state.task = i % 2 === 0 ? 'B' : 'A';
     saveState(state);
+  }
+}
+
+/**
+ * The same shape as `saveMode`, through `artifact()` instead - and deliberately
+ * NOT sized like the state.json fixture above.
+ *
+ * `PADDING_EVENTS` is ~1.1MB because state.json's failure is *tearing*, and
+ * tearing needed a write long enough for `TerminateProcess` to land inside. That
+ * note is still right about that. This is the other failure mode: `writeFileSync`
+ * opens `O_TRUNC`, so the file is emptied at open and a kill in that window
+ * leaves ZERO bytes, not a splice. The truncate window is roughly fixed while
+ * the write after it grows, so a smaller artifact is damaged more often, not
+ * less: measured on 2026-08-28 against `develop` at `99eca2e`, 40 kills per
+ * size, a 17KB body was destroyed 5 times in 40 where a 1.1MB one was destroyed
+ * 2. Inflating this fixture would make the test *less* sensitive, which is why
+ * ~17KB - the size of a real `PLAN.md` - is the honest number here.
+ *
+ * `PLAN.md` and not `OUTSTANDING.md`: `artifact()` is one seam with no
+ * name-specific behaviour. The reason the bug matters most for OUTSTANDING.md is
+ * that `recoverOutstanding` skips it on `existsSync` and
+ * `settlePendingOutstanding` skips it for want of its marker, so an empty one is
+ * stuck permanently between the two - but that is the motivation, not a second
+ * thing to test.
+ */
+function artifactMode(targetDir: string): void {
+  const state = createRun(targetDir, 'kill during artifact', true);
+  artifact(state, 'PLAN.md', ARTIFACT_BODY_A);
+
+  process.stdout.write(`ready ${state.dir}\n`);
+  // Alternate the body so the parent can tell which whole file it recovered.
+  // No pause between writes: the kill has to be able to land inside one.
+  for (let i = 0; ; i++) {
+    artifact(state, 'PLAN.md', i % 2 === 0 ? ARTIFACT_BODY_B : ARTIFACT_BODY_A);
   }
 }
 
@@ -148,6 +189,18 @@ function forkMode(targetDir: string): void {
   process.stdin.resume();
 }
 
+/**
+ * Neither of the two things the parent waits for.
+ *
+ * Nothing on stdout, no exit, and no filesystem work at all - the point is the
+ * shape a stalled child has from outside, not any particular way of stalling.
+ * The real ones this stands for stall inside `createRun` or the first artifact
+ * write: a contended temp directory, a scanner holding a handle, a full disk.
+ */
+function hangMode(): void {
+  setInterval(() => {}, 1_000);
+}
+
 function main(): void {
   const targetDir = process.argv[2];
   const mode = process.argv[3] ?? 'save';
@@ -155,6 +208,8 @@ function main(): void {
 
   if (mode === 'alloc') allocMode(targetDir);
   else if (mode === 'fork') forkMode(targetDir);
+  else if (mode === 'artifact') artifactMode(targetDir);
+  else if (mode === 'hang') hangMode();
   else saveMode(targetDir);
 }
 

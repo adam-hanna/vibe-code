@@ -179,19 +179,22 @@ test('the object form naming only a provider dispatches the identical models', a
   );
 });
 
-test('the progress window and the rotation decision default to what they read before', () => {
+test('the progress window and the rotation decision read the model the turn names', () => {
   const cfg: Config = { ...DEFAULTS, progress: { ...DEFAULTS.progress, enabled: true } };
   const state = createRun(mkdtempSync(path.join(tmpdir(), 'vibe-model-win-')), 'window', false);
   rememberContextWindow(cfg.claude.model, 200_000);
 
-  // progressOptions' default argument IS cfg.claude.model, so a caller passing
-  // nothing gets the identical window - which is what keeps every existing call
-  // site rendering what it renders today.
+  // This used to assert that omitting the model gave the identical window,
+  // because progressOptions' default argument WAS cfg.claude.model. That
+  // default was #60's migration device and #86 removed it: a caller that named
+  // nothing inherited Claude's model silently, which is how a Codex turn came to
+  // be handed Claude's window. The claim moved; what #60 was protecting - a
+  // per-role model reaching only the turns that named one - is unchanged and is
+  // pinned by the dispatch cases above and below.
   assert.equal(
-    progressOptions(state, cfg, 'plan')?.contextWindow,
-    progressOptions(state, cfg, 'plan', cfg.claude.model)?.contextWindow,
+    progressOptions(state, cfg, 'plan', cfg.claude.model, 'claude')?.contextWindow,
+    200_000,
   );
-  assert.equal(progressOptions(state, cfg, 'plan')?.contextWindow, 200_000);
 
   const rotating: Config = { ...cfg, context: { ...cfg.context, enabled: true } };
   const measured = { ...state, sessionStarted: true } as RunState;

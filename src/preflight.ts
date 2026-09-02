@@ -3,6 +3,7 @@ import { ClaudeAdapter } from '@src/adapters/claude-adapter.js';
 import { CodexAdapter, selectProbeTranscript } from '@src/adapters/codex-adapter.js';
 import { claudeBin, parseProbeTurn } from '@src/claude.js';
 import { codexBin, parseProbeStream } from '@src/codex.js';
+import * as git from '@src/git.js';
 import { hostExecutableFor } from '@src/hosttools.js';
 import { run } from '@src/proc.js';
 import { codexProbeSandbox, enabledRolesFor, providerAccess, rolesFor } from '@src/roles.js';
@@ -191,6 +192,67 @@ export function contractForPhases(
     if (requirement.phases.some((phase) => phases.includes(phase))) setOwn(out, tool, requirement);
   }
   return out;
+}
+
+/**
+ * Phases that cannot run at all outside a git repository.
+ *
+ * `review` alone. `plan` needs nothing from git, and `implement` degrades
+ * honestly: `markBase` goes through `hasCommits`, which is `allowFail`, so it
+ * returns null, and `maybeCommit` answers `not-a-repo` (measured 2026-08-27,
+ * #71). Only the review phase has no honest degraded form - its entire input is
+ * a diff produced by git.
+ */
+export function repoRequiredBy(phases: readonly Phase[]): boolean {
+  return phases.includes('review');
+}
+
+/**
+ * The reason this directory cannot host these phases, or null. Never throws.
+ *
+ * Deterministic, free, and therefore NOT part of the probe half of preflight:
+ * there is no configuration in which refusing is wrong. Outside a repository
+ * `git diff` falls back to `--no-index` mode, which has no `--cached`, so
+ * `runReview`'s `diffChunks` call dies with `git diff --cached failed (129):
+ * error: unknown option 'cached'` - a git usage message naming neither the
+ * repository, nor the review phase, nor anything a user could act on. The run
+ * that produced #71 hit it 30,277,210 tokens and 70.7 minutes in, with the plan
+ * converged, the implementation written and the verification gate passed three
+ * times.
+ *
+ * `isRepo`, and specifically NOT `hasCommits`: a repository with no commits
+ * reviews fine, because `diffSince`'s null-base path does `add -A` then
+ * `diff --cached` (measured 2026-08-27 on a `git init` with nothing committed:
+ * `chunks=1 files=["a.txt","b.txt"]`). A check that demanded a commit would
+ * refuse a working case.
+ *
+ * `isRepo`, and specifically NOT a `.git` directory check: the run that
+ * produced #71 had a `.git` *file* pointing somewhere that could not be
+ * followed. `git rev-parse --git-dir` is the only thing that answers the real
+ * question - can the git binary this run will use resolve this directory?
+ */
+export async function gitPrecondition(
+  targetDir: string,
+  phases: readonly Phase[],
+): Promise<string | null> {
+  if (!repoRequiredBy(phases)) return null;
+  // `repoStatus`, not `isRepo`: a git binary that cannot be resolved or spawned
+  // makes `isRepo` throw, and a throw here would escape as a generic run error
+  // (exit 1) instead of the named environment refusal this gate exists to give
+  // (exit 6). Both answers mean the same thing for the review phase - there
+  // will be no diff - so both are refused, and each says which it was.
+  const { isRepo, error } = await git.repoStatus(targetDir);
+  if (isRepo) return null;
+  const why =
+    "the reviewer's only input is a diff produced by git, and there is no second source " +
+    'for it. ';
+  return error === null
+    ? `${targetDir} is not a git repository, and the review phase cannot run without one: ` +
+        `${why}Run \`git init\` here, point -C at the repository, or run \`vibe plan\` if a ` +
+        'plan is all you need.'
+    : `git could not be run against ${targetDir} (${error}), so the review phase cannot run: ` +
+        `${why}Repair the git binary - VIBE_GIT_BIN, or git on PATH - or run \`vibe plan\` if ` +
+        'a plan is all you need.';
 }
 
 /**

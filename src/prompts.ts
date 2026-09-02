@@ -1,5 +1,6 @@
 import { describedRole, ROLES } from '@src/roles.js';
 import { EVIDENCE_RULE } from '@src/schemas.js';
+import { inspectedItems } from '@src/evidence.js';
 import { readEvidence } from '@src/validate.js';
 import type { RoleTable } from '@src/roles.js';
 import type { EnvironmentFacts } from '@src/runtime.js';
@@ -12,6 +13,7 @@ import type {
   OutOfScopeItem,
   Plan,
   RunSummary,
+  TurnActivity,
 } from '@src/types.js';
 
 const RESPOND_WITH_JSON =
@@ -508,11 +510,42 @@ function priorRunRow(run: RunSummary): string | null {
 export function priorRunsSection(runs: readonly RunSummary[]): string {
   // Sliced here as well as by the caller: the bound is a property of the
   // prompt, so it holds whatever a caller passes.
-  const rows = runs
+  const kept = runs
     .slice(0, PRIOR_RUN_LIMIT)
-    .map(priorRunRow)
-    .filter((row): row is string => row !== null);
+    .map((run) => ({ run, row: priorRunRow(run) }))
+    .filter((x): x is { run: RunSummary; row: string } => x.row !== null);
+  const rows = kept.map((x) => x.row);
   if (rows.length === 0) return '';
+
+  // Provenance, never the display status. `status` is read off disk and shown
+  // verbatim - `summariseStored` passes an unrecognised value straight through -
+  // so a stored `"status": "linked"` is a coincidence, not a symlink, and
+  // telling the planner that run's directory points outside the archive would
+  // be a fabrication. `linked` is set only by `listRuns`, only for an entry it
+  // measured and refused to follow (#53).
+  //
+  // Keyed off the rows that actually RENDERED, not the input: `priorRunRow`
+  // drops a row whose id sanitises to empty, and a warning about a row nobody
+  // can see is noise the planner cannot act on.
+  //
+  // Both halves are warned about, and they are two lines because they are two
+  // facts: `linked` was measured, `unverified` is the absence of a measurement -
+  // an entry whose `lstat` threw, which vibe therefore did not follow and cannot
+  // rule out as a link. Dropping the second would leave the planner reading the
+  // "you can open any of them" sentence above over exactly the rows vibe refused
+  // to open itself.
+  const hasLinked = kept.some((x) => x.run.linked === true);
+  const hasUnverified = kept.some((x) => x.run.unverified === true);
+
+  // Rendered only when there IS such a row, which is what keeps every other
+  // planning prompt byte-identical to the one before this existed - the same
+  // compatibility bar the section itself was accepted against.
+  const linkedNote = hasLinked
+    ? '\n- A run marked **`linked`** is not a run: its directory or its `state.json` is a symlink or junction pointing outside `.vibe/runs/`, and vibe refused to follow it. **Do not open it** - there is no run record under it, and reading it would leave the archive.'
+    : '';
+  const unverifiedNote = hasUnverified
+    ? '\n- A run marked **`unverified`** could not be classified at all - vibe could not tell whether it is a real directory or a link out of the archive, so it did not look inside. **Do not open it either**, for the same reason.'
+    : '';
 
   return `## Past runs in this repository
 
@@ -528,7 +561,7 @@ At most ${PRIOR_RUN_LIMIT} runs are listed here and **there may be more** - \`.v
 - It describes the code **as it was on that date**, and it may already be wrong. Check any claim it makes against the code as it is now, exactly as your own claims will be checked.
 - A severity or a decision recorded there was true of that run's argument, not of this one.
 - **Finding that something was declined before is not a reason to decline it again.** It is a reason to know why, and to say something new if you disagree.
-- If your plan relies on a past run's conclusion, **cite the run id in the assumption that rests on it**, so the critic can open the same file and check it.
+- If your plan relies on a past run's conclusion, **cite the run id in the assumption that rests on it**, so the critic can open the same file and check it.${linkedNote}${unverifiedNote}
 
 `;
 }
@@ -577,6 +610,36 @@ Do not inflate either list. A plan with fifteen trivial questions is as unreview
 ${RESPOND_WITH_JSON}`;
 }
 
+/**
+ * One named fact about the turn that wrote the plan, when it opened nothing
+ * (#63).
+ *
+ * The measurement this exists for: of 276 critique findings across 25 archived
+ * runs, 75% dispute a *fact about the existing code* rather than a decision, and
+ * 52% would be settled by one command or one file read. Meanwhile the critic
+ * turns ran 150-170 command executions each while planner revision turns ran
+ * two. Six planner turns in the archive inspected nothing at all, and four of
+ * them are the run that spent 67.2M tokens over eleven rounds and produced no
+ * code - including its last three revisions, each rewriting a 45,000-character
+ * plan without opening a file.
+ *
+ * A fact, not a threshold and not a verdict. "More than N assertions with fewer
+ * than M commands is suspicious" is the invented number AGENTS.md forbids, and
+ * whether a claim about `git diff --stat` is *wrong* is not observable - that a
+ * turn ran nothing is. The critic already does the checking; this tells it where
+ * to look first, the way #47 made a gate outcome named rather than implied.
+ *
+ * Empty string in every other case, so a plan turn that looked at something -
+ * and a turn nothing measured, which is every run before #66 - produces a prompt
+ * byte-identical to today's.
+ */
+function planInspectionNote(activity: TurnActivity | undefined): string {
+  if (inspectedItems(activity) !== 0) return '';
+  return `
+
+**The turn that wrote this plan ran no commands and opened no files.** It emitted only its own message and its answer. That is a fact about the turn, not a verdict on the plan: a plan can be right without the turn having checked anything. But every claim it makes about this repository was made from memory, so check them against the repository first, and be specific about which ones you verified.`;
+}
+
 export function critiquePrompt(
   planMd: string,
   assumptions: readonly Assumption[],
@@ -591,10 +654,15 @@ export function critiquePrompt(
    * inserted parameter would silently reinterpret one of them.
    */
   acceptanceCriteria?: readonly AcceptanceCriterion[] | undefined,
+  /**
+   * What the plan turn that produced this plan did, or absent when nothing
+   * measured it. Appended for the reason `acceptanceCriteria` was.
+   */
+  planActivity?: TurnActivity | undefined,
 ): string {
   return `You are a senior engineer reviewing an implementation plan before any code is written. Be adversarial: your job is to find what is wrong with it, not to praise it.${
     round > 1 ? continuityNote(round, hasMemory, 'plan') : ''
-  }
+  }${planInspectionNote(planActivity)}
 
 Read the actual repository to check the plan's claims against reality. A plan that references a file, function, or API that does not exist is a P1.
 

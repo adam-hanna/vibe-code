@@ -1,9 +1,15 @@
 import { readFileSync, existsSync, renameSync } from 'node:fs';
 import path from 'node:path';
-import { applyOverrides, configDiff, EFFORTS, loadConfig } from '@src/config.js';
+import {
+  applyOverrides,
+  configDiff,
+  EFFORTS,
+  environmentStale,
+  loadConfig,
+} from '@src/config.js';
 import {
   allocateRun,
-  artifact,
+  assertUnlinkedRun,
   createRun,
   listRuns,
   loadRun,
@@ -19,22 +25,28 @@ import type { AllocatedRun } from '@src/run.js';
 import { acquireLock, describeLiveness } from '@src/lock.js';
 import { commitFork, listForkPoints, planFork } from '@src/fork.js';
 import type { Liveness, LockHandle } from '@src/lock.js';
+import { reconcileAssumed, reconcileQuestionRecords } from '@src/questions.js';
 import { assertUsableRunId } from '@src/stored.js';
 import { Escalation, EXIT, orchestrate, writeEscalation } from '@src/orchestrator.js';
 import type { ExitCode } from '@src/orchestrator.js';
 import {
   codexConversations,
   DEFAULT_ROLE_PROVIDERS,
+  effortFor,
+  modelFor,
   ROLE_NAMES,
   rolesFor,
   roleWarnings,
+  turnTimeoutMs,
 } from '@src/roles.js';
+import type { RolePatches } from '@src/roles.js';
+import { setOwn } from '@src/runtime.js';
 import { claudeBin, setSessionArgs } from '@src/claude.js';
 import { codexBin } from '@src/codex.js';
 // The accounting seam, from the leaf it lives in: orchestrator.js re-exports
 // applyCharge but not fmtTokens, and charge.js imports nothing that imports this.
 import { applyCharge, fmtTokens, takeInFlight } from '@src/charge.js';
-import { preflight, REAL_PROBES } from '@src/preflight.js';
+import { gitPrecondition, preflight, REAL_PROBES } from '@src/preflight.js';
 import type { PreflightProbes, PreflightReport } from '@src/preflight.js';
 import { closeCodexRateLimits, describeLimits, readCodexRateLimits } from '@src/ratelimits.js';
 import { resolveGates } from '@src/verify.js';
@@ -42,7 +54,14 @@ import type { AgentPreflight } from '@src/preflight.js';
 import * as git from '@src/git.js';
 import * as log from '@src/log.js';
 import type { EnvironmentFacts, Phase } from '@src/runtime.js';
-import type { Answer, Config, ConfigOverrides, Effort, RunState } from '@src/types.js';
+import type {
+  Answer,
+  Config,
+  ConfigOverrides,
+  Effort,
+  LoadedConfig,
+  RunState,
+} from '@src/types.js';
 
 const USAGE = `
 vibe - automated plan/critique/implement/review loop (Claude Code + Codex)
@@ -53,7 +72,7 @@ Usage
   vibe resume <run-id> [--force]   Continue a run that stopped for input
   vibe fork <run-id> --at <n>      Start a new run from a point in an old one
   vibe list                        Show runs in this repo
-  vibe doctor                      Verify both CLIs and the environment
+  vibe doctor [options]            Verify both CLIs, and preview the config those options give
 
   "vibe fork <run-id>" with no --at lists the points that run can be forked from.
   A fork creates its branch WITHOUT checking it out: your working tree is
@@ -67,6 +86,12 @@ Options
   --claude-effort <e>        low|medium|high|xhigh|max (default: medium)
   --codex-model <m>          Default: gpt-5.6-luna
   --codex-effort <e>         Default: xhigh
+  --role <r>:<k>=<v>         Per-role setting, repeatable. The role is one of planner,
+                             implementer, critic, answerer, reviewer; the key is provider,
+                             model, effort or timeoutMs (milliseconds). It PATCHES the role
+                             rather than replacing it, so --role reviewer:effort=max keeps a
+                             model vibe.config.json named, and provider is not required.
+                             e.g. --role reviewer:model=gpt-5.6-pro --role critic:timeoutMs=600000
   --codex-context-window <n> The Codex model's context window in tokens. Unset by default:
                              the protocol never reports it for a codex exec thread, so
                              occupancy is reported in tokens with no ratio until you say
@@ -153,6 +178,14 @@ interface ParsedArgs {
     implementTimeout?: number;
     codexTimeout?: number;
     verifyTimeout?: number;
+    /**
+     * Raw `--role <role>:<key>=<value>` arguments, in the order given (#89).
+     *
+     * Unparsed here on purpose: "last wins" is one rule, and resolving it in one
+     * place - `buildRoleOverrides` - keeps it from being half-implemented in the
+     * parser and half in the consumer.
+     */
+    role?: string[];
     help?: boolean;
   };
 }
@@ -225,6 +258,8 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       case '--codex-model': out.flags.codexModel = next(); break;
       case '--codex-effort': out.flags.codexEffort = next(); break;
       case '--codex-context-window': out.flags.codexContextWindow = nextNum(); break;
+      // Repeatable, and collected raw: see the field's comment.
+      case '--role': (out.flags.role ??= []).push(next()); break;
       case '--max-plan-rounds': out.flags.maxPlanRounds = nextNum(); break;
       case '--max-review-rounds': out.flags.maxReviewRounds = nextNum(); break;
       case '--max-verify-rounds': out.flags.maxVerifyRounds = nextNum(); break;
@@ -268,6 +303,119 @@ function asEffort(value: string, flagName: string): Effort {
     throw new Error(`${flagName} must be one of ${EFFORTS.join(', ')}`);
   }
   return value as Effort;
+}
+
+/** What `--role` takes, for the message a mistyped one gets. */
+const ROLE_FLAG_KEYS = 'provider, model, effort or timeoutMs';
+
+/**
+ * The `timeoutMs` value as `roleSetting` must see it (#89).
+ *
+ * Values arrive from a command line as strings, and `roleSetting` tests `typeof`
+ * before `Number.isFinite` on purpose (#84) - so an uncoerced `"600000"` would be
+ * refused as a string. Only a finite number is coerced, and everything else is
+ * passed through UNCHANGED rather than rejected here: that is what makes
+ * `--role critic:timeoutMs=abc` produce the same message, byte for byte, as
+ * `"timeoutMs": "abc"` in the config file. One vocabulary, not two.
+ *
+ * The empty check is not decoration: `Number('')` and `Number(' ')` are 0, so
+ * coercing them would report `is 0` for a figure the user never typed.
+ */
+function roleFlagValue(key: string, raw: string): string | number {
+  if (key !== 'timeoutMs' || raw.trim() === '') return raw;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : raw;
+}
+
+/**
+ * Per-role settings from `--role <role>:<key>=<value>`, last wins (#89).
+ *
+ * Split on the FIRST `:` and then the FIRST `=`, so a value may contain either -
+ * a model name with a colon in it is a value, not a shape error.
+ *
+ * Nothing here checks the role name or the key. An unknown, inherited or
+ * `__proto__` role name and an unknown key are both refused downstream by
+ * `validateRoles`/`roleSetting`, naming what is legal - which is the same
+ * message the config file gets for the same mistake.
+ *
+ * Exported for the flag tests, alongside `parseArgs`.
+ */
+export function buildRoleOverrides(flags: ParsedArgs['flags']): RolePatches {
+  const out: Record<string, Record<string, unknown>> = {};
+  for (const raw of flags.role ?? []) {
+    const colon = raw.indexOf(':');
+    const rest = colon < 0 ? '' : raw.slice(colon + 1);
+    const eq = rest.indexOf('=');
+    if (colon < 0 || eq < 0) {
+      throw new Error(
+        `--role expects <role>:<key>=<value>, got "${raw}". The role is one of ` +
+          `${ROLE_NAMES.join(', ')} and the key is one of ${ROLE_FLAG_KEYS} - for example ` +
+          `--role reviewer:model=gpt-5.6-pro`,
+      );
+    }
+    const role = raw.slice(0, colon);
+    const key = rest.slice(0, eq);
+    // `hasOwnProperty`, not `out[role]`: before the first write `out['__proto__']`
+    // is `Object.prototype` and `out['toString']` is a function, and spreading
+    // either would build a patch off the prototype chain. `setOwn` guards the
+    // write, this guards the read - and the local satisfies
+    // `noUncheckedIndexedAccess` without a non-null assertion.
+    const existing = Object.prototype.hasOwnProperty.call(out, role) ? out[role] : undefined;
+    const bucket = existing ?? {};
+    // Last wins, per role and per key, exactly as every other flag does.
+    setOwn(bucket, key, roleFlagValue(key, rest.slice(eq + 1)));
+    setOwn(out, role, bucket);
+  }
+  return out;
+}
+
+/**
+ * The config a `vibe run` on these flags produces.
+ *
+ * Exported for the flag tests: `cmdRun` goes on to allocate a run, take a lock
+ * and spawn agents, so this is the seam that can be asserted on. It is also the
+ * ONLY place a config is built from flags, which is what keeps a flag from
+ * reaching one command and not another.
+ *
+ * `vibe doctor` shares it since #106 - it used to have a `doctorConfig` of its
+ * own that applied the role patches and no other flag, so its report was a
+ * SUBSET of the run's: some values reflected the flags and some did not, and
+ * nothing on the page said which were which. That was the worst of the three
+ * available positions. Doctor answers "what will this run do" now, or it
+ * answers nothing; a separate function was where the two could drift, so there
+ * is no longer one to drift.
+ */
+export function configFromFlags(targetDir: string, flags: ParsedArgs['flags']): LoadedConfig {
+  return loadConfig(targetDir, buildOverrides(flags), buildRoleOverrides(flags));
+}
+
+/**
+ * Which settings the command line moved, named as config keys (#106).
+ *
+ * `vibe doctor` reports the config a run would use, so the one thing a reader
+ * cannot work out from the report itself is whether a value came from the file
+ * or from a flag. This answers that, in the vocabulary the report is printed in
+ * rather than in flag spellings - `codex.model`, not `--codex-model` - because
+ * the lines underneath print config keys and a reader is matching them up.
+ *
+ * Both kinds, because since #106 both reach the report and naming only one would
+ * leave the other looking like the file's doing.
+ *
+ * Empty when no flag moved anything, which is the ordinary case and prints
+ * nothing at all.
+ */
+export function flagOverrideNames(flags: ParsedArgs['flags']): string[] {
+  const out: string[] = [];
+  for (const [section, patch] of Object.entries(buildOverrides(flags))) {
+    if (typeof patch !== 'object' || patch === null) continue;
+    for (const [key, value] of Object.entries(patch)) {
+      if (value !== undefined) out.push(`${section}.${key}`);
+    }
+  }
+  for (const [role, patch] of Object.entries(buildRoleOverrides(flags))) {
+    for (const key of Object.keys(patch)) out.push(`roles.${role}.${key}`);
+  }
+  return out.sort();
 }
 
 /** Exported for the flag tests, alongside parseArgs. */
@@ -335,7 +483,7 @@ async function cmdRun(args: readonly string[], planOnly: boolean): Promise<ExitC
   }
 
   const targetDir = path.resolve(flags.cwd ?? process.cwd());
-  const cfg = loadConfig(targetDir, buildOverrides(flags));
+  const cfg = configFromFlags(targetDir, flags);
 
   // Read before anything is created. A missing context file used to be found two
   // state writes into a run that then existed on disk, half-configured, for the
@@ -440,7 +588,7 @@ async function startRun(
     );
   }
 
-  return execute(state, cfg, false, flags.skipProbe === true, runPreflight, orchestrate, handle);
+  return execute(state, cfg, false, flags.skipProbe === true, REAL_GATE, orchestrate, handle);
 }
 
 /**
@@ -458,15 +606,19 @@ async function startRun(
  */
 export function resumeConfig(targetDir: string, state: RunState, flags: ParsedArgs['flags']): Config {
   const stored = state.config;
-  const overrides = buildOverrides(flags);
+  // One loader for both halves below, rather than the same ternary written
+  // twice: which source a resume reads is one decision, and the two calls have
+  // to agree about it or the diff compares configs built different ways.
+  const load = (overrides: ConfigOverrides, roles: RolePatches): Config =>
+    stored === undefined
+      ? loadConfig(targetDir, overrides, roles)
+      : applyOverrides(stored, overrides, roles);
+
   // What this resume would have run on with no flags at all. Compared against
   // the effective config so the event below records the user's change, and not
   // the defaults applyOverrides fills in for keys an older vibe never stored.
-  const base = stored === undefined ? loadConfig(targetDir) : applyOverrides(stored, {});
-  const cfg =
-    stored === undefined
-      ? loadConfig(targetDir, overrides)
-      : applyOverrides(stored, overrides);
+  const base = load({}, {});
+  const cfg = load(buildOverrides(flags), buildRoleOverrides(flags));
 
   // state.config holds only the latest snapshot, so on its own it cannot say
   // when a setting changed or what it was before. The resume line printed by
@@ -477,9 +629,21 @@ export function resumeConfig(targetDir: string, state: RunState, flags: ParsedAr
   // either way: a save between the two would leave a window in which the new
   // settings are persisted and the record of the change is not.
   const changed = configDiff(base, cfg);
+  // The probed facts describe the table and the contract the probe ran against,
+  // and `--role` is the first thing that can move either after a run exists
+  // (#89). `environmentBlock` labels each agent through the CURRENT table, so
+  // keeping them would state, as verified fact, that the agent now called "the
+  // implementer" was observed with the tools the old contract asked of it. There
+  // is no way to recompute a probe, so they go, and preflight rewrites them -
+  // or, under --skip-probe, the prompts omit the section, which is honest.
+  const stale = state.environment != null && environmentStale(base, cfg);
+  if (stale) delete state.environment;
   state.config = cfg;
-  if (changed.length > 0) recordEvent(state, 'resume_config', { changed });
-  else saveState(state);
+  // Still a single write, and the reason the facts went travels with the change
+  // that caused it rather than in an event of its own.
+  if (changed.length > 0) {
+    recordEvent(state, 'resume_config', { changed, ...(stale ? { environmentCleared: true } : {}) });
+  } else saveState(state);
   return cfg;
 }
 
@@ -509,6 +673,11 @@ async function cmdResume(args: readonly string[]): Promise<ExitCode> {
   // through to `loadRun`, whose error already says what is wrong.
   const runsRoot = path.join(targetDir, '.vibe', 'runs');
   assertUsableRunId(id, runsRoot);
+  // Before the lock, not merely before `loadRun`: `statePresence` is a `statSync`
+  // and reports a linked entry's target as present, so control reaches
+  // `acquireLock` - which READS the target's state.json and WRITES `run.lock`
+  // into it - before `loadRun` ever gets the chance to refuse (#53).
+  assertUnlinkedRun(runsRoot, id);
   const runDir = path.join(runsRoot, id);
   if (statePresence(path.join(runDir, 'state.json')) === 'absent') {
     // No lock, and no new message: `loadRun` already refuses this by name, and
@@ -574,7 +743,7 @@ async function resumeRun(
       log.info('Previous stop reported findings, not questions - continuing with raised limits.');
       renameSync(answersFile, path.join(state.dir, `stalled-${state.planRound}.md`));
       log.heading(`Resuming ${state.id}`);
-      return execute(state, cfg, true, flags.skipProbe === true, runPreflight, orchestrate, handle);
+      return execute(state, cfg, true, flags.skipProbe === true, REAL_GATE, orchestrate, handle);
     }
 
     const answers = parseHumanAnswers(raw);
@@ -585,14 +754,23 @@ async function resumeRun(
     }
     log.ok(`Picked up ${answers.length} answer(s) from NEEDS-INPUT.md`);
     state.pendingAnswers = answers;
+    // On the same write that stores them, so there is no window where the run
+    // is holding answers it has no durable record of having been given (#65).
+    // `pendingAnswers` is consumed by the loop and cannot be that record.
+    recordHumanAnswers(state, answers);
     saveState(state);
+    // Immediately, and before preflight: `ASSUMED.md` is authored at the end of
+    // a successful run, but this resume may exit at the preflight gate or stop
+    // for input again, and a file left claiming an answered question was a
+    // guess outlives every one of those paths.
+    reconcileQuestionRecords(state);
     // Retire the file so a later escalation writes a fresh one and these
     // answers are not silently replayed.
     renameSync(answersFile, path.join(state.dir, `answered-${state.planRound}.md`));
   }
 
   log.heading(`Resuming ${state.id}`);
-  return execute(state, cfg, true, flags.skipProbe === true, runPreflight, orchestrate, handle);
+  return execute(state, cfg, true, flags.skipProbe === true, REAL_GATE, orchestrate, handle);
 }
 
 /**
@@ -633,7 +811,14 @@ async function cmdFork(args: readonly string[]): Promise<ExitCode> {
       return EXIT.ERROR;
     }
     log.heading(`Fork points in ${sourceId}`);
-    for (const { n, meta } of points) {
+    for (const { n, meta, linked } of points) {
+      if (linked === true) {
+        // A different row from `(unreadable)`, and #53 drew the distinction:
+        // one says a file was opened and could not be used, this one says vibe
+        // did not look inside it (#102).
+        console.log(`  ${String(n).padStart(3)}  (a link, or unclassifiable - not read)`);
+        continue;
+      }
       if (meta === null) {
         console.log(`  ${String(n).padStart(3)}  (unreadable)`);
         continue;
@@ -648,7 +833,13 @@ async function cmdFork(args: readonly string[]): Promise<ExitCode> {
     return EXIT.ERROR;
   }
 
-  const plan = await planFork(targetDir, sourceId, wanted, buildOverrides(flags));
+  const plan = await planFork(
+    targetDir,
+    sourceId,
+    wanted,
+    buildOverrides(flags),
+    buildRoleOverrides(flags),
+  );
   const result = await commitFork(targetDir, plan);
   const origin = result.state.forkedFrom;
 
@@ -724,8 +915,42 @@ export function parseHumanAnswers(md: string): Answer[] {
   return answers;
 }
 
+/**
+ * The durable record of what a human actually answered (#65).
+ *
+ * Verbatim, not normalized: `ASSUMED.md` quotes questions and the audit file
+ * quotes what matched what, and `normalize` is idempotent so nothing is lost by
+ * keeping the wording a person will recognise.
+ *
+ * Appended, never replaced - a run can stop for input more than once - and
+ * empty headings are dropped rather than stored as a question that matches
+ * nothing.
+ */
+export function recordHumanAnswers(state: RunState, answers: readonly Answer[]): void {
+  const fresh = answers.map((a) => a.question).filter((q) => q.trim() !== '');
+  if (fresh.length === 0) return;
+  state.humanAnswered = [...(state.humanAnswered ?? []), ...fresh];
+}
+
+/**
+ * What the gate may skip.
+ *
+ * `--skip-probe` is documented as "Skip the agent environment preflight", and
+ * since #71 the gate does two separable things: it probes both agents, and it
+ * checks deterministic preconditions on the target directory. Only the first is
+ * skippable, so the flag is passed *into* the gate rather than deciding whether
+ * to call it.
+ */
+export interface PreflightOptions {
+  skipProbe: boolean;
+}
+
 /** The preflight gate, injected so its escalation path is testable without spawning. */
-export type PreflightGate = (state: RunState, cfg: Config) => Promise<ExitCode | null>;
+export type PreflightGate = (
+  state: RunState,
+  cfg: Config,
+  options: PreflightOptions,
+) => Promise<ExitCode | null>;
 
 /**
  * The loop itself, injected alongside the gate for the same reason: a test that
@@ -761,6 +986,13 @@ function reportRoles(cfg: Config): void {
       // validates a model name, so this line is where a typo is seen in the
       // first ten lines rather than after the planner and the implementer have
       // run (#60).
+      //
+      // `timeoutMs` (#84) is deliberately NOT shown, for the same reason stated
+      // the other way round: it is checked at config time - finite, positive,
+      // and refused by name - so there is no typo left for this line to catch,
+      // and a fourth segment would cost every reader something on every run to
+      // report a value that cannot be wrong by the time it is printed. Where it
+      // does matter is on a failure, and `noteRoleProvenance` names it there.
       return (
         `${role}=${spec.provider}` +
         `${spec.model === undefined ? '' : `@${spec.model}`}` +
@@ -770,6 +1002,37 @@ function reportRoles(cfg: Config): void {
     log.info(`Roles:   ${named.join(' ')}`);
   }
   for (const warning of roleWarnings(cfg)) log.warn(warning);
+}
+
+/**
+ * Every seat, and what it resolved to - `vibe doctor`'s answer to "what will
+ * this run do" (#89).
+ *
+ * Unlike `reportRoles`, which is silent under the default table and prints only
+ * what a role named for itself, this is unconditional and shows the resolved
+ * value for all four settings. Doctor is the command whose whole job is to state
+ * the configuration, and a seat running its provider's model is as much a fact
+ * as one naming its own.
+ *
+ * Read through `modelFor`, `effortFor` and `turnTimeoutMs` rather than by
+ * reaching into the table, so the numbers here are the ones a turn will actually
+ * be spawned with - including the access-based pick between a provider's two
+ * timeout keys, which is why the planner and the implementer differ.
+ *
+ * Milliseconds, unconverted: the key names the unit, which is the rule
+ * `noteRoleProvenance` already prints by.
+ */
+function reportResolvedRoles(cfg: Config): void {
+  const table = rolesFor(cfg);
+  log.info('  roles:');
+  const width = Math.max(...ROLE_NAMES.map((role) => role.length));
+  for (const role of ROLE_NAMES) {
+    log.info(
+      `    ${role.padEnd(width)}  ${table[role].provider.padEnd(6)}  ` +
+        `${modelFor(role, cfg, table)} / ${effortFor(role, cfg, table)} / ` +
+        `${turnTimeoutMs(role, cfg, table)}ms`,
+    );
+  }
 }
 
 /**
@@ -918,7 +1181,7 @@ export async function execute(
   cfg: Config,
   resume: boolean,
   skipProbe = false,
-  preflightGate: PreflightGate = runPreflight,
+  preflightGate: PreflightGate = REAL_GATE,
   loop: RunLoop = orchestrate,
   /**
    * The run's lock, acquired by the command. Trailing and optional so every
@@ -958,16 +1221,17 @@ export async function execute(
     // Inside the try, not above it: preflight now charges what its probes spent,
     // so it can raise the same budget Escalation a turn can, and that belongs in
     // the one handler that reports an escalation rather than escaping uncaught.
-    if (!skipProbe) {
-      const gate = await preflightGate(state, cfg);
-      if (gate !== null) {
-        // Summarised, where it used to return in silence. The probes have
-        // already been charged through `chargePreflight`, and after a recovery
-        // there may be a caveat owed as well: a run that exits owing a number
-        // should say what the number is, wherever it exits (#77).
-        summary(state, started, recovery);
-        return gate;
-      }
+    // Always called, and handed the flag rather than gated on it: since #71 the
+    // gate's deterministic half is not skippable, and only it knows which half
+    // is which.
+    const gate = await preflightGate(state, cfg, { skipProbe });
+    if (gate !== null) {
+      // Summarised, where it used to return in silence. The probes have
+      // already been charged through `chargePreflight`, and after a recovery
+      // there may be a caveat owed as well: a run that exits owing a number
+      // should say what the number is, wherever it exits (#77).
+      summary(state, started, recovery);
+      return gate;
     }
 
     await loop(state, cfg, resume);
@@ -1098,18 +1362,80 @@ function environmentFacts(
 }
 
 /**
- * Gate the run on both agents' execution environments.
+ * Gate the run on the target directory, then on both agents' execution
+ * environments.
  *
  * Returns an exit code to stop on, or null to proceed. Deliberately before the
  * first planning token: the failure this replaces cost 35 minutes and surfaced
  * as a plan-stage P1 from the reviewer rather than as an environment error.
+ *
+ * Two halves since #71, and only the second is skippable. The deterministic
+ * preconditions are neither an agent nor a probe - they are free, they cannot
+ * be wrong, and `--skip-probe` is documented as skipping the *agent
+ * environment* preflight.
+ *
+ * This is also the one place the run path derives `phases` from `planOnly`;
+ * both halves read that single derivation rather than each computing its own.
  */
 export async function runPreflight(
   state: RunState,
   cfg: Config,
   probes: PreflightProbes = REAL_PROBES,
+  options: { skipProbe?: boolean } = {},
 ): Promise<ExitCode | null> {
   const phases: Phase[] = state.planOnly ? ['plan'] : ['plan', 'implement', 'review'];
+
+  // What is actually ahead, which is not always what the run's phases are. A
+  // finished run has none: `runPhases` recognises `resumePhase(state) ===
+  // 'complete'` and returns without dispatching one, so refusing such a resume
+  // for want of a repository would stop a run that was never going to review
+  // anything. The probe half deliberately keeps asking about all of `phases` -
+  // narrowing the toolchain contract by resume point is a separate change with
+  // its own blast radius, and this is the half that must not over-refuse.
+  const ahead: readonly Phase[] = resumePhase(state) === 'complete' ? [] : phases;
+
+  // Before the probes, so a refusal costs nothing: the run that produced #71
+  // spent 30M tokens before the review phase found this out for itself.
+  const blocked = await gitPrecondition(state.targetDir, ahead);
+  if (blocked !== null) {
+    log.heading('Preflight');
+    log.fail(blocked);
+    state.status = 'error';
+    recordEvent(state, 'preflight-failed', { reasons: [blocked] });
+    // Deliberately NOT followed by the probe path's "re-run with --skip-probe
+    // to proceed anyway": that flag does not skip this check, and if it did the
+    // run would still die at the review phase. It is the one piece of advice
+    // that is always wrong here.
+    return EXIT.PREFLIGHT;
+  }
+
+  // Nothing ahead, nothing to establish. Preflight verifies that the agents can
+  // run the phases that are still to come, and a finished run has none - the
+  // same fact `ahead` is built from, and the same one `runPhases` returns on
+  // before dispatching anything. Probing anyway spent ~60,000 agent tokens per
+  // resume (~15k Claude, ~41k Codex; measured 2026-08-27 on `develop` and on
+  // #87's branch, so not caused by either) verifying an environment for work
+  // that will not happen - and CHARGED them, so a completed run's recorded
+  // totals grew every time somebody looked at it. A run that says what it cost
+  // has to keep saying the same thing afterwards (#97).
+  //
+  // Reusing `ahead` rather than asking a second time: `resumePhase` and the
+  // consistency rules own what "this run is over" means, and a second reading of
+  // it is precisely the hazard `src/consistency.ts` exists to prevent. `phases`
+  // is never empty, so an empty `ahead` is exactly that one derivation saying
+  // the run is complete.
+  //
+  // Below the precondition and not above it, so the two halves stay separately
+  // decided (#71): a finished run skips the probes, not the free deterministic
+  // checks. Silent, exactly as `--skip-probe` is - the loop prints "This run
+  // already finished - there is nothing to resume" a moment later, which is the
+  // explanation a user needs.
+  if (ahead.length === 0) return null;
+
+  // After the preconditions, before the heading: a skipped probe printed
+  // nothing before #71 and still prints nothing now.
+  if (options.skipProbe === true) return null;
+
   log.heading('Preflight');
 
   let report: Awaited<ReturnType<typeof preflight>>;
@@ -1167,6 +1493,16 @@ export async function runPreflight(
 
   return report.ok ? null : EXIT.PREFLIGHT;
 }
+
+/**
+ * What a real run gates on.
+ *
+ * An adapter rather than `runPreflight` itself: the gate's third argument is
+ * the options and `runPreflight`'s is its injected probes, which a test
+ * substitutes. Naming the real pairing here keeps both seams intact.
+ */
+export const REAL_GATE: PreflightGate = (state, cfg, options) =>
+  runPreflight(state, cfg, REAL_PROBES, options);
 
 /**
  * What preflight's probes spent, through the same seam a turn pays through.
@@ -1323,29 +1659,52 @@ function reportReviewCoverage(state: RunState): void {
 /**
  * Advisory questions Codex declined ran on the planner's guess. That is a
  * deliberate choice, not a silent one - it gets reported every time.
+ *
+ * Every time, but not about every question: one a human answered was not a
+ * guess, and calling it one is what #65 reported. The filter, the file and the
+ * count all come out of `reconcileAssumed`, so the number in the log line and
+ * the number of entries in the file cannot disagree - the old code counted the
+ * whole list and rendered the whole list, and both were wrong together.
+ *
+ * `create` because this is the one caller that *authors* the file. The repair
+ * callers only bring an existing one back into line.
+ *
+ * The disposals are not warned about here: `reconcileAssumed` announces each
+ * one on the pass that records it, which is usually the resume that read the
+ * answer rather than this one, and warning again forty minutes later would
+ * double every line. What is left to say is what the file now covers.
+ *
+ * Exported for the reason `parseHumanAnswers` is: `execute` cannot be reached
+ * from a test without spawning real agents.
  */
-function reportDeferred(state: RunState): void {
+export function reportDeferred(state: RunState): void {
   if (state.deferredQuestions.length === 0) return;
+  const { remaining, file } = reconcileAssumed(state, { create: true });
 
-  const lines: string[] = [
-    '# Questions answered by assumption\n',
-    `**Run:** \`${state.id}\``,
-    '',
-    'Codex declined these and they were not blocking, so the run continued on the',
-    "planner's fallback. Nothing is wrong with the run - but these are the points",
-    'where the result rests on a guess rather than a decision.\n',
-  ];
-  for (const [i, q] of state.deferredQuestions.entries()) {
-    lines.push(`### ${i + 1}. ${q.question}`);
-    lines.push(`*Kind:* ${q.kind}`);
-    lines.push(`*Proceeded with:* ${q.recommended}`);
-    lines.push(`*Why Codex declined:* ${q.reason}\n`);
-  }
-  const file = artifact(state, 'ASSUMED.md', lines.join('\n'));
+  if (remaining.length === 0 || file === null) return;
 
-  log.warn(`${state.deferredQuestions.length} question(s) ran on the planner's default:`);
-  for (const q of state.deferredQuestions) log.info(`  - ${q.question}`);
+  log.warn(`${remaining.length} question(s) ran on the planner's default:`);
+  for (const q of remaining) log.info(`  - ${q.question}`);
   log.info(`  Detail: ${file}`);
+}
+
+/**
+ * The Claude share, or null when the state cannot support one.
+ *
+ * The one reader of the subtraction, and belt and braces beside rule D
+ * (`checkTokenShare`, `src/consistency.ts`) rather than a duplicate of it: the
+ * rule runs in `loadRun` and `planFork`, while `summary` is also reached by a
+ * fresh in-process run that went through neither. A display that depends on an
+ * invariant holding somewhere else is one that breaks the day it does not, and
+ * what it broke into was a negative token total (#87).
+ *
+ * Null rather than a clamped figure, because this is a display: printing
+ * `tokensUsed` as Claude's share here would state a number no charge produced.
+ */
+export function claudeShare(state: Pick<RunState, 'tokensUsed' | 'codexTokens'>): number | null {
+  const codex = state.codexTokens;
+  if (codex !== undefined && codex > state.tokensUsed) return null;
+  return state.tokensUsed - (codex ?? 0);
 }
 
 function summary(state: RunState, started: number, recovery?: RecoveryReport): void {
@@ -1363,10 +1722,22 @@ function summary(state: RunState, started: number, recovery?: RecoveryReport): v
     `Work:     ${state.tokensUsed.toLocaleString()} tokens, ${mins} min` +
       (incomplete ? '  (incomplete - see above)' : ''),
   );
-  log.info(
-    `          Claude ${(state.tokensUsed - codex).toLocaleString()} tok ` +
-      `(~$${state.costUsd.toFixed(2)} API-equivalent)`,
-  );
+  // The dollar figure stays on both branches: `costUsd` is Claude's alone and is
+  // unaffected by whatever the Codex share says.
+  const claude = claudeShare(state);
+  if (claude === null) {
+    log.info(
+      `          Claude share not available - the recorded Codex total ` +
+        `(${codex.toLocaleString()} tok) exceeds the run total ` +
+        `(${state.tokensUsed.toLocaleString()} tok) ` +
+        `(~$${state.costUsd.toFixed(2)} API-equivalent)`,
+    );
+  } else {
+    log.info(
+      `          Claude ${claude.toLocaleString()} tok ` +
+        `(~$${state.costUsd.toFixed(2)} API-equivalent)`,
+    );
+  }
   if (codex > 0) log.info(`          Codex  ${codex.toLocaleString()} tok (cost not reported)`);
   const limit = state.codexRateLimit;
   if (limit) {
@@ -1499,10 +1870,28 @@ async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
   check('codex', codexBin);
   check('git', git.gitBin);
 
+  // Loaded ONCE, and every block below reads this one value. It used to be
+  // loaded three times - here, for the rate-limit read and for the probe - which
+  // made "the flags reached the display but not the contract preflight enforces"
+  // a state the code could be in (#89).
+  let cfg: LoadedConfig | null = null;
   try {
-    const cfg = loadConfig(targetDir);
-    log.ok(`config: ${cfg.configPath ?? 'defaults'}`);
+    // The run's config, flags and all (#106). A flag that was silently ignored
+    // here now matters, and that includes an invalid one: `--codex-context-window 0`
+    // fails this check rather than being dropped, which is the same answer
+    // `vibe run` gives it and the whole point of a preview.
+    cfg = configFromFlags(targetDir, flags);
+    const moved = flagOverrideNames(flags);
+    // Named rather than counted, and in config keys: the question a reader has
+    // is "did a flag reach the value I am looking at", and only the names answer
+    // it. Silent where no flag moved anything, which is every ordinary run of
+    // this command.
+    log.ok(
+      `config: ${cfg.configPath ?? 'defaults'}` +
+        (moved.length === 0 ? '' : ` (command line also sets ${moved.join(', ')})`),
+    );
     log.info(`  claude ${cfg.claude.model}/${cfg.claude.effort} - codex ${cfg.codex.model}/${cfg.codex.effort}`);
+    reportResolvedRoles(cfg);
     log.info(
       `  budget $${cfg.budget.maxCostUsd} (Claude) / ` +
         `${cfg.budget.maxTokens > 0 ? `${cfg.budget.maxTokens.toLocaleString()} tokens (both)` : 'no token ceiling'}` +
@@ -1542,12 +1931,18 @@ async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
   // app-server is experimental and absent on older Codex builds, and a machine
   // without it is not a broken environment.
   try {
-    const cfg = loadConfig(targetDir);
-    const limits = await readCodexRateLimits(cfg, targetDir);
-    if (limits === null) {
-      log.info('codex rate limits: not available (codex app-server did not answer)');
+    if (cfg === null) {
+      // Through `log.detail` like every other outcome of this block: an
+      // unreadable config is already a counted failure above, and counting it
+      // twice here would say the account was the problem.
+      log.detail('codex rate limits: not read (the config above could not be read)');
     } else {
-      log.ok(`codex rate limits: ${describeLimits(limits)}`);
+      const limits = await readCodexRateLimits(cfg, targetDir);
+      if (limits === null) {
+        log.info('codex rate limits: not available (codex app-server did not answer)');
+      } else {
+        log.ok(`codex rate limits: ${describeLimits(limits)}`);
+      }
     }
   } catch (err) {
     log.detail(`codex rate limits: ${err instanceof Error ? err.message : String(err)}`);
@@ -1556,11 +1951,46 @@ async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
     closeCodexRateLimits();
   }
 
-  if (await git.isRepo(targetDir)) {
+  // `repoStatus`, because this is the command whose whole job is to report a
+  // broken environment: `isRepo` throws when the git binary cannot be resolved
+  // or spawned, and an unhandled throw here would end `vibe doctor` on a
+  // generic error instead of the line the user came for (#71, review round 1).
+  const repo = await git.repoStatus(targetDir);
+  if (repo.isRepo) {
     log.ok(`git repo: ${targetDir} (branch ${await git.currentBranch(targetDir)})`);
     if (await git.isDirty(targetDir)) log.warn('working tree is dirty');
+  } else if (repo.error !== null) {
+    // A failure, not a warning, and it counts against the exit code. An
+    // ordinary non-repository target is a fine environment - `vibe plan` works
+    // there - but a git that cannot be run is broken, and `check('git', ...)`
+    // above only RESOLVES the binary: a path that exists but cannot be spawned
+    // passes it and would otherwise leave doctor reporting a healthy
+    // environment (#71, review round 2).
+    log.fail(
+      `git could not be run against ${targetDir}: ${repo.error}. ` +
+        '`vibe run` will refuse here with exit 6, because the review phase needs a diff.',
+    );
+    bad++;
   } else {
-    log.warn(`not a git repository: ${targetDir} - no branch isolation or commits`);
+    // Reported, not failed: doctor has no run state and so no `planOnly`, and
+    // `vibe plan` works perfectly here. Naming the refusal is what the old
+    // warning was missing - it said what was lost, not that a full run would
+    // die of it (#71).
+    log.warn(
+      `not a git repository: ${targetDir} - no branch isolation or commits, and ` +
+        '`vibe run` will refuse here with exit 6 because the review phase needs a diff. ' +
+        '`vibe plan` still works.',
+    );
+  }
+
+  // Ahead of the --skip-probe return, deliberately: "skipped" would claim a
+  // choice the user made, when the truth is that doctor never had a contract to
+  // probe against. Counted, as the unreadable config was before this block
+  // repeated its message - the exit code is unchanged either way.
+  if (cfg === null) {
+    log.fail('agent environments: not checked - the config above could not be read');
+    bad++;
+    return EXIT.ERROR;
   }
 
   if (flags.skipProbe === true) {
@@ -1570,7 +2000,6 @@ async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
 
   log.heading('agent environments');
   try {
-    const cfg = loadConfig(targetDir);
     const report = await preflight(
       targetDir,
       cfg,

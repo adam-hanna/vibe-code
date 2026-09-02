@@ -12,9 +12,11 @@ import type {
   CheckpointBoundary,
   CheckpointCommitNote,
   CodexRateLimitRecord,
+  ArtifactEntryOutcome,
   Confidence,
   DeferredQuestion,
   Finding,
+  GateArtifacts,
   ForkedConversation,
   ForkOrigin,
   ForkPendingEntry,
@@ -25,7 +27,9 @@ import type {
   PendingFindings,
   Plan,
   QuestionKind,
+  ResolvedQuestion,
   ReviewCoverage,
+  RoundClaim,
   RoundRecord,
   RunCheckpointMeta,
   RunEvent,
@@ -33,6 +37,7 @@ import type {
   RunState,
   RunStatus,
   RunSummary,
+  SuppressedQuestion,
 } from '@src/types.js';
 
 /**
@@ -89,21 +94,29 @@ import type {
  *    a refusal here can. Three cases in `tests/stored-state.test.ts` had to be
  *    narrowed for it: each asserted a contradictory triple loads clean, which
  *    is the claim the module exists to withdraw - see that file's comments and
- *    the PR for which was which. The `codexTokens <= tokensUsed` share still
- *    has NO rule anywhere: it is a
- *    reporting concern rather than a resume one, since nothing in `runPhases`
- *    branches on either field while `summary()` (`src/cli.ts`) renders
- *    `tokensUsed - codexTokens` and would print a negative Claude share.
+ *    the PR for which was which. The `codexTokens <= tokensUsed` share is that
+ *    module's rule D since #87: still not policed HERE - both values are legal
+ *    per field, and this validator does not ask what the pair says - but the
+ *    load path clamps the Codex share down to the run total and records the
+ *    change, because `summary()` (`src/cli.ts`) renders `tokensUsed -
+ *    codexTokens` and printed a negative Claude share without it. Rule D
+ *    normalises rather than refusing, and runs in `loadRun` and `planFork`
+ *    alike.
  * 6. **Nothing is written on a refusal path.** Every function here is pure: it
  *    reads, decides, and either throws or returns. That is what makes the
  *    refusal messages' "the run directory is intact and no file has been
  *    rewritten" literally true.
  *
- * Containment (`assertUsableRunId`) is **lexical**: it closes `../` traversal,
- * which is what a CLI argument can reach. A symlinked or junctioned run
- * directory can still point outside the runs root, in `loadRun` and `listRuns`
- * alike; resolving that needs `realpath` on both sides plus separate POSIX and
- * Windows handling, and it is issue #53.
+ * Containment (`assertUsableRunId`) is **lexical**, and stays that way: it
+ * answers "is this string a single directory name" before a path exists, which
+ * is what a CLI argument can reach. Whether the entry that name reaches is a
+ * SYMLINK or a junction pointing outside the archive is a filesystem question,
+ * and it is asked one layer down, at the read, by `linkedRunReason` and
+ * `assertUnlinkedRun` in `src/run.ts` (#53) - which `loadRun`, `listRuns`,
+ * `cmdResume`, `listForkPoints`, `planFork` and `commitFork` each apply before
+ * they open anything. It needs no `realpath` and no platform split:
+ * `lstat(...).isSymbolicLink()` is true of a POSIX symlink, a Node junction and
+ * an `mklink /J` junction alike.
  *
  * The strict parsers in `src/validate.ts` are deliberately NOT reused. They
  * exist for model output, which is adversarial-ish and always fresh, and they
@@ -424,7 +437,8 @@ interface ReadContext {
  * A whitelist rather than a separator blacklist, so `/`, `\`, drive prefixes and
  * control characters are all covered at once, with `basename` as a second belt.
  *
- * Lexical only. Symlinks and junctions are issue #53.
+ * Lexical only, deliberately: symlinks and junctions are a filesystem question,
+ * asked by `assertUnlinkedRun` (`src/run.ts`) at each site that reads (#53).
  */
 const RUN_ID = /^[A-Za-z0-9._-]+$/;
 
@@ -761,11 +775,12 @@ const roundReader =
     if (signature !== null && !isString(signature)) return null;
     const count = entry['count'];
     if (!isCounter(count)) return null;
+    const claims = readClaims(ctx, entry['claims'], at);
     const rawIds = entry['ids'];
-    if (rawIds === undefined) return { signature, count };
+    if (rawIds === undefined) return { signature, count, ...claims };
     if (!Array.isArray(rawIds)) {
       ctx.repairs.replaced(`${at}.ids`, rawIds, 'nothing');
-      return { signature, count };
+      return { signature, count, ...claims };
     }
     const ids: string[] = [];
     rawIds.forEach((id, i) => {
@@ -775,8 +790,43 @@ const roundReader =
       if (isString(id)) ids.push(id);
       else ctx.repairs.dropped(`${at}.ids`, `${at}.ids[${i}]`);
     });
-    return { signature, count, ids };
+    return { signature, count, ids, ...claims };
   };
+
+/**
+ * The claims of one round, on the same terms as its ids.
+ *
+ * Absent stays absent, and an unusable `claims` becomes absent rather than an
+ * empty list - because absent is what every guard reads as "recorded before
+ * claims existed", and it makes them fall back to `ids`/`signature`. An empty
+ * list would instead assert that the round had no blocking findings, which is a
+ * claim about a run nobody measured (#116).
+ *
+ * A partial drop is deliberately fatal to the whole field, unlike `ids`. A round
+ * missing one claim would be compared as a *shorter* round, and `claimsMatch`
+ * requires equal lengths - so a single dropped entry would silently turn a
+ * repeated round into a differing one and disable the brake for that window.
+ */
+function readClaims(
+  ctx: ReadContext,
+  raw: unknown,
+  at: string,
+): { claims?: RoundClaim[] } {
+  if (raw === undefined) return {};
+  if (!Array.isArray(raw)) {
+    ctx.repairs.replaced(`${at}.claims`, raw, 'nothing');
+    return {};
+  }
+  const claims: RoundClaim[] = [];
+  for (const entry of raw) {
+    if (!isRecord(entry) || !isString(entry['id']) || !isString(entry['title'])) {
+      ctx.repairs.replaced(`${at}.claims`, raw, 'nothing');
+      return {};
+    }
+    claims.push({ id: entry['id'], title: entry['title'] });
+  }
+  return { claims };
+}
 
 function readDeferredQuestion(entry: unknown): DeferredQuestion | null {
   if (!isRecord(entry)) return null;
@@ -795,6 +845,33 @@ function readDeferredQuestion(entry: unknown): DeferredQuestion | null {
     recommended: entry['recommended'],
     reason: entry['reason'],
   };
+}
+
+/**
+ * A similarity, not a context ratio: 1 is the top of this scale.
+ *
+ * Deliberately not `isRatio`, which has no upper bound because an overfull
+ * context is a real measurement. A score above 1 is not a measurement of
+ * anything `similarity` can produce, so it is damage.
+ */
+function isUnitInterval(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1;
+}
+
+function readSuppressedQuestion(entry: unknown): SuppressedQuestion | null {
+  if (!isRecord(entry)) return null;
+  if (!isString(entry['question']) || !isString(entry['matched']) || !isUnitInterval(entry['score'])) {
+    return null;
+  }
+  return { question: entry['question'], matched: entry['matched'], score: entry['score'] };
+}
+
+function readResolvedQuestion(entry: unknown): ResolvedQuestion | null {
+  if (!isRecord(entry)) return null;
+  if (!isString(entry['question']) || !isString(entry['answered']) || !isUnitInterval(entry['score'])) {
+    return null;
+  }
+  return { question: entry['question'], answered: entry['answered'], score: entry['score'] };
 }
 
 /**
@@ -987,19 +1064,97 @@ const GATE_STATUSES = {
  * from them: a record whose `required` cannot be read must not be guessed into
  * `false`, which would turn an unverified run into a clean one.
  */
-function readGateOutcome(entry: unknown): GateOutcome | null {
+function readGateOutcome(entry: unknown, at: string, ctx: ReadContext): GateOutcome | null {
   if (!isRecord(entry)) return null;
   const status = enumOf(entry['status'], GATE_STATUSES);
   const command = entry['command'];
   if (status === null || !isString(entry['name'])) return null;
   if (!(command === null || isString(command))) return null;
   if (!isCounter(entry['runs']) || !isBool(entry['required'])) return null;
+  const artifacts = readGateArtifacts(`${at}.artifacts`, entry['artifacts'], ctx);
   return {
     name: entry['name'],
     status,
     command,
     runs: entry['runs'],
     required: entry['required'],
+    ...(artifacts === undefined ? {} : { artifacts }),
+  };
+}
+
+// The same member-to-member table, for the same reason: a new artifact status
+// has to fail the build rather than fail to read back.
+const GATE_ARTIFACT_STATUSES = {
+  copied: 'copied',
+  missing: 'missing',
+  refused: 'refused',
+  'too-large': 'too-large',
+  failed: 'failed',
+} satisfies Record<ArtifactEntryOutcome['status'], ArtifactEntryOutcome['status']>;
+
+/** One preserved path's outcome, or null so the array reader drops just this one. */
+function readArtifactEntry(raw: unknown, at: string, ctx: ReadContext): ArtifactEntryOutcome | null {
+  if (!isRecord(raw)) return null;
+  const status = enumOf(raw['status'], GATE_ARTIFACT_STATUSES);
+  if (status === null || !isString(raw['path'])) return null;
+  const files = optionalNumber(`${at}.files`, raw['files'], ctx, isCounter);
+  const bytes = optionalNumber(`${at}.bytes`, raw['bytes'], ctx, isCounter);
+  const why = optionalString(`${at}.reason`, raw['reason'], ctx);
+  const links =
+    raw['skippedLinks'] === undefined
+      ? undefined
+      : repairedArray(`${at}.skippedLinks`, raw['skippedLinks'], ctx, (v) =>
+          isString(v) ? v : null,
+        );
+  return {
+    path: raw['path'],
+    status,
+    ...(files === undefined ? {} : { files }),
+    ...(bytes === undefined ? {} : { bytes }),
+    ...(why === undefined ? {} : { reason: why }),
+    ...(links === undefined ? {} : { skippedLinks: links }),
+  };
+}
+
+/**
+ * A gate's preserved artifacts, or nothing.
+ *
+ * The one field on a gate outcome that is repaired ELEMENT BY ELEMENT rather
+ * than costing the whole list, and the distinction is what the value is for.
+ * `readGateOutcomes` below discards everything on a single bad entry because the
+ * exit code is computed from `status` and `required` - a partial gate record
+ * would read as a clean run. Nothing computes anything from this field: it tells
+ * a human where to look. Discarding a run's whole gate record over a damaged
+ * pointer to a report would be the wrong trade in the other direction.
+ *
+ * Every drop still goes through `ctx.repairs`, which `loadRun` turns into a
+ * `state_repaired` event, so the loss is visible even though the field is not.
+ */
+function readGateArtifacts(field: string, raw: unknown, ctx: ReadContext): GateArtifacts | undefined {
+  if (raw === undefined) return undefined;
+  // `entries` is checked HERE, with the rest of the record, rather than being
+  // handed to `repairedArray`: that helper turns a non-array into `[]`, which
+  // would leave `{dir, bytes, entries: "bad"}` reading as a complete record of a
+  // preservation that copied nothing - a record contradicting a directory that
+  // may hold a whole report. The container is part of what makes this record
+  // one, so it fails with it.
+  if (
+    !isRecord(raw) ||
+    !isString(raw['dir']) ||
+    !isCounter(raw['bytes']) ||
+    !Array.isArray(raw['entries'])
+  ) {
+    ctx.repairs.replaced(field, raw, 'nothing');
+    return undefined;
+  }
+  const unresolved = optionalString(`${field}.unresolved`, raw['unresolved'], ctx);
+  return {
+    dir: raw['dir'],
+    bytes: raw['bytes'],
+    entries: repairedArray(`${field}.entries`, raw['entries'], ctx, (entry, at) =>
+      readArtifactEntry(entry, at, ctx),
+    ),
+    ...(unresolved === undefined ? {} : { unresolved }),
   };
 }
 
@@ -1026,7 +1181,7 @@ function readGateOutcomes(raw: unknown, ctx: ReadContext): GateOutcome[] | undef
 
   const outcomes: GateOutcome[] = [];
   for (const [i, entry] of raw.entries()) {
-    const outcome = readGateOutcome(entry);
+    const outcome = readGateOutcome(entry, `gateOutcomes[${i}]`, ctx);
     if (outcome === null) {
       ctx.repairs.dropped('gateOutcomes', `gateOutcomes[${i}]`);
       ctx.repairs.replaced(
@@ -1226,6 +1381,15 @@ function readForkOrigin(raw: unknown, ctx: ReadContext): ForkOrigin | undefined 
   // Absent stays absent. It is NOT defaulted to zero: a checkpoint with no
   // recorded Codex share may mean no Codex turn ran or that none was recorded,
   // and vibe does not decide which.
+  //
+  // And deliberately NOT checked against `inheritedTokens` the way rule D checks
+  // the live pair (#87). Two reasons. This is a historical record of what a
+  // parent held at a point in time, and `commitFork` cannot write an over-large
+  // one any more - `planFork` clamps first. And nothing subtracts these: the
+  // `Forked:` lines in `summary()` print `inheritedTokens` and
+  // `inheritedCostUsd` only, so no display can turn this field negative.
+  // Clamping on read would rewrite a record to satisfy an invariant no reader
+  // has.
   if (codexTokens !== undefined && !isTotal(codexTokens)) {
     return refuse('forkedFrom', raw, 'a complete fork record', ctx, note);
   }
@@ -1572,6 +1736,11 @@ const READERS = {
   // has never run looks like, and there is nothing here to migrate into.
   reviewSessionId: (raw, ctx) => optionalString('reviewSessionId', raw, ctx),
   reviewSessionStarted: (raw, ctx) => optionalBool('reviewSessionStarted', raw, ctx),
+  // The Claude slot's registration marker (#74). Optional for the reason the
+  // four above are: absent is what an id that has never been handed to the CLI
+  // looks like, and it is what every state written before this field existed
+  // presents - so nothing here is migrated and nothing is repaired.
+  sessionRegistered: (raw, ctx) => optionalBool('sessionRegistered', raw, ctx),
   reviewContextTokens: (raw, ctx) =>
     optionalNumber('reviewContextTokens', raw, ctx, isPositiveInt),
   reviewContextThread: (raw, ctx) => optionalString('reviewContextThread', raw, ctx),
@@ -1609,6 +1778,18 @@ const READERS = {
   forkedFrom: (raw, ctx) => readForkOrigin(raw, ctx),
   forkPending: (raw, ctx) => readForkPending(raw, ctx),
   branchPending: (raw, ctx) => readBranchPending(raw, ctx),
+  // The three question-record fields (#65). Optional every one: absent is what
+  // a run that suppressed nothing and was answered by nobody looks like, and it
+  // is what every state written before they existed presents - so nothing here
+  // migrates and nothing is repaired.
+  humanAnswered: (raw, ctx) =>
+    raw === undefined ? undefined : repairedArray('humanAnswered', raw, ctx, readString),
+  suppressedQuestions: (raw, ctx) =>
+    raw === undefined
+      ? undefined
+      : repairedArray('suppressedQuestions', raw, ctx, readSuppressedQuestion),
+  resolvedByHuman: (raw, ctx) =>
+    raw === undefined ? undefined : repairedArray('resolvedByHuman', raw, ctx, readResolvedQuestion),
   carried: (raw, ctx) =>
     raw === undefined ? undefined : repairedArray('carried', raw, ctx, readFinding),
   declined: (raw, ctx) =>
@@ -1699,6 +1880,13 @@ export function validateStoredState(
  * as money here - with ONE deliberate divergence: an unrecognised `status` is
  * shown verbatim rather than refused, because resuming acts on that value while
  * listing only prints it.
+ *
+ * That verbatim rule is exactly why `RunSummary.linked` exists rather than a
+ * reserved status string: a stored `"status": "linked"` reaches the row from
+ * this function, and anything that ACTS on "vibe refused to follow this entry"
+ * has to read a field only `listRuns`'s own guard can set (#53). Nothing here
+ * sets it - the summary is built field by field from `id`, `status`, `task`,
+ * `costUsd` and `forkLabel`, so no stored value can reach it.
  */
 export function summariseStored(raw: unknown, id: string): RunSummary {
   if (!isRecord(raw)) return { id, status: 'unreadable', task: '', costUsd: null };

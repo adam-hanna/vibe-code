@@ -144,8 +144,29 @@ export interface CodexRateLimitRecord {
 }
 
 /** What one review round produced: which blocking findings, and how many. */
+/**
+ * One blocking finding, as much of it as the convergence guards need.
+ *
+ * The title rides along because the id does not mean what three guards took it
+ * to mean. Across 25 archived runs an id came back in more than one round 21
+ * times, and all 21 carried a different claim - the critic reuses a label for
+ * the next defect in the same area while the planner closes the last one (#116).
+ * The id alone is a model-authored slug and nothing enforces its stability.
+ */
+export interface RoundClaim {
+  id: string;
+  title: string;
+}
+
 export interface RoundRecord {
-  /** Fingerprint of the blocking id set, or null when the round had none. */
+  /**
+   * Fingerprint of the blocking id set, or null when the round had none.
+   *
+   * Kept, and still written, but only *read* for a record that predates
+   * `claims`: it hashes ids, so it inherits exactly the defect `claims` exists
+   * to fix. A resumed legacy history has nothing else to compare, and falling
+   * back to it leaves such a run behaving precisely as it did before (#116).
+   */
   signature: string | null;
   count: number;
   /**
@@ -159,8 +180,20 @@ export interface RoundRecord {
    * history survived rounds 3 through 8 and was cleared at round 9, in a run
    * that then passed 1977/1977 tests. Optional so runs recorded before this
    * field loaded still parse.
+   *
+   * Superseded as an identity by `claims`, and retained as the legacy fallback
+   * for the same reason `signature` is.
    */
   ids?: string[];
+  /**
+   * What each blocking finding actually claimed, which is what the guards
+   * compare since #116.
+   *
+   * Optional, and absent means "this round was recorded before finding identity
+   * meant anything": every guard falls back to `ids`/`signature` for such a
+   * round rather than inventing claims for it.
+   */
+  claims?: RoundClaim[];
 }
 
 export interface LoopConfig {
@@ -290,6 +323,41 @@ export interface DeferredQuestion {
   reason: string;
 }
 
+/**
+ * A question the re-ask guard suppressed as a rephrasing of one already asked
+ * (#65).
+ *
+ * `matched` is the *normalized* earlier question, because `answeredQuestions`
+ * has only ever held normalized keys and the original wording cannot be
+ * recovered from one. Said plainly in `REPHRASED.md` rather than dressed up as
+ * the wording the planner used.
+ */
+export interface SuppressedQuestion {
+  /** The new wording, verbatim, as the planner asked it. */
+  question: string;
+  /** The `answeredQuestions` key it matched. Normalized, not the original. */
+  matched: string;
+  /** Jaccard over `normalize`'s tokens: 0..1. */
+  score: number;
+}
+
+/**
+ * A deferred question a human's answer disposed of, matched by rephrasing
+ * (#65).
+ *
+ * Recorded because the alternative is a silent omission: the entry leaves
+ * `ASSUMED.md` on the strength of a similarity score, and a wrong match must
+ * cost a line someone can check rather than a question nobody hears about
+ * again.
+ */
+export interface ResolvedQuestion {
+  /** The deferred wording, as `ASSUMED.md` would have printed it. */
+  question: string;
+  /** The question the human answered, verbatim. */
+  answered: string;
+  score: number;
+}
+
 export interface GitConfig {
   useBranch: boolean;
   branchPrefix: string;
@@ -337,6 +405,19 @@ export interface VerifyGate {
    * blocks, whatever this says.
    */
   required?: boolean;
+  /**
+   * What the command produced, preserved when this gate FAILS (#62).
+   *
+   * Project-relative paths, each a directory or a file - not globs. `fs.glob`
+   * arrived in Node 22 and `engines` is node >=20 with no dependencies, so a
+   * glob would mean hand-rolling a matcher; worse, the matcher would have to be
+   * link-aware while it expanded, which puts the containment rule in a second
+   * place. A path needs neither.
+   *
+   * Absolute paths, `..` segments and anything under `.vibe` are refused by
+   * `refuseArtifactPath`, and overlapping entries by `refuseOverlappingArtifacts`.
+   */
+  artifacts?: string[];
 }
 
 export interface VerifyConfig {
@@ -365,6 +446,20 @@ export interface VerifyConfig {
    * per-gate defaults a gate may override.
    */
   gates: VerifyGate[] | null;
+  /**
+   * A ceiling on what one gate artifact entry may copy, in bytes. Null is no
+   * ceiling, and it is the default (#62).
+   *
+   * Null rather than a number because there is nothing to derive a number from.
+   * The only measurement available bounds what *vibe* writes - 11.6MB across 24
+   * archived runs, largest single record 1.14MB - and says nothing about what a
+   * test reporter writes, which is the thing a ceiling is about. A default here
+   * would be invented, and the user opted in by naming the path.
+   *
+   * One setting for all gates rather than a per-gate key: the surface is smaller
+   * and nothing yet wants two.
+   */
+  artifactMaxBytes: number | null;
 }
 
 export interface ProgressConfig {
@@ -375,14 +470,14 @@ export interface ProgressConfig {
 
 export interface Config {
   /**
-   * Which agent holds each role on this run, and what model and effort it runs
-   * at.
+   * Which agent holds each role on this run, and what model, effort and turn
+   * timeout it runs under.
    *
-   * The three choices a run makes about the role table - a provider per role,
-   * and optionally that role's own effort (#46) and model (#60): `access`, the
-   * output schema and the conversation slot are facts about the job, not user
-   * settings. Absent - a config stored before this key existed - means the
-   * default assignment, which is what every run before it did.
+   * The four choices a run makes about the role table - a provider per role, and
+   * optionally that role's own effort (#46), model (#60) and timeout (#84):
+   * `access`, the output schema and the conversation slot are facts about the
+   * job, not user settings. Absent - a config stored before this key existed -
+   * means the default assignment, which is what every run before it did.
    */
   roles: RoleProviders;
   claude: ClaudeConfig;
@@ -634,6 +729,26 @@ export interface TokenUsage {
   total: number;
 }
 
+/**
+ * What one turn actually did, counted from its own live stream (#66).
+ *
+ * `tool` is stored rather than re-derived on read, because the classification is
+ * the *provider's*: a Claude tally is keyed by tool name (`Read`, `Bash`) and a
+ * Codex one by item type (`command_execution`, `agent_message`), and a reader
+ * holding only `items` cannot tell which vocabulary it has. `items` is kept
+ * beside it so a human can second-guess the judgement the run made.
+ *
+ * Absent, never zeroed, for a turn nothing measured - no heartbeat at all
+ * (`progress.enabled` false, or the preflight probe, which passes none), or an
+ * injected agent in a test. "Nothing was observed" is not "nothing was done".
+ */
+export interface TurnActivity {
+  /** Item kinds this turn emitted, counted once each. Provider vocabulary. */
+  items: Record<string, number>;
+  /** How many of them were the agent using a tool rather than thinking or talking. */
+  tool: number;
+}
+
 export interface ClaudeTurnResult {
   text: string;
   costUsd: number;
@@ -644,6 +759,13 @@ export interface ClaudeTurnResult {
   usage: ContextUsage | null;
   /** Cumulative work for the turn, from the aggregated envelope. */
   tokens: TokenUsage;
+  /**
+   * What the turn did, from its heartbeat. Absent when it had none (#66).
+   *
+   * Optional so every injected fake reports an unmeasured turn rather than a
+   * fabricated empty one.
+   */
+  activity?: TurnActivity | undefined;
 }
 
 /**
@@ -660,6 +782,64 @@ export interface GateOutcome {
   /** Executions actually performed. Zero for unavailable and disabled. */
   runs: number;
   required: boolean;
+  /**
+   * What was preserved of what the failing command produced (#62).
+   *
+   * Absent when the gate passed, when it named no `artifacts`, and when
+   * verification is disabled. Absent is NOT an empty record: "nothing was asked
+   * for" and "something was asked for and nothing survived" are different facts,
+   * and only the second one is a report a human has to go and read.
+   */
+  artifacts?: GateArtifacts | undefined;
+}
+
+/**
+ * What happened to ONE configured artifact path.
+ *
+ * Every status other than `copied` carries its `reason`, because a run record
+ * that quietly omits half a report looks complete - and looking complete while
+ * being partial is the fabrication this repo's rules exist to prevent.
+ */
+export interface ArtifactEntryOutcome {
+  /** The path exactly as configured, so a reader can match it to their config. */
+  path: string;
+  status: 'copied' | 'missing' | 'refused' | 'too-large' | 'failed';
+  files?: number;
+  bytes?: number;
+  /** Why, for anything that is not `copied`. Present for every other status. */
+  reason?: string;
+  /** Links refused inside the tree, relative to the entry, in walk order. */
+  skippedLinks?: string[];
+}
+
+/** One gate's preserved evidence for one verification round. */
+export interface GateArtifacts {
+  /**
+   * Where they went, RELATIVE to the run directory and with POSIX separators -
+   * `artifacts/qa/round-1`.
+   *
+   * Relative for the reason `loadRun` re-derives `dir` and `targetDir` rather
+   * than trusting the stored ones: a run record has to stay readable when the
+   * repository moves, and an absolute host-native path stored in state.json
+   * would be wrong the moment it did.
+   */
+  dir: string;
+  entries: ArtifactEntryOutcome[];
+  /** Bytes actually written. The sum of the entries that were copied. */
+  bytes: number;
+  /**
+   * Housekeeping this attempt could not finish, named.
+   *
+   * Deleting the superseded round after the new one is installed is the last
+   * step and the only one that can fail without costing anything - the snapshot
+   * is already in place, so reporting the entries as failed would make the
+   * record contradict a filesystem holding exactly what was asked for. But a
+   * `round-1.superseded-*` directory nobody explained is a puzzle for whoever
+   * opens the run, so what is left over is said here instead of only in a log
+   * line that has long since scrolled away. Absent means the directory holds
+   * exactly the round and nothing else.
+   */
+  unresolved?: string;
 }
 
 /**
@@ -797,10 +977,17 @@ export interface ForkOrigin {
   inheritedTokens: number;
   inheritedCostUsd: number;
   /**
-   * The checkpoint's `codexTokens`, verbatim - **absent when the checkpoint had
-   * none.** Not classified and not defaulted: an absent Codex share may mean no
-   * Codex turn ran or that none was recorded, and nothing here decides which,
-   * because nothing depends on the answer. A zero would be an invented number.
+   * The checkpoint's `codexTokens` - **absent when the checkpoint had none.**
+   * Not classified and not defaulted: an absent Codex share may mean no Codex
+   * turn ran or that none was recorded, and nothing here decides which, because
+   * nothing depends on the answer. A zero would be an invented number.
+   *
+   * Verbatim except for rule D (`checkTokenShare`, `src/consistency.ts`): a
+   * checkpoint whose Codex share exceeded its own total is **normalised down to
+   * `inheritedTokens`** before the fork copies it, because a provenance figure
+   * larger than the total beside it is the same defect one layer down. The raw
+   * figure is not lost - it is in the child's rule-D `state_repaired` event and
+   * named in `notInherited` (#87).
    */
   inheritedCodexTokens?: number;
   /** The 40-hex commit the fork's branch ref was created at, or null. */
@@ -970,9 +1157,53 @@ export interface RunState {
    * `src/slots.ts`, never here.
    */
   sessionStarted: boolean;
+  /**
+   * Whether `sessionId` has been handed to the Claude CLI - `SLOTS.main`'s third
+   * marker (#74).
+   *
+   * Written BEFORE the spawn, because `claude --session-id` spends the id on
+   * *attempt* and not on success: a process killed after the CLI registered the
+   * session but before the turn returned otherwise leaves a state that believes
+   * the id is still free, and every later attempt fails instantly with
+   * "Session ID ... is already in use".
+   *
+   * Separate from `sessionStarted`, which answers a different question - has a
+   * turn ever SUCCEEDED here. The two together are what distinguish a session
+   * that died mid-turn (resumable, and holding that turn's work) from one that
+   * has never been spawned at all.
+   *
+   * Optional: absent means never registered, so every state written before this
+   * existed loads with no repair. Read and written through `src/slots.ts`,
+   * never here.
+   */
+  sessionRegistered?: boolean;
   planOnly: boolean;
   answeredQuestions: string[];
   deferredQuestions: DeferredQuestion[];
+  /**
+   * Questions a human actually answered, verbatim as the `### ` headings of
+   * `NEEDS-INPUT.md` gave them (#65).
+   *
+   * Neither existing field can do this job. `pendingAnswers` is *consumed* by
+   * the loop the moment it revises against them, so it is gone by the time
+   * anything reports; `answeredQuestions` is marked for every question **asked**
+   * whatever came back, so reconciling `ASSUMED.md` against it would empty the
+   * file including the entries that are true.
+   *
+   * Optional, so a state written before this existed loads with no repair and a
+   * run nobody answered writes no field at all.
+   */
+  humanAnswered?: string[];
+  /**
+   * Re-asks the guard suppressed as rephrasings, with what each matched.
+   *
+   * Written the moment a suppression happens rather than at the end of the run:
+   * the run that motivated this stopped at the round cap, and a record that
+   * only exists on the success path is missing exactly when it is wanted.
+   */
+  suppressedQuestions?: SuppressedQuestion[];
+  /** Deferred questions a human's answer disposed of - see `ResolvedQuestion`. */
+  resolvedByHuman?: ResolvedQuestion[];
   sessionRotations: number;
   /**
    * The plan-side judge's Codex thread id, reused across critique and answer
@@ -1266,4 +1497,29 @@ export interface RunSummary {
    * do - one prints, the other acts.
    */
   forkedFrom?: { runId: string; checkpoint: number };
+  /**
+   * Set only by `listRuns`, and only for an entry it refused to follow because
+   * the directory or its state.json is a symlink or a junction (#53).
+   *
+   * Separate from `status` because `status` is read off disk and displayed
+   * verbatim - `summariseStored` passes an unrecognised value straight through
+   * on purpose - so a stored `"status": "linked"` is a display coincidence, not
+   * a fact about the filesystem. Anything that must ACT on the distinction (the
+   * planner's do-not-open warning) reads this; anything that only prints reads
+   * `status`. Never set for an entry that is merely unreadable: a claim that
+   * something is a link is a measurement, not a fallback.
+   */
+  linked?: true;
+  /**
+   * Set only by `listRuns`, and only for an entry whose `lstat` threw - so
+   * whether it is a link could not be established at all (#53).
+   *
+   * The fail-closed half of `linked`. Nothing under such an entry was followed,
+   * and the planner is warned off it for the same reason, but it is a separate
+   * field because it is a separate fact: one is measured, the other is the
+   * absence of a measurement, and collapsing them would either fabricate a link
+   * or drop the warning. Distinct from an `unreadable` row, where the state.json
+   * WAS opened and the entry itself was never in doubt.
+   */
+  unverified?: true;
 }

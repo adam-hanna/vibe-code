@@ -1,6 +1,7 @@
 import { ANSWERS_SCHEMA, FINDINGS_SCHEMA, PLAN_SCHEMA } from '@src/schemas.js';
 import { SLOTS, slotMeasured, slotRotatable } from '@src/slots.js';
 import type { SlotName } from '@src/slots.js';
+import { setOwn } from '@src/runtime.js';
 import type { AgentProvider } from '@src/runtime.js';
 import { EFFORTS } from '@src/types.js';
 import type { Config, Effort, PermissionMode, Sandbox } from '@src/types.js';
@@ -63,6 +64,15 @@ export interface RoleSpec {
    * reason: a table cannot then claim an override nobody wrote. See `modelFor`.
    */
   model?: string | undefined;
+  /**
+   * The timeout this role named for itself, and absent when it named none -
+   * which means its provider's pair, chosen by access, as every role meant
+   * before this key existed (#84). Absent rather than pre-resolved for the same
+   * reason again, and here it carries a second job: `noteRoleProvenance` reads
+   * the absence to decide whether a failed turn owes the user a note naming
+   * `roles.<role>.timeoutMs`. See `turnTimeoutMs`.
+   */
+  timeoutMs?: number | undefined;
 }
 
 /**
@@ -130,6 +140,17 @@ export interface RoleSetting {
    * un-taught here: the refusal simply becomes a setting.
    */
   model?: string | undefined;
+  /**
+   * How long a turn in this seat gets, in milliseconds, and absent when the role
+   * named none - which then means its provider's pair, chosen by access, as
+   * every role meant before this key existed.
+   *
+   * Validated exactly as the provider keys it overrides are (`config.ts`'s
+   * `claude.planTimeoutMs` and the Codex pair): finite and positive, and
+   * deliberately NOT whole. Those keys accept a fractional number, and an
+   * override stricter than the value it replaces is a trap.
+   */
+  timeoutMs?: number | undefined;
 }
 
 /** The config surface for one role: who holds it, optionally with what it overrides. */
@@ -148,6 +169,17 @@ export type RoleValue = AgentProvider | RoleSetting;
  * strings are all that is on disk.
  */
 export type RoleProviders = Record<Role, RoleValue>;
+
+/**
+ * One role's flag-set keys, as `--role <role>:<key>=<value>` produced them (#89).
+ *
+ * Keyed by `string` rather than by `Role`, and valued as `unknown`, because both
+ * halves are user input: an unknown role name and an unknown key have to *reach*
+ * `validateRoles`/`roleSetting` to be refused by name, and a type that could not
+ * carry them would have to invent a second refusal vocabulary. Nothing here is
+ * validated; see `patchRoles`.
+ */
+export type RolePatches = Readonly<Record<string, Readonly<Record<string, unknown>>>>;
 
 /**
  * Who does what when a run says nothing: Claude plans and implements, Codex
@@ -214,19 +246,35 @@ function defaultSlot(role: Role, provider: AgentProvider): SlotName {
 }
 
 /** The keys a role object may carry. Anything else is a mistake worth naming. */
-const ROLE_OBJECT_KEYS: readonly string[] = ['provider', 'model', 'effort'];
+const ROLE_OBJECT_KEYS: readonly string[] = ['provider', 'model', 'effort', 'timeoutMs'];
 
 /**
- * `provider, model and effort` - a list a person would read aloud.
+ * `provider, model, effort and timeoutMs` - a list a person would read aloud.
  *
  * `join(' and ')` was fine while there were two keys and reads as
  * `provider and model and effort` with three, which is how #60 found it. Written
- * against the array's length rather than its contents, so a fourth key does not
- * need this touched again.
+ * against the array's length rather than its contents, which is why #84's fourth
+ * key needed nothing here but this sentence.
  */
 function listKeys(keys: readonly string[]): string {
   if (keys.length < 2) return keys.join('');
   return `${keys.slice(0, -1).join(', ')} and ${keys[keys.length - 1]}`;
+}
+
+/**
+ * A rejected value, as a message should show it back.
+ *
+ * The idiom the messages below use is `JSON.stringify(v) ?? String(v)`, which
+ * renders `NaN` as `null` - a different mistake than the one the user made.
+ * `Infinity` and `-Infinity` stringify to `null` too, and they are the only
+ * other values that do: JSON has no way to write any of the three, so the
+ * non-finite numbers are exactly the set this has to hand to `String` instead.
+ * Scoped to the timeout check rather than applied to every message, so no
+ * existing error text changes bytes.
+ */
+function shown(value: unknown): string {
+  if (typeof value === 'number' && !Number.isFinite(value)) return String(value);
+  return JSON.stringify(value) ?? String(value);
 }
 
 /** What a role's configured value has to say to be one, worded for a user. */
@@ -234,7 +282,7 @@ function expectedRoleValue(role: Role, value: unknown): Error {
   return new Error(
     `roles.${role} is ${JSON.stringify(value) ?? String(value)}; expected ` +
       `${PROVIDERS.map((p) => `"${p}"`).join(' or ')}, or an object naming a provider and ` +
-      `optionally a model and an effort`,
+      `optionally a model, an effort and a timeout`,
   );
 }
 
@@ -300,13 +348,91 @@ export function roleSetting(role: Role, value: unknown): RoleSetting {
     );
   }
 
+  // The provider keys this overrides are checked for being finite and positive
+  // and nothing more (`claude.planTimeoutMs`, the Codex pair), so this is too:
+  // a per-role override that refused a fractional number the key it replaces
+  // accepts would be a trap. `typeof` first, so `Number.isFinite` is never
+  // handed a string that a coercing check would have let through - "30m" is a
+  // config error, not 30.
+  const timeoutMs = value['timeoutMs'];
+  if (
+    timeoutMs !== undefined &&
+    (typeof timeoutMs !== 'number' || !Number.isFinite(timeoutMs) || timeoutMs <= 0)
+  ) {
+    throw new Error(
+      `roles.${role}.timeoutMs is ${shown(timeoutMs)}; must be a positive number of ` +
+        `milliseconds, or absent for ${provider}'s own timeout`,
+    );
+  }
+
   // Spread rather than assigned, for the reason `tableFor` spreads them: a role
   // that named neither must carry neither key, not two holding undefined.
   return {
     provider: provider as AgentProvider,
     ...(effort === undefined ? {} : { effort: effort as Effort }),
     ...(model === undefined ? {} : { model }),
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
   };
+}
+
+/**
+ * Apply per-role CLI settings to a role table, key by key (#89).
+ *
+ * Deliberately NOT `mergeRoles`' semantics, and the difference is the whole of
+ * the flag's design. A config *layer* replaces a role's value wholesale, which
+ * is why `provider` is required inside a role object: a partial object could
+ * otherwise hand a role back to the default agent silently. A flag is not a
+ * layer. `--role reviewer:effort=max` over a file that named the reviewer's
+ * model must keep that model, so this patches the *resolved* value - and
+ * `provider` is not required from a flag, because the base always supplies one
+ * (`validateRoles` refuses a table missing any role, so after
+ * `mergeConfig(DEFAULTS, ...)` every role has a value). Patching is strictly
+ * safer than wholesale here: it never changes the provider unless the flag says
+ * `provider=`.
+ *
+ * Validates nothing. Every bad value is refused by `roleSetting` or
+ * `validateRoles`, which is what makes `--role reviewer:effort=maximum` produce
+ * the same message as `roles.reviewer.effort` in the config file.
+ */
+export function patchRoles(base: RoleProviders, patches: RolePatches): RoleProviders {
+  // Identity, so a run passing no `--role` is byte-identical to one from before
+  // the flag existed - the object is not even copied.
+  if (Object.keys(patches).length === 0) return base;
+  // `"roles": null` still has to reach `validateRoles` and get its own message.
+  if (!isRecord(base)) return base;
+
+  // The `Record<string, unknown>` view is `mergeRoles`' own idiom in
+  // src/config.ts: a role name off a flag is a `string`, `RoleProviders` is keyed
+  // by the `Role` union, and the ownership check below narrows nothing for the
+  // type checker. Cast once in, cast once out.
+  const src = base as unknown as Record<string, unknown>;
+  const out: Record<string, unknown> = { ...src };
+
+  for (const [roleName, keys] of Object.entries(patches)) {
+    // `hasOwnProperty`, not `src[roleName] !== undefined`: `toString`,
+    // `constructor` and `valueOf` are inherited and would read as roles that
+    // already exist, so `--role toString:effort=max` would be silently SKIPPED
+    // rather than refused - the same swallow `mergeRoles` uses `setOwn` to
+    // prevent, by the other direction. `__proto__` would read as
+    // `Object.prototype`. `setOwn` guards the write; this guards the read.
+    const has = Object.prototype.hasOwnProperty.call(src, roleName);
+    const current = has ? src[roleName] : undefined;
+    const next =
+      typeof current === 'string'
+        ? { provider: current }
+        : isRecord(current)
+          ? { ...current }
+          : undefined;
+    // A stored value that is neither form (`roles.reviewer: 42`) is left exactly
+    // as it is, so `validateRoles` names the config's error rather than this
+    // patch hiding it behind "an object with no provider". An unknown role name
+    // takes the other branch and becomes an own key, so it is refused BY NAME.
+    if (next === undefined && has) continue;
+    const target: Record<string, unknown> = next ?? {};
+    for (const [key, value] of Object.entries(keys)) setOwn(target, key, value);
+    setOwn(out, roleName, target);
+  }
+  return out as unknown as RoleProviders;
 }
 
 /**
@@ -325,7 +451,7 @@ export function tableFor(providers: RoleProviders): RoleTable {
   if (!isRecord(providers)) {
     throw new Error(
       'roles must be an object mapping role names to "claude" or "codex", or to an object ' +
-        'naming a provider and optionally a model and an effort',
+        'naming a provider and optionally a model, an effort and a timeout',
     );
   }
   const table = {} as RoleTable;
@@ -343,6 +469,9 @@ export function tableFor(providers: RoleProviders): RoleTable {
       // The same rule, for the same reason: an absent key is what says "this
       // role means its provider's model".
       ...(setting.model === undefined ? {} : { model: setting.model }),
+      // And again: an absent key is what says "this role means its provider's
+      // timeout", and `exactOptionalPropertyTypes` keeps the two apart.
+      ...(setting.timeoutMs === undefined ? {} : { timeoutMs: setting.timeoutMs }),
     };
   }
   return table;
@@ -595,9 +724,20 @@ export function providersForRoles(
  * is read is decided by the role's access, for both providers now that a Codex
  * role can write: `codex.timeoutMs` is the reviewing figure and
  * `codex.implementTimeoutMs` the writing one, the same pair Claude has had.
+ *
+ * The role's own figure wins over that pair where it named one (#84), which
+ * makes the full order request -> role -> provider: `runTurn` already reads
+ * `req.timeoutMs ?? turnTimeoutMs(...)`, so a caller with a reason of its own
+ * still outranks the table and no call site changed to give the role its say.
+ * `effortFor`'s rule, for the third setting a role may name.
  */
 export function turnTimeoutMs(role: Role, cfg: Config, roles: RoleTable = rolesFor(cfg)): number {
   const spec = roles[role];
+  // The role's own where it named one; otherwise byte-identically what this
+  // function computed before the key existed, access-based pair selection and
+  // all. That equality is the compatibility claim - see role-timeout.test.ts,
+  // which enumerates every role on both providers rather than sampling.
+  if (spec.timeoutMs !== undefined) return spec.timeoutMs;
   if (spec.provider === 'claude') {
     return spec.access === 'write' ? cfg.claude.implementTimeoutMs : cfg.claude.planTimeoutMs;
   }

@@ -7,6 +7,166 @@ for a change that breaks an existing config or an existing run.
 Each entry links the pull request that made it and, where there is one, the issue it
 closes.
 
+## 1.3.0 - 2026-09-02
+
+Twenty-four issues since 1.2.0. **Nothing here breaks an existing config**: no key was renamed or
+removed, and every new key has a default that reproduces 1.2.0's behaviour. Five behaviours a
+running setup can notice are listed under Upgrading.
+
+The theme is what a killed process leaves behind. 1.2.0 could tell a dead run from a live one and
+recover what it spent; this release recovers the session it was talking through, the artifacts it
+wrote, the evidence a failing gate produced and — where an implementer had stashed to get a clean
+test run — the work itself. Alongside it, the role table finally reaches the command line, and the
+guards that decide whether a run is making progress stopped taking a model's word for it.
+
+Almost every change here was preceded by a measurement, and in five cases the measurement
+contradicted the issue that asked for the work. Those are called out in the entries rather than
+quietly corrected.
+
+### Added
+
+- **A failing gate's evidence is preserved.** `verify.gates[].artifacts` names project-relative
+  paths to copy into `<run>/artifacts/<gate>/round-<n>/` when that gate fails, one directory per
+  round, with the size always reported. Every link on the way in is refused and named — measured
+  against all four shapes at once, because `cpSync` preserves a symlink as a pointer out of the
+  archive and copies a junction's bytes *in*.
+  (#62, #104, [#110](https://github.com/adam-hanna/vibe-code/pull/110))
+- **The role table has a command line.** `--role <role>:<key>=<value>`, repeatable, last wins, on
+  `vibe run`, `vibe resume` and `vibe fork`. It **patches** a role rather than replacing it, so
+  `--role reviewer:effort=max` keeps the model the file named — and the toolchain contract is
+  re-derived when a flag moves a seat to another agent. This is what #2, #46 and #60 each deferred.
+  (#89, [#105](https://github.com/adam-hanna/vibe-code/pull/105))
+- **A role can name its own turn timeout.** `roles.<role>.timeoutMs`, resolved request → role →
+  provider, and a turn that dies under one now says which key set it.
+  (#84, [#103](https://github.com/adam-hanna/vibe-code/pull/103))
+- **`vibe doctor` previews the run those flags would give you.** It takes the same options
+  `vibe run` does and reports the configuration they produce, not the file's version of it; where a
+  flag moved something the config line names what. Since 1.2.0 it honoured `--role` and nothing
+  else, which meant reporting a subset with no way to tell which parts the flags had reached.
+  (#106, [#128](https://github.com/adam-hanna/vibe-code/pull/128))
+- **Every turn records what it actually did** — a per-kind tally of the items it emitted and the
+  tools it used, for every role on both agents. A **review** turn that emitted items and used no
+  tool has its blocking findings downgraded to P2 through the existing evidence mechanism. The
+  threshold was not chosen: Codex's own rollouts made it possible to reconstruct the tally for
+  every turn vibe had ever run here, 263 of them going back to 2026-08-12.
+  (#66, [#109](https://github.com/adam-hanna/vibe-code/pull/109))
+
+### Fixed
+
+- **A failed first Claude turn no longer burns the session id.** A turn that died after the CLI
+  registered its session but before vibe saw it succeed left the run *permanently unresumable* —
+  every later attempt refused with `Session ID ... is already in use`, with no flag that cleared it.
+  Measured against the real CLI: the id is spent on **attempt**, and the dead session is
+  **resumable and still holds that turn's work**, which ruled out minting a fresh id as the whole
+  answer.
+  (#74, [#90](https://github.com/adam-hanna/vibe-code/pull/90))
+- **A rate limit no longer costs the session it never damaged.** The first Claude turn of a run is
+  the plan turn; a limit there used to wait as much as `budget.maxWaitMinutes` and then redo the
+  work in a fresh conversation. A `RateLimitError` is raised only from a complete result envelope,
+  so the conversation behind it is intact; the retry now resumes it. Every other failure class
+  still gives the spent id up.
+  (#91, [#126](https://github.com/adam-hanna/vibe-code/pull/126))
+- **A killed turn's work is no longer silently stranded in a git stash.** An implementer that
+  stashes to check whether a failing test predates its change, and is killed before the matching
+  pop, leaves its entire output where nothing can see it — the tree reads clean, there are no
+  commits, and the accounting correctly says the turn ran. One run lost 11.3M tokens that way. A
+  run with a branch now reads `git stash list` before dispatching anything and reports any entry
+  made on that branch. It notices and does nothing else: a pop can conflict, and a stash a human
+  made is not vibe's to take.
+  (#96, [#127](https://github.com/adam-hanna/vibe-code/pull/127))
+- **Every run artifact is written whole or not at all.** `artifact()` was the last plain
+  `writeFileSync` in the run directory. The failure mode is not a splice: `'w'` is `O_TRUNC`, so a
+  kill in that window leaves a **zero-byte** file — reproduced 5 times in 40 on a 17KB `PLAN.md`.
+  (#88, [#99](https://github.com/adam-hanna/vibe-code/pull/99))
+- **A run entry under `.vibe/runs/` can no longer be a link out of the archive.** The traversal
+  guard was lexical, so a single-component entry that was a symlink or junction passed every check
+  and was followed by `loadRun`, `listRuns`, `cmdResume` and all three fork entry points. Measured
+  on 1.2.0: `vibe resume` completed with exit 0, **rewrote the target's `state.json`** and created
+  files in it.
+  (#53, [#101](https://github.com/adam-hanna/vibe-code/pull/101))
+- **Nor can a checkpoint inside one**, which is the file that *becomes* a run when it is forked
+  from. Reported as linked rather than as unreadable, and refused before the check that would
+  follow it.
+  (#102, [#125](https://github.com/adam-hanna/vibe-code/pull/125))
+- **A killed artifact preservation no longer strands its staging directory** in the run record.
+  Swept at the top of each pass, naming what it removed and what it left. This also collected a
+  second shape nothing had ever removed: a `.partial-<i>` **file**, left when the copied entry was
+  a single file rather than a directory.
+  (#111, [#124](https://github.com/adam-hanna/vibe-code/pull/124))
+- **A run whose review phase has no git to read is refused at minute zero**, instead of dying at
+  the last phase — 30,277,210 tokens and 70.7 minutes into the run that prompted it, with the plan
+  converged, the implementation written and the gate passed three times. Exactly one call in the
+  whole run was unguarded. `vibe plan` still works anywhere.
+  (#71, [#92](https://github.com/adam-hanna/vibe-code/pull/92))
+- **The summary can no longer print a negative Claude share.** Nothing enforced
+  `codexTokens <= tokensUsed`, and `summary()` renders Claude's share by subtraction; a state where
+  it was larger printed `Claude -4,988,787 tok` as the run's accounting.
+  (#87, [#95](https://github.com/adam-hanna/vibe-code/pull/95))
+- **A Codex turn's heartbeat is no longer handed Claude's context window.** Latent rather than
+  visible — counted across 2,480 archived heartbeat lines, no Codex heartbeat has ever rendered a
+  `ctx%`, because Codex reports no per-request usage. What is removed is the trap, and the issue's
+  claim that it rendered a wrong figure was wrong.
+  (#86, [#94](https://github.com/adam-hanna/vibe-code/pull/94))
+- **The past-run index no longer stats the whole archive to render ten rows.** At 2,000 runs the
+  pre-slice stat sweep was 74.40ms of a 77.03ms call — 97% of it. Reordered; no cache, no index
+  file, nothing else on the path needed touching.
+  (#85, [#98](https://github.com/adam-hanna/vibe-code/pull/98))
+- **Resuming a finished run no longer spends ~60,000 tokens** probing agent environments for phases
+  it does not have.
+  (#97, [#120](https://github.com/adam-hanna/vibe-code/pull/120))
+- **A plan whose body is a pointer is refused.** One run implemented a `plan_md` of 13 characters:
+  the critique raised it, and `p1Tolerance` carried it through the gate anyway. It is now a P0 the
+  tolerance cannot carry.
+  (#108, [#121](https://github.com/adam-hanna/vibe-code/pull/121))
+- **A finding's identity means its claim, not its label.** The convergence guards keyed on `id`
+  alone, so a model that renamed a finding looked like progress and one that recycled a label
+  looked like repetition. Across 25 archived runs — 276 findings, 61 rounds — a recycled label was
+  measured to change the title far more often than not, and replaying every history through both
+  builds changed no round-level verdict while removing two false persistence notices.
+  (#116, [#122](https://github.com/adam-hanna/vibe-code/pull/122))
+- **The critic is told when the plan turn never looked at anything** — a plan turn that answered
+  from the conversation, inspecting no file and running no command, no longer arrives
+  indistinguishable from one that read the code.
+  (#63, [#123](https://github.com/adam-hanna/vibe-code/pull/123))
+- **`ASSUMED.md` no longer calls a human decision a guess**, and one question is no longer asked
+  four times. The identity rule was measured rather than chosen: 115 open questions across 22 runs,
+  335 within-run pairs, with a clean gap in the distribution where the threshold went.
+  (#65, [#107](https://github.com/adam-hanna/vibe-code/pull/107))
+
+### Internal
+
+- **One readiness wait for the kill-sweep helpers, with a third way out.** There were two identical
+  copies and neither could time out, so a helper that never said ready hung the whole suite.
+  (#100, [#118](https://github.com/adam-hanna/vibe-code/pull/118))
+- **`changedFiles` is deleted.** Left behind with no caller, still diverging from the packer it was
+  extracted beside, and still answering `[]` where it meant "I could not look".
+  (#93, [#119](https://github.com/adam-hanna/vibe-code/pull/119))
+
+### Upgrading
+
+No config change is required. Five behaviours a running setup can notice:
+
+- **`vibe doctor` honours every flag now, including an invalid one.** A flag it used to ignore
+  starts mattering, so `vibe doctor --codex-context-window 0` fails the config check where it was
+  previously dropped. That is the point — the same flag stops `vibe run` — but if you script on
+  doctor's exit code with flags that were being ignored, check them.
+  (#106)
+- **A review turn that emitted items and used no tool has its blocking findings downgraded to P2.**
+  A review round that used to block can now pass. The downgrade is recorded on the finding with its
+  reason, as every other evidence-based downgrade is.
+  (#66)
+- **A run entry or checkpoint under `.vibe/runs/` that is a symlink or a junction is refused**,
+  unopened, and reported as *linked* rather than as unreadable. If you keep run directories
+  elsewhere and link them into the archive, those runs will no longer load; move them in, or point
+  `-C` at where they actually are.
+  (#53, #102)
+- **`vibe run` outside a git repository exits 6 before the first turn**, rather than warning and
+  then dying in the review phase. `vibe plan` is unaffected and still works anywhere.
+  (#71)
+- **A plan whose body carries no plan is refused as a P0** and `loop.p1Tolerance` will not carry it
+  past the gate, however high it is set.
+  (#108)
+
 ## 1.2.0 - 2026-08-27
 
 Seventeen issues since 1.1.0. **Nothing here breaks an existing config**: every new key has a

@@ -181,6 +181,92 @@ test('codex: a turn whose output file parses flushes', async () => {
   assert.ok(sources.includes('final'));
 });
 
+test('codex: an accepted turn carries out what its heartbeat counted', async () => {
+  // The tally is gathered by the heartbeat and read once, here, after the output
+  // was accepted - so it describes a turn that completed (#66).
+  const dir = codexDir();
+  const { options } = progressRecorder();
+  const completed = (type: string): string => JSON.stringify({ type: 'item.completed', item: { type } });
+
+  const result = await codexTurn(
+    codexOptions(dir, options),
+    fakeExec(0, [CODEX_ITEM, completed('command_execution'), completed('agent_message')], () => {
+      writeFileSync(outPath(dir), '{"findings":[]}', 'utf8');
+    }),
+  );
+
+  assert.deepEqual(result.activity, {
+    items: { command_execution: 1, agent_message: 1 },
+    tool: 1,
+  });
+});
+
+test('codex: a turn that only talked reports items with no tool among them', async () => {
+  // The #44 shape, through the real adapter: measured, and inert.
+  const dir = codexDir();
+  const { options } = progressRecorder();
+
+  const result = await codexTurn(
+    codexOptions(dir, options),
+    fakeExec(0, [JSON.stringify({ type: 'item.completed', item: { type: 'agent_message' } })], () => {
+      writeFileSync(outPath(dir), '{"findings":[]}', 'utf8');
+    }),
+  );
+
+  assert.deepEqual(result.activity, { items: { agent_message: 1 }, tool: 0 });
+});
+
+test('codex: a turn run without progress reports no activity at all', async () => {
+  // The preflight probe passes no `progress`, and so does a run with
+  // `progress.enabled` off. Absent, not an empty tally: `isInert` reads the two
+  // the same way and both mean "nothing measured this".
+  const dir = codexDir();
+  const opts = codexOptions(dir, progressRecorder().options);
+  delete (opts as { progress?: ProgressOptions }).progress;
+
+  const result = await codexTurn(
+    opts,
+    fakeExec(0, [CODEX_ITEM], () => {
+      writeFileSync(outPath(dir), '{"findings":[]}', 'utf8');
+    }),
+  );
+
+  assert.equal(result.activity, undefined);
+});
+
+test('claude: an accepted turn carries out its tool uses and its message', async () => {
+  const { options } = progressRecorder();
+  const withUsage = JSON.stringify({
+    type: 'assistant',
+    message: {
+      id: 'msg_1',
+      usage: { input_tokens: 10, output_tokens: 5 },
+      content: [{ type: 'tool_use', name: 'Read', input: { file_path: 'a.ts' } }],
+    },
+  });
+
+  const result = await claudeTurn(claudeOptions(options), fakeExec(0, [withUsage, SUCCESS]));
+
+  assert.deepEqual(result.activity, { items: { Read: 1, message: 1 }, tool: 1 });
+});
+
+test('claude: a text-only turn reporting no usage is still measured as inert', async () => {
+  // The whole stream for a turn that said one thing and did nothing, in the
+  // shape that carries no `usage` - which the adapter accepts (`usage: null` on
+  // the result). The tally must still describe it, or the reviewer rule cannot
+  // see a Claude review turn that ran nothing.
+  const { options } = progressRecorder();
+  const textOnly = JSON.stringify({
+    type: 'assistant',
+    message: { id: 'msg_1', content: [{ type: 'text', text: 'Looks wrong to me.' }] },
+  });
+
+  const result = await claudeTurn(claudeOptions(options), fakeExec(0, [textOnly, SUCCESS]));
+
+  assert.equal(result.usage, null, 'the turn really did report no usage');
+  assert.deepEqual(result.activity, { items: { message: 1 }, tool: 0 });
+});
+
 test('codex: a non-zero exit whose output file parses is accepted', async () => {
   const dir = codexDir();
   const { options, sources } = progressRecorder();
@@ -293,6 +379,21 @@ test('claude: a fork names the parent to --resume and the child to --session-id'
   assert.equal(argv[at + 1], 'parent-session', 'the parent is what is resumed');
   assert.ok(argv.includes('--fork-session'), 'and forked rather than continued');
   assert.equal(argv[argv.indexOf('--session-id') + 1], 'fixture-session', 'into vibe own id');
+});
+
+test('claude: a resume continues one session and mints nothing', async () => {
+  const { options } = progressRecorder();
+  const { args, exec } = capture();
+
+  await claudeTurn({ ...claudeOptions(options), resume: true }, exec);
+
+  const argv = args[0] ?? [];
+  assert.equal(argv[argv.indexOf('--resume') + 1], 'fixture-session');
+  // Not `--session-id`, and this is the argv half of #74: that flag CREATES a
+  // session and spends the id on attempt, so sending it for a conversation that
+  // already exists is what the CLI refuses with "already in use".
+  assert.equal(argv.includes('--session-id'), false, `no id is minted: ${argv.join(' ')}`);
+  assert.equal(argv.includes('--fork-session'), false, 'and nothing is copied');
 });
 
 test('claude: an ordinary turn sends no fork flag at all', async () => {

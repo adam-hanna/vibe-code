@@ -64,7 +64,8 @@
     "command": null,
     "timeoutMs": 900000,
     "runs": 3,
-    "gates": null
+    "gates": null,
+    "artifactMaxBytes": null
   },
   "toolchain": {
     "git": { "probe": "git --version", "phases": ["plan", "implement", "review"] },

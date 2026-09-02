@@ -2,13 +2,15 @@ import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import {
   DEFAULT_ROLE_PROVIDERS,
+  patchRoles,
   providersForRoles,
   ROLE_NAMES,
   roleRefusals,
   roleSetting,
   rolesFor,
+  tableFor,
 } from '@src/roles.js';
-import type { Role, RoleProviders } from '@src/roles.js';
+import type { Role, RoleProviders, RolePatches, RoleTable } from '@src/roles.js';
 import { setOwn } from '@src/runtime.js';
 import type { AgentProvider, ToolchainContract, ToolRequirement, Phase } from '@src/runtime.js';
 import { EFFORTS } from '@src/types.js';
@@ -150,6 +152,11 @@ export const DEFAULTS: Config = {
     // written before #47 has - and anything that spreads `DEFAULTS.verify` and
     // sets `command` keeps producing a legacy config rather than an illegal one.
     gates: null,
+    // No ceiling by default, and deliberately no number. The archive measurement
+    // that exists (11.6MB over 24 runs) bounds what vibe writes, not what a test
+    // reporter writes, so any default would be invented - and a user who named
+    // an artifact path opted in to it being copied (#62).
+    artifactMaxBytes: null,
   },
   progress: {
     enabled: true,
@@ -267,6 +274,51 @@ function mergeToolchain(base: ToolchainContract, override: unknown): ToolchainCo
 }
 
 /**
+ * The config with per-role CLI settings applied to its role table (#89).
+ *
+ * Returns the config itself when there are none, so the no-flag path allocates
+ * nothing and cannot differ by so much as an object identity. Applied INSIDE
+ * both entry points rather than layered on afterwards, and that placement is the
+ * whole of #89: `resolveRoleScopedAgents` derives `toolchain.<tool>.agents` from
+ * the table, and it skips any tool a *layer* pinned - so handing a resolved
+ * config back as a layer makes every role-scoped tool look like a user pin and
+ * the second pass declines to re-derive. Preflight would then enforce a runtime
+ * against an agent no role holds.
+ */
+function withRolePatches(cfg: Config, roles: RolePatches): Config {
+  if (Object.keys(roles).length === 0) return cfg;
+  return { ...cfg, roles: patchRoles(cfg.roles, roles) };
+}
+
+/**
+ * Whether probed environment facts recorded under `before` still describe
+ * `after` (#89).
+ *
+ * Two things in `EnvironmentFacts` are not restated from config and cannot be
+ * recomputed without re-probing: which provider holds which role - the label
+ * `environmentBlock` prints, via `describedRole` - and which tools were
+ * contracted of each agent, which is the probe's own question. Both move when a
+ * role changes provider or when the contract does, and the contract half catches
+ * the explicit-pin case too, where `resolveRoleScopedAgents` deliberately did
+ * NOT re-derive.
+ *
+ * Deliberately not triggered by a model, effort or timeout change: none of those
+ * is stated in the environment block, and clearing on them would throw away
+ * probed facts whose absence costs three plan rounds of false "no Node runtime"
+ * findings - the failure that block exists to prevent.
+ *
+ * Both sides are resolved, validated configs, so `tableFor` cannot throw here.
+ */
+export function environmentStale(before: Config, after: Config): boolean {
+  const b = tableFor(before.roles);
+  const a = tableFor(after.roles);
+  return (
+    ROLE_NAMES.some((role) => b[role].provider !== a[role].provider) ||
+    JSON.stringify(before.toolchain) !== JSON.stringify(after.toolchain)
+  );
+}
+
+/**
  * Layer CLI overrides onto an already-resolved config.
  *
  * Used on resume, where the base is the config the run started with rather
@@ -280,13 +332,41 @@ function mergeToolchain(base: ToolchainContract, override: unknown): ToolchainCo
  * given now still beat both. This is not specific to any one setting; without
  * it, the next key added breaks resume for every run already on disk.
  */
-export function applyOverrides(base: Config, overrides: ConfigOverrides): Config {
-  const merged = mergeConfig(mergeConfig(DEFAULTS, base), overrides);
+export function applyOverrides(
+  base: Config,
+  overrides: ConfigOverrides,
+  roles: RolePatches = {},
+): Config {
+  const layered = mergeConfig(mergeConfig(DEFAULTS, base), overrides);
+  const merged = withRolePatches(layered, roles);
   // The table is checked before anything derives from it - see loadConfig.
   validateRoles(merged.roles);
-  const cfg = resolveRoleScopedAgents(merged, [base, overrides]);
+  // `base` here is a resolved config, so its `toolchain.node.agents` is always
+  // defined and `pinnedByAnyLayer` reports it as a pin - on EVERY resume. Without
+  // a prior table to compare against, a role patch that moves a provider would
+  // change the table and leave the contract behind it. Computed only when there
+  // are patches, so a resume with no `--role` behaves exactly as it did.
+  const priorTable = Object.keys(roles).length === 0 ? undefined : tableOrUndefined(layered.roles);
+  const cfg = resolveRoleScopedAgents(merged, [base, overrides], priorTable);
   validate(cfg);
   return cfg;
+}
+
+/**
+ * The table this assignment describes, or nothing when it does not describe one.
+ *
+ * `state.config` is the one field `validateStoredState` passes through
+ * unchecked, so a stored table can be malformed - and a stored config that no
+ * longer validates has to be refused by `validateRoles`' message rather than by
+ * `tableFor` throwing three frames earlier, from a comparison that is only an
+ * optimisation. Absent means "cannot say", which leaves every pin standing.
+ */
+function tableOrUndefined(roles: RoleProviders): RoleTable | undefined {
+  try {
+    return tableFor(roles);
+  } catch {
+    return undefined;
+  }
 }
 
 const SECTIONS = [
@@ -328,7 +408,11 @@ export function configDiff(before: Config, after: Config): string[] {
 }
 
 /** Precedence: defaults < vibe.config.json in the target repo < CLI flags. */
-export function loadConfig(targetDir: string, overrides: ConfigOverrides = {}): LoadedConfig {
+export function loadConfig(
+  targetDir: string,
+  overrides: ConfigOverrides = {},
+  roles: RolePatches = {},
+): LoadedConfig {
   const configPath = path.join(targetDir, 'vibe.config.json');
   let fromFile: unknown = {};
 
@@ -341,11 +425,14 @@ export function loadConfig(targetDir: string, overrides: ConfigOverrides = {}): 
     }
   }
 
-  const merged = mergeConfig(mergeConfig(DEFAULTS, fromFile), overrides);
+  const merged = withRolePatches(mergeConfig(mergeConfig(DEFAULTS, fromFile), overrides), roles);
   // Order matters. `resolveRoleScopedAgents` reads the table, so a bad role
   // value checked afterwards would surface as an empty `toolchain.node.agents`
   // - a toolchain error for what is a `roles` mistake.
   validateRoles(merged.roles);
+  // No prior table, unlike `applyOverrides`: these layers are raw file and flag
+  // input, so any `agents` in one is a contract the user wrote by hand and keeps
+  // winning over the role table, exactly as it did before per-role flags.
   const cfg = resolveRoleScopedAgents(merged, [fromFile, overrides]);
   validate(cfg);
   return { ...cfg, configPath: existsSync(configPath) ? configPath : null };
@@ -388,19 +475,52 @@ function pinnedByAnyLayer(layers: readonly unknown[], tool: string): boolean {
  * a stored `state.config` - which always carries concrete agents - authoritative
  * on resume.
  *
+ * `priorTable` is the one exception, and it exists because a *resolved* config
+ * used as a layer is indistinguishable from a hand-written pin: every one of
+ * them carries `agents`, so before #89 a role table could never change after a
+ * run was created and the ambiguity was unreachable. A caller that is about to
+ * change the table passes the table as it was, and a pin equal to what THAT
+ * table would have derived is treated as derived and re-derived. A pin that
+ * differs is a contract the user wrote and is left alone.
+ *
+ * The residual trade, stated rather than hidden: a hand-written pin that happens
+ * to equal the pre-change derived value is re-derived too. That is the safer of
+ * the two errors - the alternative is preflight probing and enforcing a runtime
+ * against an agent no role holds.
+ *
  * Runs after `validateRoles`, so the table is well formed and `agents` is never
  * resolved to an empty list.
  */
-function resolveRoleScopedAgents(cfg: Config, layers: readonly unknown[]): Config {
+function resolveRoleScopedAgents(
+  cfg: Config,
+  layers: readonly unknown[],
+  priorTable?: RoleTable,
+): Config {
   const table = rolesFor(cfg);
   const toolchain: Record<string, ToolRequirement> = { ...cfg.toolchain };
   for (const [tool, wanted] of Object.entries(ROLE_SCOPED_TOOLS)) {
     const requirement = toolchain[tool];
     if (requirement === undefined) continue;
-    if (pinnedByAnyLayer(layers, tool)) continue;
+    if (pinnedByAnyLayer(layers, tool) && !pinWasDerived(requirement, wanted, priorTable)) continue;
     toolchain[tool] = { ...requirement, agents: providersForRoles(wanted, table) };
   }
   return { ...cfg, toolchain };
+}
+
+/**
+ * Whether a pin is one this function itself derived, under the prior table.
+ *
+ * False with no prior table, which is every caller that is not changing the
+ * table - so the pin wins, as it always has. `providersForRoles` emits a fixed
+ * order, so comparing the rendered lists is stable.
+ */
+function pinWasDerived(
+  requirement: ToolRequirement,
+  wanted: readonly Role[],
+  priorTable: RoleTable | undefined,
+): boolean {
+  if (priorTable === undefined) return false;
+  return JSON.stringify(requirement.agents) === JSON.stringify(providersForRoles(wanted, priorTable));
 }
 
 /**
@@ -414,7 +534,7 @@ function validateRoles(raw: unknown): void {
   if (!isRecord(raw)) {
     throw new Error(
       'roles must be an object mapping role names to "claude" or "codex", or to an object ' +
-        'naming a provider and optionally a model and an effort',
+        'naming a provider and optionally a model, an effort and a timeout',
     );
   }
   for (const key of Object.keys(raw)) {
@@ -516,7 +636,151 @@ const PROVIDERS: readonly AgentProvider[] = ['claude', 'codex'];
 
 /** A gate name has to survive being a finding id, so it is kept to one alphabet. */
 const GATE_NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
-const GATE_KEYS = ['name', 'command', 'runs', 'timeoutMs', 'required'] as const;
+const GATE_KEYS = ['name', 'command', 'runs', 'timeoutMs', 'required', 'artifacts'] as const;
+
+/** The run directory's own name. Copying it into itself is the one self-reference to refuse. */
+const VIBE_DIR = '.vibe';
+
+/**
+ * Every absolute spelling, checked on EVERY host rather than per platform.
+ *
+ * `path.isAbsolute` answers for the host it runs on and nothing else, so a
+ * config written on Windows and validated on CI would have `C:\reports` read as
+ * a relative directory literally named `C:`. A rule about what the user may
+ * write must not depend on where it is read.
+ */
+const WINDOWS_DRIVE_RE = /^[A-Za-z]:/;
+const UNC_RE = /^[\\/]{2}/;
+/**
+ * A leading separator of either flavour, refused on every host too.
+ *
+ * `path.isAbsolute('\\x')` is true on win32 and FALSE on POSIX, so without this
+ * the same config is rooted on one host and a directory literally named `\x` on
+ * the other. Same rule as above: what the user may write cannot depend on where
+ * it is read.
+ */
+const LEADING_SEPARATOR_RE = /^[\\/]/;
+
+/**
+ * A segment Windows would canonicalize into a different one.
+ *
+ * The Win32 layer strips trailing dots and spaces from every component, so
+ * `".. "` IS `..` there, and `"foo."` IS `foo`. A `..` check that compares raw
+ * segments therefore passes `foo/.. /secret` straight through while the
+ * filesystem walks it out of the project - which is a containment hole, not a
+ * cosmetic one. Refusing the whole shape on EVERY host is one rule instead of a
+ * canonicalization the rest of the code would then have to agree with, and it
+ * costs only the ability to name a POSIX file with a trailing dot or space.
+ *
+ * The repo's existing answer to the same hole, and the reason this one is
+ * spelled the same way: `assertUsableRunId` refuses a run id ending in a dot or
+ * a space, and `isReportBasename` refuses the same shape one field along.
+ */
+const TRAILING_DOT_OR_SPACE_RE = /[. ]$/;
+
+/**
+ * One artifact path's segments, in the form the comparison rules use.
+ *
+ * Windows folds case AND strips trailing dots and spaces at the Win32 layer, so
+ * `.VIBE`, `.vibe.` and `.vibe ` all name the same directory there while a naive
+ * `=== '.vibe'` sees three different strings - which would be a way to copy the
+ * run archive into a descendant of itself. POSIX does none of that folding, and
+ * pretending it does would refuse paths that are genuinely distinct.
+ */
+function artifactSegments(entry: string): string[] {
+  return entry
+    .split(/[\\/]+/)
+    .filter((s) => s !== '' && s !== '.')
+    .map((s) => (process.platform === 'win32' ? s.toLowerCase().replace(/[. ]+$/, '') : s));
+}
+
+/**
+ * Why this artifact path may not be copied, or null.
+ *
+ * The ONE lexical rule for an artifact path, exported so `src/artifacts.ts` can
+ * apply the identical rule at copy time (#62). Two nearly-agreeing checks in two
+ * files is how a validation rule and the thing it guards drift apart: an earlier
+ * draft of this change had the copy-time check mirror `resolveInside`, which
+ * permits an absolute path *inside* the root and a `sub/../file` alias - both of
+ * which this refuses.
+ *
+ * Lexical only. Links are a filesystem question, asked component by component in
+ * `src/artifacts.ts` with #53's predicate.
+ */
+export function refuseArtifactPath(entry: unknown): string | null {
+  if (typeof entry !== 'string' || entry.trim() === '') {
+    return 'must be a non-empty path string';
+  }
+  if (
+    path.isAbsolute(entry) ||
+    LEADING_SEPARATOR_RE.test(entry) ||
+    WINDOWS_DRIVE_RE.test(entry) ||
+    UNC_RE.test(entry)
+  ) {
+    return `"${entry}" is absolute; artifact paths are relative to the project`;
+  }
+  const raw = entry.split(/[\\/]+/).filter((s) => s !== '' && s !== '.');
+  if (raw.includes('..')) {
+    // Refused even where it resolves back inside - `sub/../file` is the same
+    // file as `file` and has no reason to be written that way, and one rule
+    // that is easy to state beats two that nearly agree.
+    return `"${entry}" contains a ".." segment; artifact paths may not walk upwards`;
+  }
+  // AFTER the `..` check, which is exact: `..` itself ends in a dot, and the two
+  // refusals mean different things to whoever reads them.
+  const ambiguous = raw.find((s) => TRAILING_DOT_OR_SPACE_RE.test(s));
+  if (ambiguous !== undefined) {
+    return (
+      `"${entry}" has a segment ending in a dot or space ("${ambiguous}"), which Windows ` +
+      'strips - so the path names something different there than it reads as here'
+    );
+  }
+  const segments = artifactSegments(entry);
+  if (segments.length === 0) {
+    return `"${entry}" names the project root; artifact paths must name something inside it`;
+  }
+  // `segments` is already folded on win32 and `.vibe` is already lower case, so
+  // one comparison covers `.VIBE`, `.vibe.` and `.vibe ` there.
+  if (segments.includes(VIBE_DIR)) {
+    return `"${entry}" is under ${VIBE_DIR}, which is the run directory itself`;
+  }
+  return null;
+}
+
+/**
+ * Why these two artifact paths may not both be copied, or null.
+ *
+ * `["reports", "reports/output.json"]` copies the same bytes twice, so the
+ * reported total double-counts them; worse, a child refused as `too-large` or
+ * reported `missing` would still be sitting in the run directory because its
+ * parent copied it. Both are records that contradict the filesystem, which is
+ * the failure this whole change exists to prevent - so the config is refused
+ * rather than given an aggregation rule nobody has asked for.
+ *
+ * Disjoint entries sharing a basename are fine: destinations mirror the
+ * configured path, so `a/report` and `b/report` cannot collide.
+ */
+export function refuseOverlappingArtifacts(entries: readonly string[]): string | null {
+  const seen: { entry: string; segments: string[] }[] = [];
+  for (const entry of entries) {
+    const segments = artifactSegments(entry);
+    for (const prior of seen) {
+      const [shorter, longer] =
+        prior.segments.length <= segments.length
+          ? [prior, { entry, segments }]
+          : [{ entry, segments }, prior];
+      const nested = shorter.segments.every((s, i) => longer.segments[i] === s);
+      if (nested) {
+        return (
+          `"${prior.entry}" and "${entry}" overlap; one contains the other, so the same ` +
+          'files would be copied twice and counted twice'
+        );
+      }
+    }
+    seen.push({ entry, segments });
+  }
+  return null;
+}
 
 /**
  * The verification section, including the gate list.
@@ -536,6 +800,20 @@ function validateVerify(verify: VerifyConfig): void {
     throw new Error(
       'verify.command must be a non-empty command string, or null to auto-detect',
     );
+  }
+
+  // Above the `gates === null` return below, deliberately: this key is a
+  // property of the whole verify section, and a legacy config - which is the
+  // shape most runs still have - would otherwise skip its validation entirely
+  // and accept `artifactMaxBytes: "10"` in silence.
+  const maxBytes: unknown = verify.artifactMaxBytes;
+  if (maxBytes !== null && maxBytes !== undefined) {
+    if (!Number.isInteger(maxBytes) || (maxBytes as number) < 1) {
+      throw new Error(
+        'verify.artifactMaxBytes must be a positive integer number of bytes, or null for no ' +
+          'ceiling',
+      );
+    }
   }
 
   const gates: unknown = verify.gates;
@@ -566,16 +844,6 @@ function validateVerify(verify: VerifyConfig): void {
     const where = `verify.gates[${i}]`;
     if (!isRecord(entry)) throw new Error(`${where} must be an object with a name and a command`);
 
-    // Asked before the field checks, as `roleSetting` does: `{"artifacts": [...]}`
-    // is a real request out of #47's own example, and answering it with "gate has
-    // no command" would send the reader the wrong way.
-    if (Object.prototype.hasOwnProperty.call(entry, 'artifacts')) {
-      throw new Error(
-        `${where}.artifacts is not supported: gate artifacts are not implemented. The gate ` +
-          'list ships without them (#47); copying project-controlled paths into the run ' +
-          'directory waits on #53.',
-      );
-    }
     for (const key of Object.keys(entry)) {
       if (!(GATE_KEYS as readonly string[]).includes(key)) {
         throw new Error(
@@ -622,6 +890,25 @@ function validateVerify(verify: VerifyConfig): void {
     const required = entry['required'];
     if (required !== undefined && typeof required !== 'boolean') {
       throw new Error(`${where}.required must be true or false`);
+    }
+
+    // The shape settles these, so they are refused HERE rather than mid-run:
+    // a typo in a path is a config error, not a surprise forty minutes in when
+    // the gate finally fails and there is nothing to preserve (#62).
+    const artifacts = entry['artifacts'];
+    if (artifacts !== undefined) {
+      if (!Array.isArray(artifacts)) {
+        throw new Error(
+          `${where}.artifacts must be a list of project-relative paths (a directory or a file ` +
+            'each), or absent',
+        );
+      }
+      artifacts.forEach((candidate: unknown, j) => {
+        const refusal = refuseArtifactPath(candidate);
+        if (refusal !== null) throw new Error(`${where}.artifacts[${j}] ${refusal}`);
+      });
+      const overlap = refuseOverlappingArtifacts(artifacts as string[]);
+      if (overlap !== null) throw new Error(`${where}.artifacts: ${overlap}`);
     }
   });
 }

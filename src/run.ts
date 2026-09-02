@@ -1,5 +1,6 @@
 ﻿import {
   closeSync,
+  lstatSync,
   mkdirSync,
   openSync,
   writeFileSync,
@@ -16,13 +17,15 @@ import * as log from '@src/log.js';
 import { livenessOf } from '@src/lock.js';
 import type { ActivityObservation } from '@src/progress.js';
 import { initialSlotFields } from '@src/slots.js';
-import { checkStoredConsistency } from '@src/consistency.js';
+import { checkStoredConsistency, checkTokenShare } from '@src/consistency.js';
+import { normalize, REPHRASE_THRESHOLD, similarity } from '@src/similarity.js';
 import {
   assertUsableRunId,
   hasFindingShape,
   isRecord,
   parseStoredState,
   readCheckpointShape,
+  StoredStateError,
   summariseStored,
   validateStoredState,
 } from '@src/stored.js';
@@ -33,6 +36,7 @@ import type {
   GateOutcome,
   InFlightTurn,
   PendingFindings,
+  RoundClaim,
   RoundRecord,
   RunCheckpointMeta,
   RunPhase,
@@ -229,14 +233,19 @@ export function createRun(
  * repair-or-refuse rule this enforces.
  *
  * The order is load-bearing. The id is constrained before it becomes a path, so
- * a traversal attempt never opens a file; parsing and validation are pure and
- * throw before anything is written, so a refused state file is left
- * byte-for-byte unchanged; and only once the state is known good are the
- * repairs recorded, which is the first write this function makes.
+ * a traversal attempt never opens a file; the entry is then classified before it
+ * is opened, so a linked run never has its bytes read (#53); parsing and
+ * validation are pure and throw before anything is written, so a refused state
+ * file is left byte-for-byte unchanged; and only once the state is known good
+ * are the repairs recorded, which is the first write this function makes.
  */
 export function loadRun(targetDir: string, id: string): RunState {
   const root = path.join(targetDir, RUNS_DIR);
   assertUsableRunId(id, root);
+  // One layer under the lexical check above, and the same promise: this throws
+  // before `existsSync`, before the read, and before `ensureVibeIgnored` - which
+  // is what keeps "nothing was read or written" literally true (#53).
+  assertUnlinkedRun(root, id);
   const dir = path.join(root, id);
   const file = path.join(dir, 'state.json');
   if (!existsSync(file)) throw new Error(`No run "${id}" under ${RUNS_DIR}`);
@@ -324,6 +333,48 @@ export function loadRun(targetDir: string, id: string): RunState {
         'Nothing else was changed.',
     );
   }
+
+  // Rule D, the other cross-field pass (#87). Applied here rather than beside
+  // the phase one because it never refuses: it makes no promise about what has
+  // been written, so it does not need to precede `ensureVibeIgnored`.
+  //
+  // Recorded as a `state_repaired` event, NOT as a `state_normalised` one, and
+  // not by joining the `repairs` array above. The event type is the one every
+  // consumer already filters for "which stored fields did this load alter", and
+  // its payload is a superset of `StateRepair`, so a reader of
+  // `field`/`found`/`replacedWith` needs no change; the `rule`, `against` and
+  // `storedCodexTokens` keys are what tell a clamp from a per-field repair, and
+  // they are the only surviving copy of the figure the file held.
+  // `state_normalised`'s payload is phase-shaped - `storedPhase`,
+  // `resolvedPhase`, `planOnly` - and describes nothing here. Joining `repairs`
+  // was the third option and is wrong for the warning it would print: that line
+  // says each field "was replaced with the empty value its type implies", which
+  // is untrue of a clamp. Hence the separate line below.
+  //
+  // Fires once. It rewrites the field its own predicate reads, so the next load
+  // of the same run sees a consistent state - unlike rule B.
+  const share = checkTokenShare(state);
+  if (share !== null) {
+    state.codexTokens = share.codexTokens;
+    recordEvent(state, 'state_repaired', {
+      field: 'codexTokens',
+      found: String(share.storedCodexTokens),
+      replacedWith: String(share.codexTokens),
+      droppedCount: 0,
+      droppedPaths: [],
+      rule: share.rule,
+      against: 'tokensUsed',
+      storedCodexTokens: share.storedCodexTokens,
+      tokensUsed: share.tokensUsed,
+      why: share.why,
+    });
+    log.warn(
+      `state.json for ${id} recorded ${share.storedCodexTokens.toLocaleString()} Codex tokens ` +
+        `against a run total of ${share.tokensUsed.toLocaleString()} - ${share.why}. The Codex ` +
+        `share was clamped to ${share.codexTokens.toLocaleString()} and the change recorded in ` +
+        "the run's event log; the run total, the cost and nothing else were touched.",
+    );
+  }
   return state;
 }
 
@@ -339,11 +390,270 @@ export interface ListRunsOptions {
   exclude?: string | undefined;
   /**
    * Parse at most this many runs, newest first. Applied before the map, so an
-   * archive of a hundred runs costs ten reads rather than a hundred - the
-   * directory scan itself is still proportional to the archive, which is stated
-   * rather than fixed here (#52).
+   * archive of a hundred runs costs ten reads rather than a hundred.
+   *
+   * Until #85 the *scan* was still proportional to the archive: every entry was
+   * stat-ed before the limit was applied, which at 2000 runs was 74.40ms of a
+   * 77.03ms `limit: 10` call - 97% of it, against 1.46ms of `readdirSync`.
+   * `selectRunIds` now walks the sorted entries and stops at the first `limit`
+   * survivors, so the probing is proportional to the entries EXAMINED - the rows
+   * returned plus whatever was skipped on the way to them - rather than to the
+   * archive. `limit: undefined` (`vibe list`) still examines everything: there
+   * is no limit to stop at, and that listing shows every run by design.
+   *
+   * What one examined entry costs changed with #53 and the figure above did not
+   * move with it: it was one `statSync`, and is now one `lstat` on the entry
+   * plus, for a real directory, one `lstat` on its state.json - which is what
+   * replaced that `statSync` rather than adding to it. The classification is
+   * kept for the row builder instead of being repeated there. A
+   * not-a-directory entry still costs the old `statSync` as well, because its
+   * platform-dependent verdict is the behaviour it has always had.
    */
   limit?: number | undefined;
+}
+
+/** What a run directory's state.json can be told to be (#77). */
+export type StatePresence = 'absent' | 'present' | 'unknown';
+
+/**
+ * Whether a directory holds a run at all - and, when that cannot be told apart,
+ * which way to fail.
+ *
+ * `existsSync` answers `false` both for "there is no state.json" and for "there
+ * is one and this process may not look at it", and those need opposite
+ * treatment: the first is an allocated-but-uninitialised directory that was
+ * never a run and must not appear in the listing or in the planner's index, the
+ * second is a run that exists and whose row belongs in the listing as
+ * `unreadable`, with the liveness verdict the lock beside it can still give.
+ * Dropping the second is how an inaccessible run disappears entirely (#77).
+ *
+ * `throwIfNoEntry: false` is what separates them: `undefined` is `ENOENT`, and a
+ * throw is everything else.
+ *
+ * **This is a `statSync`, so it FOLLOWS links** - a symlinked or junctioned run
+ * directory is stat-ed through, and the answer describes a file outside the
+ * archive (#53). It must therefore never be the first question asked about an
+ * entry that has not been classified by `linkageOf` yet; `listRuns` classifies
+ * first and calls this only for an entry it has established is a plain
+ * directory.
+ */
+export function statePresence(file: string): StatePresence {
+  try {
+    return statSync(file, { throwIfNoEntry: false }) === undefined ? 'absent' : 'present';
+  } catch {
+    return 'unknown';
+  }
+}
+
+/**
+ * Whether a path is a link out of the archive, and - when that cannot be told -
+ * which way to fail (#53).
+ *
+ * `lstat`, never `stat`: `statSync` follows a POSIX symlink, a Node `'junction'`
+ * and an `mklink /J` junction alike, so it cannot see any of them, while
+ * `lstat(...).isSymbolicLink()` is true for all three. That measurement is what
+ * settled the design - one predicate, no platform split.
+ *
+ * **Only the LAST component escapes the follow.** `linkageOf('<link>/state.json')`
+ * resolves `<link>` to reach the child, so a caller must classify the directory
+ * first and only ask about anything inside it once the answer is a real
+ * directory. `runEntryLinkage` is that order, written once.
+ *
+ * `plain` means "not a symlink" and nothing more. It is the verdict for
+ * `state.json`, where being a file is what is expected; the run entry itself
+ * needs the stronger question and gets `entryKind` below.
+ */
+export type PathLinkage = 'link' | 'plain' | 'missing' | 'unknown';
+
+export function linkageOf(p: string): PathLinkage {
+  try {
+    const st = lstatSync(p, { throwIfNoEntry: false });
+    if (st === undefined) return 'missing';
+    return st.isSymbolicLink() ? 'link' : 'plain';
+  } catch {
+    return 'unknown';
+  }
+}
+
+/**
+ * What a run entry is, from one `lstat` that follows nothing.
+ *
+ * `not-a-directory` is a separate verdict from `unknown` on purpose, and the
+ * distinction is load-bearing in both directions. A regular file sitting in
+ * `.vibe/runs` is *definitively* classified: it is not a link, nothing can be
+ * reached through it, and the row it produces is the `unreadable` one it has
+ * always produced (#77) - calling it a junction would fabricate a fact about the
+ * filesystem. An `lstat` that *threw* is the opposite: nothing is known, so
+ * nothing may be followed, and the row has to say so rather than pass as
+ * ordinary.
+ */
+export type EntryKind = 'link' | 'directory' | 'not-a-directory' | 'missing' | 'unknown';
+
+export function entryKind(p: string): EntryKind {
+  try {
+    const st = lstatSync(p, { throwIfNoEntry: false });
+    if (st === undefined) return 'missing';
+    if (st.isSymbolicLink()) return 'link';
+    return st.isDirectory() ? 'directory' : 'not-a-directory';
+  } catch {
+    return 'unknown';
+  }
+}
+
+/**
+ * The status a refused entry DISPLAYS as. Not provenance - see
+ * `RunSummary.linked`, which is the field anything acting on the distinction
+ * must read.
+ */
+export const LINKED_STATUS = 'linked';
+
+/**
+ * The status an entry displays as when `lstat` could not classify it at all.
+ *
+ * Distinct from `unreadable`, which says a state.json was opened and could not
+ * be used, and from `linked`, which is a measurement. This one says only "vibe
+ * did not look inside this, because it could not establish what it is" - which
+ * is a different fact and the one the planner has to be told, since the
+ * do-not-open warning has to name a row the reader can pick out.
+ */
+export const UNVERIFIED_STATUS = 'unverified';
+
+/** The two questions #53 is about, asked in the only order that is safe. */
+export interface RunEntryLinkage {
+  dir: EntryKind;
+  /**
+   * `null` when the directory is not a plain directory, because there is no
+   * honest answer: the path that would be probed runs through the very entry
+   * being judged.
+   */
+  state: PathLinkage | null;
+}
+
+export function runEntryLinkage(root: string, id: string): RunEntryLinkage {
+  const dir = entryKind(path.join(root, id));
+  if (dir !== 'directory') return { dir, state: null };
+  return { dir, state: linkageOf(path.join(root, id, 'state.json')) };
+}
+
+/**
+ * What a listing may do with an entry, from its classification alone.
+ *
+ * Three outcomes, and they are three because the facts are:
+ *
+ * - `linked` - measured: the entry or its state.json IS a symlink or a
+ *   junction. Refused, and the planner is told not to open it.
+ * - `unverified` - `lstat` threw (EACCES on the entry while `readdir` still
+ *   succeeded is the realistic cause). **Fails closed**: nothing is followed,
+ *   and the row carries the same do-not-open warning, because an entry that
+ *   cannot be classified cannot be ruled out as a link. It is NOT called a
+ *   link, because that was not measured.
+ * - `readable` - everything else, including a regular file or any other
+ *   not-a-directory entry, which reads and fails exactly as it always has.
+ *
+ * Pure, and exported for its test: the throwing branches need an `lstat` that
+ * fails, which no portable fixture can arrange, so the decision is tested
+ * directly and the wiring is tested with real links.
+ */
+export type EntryVerdict = 'linked' | 'unverified' | 'readable';
+
+export function entryVerdict(linkage: RunEntryLinkage): EntryVerdict {
+  if (linkage.dir === 'link' || linkage.state === 'link') return 'linked';
+  if (linkage.dir === 'unknown' || linkage.state === 'unknown') return 'unverified';
+  return 'readable';
+}
+
+/**
+ * Why this entry may not be used, or null (#53).
+ *
+ * `assertUsableRunId` closes `../` traversal lexically, which is what a CLI
+ * argument can reach. This is the layer under it: a single-component entry that
+ * is a symlink or a junction passes every lexical check and still points
+ * anywhere on disk, and both the resume path and the fork path followed it.
+ *
+ * One message builder for every refusing site - `loadRun` and `cmdResume` throw
+ * it as a `StoredStateError`, `listForkPoints`, `planFork` and `commitFork` as a
+ * `ForkError` - so the refusal reads the same whichever command hit it. It names
+ * the entry and NOT the link's target: reading the target would be another read
+ * of an attacker-controlled entry, for a path `ls -l` already shows.
+ */
+export function linkedRunReason(root: string, id: string): string | null {
+  const { dir, state } = runEntryLinkage(root, id);
+  const what = dir === 'link' ? 'the run directory' : state === 'link' ? 'its state.json' : null;
+  if (what === null) return null;
+  return (
+    `Run "${id}" cannot be used: ${what} under ${RUNS_DIR} is a symlink or a junction, so it ` +
+    'points outside the run archive. vibe never creates one - every run directory it makes is a ' +
+    'real directory - so this was not made by a run. Nothing was read and nothing was written.'
+  );
+}
+
+/**
+ * Refuse a run directory, or its state.json, that is a link (#53).
+ *
+ * `unknown` does NOT refuse here, and that asymmetry with `listRuns` is
+ * deliberate: an entry `lstat` could not classify is not evidence of a link, and
+ * the read that follows either succeeds under the existing checks or fails with
+ * the existing error - which is what #77 requires of a run that is present and
+ * unreadable. `listRuns` fails closed instead, because it is choosing whether to
+ * FOLLOW rather than which error to report.
+ */
+export function assertUnlinkedRun(root: string, id: string): void {
+  const reason = linkedRunReason(root, id);
+  if (reason !== null) throw new StoredStateError(reason);
+}
+
+/**
+ * Which run ids to read, newest first - and only as many stats as that costs.
+ *
+ * Ordering first and probing second is what makes the scan proportional to the
+ * rows returned rather than to the archive (#85). It changes nothing about the
+ * answer: `filter` preserves order, so filtering before or after a total-order
+ * sort gives the same sequence, and taking the first `limit` of that sequence is
+ * the same list as walking it and keeping the first `limit` that pass. The stat
+ * count is bounded above by the old always-N, never higher - even in the
+ * pathological archive of 1000 uninitialised directories sorting newer than 100
+ * real runs, where the old chain probed 1100 and this probes 1010.
+ *
+ * The presence probe is a parameter rather than a direct `statSync` so that a
+ * test can count the examinations: `mock.module` is experimental and 22.3+ while
+ * `engines` is node >=20, and nothing in tests/ mocks a module. `listRuns`
+ * passes the real `statePresence`. Exported for its test, as `assessConvergence`
+ * and friends already are.
+ *
+ * The per-entry decision - "is this entry a run, and may we look at it?" - is
+ * deliberately in one place, the loop body.
+ *
+ * #53 did NOT land here. The link check lives in the callback `listRuns` passes
+ * in and in its row builder, for two reasons: an `lstat` in this loop would run
+ * for every ordered candidate rather than only for entries `listRuns` is about
+ * to open, and this function's contract is `StatePresence`, which stays
+ * three-valued because `src/cli.ts` and `src/fork.ts` compare against it.
+ */
+export function selectRunIds(
+  entries: readonly string[],
+  opts: ListRunsOptions,
+  presence: (id: string) => StatePresence,
+): string[] {
+  // `slice(0, n)` truncated a fractional limit and returned nothing for a
+  // negative or a NaN one; the loop has to reproduce both, not approximate them.
+  // `!(limit >= 1)` is all three: zero, negative and NaN.
+  const limit = opts.limit === undefined ? undefined : Math.floor(Math.max(0, opts.limit));
+  if (limit !== undefined && !(limit >= 1)) return [];
+
+  // Copied because the parameter is readonly and `sort` mutates in place.
+  const ordered = [...entries].sort().reverse();
+  const kept: string[] = [];
+  for (const id of ordered) {
+    // Before the stat: excluding the current run must never cost a listed one,
+    // and it is the one entry guaranteed to be present, so the stat is waste.
+    if (id === opts.exclude) continue;
+    // Only 'absent' drops it. 'unknown' is a run that exists and may not be
+    // read, and its row belongs in the listing as unreadable (#77, #78).
+    if (presence(id) === 'absent') continue;
+    kept.push(id);
+    if (limit !== undefined && kept.length >= limit) break;
+  }
+  return kept;
 }
 
 /**
@@ -361,29 +671,6 @@ export interface ListRunsOptions {
  * rendered, in `priorRunsSection`, and this stays the listing it has always
  * been.
  */
-/**
- * Whether a directory holds a run at all - and, when that cannot be told apart,
- * which way to fail.
- *
- * `existsSync` answers `false` both for "there is no state.json" and for "there
- * is one and this process may not look at it", and those need opposite
- * treatment: the first is an allocated-but-uninitialised directory that was
- * never a run and must not appear in the listing or in the planner's index, the
- * second is a run that exists and whose row belongs in the listing as
- * `unreadable`, with the liveness verdict the lock beside it can still give.
- * Dropping the second is how an inaccessible run disappears entirely (#77).
- *
- * `throwIfNoEntry: false` is what separates them: `undefined` is `ENOENT`, and a
- * throw is everything else.
- */
-export function statePresence(file: string): 'absent' | 'present' | 'unknown' {
-  try {
-    return statSync(file, { throwIfNoEntry: false }) === undefined ? 'absent' : 'present';
-  } catch {
-    return 'unknown';
-  }
-}
-
 export function listRuns(targetDir: string, opts: ListRunsOptions = {}): RunSummary[] {
   const root = path.join(targetDir, RUNS_DIR);
   if (!existsSync(root)) return [];
@@ -398,17 +685,69 @@ export function listRuns(targetDir: string, opts: ListRunsOptions = {}): RunSumm
     return [];
   }
 
-  let ids = entries
-    .filter((d) => statePresence(path.join(root, d, 'state.json')) !== 'absent')
-    // Before the slice: excluding the current run must never cost a listed one.
-    .filter((d) => d !== opts.exclude)
-    .sort()
-    .reverse();
-  // Before the map, so only the runs that will be shown are read and parsed.
-  if (opts.limit !== undefined) ids = ids.slice(0, Math.max(0, opts.limit));
+  // Ordering, exclusion and the presence probe all happen in there, so that the
+  // probing stops at the limit rather than sweeping the archive (#85). Before
+  // the map either way, so only the runs that will be shown are read and parsed.
+  //
+  // The classification each candidate costs is kept, not thrown away and
+  // repeated: the row builder needs the same answer, and probing twice would
+  // double the cost of every listed row for no extra safety - the second probe
+  // is not a fresh guarantee, only a smaller race window, and closing that race
+  // properly is a different design (open-by-handle) that #53 does not attempt.
+  const classified = new Map<string, RunEntryLinkage>();
+  const ids = selectRunIds(entries, opts, (d) => {
+    // Before `statePresence`, which is a `statSync` and follows a link - the
+    // probe itself was the leak (#53). Directory first: `<link>/state.json`
+    // resolves `<link>`, so the child may only be asked about once the parent is
+    // known to be a real directory.
+    //
+    // A link, and anything `lstat` could not classify, reports `present`: the
+    // row must reach the map so it can be listed rather than dropped. `absent`
+    // would drop it, and #78 established that a silently dropped entry is how a
+    // run disappears - a refused entry is refused, not absent. `StatePresence`
+    // is untouched and still three-valued (#77, #85); this callback answers it
+    // without reading.
+    const linkage = runEntryLinkage(root, d);
+    classified.set(d, linkage);
+    const { dir, state } = linkage;
+    if (dir === 'link' || dir === 'unknown') return 'present';
+    if (dir === 'missing') return 'absent';
+    // The `lstat` already answered existence for a plain state.json, so the old
+    // `statSync` would be a third probe telling us what we know. Only the
+    // not-a-directory entry still needs it, and there the answer is genuinely
+    // different per platform (ENOENT on Windows, ENOTDIR on POSIX) - which is
+    // the behaviour that entry has always had, and is left exactly as it was.
+    if (dir === 'not-a-directory') return statePresence(path.join(root, d, 'state.json'));
+    if (state === 'link' || state === 'unknown') return 'present';
+    return state === 'missing' ? 'absent' : 'present';
+  });
 
   return ids.map((d): RunSummary => {
     const dir = path.join(root, d);
+    // Carried from the probe above, and recomputed only if this row never went
+    // through it - which it cannot today, since `selectRunIds` only returns ids
+    // it asked about. The fallback is there so that stays true by construction
+    // rather than by assumption.
+    const linkage = classified.get(d) ?? runEntryLinkage(root, d);
+    const verdict = entryVerdict(linkage);
+    if (verdict !== 'readable') {
+      // Nothing is read: not state.json, and not the lock either - it is a
+      // separate file INSIDE the entry, so `livenessOf` would leave the archive
+      // too. `liveness` is therefore left unset rather than filled in;
+      // `cmdList` renders an absent value as `unknown`, which is the honest
+      // answer to a question no measurement was taken for, where `not-running`
+      // would be a claim.
+      //
+      // Two statuses, because there are two facts. `linked` is measured. An
+      // entry `lstat` could not classify at all is `unverified`: it fails closed
+      // - nothing under it is followed - and it carries the same do-not-open
+      // provenance, because what cannot be classified cannot be ruled out as a
+      // link. It is deliberately NOT called a link, and deliberately not folded
+      // into `unreadable`, which means a state.json that WAS opened.
+      return verdict === 'linked'
+        ? { id: d, status: LINKED_STATUS, task: '', costUsd: null, linked: true }
+        : { id: d, status: UNVERIFIED_STATUS, task: '', costUsd: null, unverified: true };
+    }
     let raw: unknown;
     let summary: RunSummary;
     try {
@@ -564,8 +903,9 @@ function isSharingViolation(err: unknown): boolean {
  * guarantee this was built for. Surviving a power loss additionally needs the
  * file *and its directory* fsynced, and directory fsync is not available on
  * Windows - claiming a durability that is not there is worse than not claiming
- * it. Only state.json is written this way; `artifact()` is written a handful of
- * times per run, not every five seconds.
+ * it. That limit is unchanged by #88, which routed `artifact()` through
+ * `writeAtomic` as well: both are safe against a process kill and neither claims
+ * more.
  *
  * Still throws whatever the write throws: `chargeFailure` has a `catch` that
  * depends on it.
@@ -875,6 +1215,44 @@ export interface CheckpointEntry {
   n: number;
   file: string;
   meta: RunCheckpointMeta | null;
+  /**
+   * Set when the file is a link, or `lstat` could not classify it - so nothing
+   * was read from it (#102).
+   *
+   * A separate fact from `meta: null`, and the distinction is the one #53 drew
+   * between `unreadable` and `linked`: one says a file was opened and could not
+   * be used, the other says vibe did not look inside it. Collapsing them would
+   * have a listing report "unreadable" about a file it never opened.
+   */
+  linked?: true | undefined;
+}
+
+/**
+ * Why a checkpoint file may not be read, or null (#102).
+ *
+ * #53 closed the run **entry** and its `state.json`; a `checkpoint-<n>.json`
+ * inside an entry that has already been accepted is the same hole one level
+ * deeper, and #53 said so when it drew its line there. A checkpoint *becomes* a
+ * run - `planFork` puts it through `loadRun`'s validators and `commitFork`
+ * inherits it under a new identity - which is the same class of consequence,
+ * and `loadRun` quotes field contents back in its refusals, so a link pointing
+ * at an arbitrary file can put that file's bytes in a terminal.
+ *
+ * The predicate is `linkageOf`, the same one `linkedRunReason` above uses. One
+ * rule, two messages, because the two name different things to a reader.
+ */
+export function linkedCheckpointReason(dir: string, n: number): string | null {
+  const linkage = linkageOf(path.join(dir, checkpointName(n)));
+  if (linkage !== 'link' && linkage !== 'unknown') return null;
+  const what =
+    linkage === 'link'
+      ? 'is a symlink or a junction, so it points outside the run archive'
+      : 'could not be classified, so it cannot be ruled out as a link';
+  return (
+    `Checkpoint ${n} cannot be used: ${checkpointName(n)} ${what}. vibe never creates one - ` +
+    'every checkpoint it writes is a real file - so this was not made by a run. Nothing was ' +
+    'read and nothing was written.'
+  );
 }
 
 /**
@@ -883,6 +1261,10 @@ export interface CheckpointEntry {
  * Read by `vibe fork` to list where a run can be forked from, which is a
  * listing: one damaged snapshot must not hide the healthy ones beside it, so a
  * file that cannot be read is reported with `meta: null` rather than dropped.
+ *
+ * A linked entry is reported and **not opened** (#102). Fails closed on an
+ * `lstat` that threw, for the reason `listRuns` does and `assertUnlinkedRun`
+ * does not: this is choosing whether to FOLLOW, not which error to report.
  */
 export function listCheckpoints(dir: string): CheckpointEntry[] {
   let entries: string[];
@@ -896,6 +1278,11 @@ export function listCheckpoints(dir: string): CheckpointEntry[] {
     const found = CHECKPOINT_RE.exec(entry);
     if (found?.[1] === undefined) continue;
     const file = path.join(dir, entry);
+    const linkage = linkageOf(file);
+    if (linkage === 'link' || linkage === 'unknown') {
+      out.push({ n: Number(found[1]), file, meta: null, linked: true });
+      continue;
+    }
     let meta: RunCheckpointMeta | null = null;
     try {
       const raw: unknown = JSON.parse(readFileSync(file, 'utf8'));
@@ -909,10 +1296,36 @@ export function listCheckpoints(dir: string): CheckpointEntry[] {
   return out.sort((a, b) => a.n - b.n);
 }
 
+/**
+ * Write one of the run's documents, whole or not at all.
+ *
+ * Through `writeAtomic` since #88, for a failure that is not the one state.json
+ * had. `writeFileSync` opens `O_TRUNC`: the file is *emptied at open* and only
+ * then written, so a killed process leaves zero bytes rather than a splice - and
+ * unlike tearing it does not need a large file to appear. Measured against
+ * `develop` at `99eca2e`, 40 kills per size: a 17KB `PLAN.md` was destroyed 5
+ * times in 40, a 47KB checkpoint 2, a 1.1MB body 2. The truncate window is
+ * roughly fixed while the write after it grows, so the ordinary artifact is the
+ * one most often lost.
+ *
+ * The file that made it worth fixing is `OUTSTANDING.md`, which is read back by
+ * code on both sides and which an empty copy strands between them:
+ * `recoverOutstanding` skips it because `hasArtifact` is `existsSync` and an
+ * empty file exists, and `settlePendingOutstanding` skips it because it does not
+ * contain `OUTSTANDING_OWNED`. The run then finishes reporting carried findings
+ * into a file that says nothing, and nothing will ever correct it.
+ *
+ * Cost of the reuse, median of 400 writes: +0.44ms at 17KB, +0.32ms at 47KB.
+ * The busiest archived run wrote 29 artifacts, so this is tens of milliseconds
+ * across a run measured in hours.
+ *
+ * Still throws whatever the write throws - several callers depend on that, for
+ * the same reason `saveState` records.
+ */
 export function artifact(state: RunState, name: string, content: string | object): string {
   const file = path.join(state.dir, name);
   const body = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
-  writeFileSync(file, body, 'utf8');
+  writeAtomic(state.dir, name, body);
   return file;
 }
 
@@ -1115,17 +1528,105 @@ const LATE_ROUND_FRACTION = 0.75;
 const TREND_FLOOR = 8;
 
 /**
+ * When two findings are one finding (#116).
+ *
+ * Not the id. An id is a model-authored slug, nothing enforces its stability,
+ * and across 25 archived runs an id came back in more than one round 21 times
+ * carrying a different claim **21 times out of 21** - the critic reuses a label
+ * for the next defect in the same area while the planner closes the last one.
+ * Three guards read id equality as claim equality and all three were wrong every
+ * time they fired.
+ *
+ * So: the same id AND the same claim, where "the same claim" is the rule
+ * `src/questions.ts` already uses for two wordings of one question, over the
+ * same metric and the same threshold. The census that licenses it for titles is
+ * with the constant in `src/similarity.ts`; the short version is that the 28
+ * recycled-label pairs top out at 0.286 and nothing in the corpus reaches 0.6.
+ *
+ * **The citation was measured and rejected**, though the issue proposed it
+ * first: two of the 21 recycled ids kept an identical citation set across the
+ * rounds that changed their claim - one of them cited nothing at all, three
+ * rounds running - so a citation-based identity gets 19 of 21 where the claim
+ * gets 21. Adding it as a further conjunct would make findings *less* likely to
+ * be judged the same, which loosens the brake further, for no measured gain.
+ *
+ * **An untitled finding degrades to id-only**, which is today's behaviour: with
+ * nothing to compare, the honest answer is the one the loop has always given,
+ * and it is the answer that keeps the brake firing rather than the one that
+ * silently disables it.
+ */
+export function sameClaim(a: RoundClaim, b: RoundClaim): boolean {
+  if (a.id !== b.id) return false;
+  const left = normalize(a.title);
+  const right = normalize(b.title);
+  if (left === '' || right === '') return true;
+  return left === right || similarity(a.title, b.title) >= REPHRASE_THRESHOLD;
+}
+
+/** A round's claims, or null when it was recorded before they existed. */
+function claimsOf(record: RoundRecord | undefined): readonly RoundClaim[] | null {
+  const claims = record?.claims;
+  return claims === undefined ? null : claims;
+}
+
+/**
+ * Do two rounds hold the same findings?
+ *
+ * A bijection, not a set-difference: two rounds of the same length whose claims
+ * pair off one-for-one. Greedy with removal, which is exact whenever an id
+ * appears once in a round - every round in the archive - and a defensible
+ * approximation when one does not.
+ */
+function claimsMatch(a: readonly RoundClaim[], b: readonly RoundClaim[]): boolean {
+  if (a.length !== b.length) return false;
+  const pool = [...b];
+  for (const claim of a) {
+    const i = pool.findIndex((other) => sameClaim(claim, other));
+    if (i === -1) return false;
+    pool.splice(i, 1);
+  }
+  return true;
+}
+
+/**
+ * Did this round repeat the one before it?
+ *
+ * Claims when both rounds have them, signatures when either does not. The
+ * fallback is what leaves a resumed legacy history behaving exactly as it did:
+ * such a round has only a hash of its ids, and inventing claims for it would be
+ * asserting something about a run nobody measured.
+ */
+function roundRepeated(a: RoundRecord, b: RoundRecord): boolean {
+  const left = claimsOf(a);
+  const right = claimsOf(b);
+  if (left === null || right === null) {
+    return a.signature != null && a.signature === b.signature;
+  }
+  return left.length > 0 && claimsMatch(left, right);
+}
+
+/**
  * Histories are passed in rather than read from a fixed field: the review loop
  * and the verification loop converge independently, and mixing their rounds
  * makes each look less stable than it is.
+ *
+ * `claims` is trailing and optional for the reason `ids` was: every existing
+ * caller compiles unchanged, and a caller that passes none records a round the
+ * guards read the legacy way.
  */
 export function recordRound(
   history: RoundRecord[],
   signature: string | null,
   count: number,
   ids: readonly string[] = [],
+  claims?: readonly RoundClaim[],
 ): void {
-  history.push({ signature, count, ids: [...ids] });
+  history.push({
+    signature,
+    count,
+    ids: [...ids],
+    ...(claims === undefined ? {} : { claims: claims.map((c) => ({ ...c })) }),
+  });
 }
 
 /**
@@ -1197,6 +1698,24 @@ export function clearPendingFindings(state: RunState): void {
  * run. Such a window falls back to the count-only verdict.
  */
 function windowTurnedOver(recent: readonly RoundRecord[]): boolean {
+  // Claims when every round in the window has them; ids when any round does not.
+  // Mixing the two would compare a claim against a bare id, which is not a
+  // comparison - and a window spanning the upgrade is exactly what a resumed run
+  // produces.
+  const claims = recent.map((r) => claimsOf(r));
+  if (claims.every((c) => c !== null)) {
+    const rounds = claims as readonly (readonly RoundClaim[])[];
+    if (rounds.some((c) => c.length === 0)) return false;
+    for (let i = 0; i < rounds.length; i += 1) {
+      for (const claim of rounds[i] ?? []) {
+        for (let j = i + 1; j < rounds.length; j += 1) {
+          if ((rounds[j] ?? []).some((other) => sameClaim(claim, other))) return false;
+        }
+      }
+    }
+    return true;
+  }
+
   const seen = new Map<string, number>();
   for (const r of recent) {
     const ids = r.ids;
@@ -1247,12 +1766,19 @@ export function assessConvergence(
 
   // Identical findings N rounds running means no new information is being
   // produced at all. More rounds cannot help, whenever it happens.
+  //
+  // "Identical" is claim identity since #116, not id identity. The premise here
+  // was always right - it is the measurement of sameness underneath it that was
+  // wrong, 21 times out of 21 - so the arm is unchanged and only what it
+  // compares has moved. `roundRepeated` falls back to the signature for a round
+  // recorded before claims existed, which is what leaves a resumed legacy
+  // history stopping exactly where it always did.
   const repeats = history.slice(-repeatThreshold);
   const first = repeats[0];
   if (
     repeats.length === repeatThreshold &&
-    first?.signature != null &&
-    repeats.every((r) => r.signature === first.signature)
+    first !== undefined &&
+    repeats.every((r) => roundRepeated(first, r))
   ) {
     return `the same P1 set came back ${repeatThreshold} rounds running`;
   }
@@ -1318,7 +1844,31 @@ export function assessConvergence(
 export function persistentStreak(
   history: readonly RoundRecord[],
 ): { id: string; rounds: number } | null {
-  const last = history[history.length - 1]?.ids;
+  const lastRecord = history[history.length - 1];
+  const lastClaims = claimsOf(lastRecord);
+
+  // The claim, not the label. The notice this feeds told a user that
+  // "unanswered-fact-unknowns-proceed" had been blocking for four rounds; it was
+  // four separate defects with four separate fixes, wearing one label, and the
+  // line was read as evidence the loop was stuck when it was evidence of the
+  // loop working (#116).
+  if (lastClaims !== null) {
+    if (lastClaims.length === 0) return null;
+    let best: { id: string; rounds: number } | null = null;
+    for (const claim of lastClaims) {
+      let rounds = 0;
+      for (let i = history.length - 1; i >= 0; i -= 1) {
+        const claims = claimsOf(history[i]);
+        // A round with no claims recorded cannot be said to hold this one.
+        if (claims === null || !claims.some((other) => sameClaim(claim, other))) break;
+        rounds += 1;
+      }
+      if (best === null || rounds > best.rounds) best = { id: claim.id, rounds };
+    }
+    return best;
+  }
+
+  const last = lastRecord?.ids;
   if (last === undefined || last.length === 0) return null;
 
   let best: { id: string; rounds: number } | null = null;
@@ -1331,6 +1881,51 @@ export function persistentStreak(
     if (best === null || rounds > best.rounds) best = { id, rounds };
   }
   return best;
+}
+
+/**
+ * What to say when the old rule would have stopped the run and the new one did
+ * not (#116).
+ *
+ * The mitigation for the one thing the title census could not measure. It has no
+ * positive samples - no genuine repeat exists in the archive - so it bounds the
+ * false-positive side and says nothing about a real repeat worded below the
+ * threshold. This is the same answer `writeRephrased` gives for questions: the
+ * decision is reported, so a loosened brake costs a visible, checkable line
+ * rather than a silent omission.
+ *
+ * Fires only where the two rules disagree, which is a run that would have been
+ * stopped and no longer is. Null when they agree, which is almost always.
+ */
+export function recycledLabelNotice(
+  history: readonly RoundRecord[],
+  repeatThreshold: number,
+): string | null {
+  const repeats = history.slice(-repeatThreshold);
+  const first = repeats[0];
+  if (repeats.length !== repeatThreshold || first?.signature == null) return null;
+  // The old rule: an identical id set, N rounds running.
+  if (!repeats.every((r) => r.signature === first.signature)) return null;
+  // The new rule agrees, and the run is stopping. Nothing to report.
+  if (repeats.every((r) => roundRepeated(first, r))) return null;
+
+  const moved: string[] = [];
+  for (const claim of claimsOf(first) ?? []) {
+    const later = repeats[repeats.length - 1];
+    const other = (claimsOf(later) ?? []).find((c) => c.id === claim.id);
+    if (other === undefined || sameClaim(claim, other)) continue;
+    moved.push(
+      `"${claim.id}" (${similarity(claim.title, other.title).toFixed(2)}): ` +
+        `"${claim.title}" -> "${other.title}"`,
+    );
+  }
+  if (moved.length === 0) return null;
+
+  return (
+    `Not stopping: the same finding ids came back ${repeatThreshold} rounds running, but the ` +
+    `claims under them changed, so the loop is producing new information. ${moved.join('; ')}. ` +
+    'If those are the same finding restated, that is a defect worth reporting.'
+  );
 }
 
 export interface PersistenceNoticeArgs {

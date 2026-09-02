@@ -1,9 +1,15 @@
 ﻿import path from 'node:path';
 import { applyCharge, chargeFailure, enforceCeilings, Escalation, EXIT, fmtTokens } from '@src/charge.js';
-import { claudeTurn, parseStructured, RateLimitError } from '@src/claude.js';
+import {
+  claudeTurn,
+  failureSparedConversation,
+  parseStructured,
+  RateLimitError,
+} from '@src/claude.js';
 import { codexTurn } from '@src/codex.js';
 import type { CodexTurnOptions, CodexTurnResult } from '@src/codex.js';
-import { groundFindings } from '@src/evidence.js';
+import { preserveGateArtifacts, sweepGateArtifacts } from '@src/artifacts.js';
+import { downgradeInert, groundFindings, refusePlaceholderPlan } from '@src/evidence.js';
 import * as git from '@src/git.js';
 import * as log from '@src/log.js';
 import type { PathStyle } from '@src/pathstyle.js';
@@ -27,9 +33,12 @@ import {
   ensureSlotId,
   markSlotStarted,
   noteSlotForkAttempt,
+  noteSlotRegistered,
   recordSlotOccupancy,
+  recoverDeadSlot,
   slotContinuity,
   slotForkParent,
+  slotHasDeadTurn,
   slotHasMemory,
   slotId,
   slotResumeId,
@@ -50,14 +59,23 @@ import {
   recordEvent,
   recordPendingFindings,
   recordRound,
+  recycledLabelNotice,
   removeArtifact,
   stageEvent,
   resumePhase,
   saveState,
   takePendingFindings,
+  tryRecordEvent,
   verificationCaveat,
   writeCheckpoint,
 } from '@src/run.js';
+import {
+  findRephrase,
+  isSameQuestion,
+  normalize,
+  reconcileQuestionRecords,
+  recordSuppressed,
+} from '@src/questions.js';
 import { hasFindingShape, isReportBasename } from '@src/stored.js';
 import {
   blockers as blockingFindings,
@@ -101,6 +119,7 @@ import type {
   RunState,
   RunSummary,
   Severity,
+  TurnActivity,
 } from '@src/types.js';
 
 // The accounting vocabulary lives in @src/charge.js, a leaf: the session
@@ -213,6 +232,20 @@ export async function orchestrate(
     // nothing; on a resume it is the one point holding both the stored plan and
     // the artifact the previous process may have died between writing.
     reconcileFollowUps(state);
+    // Beside it, for the same reason and against the same hazard: the record of
+    // a suppressed re-ask or a disposed-of deferral lives in `state.json`, and
+    // the file that reports it is a second write a kill can land between. A
+    // fork is the same shape - the child inherits the state and none of the
+    // parent's artifacts - and a forked run is always started by `vibe resume`,
+    // so this pass is where it gets its copy (#65).
+    reconcileQuestionRecords(state);
+    // Beside them, and for the same shape of reason: a process killed inside
+    // `preserveGateArtifacts` leaves a staging tree that only the next preserve
+    // FOR THAT GATE AND ROUND would have cleared, so a run that resumes and
+    // never fails that gate again keeps a full copy of what the gate produced
+    // for ever. Here rather than in `createRun`/`loadRun` because that would put
+    // `run.ts` in a cycle with this module's - `artifacts.ts` imports it (#111).
+    sweepArtifacts(state);
     return await runPhases(state, cfg, resume, turns);
   } finally {
     // A `finally`, not a tail call: the phases below return early at the
@@ -221,6 +254,35 @@ export async function orchestrate(
     // paths.
     closeCodexRateLimits();
   }
+}
+
+/**
+ * Tidy the gate-artifact scratch, and say so only when there was something to
+ * say (#111).
+ *
+ * Silent and eventless on a run with nothing stranded, which is every ordinary
+ * run: a pass that removed nothing must leave the record byte-identical to what
+ * it was before this existed. What it did remove is named rather than counted -
+ * these are potentially the largest objects in `.vibe/`, and "swept 2 entries"
+ * is not something a user can check.
+ */
+function sweepArtifacts(state: RunState): void {
+  const sweep = sweepGateArtifacts(state);
+  if (sweep.removed.length > 0) {
+    log.info(
+      `Removed ${sweep.removed.length} leftover artifact staging entr` +
+        `${sweep.removed.length === 1 ? 'y' : 'ies'} from an interrupted preservation: ` +
+        sweep.removed.join(', '),
+    );
+  }
+  for (const kept of sweep.kept) {
+    log.warn(`Left in place: ${kept.at} ${kept.why}`);
+  }
+  if (sweep.removed.length === 0 && sweep.kept.length === 0) return;
+  recordEvent(state, 'artifact_staging_swept', {
+    removed: sweep.removed,
+    kept: sweep.kept.map((k) => k.at),
+  });
 }
 
 async function runPhases(
@@ -351,11 +413,21 @@ async function planPhase(
   turns: AgentTurns,
 ): Promise<Plan> {
   let plan: Plan;
+  /**
+   * What the plan turn *this process ran* did, or absent (#63).
+   *
+   * Reassigned by every turn that produces a plan, so the critique below is told
+   * about the turn that wrote the plan it is critiquing and never about an
+   * earlier one. A plan restored from `state.plan` on a resume leaves this
+   * absent: no turn ran here, so there is nothing to say about one, and absent
+   * is what "unmeasured" has always meant.
+   */
+  let planActivity: TurnActivity | undefined;
   if (state.plan) {
     plan = state.plan;
   } else {
     log.heading('Planning');
-    plan = await runPlan(state, cfg, cwd, roles, turns);
+    ({ plan, activity: planActivity } = await runPlan(state, cfg, cwd, roles, turns));
   }
 
   // Answers supplied by a human in NEEDS-INPUT.md, picked up on resume.
@@ -367,7 +439,14 @@ async function planPhase(
   // path where both are present.
   if (state.pendingAnswers && state.pendingAnswers.length > 0) {
     for (const a of state.pendingAnswers) markAnswered(state, a.question);
-    plan = await revisePlan(state, cfg, cwd, { answers: state.pendingAnswers }, roles, turns);
+    ({ plan, activity: planActivity } = await revisePlan(
+      state,
+      cfg,
+      cwd,
+      { answers: state.pendingAnswers },
+      roles,
+      turns,
+    ));
     state.pendingAnswers = null;
     saveState(state);
   }
@@ -394,16 +473,47 @@ async function planPhase(
       // the plan answering them - not here, where a second write would reopen a
       // window between the two. A revision that throws, is rate-limited or dies
       // mid-flight never reaches that write, so the findings stay outstanding.
-      plan = await revisePlan(state, cfg, cwd, { findings: carried }, roles, turns);
+      ({ plan, activity: planActivity } = await revisePlan(
+        state,
+        cfg,
+        cwd,
+        { findings: carried },
+        roles,
+        turns,
+      ));
       continue;
     }
     firstPass = false;
 
     // A question already put to Codex never comes back, however the revised plan
     // rephrases it - otherwise an insistent planner loops the run forever.
-    const pending = plan.open_questions.filter(
-      (q) => (q.blocking || cfg.questions.answerNonBlocking) && !isAnswered(state, q.question),
+    //
+    // "However it rephrases it" used to mean "however it repunctuates it": the
+    // guard was exact equality over `normalize`, and a genuine rewording walked
+    // straight past it. Four wordings of one question cost the #47 run three
+    // extra answer turns and drove it into `loop.maxQuestionRounds`. So the
+    // filter is now exact-then-fuzzy, and the two halves cost different things:
+    // an exact repeat is dropped in silence, exactly as it always was, while a
+    // rephrasing is recorded with what it matched and its score before it is
+    // dropped. See `src/questions.ts` for the threshold and its measurement.
+    const askable = plan.open_questions.filter(
+      (q) => q.blocking || cfg.questions.answerNonBlocking,
     );
+    const pending: OpenQuestion[] = [];
+    for (const q of askable) {
+      if (isAnswered(state, q.question)) continue;
+      const near = findRephrase(q.question, state.answeredQuestions);
+      if (near === null) {
+        pending.push(q);
+        continue;
+      }
+      recordSuppressed(state, q.question, near);
+      log.warn(
+        `Not asking again - this is the same question as one already put to the answerer ` +
+          `(${near.score.toFixed(2)}): ${q.question}`,
+      );
+      log.info('  See REPHRASED.md. If those are two different questions, that is a defect.');
+    }
     if (pending.length > 0) {
       // The planner gets a bounded number of goes at resolving its own
       // questions. Without this the path re-plans forever on newly-invented
@@ -421,9 +531,19 @@ async function planPhase(
       saveState(state);
 
       const answers = await resolveQuestions(state, cfg, cwd, pending, plan, roles, turns);
-      // The answerer may have declined every one; only revise if something came back.
-      plan =
-        answers.length > 0 ? await revisePlan(state, cfg, cwd, { answers }, roles, turns) : plan;
+      // The answerer may have declined every one; only revise if something came
+      // back - and when nothing did, the plan and the turn that wrote it are
+      // both still the ones already in hand.
+      if (answers.length > 0) {
+        ({ plan, activity: planActivity } = await revisePlan(
+          state,
+          cfg,
+          cwd,
+          { answers },
+          roles,
+          turns,
+        ));
+      }
       continue;
     }
 
@@ -437,7 +557,17 @@ async function planPhase(
       state,
       cfg,
       async () => {
-        const found = await runCritique(state, cfg, cwd, plan, roles, turns);
+        const critiqued = await runCritique(state, cfg, cwd, plan, roles, turns, planActivity);
+        // Before the artifact and before `recordPendingFindings`, so the round's
+        // record shows what the run refused on and the next revision is told
+        // about it. A mechanical fact about the artifact on disk, added to the
+        // critic's judgement rather than replacing it (#108).
+        const planFile = `plan-${state.planRound}.json`;
+        const { report: found, raised } = refusePlaceholderPlan(critiqued, plan.plan_md, planFile);
+        if (raised !== null) {
+          log.fail(`${planFile} holds a pointer, not a plan - refusing to implement it.`);
+          recordEvent(state, 'plan_placeholder_refused', { artifact: planFile, id: raised.id });
+        }
         artifact(state, `plan-critique-${state.planRound}.json`, found);
         collectDeferred(state, found.findings);
         writeFollowUps(state, plan);
@@ -1198,6 +1328,10 @@ export function guardProgress(
     p1Signature(all),
     blockers.length,
     blockers.map((f) => f.id),
+    // The claim, not only the label. `ids` and `signature` are still written for
+    // a process that reads this history on an older build, and are what the
+    // guards fall back to for a round recorded before this existed (#116).
+    blockers.map((f) => ({ id: f.id, title: f.title })),
   );
 
   const stall = assessConvergence(history, {
@@ -1222,6 +1356,15 @@ export function guardProgress(
       [...blockers],
     );
   }
+
+  // Beside the persistence notice and for the same reason - the run is
+  // continuing, and every stop above has declined to fire. This one reports a
+  // brake that did NOT fire because the claims under a repeated set of ids had
+  // changed. It is the mitigation for the one thing the title census could not
+  // measure, and it is the same answer `REPHRASED.md` gives for questions: a
+  // loosened brake costs a visible line rather than a silent omission (#116).
+  const recycled = recycledLabelNotice(history, cfg.loop.oscillationThreshold);
+  if (recycled !== null) log.warn(recycled);
 
   // Last, deliberately: the notice tells the user the run is continuing, which
   // is only true once every stop above has declined to fire. Emitted earlier it
@@ -1249,6 +1392,76 @@ export function guardProgress(
  *    unrecoverably by reading the log. It is a refusal rather than a warning for
  *    that reason, with `git checkout` and `--no-branch` both named.
  */
+/**
+ * Say so when a killed turn's work is sitting in a git stash (#96).
+ *
+ * #77 made a killed run recover its accounting. Nothing recovers its working
+ * tree, and an implementer that stashes to get a clean test run defeats every
+ * guard at once: `maybeCommit` runs at round boundaries and a turn killed
+ * mid-round has committed nothing, `state.baseSha` is correct and says nothing
+ * about where the work went, `inFlight` is accounting and deliberately records
+ * only what a turn spent, and `prepareGit` checks the branch, not the tree - a
+ * stashed tree is CLEAN, so `isDirty` is false. The #87 run left 11.3M tokens of
+ * implementation in a stash while every guard reported healthy; it was recovered
+ * by hand.
+ *
+ * Notice, not recover and not refuse. Recovering means popping, a pop can
+ * conflict, and a run that pops a stash a human made for their own reasons has
+ * taken something that was not its. Refusing is heavier than the problem: the
+ * work is safe where it is, and the only thing missing is that anyone knows.
+ * This turns a silent loss into a line of output, cannot itself destroy
+ * anything, and composes with either of the others later.
+ *
+ * Fires only where `state.branch` is set, which is what makes it inert on a
+ * fresh run without a second fact to store: the branch is created a few lines
+ * below, so a run in its first process has none to match against - and a branch
+ * this process did not create is exactly a resume or a fork. The match is on the
+ * branch name git itself wrote into the entry, so a stash belonging to somebody
+ * else is left alone by construction rather than by a heuristic.
+ *
+ * Not prompted against, either: the implementer was doing the right thing.
+ * Establishing whether a flaky test predates your change means testing without
+ * your change, and `git stash` is the obvious way. Two runs in this repo have
+ * needed the manoeuvre.
+ */
+async function noticeStrandedWork(state: RunState, cwd: string): Promise<void> {
+  const branch = state.branch;
+  if (branch === null) return;
+
+  const stashes = await git.stashesFor(cwd, branch);
+  if (stashes.length === 0) return;
+
+  log.warn(
+    `git stash holds ${stashes.length} entr${stashes.length === 1 ? 'y' : 'ies'} made on this ` +
+      `run's branch "${branch}". A turn killed between "git stash push" and "git stash pop" ` +
+      'leaves its work there, where nothing else in this run can see it: the tree reads clean ' +
+      'and there are no commits, while the accounting says the turn ran.',
+  );
+  for (const entry of stashes) {
+    log.warn(`  ${entry.ref}  ${entry.subject}`);
+    // The stat is the evidence that makes this worth acting on - "7 files
+    // changed, 319 insertions" is what says a turn's output is in there. Where
+    // there is none, the command is named rather than an emptiness asserted.
+    log.warn(
+      entry.stat === null
+        ? `    contents not summarised - run: git stash show -p ${entry.ref}`
+        : entry.stat
+            .split('\n')
+            .map((l) => `    ${l.trim()}`)
+            .join('\n'),
+    );
+  }
+  log.warn(
+    'Check it before this run does more work. Nothing has been popped - vibe does not touch ' +
+      'the stash.',
+  );
+
+  recordEvent(state, 'stash_noticed', {
+    branch,
+    refs: stashes.map((e) => e.ref),
+  });
+}
+
 async function prepareGit(
   state: RunState,
   cfg: Config,
@@ -1260,18 +1473,49 @@ async function prepareGit(
   // run - and commit - on whatever happens to be checked out.
   const owed = cfg.git.useBranch && state.branchPending === true;
 
-  if (!(await git.isRepo(cwd))) {
+  // `repoStatus`, so a git binary that cannot be resolved or spawned is an
+  // answer here rather than a throw. `isRepo` only tolerates a git that RAN and
+  // exited nonzero; a missing `VIBE_GIT_BIN` made this line take down a
+  // plan-only run - which needs nothing from git at all - with a generic error
+  // before the first planning turn (#71, review round 2). The work that reaches
+  // this function without a repository is precisely the work that does not need
+  // one: a full run has already been refused by `gitPrecondition` in the
+  // preflight gate, and a finished run returns a few lines below without
+  // dispatching a phase.
+  const { isRepo, error } = await git.repoStatus(cwd);
+  if (!isRepo) {
     if (owed) {
+      // Still a refusal, and for the same reason: a fork that cannot be put on
+      // its branch would otherwise run - and commit - on whatever is checked
+      // out. Only the cause differs, so only the cause is reworded.
       throw new Escalation(
         EXIT.ERROR,
-        `Run ${state.id} was forked onto branch "${String(state.branch)}", but ${cwd} is not a ` +
-          'git repository, so it cannot be put on it. Nothing has run. Point the run at the ' +
-          'repository it was forked in, or resume with --no-branch to run here anyway.',
+        `Run ${state.id} was forked onto branch "${String(state.branch)}", but ` +
+          (error === null
+            ? `${cwd} is not a git repository`
+            : `git could not be run against ${cwd} (${error})`) +
+          ', so it cannot be put on it. Nothing has run. Point the run at the repository it ' +
+          'was forked in, or resume with --no-branch to run here anyway.',
       );
     }
     // Only on a fresh run, as before: a resume said this once already, and
     // repeating it every pass would be new output for an unchanged situation.
-    if (!resume) log.warn('Not a git repository - running without branch isolation or commits.');
+    //
+    // Since #71 only a plan-only or already-finished run reaches this line: a
+    // full run is refused by `gitPrecondition` before the loop starts, because
+    // its review phase would have died on `git diff --cached` an hour later.
+    // The not-a-repository wording is unchanged because it stays true of the
+    // runs that still get here - they do run, and they do so without branch
+    // isolation or commits. The broken-binary case is named rather than folded
+    // into it: "not a git repository" would be a false statement about a
+    // directory that may well be one.
+    if (!resume) {
+      log.warn(
+        error === null
+          ? 'Not a git repository - running without branch isolation or commits.'
+          : `git could not be run (${error}) - running without branch isolation or commits.`,
+      );
+    }
     return;
   }
   // Fresh runs only, and not merely to keep the output identical: "they will be
@@ -1280,6 +1524,11 @@ async function prepareGit(
   if (!resume && (await git.isDirty(cwd))) {
     log.warn('Working tree has uncommitted changes; they will be swept into the first commit.');
   }
+  // Before the branch work below, and before `useBranch` can return: a run
+  // resumed with `--no-branch` to escape the refusal is one whose stranded work
+  // is if anything more likely to be missed.
+  await noticeStrandedWork(state, cwd);
+
   // With branch isolation off nothing below runs, which is also what makes
   // `vibe resume <id> --no-branch` the documented escape from the refusal.
   if (!cfg.git.useBranch) return;
@@ -1492,13 +1741,14 @@ async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Findi
     log.warn(
       `Gate ${gate.name} failed: ${result.command} (attempt ${result.failedRun} of ${result.runs})`,
     );
-    outcomes.push({
+    const failed: GateOutcome = {
       name: gate.name,
       status: 'failed',
       command: result.command,
       runs: result.runs,
       required: gate.required,
-    });
+    };
+    outcomes.push(failed);
     recordEvent(state, 'verify_failed', {
       gate: gate.name,
       command: result.command,
@@ -1506,6 +1756,44 @@ async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Findi
       exitCode: result.exitCode,
     });
     artifact(state, `verify-failure-${state.reviewRound}.txt`, result.output);
+
+    // What the failing command PRODUCED, on the failing branch only (#62). Not
+    // on the unavailable or unlaunchable paths above: nothing ran there, so
+    // there is nothing the command produced. `verifyRound + 1` because the
+    // counter is incremented after this function returns, which makes this the
+    // same number as the `verify-fix-<n>.md` report that answers this failure.
+    if (gate.artifacts.length > 0) {
+      const preserved = preserveGateArtifacts(
+        state,
+        cwd,
+        gate.name,
+        state.verifyRound + 1,
+        gate.artifacts,
+        cfg.verify.artifactMaxBytes,
+      );
+      failed.artifacts = preserved;
+      const copied = preserved.entries.filter((e) => e.status === 'copied').length;
+      const links = preserved.entries.reduce((n, e) => n + (e.skippedLinks?.length ?? 0), 0);
+      // The size is reported whether or not a ceiling is set: copying a report
+      // into the user's repository is never silent.
+      log.info(
+        `Gate ${gate.name}: kept ${copied} of ${preserved.entries.length} artifact paths ` +
+          `(${preserved.bytes} bytes) under ${preserved.dir}` +
+          (links > 0 ? `; ${links} link${links === 1 ? '' : 's'} refused` : ''),
+      );
+      // tryRecordEvent, never recordEvent: `saveState` rethrows, and a throw
+      // here would replace a gate failure the loop knows how to fix with
+      // EXIT.ERROR - the audit trail of a side effect destroying the thing it is
+      // about. `verify_failed` above is already persisted, so the exit rule's
+      // input is safe whatever this write does.
+      tryRecordEvent(state, 'gate_artifacts', {
+        gate: gate.name,
+        round: state.verifyRound + 1,
+        dir: preserved.dir,
+        bytes: preserved.bytes,
+        entries: preserved.entries,
+      });
+    }
 
     return {
       // A stable id, and one PER GATE: an identical failure across rounds is what
@@ -1638,6 +1926,27 @@ export interface TurnOutcome {
   text: string;
   /** Codex: its parsed structured output. Null for Claude, and for a turn with no schema. */
   structured: unknown;
+  /**
+   * What the turn did, from its heartbeat, or absent when nothing measured it.
+   *
+   * Carried out of the dispatch rather than read from state, because the caller
+   * that has to act on it - `groundAndRecord` - is judging *this* turn and a
+   * later reader could not tell which turn a stored figure belonged to (#66).
+   */
+  activity?: TurnActivity | undefined;
+}
+
+/**
+ * What a turn event says about the turn's activity, or nothing at all (#66).
+ *
+ * Two fields rather than the nested object: `items` is the kinds and `toolItems`
+ * the count the rule reads, and an event log a human greps is better served by
+ * a flat key than by `activity.tool`. Both omitted together when the turn was
+ * unmeasured - never `toolItems: 0`, which would assert an idle turn where
+ * there was only an unobserved one.
+ */
+function activityEvent(activity: TurnActivity | undefined): Record<string, unknown> {
+  return activity === undefined ? {} : { items: activity.items, toolItems: activity.tool };
 }
 
 /**
@@ -1777,19 +2086,28 @@ function planOfRecord(state: RunState, role: Role): string | null {
 }
 
 /**
- * Say which setting named this turn's model, on the way out of a failure.
+ * Say which of the role's own settings this turn ran under, on the way out of a
+ * failure.
  *
  * A user who set `roles.reviewer.model` and is shown `codex.model` edits the
  * wrong line - and since #60 the two keys can hold different strings, so the
  * provider key is no longer a safe thing to name. Nothing here classifies the
- * failure: the note states what the turn ran and where the name came from,
+ * failure: the note states what the turn ran and where the value came from,
  * which is true of a timeout, a rate limit and an unknown model alike. There is
  * deliberately no retry and no fallback to the provider's model - a model the
  * user named and vibe silently replaced is the failure this key's design is
  * strict to prevent.
  *
- * Added only where the role named a model of its own, so no run that sets
- * nothing has its error text changed.
+ * The timeout is the second fact it states (#84), which is why this is no longer
+ * called `noteModelProvenance`. It is the same failure by another route: four
+ * provider keys can set a turn's timeout and `proc.ts` reports the figure and
+ * never the key, so a user raises the wrong one. One function rather than two,
+ * because the `stack`-before-`message` order below has to happen exactly once
+ * per error however many notes are owed.
+ *
+ * Added only where the role named a setting of its own, so no run that sets
+ * nothing has its error text changed - and a run that names only a model gets
+ * exactly the one note it got before.
  *
  * The error object itself is rethrown, never wrapped: `charge.ts` keys a failed
  * turn's spend in a WeakMap on identity, the retry loop tests `instanceof
@@ -1805,12 +2123,39 @@ function planOfRecord(state: RunState, role: Role): string | null {
  * rotation running concurrently can land in the gap. A `catch` costs nothing on
  * the path that succeeds.
  */
-function noteModelProvenance(err: unknown, role: Role, cfg: Config, roles: RoleTable): unknown {
+function noteRoleProvenance(
+  err: unknown,
+  role: Role,
+  cfg: Config,
+  roles: RoleTable,
+  /** The figure this turn actually ran with - `DispatchRequest.timeoutMs`. */
+  timeoutMs: number,
+): unknown {
+  const spec = roles[role];
   // The guard that keeps a run setting nothing byte-identical: no per-role
-  // model, no note.
-  if (roles[role].model === undefined) return err;
-  const note = `[this turn ran ${modelSource(role, roles)} = "${modelFor(role, cfg, roles)}"]`;
-  if (!(err instanceof Error) || err.message.includes(note)) return err;
+  // setting, no note.
+  const notes: string[] = [];
+  if (spec.model !== undefined) {
+    notes.push(`[this turn ran ${modelSource(role, roles)} = "${modelFor(role, cfg, roles)}"]`);
+  }
+  // A bare number, no unit: the key names the unit, and `proc.ts`'s own "timed
+  // out after 5400000ms" is already in the same message.
+  //
+  // Only where the role's figure is the one the turn ran under. A caller that
+  // passed an explicit `timeoutMs` overrode the table, and a note naming a key
+  // that did not apply sends the user to edit the wrong line - which is the
+  // failure this whole mechanism exists to prevent, committed by the mechanism
+  // itself. No orchestrator call site does that today; the tests do, and a
+  // future one that starts to gets silence rather than a false statement.
+  if (spec.timeoutMs !== undefined && spec.timeoutMs === timeoutMs) {
+    notes.push(`[this turn ran roles.${role}.timeoutMs = ${spec.timeoutMs}]`);
+  }
+  if (notes.length === 0 || !(err instanceof Error)) return err;
+  // Per note, so an error that has already been through here once - and there is
+  // no such path today - gains only what it is missing.
+  const fresh = notes.filter((each) => !err.message.includes(each));
+  if (fresh.length === 0) return err;
+  const note = fresh.join(' ');
   // Read before the message is changed, and this order is the whole of it: V8
   // builds `stack` lazily on first access, from the message as it stands at
   // that moment. Touching `message` first and `stack` second therefore appends
@@ -1825,26 +2170,39 @@ function noteModelProvenance(err: unknown, role: Role, cfg: Config, roles: RoleT
 }
 
 /**
- * The parent conversation this turn must fork, or null - recording the attempt
- * before the child is spawned.
+ * What this turn must know before it is spawned: the parent conversation it owes
+ * a fork of, or null - and, on the way past, that the slot's id is about to be
+ * handed to the provider.
  *
- * ONE write, and it happens *before* the turn: the counter and the disclosure it
- * justifies land together, so no interruption can leave a state carrying
- * `attempts: 2` without the `fork_retried` event beside it, or the event without
- * the counter.
+ * ONE write, and it happens *before* the turn. Both facts are pre-turn for the
+ * same reason: they are the facts that matter precisely when no result ever
+ * arrives. The counter and the disclosure it justifies land together, so no
+ * interruption can leave a state carrying `attempts: 2` without the
+ * `fork_retried` event beside it, or the event without the counter.
  *
  * The counter is not decoration. A Codex thread id is provider-minted, so a
  * process that dies between the provider returning and the accounting write
  * loses the id and the next pass forks again - leaving one orphaned thread on
  * the provider's side. That is bounded and it is disclosed here, rather than
  * being made invisible.
+ *
+ * The registration is #74: `claude --session-id` spends the id on attempt, so a
+ * state that has not recorded the handover before the spawn cannot tell a killed
+ * turn from one that never ran, and re-issues an id the CLI refuses. It costs
+ * one extra write per Claude session - the first turn, and the first turn after
+ * each rotation - and none at all on the Codex path, where the provider mints
+ * the id and there is nothing to hand over (D7).
  */
-function noteFork(state: RunState, cfg: Config, slot: SlotName): string | null {
+function noteSpawn(state: RunState, cfg: Config, slot: SlotName): string | null {
   const forkFrom = slotForkParent(state, cfg, slot);
-  if (forkFrom === null) return null;
-  const attempt = noteSlotForkAttempt(state, slot);
-  if (attempt > 1) stageEvent(state, 'fork_retried', { slot, parentId: forkFrom, attempt });
-  saveState(state);
+  if (forkFrom !== null) {
+    const attempt = noteSlotForkAttempt(state, slot);
+    if (attempt > 1) stageEvent(state, 'fork_retried', { slot, parentId: forkFrom, attempt });
+  }
+  const registered = noteSlotRegistered(state, slot);
+  // Only where something changed, so a run that owes no fork and has already
+  // registered writes exactly as often as it did before this existed.
+  if (forkFrom !== null || registered) saveState(state);
   return forkFrom;
 }
 
@@ -1873,45 +2231,135 @@ async function claudeDispatch(
     await rotateSession(state, cfg, turn, roles, model);
   }
 
-  const forkFrom = noteFork(state, cfg, slot);
-  // A fork is not a resume: `--fork-session` copies the parent into a new
-  // session rather than continuing one, so `--resume` alone would continue the
-  // parent's own conversation and put two runs in it.
-  const resume = forkFrom === null && slotHasMemory(state, cfg, slot);
-  // Continuity, not `resume`: a forked conversation arrives holding the
-  // parent's context, so greeting it as a fresh one would be false.
-  const prompt = freshConversationPrefix(state, req.role, slotContinuity(state, cfg, slot)) + req.prompt;
-
   // The `await` a plain assignment would have done, wrapped so a failure can say
   // which setting named the model it ran. Outside the retry, so a turn that is
   // waited out and retried is annotated once, when it finally gives up.
   let result: ClaudeTurnResult;
   try {
-    result = await withRateLimitRetry(state, cfg, req.label, 'claude', () =>
-      turn({
-        prompt,
-        sessionId: ensureSlotId(state, slot),
-        resume,
-        ...(forkFrom === null ? {} : { forkFrom }),
-        permissionMode: claudePermission(access),
-        model,
-        effort: effortFor(req.role, cfg, roles),
-        cwd: req.cwd,
-        jsonSchema: req.jsonSchema,
-        tools: req.tools,
-        timeoutMs: req.timeoutMs,
-        progress: progressOptions(state, cfg, req.label, model),
-      }),
+    result = await withRateLimitRetry(
+      state,
+      cfg,
+      req.label,
+      'claude',
+      () => {
+        // Everything a spawn depends on is asked PER ATTEMPT (#74). It used to
+        // be computed once outside this closure while the id was read inside it,
+        // so a turn that hit a rate limit, waited, and retried re-issued
+        // `--session-id` against an id its own first attempt had already spent -
+        // and the wait bought nothing, because "already in use" is not a rate
+        // limit and is not retried.
+        //
+        // Ordering: `dead` and the prompt are both read BEFORE `noteSpawn` marks
+        // this slot registered, or a genuinely fresh first attempt would see its
+        // own registration and mistake itself for a session that died mid-turn.
+        //
+        // Synchronous, and returning the provider's promise unawaited: this is
+        // the seam `turn-seam.test.ts` measures in microtasks, and an `async`
+        // wrapper here puts one more await between a provider result and its
+        // accounting.
+        const dead = slotHasDeadTurn(state, slot);
+        // Continuity, not `resume`: a forked conversation arrives holding the
+        // parent's context, and so does a resumed dead one, so greeting either
+        // as fresh would be false. Rebuilt per attempt because a reset between
+        // two of them turns a continuing conversation into a genuinely fresh
+        // one, and a retry carrying the first attempt's prefix would start that
+        // fresh session without the handoff or the plan of record.
+        const prompt =
+          freshConversationPrefix(state, req.role, slotContinuity(state, cfg, slot)) + req.prompt;
+        // A registered id with no successful turn means an attempt was made here
+        // and never returned: a previous process died on it, or - since #91 - an
+        // earlier attempt of this very turn was rate limited. A failure that left
+        // the conversation unusable resets the slot, so it cannot mean anything
+        // else. Both readings want the same thing and that is why one rule
+        // serves them: the session is resumable and holds the attempt's work; and
+        // where a fork was owed, the child already holds the parent's whole
+        // history, because `--fork-session` copies at session creation rather
+        // than at turn completion. So the fork is already made: resume it, and
+        // do NOT fork again.
+        const forkFrom = dead ? null : noteSpawn(state, cfg, slot);
+        // A fork is not a resume: `--fork-session` copies the parent into a new
+        // session rather than continuing one, so `--resume` alone would continue
+        // the parent's own conversation and put two runs in it.
+        const resume = dead || (forkFrom === null && slotHasMemory(state, cfg, slot));
+        return turn({
+          prompt,
+          sessionId: ensureSlotId(state, slot),
+          resume,
+          ...(forkFrom === null ? {} : { forkFrom }),
+          permissionMode: claudePermission(access),
+          model,
+          effort: effortFor(req.role, cfg, roles),
+          cwd: req.cwd,
+          jsonSchema: req.jsonSchema,
+          tools: req.tools,
+          timeoutMs: req.timeoutMs,
+          progress: progressOptions(state, cfg, req.label, model, 'claude'),
+        });
+      },
+      // Every observed failure that left the conversation UNUSABLE (#91).
+      //
+      // #74 reset on every observed failure, full stop, which bought the
+      // dispatch rule its unambiguity - a slot still registered-and-unstarted
+      // could then only be one a killed process left behind - at the price of
+      // discarding a session on the one failure class that is known not to have
+      // damaged it. That price is highest exactly where it is paid most often:
+      // the first Claude turn of a run is the plan turn, and a rate limit there
+      // made the run wait as much as `budget.maxWaitMinutes` and then REDO the
+      // work in a fresh conversation instead of resuming the one it had paid
+      // for. `failureSparedConversation` is where that class is named, on the
+      // error's type rather than on its text.
+      //
+      // Gated here rather than moved to the outer catch, which is the shape that
+      // looks right and is not: past the wait cap the loop THROWS, so a reset in
+      // the catch would give up an intact session at the exact moment the run is
+      // exiting resumable on it - throwing away the work a later `vibe resume`
+      // would have recovered. "Escapes the loop" is the wrong predicate; "left
+      // the conversation unusable" is the right one, and it holds on both paths.
+      //
+      // Exactly registered-and-unstarted: an id never handed over has no
+      // evidence of having been spent.
+      //
+      // Passed to the retry loop rather than wrapped around the turn, so the
+      // path that succeeds gains no await at all.
+      (err: unknown) => {
+        if (failureSparedConversation(err)) {
+          // Said out loud, because it is the whole point and it is otherwise
+          // invisible: the run is about to wait, possibly for hours, and what it
+          // will resume is the conversation this attempt already paid for. Only
+          // where there is something to keep - a slot that never registered had
+          // nothing at stake.
+          const kept = slotHasDeadTurn(state, slot) ? slotId(state, slot) : null;
+          if (kept !== null) {
+            log.detail(
+              `"${req.label}" was rate limited on session ${kept}; the conversation is intact ` +
+                'and the retry resumes it rather than starting over.',
+            );
+          }
+          return;
+        }
+        const discarded = recoverDeadSlot(state, slot);
+        if (discarded !== null) {
+          log.warn(
+            `"${req.label}" failed on session ${discarded} before any turn succeeded; ` +
+              'starting a fresh conversation rather than re-using a spent id.',
+          );
+        }
+      },
     );
   } catch (err: unknown) {
-    throw noteModelProvenance(err, req.role, cfg, roles);
+    throw noteRoleProvenance(err, req.role, cfg, roles, req.timeoutMs);
   }
 
+  // Asked before `markSlotStarted`, which is what makes `slotForkParent` answer
+  // null. True both for a fork this turn made and for one a dead turn had
+  // already made and this turn only resumed - the copy exists either way, so
+  // both owe the same clear.
+  const owedFork = slotForkParent(state, cfg, slot) !== null;
   // The slot's marker, not its id: this turn returning is the only evidence
   // that the conversation exists at all.
   markSlotStarted(state, cfg, slot, result.sessionId);
   // Staged, NOT persisted here - see `clearSlotFork` and `applyCharge` below.
-  if (forkFrom !== null) clearSlotFork(state, slot);
+  if (owedFork) clearSlotFork(state, slot);
   // Tagged with the model that produced it: the ratio is a fraction of this
   // model's window and means nothing under another one. Through the shared seam
   // so the rotation turn in context.ts cannot drift out of step with this one.
@@ -1936,6 +2384,12 @@ async function claudeDispatch(
         // the record of what a run did, and a ratio against the wrong window is
         // not it.
         contextRatio: measured === null ? null : Number(measured.toFixed(3)),
+        // What the turn did, for every role on both providers (#66) - point 2
+        // of the issue, and worth having on its own: three of its four data
+        // points had to be recovered by grepping a transcript. Omitted
+        // ENTIRELY when the turn was unmeasured, because a zero standing in for
+        // an absence is the one thing this repo never records.
+        ...activityEvent(result.activity),
       },
     },
     describe: () =>
@@ -1947,7 +2401,11 @@ async function claudeDispatch(
         : [],
   });
 
-  return { text: result.text, structured: null };
+  return {
+    text: result.text,
+    structured: null,
+    ...(result.activity === undefined ? {} : { activity: result.activity }),
+  };
 }
 
 /**
@@ -1957,6 +2415,16 @@ async function claudeDispatch(
  * overage disabled - no charge accrues, requests simply start failing. The wait
  * is capped so a weekly-cap reset cannot hang the process for days; past the cap
  * the run exits resumable.
+ *
+ * `onFailure` runs once per failed attempt, before the charge and before the
+ * decision to wait, and it is where a caller repairs whatever that attempt spoiled
+ * (#74: a Claude session id spent by an attempt that then failed). It is handed
+ * the error, because what an attempt spoiled depends on how it failed and the
+ * caller is the only one that knows what it has at stake (#91). It mutates
+ * state in memory only, so the charge below persists the repair in the same write
+ * as the account of what the failure cost. A callback rather than a wrapper around
+ * `work`, because the path that succeeds must not gain an await - see
+ * `applyCharge` and `turn-seam.test.ts`.
  */
 async function withRateLimitRetry<T>(
   state: RunState,
@@ -1964,11 +2432,13 @@ async function withRateLimitRetry<T>(
   label: string,
   provider: 'claude' | 'codex',
   work: () => Promise<T>,
+  onFailure?: (err: unknown) => void,
 ): Promise<T> {
   for (;;) {
     try {
       return await work();
     } catch (err) {
+      onFailure?.(err);
       // What this attempt spent, whether or not it is retryable, and per attempt
       // rather than per turn: a turn that burns tokens, fails, waits and burns
       // them again used to have nothing consulted between the two. Any ceiling
@@ -2051,13 +2521,28 @@ function priorRuns(state: RunState): readonly RunSummary[] {
   }
 }
 
+/**
+ * A plan, and what the turn that wrote it did.
+ *
+ * The activity is carried out of the turn rather than read back from state, for
+ * the reason `TurnOutcome.activity` gives: the caller that acts on it is judging
+ * *this* turn, and a later reader could not tell which turn a stored figure
+ * belonged to (#66). Absent when nothing measured the turn, and absent for a
+ * plan that came from `state.plan` on a resume - this process ran no plan turn,
+ * so it has nothing to say about one (#63).
+ */
+interface PlannedTurn {
+  plan: Plan;
+  activity?: TurnActivity | undefined;
+}
+
 async function runPlan(
   state: RunState,
   cfg: Config,
   cwd: string,
   roles: RoleTable,
   turns: AgentTurns,
-): Promise<Plan> {
+): Promise<PlannedTurn> {
   log.step(`${holderLabel('planner', roles)} is planning (read-only)`);
   const outcome = await runTurn(
     state,
@@ -2090,7 +2575,7 @@ async function runPlan(
   log.ok(
     `Plan drafted - ${plan.assumptions.length} assumption(s), ${plan.open_questions.length} open question(s)`,
   );
-  return plan;
+  return { plan, ...(outcome.activity === undefined ? {} : { activity: outcome.activity }) };
 }
 
 interface ReviseArgs {
@@ -2105,7 +2590,7 @@ async function revisePlan(
   args: ReviseArgs,
   roles: RoleTable,
   turns: AgentTurns,
-): Promise<Plan> {
+): Promise<PlannedTurn> {
   state.planRound += 1;
   saveState(state);
   log.step(`${holderLabel('planner', roles)} is revising the plan (round ${state.planRound})`);
@@ -2156,7 +2641,7 @@ async function revisePlan(
   // record is complete. No commit here: the planning phase does not touch the
   // tree, and the note says that rather than implying a failure.
   writeCheckpoint(state, 'plan-round', NO_COMMIT);
-  return plan;
+  return { plan, ...(outcome.activity === undefined ? {} : { activity: outcome.activity }) };
 }
 
 /**
@@ -2180,7 +2665,13 @@ async function codexDispatch(
   turn: CodexTurnFn,
 ): Promise<TurnOutcome> {
   const slot = slotForRole(req.role, roles);
-  const forkFrom = noteFork(state, cfg, slot);
+  // The role's, falling back to the provider's, resolved once: the spawn and the
+  // progress window below both read it, and they must not be able to disagree
+  // about which model this turn is. As on the Claude side (`claudeDispatch`),
+  // and outside the retry for the same reason - it is a pure resolution over
+  // inputs no attempt changes.
+  const model = modelFor(req.role, cfg, roles);
+  const forkFrom = noteSpawn(state, cfg, slot);
   const prompt = freshConversationPrefix(state, req.role, slotContinuity(state, cfg, slot)) + req.prompt;
 
   // Through the same retry the Claude turns use, so a Codex rate limit gets the
@@ -2202,7 +2693,7 @@ async function codexDispatch(
         // threads, so they can now run two different models - which is what
         // `roleWarnings` W5 says out loud when `codex.contextWindow` is set,
         // because one window cannot describe both.
-        model: modelFor(req.role, cfg, roles),
+        model,
         // As on the Claude side: the role's effort where it named one, and this
         // provider's otherwise. Two Codex roles can now differ, which is the
         // whole of #46 - the reviewer's thread and the judge's are already
@@ -2216,17 +2707,29 @@ async function codexDispatch(
         ...(forkFrom === null
           ? { sessionId: slotResumeId(state, cfg, slot) }
           : { forkFrom }),
-        // Deliberately unchanged: this resolves a *Claude* window for a Codex
-        // turn, which predates #60 and is a separate defect. Handing it this
-        // role's model would half-fix it - a Codex model has no entry in either
-        // window source - so it is left exactly as wrong as it was.
-        progress: progressOptions(state, cfg, req.label),
+        // This role's own model, on this role's own provider's conversation -
+        // the same two facts the Claude path names. It resolves to no window at
+        // all, because no Codex conversation has ever reported one: both
+        // sources are written by completed Claude turns. Naming the model alone
+        // would not have been enough, because both are keyed by a bare model
+        // name and `claude.model` may legally equal a Codex role's model - a
+        // shared name would then have handed this turn Claude's window (#86).
+        //
+        // The defect this closes was latent, not live. Across the 15 archived
+        // runs (census 2026-08-27) there are 1,270 Codex heartbeat lines and not
+        // one carries a `ctx%` segment: `formatHeartbeat` gates that segment on
+        // `promptTokens > 0`, `parseCodexLine` never sets it, and Codex reports
+        // usage only at `turn.completed`, which is the end of the turn. So the
+        // wrong denominator was delivered on every Codex turn and would have
+        // rendered - `ctx 210%` on a real critique turn - the moment a numerator
+        // existed. Fixed before the numerator, rather than after.
+        progress: progressOptions(state, cfg, req.label, model, 'codex'),
       });
     });
   } catch (err: unknown) {
-    throw noteModelProvenance(err, req.role, cfg, roles);
+    throw noteRoleProvenance(err, req.role, cfg, roles, req.timeoutMs);
   }
-  const { structured, raw, sessionId, tokens } = outcome;
+  const { structured, raw, sessionId, tokens, activity } = outcome;
 
   // The marker is set whatever the run does with the id: a turn either succeeded
   // or it did not. `idChanged` is false when this run is not carrying the
@@ -2281,6 +2784,9 @@ async function codexDispatch(
         // for want of a denominator.
         ...(occupancy === null ? {} : { contextTokens: occupancy.tokens }),
         ...(occupancy?.ratio == null ? {} : { contextRatio: Number(occupancy.ratio.toFixed(3)) }),
+        // See the same spread on `claude_turn`: recorded for every role, absent
+        // rather than zeroed for a turn nothing measured (#66).
+        ...activityEvent(activity),
       },
     },
     describe: () =>
@@ -2295,7 +2801,11 @@ async function codexDispatch(
   // the safe direction for a condition nothing can clear.
   if (warning !== null) markOccupancyWarned(state);
 
-  return { text: raw, structured };
+  return {
+    text: raw,
+    structured,
+    ...(activity === undefined ? {} : { activity }),
+  };
 }
 
 /**
@@ -2385,7 +2895,7 @@ function pathStyleFor(state: RunState, role: Role, roles: RoleTable): PathStyle 
 }
 
 /**
- * The grounding seam: one place, both findings-producing turns.
+ * The downgrade seam: one place, both findings-producing turns.
  *
  * Here rather than at the call sites, because everything that reads a severity
  * happens after this - the artifact, `collectDeferred`, `recordPendingFindings`
@@ -2395,6 +2905,20 @@ function pathStyleFor(state: RunState, role: Role, roles: RoleTable): PathStyle 
  * `log.warn` as well as the event: this is the run telling the user that a
  * reviewer asserted something it could not point at, which is worth seeing at
  * the time and not only in a file (#48).
+ *
+ * Two rules now, and the order matters. Grounding runs first and inertness only
+ * over the survivors, so a finding that cited nothing AND came from a turn that
+ * ran nothing is downgraded once, by grounding - which keeps `downgraded.from`
+ * naming the severity the model actually gave it, and keeps the recorded reason
+ * the more specific of the two.
+ *
+ * The inertness rule is the **reviewer's alone** (#66). The critic must not be
+ * held to it: it critiques a *plan*, before any code exists, reading the plan is
+ * in its prompt, and a plan critique that runs no shell has not failed to gather
+ * evidence. The census supports keeping it out rather than assuming - 2 of 65
+ * critique turns ran zero commands, and nothing in the archive says either was
+ * wrong. The *tally* is recorded for every role either way, so the question can
+ * be reopened later on evidence the runs themselves recorded.
  */
 function groundAndRecord(
   state: RunState,
@@ -2402,13 +2926,17 @@ function groundAndRecord(
   role: Role,
   roles: RoleTable,
   found: FindingsReport,
+  /** What the turn that produced `found` did. Absent when nothing measured it. */
+  activity: TurnActivity | undefined,
 ): FindingsReport {
-  const { report, downgraded } = groundFindings(
-    found,
-    cwd,
-    state.dir,
-    pathStyleFor(state, role, roles),
-  );
+  const grounded = groundFindings(found, cwd, state.dir, pathStyleFor(state, role, roles));
+  const inert =
+    role === 'reviewer'
+      ? downgradeInert(grounded.report, activity)
+      : { report: grounded.report, downgraded: [] as Finding[] };
+  const report = inert.report;
+  const downgraded = [...grounded.downgraded, ...inert.downgraded];
+
   for (const f of downgraded) {
     // Set by construction in `groundFindings`; narrowed rather than asserted.
     const d = f.downgraded;
@@ -2436,6 +2964,12 @@ async function runCritique(
   plan: Plan,
   roles: RoleTable,
   turns: AgentTurns,
+  /**
+   * What the turn that wrote `plan` did, or absent when nothing measured it, or
+   * when this process did not run one. Named in the prompt only when it inspected
+   * nothing, so every other run's prompt is byte-identical to before (#63).
+   */
+  planActivity?: TurnActivity | undefined,
 ): Promise<FindingsReport> {
   log.step(`${holderLabel('critic', roles)} is critiquing the plan`);
   const outcome = await runTurn(
@@ -2454,6 +2988,7 @@ async function runCritique(
         // The plan's own bar, not a snapshot: this runs before the gate, and
         // the critic is what decides whether the bar is any good.
         plan.acceptance_criteria,
+        planActivity,
       ),
       cwd,
       label: `critique-${state.planRound}`,
@@ -2461,7 +2996,16 @@ async function runCritique(
     turns,
     roles,
   );
-  return groundAndRecord(state, cwd, 'critic', roles, parseFindings(readStructured(outcome)));
+  // The activity is passed for the record, not for a rule: `groundAndRecord`
+  // applies the inertness rule to the reviewer only. See its header.
+  return groundAndRecord(
+    state,
+    cwd,
+    'critic',
+    roles,
+    parseFindings(readStructured(outcome)),
+    outcome.activity,
+  );
 }
 
 async function runReview(
@@ -2472,6 +3016,36 @@ async function runReview(
   roles: RoleTable,
   turns: AgentTurns,
 ): Promise<FindingsReport> {
+  // Before `log.step`, so the run never claims a reviewer started on a diff it
+  // could not read. The decision that a gitless run is refused rather than
+  // degraded is NOT made here - it is made by `gitPrecondition` in the preflight
+  // gate, before anything is spent. This covers only what that gate cannot see:
+  // a resume, a hand-edited state, or a repository that stopped being one
+  // mid-run. `isRepo` and not `hasCommits` for the reason recorded there - a
+  // repository with no commits reviews fine (measured 2026-08-27, #71).
+  //
+  // Without it, `diffChunks` runs `git diff --cached`, which outside a
+  // repository falls back to `--no-index` mode and dies with `unknown option
+  // 'cached'` - a git usage message about a flag vibe passed, naming nothing a
+  // user could act on.
+  // `repoStatus` rather than `isRepo` for the same reason the gate uses it: a
+  // git that cannot be resolved or spawned makes `isRepo` throw, and an
+  // unhandled throw here is a generic run error rather than the named refusal.
+  const repo = await git.repoStatus(cwd);
+  if (!repo.isRepo) {
+    throw new Escalation(
+      EXIT.PREFLIGHT,
+      (repo.error === null
+        ? `${cwd} is not a git repository`
+        : `git could not be run against ${cwd} (${repo.error})`) +
+        ", so the review phase cannot run: the reviewer's only input is a diff produced by " +
+        'git, and there is no second source for it. ' +
+        (repo.error === null
+          ? 'Point the run at the repository, or `git init` here, and resume.'
+          : 'Repair the git binary - VIBE_GIT_BIN, or git on PATH - and resume.'),
+    );
+  }
+
   log.step(`${holderLabel('reviewer', roles)} is reviewing the implementation`);
   const { chunks, files } = await git.diffChunks(cwd, state.baseSha);
 
@@ -2565,7 +3139,17 @@ async function runReview(
       roles,
     );
     reports.push(
-      groundAndRecord(state, cwd, 'reviewer', roles, parseFindings(readStructured(outcome))),
+      // Per chunk turn, deliberately: a chunked round is several reviewer turns,
+      // and each one's findings are judged against what that turn did rather
+      // than against the round as a whole (#66).
+      groundAndRecord(
+        state,
+        cwd,
+        'reviewer',
+        roles,
+        parseFindings(readStructured(outcome)),
+        outcome.activity,
+      ),
     );
 
     // After the turn, never before it: this says what the reviewer was actually
@@ -2735,8 +3319,15 @@ async function resolveQuestions(
   return usable;
 }
 
-const normalize = (s: string): string => s.toLowerCase().replace(/\W+/g, ' ').trim();
-
+/**
+ * Every question actually put to the answerer, and every answer that came back.
+ *
+ * That is the whole meaning of the list, and #65 left it there: a re-ask the
+ * guard suppresses was never sent, so it is not marked here. The cost is that a
+ * suppressed wording recurring in a later round is caught by the fuzzy scan
+ * against the original rather than by the exact path below - which is what the
+ * scores in `src/questions.ts` leave room for.
+ */
 function markAnswered(state: RunState, question: string): void {
   const key = normalize(question);
   if (key && !state.answeredQuestions.includes(key)) state.answeredQuestions.push(key);
@@ -2744,7 +3335,7 @@ function markAnswered(state: RunState, question: string): void {
 }
 
 function isAnswered(state: RunState, question: string): boolean {
-  return state.answeredQuestions.includes(normalize(question));
+  return state.answeredQuestions.some((key) => isSameQuestion(key, question));
 }
 
 /** Human-facing handoff written whenever a run stops for input. */

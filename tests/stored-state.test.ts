@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRun, listRuns, loadRun, resumePhase } from '@src/run.js';
-import { KNOWN_KEYS, REDERIVED_KEYS, StoredStateError } from '@src/stored.js';
+import { KNOWN_KEYS, REDERIVED_KEYS, StoredStateError, validateStoredState } from '@src/stored.js';
 import type { RunState, RunStatus } from '@src/types.js';
 
 /**
@@ -315,6 +315,35 @@ test('a present non-array becomes the empty list, with an event naming the field
   }
 });
 
+test("a round's claims survive a load, and an unusable list reads as absent (#116)", () => {
+  const loaded = load((raw) => {
+    raw['p1Rounds'] = [
+      { signature: 'abc', count: 1, ids: ['one'], claims: [{ id: 'one', title: 'A claim' }] },
+      { signature: 'def', count: 1, ids: ['two'], claims: 'nope' },
+      {
+        signature: 'ghi',
+        count: 2,
+        ids: ['a', 'b'],
+        claims: [{ id: 'a', title: 'A' }, { id: 'b' }],
+      },
+    ];
+  });
+
+  assert.deepEqual(loaded.p1Rounds[0]?.claims, [{ id: 'one', title: 'A claim' }]);
+  // Absent, never `[]`: absent is what the guards read as "recorded before
+  // claims existed" and fall back to `ids`/`signature` for. An empty list would
+  // instead assert the round had no blocking findings.
+  assert.equal(loaded.p1Rounds[1]?.claims, undefined);
+  // One bad entry costs the whole field, unlike `ids`. A round missing one claim
+  // would compare as a *shorter* round, and `claimsMatch` requires equal
+  // lengths - so a single silent drop would turn a repeated round into a
+  // differing one and switch the repeat brake off for that window.
+  assert.equal(loaded.p1Rounds[2]?.claims, undefined);
+  assert.deepEqual(loaded.p1Rounds[2]?.ids, ['a', 'b'], 'and the ids beside it are untouched');
+  assert.ok(repairs(loaded).includes('p1Rounds[1].claims'));
+  assert.ok(repairs(loaded).includes('p1Rounds[2].claims'));
+});
+
 test('a wrong-typed nullable becomes null, and a stored null is left alone', () => {
   for (const field of ['baseSha', 'branch', 'handoff', 'extraContext', 'codexSessionId']) {
     const repaired = load((raw) => {
@@ -337,6 +366,25 @@ test('a corrupt sessionStarted or contextRatio takes its empty value', () => {
   });
   assert.equal(ratio.contextRatio, 0);
   assert.deepEqual(repairs(ratio), ['contextRatio']);
+});
+
+test('a state written before sessionRegistered existed loads with no repair', () => {
+  // Absent is what an id that has never been handed to the CLI looks like, and
+  // it is what every state written before #74 presents - so there is nothing to
+  // migrate and nothing to repair.
+  const loaded = load((raw) => {
+    delete raw['sessionRegistered'];
+  });
+  assert.equal(loaded.sessionRegistered, undefined);
+  assert.deepEqual(repairs(loaded), []);
+
+  // Present and unreadable is dropped to that same absence, named once - the
+  // `reviewSessionStarted` precedent, and never corruption.
+  const damaged = load((raw) => {
+    raw['sessionRegistered'] = 'yes';
+  });
+  assert.equal(damaged.sessionRegistered, undefined);
+  assert.deepEqual(repairs(damaged), ['sessionRegistered']);
 });
 
 test('a stored string in pendingAnswers never reaches the planner as characters', () => {
@@ -577,14 +625,26 @@ test('a TERMINAL status is trusted beside any phase, complete included - see #54
   }
 });
 
-test('the token share is not policed here either - see #54', () => {
-  const loaded = load((raw) => {
+test('the token share is not policed per field - the load-path rule is D (#87)', () => {
+  // Half of this case's claim moved with #87 and half of it did not, so it
+  // asserts against `validateStoredState` directly rather than through
+  // `loadRun`. What still holds is this module's rule 5: the two values are
+  // legal apart, and the per-field validator does not ask what the pair says -
+  // no repair, both figures intact. What changed is the LOAD: `loadRun` now
+  // applies rule D from `src/consistency.ts` and clamps the Codex share to the
+  // run total. That contract is pinned in `tests/token-share.test.ts`, which is
+  // where this case's `loadRun` half now lives.
+  const run = corrupt((raw) => {
     raw['tokensUsed'] = 10;
     raw['codexTokens'] = 100;
   });
-  assert.equal(loaded.tokensUsed, 10);
-  assert.equal(loaded.codexTokens, 100);
-  assert.deepEqual(repairs(loaded), []);
+  const raw: unknown = JSON.parse(readFileSync(run.file, 'utf8'));
+
+  const { state, repairs: found } = validateStoredState(raw, run.id, path.dirname(run.file));
+
+  assert.equal(state.tokensUsed, 10);
+  assert.equal(state.codexTokens, 100);
+  assert.deepEqual(found, []);
 });
 
 // ---- the reader's domain is the writer's range ------------------------------
@@ -778,6 +838,60 @@ test('dir and targetDir are re-derived, and the stored ones are ignored', () => 
   assert.equal(loaded.targetDir, run.targetDir);
   assert.equal(loaded.dir, path.join(run.targetDir, RUNS, run.id));
   assert.deepEqual(repairs(loaded), []);
+});
+
+// ---- the question record (#65) ----------------------------------------------
+
+test('a state written before the question-record fields existed loads with no repair', () => {
+  const loaded = load(() => {
+    // Nothing to delete: these three have never been written by an older vibe,
+    // and absent is exactly what "nobody answered, nothing was suppressed"
+    // looks like. Repairing them into `[]` would be inventing a record.
+  });
+  assert.equal(loaded.humanAnswered, undefined);
+  assert.equal(loaded.suppressedQuestions, undefined);
+  assert.equal(loaded.resolvedByHuman, undefined);
+  assert.deepEqual(repairs(loaded), []);
+});
+
+test('a similarity score outside 0..1 is damage, not a measurement', () => {
+  const good = { question: 'q', matched: 'm', score: 0.81 };
+  const loaded = load((raw) => {
+    raw['humanAnswered'] = ['ok', 5];
+    raw['suppressedQuestions'] = [
+      good,
+      { question: 'q', matched: 'm', score: 2 },
+      { question: 'q', matched: 'm', score: -1 },
+      // `JSON.stringify` writes NaN as null, which is what a real damaged file
+      // would hold - so this is the shape the reader actually meets.
+      { question: 'q', matched: 'm', score: Number.NaN },
+      { question: 'q', matched: 'm', score: 'high' },
+      { question: 'q', matched: 'm' },
+      { question: 7, matched: 'm', score: 0.9 },
+      'junk',
+    ];
+    raw['resolvedByHuman'] = [
+      { question: 'q', answered: 'a', score: 1 },
+      { question: 'q', answered: 'a', score: 1.0001 },
+      { question: 'q', score: 0.7 },
+    ];
+  });
+
+  // `isRatio` would have kept the 2 and the 1.0001: it has no upper bound on
+  // purpose, because an overfull context ratio is a real measurement. A
+  // similarity above 1 is not.
+  assert.deepEqual(loaded.humanAnswered, ['ok']);
+  assert.deepEqual(loaded.suppressedQuestions, [good]);
+  assert.deepEqual(loaded.resolvedByHuman, [{ question: 'q', answered: 'a', score: 1 }]);
+  for (const field of ['humanAnswered', 'suppressedQuestions', 'resolvedByHuman']) {
+    assert.ok(repairs(loaded).includes(field), `${field} said what it dropped`);
+  }
+});
+
+test('the three question-record fields are keys the validator decides', () => {
+  for (const key of ['humanAnswered', 'suppressedQuestions', 'resolvedByHuman']) {
+    assert.equal(KNOWN_KEYS.has(key), true, `${key} is in the registry`);
+  }
 });
 
 // ---- the registry cannot drift ----------------------------------------------

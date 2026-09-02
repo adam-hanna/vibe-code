@@ -123,8 +123,9 @@ test('a file bigger than the limit is cut inside its own chunk and named', async
 test('the file list and the diff describe the same change when baseSha..HEAD is empty', async () => {
   // `git.commitEachRound: false` leaves the implementation uncommitted, so
   // `baseSha..HEAD` is empty and `diffSince` falls back to the working tree.
-  // `changedFiles` has no such fallback, which used to hand the reviewer a real
-  // diff beside an empty file list - and would now hand it nothing at all.
+  // The file list used to be taken by a separate reader with no such fallback
+  // (`changedFiles`, removed in #93), which handed the reviewer a real diff
+  // beside an empty file list - and would now hand it nothing at all.
   const dir = repo({ commit: true });
   const baseSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
   write(dir, 'uncommitted.txt', lines(100));
@@ -137,6 +138,29 @@ test('the file list and the diff describe the same change when baseSha..HEAD is 
   assert.deepEqual(
     chunks.flatMap((c) => c.files),
     files,
+  );
+});
+
+/**
+ * What "no repository here" is allowed to look like.
+ *
+ * `changedFiles` answered `[]` to that question, because `allowFail: true`
+ * turned "I could not look" into "nothing changed" - the one rule this repo
+ * breaks least often. It is deleted rather than repaired (#93): it had no
+ * caller, and `diffChunks` already returns the file list every caller wanted,
+ * resolved through the same mode as the diff beside it.
+ *
+ * So the property moves here, and is pinned rather than assumed: the surviving
+ * reader refuses. An empty list from this function has to mean the change is
+ * empty, since that is now the only thing any caller can conclude from it.
+ */
+test('the file list refuses where there is no repository, rather than reporting no change', async () => {
+  const notARepo = mkdtempSync(path.join(tmpdir(), 'vibe-chunk-bare-'));
+
+  await assert.rejects(
+    () => diffChunks(notARepo, null),
+    /^Error: git .* failed \(\d+\)/,
+    'a directory with no repository must not answer as though nothing changed',
   );
 });
 

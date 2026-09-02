@@ -2,15 +2,24 @@ import { describe, intact, StoredStateError } from '@src/stored.js';
 import type { RunPhase, RunStatus } from '@src/types.js';
 
 /**
- * The one cross-field rule over `status`, `phase` and `planOnly` (#54).
+ * The cross-field rules over stored state.
  *
- * `src/stored.ts` validates strictly per field and says so as its rule 5: each
- * of these three fields is individually legal in every value the other two can
- * hold, so no per-field reader can see the contradiction. What a *pair* or a
- * *triple* of them can say is a different question, and this module is the only
- * place it is asked.
+ * `src/stored.ts` validates strictly per field and says so as its rule 5: a
+ * field is individually legal in every value the others can hold, so no
+ * per-field reader can see a contradiction between two of them. What a *pair* or
+ * a *triple* of them can say is a different question, and this module is the
+ * only place it is asked.
  *
- * ## Where it runs
+ * There are two subjects, and they are independent - different fields,
+ * different remedies, separate entry points:
+ *
+ * - **`status`/`phase`/`planOnly`** (#54), rules A, B and C, decided together by
+ *   `checkStoredConsistency`. Everything down to "The two states that look wrong
+ *   and are not" is about those three.
+ * - **`codexTokens` against `tokensUsed`** (#87), rule D, decided by
+ *   `checkTokenShare`. Documented at that function.
+ *
+ * ## Where the status/phase/planOnly rules run
  *
  * `loadRun` (`src/run.ts`), after `validateStoredState` and *before*
  * `ensureVibeIgnored`, which is that function's first write of any kind. The
@@ -275,4 +284,95 @@ export function checkStoredConsistency(
   }
 
   return null;
+}
+
+// ---- rule D: the token share (#87) -----------------------------------------
+
+/**
+ * The two fields rule D reads. An object literal satisfies it, like
+ * `ConsistencyFields`, so the rule is testable without a run on disk.
+ */
+export interface TokenShareFields {
+  readonly id: string;
+  readonly dir: string;
+  readonly tokensUsed: number;
+  readonly codexTokens?: number | undefined;
+}
+
+/** A Codex share the loader clamped, and everything needed to justify it. */
+export interface TokenShareClamp {
+  /** Rule D. Named so the recorded event can be told from a per-field repair. */
+  rule: 'D';
+  /** What the file held. After the clamp, this event is its only copy. */
+  storedCodexTokens: number;
+  /** The authority it was clamped to - `tokensUsed`, which is left alone. */
+  tokensUsed: number;
+  /** Always `tokensUsed`. */
+  codexTokens: number;
+  /** Why no writer could have produced the pair, worded for a human. */
+  why: string;
+}
+
+/**
+ * Rule D - normalise. A Codex share larger than the run's own total.
+ *
+ * `summary()` (`src/cli.ts`) renders the Claude share as `tokensUsed` minus
+ * `codexTokens`, so a stored pair in this order prints a NEGATIVE token total -
+ * a number that cannot exist, presented as the run's accounting. Measured
+ * against `dist/` on 2026-08-27 with `tokensUsed: 1000, codexTokens: 5000000`:
+ * `Claude -4,988,791 tok`, and the load accepted it in silence.
+ *
+ * ## How a state gets here - measured, because #87 guessed wrong
+ *
+ * The issue proposed that a malformed `tokensUsed` is repaired to `0` while a
+ * valid `codexTokens` survives beside it. **That route does not exist.**
+ * `tokensUsed` is read by `refusedNumber` (`src/stored.ts`), so a malformed one
+ * refuses the load outright; there is no repair to zero and there never was.
+ * The mirror case is a repair - `codexTokens` is `optionalNumber`, so a
+ * malformed one is dropped with one recorded repair and `tokensUsed` is left
+ * untouched - which is the precedent this rule follows.
+ *
+ * No writer can produce the pair either: `applyCharge` (`src/charge.ts`) adds to
+ * `tokensUsed` unconditionally and only ever adds to `codexTokens` on the Codex
+ * branch. So the two routes in are a hand-edited `state.json`, and a hand-edited
+ * `checkpoint-<n>.json` that `vibe fork` inherits.
+ *
+ * ## Why it clamps rather than refusing
+ *
+ * Unlike rule A, this one can tell which field is wrong. The two are already
+ * ranked by their own validators: `tokensUsed` is `refusedNumber` - "the run
+ * cannot proceed without it" - and is what `enforceTokenCeiling` reads, while
+ * `codexTokens` is `optionalNumber` and is read only by `summary()` and the
+ * fork's provenance line. Clamping the decoration to the authority follows a
+ * ranking the codebase has already made, only ever LOWERS `codexTokens`, and
+ * never touches `tokensUsed` - so it cannot buy the run more budget. Refusing
+ * would stand a resumable run down over a display defect, and would treat a
+ * well-formed value more harshly than the malformed one that is merely dropped.
+ *
+ * `>` and never `>=`: a run whose work was all Codex is a real run, so an equal
+ * share is legal and must stay untouched.
+ *
+ * ## Its own entry point, deliberately
+ *
+ * Not a fourth case inside `checkStoredConsistency`. `planFork` (`src/fork.ts`)
+ * turns ANY non-null return of that function into a refusal, and rule D has to
+ * clamp there rather than refuse. Merging the two would silently convert a
+ * forkable run into a `ForkError`.
+ *
+ * **Pure, like the rest of this module.** The caller applies the clamp and
+ * records it; nothing here writes.
+ */
+export function checkTokenShare(state: TokenShareFields): TokenShareClamp | null {
+  const codex = state.codexTokens;
+  if (codex === undefined || codex <= state.tokensUsed) return null;
+  return {
+    rule: 'D',
+    storedCodexTokens: codex,
+    tokensUsed: state.tokensUsed,
+    codexTokens: state.tokensUsed,
+    why:
+      `the Codex share (${codex.toLocaleString()} tok) is larger than the run's own total ` +
+      `(${state.tokensUsed.toLocaleString()} tok), which no writer produces - every charge ` +
+      'raises the run total, and only a Codex charge raises the Codex share',
+  };
 }

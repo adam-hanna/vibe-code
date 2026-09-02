@@ -48,9 +48,16 @@ export interface ClaudeTurnOptions {
    *
    * `--fork-session` copies the parent's history into a NEW session rather than
    * continuing it, so the parent stays resumable under its own id and both runs
-   * can proceed independently. The new session is vibe's own chosen id, which is
-   * what makes the fork idempotent: a process killed before the turn is charged
-   * re-forks to the same id rather than accumulating orphans.
+   * can proceed independently. The new session is vibe's own chosen id.
+   *
+   * That id is NOT re-usable, and this comment used to claim it was: re-issuing
+   * the identical command after a killed fork was called idempotence, and #74
+   * measured it failing with "Session ID ... is already in use" every time,
+   * forever. The copy is made at session creation rather than at turn
+   * completion, so a fork whose first turn died has already happened - the
+   * child holds the parent's history - and the recovery is `--resume <child>`,
+   * decided by the slot in `src/slots.ts`. A fork this adapter is asked to make
+   * is always one being made for the first time.
    *
    * Mutually exclusive with `resume` - forking a conversation you are already
    * continuing is not a state a run can be in.
@@ -195,11 +202,19 @@ export async function claudeTurn(
       warn(`claude exited ${String(code)} but returned a complete successful result; accepting it.`);
     }
 
+    // Read here, inside the heartbeat's work and after the output was accepted:
+    // this is a fact about a turn that completed, and the object is stored from
+    // this point on rather than watched (#66). Spread conditionally because
+    // `exactOptionalPropertyTypes` distinguishes an absent field from an
+    // explicit undefined, and "no heartbeat" must be the absent one.
+    const activity = heartbeat?.activity();
+
     return {
       text,
       costUsd: num(parsed['total_cost_usd']),
       sessionId: typeof parsed['session_id'] === 'string' ? parsed['session_id'] : sessionId,
       denials: Array.isArray(denialsRaw) ? denialsRaw : [],
+      ...(activity === undefined ? {} : { activity }),
       numTurns: num(parsed['num_turns']),
       usage: extractUsage(parsed, lastAssistantUsage),
       tokens: extractTokens(parsed),
@@ -242,6 +257,32 @@ export class RateLimitError extends Error {
     super(message);
     this.name = 'RateLimitError';
   }
+}
+
+/**
+ * Whether this failure left the conversation it ran in usable (#91).
+ *
+ * The one question the slot recovery needs and the codebase did not model.
+ * `chargeFailure` already separates retryable from terminal, but for the purpose
+ * of deciding whether to *wait* - which says nothing about what the conversation
+ * is worth afterwards.
+ *
+ * A rate limit is the only class that answers yes, and it does so on evidence
+ * rather than on optimism. On the Claude path a `RateLimitError` is raised from
+ * exactly one place: the `is_error` branch above, which is reached only after a
+ * complete `result` envelope has been parsed. The CLI ran to completion and
+ * declined the request; nothing was killed mid-write. #74 measured that even a
+ * HARD-KILLED session resumes cleanly and carries its work, and a rate-limited
+ * one is strictly less damaged than that.
+ *
+ * Everything else answers no, including errors nobody has classified. That is
+ * the fail-closed direction: giving up an intact conversation costs the work of
+ * one turn, and re-using a broken one costs the run. And it is self-correcting
+ * either way - a resume of a conversation that turns out to be unusable fails
+ * with something that is not a rate limit, which does give the id up.
+ */
+export function failureSparedConversation(err: unknown): boolean {
+  return err instanceof RateLimitError;
 }
 
 const RATE_LIMIT_RE =

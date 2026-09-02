@@ -3,11 +3,12 @@ import { existsSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { ClaudeTurnOptions } from '@src/claude.js';
-import { parseHumanAnswers } from '@src/cli.js';
+import { parseHumanAnswers, recordHumanAnswers } from '@src/cli.js';
 import type { CodexTurnOptions } from '@src/codex.js';
 import { DEFAULTS } from '@src/config.js';
 import { Escalation, EXIT, orchestrate, writeEscalation } from '@src/orchestrator.js';
 import type { AgentTurns } from '@src/orchestrator.js';
+import { reconcileQuestionRecords } from '@src/questions.js';
 import { createRun, saveState } from '@src/run.js';
 import type {
   Answer,
@@ -21,6 +22,7 @@ import type {
   Plan,
   RunState,
   TokenUsage,
+  TurnActivity,
 } from '@src/types.js';
 
 /**
@@ -189,6 +191,30 @@ export interface Handlers {
    * no way for an injected turn to report any.
    */
   usage?: (label: string, options: ClaudeTurnOptions) => ContextUsage | null;
+  /**
+   * What this turn's heartbeat observed it doing, or undefined for a turn
+   * nothing measured (#66).
+   *
+   * Keyed by label alone, and applied to both providers, because that is what
+   * every case needs to say: "the turn labelled `review-0` ran nothing". The
+   * default is undefined, which is what these fakes reported before the hook
+   * existed - so every case that does not set it dispatches and records exactly
+   * what it did, and none of them can be downgraded for inertness.
+   */
+  activity?: (label: string) => TurnActivity | undefined;
+}
+
+/** A turn that used tools: the ordinary case, and the control in every inertness case. */
+export function active(commands = 3): TurnActivity {
+  return { items: { command_execution: commands, agent_message: 1 }, tool: commands };
+}
+
+/**
+ * A turn that emitted items and used no tool - the #44 reviewer, in the shape
+ * `parseCodexLine` would have recorded it.
+ */
+export function inert(messages = 3): TurnActivity {
+  return { items: { agent_message: messages }, tool: 0 };
 }
 
 /**
@@ -208,6 +234,7 @@ export function agents(handlers: Handlers, calls: string[]): AgentTurns {
       const label = options.progress?.label ?? '(unlabelled)';
       calls.push(label);
       const produced = handlers.claude?.(label, options) ?? 'claude said so';
+      const activity = handlers.activity?.(label);
       return Promise.resolve({
         text: typeof produced === 'string' ? produced : JSON.stringify(produced),
         costUsd: 0.01,
@@ -216,12 +243,18 @@ export function agents(handlers: Handlers, calls: string[]): AgentTurns {
         numTurns: 1,
         usage: handlers.usage?.(label, options) ?? null,
         tokens: tokens(1000),
+        // Spread rather than assigned: `exactOptionalPropertyTypes` makes an
+        // absent field and an explicit undefined different things, and a turn
+        // nothing measured must produce the absent one.
+        ...(activity === undefined ? {} : { activity }),
       });
     },
     codex: (options) => {
       calls.push(options.schemaName);
       const structured = handlers.codex?.(options.schemaName, options) ?? report([]);
+      const activity = handlers.activity?.(options.schemaName);
       return Promise.resolve({
+        ...(activity === undefined ? {} : { activity }),
         structured,
         raw: JSON.stringify(structured),
         // Not `?? 'thread-1'`: a handler that returns null is saying this turn
@@ -465,22 +498,35 @@ export function unlaunchableVerify(): Partial<Config> {
  * fail while `test` never runs - which is the whole point of an ordered list.
  * Same shape of script for the same reasons: relative, no spaces, and a marker
  * file rather than a stub, so "did this gate execute" is an observation.
+ *
+ * `produces` names a directory the command WRITES before it exits, holding one
+ * file whose content is the execution number - which is what makes "round 1 kept
+ * round 1's evidence" checkable rather than assumed (#62). It is rewritten every
+ * run, exactly as a real reporter's output directory is, which is the reason
+ * recording a path instead of copying would have been a wrong answer.
  */
 export function gateScript(
   state: RunState,
   name: string,
-  options: { failures?: number; failRuns?: readonly number[] } = {},
+  options: { failures?: number; failRuns?: readonly number[]; produces?: string } = {},
 ): string {
   const script = `vibe-gate-${name}.mjs`;
   const logFile = `vibe-gate-${name}-runs.txt`;
   const failing =
     options.failRuns ?? Array.from({ length: options.failures ?? 0 }, (_unused, i) => i + 1);
+  const produces =
+    options.produces === undefined
+      ? ''
+      : `mkdirSync(${JSON.stringify(options.produces)}, { recursive: true });\n` +
+        `writeFileSync(${JSON.stringify(`${options.produces}/report.txt`)}, ` +
+        "`run ${runs}`, 'utf8');\n";
   writeFileSync(
     path.join(state.targetDir, script),
-    "import { appendFileSync, readFileSync } from 'node:fs';\n" +
+    "import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';\n" +
       `const log = ${JSON.stringify(logFile)};\n` +
       "appendFileSync(log, 'ran\\n');\n" +
       "const runs = readFileSync(log, 'utf8').split('\\n').filter(Boolean).length;\n" +
+      produces +
       `process.exit(${JSON.stringify([...failing])}.includes(runs) ? 1 : 0);\n`,
     'utf8',
   );
@@ -522,9 +568,15 @@ export function escalationFile(state: RunState, err: Escalation): string {
  * Mirrors src/cli.ts:413-439 rather than calling it: `cmdResume` is not
  * exported and reaches `execute`, which runs the real preflight and spawns. So
  * this fills every "**Your answer:**" blockquote, parses the file through the
- * exported `parseHumanAnswers`, hangs the answers on the state and retires the
- * file so they cannot be replayed - and the CLI glue around those steps stays
- * uncovered, deliberately.
+ * exported `parseHumanAnswers`, hangs the answers on the state, records them
+ * through the exported `recordHumanAnswers` and `reconcileQuestionRecords` as
+ * `cmdResume` does on the same write, and retires the file so they cannot be
+ * replayed - and the CLI glue around those steps stays uncovered, deliberately.
+ *
+ * The two recording steps are not decoration: without them nothing reaches the
+ * `ASSUMED.md` reconciliation through the path a human actually takes, and a
+ * case that hung `humanAnswered` on the state by hand would be asserting on a
+ * fixture rather than on the flow (#65).
  */
 export function answerNeedsInput(
   state: RunState,
@@ -561,7 +613,9 @@ export function answerNeedsInput(
     );
   }
   state.pendingAnswers = answers;
+  recordHumanAnswers(state, answers);
   saveState(state);
+  reconcileQuestionRecords(state);
   renameSync(file, path.join(state.dir, `answered-${state.planRound}.md`));
   return answers;
 }

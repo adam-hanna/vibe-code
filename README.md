@@ -27,6 +27,8 @@ vibe doctor
 
 **`vibe` drives two CLIs it does not install.** You need `claude` and `codex` already installed *and logged in* — this tool shells out to them and inherits your existing subscriptions. npm cannot express that as a dependency, so it is on you. `vibe doctor` checks for both, prints the resolved paths, and verifies each agent can actually run the tools it needs; run it first.
 
+**`vibe doctor` takes the same options `vibe run` does, and previews the config they give you.** Models, efforts, timeouts, budgets, round caps, compaction, the verification gates and the role table — the report is the configuration a run under those flags would use, not the file's version of it. Where a flag moved something, the config line names what: `config: ./vibe.config.json (command line also sets codex.model, loop.maxPlanRounds)`. The corollary is worth knowing before you put it in a script: a flag that doctor used to ignore now matters, so an *invalid* one fails doctor rather than being dropped — which is the point, since it would also stop the run.
+
 Node 20+ is required and is enforced via `engines`.
 
 Installing globally puts `vibe` on your PATH — rename the bin or use `npx @adam-hanna/vibe-code` if that collides with something you already have.
@@ -59,6 +61,9 @@ vibe plan "Migrate the session store to Redis"
 
 # Target another directory
 vibe run "Fix the flaky auth tests" -C ../my-service
+
+# Give one seat its own model, effort or timeout — repeatable, and it works on resume too
+vibe run "Port the parser to the new AST" --role reviewer:model=gpt-5.6-pro --role reviewer:effort=max
 
 # Continue a run that stopped for your input
 vibe resume 20260811-142530-add-rate-limiting
@@ -217,6 +222,10 @@ What it cannot recover is stated rather than estimated:
 - **An interrupted Codex turn's tokens, entirely.** `codex exec --json` reports usage only on `turn.completed`, so there is nothing to observe in flight. The turn is named in the summary as unattributed; no total moves.
 - **Up to five seconds of a turn killed between two writes.** The record rides the existing five-second write, so the recovered figure is the last one observed. It is an under-count, never an over-count, and the first figure a turn produces is written immediately so an early kill is not recorded as a zero.
 
+- **A killed turn's work, if the turn had stashed it.** This one gets a notice rather than a shrug. An implementer that runs `git stash push` to check whether a failing test predates its change — a legitimate manoeuvre, and one two runs here have needed — and is killed before the matching `git stash pop` leaves its entire output in the stash, where nothing else can see it: the tree reads clean, there are no commits, and the accounting correctly says the turn ran. One run lost 11.3M tokens of implementation that way and it was recovered by hand. So a run that has a branch now reads `git stash list` before dispatching anything, and where an entry was made on that branch it says so — the ref, git's own description of it, and what `git stash show --stat` says is in it.
+
+  **It notices and does nothing else.** Popping can conflict, and a stash a human made for their own reasons is not vibe's to take; the work is safe where it is and the only thing missing was that anyone knew. A run with no such stash, and a run whose stash names somebody else's branch, are both silent. Note that the match is on the branch name **git** recorded in the entry, which on some versions is the last path component rather than the whole name — the full description is printed beside it so you can judge.
+
 **`--force` reports what it finds and charges none of it.** Forcing is the declaration that vibe cannot tell whether the other process is still alive and still owns those amounts, and an amount that cannot be attributed is not charged — the same rule that makes Codex cost absent rather than estimated. The figures are printed with the reason they were not charged, and then cleared. If you know the run is dead and want that spend counted, delete `run.lock` by hand and resume normally: that is the route that keeps it.
 
 A run whose progress heartbeat is off (`--no-progress`) observes none of this, so there is nothing for it to recover. The lock and the verdict work exactly the same.
@@ -239,12 +248,29 @@ One command can only fail one way. `verify.gates` names as many as the project n
   "gates": [
     { "name": "typecheck", "command": "npm run typecheck", "runs": 1 },
     { "name": "test",      "command": "npm test",          "runs": 3 },
-    { "name": "qa",        "command": null, "runs": 1, "timeoutMs": 1800000, "required": false }
+    { "name": "qa",        "command": "npx playwright test", "runs": 1, "timeoutMs": 1800000,
+      "artifacts": ["playwright-report", "test-results/summary.json"] }
   ]
 }
 ```
 
 `runs` and `timeoutMs` default to `verify.runs` and `verify.timeoutMs`; `required` defaults to true; `command` is a **required key that may hold null**, so "there is deliberately nothing to run here" cannot be spelled by forgetting to write it. Each gate files its failure as `${name}-failing`, which is what lets the oscillation guard tell a typecheck that keeps failing from a test suite that keeps failing.
+
+### What a failing gate produced
+
+A failing suite usually writes something a human would want to read — a Playwright report, a `test-results/` tree — and nothing kept it: the next fix round runs the same command, the reporter rewrites its own output directory, and by the time anyone looks, round 1's evidence is round 3's. `artifacts` copies it instead, into `<run>/artifacts/<gate>/round-<n>/`, **one directory per round**, so a gate that failed three times leaves three pieces of evidence rather than one.
+
+**On failure only.** A passing report is evidence nothing consumes, and copying always would turn every green run into a copy.
+
+**Paths, not globs.** Each entry is a project-relative directory or file. `fs.glob` arrived in Node 22 and `vibe` supports Node 20 with no dependencies, so a glob would mean hand-writing a matcher — and that matcher would have to be link-aware while it expanded (does it descend into `playwright-report/junction/**`?), which puts the containment rule in a second place. A path needs none of that.
+
+**Every link is refused, and named.** This was measured, not assumed: `cpSync` preserves a symlink *as a symlink* — a pointer out of the archive that outlives the copy — and silently **follows a junction**, writing the target's bytes into the run directory. `dereference` and `verbatimSymlinks` change nothing; only a `filter` refuses anything. So every link is refused, in all four shapes (POSIX symlink, directory symlink, Node junction, `mklink /J`), at all three places one can appear: the configured path itself, **any ancestor of it** — `reports/output.json` where `reports` is a junction — and anything inside the tree. Each refusal is listed in the run record: a report that quietly lost half its files would look complete while being partial.
+
+Refused at config load, too: an absolute path (in every spelling, on every host), any `..` segment, the project root, anything under `.vibe` (which would copy the run directory into itself), and any segment ending in a **dot or a space** — Windows strips those, so `foo/.. /secret` reads as an ordinary relative path here and walks out of the project there. The same rule already governs run ids. **Overlapping entries are refused as well** — `["reports", "reports/output.json"]` would copy the same bytes twice and count them twice, and a child reported `missing` would still be on disk because its parent copied it.
+
+**The size is always reported**, in the console line and in the run record, whether or not you set a ceiling — copying into your repository is never silent. `verify.artifactMaxBytes` is that ceiling and defaults to **null**, deliberately: the only measurement available bounds what `vibe` itself writes (11.6MB across 24 archived runs), which says nothing about what a reporter writes, and a default here would be a number nobody measured. Over the ceiling, the entry copies **nothing** and says so — a truncated report that looks whole is worse than an absent one that says it is absent.
+
+Nothing copied can reach a commit: `.vibe/` contains a `.gitignore` holding `*`, so the whole subtree is self-ignoring whatever the project's own ignore rules say.
 
 **Ordering.** A **failure stops the sequence** — the fixer gets one problem, and running a suite against code that does not typecheck buys an opinion about the wrong thing. An **unavailable gate does not** stop it: a `typecheck` gate nobody configured must not prevent `test` from running.
 
@@ -315,6 +341,21 @@ A citation is read in the *reporting agent's* own path convention (Codex reports
 
 The check is `existsSync`, a line count and a substring: no tokens, no second opinion. **It checks that a finding is grounded, not that it is correct.**
 
+### And the turn that raised it has to have looked
+
+Grounding asks whether a claim names a real place. It cannot ask whether anyone went and looked — a reviewer that read nothing can still cite a file that exists, which is exactly what the review turn behind this rule would do today.
+
+So **every turn, of every role, on both agents, now records what it did**: how many items of each kind its live stream emitted, and how many of those were the agent using a tool. Both land on that turn's `claude_turn` / `codex_turn` event in `state.json`, as `items` and `toolItems`. A turn nothing measured — progress disabled, or the preflight probe — records neither field rather than recording a zero.
+
+"Used a tool" is read in each provider's own vocabulary, because the two do not agree: for Claude it is a `tool_use` block, named by the tool; for Codex it is any completed stream item that is not `agent_message` or `reasoning`. An item kind `vibe` has never seen counts as a tool use — that loses a detection rather than downgrading a true finding, which is the same direction the grounding check fails in.
+
+**A P0 or P1 from a review turn that emitted items and used no tool is downgraded to P2**, through the same mechanism as an ungrounded one: kept in the artifact, reason recorded on the finding, warned about, logged as `finding_downgraded`. Two things it is deliberately not:
+
+- **Not applied to the critic.** It critiques a *plan*, before the code exists; reading the plan is its whole job, and a plan critique that runs no shell has not failed to gather evidence. The tally is still recorded for it, so the question can be reopened on evidence rather than on opinion.
+- **Not applied to a turn nothing measured.** No heartbeat, or a stream that produced no items at all, means "nothing was observed" — which is never read as "nothing was done".
+
+The threshold is zero tool items, exactly, and there is no other number in the rule. Across every review turn in this repo's own archive — 29 of them, over 23 runs — one ran nothing and the rest ran between 5 and 154 commands. That one produced the only false blocking finding in the archive, and it bought a fix round that edited working code to satisfy a premise four seconds of `tsc` would have refuted.
+
 A carried P1 is not dropped. In the plan phase it is written into the implementation prompt as a known open issue. In the review phase it gets one final fix round, which is committed and re-verified but deliberately **not** re-reviewed — a fresh review could raise something new and reopen the argument the tolerance just settled. So those findings are worked on but unconfirmed, and `OUTSTANDING.md` says so rather than calling them unfixed.
 
 Brakes, all independent:
@@ -348,6 +389,7 @@ verify-fix-1.md ...        the same, after a verification repair
 answers-N.json             Codex's answers to blocking questions
 answered-N.md              those answers as the planner received them
 ASSUMED.md                 non-blocking questions the run proceeded on, and the answer it used
+REPHRASED.md               questions treated as ones already asked or answered — what matched, and the score
 handoff-N.md               briefing carried across each session rotation
 NEEDS-INPUT.md             written when the run stops for you
 OUTSTANDING.md             carried P1s: fixed in a final round, but not re-reviewed
@@ -358,14 +400,26 @@ transcript.log
 codex/                     raw schema and output files
 ```
 
-`FOLLOW-UPS.md` and `ASSUMED.md` are the two worth reading after a clean run. The first is
-what the critic said belongs in a different change; the second is what the planner decided
-without asking you. Both are raw material for the next issue rather than a defect report.
+`FOLLOW-UPS.md`, `ASSUMED.md` and `REPHRASED.md` are the three worth reading after a clean
+run. The first is what the critic said belongs in a different change. The second is what the
+planner decided without asking you — and since #65 it excludes anything *you* answered, so
+what is left really did run on a guess. Both are raw material for the next issue rather than
+a defect report.
+
+`REPHRASED.md` is different in kind: it is the audit of every question the run decided it had
+already asked, or that an answer of yours had already settled. The run makes that call on a
+similarity score, and the threshold behind it was measured over every question this tool has
+asked in this repository — but a threshold measured on one corpus can be wrong somewhere
+else. **If two entries in that file are not the same question, that is a defect worth
+reporting**: a question went unasked, or an assumption went unreported, and this file is the
+only place the run says so.
 
 Most of the files above are conditional: `FOLLOW-UPS.md` is removed when there is nothing
 deferred and no declared out-of-scope work, `ASSUMED.md` is written only when a question ran
-on the planner's guess, and `OUTSTANDING.md` only when findings were carried. A missing one
-means that run had nothing to report, not that the record is incomplete.
+on the planner's guess *and you did not answer it yourself*, `REPHRASED.md` only when a
+re-ask was suppressed or an answer of yours disposed of a deferred question, and
+`OUTSTANDING.md` only when findings were carried. A missing one means that run had nothing
+to report, not that the record is incomplete.
 
 **Since #52 the planner reads this directory back.** See below.
 
@@ -390,7 +444,8 @@ defaults rather than a sample — omit any section and you get exactly what is p
               "convergenceWindow": 3 },
   "budget": { "maxCostUsd": 25, "maxTokens": 25000000, "planShare": 0.4,
               "codexLimitPercent": 95, "waitOnRateLimit": true, "maxWaitMinutes": 360 },
-  "verify": { "enabled": true, "command": null, "runs": 3, "timeoutMs": 900000, "gates": null },
+  "verify": { "enabled": true, "command": null, "runs": 3, "timeoutMs": 900000, "gates": null,
+              "artifactMaxBytes": null },
   "questions": { "askCodex": true, "answerNonBlocking": true,
                  "escalateOnDefer": true, "escalateOnLowConfidence": true },
   "git": { "useBranch": true, "branchPrefix": "vibe/", "commitEachRound": true },
@@ -419,25 +474,35 @@ Binaries can be pinned with `VIBE_CLAUDE_BIN`, `VIBE_CODEX_BIN`, `VIBE_GIT_BIN`.
 
 ### Who does what
 
-`roles` decides which agent holds each job. Omit it and you get the assignment above, which is what every run did before the key existed; name only the roles you want to move and the rest fill in. A role's value takes two forms: a provider name — `"reviewer": "codex"` — or an object naming the provider and, optionally, that role's own model and reasoning effort:
+`roles` decides which agent holds each job. Omit it and you get the assignment above, which is what every run did before the key existed; name only the roles you want to move and the rest fill in. A role's value takes two forms: a provider name — `"reviewer": "codex"` — or an object naming the provider and, optionally, that role's own model, reasoning effort and turn timeout:
 
 ```jsonc
 {
   "roles": {
     "critic":      "codex",                                              // the string form, unchanged
-    "reviewer":    { "provider": "codex", "model": "gpt-5.6-pro", "effort": "max" },
+    "reviewer":    { "provider": "codex", "model": "gpt-5.6-pro", "effort": "max", "timeoutMs": 5400000 },
     "implementer": { "provider": "claude", "model": "sonnet" }           // its own model, and only its own
   }
 }
 ```
 
-**Model and effort are the two settings a role may name**, and `claude.model`/`claude.effort` and `codex.model`/`codex.effort` remain what every other role on that provider runs. Everything else is a fact about the *job*, not a choice — whether a role may write, what schema its turn returns, and which conversation it talks through. There are three conversations, and which one a role gets follows from its provider and its job: everything on Claude shares Claude's session; a Codex reviewer holds the reviewer's thread, and every other Codex role the plan-side judge's.
+**Every key of that object is settable from the command line**, with `--role <role>:<key>=<value>` — repeatable, one role per flag, last wins. It splits on the *first* `:` and then the *first* `=`, so a value may contain either. An unknown role name or key is refused in the words `vibe.config.json` would use for the same mistake, because it is the same check.
+
+```bash
+vibe run "..." --role reviewer:model=gpt-5.6-pro --role reviewer:effort=max --role critic:timeoutMs=600000
+```
+
+**The flag patches a role; it does not replace it.** `--role reviewer:effort=max` over a config file that named the reviewer's model *keeps that model* — which is why `provider` is not required from a flag, unlike the object form: the table underneath always supplies one, and a patch never changes the provider unless the flag says `provider=`. Config *layering* is unchanged and still replaces a role wholesale; the flags sit on top of the resolved table. A provider you move by flag keeps a model the file named, verbatim and unrepaired: `--role reviewer:provider=claude` over a file's `gpt-5.6-pro` gives you `reviewer=claude@gpt-5.6-pro`, which the `Roles:` line prints before the first turn. Models are accepted on trust everywhere, and a flag is not the exception.
+
+`--role` works on `vibe resume` and `vibe fork` too, and that is the one place a run's table can change after the run exists — so two things follow. Toolchain entries *derived from the table* (`node` and `npm`, required of whoever implements) are re-derived for the new table; a `toolchain.<tool>.agents` you wrote yourself stays authoritative — with one stated exception. A stored config is already resolved, so every entry in it carries concrete `agents` and a pin you wrote is indistinguishable from one vibe derived. What separates them is a comparison against the table *as it was*: an entry equal to what that table would have produced is treated as derived and re-derived. So a hand-written pin that happens to match the value the old table implied is re-derived too. That is deliberate, and it is the safer of the two errors — the alternative leaves preflight enforcing a runtime against an agent no role holds. A pin that differs from the old derived value is left exactly alone. And the verified-environment block the agents are given is dropped, in both cases, until the next successful preflight: those facts came from probing the *previous* table's agents against the previous contract, nothing can recompute a probe, and stating them under new labels would be a confident lie about a shell nobody looked in. A `--role` flag that changes only a model, an effort or a timeout keeps them, because none of the three appears in that block.
+
+**Model, effort and timeout are the three settings a role may name**, and `claude.model`/`claude.effort` and `codex.model`/`codex.effort`, along with each provider's pair of timeout keys, remain what every other role on that provider runs. Everything else is a fact about the *job*, not a choice — whether a role may write, what schema its turn returns, and which conversation it talks through. There are three conversations, and which one a role gets follows from its provider and its job: everything on Claude shares Claude's session; a Codex reviewer holds the reviewer's thread, and every other Codex role the plan-side judge's.
 
 **A model is accepted on trust, and that is deliberate.** An effort is a closed enum and is fully checked before a turn is spawned; a model name has no such check anywhere in this tool. `preflight` is an environment contract check rather than a model validator — the Claude probe runs a small fixed model whatever `claude.model` says, and the Codex probe runs `codex.model` — so it never validated a role's model and is not made to. There is no allowlist, no default table and no per-role default: vibe does not guess whether a model exists, and it never silently substitutes one that does. What you get instead is a name you mistyped surfacing twice, early and legibly: the `Roles:` line printed before the first turn shows `reviewer=codex@gpt-5.6-pro`, and a turn that fails under it reports `roles.reviewer.model` rather than `codex.model`, so you edit the line you actually wrote.
 
 Two Codex roles can now name two models, and `codex.contextWindow` is one setting describing one of them. It stays provider-level — the Codex window is a setting rather than something vibe can derive — so a run that names two Codex models *and* sets that window is warned that at least one thread's occupancy, `ctx%` and compaction threshold are measured against a window that is not its model's.
 
-`provider` is required in the object form. A role's value is replaced *wholesale* when configs are layered, so a defaulted provider would let a later `{"effort": "max"}` hand a role you had moved to Claude back to Codex silently — the one thing this section is strict to prevent. Config errors: an unknown role name, a `roles` that is not an object, a provider that is not one of the two, an object with no `provider`, a `model` that is not a non-empty string, any other unknown key inside a role object, and an effort outside `low|medium|high|xhigh|max`. Each names the role, and the key where there is one.
+`provider` is required in the object form. A role's value is replaced *wholesale* when configs are layered, so a defaulted provider would let a later `{"effort": "max"}` hand a role you had moved to Claude back to Codex silently — the one thing this section is strict to prevent. Config errors: an unknown role name, a `roles` that is not an object, a provider that is not one of the two, an object with no `provider`, a `model` that is not a non-empty string, a `timeoutMs` that is not a positive number, any other unknown key inside a role object, and an effort outside `low|medium|high|xhigh|max`. Each names the role, and the key where there is one. `timeoutMs` is checked no more strictly than the provider key it overrides: a fractional number is legal, because `codex.timeoutMs` accepts one.
 
 The headline swap is a clean split — `{"planner": "codex", "implementer": "codex", "critic": "claude", "answerer": "claude", "reviewer": "claude"}` — and needs `codex.persistSession: false` (`--no-codex-session`). That pairing is refused rather than repaired: `codex exec resume` takes no `-s` flag, so a writing Codex role on a persisted thread can write on its first turn and silently reverts to read-only on every one after.
 
@@ -448,7 +513,16 @@ Some tables run with a warning rather than a refusal, and each says what it cost
 - A planner or implementer on a persisted Codex thread grows a context that nothing can compact, and that nothing measures either unless `codex.contextWindow` is set.
 - A planner or implementer on Codex puts the expensive half of the run beyond `budget.maxCostUsd`, which is Claude-side only. `budget.maxTokens` still counts both.
 
-`codex.timeoutMs` is the reviewing figure and `codex.implementTimeoutMs` the writing one, chosen by what the role does — the pair `claude` has always had. A provider that holds no enabled role takes no turn: it is still probed, but its findings can only warn, never stop the run.
+`codex.timeoutMs` is the reviewing figure and `codex.implementTimeoutMs` the writing one, chosen by what the role does — the pair `claude` has always had. A role may override that choice with `roles.<role>.timeoutMs`, which is one figure rather than a pair because a role only ever takes one kind of turn; the provider pair stays the fallback for every role that names none. The full order is: a timeout the code itself asked for, then the role's, then the provider's. A turn that dies under a timeout the role named says so — `codex timed out after 5400000ms [this turn ran roles.reviewer.timeoutMs = 5400000]` — because otherwise four provider keys can set that figure and the message names none of them. A provider that holds no enabled role takes no turn: it is still probed, but its findings can only warn, never stop the run.
+
+**The provider sections stay even though every setting now has a per-role form, and this is the durable reason:** not every turn has a role. The compaction handoff — the turn that summarises a Claude session before it is rotated — is dispatched directly rather than through the role table, and it reads `claude.planTimeoutMs`. For that turn the provider key is not a default that a role could supersede; it is the only setting there is. Removing the provider sections would leave it with nothing.
+
+**Four settings are deliberately not per-role**, and each is a fact about something other than a role:
+
+- `codex.sandbox` — the role's `access` already decides it: writing roles get `workspace-write` and reading roles the configured sandbox. A per-role key would be a second way to say what the job already says, and the two could disagree.
+- `codex.persistSession` — a property of a *conversation*, not a role, and the critic and the answerer share one thread. Two roles on one thread cannot hold two answers.
+- `codex.contextWindow` — a property of a model on a thread, and vibe does not derive it (see "Notes and limitations"). It stays one setting, with the warning above when two Codex models are in play.
+- `codex.readRateLimits` — a property of the account, polled once per run rather than per turn.
 
 ## Exit codes
 
@@ -460,7 +534,7 @@ Some tables run with a warning rather than a refusal, and each says what it cost
 | 3 | No convergence — round cap or oscillation guard tripped |
 | 4 | Budget exceeded |
 | 5 | Rate limited — Claude's window, or Codex's above `budget.codexLimitPercent`. Resume once it resets |
-| 6 | An agent's environment fails the toolchain contract |
+| 6 | A precondition of the phases ahead is not met: an agent's environment fails the toolchain contract, or the target directory cannot host them — `vibe run` outside a git repository is refused before any turn, because the review phase's only input is a diff produced by git. `vibe plan` still works there, and `--skip-probe` does not bypass it |
 | 7 | Unverified — the run finished, but a required verification gate never ran (no command configured). The work, its artifacts and its commits are all there; the evidence that it runs is not |
 
 Suitable for `if vibe run "..."; then ...` in a wrapper script.
@@ -499,5 +573,5 @@ where nearly every change since 1.0.1 came from.
 - **The implementer's report is handed to the next reviewer, framed as a self-report rather than as evidence.** Every write turn — implement, verification repair, review fix, final fix — is asked for the same five headings (`Changed`, `Verified`, `Unable to verify`, `Deviations`, `Questions / concerns for reviewer`), keyed to the plan's acceptance-criterion ids where the plan set any, and the most recent one is rendered into *every* turn of the next review round. The prompt states both halves of what it is worth: it is **untrusted** — a "verified" line is a claim that something was checked, not evidence that it works — and it is **not exhaustive**, because it says where the implementer knows it is weak and nothing about where it does not. Its questions are review *leads*, never findings in themselves.
 
   What is stored is the report's **basename** on `state.lastReport`, not its text, so the handoff survives a resume through the artifact on disk while `state.json` stays a state file. The pointer is cleared before each write turn and rewritten once that turn's report is on disk: a run killed mid-turn therefore reports *no* report rather than the previous round's, because a stale report presented as current is worse than none. Nothing probes the run directory for one either — `implementation-report.md` may still be sitting there three fix rounds later. When there is no report the reviewer gets an explicit notice saying so, and saying that it is **not** a statement that there were no concerns; silence would read as a clean bill of health, which is the failure this exists to prevent.
-- **The past-run index is bounded in what it renders, not in what it scans.** Ten rows, each field truncated, so the prompt cannot grow with the archive — and only those ten `state.json` files are read and parsed. The directory scan underneath is still proportional to the number of runs in `.vibe/runs/`, which is a listing cost, not a prompt cost. Values are sanitised where the prompt is rendered rather than where they are read: a status or task stored by an older run is untrusted input to a model, and `vibe list` still prints exactly what is on disk.
+- **The past-run index is bounded in what it renders *and* in what it scans.** Ten rows, each field truncated, so the prompt cannot grow with the archive — and only those ten `state.json` files are read and parsed. The directory scan underneath *was* the exception: until #85 every entry was stat-ed before the limit was applied, 74ms of a 77ms call at 2000 runs, and the bullet you are reading said so. The walk now stops at the tenth surviving row, so the scan is proportional to the rows returned too. `vibe list` passes no limit and still scans the whole archive, which is what it is for. Values are sanitised where the prompt is rendered rather than where they are read: a status or task stored by an older run is untrusted input to a model, and `vibe list` still prints exactly what is on disk.
 - Both models being wrong the same way is not something this catches. A clear verdict means two independent models agreed and the test suite passed three times — it is not proof.

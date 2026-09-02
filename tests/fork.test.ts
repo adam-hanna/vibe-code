@@ -1,14 +1,14 @@
 ﻿import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { main } from '@src/cli.js';
 import { commitFork, ForkError, listForkPoints, planFork } from '@src/fork.js';
-import { orchestrate } from '@src/orchestrator.js';
+import { EXIT, orchestrate } from '@src/orchestrator.js';
 import { artifact, listCheckpoints, listRuns, loadRun, mintRunId, saveState } from '@src/run.js';
 import { StoredStateError } from '@src/stored.js';
 import { renderPlanDoc } from '@src/prompts.js';
@@ -21,6 +21,7 @@ import {
   verifying,
   work,
 } from './helpers/loop-harness.js';
+import { startKillHelper } from './helpers/kill-child.js';
 import type { RunState } from '@src/types.js';
 
 /**
@@ -524,32 +525,12 @@ test('a run with no checkpoints has no fork points, and nothing is invented', ()
 
 // ---- the kill window --------------------------------------------------------
 
-const HELPER = path.join(
-  path.dirname(fileURLToPath(import.meta.url)),
-  'helpers',
-  'kill-during-save.js',
-);
-
 /** Spawn the fork helper and wait for the parent run id it prints. */
-function startFork(targetDir: string): Promise<{ child: ChildProcessWithoutNullStreams; parentId: string }> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [HELPER, targetDir, 'fork'], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    let out = '';
-    let stderr = '';
-    child.stderr.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString();
-    });
-    child.stdout.on('data', (chunk: Buffer) => {
-      out += chunk.toString();
-      const line = out.split('\n')[0] ?? '';
-      if (line.startsWith('ready ')) resolve({ child, parentId: line.slice('ready '.length).trim() });
-    });
-    child.on('exit', (code) => {
-      reject(new Error(`helper exited ${String(code)} before saying ready: ${stderr}`));
-    });
-  });
+async function startFork(
+  targetDir: string,
+): Promise<{ child: ChildProcessWithoutNullStreams; parentId: string }> {
+  const { child, ready } = await startKillHelper(targetDir, 'fork');
+  return { child, parentId: ready };
 }
 
 const killed = (child: ChildProcessWithoutNullStreams): Promise<void> =>
@@ -593,6 +574,7 @@ test('a commitFork killed at any point leaves a child that is complete or absent
     for (const id of children) {
       const dir = path.join(root, id);
       const entries = readdirSync(dir);
+      const temps = entries.filter((e) => e.endsWith('.tmp'));
       if (existsSync(path.join(dir, 'state.json'))) {
         sawComplete = true;
         // Complete: whatever it points at is already on disk beside it.
@@ -602,16 +584,38 @@ test('a commitFork killed at any point leaves a child that is complete or absent
           assert.ok(existsSync(path.join(dir, state.lastReport)));
         }
         assert.ok(listed.includes(id), 'and it is a run');
+        // A write that RAN TO COMPLETION owes an empty directory: `writeAtomic`
+        // renames its temp away on success and unlinks it on failure, and both
+        // of those paths executed here. This half of the rule is a real
+        // contract and stays absolute.
+        assert.deepEqual(temps, [], `a completed fork left temp litter: ${entries.join(', ')}`);
       } else {
         sawIncomplete = true;
         // Absent: not a run, and nothing may present it as one.
         assert.equal(listed.includes(id), false, 'a directory with no state.json is not a run');
+        // The kill landed INSIDE the write, and there the temp file is not a
+        // defect any implementation can remove: `writeAtomic`'s cleanup lives in
+        // a `catch`, and SIGKILL runs no catch. A kill between `writeFileSync`
+        // and `renameSync` therefore always leaves `state.json.<pid>.tmp`.
+        // Measured here at roughly one occurrence per 40 executions of this case
+        // (11 kills each), on code identical to the base - it is a flake this
+        // assertion could only ever have caught by luck.
+        //
+        // What still holds, and is what the case is actually guarding: the
+        // directory is not a run and nothing lists it. It already tolerates the
+        // `PLAN.md` and `run.lock` beside it for exactly that reason, and the
+        // half-written state was never singled out on any principle the other
+        // two do not share. So only the atomic write's OWN temp is tolerated,
+        // by name: any other `.tmp` is litter somebody chose to leave and still
+        // fails.
+        for (const temp of temps) {
+          assert.match(
+            temp,
+            /^state\.json\.\d+\.tmp$/,
+            `a killed fork left temp litter that is not the atomic write's: ${entries.join(', ')}`,
+          );
+        }
       }
-      assert.equal(
-        entries.some((e) => e.endsWith('.tmp')),
-        false,
-        `a killed fork left temp litter: ${entries.join(', ')}`,
-      );
     }
   }
 
@@ -666,4 +670,109 @@ test('a branching fork does state what its branch is and is not', async () => {
   assert.ok(stated.some((l) => l.includes("fork's branch is a new ref")));
   assert.ok(stated.some((l) => l.includes('the repository may have moved on')));
   assert.equal(stated.some((l) => l.includes('--no-branch')), false);
+});
+
+// ---- per-role flags through the fork command (#89) --------------------------
+
+/**
+ * `vibe fork ... --role <role>:<key>=<value>`.
+ *
+ * Driven through `main` rather than through `planFork`, because the defaulted
+ * parameter this feature adds is exactly the kind a call site can forget without
+ * anything failing to compile. Fork spawns no agent - it reads state, resolves
+ * config and writes a branch ref - so the command itself is reachable from a
+ * test.
+ */
+async function quietly<T>(work: () => Promise<T>): Promise<T> {
+  const original = { log: console.log, error: console.error };
+  console.log = (): void => {};
+  console.error = (): void => {};
+  try {
+    return await work();
+  } finally {
+    console.log = original.log;
+    console.error = original.error;
+  }
+}
+
+/** The one run under `.vibe/runs` that is not the parent. */
+function childOf(parent: RunState): RunState {
+  const ids = runDirs(parent).filter((id) => id !== parent.id);
+  assert.equal(ids.length, 1, 'the fork created exactly one run');
+  return loadRun(parent.targetDir, ids[0] as string);
+}
+
+/** Probed facts on the checkpoint, as a run whose preflight succeeded would have. */
+function checkpointWithEnvironment(parent: RunState, n: number): unknown {
+  const file = path.join(parent.dir, `checkpoint-${n}.json`);
+  const snapshot = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
+  snapshot['environment'] = {
+    agents: [
+      {
+        provider: 'claude',
+        shell: 'bash',
+        pathStyle: 'msys',
+        repaired: false,
+        tools: [{ name: 'node', available: true, version: 'v24.18.0' }],
+      },
+    ],
+    verifyCommand: 'npm test',
+    verifyRuns: 3,
+  };
+  writeFileSync(file, JSON.stringify(snapshot), 'utf8');
+  return snapshot['environment'];
+}
+
+test('vibe fork --role moves the role and re-derives the contract, through the command', async () => {
+  const parent = await parentRun('fork role flag');
+  const n = committedPoint(parent);
+
+  const code = await quietly(() =>
+    main([
+      'fork',
+      parent.id,
+      '--at',
+      String(n),
+      '-C',
+      parent.targetDir,
+      '--role',
+      'implementer:provider=codex',
+      // A writing Codex role on a persisted thread is a refusal, not a repair.
+      '--no-codex-session',
+    ]),
+  );
+
+  assert.equal(code, EXIT.OK);
+  const child = childOf(parent);
+  assert.deepEqual(child.config?.roles.implementer, { provider: 'codex' });
+  assert.deepEqual(child.config?.toolchain['node']?.agents, ['codex']);
+  assert.deepEqual(child.config?.toolchain['npm']?.agents, ['codex']);
+});
+
+test('a fork that moves a provider does not carry the parent\'s environment facts', async () => {
+  const parent = await parentRun('fork drops facts');
+  const n = committedPoint(parent);
+  checkpointWithEnvironment(parent, n);
+
+  await quietly(() =>
+    main([
+      'fork', parent.id, '--at', String(n), '-C', parent.targetDir,
+      '--role', 'implementer:provider=codex', '--no-codex-session',
+    ]),
+  );
+
+  // The probe ran against a contract this child no longer has, and a fork cannot
+  // re-probe. Preflight will write fresh ones; until then the prompts say nothing
+  // about the environment, which is the honest answer.
+  assert.equal(childOf(parent).environment, undefined);
+});
+
+test('a fork with no --role carries the parent\'s environment facts through', async () => {
+  const parent = await parentRun('fork keeps facts');
+  const n = committedPoint(parent);
+  const facts = checkpointWithEnvironment(parent, n);
+
+  const { child } = await fork(parent, n);
+
+  assert.deepEqual(child.environment, facts);
 });

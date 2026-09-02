@@ -89,7 +89,8 @@ test('a rotation that changes models does not report the old window', () => {
   assert.equal('contextWindow' in state, false);
   assert.equal(measuredWindow(state, 'fixture-rotated'), undefined);
   assert.equal(
-    progressOptions(state, cfgWith('fixture-rotated'), 'plan')?.contextWindow,
+    progressOptions(state, cfgWith('fixture-rotated'), 'plan', 'fixture-rotated', 'claude')
+      ?.contextWindow,
     undefined,
   );
 });
@@ -252,7 +253,7 @@ test('a rotation as the first Claude turn leaves a window for the next turn', as
   );
 
   assert.equal(
-    progressOptions(state, cfgWith('fixture-rot'), 'plan')?.contextWindow,
+    progressOptions(state, cfgWith('fixture-rot'), 'plan', 'fixture-rot', 'claude')?.contextWindow,
     200_000,
     'the next turn can render ctx%',
   );
@@ -277,7 +278,10 @@ test('a baseline rotation window is not attributed to the incoming model', async
   );
 
   assert.equal('contextWindow' in state, false);
-  assert.equal(progressOptions(state, cfgWith('fixture-new'), 'plan')?.contextWindow, undefined);
+  assert.equal(
+    progressOptions(state, cfgWith('fixture-new'), 'plan', 'fixture-new', 'claude')?.contextWindow,
+    undefined,
+  );
 });
 
 test('a per-role implementer model is what the rotation resets to, and the grower is still asked', async () => {
