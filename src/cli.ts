@@ -786,7 +786,14 @@ async function cmdFork(args: readonly string[]): Promise<ExitCode> {
       return EXIT.ERROR;
     }
     log.heading(`Fork points in ${sourceId}`);
-    for (const { n, meta } of points) {
+    for (const { n, meta, linked } of points) {
+      if (linked === true) {
+        // A different row from `(unreadable)`, and #53 drew the distinction:
+        // one says a file was opened and could not be used, this one says vibe
+        // did not look inside it (#102).
+        console.log(`  ${String(n).padStart(3)}  (a link, or unclassifiable - not read)`);
+        continue;
+      }
       if (meta === null) {
         console.log(`  ${String(n).padStart(3)}  (unreadable)`);
         continue;

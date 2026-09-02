@@ -1215,6 +1215,44 @@ export interface CheckpointEntry {
   n: number;
   file: string;
   meta: RunCheckpointMeta | null;
+  /**
+   * Set when the file is a link, or `lstat` could not classify it - so nothing
+   * was read from it (#102).
+   *
+   * A separate fact from `meta: null`, and the distinction is the one #53 drew
+   * between `unreadable` and `linked`: one says a file was opened and could not
+   * be used, the other says vibe did not look inside it. Collapsing them would
+   * have a listing report "unreadable" about a file it never opened.
+   */
+  linked?: true | undefined;
+}
+
+/**
+ * Why a checkpoint file may not be read, or null (#102).
+ *
+ * #53 closed the run **entry** and its `state.json`; a `checkpoint-<n>.json`
+ * inside an entry that has already been accepted is the same hole one level
+ * deeper, and #53 said so when it drew its line there. A checkpoint *becomes* a
+ * run - `planFork` puts it through `loadRun`'s validators and `commitFork`
+ * inherits it under a new identity - which is the same class of consequence,
+ * and `loadRun` quotes field contents back in its refusals, so a link pointing
+ * at an arbitrary file can put that file's bytes in a terminal.
+ *
+ * The predicate is `linkageOf`, the same one `linkedRunReason` above uses. One
+ * rule, two messages, because the two name different things to a reader.
+ */
+export function linkedCheckpointReason(dir: string, n: number): string | null {
+  const linkage = linkageOf(path.join(dir, checkpointName(n)));
+  if (linkage !== 'link' && linkage !== 'unknown') return null;
+  const what =
+    linkage === 'link'
+      ? 'is a symlink or a junction, so it points outside the run archive'
+      : 'could not be classified, so it cannot be ruled out as a link';
+  return (
+    `Checkpoint ${n} cannot be used: ${checkpointName(n)} ${what}. vibe never creates one - ` +
+    'every checkpoint it writes is a real file - so this was not made by a run. Nothing was ' +
+    'read and nothing was written.'
+  );
 }
 
 /**
@@ -1223,6 +1261,10 @@ export interface CheckpointEntry {
  * Read by `vibe fork` to list where a run can be forked from, which is a
  * listing: one damaged snapshot must not hide the healthy ones beside it, so a
  * file that cannot be read is reported with `meta: null` rather than dropped.
+ *
+ * A linked entry is reported and **not opened** (#102). Fails closed on an
+ * `lstat` that threw, for the reason `listRuns` does and `assertUnlinkedRun`
+ * does not: this is choosing whether to FOLLOW, not which error to report.
  */
 export function listCheckpoints(dir: string): CheckpointEntry[] {
   let entries: string[];
@@ -1236,6 +1278,11 @@ export function listCheckpoints(dir: string): CheckpointEntry[] {
     const found = CHECKPOINT_RE.exec(entry);
     if (found?.[1] === undefined) continue;
     const file = path.join(dir, entry);
+    const linkage = linkageOf(file);
+    if (linkage === 'link' || linkage === 'unknown') {
+      out.push({ n: Number(found[1]), file, meta: null, linked: true });
+      continue;
+    }
     let meta: RunCheckpointMeta | null = null;
     try {
       const raw: unknown = JSON.parse(readFileSync(file, 'utf8'));
