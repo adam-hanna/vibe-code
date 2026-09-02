@@ -31,6 +31,9 @@ import {
  *             for reasons that had nothing to do with the code under test.
  *   `artifact` - the same shape as `save`, but through `artifact()` and at a
  *             lifelike size. A different failure mode; see `artifactMode`.
+ *   `hang`  - never prints `ready` and never exits. Not a kill window: it is the
+ *             third outcome the parent's readiness wait has to survive (#100),
+ *             and the only way to assert that is a child that really does hang.
  *
  * Each save carries a marker: the parent asserts the file it recovers parses AND
  * holds one of the two legal markers, which is what "the whole previous file or
@@ -186,6 +189,18 @@ function forkMode(targetDir: string): void {
   process.stdin.resume();
 }
 
+/**
+ * Neither of the two things the parent waits for.
+ *
+ * Nothing on stdout, no exit, and no filesystem work at all - the point is the
+ * shape a stalled child has from outside, not any particular way of stalling.
+ * The real ones this stands for stall inside `createRun` or the first artifact
+ * write: a contended temp directory, a scanner holding a handle, a full disk.
+ */
+function hangMode(): void {
+  setInterval(() => {}, 1_000);
+}
+
 function main(): void {
   const targetDir = process.argv[2];
   const mode = process.argv[3] ?? 'save';
@@ -194,6 +209,7 @@ function main(): void {
   if (mode === 'alloc') allocMode(targetDir);
   else if (mode === 'fork') forkMode(targetDir);
   else if (mode === 'artifact') artifactMode(targetDir);
+  else if (mode === 'hang') hangMode();
   else saveMode(targetDir);
 }
 

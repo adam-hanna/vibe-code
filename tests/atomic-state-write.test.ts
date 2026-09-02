@@ -1,11 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { artifact, createRun, saveState } from '@src/run.js';
 import { main } from '@src/cli.js';
 import { EXIT } from '@src/orchestrator.js';
@@ -16,6 +14,7 @@ import {
   ARTIFACT_BODY_A,
   ARTIFACT_BODY_B,
 } from './helpers/kill-markers.js';
+import { ReadinessTimeout, startKillHelper } from './helpers/kill-child.js';
 
 /**
  * What a process killed mid-write leaves behind.
@@ -31,43 +30,17 @@ import {
  * system does between two syscalls, which is the entire question.
  */
 
-const HELPER = path.join(
-  path.dirname(fileURLToPath(import.meta.url)),
-  'helpers',
-  'kill-during-save.js',
-);
-
 function scratch(): string {
   return mkdtempSync(path.join(tmpdir(), 'vibe-atomic-'));
 }
 
-interface Started {
-  child: ChildProcessWithoutNullStreams;
-  dir: string;
-}
-
 /** Spawn the helper and wait for the run directory it prints. */
-function start(targetDir: string, mode: 'save' | 'alloc' | 'artifact'): Promise<Started> {
-  return new Promise((resolve, reject) => {
-    // All three piped so the child types as `ChildProcessWithoutNullStreams`;
-    // stdin is simply never written to.
-    const child = spawn(process.execPath, [HELPER, targetDir, mode], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    let out = '';
-    let stderr = '';
-    child.stderr.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString();
-    });
-    child.stdout.on('data', (chunk: Buffer) => {
-      out += chunk.toString();
-      const line = out.split('\n')[0] ?? '';
-      if (line.startsWith('ready ')) resolve({ child, dir: line.slice('ready '.length).trim() });
-    });
-    child.on('exit', (code) => {
-      reject(new Error(`helper exited ${String(code)} before saying ready: ${stderr}`));
-    });
-  });
+async function start(
+  targetDir: string,
+  mode: 'save' | 'alloc' | 'artifact',
+): Promise<{ child: ChildProcessWithoutNullStreams; dir: string }> {
+  const { child, ready } = await startKillHelper(targetDir, mode);
+  return { child, dir: ready };
 }
 
 function killed(child: ChildProcessWithoutNullStreams): Promise<void> {
@@ -78,6 +51,47 @@ function killed(child: ChildProcessWithoutNullStreams): Promise<void> {
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * The harness's own guard, and a test rather than a comment because the failure
+ * it prevents is invisible.
+ *
+ * Every case below spawns a child and waits for `ready`. That wait used to have
+ * two ways out - the line, or the child exiting - and a child that does neither
+ * left the promise pending for ever. `node --test` sets no default timeout, and
+ * there is no CI here, so one stalled child stops the whole suite and looks
+ * exactly like a slow machine. The suite spawns 100 children per run since #88,
+ * each after real filesystem work, so the third outcome is not hypothetical.
+ *
+ * 250ms rather than the 10s default: the number under test is the branch, not
+ * the constant, and the suite should not spend ten seconds proving it exists.
+ */
+test('a helper that never says ready fails the wait instead of hanging it', async () => {
+  const err = await startKillHelper(scratch(), 'hang', { timeoutMs: 250 }).then(
+    () => null,
+    (e: unknown) => e,
+  );
+
+  assert.ok(err instanceof ReadinessTimeout, `expected a readiness timeout, got ${String(err)}`);
+  assert.match(err.message, /never reached readiness in hang mode/);
+
+  // No orphan: `hang` idles, but `save` and `artifact` write in a loop for ever,
+  // so a helper abandoned by a timed-out wait would keep writing to a temp
+  // directory nobody is reading. SIGKILL is not synchronous, hence the poll.
+  const { pid } = err;
+  assert.ok(pid !== undefined, 'the timeout has to name the child it killed');
+  const deadline = Date.now() + 5_000;
+  let alive = true;
+  while (alive && Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+      await sleep(10);
+    } catch {
+      alive = false;
+    }
+  }
+  assert.equal(alive, false, `the helper was left running as pid ${String(pid)}`);
+});
 
 test('a state.json write killed at any point leaves a whole file', async () => {
   // Spread across the write loop rather than aimed at one moment: the kill has
