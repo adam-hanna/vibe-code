@@ -1,11 +1,10 @@
 ﻿import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { main } from '@src/cli.js';
 import { commitFork, ForkError, listForkPoints, planFork } from '@src/fork.js';
@@ -22,6 +21,7 @@ import {
   verifying,
   work,
 } from './helpers/loop-harness.js';
+import { startKillHelper } from './helpers/kill-child.js';
 import type { RunState } from '@src/types.js';
 
 /**
@@ -525,32 +525,12 @@ test('a run with no checkpoints has no fork points, and nothing is invented', ()
 
 // ---- the kill window --------------------------------------------------------
 
-const HELPER = path.join(
-  path.dirname(fileURLToPath(import.meta.url)),
-  'helpers',
-  'kill-during-save.js',
-);
-
 /** Spawn the fork helper and wait for the parent run id it prints. */
-function startFork(targetDir: string): Promise<{ child: ChildProcessWithoutNullStreams; parentId: string }> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [HELPER, targetDir, 'fork'], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    let out = '';
-    let stderr = '';
-    child.stderr.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString();
-    });
-    child.stdout.on('data', (chunk: Buffer) => {
-      out += chunk.toString();
-      const line = out.split('\n')[0] ?? '';
-      if (line.startsWith('ready ')) resolve({ child, parentId: line.slice('ready '.length).trim() });
-    });
-    child.on('exit', (code) => {
-      reject(new Error(`helper exited ${String(code)} before saying ready: ${stderr}`));
-    });
-  });
+async function startFork(
+  targetDir: string,
+): Promise<{ child: ChildProcessWithoutNullStreams; parentId: string }> {
+  const { child, ready } = await startKillHelper(targetDir, 'fork');
+  return { child, parentId: ready };
 }
 
 const killed = (child: ChildProcessWithoutNullStreams): Promise<void> =>
