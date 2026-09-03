@@ -11,8 +11,11 @@ import type { CodexTurnOptions, CodexTurnResult } from '@src/codex.js';
 import { preserveGateArtifacts, sweepGateArtifacts } from '@src/artifacts.js';
 import { downgradeInert, groundFindings, refusePlaceholderPlan } from '@src/evidence.js';
 import * as git from '@src/git.js';
+import { readDecision } from '@src/host.js';
+import type { GateContext, Host } from '@src/host.js';
 import * as log from '@src/log.js';
 import type { PathStyle } from '@src/pathstyle.js';
+import type { CheckpointBoundary } from '@src/types.js';
 import * as P from '@src/prompts.js';
 import {
   claudePermission,
@@ -213,6 +216,92 @@ function latestReport(state: RunState): string | null {
   return text;
 }
 
+/**
+ * Hold at a boundary and ask the host what to do next.
+ *
+ * **Called after the checkpoint, never before.** That ordering is the whole
+ * promise: `CheckpointBoundary` names the points at which the work of a round is
+ * recorded and the next has not begun, so a gate that fires there can say
+ * "nothing is lost" and mean it. A gate before the write could not.
+ *
+ * With no host this returns immediately and the run behaves exactly as it always
+ * has - which is what makes this shippable as groundwork.
+ *
+ * **The await is the pause.** Nothing here spins, polls or sets a timer: a host
+ * that has not answered yet simply has not resolved its promise, the process
+ * stays alive, and the agent sessions stay warm. That is the property the app
+ * exists to buy, and it costs no machinery at all.
+ *
+ * `complete` is deliberately not gated - see `GATED` below.
+ */
+async function holdAt(
+  state: RunState,
+  host: Host | undefined,
+  boundary: CheckpointBoundary,
+): Promise<void> {
+  if (host === undefined || !GATED.has(boundary)) return;
+
+  const ctx: GateContext = {
+    boundary,
+    // Absent rather than guessed. `validateStoredState` turns an unrecognised
+    // phase into ABSENCE, and a host told 'planning' about a run whose phase
+    // nobody could read would be told something no writer ever wrote.
+    phase: state.phase ?? null,
+    planRound: state.planRound,
+    reviewRound: state.reviewRound,
+    verifyRound: state.verifyRound,
+  };
+
+  // Narrated with an id, and deliberately NOT recorded. By the durability rule
+  // in `recordAndSay`: a gate that is waiting is not a transition - nothing
+  // resumes from "was waiting", and nothing judges the run by it. #133 named
+  // `gate_waiting` as exactly this case when it asked for stable ids.
+  log.step(`Holding at ${boundary} - waiting on you`, { id: 'gate_waiting', data: { ...ctx } });
+
+  const decision = readDecision(await host.decide(ctx));
+  if (decision.kind === 'continue') {
+    log.ok(`Released at ${boundary}`, { id: 'gate_released', data: { boundary } });
+    return;
+  }
+
+  // A stop IS a transition - the run ends here and a later process has to know
+  // why - so this one is recorded as well as said.
+  const why = decision.reason ?? 'the host stopped the run at this boundary';
+  recordAndSay(state, 'warn', 'gate_stopped', `Stopped at ${boundary} - ${why}`, {
+    boundary,
+    reason: decision.reason,
+  });
+  // The exit-resumable path the round caps already use: `writeEscalation` ->
+  // `status: 'needs-input'` -> `vibe resume`. A CLI run has no host to ask, so
+  // it never reaches here; an app that stops gets the same durable outcome its
+  // user would get from the terminal.
+  throw new Escalation(EXIT.NEEDS_HUMAN, `Stopped at the ${boundary} boundary. ${why}`);
+}
+
+/**
+ * The boundaries a host is asked about: every checkpoint except `complete`.
+ *
+ * A gate exists to hold *before the next thing*. At `complete` there is no next
+ * thing - the plan is approved or not, the code is written, the review is
+ * finished - so a stop there could not prevent anything, and answering it would
+ * convert a run that succeeded into one reported as needing input it has no use
+ * for.
+ *
+ * Worth being explicit that `consistency.ts` would NOT catch that: `needs-input`
+ * is in `COMPLETION_STATUSES`, precisely because W8 may overwrite a terminal
+ * status without touching the phase. So `needs-input` beside `phase: 'complete'`
+ * is a legal stored state and the guard would pass it. This is a decision about
+ * what a gate MEANS, not a constraint the validators impose.
+ */
+const GATED: ReadonlySet<CheckpointBoundary> = new Set<CheckpointBoundary>([
+  'plan-round',
+  'plan-approved',
+  'implemented',
+  'verify-round',
+  'review-round',
+  'final-fix',
+]);
+
 export async function orchestrate(
   state: RunState,
   cfg: Config,
@@ -237,6 +326,15 @@ export async function orchestrate(
    * caller including `RunLoop` in cli.ts is unchanged.
    */
   turns: AgentTurns = REAL_AGENTS,
+  /**
+   * Something outside the loop that may hold it at a boundary (#134).
+   *
+   * Trailing and optional for the reason `turns` is: every existing caller,
+   * `RunLoop` in `cli.ts` included, compiles and behaves unchanged. The CLI
+   * passes none and never will - it has no host to ask, and a terminal cannot
+   * answer a promise.
+   */
+  host?: Host,
 ): Promise<RunState> {
   try {
     // Before any phase runs. On a fresh run `state.plan` is null and this does
@@ -257,7 +355,7 @@ export async function orchestrate(
     // for ever. Here rather than in `createRun`/`loadRun` because that would put
     // `run.ts` in a cycle with this module's - `artifacts.ts` imports it (#111).
     sweepArtifacts(state);
-    return await runPhases(state, cfg, resume, turns);
+    return await runPhases(state, cfg, resume, turns, host);
   } finally {
     // A `finally`, not a tail call: the phases below return early at the
     // "already finished" check and at the plan-only exit, and a persistent
@@ -301,6 +399,7 @@ async function runPhases(
   cfg: Config,
   resume: boolean,
   turns: AgentTurns,
+  host?: Host,
 ): Promise<RunState> {
   const cwd = state.targetDir;
   // Resolved once and threaded, so no step below can answer "who does this job"
@@ -326,7 +425,7 @@ async function runPhases(
   // than about the task.
   let plan: Plan;
   if (phase === 'planning') {
-    plan = await planPhase(state, cfg, cwd, roles, turns);
+    plan = await planPhase(state, cfg, cwd, roles, turns, host);
     if (state.planOnly) {
       state.status = 'planned';
       advancePhase(state, 'complete');
@@ -336,6 +435,7 @@ async function runPhases(
     }
     advancePhase(state, 'implementing');
     writeCheckpoint(state, 'plan-approved', NO_COMMIT);
+    await holdAt(state, host, 'plan-approved');
   } else {
     const approved = state.plan;
     if (approved === null) {
@@ -401,13 +501,14 @@ async function runPhases(
     state.status = 'reviewing';
     saveState(state);
     writeCheckpoint(state, 'implemented', committed);
+    await holdAt(state, host, 'implemented');
   }
 
   // ---- Review --------------------------------------------------------------
   state.status = 'reviewing';
   saveState(state);
 
-  await reviewPhase(state, cfg, cwd, plan, roles, turns);
+  await reviewPhase(state, cfg, cwd, plan, roles, turns, host);
 
   state.status = 'done';
   advancePhase(state, 'complete');
@@ -422,6 +523,7 @@ async function planPhase(
   cwd: string,
   roles: RoleTable,
   turns: AgentTurns,
+  host?: Host,
 ): Promise<Plan> {
   let plan: Plan;
   /**
@@ -457,6 +559,7 @@ async function planPhase(
       { answers: state.pendingAnswers },
       roles,
       turns,
+      host,
     ));
     state.pendingAnswers = null;
     saveState(state);
@@ -491,6 +594,7 @@ async function planPhase(
         { findings: carried },
         roles,
         turns,
+        host,
       ));
       continue;
     }
@@ -553,6 +657,7 @@ async function planPhase(
           { answers },
           roles,
           turns,
+          host,
         ));
       }
       continue;
@@ -685,6 +790,7 @@ async function reviewPhase(
   plan: Plan,
   roles: RoleTable,
   turns: AgentTurns,
+  host?: Host,
 ): Promise<void> {
   // As in `planPhase`: only the first iteration can be a re-entry.
   let firstPass = true;
@@ -702,7 +808,7 @@ async function reviewPhase(
         );
       }
       firstPass = false;
-      await runFixRound(state, cfg, cwd, carried, roles, turns);
+      await runFixRound(state, cfg, cwd, carried, roles, turns, host);
       // No OUTSTANDING.md here, even when these were the final round's
       // findings: the artifact says the fix ran *and verification still
       // passed*, and the gate has not run yet. It is written below, on the
@@ -762,6 +868,7 @@ async function reviewPhase(
         'verify-round',
         await maybeCommit(cfg, cwd, `vibe: fix verification failure (round ${state.verifyRound})`),
       );
+      await holdAt(state, host, 'verify-round');
       continue;
     }
 
@@ -883,6 +990,7 @@ async function reviewPhase(
         'final-fix',
         await maybeCommit(cfg, cwd, `vibe: address carried review findings (final round)`),
       );
+      await holdAt(state, host, 'final-fix');
       recordEvent(state, 'review_approved', {
         findings: review.findings.length,
         carriedAndFixed: decision.tolerated.map((f) => f.id),
@@ -923,6 +1031,7 @@ async function runFixRound(
   findings: readonly Finding[],
   roles: RoleTable,
   turns: AgentTurns,
+  host?: Host,
 ): Promise<void> {
   state.reviewRound += 1;
   saveState(state);
@@ -952,6 +1061,7 @@ async function runFixRound(
     'review-round',
     await maybeCommit(cfg, cwd, `vibe: address review round ${state.reviewRound}`),
   );
+  await holdAt(state, host, 'review-round');
 }
 
 /**
@@ -2611,6 +2721,7 @@ async function revisePlan(
   args: ReviseArgs,
   roles: RoleTable,
   turns: AgentTurns,
+  host?: Host,
 ): Promise<PlannedTurn> {
   state.planRound += 1;
   saveState(state);
@@ -2662,6 +2773,7 @@ async function revisePlan(
   // record is complete. No commit here: the planning phase does not touch the
   // tree, and the note says that rather than implying a failure.
   writeCheckpoint(state, 'plan-round', NO_COMMIT);
+  await holdAt(state, host, 'plan-round');
   return { plan, ...(outcome.activity === undefined ? {} : { activity: outcome.activity }) };
 }
 
