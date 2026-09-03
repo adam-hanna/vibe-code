@@ -1,0 +1,234 @@
+/*
+ * The design system, as tokens.
+ *
+ * Transcribed from `Vibe Design Spec.dc.html` §1-§3, which is itself the
+ * distillation of fourteen hi-fi screens over nine review rounds: 51 distinct
+ * hexes resolved to 42 tokens, 70 font declarations collapsed to 9 named styles
+ * across 8 sizes, and 19 padding plus 18 gap values collapsed to 8 steps.
+ *
+ * The semantics here were argued about. The mechanics were not - they were
+ * decided seventy and nineteen times independently and collapsed once, and this
+ * file is the collapse. Reaching past a token for a raw hex re-derives a
+ * decision that has already been made twice.
+ *
+ * Two rules the spec names as the ones most likely to slip, both checkable:
+ *
+ *   - The text floor is `--text-tertiary`. It is the last step that passes
+ *     4.5:1 on these grounds (5.47-6.09 depending on ground). Anything dimmer
+ *     is a border, not text. Recession below it is built with size and weight.
+ *   - Solid fill means interactive. The one exception is the single state label
+ *     that leads a banner. Never two solids of the same fill in one region.
+ */
+
+:root {
+  /* ---------------------------------------------------------------- surfaces
+   * Ten grounds, page-dark to card-light, plus the three that carry meaning:
+   * `active` for the live thing, `accent-tint` for selection, `alarm` for a
+   * halt. Ordered here as they stack.
+   */
+  --surface-page: #0e1012;          /* desk behind the window */
+  --surface-chrome: #101315;        /* titlebar, rail, tab bar */
+  --surface-column: #131618;        /* loop column, table header, footers */
+  --surface-panel: #141719;         /* window body, content panes */
+  --surface-card: #16191c;          /* cards, fields, and the modal */
+  --surface-active: #161b20;        /* the live card, your turns, selected row */
+  --surface-active-hdr: #1a2530;    /* the live cycle's header band */
+  --surface-accent-tint: #1b2a38;   /* P2 chip, selected segment, evidence chip */
+  --surface-alarm: #1b1e21;         /* halt banner and stale strip ground */
+  --surface-tray: #0b0d0e;          /* menubar strip, the app with no window */
+
+  /* ------------------------------------------------------- text: 3 tiers, 2 emphases
+   * Ratios are against `--surface-panel`, the most common ground. The floor
+   * holds across all ten surfaces; the others have headroom.
+   */
+  --text-display: #e7e9eb;          /* 15.4 - titles only */
+  --text-emphasis: #dbe4ec;         /* 14.0 - the live value */
+  --text-primary: #c3c8cc;          /* 10.7 - measurements, body */
+  --text-secondary: #9aa0a5;        /*  6.7 - prose, log history */
+  --text-tertiary: #8f9498;         /*  5.9 - labels, timestamps. THE FLOOR */
+
+  /* Documentation only - never ship as text. Retired in ramp revision 2 and
+   * kept named so the retirement stays legible: someone reaching for a quieter
+   * grey should find these already refused rather than invent one. */
+  --retired-aa-limit: #7b8085;      /* the AA limit itself */
+  --retired-1: #6c7176;
+  --retired-2: #5f6469;
+  --retired-3: #565b60;
+  --retired-4: #4e5358;
+
+  /* ------------------------------------------------- rules and borders: never text
+   * The four retired greys above are good at exactly this, and that is what
+   * they became.
+   */
+  --rule-strong: #4a4f54;           /* dashed chips, card outline */
+  --rule-control: #3d4247;          /* buttons, fields */
+  --rule-control-dim: #33383d;      /* unselected segment, locked cell */
+  --rule-structure: #2e3236;        /* window, pane and bar edges */
+  --rule-card: #2b3034;             /* card and panel outline */
+  --rule-inner: #232a30;            /* inside a card, empty bar track */
+  --rule-hatch: #191d20;            /* absence fill, 135deg at 5px */
+
+  /* ------------------------------------------------- accent: solid means interactive */
+  --accent-solid: #94bce3;          /* primary button, selection marks */
+  --accent-on-tint: #b5d9fd;        /* text on --surface-accent-tint */
+  --accent-border: #4a6b8c;         /* live card, tinted chip, modal edge */
+  --accent-border-dim: #35516b;     /* rule under an active header */
+  --accent-base: #5980a6;           /* Industry's own steel, rail selection */
+  --accent-muted: #8fb3d4;          /* metadata inside an active region */
+
+  /* ------------------------------------------------------ severity: a ramp with an order
+   * Weight ascends with severity. On a dark ground the ramp is rebuilt, not
+   * flipped - P0 takes the highest luminance AND a doubled rule. No chip
+   * carries a fill, because a fill would mean pressable.
+   *
+   * `--text-emphasis` is reserved for alarm across the whole product: P0,
+   * banner kickers, the stale strip, a failing sliver, headroom near a cap. It
+   * is never a quantity.
+   */
+  --severity-p0-rule: var(--text-emphasis);
+  --severity-p0-text: var(--text-emphasis);
+  --severity-p0-width: 2px;
+  --severity-p1-rule: var(--accent-solid);
+  --severity-p1-text: var(--accent-solid);
+  --severity-p2-rule: var(--accent-border);
+  --severity-p2-fill: var(--surface-accent-tint);
+  --severity-p3-rule: var(--rule-strong);
+  --severity-zero-rule: var(--rule-strong);   /* dashed; digit at the text floor */
+
+  /* ------------------------------------------------------- quantity: proportions only
+   * A run bar is a proportion, not a severity. Charts and share bars take this
+   * ramp and nothing else does. `--accent-solid` must never appear as a bar
+   * fill: it means pressable.
+   */
+  --quantity-1: #7fa3c4;            /* largest share, oscillation high */
+  --quantity-2: #4a6b8c;            /* second share, passing tests */
+  --quantity-3: #33475a;            /* remainder, unattributed */
+  --quantity-track: #232a30;        /* the empty part of a bar */
+
+  /* ------------------------------------------------------ diff: two rules, one per axis
+   * Contrast ratio answers "is the row visible" and "is the code readable". It
+   * cannot answer "added or removed" - it measures luminance only, so two
+   * equal-luminance hues score 1.0 while being perfectly discriminable.
+   *
+   * So: luminance is symmetric (rows at 1.58 and 1.56 against the panel, both
+   * below every card in the app) and HUE carries the pair, at ~6.8% saturation.
+   * Revision 3 of this decision; revision 2 cut saturation to 2.4% and made the
+   * two rows differ only in brightness, which is what this replaces.
+   */
+  --diff-added-row: #343c34;        /* 1.58 vs panel */
+  --diff-added-gutter: #414b41;     /* 2.00 */
+  --diff-added-glyph: #9ad183;
+  --diff-added-number: #dbe7d6;
+  --diff-added-code: #d7e6d1;
+  --diff-removed-row: #3f3737;      /* 1.56 vs panel */
+  --diff-removed-gutter: #4b4242;   /* 1.87 */
+  --diff-removed-glyph: #e0a596;
+  --diff-removed-number: #e6d2cc;
+  --diff-removed-code: #e8cfc8;
+
+  /* --------------------------------------------- semantic: the only two hues outside steel
+   * Neither is a status colour, and a build that reaches for green-for-good or
+   * red-for-bad has left the system.
+   *
+   * Green means "a process is alive" and nothing else - never success, because
+   * a passing verify is a word. Terracotta means "lines were deleted" and
+   * nothing else - never danger, because this palette has no red and the halt
+   * states are built from weight instead.
+   */
+  --semantic-live: #7fb069;         /* liveness dot, and +n line counts */
+  --semantic-loss: #c07a6a;         /* -n line counts only */
+
+  /* ============================================================ type
+   * 70 declarations across 15 sizes -> 9 named styles across 8 sizes.
+   *
+   * Two families, one job each. Barlow Condensed, always uppercase, always
+   * tracked: every label, heading, tab and button. Barlow: every sentence.
+   * Mono: every value. If a string is a number, a path, an id or a config key
+   * it is mono; if it is a sentence it is not. That rule alone removed most of
+   * the seventy.
+   *
+   * Collapsed away: 8px existed only inside two chips (use micro at 9). The
+   * 16/20/22/26 sizes were canvas annotation headings - spec document type, not
+   * product type. 15px survives only as `kicker`.
+   */
+  --font-sans: 'Barlow', system-ui, -apple-system, sans-serif;
+  --font-condensed: 'Barlow Condensed', 'Barlow', system-ui, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
+
+  --type-display: 600 30px/1 var(--font-condensed);
+  --type-title: 600 21px/1.1 var(--font-condensed);
+  --type-section: 600 17px/1 var(--font-condensed);
+  --type-kicker: 600 15px/1 var(--font-condensed);
+  --type-tab: 600 12px/1 var(--font-condensed);
+  --type-label: 600 10px/1 var(--font-condensed);
+  --type-lead: 400 14px/1.62 var(--font-sans);
+  --type-body: 400 13px/1.6 var(--font-sans);
+  --type-body-sm: 400 12px/1.55 var(--font-sans);
+  --type-mono: 400 12px/1.5 var(--font-mono);
+  --type-mono-sm: 400 11px/1 var(--font-mono);
+  --type-chip: 700 10px/16px var(--font-sans);
+  --type-chip-micro: 700 9px/14px var(--font-sans);
+
+  /* Tracking is per-style and not optional: the condensed faces are unreadable
+   * as caps without it, and that is the only reason they are tracked. */
+  --track-display: 0.02em;
+  --track-title: 0.01em;
+  --track-section: 0.1em;
+  --track-kicker: 0.09em;
+  --track-tab: 0.13em;
+  --track-label: 0.16em;
+  --track-chip: 0.05em;
+  --track-chip-micro: 0.1em;
+
+  /* ============================================================ spacing
+   * 19 padding values and 18 gap values -> 8 steps. What each absorbed is in
+   * the comment, because the collapse is the decision: the difference between 9
+   * and 11 was not carrying meaning anywhere.
+   */
+  --space-1: 4px;                   /* absorbs 2, 5  - chip rows, icon-to-label */
+  --space-2: 6px;                   /* absorbs 7     - chip padding, label-to-control */
+  --space-3: 8px;                   /* absorbs 9     - sibling controls, button padding */
+  --space-4: 12px;                  /* absorbs 10,11,13 - card padding. THE DEFAULT */
+  --space-5: 16px;                  /* absorbs 14,15,18 - pane padding, between cards */
+  --space-6: 22px;                  /* absorbs 20,24,26 - modal padding, form sections */
+  --space-7: 32px;                  /* absorbs 28    - above a section starting a new subject */
+  --space-8: 44px;                  /* absorbs 40,56 - the deliberate fold below a scrolling section */
+
+  /* --------------------------------------------- fixed dimensions, NOT spacing
+   * Deliberately off the scale. These are sized by their content, and rounding
+   * a 32px field to 36 or a 34px row to 32 costs alignment for nothing.
+   */
+  --dim-rail: 54px;
+  --dim-loop-column: 372px;
+  --dim-titlebar: 38px;
+  --dim-tab-bar: 40px;
+  --dim-sub-bar: 34px;
+  --dim-table-header: 30px;
+  --dim-table-row: 34px;
+  --dim-field: 32px;
+  --dim-switch: 32px;
+  --dim-radio: 12px;
+  --dim-checkbox: 13px;
+  --dim-bar-track: 8px;
+  --dim-liveness-dot: 5px;
+  --dim-corner-mark: 8px;
+  --dim-scroll-track: 4px;
+
+  /* ============================================================ motion
+   * One pulse, and that is the whole system rather than an omission: this is a
+   * screen watched for forty minutes at a time, and the one moving thing on it
+   * should be the one that means something is still alive.
+   *
+   * Consequence worth stating: state changes are instant. No cross-fades
+   * between phases, no sliding panels, no skeleton shimmer.
+   */
+  --pulse-duration: 2.4s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    /* The pulse becomes a static filled dot, which loses nothing - the label
+     * beside it already says `live - updated 2s ago`. */
+    --pulse-duration: 0s;
+  }
+}
