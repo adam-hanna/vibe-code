@@ -1,4 +1,5 @@
 import { detail } from '@src/log.js';
+import type { Meta } from '@src/log.js';
 import { markActivity, measuredWindow } from '@src/run.js';
 import type { AgentProvider } from '@src/runtime.js';
 import type { Config, InFlightTurn, RunState, TurnActivity } from '@src/types.js';
@@ -320,6 +321,38 @@ export interface HeartbeatLine {
 }
 
 /**
+ * The same heartbeat as data, for a host that renders a row rather than a line.
+ *
+ * `formatHeartbeat` below is one renderer of this record, not the record itself
+ * (#133) - a host that had to parse `implement: 9m12s · 47 tool calls · ...`
+ * back apart would break on the next wording change.
+ *
+ * **The omission rule is the formatter's, deliberately.** A field is present
+ * when the stream supplied it and absent when it did not, exactly as the string
+ * drops the segment. `activities: 0` and `tokens: 0` are counted zeros and are
+ * facts; `lastActivity: null` and an unmeasured `contextWindow` are absences,
+ * and an absence reported as zero is the one thing this repo never records.
+ *
+ * `unit` travels with `activities` because it is the noun that makes the number
+ * mean something: 'tool use' for Claude, 'event' for Codex, and they do not
+ * count the same thing.
+ */
+export function heartbeatData(args: HeartbeatLine): Record<string, unknown> {
+  const { label, elapsedMs, snapshot, unit, contextWindow } = args;
+  const data: Record<string, unknown> = {
+    label,
+    elapsedMs,
+    activities: snapshot.activities,
+    unit,
+    tokens: snapshot.tokens,
+    promptTokens: snapshot.promptTokens,
+  };
+  if (snapshot.lastActivity !== null) data['lastActivity'] = snapshot.lastActivity;
+  if (contextWindow !== undefined && contextWindow > 0) data['contextWindow'] = contextWindow;
+  return data;
+}
+
+/**
  * One heartbeat line.
  *
  * Every segment except elapsed time is omitted when the stream has not supplied
@@ -437,7 +470,12 @@ export interface ProgressOptions {
   /** Called once per observation. See the ownership rule in createHeartbeat. */
   onActivity?: ((observation: ActivityObservation) => void) | undefined;
   now?: (() => number) | undefined;
-  emit?: ((line: string) => void) | undefined;
+  /**
+   * Where a heartbeat goes. Defaults to `log.detail`, which since #133 carries
+   * the record alongside the line - so a host gets `{elapsedMs, activities,
+   * tokens, ...}` and the terminal gets the sentence, from one call.
+   */
+  emit?: ((line: string, meta?: Meta) => void) | undefined;
   timers?: TimerApi | undefined;
 }
 
@@ -583,15 +621,17 @@ export function createHeartbeat(
     if (stopped || !dueForEmit(lastEmitAt, now(), intervalMs)) return false;
     lastEmitAt = now();
     try {
-      emit(
-        formatHeartbeat({
-          label,
-          elapsedMs: lastEmitAt - startedAt,
-          snapshot,
-          unit,
-          contextWindow,
-        }),
-      );
+      // Built once and rendered twice: the string for the terminal, the record
+      // for a host. Two calls here would let the two drift apart in exactly the
+      // way #133 exists to prevent.
+      const line: HeartbeatLine = {
+        label,
+        elapsedMs: lastEmitAt - startedAt,
+        snapshot,
+        unit,
+        contextWindow,
+      };
+      emit(formatHeartbeat(line), { id: 'heartbeat', data: heartbeatData(line) });
     } catch {
       // A broken sink must not take down a run.
     }
