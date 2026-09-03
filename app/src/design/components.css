@@ -1,0 +1,644 @@
+/*
+ * The sixteen components from build spec §4.
+ *
+ * Class names are `v-` prefixed and flat. No nesting, no CSS-in-JS, no runtime:
+ * this repo has zero runtime dependencies and the design system should not be
+ * the thing that introduces one. The tokens are inspectable in devtools by the
+ * name the spec gives them, which is the point.
+ */
+
+/* ================================================================ 1 · severity chip
+ * Weight ascends with severity. No chip carries a fill - a fill would mean
+ * pressable. P0 takes the highest luminance AND a doubled rule, because on a
+ * dark ground the ramp is rebuilt rather than flipped.
+ */
+.v-sev {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  padding: 2px var(--space-2);
+  font: var(--type-chip);
+  letter-spacing: var(--track-chip);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.v-sev--p0 {
+  border: var(--severity-p0-width) solid var(--severity-p0-rule);
+  color: var(--severity-p0-text);
+}
+.v-sev--p1 {
+  border: 1px solid var(--severity-p1-rule);
+  color: var(--severity-p1-text);
+}
+.v-sev--p2 {
+  border: 1px solid var(--severity-p2-rule);
+  background: var(--severity-p2-fill);
+  color: var(--accent-on-tint);
+}
+.v-sev--p3 {
+  border: 1px solid var(--severity-p3-rule);
+  color: var(--text-primary);
+}
+/* Zero is dashed, and its digit sits at the text floor: nothing to report is an
+ * absence, and absence has a treatment. */
+.v-sev--zero {
+  border: 1px dashed var(--severity-zero-rule);
+  color: var(--text-tertiary);
+}
+
+/* ================================================================ 2 · state kicker
+ * The headline of a banner. This is the ONE place a solid fill does not mean
+ * interactive, and it is allowed exactly one per region.
+ */
+.v-kicker {
+  display: inline-block;
+  padding: var(--space-1) var(--space-3);
+  font: var(--type-kicker);
+  letter-spacing: var(--track-kicker);
+  text-transform: uppercase;
+}
+.v-kicker--alarm {
+  background: var(--text-emphasis);
+  color: var(--surface-page);
+}
+.v-kicker--accent {
+  background: var(--accent-solid);
+  color: var(--surface-page);
+}
+.v-kicker--quiet {
+  border: 1px solid var(--rule-strong);
+  color: var(--text-emphasis);
+}
+
+/* ================================================================ 3 · meta chip
+ * `proposed · #NNN`, `app`, `unknown`, `likely the same`, evidence kinds.
+ * All dashed EXCEPT the checkable kinds - a dashed border says "this was not
+ * verified", and `code`/`artifact` evidence is verified by construction.
+ */
+.v-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 1px var(--space-2);
+  border: 1px dashed var(--rule-strong);
+  font: var(--type-chip-micro);
+  letter-spacing: var(--track-chip-micro);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+/* Checkable: it resolved on disk, so it is drawn as a fact rather than a claim. */
+.v-meta--checkable {
+  border-style: solid;
+  border-color: var(--accent-border);
+  background: var(--surface-accent-tint);
+  color: var(--accent-on-tint);
+}
+/* `proposed · #NNN` - the UI is promising something the code has not built. Any
+ * of these surviving into a shipped build is a screen running ahead of its
+ * behaviour. */
+.v-meta--proposed {
+  border-color: var(--accent-border-dim);
+  color: var(--accent-muted);
+}
+
+/* ================================================================ 4 · button
+ * Three levels, one primary per region. Solid means interactive, and this is
+ * what solid is FOR.
+ */
+.v-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid transparent;
+  background: none;
+  font: var(--type-tab);
+  letter-spacing: var(--track-tab);
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.v-btn--primary {
+  background: var(--accent-solid);
+  color: var(--surface-page);
+}
+/* Hover lightens the fill. Nothing else moves - no transform, no shadow. */
+.v-btn--primary:hover:not(:disabled) {
+  background: var(--accent-on-tint);
+}
+/* Active INVERTS: the solid becomes the tint. Pressing something makes it
+ * quieter, which is the opposite of hover and is the point. */
+.v-btn--primary:active:not(:disabled) {
+  background: var(--surface-accent-tint);
+  border-color: var(--accent-border);
+  color: var(--accent-on-tint);
+}
+
+.v-btn--secondary {
+  border-color: var(--rule-control);
+  color: var(--text-primary);
+}
+/* Hover steps the border one lighter: --rule-control -> --rule-strong. */
+.v-btn--secondary:hover:not(:disabled) {
+  border-color: var(--rule-strong);
+}
+.v-btn--secondary:active:not(:disabled) {
+  background: var(--surface-active);
+}
+
+.v-btn--tertiary {
+  padding: var(--space-2) var(--space-3);
+  color: var(--text-secondary);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+/* The tertiary has no border to step, so it gains a ground instead. */
+.v-btn--tertiary:hover:not(:disabled) {
+  background: var(--surface-active);
+  color: var(--text-primary);
+}
+
+/* Disabled is the dashed absence treatment, never a dimming. */
+.v-btn:disabled {
+  border: 1px dashed var(--rule-strong);
+  background: none;
+  color: var(--text-tertiary);
+  cursor: default;
+}
+
+/* ================================================================ 5 · field */
+.v-field {
+  display: flex;
+  align-items: center;
+  height: var(--dim-field);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--rule-control);
+  background: var(--surface-card);
+  color: var(--text-primary);
+  font: var(--type-mono);
+}
+.v-field:hover:not(:disabled) {
+  border-color: var(--rule-strong);
+}
+/* A field is focused far more often than it is tabbed to, so it keeps its
+ * inline treatment as well as the outline: border to accent, plus the caret. */
+.v-field:focus {
+  border-color: var(--accent-solid);
+  caret-color: var(--accent-solid);
+}
+/* Empty is dashed - nothing has been said here yet. */
+.v-field--empty {
+  border-style: dashed;
+  border-color: var(--rule-strong);
+  color: var(--text-tertiary);
+}
+/* Locked is dashed AND dim: unavailable by rule. */
+.v-field--locked {
+  border-style: dashed;
+  border-color: var(--rule-control-dim);
+  color: var(--text-tertiary);
+  cursor: default;
+}
+.v-field__unit {
+  margin-left: auto;
+  padding-left: var(--space-2);
+  font: var(--type-label);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+/* Numeric steppers - chevrons at 12, per the icon rule. */
+.v-stepper {
+  display: flex;
+  flex-direction: column;
+  margin-left: var(--space-2);
+}
+.v-stepper button {
+  padding: 0 var(--space-1);
+  border: 0;
+  background: none;
+  color: var(--text-tertiary);
+  line-height: 1;
+  cursor: pointer;
+}
+.v-stepper button:hover {
+  color: var(--text-primary);
+}
+
+/* ================================================================ 6 · radio and checkbox
+ * Square, 12 and 13px. Selected mark is accent; a locked mark drops to rule
+ * grey - the mark is still there, it just stops claiming to be actionable.
+ */
+.v-radio,
+.v-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  border: 1px solid var(--rule-control);
+  background: var(--surface-card);
+  cursor: pointer;
+}
+.v-radio {
+  width: var(--dim-radio);
+  height: var(--dim-radio);
+}
+.v-check {
+  width: var(--dim-checkbox);
+  height: var(--dim-checkbox);
+  font: var(--type-chip-micro);
+  color: transparent;
+}
+.v-radio:hover,
+.v-check:hover {
+  border-color: var(--rule-strong);
+}
+.v-radio.is-on::after {
+  content: '';
+  width: 4px;
+  height: 4px;
+  background: var(--accent-solid);
+}
+.v-check.is-on {
+  color: var(--accent-solid);
+}
+.v-radio.is-locked,
+.v-check.is-locked {
+  border-style: dashed;
+  border-color: var(--rule-control-dim);
+  cursor: default;
+}
+.v-radio.is-locked.is-on::after {
+  background: var(--rule-strong);
+}
+.v-check.is-locked.is-on {
+  color: var(--rule-strong);
+}
+
+/* ================================================================ 7 · segmented switch
+ * Two or three cells. The only toggle in the system; there is no pill.
+ */
+.v-seg {
+  display: inline-flex;
+  height: var(--dim-switch);
+  border: 1px solid var(--rule-control-dim);
+}
+.v-seg button {
+  padding: 0 var(--space-4);
+  border: 0;
+  border-right: 1px solid var(--rule-control-dim);
+  background: none;
+  font: var(--type-tab);
+  letter-spacing: var(--track-tab);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  cursor: pointer;
+}
+.v-seg button:last-child {
+  border-right: 0;
+}
+.v-seg button:hover:not(.is-on):not(:disabled) {
+  color: var(--text-primary);
+}
+.v-seg button.is-on {
+  background: var(--surface-accent-tint);
+  color: var(--accent-on-tint);
+}
+.v-seg button:disabled {
+  border-right-style: dashed;
+  color: var(--text-tertiary);
+  cursor: default;
+}
+
+/* ================================================================ 8 · table
+ * 30px header, 34px rows, no zebra, no vertical rules, sized to content and
+ * never full-bleed. A table that stretches to the pane makes the eye travel
+ * across whitespace to reach a value.
+ */
+.v-table {
+  border-collapse: collapse;
+  width: auto;
+}
+.v-table th {
+  height: var(--dim-table-header);
+  padding: 0 var(--space-4);
+  background: var(--surface-column);
+  border-bottom: 1px solid var(--rule-structure);
+  font: var(--type-label);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  text-align: left;
+  white-space: nowrap;
+}
+.v-table td {
+  height: var(--dim-table-row);
+  padding: 0 var(--space-4);
+  border-bottom: 1px solid var(--rule-inner);
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+.v-table tr.is-selected td {
+  background: var(--surface-active);
+}
+.v-table tr.is-selected td:first-child {
+  box-shadow: inset 2px 0 0 var(--accent-solid);
+}
+
+/* ================================================================ 9 · card */
+.v-card {
+  position: relative;
+  padding: var(--space-4);
+  border: 1px solid var(--rule-card);
+  background: var(--surface-card);
+}
+/* Live: accent border plus corner marks. The marks are what make "this one"
+ * readable at a glance across a column of otherwise identical cards. */
+.v-card--live {
+  border-color: var(--accent-border);
+  background: var(--surface-active);
+}
+.v-card--live::before,
+.v-card--live::after {
+  content: '';
+  position: absolute;
+  width: var(--dim-corner-mark);
+  height: var(--dim-corner-mark);
+  border-color: var(--accent-solid);
+  border-style: solid;
+}
+.v-card--live::before {
+  top: -1px;
+  left: -1px;
+  border-width: 1px 0 0 1px;
+}
+.v-card--live::after {
+  bottom: -1px;
+  right: -1px;
+  border-width: 0 1px 1px 0;
+}
+/* Severity-ruled: a 2px left rule in the severity's colour. */
+.v-card--p0 {
+  border-left: 2px solid var(--severity-p0-rule);
+}
+.v-card--p1 {
+  border-left: 2px solid var(--severity-p1-rule);
+}
+.v-card--p2 {
+  border-left: 2px solid var(--severity-p2-rule);
+}
+.v-card--p3 {
+  border-left: 2px solid var(--severity-p3-rule);
+}
+
+/* ================================================================ 10 · banner
+ * Kicker + headline + evidence + actions. Replaces the footer IN PLACE and
+ * never appears above it: a halt is not a notification, it is the state of the
+ * thing you were already looking at.
+ */
+.v-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  background: var(--surface-alarm);
+  border-top: 1px solid var(--rule-structure);
+}
+.v-banner__headline {
+  font: var(--type-lead);
+  color: var(--text-emphasis);
+}
+.v-banner__evidence {
+  font: var(--type-mono-sm);
+  color: var(--text-tertiary);
+}
+.v-banner__actions {
+  margin-left: auto;
+  display: flex;
+  gap: var(--space-3);
+}
+
+/* ================================================================ 11 · tab
+ * Active is a 2px accent underline. Counts are tertiary unless the tab is
+ * active - a count that shouts from an unselected tab competes with the one
+ * you are reading.
+ */
+.v-tabs {
+  display: flex;
+  height: var(--dim-tab-bar);
+  background: var(--surface-chrome);
+  border-bottom: 1px solid var(--rule-structure);
+}
+.v-tab {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-5);
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  font: var(--type-tab);
+  letter-spacing: var(--track-tab);
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+.v-tab:hover:not(.is-on) {
+  color: var(--text-primary);
+}
+.v-tab.is-on {
+  border-bottom-color: var(--accent-solid);
+  color: var(--text-display);
+}
+.v-tab__count {
+  font: var(--type-mono-sm);
+  color: var(--text-tertiary);
+}
+.v-tab.is-on .v-tab__count {
+  color: var(--accent-muted);
+}
+
+/* ================================================================ 12 · liveness dot
+ * Four states, because liveness is more than two-valued: a process can be
+ * running, quiet, waiting on you, or unaskable. The fourth is `absent` - and an
+ * unasked question and an unanswerable one are the same thing.
+ */
+.v-dot {
+  display: inline-block;
+  width: var(--dim-liveness-dot);
+  height: var(--dim-liveness-dot);
+  border-radius: 50%;
+  flex: none;
+}
+.v-dot--live {
+  background: var(--semantic-live);
+  animation: v-pulse var(--pulse-duration) ease-in-out infinite;
+}
+.v-dot--quiet {
+  border: 1px solid var(--semantic-live);
+}
+.v-dot--waiting {
+  border: 1px solid var(--accent-solid);
+}
+/* Stale: the dot is not drawn at all. Nothing is claimed, because nothing is
+ * known. */
+.v-dot--absent {
+  border: 1px dashed var(--rule-strong);
+}
+
+/* ================================================================ 13 · diff row */
+.v-diff {
+  font: var(--type-mono);
+  background: var(--surface-panel);
+}
+.v-diff__row {
+  display: flex;
+  align-items: baseline;
+}
+.v-diff__num {
+  flex: none;
+  width: 46px;
+  padding: 0 var(--space-2);
+  background: var(--surface-column);
+  color: var(--text-tertiary);
+  text-align: right;
+}
+.v-diff__glyph {
+  flex: none;
+  width: 18px;
+  text-align: center;
+}
+.v-diff__code {
+  padding-left: var(--space-2);
+  white-space: pre;
+  color: var(--text-secondary);
+}
+.v-diff__row--added {
+  background: var(--diff-added-row);
+}
+.v-diff__row--added .v-diff__num {
+  background: var(--diff-added-gutter);
+  color: var(--diff-added-number);
+}
+.v-diff__row--added .v-diff__glyph {
+  color: var(--diff-added-glyph);
+}
+.v-diff__row--added .v-diff__code {
+  color: var(--diff-added-code);
+}
+.v-diff__row--removed {
+  background: var(--diff-removed-row);
+}
+.v-diff__row--removed .v-diff__num {
+  background: var(--diff-removed-gutter);
+  color: var(--diff-removed-number);
+}
+.v-diff__row--removed .v-diff__glyph {
+  color: var(--diff-removed-glyph);
+}
+.v-diff__row--removed .v-diff__code {
+  color: var(--diff-removed-code);
+}
+.v-diff__hunk {
+  padding: var(--space-1) var(--space-4);
+  background: var(--surface-column);
+  border-top: 1px solid var(--rule-inner);
+  border-bottom: 1px solid var(--rule-inner);
+  color: var(--text-tertiary);
+  font: var(--type-mono-sm);
+}
+/* The truncation band. It says what the reviewer WAS HANDED, not what it saw -
+ * the reviewer holds Read/Glob/Grep/Bash and can go looking, and whether it did
+ * is recorded per turn. */
+.v-diff__truncated {
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface-alarm);
+  border-top: 1px dashed var(--rule-strong);
+  border-bottom: 1px dashed var(--rule-strong);
+  color: var(--text-secondary);
+  font: var(--type-body-sm);
+}
+
+/* ================================================================ 14 · bar
+ * A proportion, never a severity. Takes the quantity ramp and nothing else.
+ * Never a bar at 0% - an unavailable track is dashed over the hatch, because a
+ * zero-width fill and "we cannot measure this" look identical.
+ */
+.v-bar {
+  display: flex;
+  height: var(--dim-bar-track);
+  background: var(--quantity-track);
+  overflow: hidden;
+}
+.v-bar__seg--1 {
+  background: var(--quantity-1);
+}
+.v-bar__seg--2 {
+  background: var(--quantity-2);
+}
+.v-bar__seg--3 {
+  background: var(--quantity-3);
+}
+.v-bar--unavailable {
+  border: 1px dashed var(--rule-strong);
+  background: none;
+}
+
+/* ================================================================ 15 · modal
+ * Scrim, card surface, accent border, corner marks, and the ONE shadow in the
+ * product.
+ *
+ * Elevation is solved from the constraint rather than from convention: this
+ * palette spent its light end on severity, so a pale panel would read as an
+ * alarm. Elevation is carried by the scrim, the shadow and the accent border
+ * instead - none of which is load-bearing anywhere else.
+ */
+.v-scrim {
+  position: fixed;
+  inset: 0;
+  background: rgb(0 0 0 / 62%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.v-modal {
+  position: relative;
+  padding: var(--space-6);
+  border: 1px solid var(--accent-border);
+  background: var(--surface-card);
+  box-shadow: 0 18px 48px rgb(0 0 0 / 55%);
+}
+.v-modal::before,
+.v-modal::after {
+  content: '';
+  position: absolute;
+  width: var(--dim-corner-mark);
+  height: var(--dim-corner-mark);
+  border-color: var(--accent-solid);
+  border-style: solid;
+}
+.v-modal::before {
+  top: -1px;
+  left: -1px;
+  border-width: 1px 0 0 1px;
+}
+.v-modal::after {
+  bottom: -1px;
+  right: -1px;
+  border-width: 0 1px 1px 0;
+}
+
+/* ================================================================ type helpers
+ * Named for the style, not for where it is used, so a heading that moves keeps
+ * its type.
+ */
+.v-display { font: var(--type-display); letter-spacing: var(--track-display); color: var(--text-display); }
+.v-title { font: var(--type-title); letter-spacing: var(--track-title); color: var(--text-display); }
+.v-section { font: var(--type-section); letter-spacing: var(--track-section); text-transform: uppercase; color: var(--text-display); }
+.v-label { font: var(--type-label); letter-spacing: var(--track-label); text-transform: uppercase; color: var(--text-tertiary); }
+.v-lead { font: var(--type-lead); color: var(--text-primary); }
+.v-body { font: var(--type-body); color: var(--text-primary); }
+.v-body-sm { font: var(--type-body-sm); color: var(--text-secondary); }
+.v-mono { font: var(--type-mono); color: var(--text-primary); }
+.v-mono-sm { font: var(--type-mono-sm); color: var(--text-tertiary); }

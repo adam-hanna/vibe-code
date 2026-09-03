@@ -28,6 +28,27 @@ testing the last change rather than this one.
 There is **no linter and no formatter**, and no CI. `npm run typecheck && npm test` before
 every commit is the whole gate, and it is on you to run it. Node 20+ (`engines`).
 
+### The desktop app — `app/`
+
+```bash
+cd app
+npm install
+npm run typecheck     # tsc --noEmit, same strictness as the core
+npm run build         # typecheck, then vite build
+npm run dev           # vite on :1420 — the gallery, not the cockpit
+npm run audit:contrast # the design system's own gate
+```
+
+**The app has its own `package.json` and its own gate.** `npm run typecheck && npm test` at
+the root still covers the core and does not see `app/`; run the app's three commands as well
+when you touch it. `app/` is *not* in `files`, so it never ships to npm — the published
+package stays the CLI, and the app ships as a Tauri bundle.
+
+`npm run audit:contrast` is the design system's equivalent of `npm test`: it parses
+`tokens.css` and checks the two rules the build spec names as most likely to slip — the text
+floor across every surface, and the ramps — plus that no hex literal exists outside
+`tokens.css`. It takes no dependencies and it should stay that way.
+
 ## Repo map
 
 ```
@@ -58,7 +79,17 @@ src/validate.ts      parser vocabulary for model output
 src/proc.ts          child-process plumbing
 src/git.ts           branch and commit operations
 tests/               node:test, one file per concern
+
+app/                 the desktop app - Vite + React, its own package.json and gate
+app/src/design/      tokens.css, base.css, components.css, and the sixteen primitives
+app/src/Gallery.tsx  every component in every state - the design system's acceptance test
+app/scripts/         contrast.mjs, which audits the tokens rather than a rendered page
 ```
+
+**The app and the CLI are two front ends over one core.** The app links `src/` and calls
+`orchestrate()` in its own process; it does not shell out to `vibe`. That is what makes a
+gate an `await` at a phase boundary rather than an exit-and-resume, and it is why pausing
+keeps the agent session warm.
 
 `src/orchestrator.ts` is the biggest file by a wide margin and is where most changes land.
 Read the phase you are touching end to end before editing it; the guards interact.

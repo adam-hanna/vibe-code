@@ -1,0 +1,200 @@
+/*
+ * Fonts, reset, and the six interaction states.
+ *
+ * The states are here rather than on each component because the spec states
+ * them once, as rules: "hover steps the border one lighter and nothing else
+ * moves". A rule applied in sixteen places is sixteen chances to apply it
+ * differently.
+ */
+
+/* ---------------------------------------------------------------- fonts
+ * Bundled, never fetched. The mockups load these from fonts.googleapis.com; a
+ * desktop app must not, and this repo has no network code of its own to grow
+ * one for a typeface. Barlow and Barlow Condensed are OFL-1.1.
+ *
+ * Three faces, because the type scale needs exactly three: Condensed 600 for
+ * every label/heading/tab/button, Barlow 400 for every sentence, Barlow 700 for
+ * chips. `latin` plus `latin-ext`; the vietnamese subsets are not shipped.
+ */
+@font-face {
+  font-family: 'Barlow';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./fonts/barlow-400-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Barlow';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./fonts/barlow-400-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF,
+    U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020,
+    U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: 'Barlow';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('./fonts/barlow-700-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Barlow';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url('./fonts/barlow-700-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF,
+    U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020,
+    U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: 'Barlow Condensed';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('./fonts/barlow-condensed-600-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Barlow Condensed';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url('./fonts/barlow-condensed-600-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF,
+    U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020,
+    U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+/* ---------------------------------------------------------------- reset */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--surface-page);
+  color: var(--text-primary);
+  font: var(--type-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* A desktop app, not a document: text selection is opt-in, so a drag on a pane
+ * does not paint half the cockpit blue. Restored on anything a user reads or
+ * copies - values, prose, code. */
+body {
+  user-select: none;
+}
+code,
+pre,
+.v-selectable {
+  user-select: text;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+/* ============================================ the six interaction states
+ * The screens draw one state per component. These are the other five, stated
+ * once each, exactly as the spec words them.
+ */
+
+/* --- focus-visible: 2px accent outline at 2px offset, on everything focusable,
+ * replacing nothing. Industry's rule, unchanged on the dark ground. */
+:focus-visible {
+  outline: 2px solid var(--accent-solid);
+  outline-offset: 2px;
+}
+/* Never remove the outline without replacing it. Kept as a rule rather than a
+ * convention because it is the one accessibility affordance that is invisible
+ * to whoever is not using it, and therefore the one that rots silently. */
+
+/* --- unavailable: dashed, never dimmed.
+ * This is the ABSENCE rule, and it means "unavailable by rule" - Defer on a P0,
+ * Step on final-fix, a budget with no cap. It says `decided`, where dimming
+ * would say `off`. */
+.is-unavailable {
+  border: 1px dashed var(--rule-strong) !important;
+  color: var(--text-tertiary) !important;
+  cursor: default;
+}
+.is-unavailable * {
+  color: var(--text-tertiary);
+}
+
+/* --- spent: opacity 0.72 on the whole row, nothing else changed.
+ * Distinct from unavailable: this is content that was ACTED ON - a declined
+ * finding, a settled round - still readable, no longer live.
+ * Never use opacity to mean disabled. */
+.is-spent {
+  opacity: 0.72;
+}
+
+/* --- selected: a 2px accent left rule plus the active wash, and the rule
+ * continues into whatever the selection produced. Selection is a relationship,
+ * so it is drawn as a line between two things. */
+.is-selected {
+  border-left: 2px solid var(--accent-solid);
+  background: var(--surface-active);
+}
+
+/* --- the hatch, for absence with area. 135deg at 5px, per the spec. */
+.v-hatch {
+  background-image: repeating-linear-gradient(
+    135deg,
+    var(--rule-hatch) 0,
+    var(--rule-hatch) 1px,
+    transparent 1px,
+    transparent 5px
+  );
+}
+
+/* ---------------------------------------------------------------- scroll track
+ * Required wherever a pane clips. 4px, inset 8. */
+.v-scroll {
+  overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--rule-control) var(--rule-inner);
+}
+.v-scroll::-webkit-scrollbar {
+  width: var(--dim-scroll-track);
+  height: var(--dim-scroll-track);
+}
+.v-scroll::-webkit-scrollbar-track {
+  background: var(--rule-inner);
+  margin: var(--space-3) 0;
+}
+.v-scroll::-webkit-scrollbar-thumb {
+  background: var(--rule-control);
+}
+
+/* ---------------------------------------------------------------- the one animation */
+@keyframes v-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
