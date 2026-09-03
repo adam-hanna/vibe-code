@@ -1074,6 +1074,79 @@ export function recordEvent(state: RunState, type: string, data: Record<string, 
 }
 
 /**
+ * The levels a durable fact may be said at.
+ *
+ * `heading` and `detail` are missing on purpose. A heading is page furniture and
+ * a detail is the heartbeat's level - neither is ever the announcement of a
+ * decision, and offering them here would invite one to be recorded as though it
+ * were.
+ */
+export type SayLevel = 'step' | 'info' | 'ok' | 'warn' | 'error';
+
+const SAY: Record<SayLevel, (msg: string, meta?: log.Meta) => void> = {
+  step: log.step,
+  info: log.info,
+  ok: log.ok,
+  warn: log.warn,
+  error: log.fail,
+};
+
+/**
+ * Record a durable fact and say it, once, in one call.
+ *
+ * ## The durability rule (#133)
+ *
+ * The issue asks for this to be decided here rather than discovered later, so:
+ *
+ * > **A narration line is durable when a later process needs it** - when it
+ * > reports a decision or a transition the run can be resumed from or judged by.
+ * > Everything else is ephemeral.
+ *
+ * The consequence is the part worth stating plainly: **narration never creates
+ * an event.** The durable set is already exactly what `recordEvent` records, and
+ * this function does not add to it. It only collapses the cases where a fact was
+ * already being both recorded and narrated.
+ *
+ * Two measurements behind that. One clean pass through `orchestrate` says 23
+ * things and records 7, so a rule that promoted narration to events would
+ * roughly quadruple `state.events` on the shortest possible run and far more on
+ * a real one - and that file is the run's memory, read by `vibe list`, by the
+ * planner's past-run index (#52) and by every consistency check, which is why
+ * #133 says in as many words that it must not become a transcript. And of the
+ * orchestrator's 19 event sites, 7 already say the same fact twice in two forms;
+ * those are the ones this function is for.
+ *
+ * The distinction that decides a case is what the fact is *about*: an event says
+ * what the run **is** - approved, verified, downgraded, rate-limited - and
+ * narration says what it is **doing**. `Codex is critiquing the plan` is not a
+ * transition; nothing resumes from it and nothing judges the run by it.
+ *
+ * ## Ordering
+ *
+ * Persist first, then narrate. The durable record is the priority and narration
+ * is a guest - a sentence claiming something that a kill then prevented from
+ * being written would be a lie the archive could not correct. It also keeps
+ * `recordEvent`'s single write exactly where it was: this adds nothing between
+ * `stageEvent` and `saveState`, which is the ordering `applyCharge` depends on.
+ *
+ * ## Identity
+ *
+ * The event type IS the narration id. That is the whole point - a host acting on
+ * `plan_approved` and an archive recording `plan_approved` are agreeing about
+ * one fact rather than about two spellings of it.
+ */
+export function recordAndSay(
+  state: RunState,
+  level: SayLevel,
+  type: string,
+  message: string,
+  data: Record<string, unknown> = {},
+): void {
+  recordEvent(state, type, data);
+  SAY[level](message, { id: type, data });
+}
+
+/**
  * `recordEvent`, for a caller that must not be taken down by its own audit
  * trail. True when the event was persisted.
  *

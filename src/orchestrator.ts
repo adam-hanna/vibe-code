@@ -56,6 +56,7 @@ import {
   measuredRatio,
   p1Signature,
   persistenceNotice,
+  recordAndSay,
   recordEvent,
   recordPendingFindings,
   recordRound,
@@ -189,14 +190,24 @@ function latestReport(state: RunState): string | null {
   // The same predicate `validateStoredState` applies on the way in, asked again
   // here because this is the call that turns the value into a path.
   if (!isReportBasename(name)) {
-    log.warn(`The recorded report name is not one vibe will read: ${name}`);
-    recordEvent(state, 'report_unusable', { name });
+    recordAndSay(
+      state,
+      'warn',
+      'report_unusable',
+      `The recorded report name is not one vibe will read: ${name}`,
+      { name },
+    );
     return null;
   }
   const text = artifactText(state, name);
   if (text === null || text.trim() === '') {
-    log.warn(`The recorded report ${name} could not be read - the reviewer is told so`);
-    recordEvent(state, 'report_unreadable', { name });
+    recordAndSay(
+      state,
+      'warn',
+      'report_unreadable',
+      `The recorded report ${name} could not be read - the reviewer is told so`,
+      { name },
+    );
     return null;
   }
   return text;
@@ -565,8 +576,13 @@ async function planPhase(
         const planFile = `plan-${state.planRound}.json`;
         const { report: found, raised } = refusePlaceholderPlan(critiqued, plan.plan_md, planFile);
         if (raised !== null) {
-          log.fail(`${planFile} holds a pointer, not a plan - refusing to implement it.`);
-          recordEvent(state, 'plan_placeholder_refused', { artifact: planFile, id: raised.id });
+          recordAndSay(
+            state,
+            'error',
+            'plan_placeholder_refused',
+            `${planFile} holds a pointer, not a plan - refusing to implement it.`,
+            { artifact: planFile, id: raised.id },
+          );
         }
         artifact(state, `plan-critique-${state.planRound}.json`, found);
         collectDeferred(state, found.findings);
@@ -799,8 +815,13 @@ async function reviewPhase(
     const stoppers = blockingFindings(review.findings);
     if (decision.pass) {
       if (decision.tolerated.length === 0) {
-        log.ok(`Review clean - ${review.findings.length} non-blocking finding(s)`);
-        recordEvent(state, 'review_approved', { findings: review.findings.length });
+        recordAndSay(
+          state,
+          'ok',
+          'review_approved',
+          `Review clean - ${review.findings.length} non-blocking finding(s)`,
+          { findings: review.findings.length },
+        );
         // Nothing blocking came back, so there is nothing for a resume to fix.
         clearPendingFindings(state);
         break;
@@ -2941,8 +2962,7 @@ function groundAndRecord(
     // Set by construction in `groundFindings`; narrowed rather than asserted.
     const d = f.downgraded;
     if (d === undefined) continue;
-    log.warn(`Downgraded ${f.id} from ${d.from} to P2 - ${d.reason}`);
-    recordEvent(state, 'finding_downgraded', {
+    recordAndSay(state, 'warn', 'finding_downgraded', `Downgraded ${f.id} from ${d.from} to P2 - ${d.reason}`, {
       id: f.id,
       from: d.from,
       reason: d.reason,
@@ -3069,10 +3089,15 @@ async function runReview(
   const report = latestReport(state);
 
   if (chunks.length > 1) {
-    log.info(`Diff too large for one turn - reviewing ${files.length} file(s) in ${chunks.length} parts`);
     // How the round was SPLIT, which is true before any turn runs. What was
     // actually seen is `reviewCoverage`, recorded per completed part below.
-    recordEvent(state, 'review_chunked', { chunks: chunks.length, files: files.length });
+    recordAndSay(
+      state,
+      'info',
+      'review_chunked',
+      `Diff too large for one turn - reviewing ${files.length} file(s) in ${chunks.length} parts`,
+      { chunks: chunks.length, files: files.length },
+    );
   }
 
   const reports: FindingsReport[] = [];
@@ -3164,8 +3189,13 @@ async function runReview(
     };
     saveState(state);
     for (const file of chunk.truncated) {
-      log.warn(`${file} is larger than one review turn - the reviewer was shown a cut diff`);
-      recordEvent(state, 'review_file_truncated', { file });
+      recordAndSay(
+        state,
+        'warn',
+        'review_file_truncated',
+        `${file} is larger than one review turn - the reviewer was shown a cut diff`,
+        { file },
+      );
     }
   }
 
