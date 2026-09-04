@@ -25,9 +25,11 @@
 //! (#144), and "run this program" must never be in reach of it.
 
 mod host;
+mod keys;
 mod reaper;
 
 use host::{host_send, host_start, host_status, launch, HostProcess};
+use keys::{key_clear, key_set, key_status};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Manager, WindowEvent};
@@ -54,7 +56,18 @@ pub fn run() {
             show(app);
         }))
         .manage(HostProcess::default())
-        .invoke_handler(tauri::generate_handler![host_start, host_send, host_status])
+        // Every command the window may call, and the list is worth reading as a
+        // whole: three that talk to a process this crate already started, and
+        // three that manage a credential the window can store and check but
+        // **never read back**. There is deliberately no `key_get` (#143).
+        .invoke_handler(tauri::generate_handler![
+            host_start,
+            host_send,
+            host_status,
+            key_set,
+            key_clear,
+            key_status
+        ])
         .setup(|app| {
             // Before the tray, and before a window can ask. The host process IS
             // the app; a webview that fails to load should leave a running host

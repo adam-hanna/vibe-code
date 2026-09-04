@@ -1,0 +1,100 @@
+/*
+ * The pilot's credentials (#143).
+ *
+ * Every value is a token, and `audit:contrast` walks `src/` for hex literals so
+ * this file is checked like the rest.
+ */
+
+.v-creds {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--surface-page);
+  padding: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.v-creds__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+}
+
+.v-creds__title {
+  font: var(--type-label);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-tertiary);
+}
+
+.v-creds__summary {
+  font: var(--type-body-sm);
+  color: var(--text-primary);
+}
+
+.v-creds__note {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  border-top: 1px solid var(--rule-inner);
+  padding-top: var(--space-3);
+}
+
+.v-cred {
+  border: 1px solid var(--rule-card);
+  background: var(--surface-card);
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.v-cred__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.v-cred__name {
+  font: var(--type-section);
+  color: var(--text-emphasis);
+}
+
+.v-cred__entry {
+  display: flex;
+  gap: var(--space-2);
+}
+
+/*
+ * `type="password"`, and it stays that way. There is no reveal toggle, because
+ * revealing implies reading something back and nothing in this window can - what
+ * is in this field is what the user just typed, and it is gone on submit.
+ */
+.v-cred__field {
+  flex: 1;
+  min-width: 0;
+  font: var(--type-mono-sm);
+  color: var(--text-primary);
+  background: var(--surface-panel);
+  border: 1px solid var(--rule-control);
+  padding: var(--space-2) var(--space-3);
+}
+
+.v-cred__field:focus-visible {
+  outline: 2px solid var(--accent-solid);
+  outline-offset: 2px;
+}
+
+.v-cred__note,
+.v-cred__error {
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+.v-cred__error {
+  color: var(--text-primary);
+  background: var(--surface-alarm);
+  border: 1px solid var(--rule-card);
+  padding: var(--space-2) var(--space-3);
+}
