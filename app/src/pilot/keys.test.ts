@@ -3,8 +3,12 @@ import { describe, expect, test } from 'vitest';
 // node types to the app's tsconfig would let any component in a webview import a
 // filesystem, and no test is worth that.
 import corePackage from '../../../package.json?raw';
+import coreLock from '../../../package-lock.json?raw';
 import rust from '../../src-tauri/src/keys.rs?raw';
 import lib from '../../src-tauri/src/lib.rs?raw';
+import pilotMod from '../../src-tauri/src/pilot/mod.rs?raw';
+import anthropicMod from '../../src-tauri/src/pilot/anthropic.rs?raw';
+import openaiMod from '../../src-tauri/src/pilot/openai.rs?raw';
 import { PROVIDER_NAME, PROVIDERS, usable } from './keys';
 import type { KeyStatus } from './keys';
 
@@ -36,13 +40,14 @@ describe('the webview can store a key and can never read one', () => {
     expect(rust).not.toContain('pub fn read');
   });
 
-  test('the handler list is exactly those three plus the host commands', () => {
+  test('the handler list is exactly those three plus the host and pilot commands', () => {
     // The second half of the same guard: a command is only reachable once it is
-    // registered, so the registration is worth pinning too.
+    // registered, so the registration is worth pinning too. Every name the
+    // window can reach is on this list and nowhere else.
     const registered = lib
       .slice(lib.indexOf('generate_handler!['), lib.indexOf(']', lib.indexOf('generate_handler![')))
       .match(/\b\w+\b/g)
-      ?.filter((w) => w.startsWith('host_') || w.startsWith('key_'));
+      ?.filter((w) => /^(host|key|pilot)_/.test(w));
     expect(registered?.sort()).toEqual([
       'host_send',
       'host_start',
@@ -50,7 +55,29 @@ describe('the webview can store a key and can never read one', () => {
       'key_clear',
       'key_set',
       'key_status',
+      'pilot_cancel',
+      'pilot_send',
     ]);
+  });
+
+  test('the one thing that reads a key is the one thing that makes the request', () => {
+    // `read` gained its caller when the adapters landed, and this pins WHO it
+    // is. A second caller is not automatically wrong, but it is the moment to
+    // ask whether the key has grown a second lifetime — which is exactly the
+    // question nobody thinks to ask six months later.
+    const callers = [...pilotMod.matchAll(/keys::read\(/g)];
+    expect(callers.length).toBe(1);
+    expect(pilotMod).toContain('fn drive(');
+  });
+
+  test('no vendor URL is reachable from the webview', () => {
+    // Both endpoints are `const` in Rust and neither is a parameter of a
+    // command. A `pilot_send` that took a URL would be a page choosing where a
+    // credential gets sent, which is the whole thing this boundary prevents.
+    for (const source of [anthropicMod, openaiMod]) {
+      expect(source).toMatch(/pub const URL: &str = "https:\/\//);
+    }
+    expect(pilotMod).not.toMatch(/url:\s*String/);
   });
 
   test('the status shape has no field a key could live in', () => {
@@ -91,5 +118,16 @@ describe('the core is untouched', () => {
     };
     expect(pkg.dependencies ?? {}).toEqual({});
     expect(pkg.files).toEqual(['dist/src', 'README.md', 'CHANGELOG.md', 'LICENSE']);
+  });
+
+  test('and its lockfile agrees, which is the half a manifest cannot prove', () => {
+    // `dependencies: {}` is a statement of intent; the lockfile is what would
+    // actually be installed. A transitive HTTP client arriving through a build
+    // tool would leave the manifest looking exactly as it does above.
+    const lock = JSON.parse(coreLock) as { packages: Record<string, { dev?: boolean }> };
+    const shipped = Object.entries(lock.packages)
+      .filter(([name, meta]) => name !== '' && meta.dev !== true)
+      .map(([name]) => name);
+    expect(shipped).toEqual([]);
   });
 });

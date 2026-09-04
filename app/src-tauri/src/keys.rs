@@ -125,12 +125,10 @@ pub fn clear(provider: Provider) -> Result<(), String> {
 /// point - the pilot's HTTP adapters call this, and nothing reachable from the
 /// webview can.
 ///
-/// The `allow` goes when those adapters land and give it a caller. It is here
-/// rather than the function being deleted because the *shape* is the deliverable
-/// of this issue: a read that exists, is used by Rust, and is unreachable from
-/// the window. Deleting it and re-adding it later would lose the one place that
-/// asymmetry is written down.
-#[allow(dead_code)]
+/// Its one caller is `pilot::drive`, which reads a key at the last possible
+/// moment, hands it straight to a request header, and drops it. The key is
+/// never emitted, never logged, never returned to the window and never written
+/// down anywhere else in this crate.
 pub(crate) fn read(provider: Provider) -> Result<String, String> {
     match entry(provider)?.get_password() {
         Ok(key) => Ok(key),
