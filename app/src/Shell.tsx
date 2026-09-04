@@ -52,6 +52,7 @@ export function Shell() {
   const [protocol, setProtocol] = useState<number | null>(null);
   const [lines, setLines] = useState<readonly Line[]>([]);
   const [failure, setFailure] = useState<string | null>(null);
+  const [uncontained, setUncontained] = useState<string | null>(null);
   const counter = useRef(0);
 
   const push = useCallback((kind: Line['kind'], text: string) => {
@@ -101,6 +102,7 @@ export function Shell() {
         // open. A bundle whose sidecar is missing is exactly the failure the
         // staging step exists to prevent, and it must be visible when it happens.
         setFailure(status.failure);
+        setUncontained(status.uncontained);
       } catch (err) {
         setFailure(err instanceof Error ? err.message : String(err));
       }
@@ -177,6 +179,15 @@ export function Shell() {
         {failure !== null && (
           <div className="v-hoststrip__failure">
             <StateKicker tone="alarm">no host</StateKicker> {failure}
+          </div>
+        )}
+
+        {/* Only when the guarantee is NOT being kept. On Windows this is silent,
+            because the kernel is enforcing it and there is nothing to say (#157). */}
+        {uncontained !== null && running && (
+          <div className="v-hoststrip__failure">
+            <StateKicker tone="quiet">uncontained</StateKicker> {uncontained} — the run stays
+            resumable, but it keeps spending until you stop it.
           </div>
         )}
 

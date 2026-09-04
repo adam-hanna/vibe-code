@@ -25,6 +25,7 @@
 //! (#144), and "run this program" must never be in reach of it.
 
 mod host;
+mod reaper;
 
 use host::{host_send, host_start, host_status, launch, HostProcess};
 use tauri::menu::{Menu, MenuItem};

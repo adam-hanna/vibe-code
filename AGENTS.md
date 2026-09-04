@@ -111,7 +111,8 @@ app/src/Gallery.tsx  every component in every state - the design system's accept
 app/src/host.ts      the webview's end of the wire: typed frames, and nothing re-derived
 app/src/Shell.tsx    the window's content until the cockpit exists
 app/src-tauri/       Rust: window, tray, single instance, spawning and relaying
-app/src-tauri/src/host.rs   supervising the host process, and the \\?\ path fix
+app/src-tauri/src/host.rs    supervising the host process, and the \\?\ path fix
+app/src-tauri/src/reaper.rs  making a killed app take the host with it
 app/scripts/         contrast.mjs, stage-sidecar.mjs, make-icon.mjs - all dependency-free
 ```
 
@@ -137,6 +138,14 @@ The webview is given **no shell permission at all**. The host is spawned from Ru
 path Rust resolved, and `host_send` writes one line to a process that is already running.
 There is deliberately no command that takes a program name — the pilot chat (#144) will be
 able to drive the session, and "run this program" must never be in reach of it.
+
+**The host dies when the app does, and the kernel is what enforces it.** `stop()` handles the
+graceful endings by closing stdin, so the host finishes the turn it is in; a Windows Job
+Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` handles the ones that run no user code at
+all — `End task`, `Stop-Process -Force`, a panic. There is nothing to hook for those by
+design, so the mechanism has to be declared in advance and left to the OS. macOS and Linux
+have no equivalent yet and **say so** through `Status.uncontained`, which the window shows:
+an unenforced guarantee nobody can see is the same as no guarantee.
 
 Two rules the host process depends on, and neither is optional:
 

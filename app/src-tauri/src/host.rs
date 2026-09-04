@@ -18,6 +18,8 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
+use crate::reaper::Reaper;
+
 /// A line the host process wrote to stdout, on its way to the webview.
 pub const FRAME_EVENT: &str = "host://frame";
 /// A line the host process wrote to stderr, or a line of stdout that was not a
@@ -92,6 +94,9 @@ pub struct Status {
     pub ready: Option<serde_json::Value>,
     /// Why there is no host, when there is none. Null while one is running.
     pub failure: Option<String>,
+    /// Why a kill of this app would leave the host running, or null if it would
+    /// not. Reported rather than assumed either way - see `reaper.rs`.
+    pub uncontained: Option<String>,
 }
 
 /// The running host, if there is one.
@@ -100,6 +105,15 @@ pub struct HostProcess {
     inner: Mutex<Option<Running>>,
     ready: Mutex<Option<serde_json::Value>>,
     failure: Mutex<Option<String>>,
+    /// Why the running host is not contained, when it is not (#157).
+    uncontained: Mutex<Option<String>>,
+    /// Created on the first spawn and held for the app's lifetime.
+    ///
+    /// **Held here on purpose.** The Windows mechanism is "the kernel kills
+    /// everything in the job when the last handle to it closes", so the handle's
+    /// lifetime IS the guarantee. Dropping it early would kill the host; not
+    /// holding it at all would do nothing.
+    reaper: Mutex<Option<Reaper>>,
 }
 
 struct Running {
@@ -175,6 +189,27 @@ impl HostProcess {
             .map_err(|e| format!("could not start {}: {e}", node.display()))?;
 
         let pid = child.id();
+
+        // Immediately after the spawn and before anything else touches the
+        // child. There is a window between `spawn` and this in which a kill
+        // would still orphan the host - it cannot be closed, because a process
+        // has to exist before it can be assigned to a job - but it is
+        // microseconds wide and it is the smallest this can be made (#157).
+        {
+            let mut slot = self.reaper.lock().map_err(|_| "reaper lock poisoned")?;
+            let reaper = slot.get_or_insert_with(Reaper::new);
+            let why = reaper.adopt(&child);
+            if let Ok(mut record) = self.uncontained.lock() {
+                *record = why.clone();
+            }
+            // Said out loud as well as recorded. A host nothing will clean up is
+            // worth a line in whatever captured this app's stderr, because the
+            // person who finds the orphan later will be looking there.
+            if let Some(reason) = why {
+                eprintln!("host is not contained: {reason}");
+            }
+        }
+
         let stdout = child.stdout.take().ok_or("the host has no stdout")?;
         let stderr = child.stderr.take().ok_or("the host has no stderr")?;
         let stdin = child.stdin.take().ok_or("the host has no stdin")?;
@@ -271,12 +306,14 @@ impl HostProcess {
     pub fn status(&self) -> Status {
         let ready = self.ready.lock().ok().and_then(|slot| slot.clone());
         let failure = self.failure.lock().ok().and_then(|slot| slot.clone());
+        let uncontained = self.uncontained.lock().ok().and_then(|slot| slot.clone());
         match self.inner.lock() {
             Ok(guard) => Status {
                 running: guard.is_some(),
                 pid: guard.as_ref().map(|r| r.pid),
                 ready,
                 failure,
+                uncontained,
             },
             // A poisoned lock means a panic happened while it was held, which is
             // not the same fact as "no host is running" - so the reason says so
@@ -286,6 +323,7 @@ impl HostProcess {
                 pid: None,
                 ready,
                 failure: Some("cannot tell: the host lock was poisoned by a panic".into()),
+                uncontained,
             },
         }
     }
