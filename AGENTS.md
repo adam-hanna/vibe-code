@@ -37,7 +37,9 @@ npm run typecheck      # tsc --noEmit, same strictness as the core
 npm run build          # typecheck, then vite build
 npm run dev            # vite on :1420 — the webview alone, no host
 npm run audit:contrast # the design system's own gate
-npm run app:test       # cargo test — the Rust side
+npm run app:test       # vitest + cargo test — both sides
+npm run test:web       # vitest — the cockpit's reducer
+npm run test:rust      # cargo test — the shell
 npm run stage:sidecar  # copy `dist/src` + a node runtime into the bundle
 npm run app:build      # the whole thing: vite, staging, cargo, installer
 ```
@@ -68,7 +70,26 @@ are copies of things the repo already has.
 `npm run audit:contrast` is the design system's equivalent of `npm test`: it parses
 `tokens.css` and checks the two rules the build spec names as most likely to slip — the text
 floor across every surface, and the ramps — plus that no hex literal exists outside
-`tokens.css`. It takes no dependencies and it should stay that way.
+`tokens.css`. It takes no dependencies and it should stay that way. The hex check **walks
+`src/` rather than naming files**; the named list missed `cockpit.css` the day it appeared,
+which is the failure mode of any allow-list somebody has to remember to extend.
+
+**The webview re-derives nothing.** Every card the cockpit draws comes from a frame it was
+sent: no phase inferred from a sentence, no default filled in for a field a frame did not
+carry, no quantity computed out of two others. `app/src/cockpit/model.ts` is the only file in
+the app with logic and it is pure — the reducer is where a cockpit bug would otherwise be
+invisible, which is why it has the tests and the components do not.
+
+Two rules the cockpit inherits from the design and must not quietly drop:
+
+- **If you cannot name the denominator, it is not a bar.** The one bar in the app is Claude's
+  context, because `promptTokens / contextWindow` is a real number over a known one — and it
+  is drawn only when the heartbeat carried the window, since it omits the field rather than
+  sending a zero. `6a` has failed three times by inventing a denominator to make waiting feel
+  measured.
+- **A missing measurement is drawn as absent with its reason**, never as a blank and never as
+  a zero. The two lines of `6a` that have no source name the issue that would supply them
+  (#136, #114), so the row completes when they land instead of being redesigned.
 
 ## Repo map
 
@@ -109,7 +130,8 @@ app/                 the desktop app - Vite + React, its own package.json and ga
 app/src/design/      tokens.css, base.css, components.css, and the sixteen primitives
 app/src/Gallery.tsx  every component in every state - the design system's acceptance test
 app/src/host.ts      the webview's end of the wire: typed frames, and nothing re-derived
-app/src/Shell.tsx    the window's content until the cockpit exists
+app/src/cockpit/model.ts   frames in, a run out - the ONLY logic in the app, and it is pure
+app/src/cockpit/           the loop column, the running row, the output pane, the gate footer
 app/src-tauri/       Rust: window, tray, single instance, spawning and relaying
 app/src-tauri/src/host.rs    supervising the host process, and the \\?\ path fix
 app/src-tauri/src/reaper.rs  making a killed app take the host with it
