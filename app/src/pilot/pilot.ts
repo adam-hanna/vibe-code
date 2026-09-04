@@ -29,19 +29,48 @@ import type { Provider } from './keys';
 export const EVENT = 'pilot://event';
 
 /**
- * Who said a thing.
+ * A tool the pilot may ask for, as declared to the vendor (#144).
  *
- * Two values, and `system` is deliberately not one: it is `Turn.system`, because
- * the two vendors want it in different places — Anthropic takes a top-level
- * field, OpenAI takes a message with `role: "system"` — and each adapter puts it
- * where its own vendor wants it. Rust refuses any other value.
+ * **Declared here and executed here.** Rust forwards the declaration and parses
+ * the call; it never decides what a tool means, for the same reason the relay
+ * never decides what a frame means. That is what makes "every pilot capability
+ * is a host request the app already makes" structural — a tool cannot exist
+ * without an implementation on this side of the wire.
+ *
+ * Nothing declares one yet: the table and its executor are the next step, and
+ * every request this build makes carries an empty list.
  */
-export type Role = 'user' | 'assistant';
-
-export interface Message {
-  role: Role;
-  content: string;
+export interface Tool {
+  name: string;
+  description: string;
+  /** JSON Schema for the input, passed through verbatim. */
+  input_schema: unknown;
 }
+
+/** A call the model asked for, on its way back into the conversation. */
+export interface AssistantCall {
+  /** The vendor's own id. Opaque, and it has to come back unchanged. */
+  id: string;
+  name: string;
+  /** Parsed, because this side had to parse it to run the call. */
+  input: unknown;
+}
+
+/**
+ * One message in the conversation.
+ *
+ * **`system` is deliberately not a role**: it is `Turn.system`, because the two
+ * vendors want it in different places — Anthropic takes a top-level field,
+ * OpenAI takes a message with `role: "system"` — and each adapter puts it where
+ * its own vendor wants it. Rust refuses any role but these three.
+ *
+ * `tool` is a role, and that is #144's change: a tool result is a message, and
+ * both vendors agree on that even though they disagree about the shape it takes.
+ */
+export type Message =
+  | { role: 'user'; content: string }
+  | { role: 'assistant'; content: string; calls?: readonly AssistantCall[] }
+  | { role: 'tool'; id: string; name: string; content: string };
 
 export interface Turn {
   provider: Provider;
@@ -49,6 +78,8 @@ export interface Turn {
   model: string;
   system?: string | null;
   messages: readonly Message[];
+  /** Empty on every request this build makes. See `Tool`. */
+  tools?: readonly Tool[];
   /** Omitted to take Rust's default. Above its ceiling the request is refused, not clamped. */
   max_tokens?: number;
 }
@@ -75,6 +106,16 @@ export interface Usage {
 export type PilotEvent =
   | { kind: 'started'; turn: number; provider: Provider; model: string | null }
   | { kind: 'text'; turn: number; delta: string }
+  /**
+   * The model asked for a tool. **Arrives before the turn ends**, always.
+   *
+   * `arguments` is the JSON string the vendor streamed, unparsed — parsing it in
+   * Rust as well would be two readings of the same bytes with two chances to
+   * disagree, and this side has to parse it against the schema it declared.
+   * A call whose arguments do not parse is a call that cannot be run, and that
+   * is a fact worth having rather than a crash in a reducer.
+   */
+  | { kind: 'tool_call'; turn: number; id: string; name: string; arguments: string }
   | { kind: 'spent'; turn: number; usage: Usage }
   | { kind: 'ended'; turn: number; stop: string | null }
   | { kind: 'failed'; turn: number; message: string }
@@ -105,6 +146,7 @@ export function isPilotEvent(v: unknown): v is PilotEvent {
   return (
     kind === 'started' ||
     kind === 'text' ||
+    kind === 'tool_call' ||
     kind === 'spent' ||
     kind === 'ended' ||
     kind === 'failed' ||

@@ -2,7 +2,15 @@ import { useCallback, useEffect, useReducer, useState } from 'react';
 import { Button, MetaChip, StateKicker } from '../design';
 import * as keys from './keys';
 import * as pilot from './pilot';
-import { ask, emptyConversation, reduce, refuse, spendParts, unrecognised } from './transcript';
+import {
+  ask,
+  emptyConversation,
+  reduce,
+  refuse,
+  spendParts,
+  unanswered,
+  unrecognised,
+} from './transcript';
 import type { KeyStatus, Provider } from './keys';
 import type { Conversation, Reply } from './transcript';
 
@@ -63,6 +71,23 @@ function ReplyCard({ reply }: { reply: Reply }) {
       {reply.text !== '' && <div className="v-pilot__text">{reply.text}</div>}
       {outcome?.kind === 'failed' && <div className="v-pilot__why">{outcome.message}</div>}
 
+      {/* What it asked for. Nothing runs these yet — the table and its executor
+          are the next step (#144) — and a call the transcript did not show
+          would be invisible rather than unimplemented. */}
+      {reply.calls.map((call) => (
+        <div className="v-pilot__call" key={call.id}>
+          <MetaChip>{call.name}</MetaChip>
+          {call.unreadable === null ? (
+            <span className="v-pilot__note">asked for, and nothing runs tools yet</span>
+          ) : (
+            // A model can emit truncated JSON when a turn hits its ceiling
+            // mid-call. Reported as a call that cannot be run, rather than
+            // shown as one that could.
+            <span className="v-pilot__why">its arguments do not parse: {call.unreadable}</span>
+          )}
+        </div>
+      ))}
+
       {/* Only what the vendor reported. OpenAI has no cache-write count, so that
           part is missing from an OpenAI line — and a reader can tell that apart
           from a cache write of zero, which is the entire point. */}
@@ -118,7 +143,12 @@ export function PilotPane() {
   }, []);
   useEffect(refresh, [refresh]);
 
-  const ready = statuses !== null && keys.usable(statuses).includes(provider);
+  // A conversation with a call nobody answered cannot be sent: both vendors
+  // reject an assistant turn whose tool_use has no matching result. Always empty
+  // in this build, because nothing declares a tool — it is here so the executor
+  // has a seam rather than a rule to rediscover.
+  const owed = unanswered(conversation);
+  const ready = statuses !== null && keys.usable(statuses).includes(provider) && owed.length === 0;
 
   const submit = useCallback(() => {
     const content = entry.trim();
@@ -168,9 +198,15 @@ export function PilotPane() {
         </select>
         {/* Names the provider rather than "a key". One provider configured is a
             supported state, so this is the message for having picked the other. */}
-        {statuses !== null && !ready && (
+        {statuses !== null && !keys.usable(statuses).includes(provider) && (
           <span className="v-pilot__note">
             no {keys.PROVIDER_NAME[provider]} key — enter one under Keys
+          </span>
+        )}
+        {owed.length > 0 && (
+          <span className="v-pilot__note">
+            {owed.length} tool call(s) unanswered — nothing runs them yet (#144), and neither
+            vendor will take a conversation that leaves one open
           </span>
         )}
       </div>

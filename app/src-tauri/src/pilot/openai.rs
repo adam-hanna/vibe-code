@@ -1,4 +1,4 @@
-//! The OpenAI adapter: chat completions, streaming.
+﻿//! The OpenAI adapter: chat completions, streaming.
 //!
 //! The counterpart to `anthropic.rs`, and deliberately not its mirror image.
 //! Four differences survive into the vocabulary rather than being papered over,
@@ -15,11 +15,20 @@
 //!   there is no cache *write* count, because the API has no such concept to
 //!   report. `Usage::cache_write` is `None` on every OpenAI turn, and `None`
 //!   means "this vendor did not say".
+//! - **Nothing says a tool call is complete**, only that the turn is. Fragments
+//!   arrive inside `delta.tool_calls[]` keyed by their own index, the id and
+//!   name appear on the first fragment only, and every call has to be held until
+//!   `finish_reason`. Anthropic closes each call with its own event and can hand
+//!   it over the moment it lands - which is why the two accumulators are two
+//!   accumulators and not one with a flag.
+//! - **A tool result is a message with a `tool` role, one per result.** Anthropic
+//!   requires the exact opposite: every result for a turn in a single user
+//!   message. Neither is a preference and both are a 400 if broken.
 
 use serde_json::{json, Value};
 
 use super::event::{PilotEvent, Usage};
-use super::request::Turn;
+use super::request::{Message, Turn};
 
 pub const URL: &str = "https://api.openai.com/v1/chat/completions";
 
@@ -39,15 +48,65 @@ pub fn body(turn: &Turn) -> Value {
         messages.push(json!({ "role": "system", "content": system }));
     }
     for message in &turn.messages {
-        messages.push(json!({ "role": message.role, "content": message.content }));
+        messages.push(match message {
+            Message::User { content } => json!({ "role": "user", "content": content }),
+            // **One message per result**, with a role of its own. Anthropic
+            // requires the exact opposite - every result for a turn in a single
+            // user message - and neither is a preference.
+            Message::Tool { id, content, .. } => json!({
+                "role": "tool",
+                "tool_call_id": id,
+                "content": content,
+            }),
+            Message::Assistant { content, calls } if calls.is_empty() => {
+                json!({ "role": "assistant", "content": content })
+            }
+            Message::Assistant { content, calls } => json!({
+                "role": "assistant",
+                // Null rather than "" when the turn was only tool calls. The API
+                // takes either, but an empty string is a thing the model said
+                // and null is the absence of one.
+                "content": if content.is_empty() { Value::Null } else { json!(content) },
+                "tool_calls": calls.iter().map(|c| json!({
+                    "id": c.id,
+                    "type": "function",
+                    "function": {
+                        "name": c.name,
+                        // A **string**, not an object. Anthropic takes the
+                        // parsed value; this vendor takes the JSON text of it,
+                        // which is also how it streams them out.
+                        "arguments": c.input.to_string(),
+                    },
+                })).collect::<Vec<_>>(),
+            }),
+        });
     }
-    json!({
+    let mut body = json!({
         "model": turn.model,
         "max_completion_tokens": turn.max_tokens,
         "stream": true,
         "stream_options": { "include_usage": true },
         "messages": messages,
-    })
+    });
+    // Omitted when there are none, for the reason the other adapter omits it:
+    // while this build declares nothing it should send what it always sent.
+    if !turn.tools.is_empty() {
+        body["tools"] = json!(turn
+            .tools
+            .iter()
+            .map(|t| json!({
+                // The envelope this vendor wraps every tool in. Anthropic has
+                // no equivalent, and calls the schema `input_schema` besides.
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.input_schema,
+                },
+            }))
+            .collect::<Vec<_>>());
+    }
+    body
 }
 
 pub fn headers(key: &str) -> [(&'static str, String); 2] {
@@ -57,13 +116,33 @@ pub fn headers(key: &str) -> [(&'static str, String); 2] {
     ]
 }
 
-/// What a single event did to the turn.
+/// A tool call being assembled out of chunks.
+#[derive(Default)]
+struct Partial {
+    /// Sent once, on the fragment that opens the call, and never repeated.
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+/// What has to be remembered between chunks.
 ///
-/// `first` is whether a `Started` has already been emitted. OpenAI has no
-/// opening event of its own - the model name arrives on the first chunk, the
-/// same as every subsequent one - so the adapter is told rather than guessing,
-/// and the caller owns the flag. That keeps this function pure.
-pub fn fold(turn: u64, data: &str, first: bool) -> Vec<PilotEvent> {
+/// **Nothing about this matches the other adapter.** There, a call opens and
+/// closes with its own events and the arguments arrive keyed by a content-block
+/// index. Here, every fragment rides inside a `delta.tool_calls[]` entry keyed by
+/// its own index, the id and name appear only on the first fragment, and nothing
+/// says a call is complete until `finish_reason` ends the whole turn. Two
+/// mechanisms, and a shared one would have had to pick a side.
+#[derive(Default)]
+pub struct State {
+    /// Whether the turn has been opened. Held here rather than passed in, so
+    /// the caller does not have to reason about which chunk was first.
+    started: bool,
+    calls: std::collections::BTreeMap<u64, Partial>,
+}
+
+/// What a single event did to the turn.
+pub fn fold(turn: u64, data: &str, state: &mut State) -> Vec<PilotEvent> {
     if data.trim() == DONE {
         // The sentinel is the end of the stream, not the end of the turn: the
         // `finish_reason` arrived on an earlier chunk and `Ended` was emitted
@@ -92,7 +171,8 @@ pub fn fold(turn: u64, data: &str, first: bool) -> Vec<PilotEvent> {
     }
 
     let mut out = Vec::new();
-    if first {
+    if !state.started {
+        state.started = true;
         out.push(PilotEvent::Started {
             turn,
             provider: crate::keys::Provider::Openai,
@@ -112,12 +192,55 @@ pub fn fold(turn: u64, data: &str, first: bool) -> Vec<PilotEvent> {
         }
     }
 
+    // Tool-call fragments. Each carries the index of the call it belongs to;
+    // the id and the name arrive only on the first fragment of each, and every
+    // fragment after that carries arguments alone.
+    if let Some(fragments) = choice["delta"]["tool_calls"].as_array() {
+        for fragment in fragments {
+            let Some(index) = fragment["index"].as_u64() else {
+                // Without the index there is nothing to attribute this to.
+                // Refusing is right: assembling it into whichever call happened
+                // to be open would build arguments the model did not write.
+                return vec![PilotEvent::Failed {
+                    turn,
+                    message: "OpenAI sent a tool-call fragment with no index".to_string(),
+                }];
+            };
+            let partial = state.calls.entry(index).or_default();
+            if let Some(id) = fragment["id"].as_str() {
+                partial.id = id.to_string();
+            }
+            if let Some(name) = fragment["function"]["name"].as_str() {
+                partial.name = name.to_string();
+            }
+            if let Some(arguments) = fragment["function"]["arguments"].as_str() {
+                partial.arguments.push_str(arguments);
+            }
+        }
+    }
+
     let usage = usage_of(&value["usage"]);
     if !usage.is_empty() {
         out.push(PilotEvent::Spent { turn, usage });
     }
 
     if let Some(stop) = choice["finish_reason"].as_str() {
+        // **Every call is emitted here**, because nothing in this stream says a
+        // single call is finished - only that the turn is. Anthropic closes each
+        // one with its own event and can hand it over the moment it lands; this
+        // vendor cannot, and pretending otherwise would mean guessing that a
+        // call with parseable arguments must be complete.
+        //
+        // Before `Ended`, so a consumer that stops at the first terminal event
+        // has already been told what was asked for.
+        for (_, partial) in std::mem::take(&mut state.calls) {
+            out.push(PilotEvent::ToolCall {
+                turn,
+                id: partial.id,
+                name: partial.name,
+                arguments: partial.arguments,
+            });
+        }
         out.push(PilotEvent::Ended {
             turn,
             stop: Some(stop.to_string()),
@@ -157,17 +280,17 @@ pub fn describe(error: &Value) -> String {
 mod tests {
     use super::*;
     use crate::keys::Provider;
-    use crate::pilot::request::{Message, Role};
+    use crate::pilot::request::{AssistantCall, Message, Tool};
 
     fn turn() -> Turn {
         Turn {
             provider: Provider::Openai,
             model: "gpt-5".into(),
             system: Some("be brief".into()),
-            messages: vec![Message {
-                role: Role::User,
+            messages: vec![Message::User {
                 content: "hello".into(),
             }],
+            tools: vec![],
             max_tokens: 1024,
         }
     }
@@ -199,13 +322,32 @@ mod tests {
         assert_eq!(body(&t)["messages"].as_array().expect("messages").len(), 1);
     }
 
+    /// One chunk, into a state nothing else has touched.
+    fn fold1(data: &str) -> Vec<PilotEvent> {
+        fold(1, data, &mut State::default())
+    }
+
+    /// A state whose turn is already open.
+    ///
+    /// Most cases are about a chunk in the middle of a reply, and a fresh state
+    /// would have them assert a `Started` they are not testing.
+    fn ongoing() -> State {
+        State {
+            started: true,
+            ..State::default()
+        }
+    }
+
     #[test]
     fn the_first_chunk_starts_the_turn_and_the_rest_do_not() {
-        // OpenAI has no opening event: the model name is on every chunk. The
-        // caller owns the flag so this function stays pure.
+        // OpenAI has no opening event: the model name is on every chunk, so the
+        // adapter remembers whether it has already opened the turn. That moved
+        // from the caller into `State` in #144, because the same state now has
+        // to hold half-assembled tool calls anyway.
         let chunk = r#"{"id":"c1","object":"chat.completion.chunk","model":"gpt-5-2026-04-01","choices":[{"index":0,"delta":{"role":"assistant","content":"Hel"},"finish_reason":null}]}"#;
+        let mut state = State::default();
         assert_eq!(
-            fold(1, chunk, true),
+            fold(1, chunk, &mut state),
             vec![
                 PilotEvent::Started {
                     turn: 1,
@@ -219,7 +361,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            fold(1, chunk, false),
+            fold(1, chunk, &mut state),
             vec![PilotEvent::Text {
                 turn: 1,
                 delta: "Hel".into()
@@ -233,7 +375,7 @@ mod tests {
         let events = fold(
             1,
             r#"{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}"#,
-            false,
+            &mut ongoing(),
         );
         assert_eq!(
             events,
@@ -251,7 +393,7 @@ mod tests {
         let events = fold(
             1,
             r#"{"choices":[],"usage":{"prompt_tokens":120,"completion_tokens":38,"total_tokens":158,"prompt_tokens_details":{"cached_tokens":64}}}"#,
-            false,
+            &mut ongoing(),
         );
         assert_eq!(
             events,
@@ -277,7 +419,7 @@ mod tests {
         let events = fold(
             1,
             r#"{"choices":[],"usage":{"prompt_tokens":1,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":0}}}"#,
-            false,
+            &mut ongoing(),
         );
         match &events[0] {
             PilotEvent::Spent { usage, .. } => {
@@ -294,8 +436,8 @@ mod tests {
         // `[DONE]` is not JSON and is not an error. The `finish_reason` came on
         // an earlier chunk, so ending here as well would end the turn twice -
         // the second time with no reason attached.
-        assert!(fold(1, DONE, false).is_empty());
-        assert!(fold(1, " [DONE] ", false).is_empty());
+        assert!(fold1(DONE).is_empty());
+        assert!(fold1(" [DONE] ").is_empty());
     }
 
     #[test]
@@ -304,7 +446,7 @@ mod tests {
             fold(
                 1,
                 r#"{"error":{"code":"rate_limit_exceeded","message":"Rate limit reached"}}"#,
-                false
+                &mut ongoing()
             ),
             vec![PilotEvent::Failed {
                 turn: 1,
@@ -321,14 +463,14 @@ mod tests {
         assert!(fold(
             1,
             r#"{"choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}"#,
-            false
+            &mut ongoing()
         )
         .is_empty());
     }
 
     #[test]
     fn a_payload_that_is_not_json_is_reported() {
-        let events = fold(1, "<html>502 Bad Gateway</html>", false);
+        let events = fold1("<html>502 Bad Gateway</html>");
         assert!(matches!(events.as_slice(), [PilotEvent::Failed { .. }]));
     }
 
@@ -336,5 +478,198 @@ mod tests {
     fn an_error_shape_this_version_does_not_know_is_reported_as_itself() {
         assert_eq!(describe(&json!({"detail": "nope"})), r#"{"detail":"nope"}"#);
         assert_eq!(describe(&Value::Null), "OpenAI gave no reason");
+    }
+
+    #[test]
+    fn a_tool_call_is_assembled_out_of_chunks_and_held_until_the_turn_ends() {
+        // Recorded from a real stream. The id and the name arrive on the first
+        // fragment only; every fragment after it carries arguments alone; and
+        // **nothing says the call is finished** until `finish_reason` ends the
+        // whole turn - which is the difference from Anthropic, where each call
+        // closes with an event of its own.
+        let mut state = ongoing();
+        let mut events = Vec::new();
+        for chunk in [
+            r#"{"choices":[{"index":0,"delta":{"role":"assistant","content":null,"tool_calls":[{"index":0,"id":"call_abc","type":"function","function":{"name":"start_run","arguments":""}}]},"finish_reason":null}]}"#,
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"task\":"}}]},"finish_reason":null}]}"#,
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":" \"fix #7\"}"}}]},"finish_reason":null}]}"#,
+        ] {
+            events.extend(fold(1, chunk, &mut state));
+        }
+        assert!(events.is_empty(), "nothing is emitted until the turn ends");
+
+        let events = fold(
+            1,
+            r#"{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
+            &mut state,
+        );
+        assert_eq!(
+            events,
+            vec![
+                PilotEvent::ToolCall {
+                    turn: 1,
+                    id: "call_abc".into(),
+                    name: "start_run".into(),
+                    arguments: r#"{"task": "fix #7"}"#.into(),
+                },
+                // The call comes BEFORE the ending, so a consumer that stops at
+                // the first terminal event has already been told what was asked
+                // for.
+                PilotEvent::Ended {
+                    turn: 1,
+                    stop: Some("tool_calls".into())
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn two_calls_in_one_turn_keep_their_own_arguments() {
+        // Keyed by the fragment's own index, which is what makes interleaved
+        // fragments reassemble correctly.
+        let mut state = ongoing();
+        for chunk in [
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_A","function":{"name":"first","arguments":""}}]}}]}"#,
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_B","function":{"name":"second","arguments":""}}]}}]}"#,
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"{\"b\":2}"}}]}}]}"#,
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"a\":1}"}}]}}]}"#,
+        ] {
+            fold(1, chunk, &mut state);
+        }
+        let events = fold(
+            1,
+            r#"{"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#,
+            &mut state,
+        );
+        assert_eq!(
+            &events[..2],
+            &[
+                PilotEvent::ToolCall {
+                    turn: 1,
+                    id: "call_A".into(),
+                    name: "first".into(),
+                    arguments: r#"{"a":1}"#.into(),
+                },
+                PilotEvent::ToolCall {
+                    turn: 1,
+                    id: "call_B".into(),
+                    name: "second".into(),
+                    arguments: r#"{"b":2}"#.into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_fragment_with_no_index_is_refused_rather_than_guessed_at() {
+        // Assembling it into whichever call happened to be open would build
+        // arguments the model did not write.
+        let events = fold(
+            1,
+            r#"{"choices":[{"index":0,"delta":{"tool_calls":[{"function":{"arguments":"{}"}}]}}]}"#,
+            &mut ongoing(),
+        );
+        assert!(matches!(events.as_slice(), [PilotEvent::Failed { .. }]));
+    }
+
+    #[test]
+    fn a_turn_that_only_called_tools_still_reports_its_text_as_absent() {
+        // The opening chunk of a tool-calling turn carries `content: null`, not
+        // an empty string. Emitting a text event for it would put a zero-length
+        // append in the transcript.
+        let events = fold(
+            1,
+            r#"{"choices":[{"index":0,"delta":{"role":"assistant","content":null,"tool_calls":[{"index":0,"id":"c","function":{"name":"n","arguments":""}}]}}]}"#,
+            &mut ongoing(),
+        );
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn a_declared_tool_is_wrapped_in_this_vendors_envelope() {
+        // `type: "function"`, a nested `function` object, and the schema called
+        // `parameters`. Anthropic takes a flat object with `input_schema` - so
+        // the same declaration produces two genuinely different requests.
+        let mut t = turn();
+        t.tools.push(Tool {
+            name: "start_run".into(),
+            description: "Start a run from a brief".into(),
+            input_schema: json!({"type": "object", "properties": {"task": {"type": "string"}}}),
+        });
+        let body = body(&t);
+        let tools = body["tools"].as_array().expect("tools");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["type"], json!("function"));
+        assert_eq!(tools[0]["function"]["name"], json!("start_run"));
+        assert_eq!(tools[0]["function"]["parameters"]["type"], json!("object"));
+        assert!(tools[0]["function"].get("input_schema").is_none());
+    }
+
+    #[test]
+    fn a_request_with_no_tools_does_not_mention_tools_at_all() {
+        assert!(body(&turn()).get("tools").is_none());
+    }
+
+    #[test]
+    fn each_result_is_its_own_message_with_a_role_of_its_own() {
+        // **The opposite of Anthropic's rule**, and both are a 400 if broken:
+        // that vendor requires every result for a turn in one user message.
+        let mut t = turn();
+        t.messages.push(Message::Assistant {
+            content: String::new(),
+            calls: vec![
+                AssistantCall {
+                    id: "call_A".into(),
+                    name: "first".into(),
+                    input: json!({"a": 1}),
+                },
+                AssistantCall {
+                    id: "call_B".into(),
+                    name: "second".into(),
+                    input: json!({}),
+                },
+            ],
+        });
+        t.messages.push(Message::Tool {
+            id: "call_A".into(),
+            name: "first".into(),
+            content: "a".into(),
+        });
+        t.messages.push(Message::Tool {
+            id: "call_B".into(),
+            name: "second".into(),
+            content: "b".into(),
+        });
+
+        let body = body(&t);
+        let messages = body["messages"].as_array().expect("messages");
+        // system, hello, the assistant turn, and one message per result.
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[2]["role"], json!("assistant"));
+        // Null, not "": the turn was only calls, and an empty string is a thing
+        // the model said where null is the absence of one.
+        assert!(messages[2]["content"].is_null());
+        assert_eq!(messages[2]["tool_calls"][0]["id"], json!("call_A"));
+        assert_eq!(messages[2]["tool_calls"][0]["type"], json!("function"));
+        // A **string**, not an object - which is what this vendor takes and
+        // what Anthropic does not.
+        assert_eq!(
+            messages[2]["tool_calls"][0]["function"]["arguments"],
+            json!(r#"{"a":1}"#)
+        );
+        assert_eq!(messages[3], json!({"role":"tool","tool_call_id":"call_A","content":"a"}));
+        assert_eq!(messages[4], json!({"role":"tool","tool_call_id":"call_B","content":"b"}));
+    }
+
+    #[test]
+    fn a_conversation_with_no_tools_is_shaped_exactly_as_it_was_before() {
+        let mut t = turn();
+        t.messages.push(Message::Assistant {
+            content: "Hello.".into(),
+            calls: vec![],
+        });
+        let body = body(&t);
+        assert_eq!(body["messages"][2], json!({"role":"assistant","content":"Hello."}));
+        assert!(body["messages"][2].get("tool_calls").is_none());
     }
 }

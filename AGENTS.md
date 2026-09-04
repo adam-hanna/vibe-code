@@ -208,6 +208,20 @@ invent the thing it hid. `sse.rs` *is* shared, and that is not a contradiction �
 wire format both vendors implement to the same specification, and sharing a format is not
 sharing a meaning.
 
+**Rust parses a tool call and never runs one.** A `tool_call` event carries the vendor's id,
+the name and its arguments **unparsed**; the window executes it, through the same code path
+its own buttons use. That is what makes *"every pilot capability is a host request the app
+already makes"* structural rather than a promise — a tool cannot exist without an
+implementation on the window's side, and a tool run from Rust would be this crate deciding
+something about a run (#144).
+
+The two vendors disagree about tool calls in four ways, and all four are in the adapters
+rather than smoothed away: the schema field is `input_schema` for one and a nested
+`parameters` inside a `function` envelope for the other; a result rides on a **user** message
+for one and a `tool` message for the other; **Anthropic requires every result for a turn in a
+single message and OpenAI requires one message each** (both are a 400 if broken); and a call
+closes with its own event for one while the other says nothing until the whole turn ends.
+
 **A vendor's error message can contain the key you sent it.** OpenAI's 401 reads `Incorrect
 API key provided: sk-proj-…`, quoting it back in full — found by the live reachability test,
 which asserts no failure carries the key it was given. Redaction is at the single seam every

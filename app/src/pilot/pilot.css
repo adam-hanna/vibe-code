@@ -201,3 +201,11 @@
   outline: 2px solid var(--accent-solid);
   outline-offset: 2px;
 }
+
+/* A tool the model asked for. Nothing runs one yet (#144). */
+.v-pilot__call {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}

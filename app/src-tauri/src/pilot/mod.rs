@@ -188,6 +188,12 @@ fn wire(turn: &Turn, key: &str) -> Wire {
     }
 }
 
+/// Which adapter is answering, holding whatever it remembers between events.
+enum Adapter {
+    Anthropic(anthropic::State),
+    Openai(openai::State),
+}
+
 /// Read the stream, folding each event and emitting what it produced.
 ///
 /// Returns the terminal event, or `None` if the stream simply stopped - which is
@@ -221,7 +227,14 @@ fn pump(
     cancel: &AtomicBool,
     mut emit: impl FnMut(PilotEvent),
 ) -> Result<Option<PilotEvent>, String> {
-    let mut started = false;
+    // Whichever adapter is answering, with whatever it has to remember between
+    // events. **Two states, not one with a flag** - a tool call arrives across
+    // three named events for one vendor and inside indexed chunk fragments for
+    // the other, and the two accumulators have nothing in common but a purpose.
+    let mut adapter = match provider {
+        Provider::Anthropic => Adapter::Anthropic(anthropic::State::default()),
+        Provider::Openai => Adapter::Openai(openai::State::default()),
+    };
     let mut terminal: Option<PilotEvent> = None;
     let mut total = event::Usage::default();
 
@@ -229,21 +242,11 @@ fn pump(
         if cancel.load(Ordering::Relaxed) {
             return sse::Flow::Stop;
         }
-        let produced = match provider {
-            Provider::Anthropic => anthropic::fold(turn, sse_event.name, sse_event.data),
-            Provider::Openai => {
-                let out = openai::fold(turn, sse_event.data, !started);
-                // Set only when the adapter actually opened the turn: a `[DONE]`
-                // or an error arriving first produces no `Started`, and marking
-                // it here anyway would suppress the one for the real first chunk.
-                if out
-                    .iter()
-                    .any(|e| matches!(e, PilotEvent::Started { .. }))
-                {
-                    started = true;
-                }
-                out
+        let produced = match &mut adapter {
+            Adapter::Anthropic(state) => {
+                anthropic::fold(turn, sse_event.name, sse_event.data, state)
             }
+            Adapter::Openai(state) => openai::fold(turn, sse_event.data, state),
         };
         for produced in produced {
             // `is_final` rather than a list of variants, so a terminal event
@@ -476,17 +479,17 @@ pub fn pilot_cancel(state: tauri::State<'_, Pilot>, turn: u64) -> Result<(), Str
 mod tests {
     use super::*;
     use event::Usage;
-    use request::{Message, Role};
+    use request::Message;
 
     fn turn(provider: Provider) -> Turn {
         Turn {
             provider,
             model: "m".into(),
             system: None,
-            messages: vec![Message {
-                role: Role::User,
+            messages: vec![Message::User {
                 content: "hi".into(),
             }],
+            tools: vec![],
             max_tokens: 100,
         }
     }

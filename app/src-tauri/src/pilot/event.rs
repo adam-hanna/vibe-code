@@ -87,6 +87,25 @@ pub enum PilotEvent {
     },
     /// A piece of the reply. Deltas, never a running total: the pane appends.
     Text { turn: u64, delta: String },
+    /// The model asked for a tool (#144).
+    ///
+    /// **Rust does not execute it.** The window does, through the same code path
+    /// its own buttons use - which is what makes "every pilot capability is a
+    /// host request the app already makes" structural rather than a promise. A
+    /// tool run from here would be this crate deciding something about a run,
+    /// and then there are two definitions of a legal one.
+    ///
+    /// `arguments` is the JSON string the vendor streamed, **unparsed**. Parsing
+    /// it here would be a second reading of the same bytes with a second chance
+    /// to disagree with the executor's - and the executor has to parse it
+    /// anyway, against the schema it declared.
+    ToolCall {
+        turn: u64,
+        /// The vendor's own id. Opaque, and it has to come back unchanged.
+        id: String,
+        name: String,
+        arguments: String,
+    },
     /// What the vendor has said this turn cost so far.
     Spent { turn: u64, usage: Usage },
     /// The stream ended normally.

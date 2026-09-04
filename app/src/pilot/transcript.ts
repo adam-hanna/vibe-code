@@ -1,5 +1,5 @@
 import { isFinal } from './pilot';
-import type { PilotEvent, Message, Usage } from './pilot';
+import type { AssistantCall, PilotEvent, Message, Usage } from './pilot';
 import type { Provider } from './keys';
 
 /**
@@ -24,6 +24,24 @@ export type Outcome =
   | { kind: 'failed'; message: string }
   | { kind: 'cancelled' };
 
+/**
+ * A tool the model asked for, and whether its arguments could be read (#144).
+ *
+ * `input` is `undefined` when `arguments` did not parse — which is a fact worth
+ * keeping rather than a crash in a reducer. A model can and does emit truncated
+ * JSON when a turn hits its token ceiling mid-call, and the honest report of
+ * that is a call that cannot be run, shown as such.
+ */
+export interface Call {
+  id: string;
+  name: string;
+  /** Exactly what the vendor streamed. Kept even when it parsed, as the record. */
+  arguments: string;
+  input: unknown;
+  /** Why `input` is absent, or null. Never both. */
+  unreadable: string | null;
+}
+
 export interface Reply {
   turn: number;
   provider: Provider;
@@ -31,10 +49,44 @@ export interface Reply {
   model: string | null;
   /** The deltas, in order, concatenated. Never a summary and never trimmed. */
   text: string;
+  /**
+   * What the model asked for, in the order it asked.
+   *
+   * **Nothing runs these yet.** The table and its executor are the next step;
+   * this build declares no tools, so the list is empty on every real turn. It
+   * exists now because the adapters can already produce a call, and a call the
+   * transcript dropped would be invisible rather than unimplemented.
+   */
+  calls: readonly Call[];
   /** The latest running total the vendor reported. Null until it reports one. */
   usage: Usage | null;
   /** Null while the turn is still streaming. */
   outcome: Outcome | null;
+}
+
+/**
+ * Read a call's arguments, keeping the failure rather than throwing it.
+ *
+ * Exported because it is the one piece of parsing on this side of the wire and
+ * it has its own cases: an empty string is a tool that takes no input, not a
+ * broken call.
+ */
+export function readCall(id: string, name: string, args: string): Call {
+  if (args.trim() === '') {
+    // A tool whose schema takes no input gets no argument fragments at all.
+    return { id, name, arguments: args, input: {}, unreadable: null };
+  }
+  try {
+    return { id, name, arguments: args, input: JSON.parse(args) as unknown, unreadable: null };
+  } catch (err) {
+    return {
+      id,
+      name,
+      arguments: args,
+      input: undefined,
+      unreadable: err instanceof Error ? err.message : String(err),
+    };
+  }
 }
 
 export interface Conversation {
@@ -69,7 +121,7 @@ export function ask(
   return {
     ...conversation,
     messages: [...conversation.messages, { role: 'user', content }],
-    live: { turn, provider, model: null, text: '', usage: null, outcome: null },
+    live: { turn, provider, model: null, text: '', calls: [], usage: null, outcome: null },
   };
 }
 
@@ -96,6 +148,7 @@ export function refuse(
     provider,
     model: null,
     text: '',
+    calls: [],
     usage: null,
     outcome: { kind: 'failed', message },
   };
@@ -121,6 +174,15 @@ export function reduce(conversation: Conversation, event: PilotEvent): Conversat
   if (event.kind === 'text') {
     return { ...conversation, live: { ...live, text: live.text + event.delta } };
   }
+  if (event.kind === 'tool_call') {
+    return {
+      ...conversation,
+      live: {
+        ...live,
+        calls: [...live.calls, readCall(event.id, event.name, event.arguments)],
+      },
+    };
+  }
   if (event.kind === 'spent') {
     // Replaced, never accumulated. Each event carries the turn's running total,
     // assembled in Rust where the vendor difference lives.
@@ -136,18 +198,59 @@ export function reduce(conversation: Conversation, event: PilotEvent): Conversat
         : { kind: 'cancelled' };
   const done: Reply = { ...live, outcome };
 
+  // Only a reply with something in it joins the conversation the next turn is
+  // sent. A failed turn produced no assistant message, and sending an empty one
+  // would have the vendor answer a conversation that never happened — but a turn
+  // that said nothing and asked for two things is not empty, so the test is both
+  // fields rather than the text alone.
+  const said = done.text !== '' || done.calls.length > 0;
   return {
     ...conversation,
     live: null,
     replies: [...conversation.replies, done],
-    // Only a reply with something in it joins the conversation the next turn is
-    // sent. A failed turn produced no assistant message, and sending an empty
-    // one would have the vendor answer a conversation that never happened.
-    messages:
-      done.text === ''
-        ? conversation.messages
-        : [...conversation.messages, { role: 'assistant', content: done.text }],
+    messages: said ? [...conversation.messages, assistant(done)] : conversation.messages,
   };
+}
+
+/**
+ * A finished reply, as the message the next turn sends back.
+ *
+ * **`calls` is omitted when there are none**, not sent as an empty array. Rust
+ * defaults the field, so a conversation with no tools produces exactly the JSON
+ * it produced before #144 — which is the whole claim this change is making, and
+ * an empty array on every message would quietly falsify it.
+ */
+function assistant(reply: Reply): Message {
+  const content = reply.text;
+  return reply.calls.length === 0
+    ? { role: 'assistant', content }
+    : { role: 'assistant', content, calls: reply.calls.map(asCall) };
+}
+
+/** A recorded call in the shape the wire takes it back. */
+function asCall(call: Call): AssistantCall {
+  return { id: call.id, name: call.name, input: call.input };
+}
+
+/**
+ * Calls that have been asked for and not answered.
+ *
+ * **A conversation with any of these cannot be sent.** Both vendors reject a
+ * request whose assistant turn asked for a tool that no later message answers —
+ * Anthropic with `tool_use ids were found without tool_result blocks`, OpenAI
+ * with its own 400 — so this is a real precondition rather than a nicety, and
+ * the composer reads it.
+ *
+ * It is always empty in this build, because nothing declares a tool. It exists
+ * now so the executor has a seam to fill rather than a rule to rediscover.
+ */
+export function unanswered(conversation: Conversation): readonly Call[] {
+  const answered = new Set(
+    conversation.messages.filter((m) => m.role === 'tool').map((m) => m.id),
+  );
+  return conversation.replies.flatMap((reply) =>
+    reply.calls.filter((call) => !answered.has(call.id)),
+  );
 }
 
 /** Note an event this build did not recognise. Shown, never discarded. */
