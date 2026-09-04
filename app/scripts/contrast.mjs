@@ -10,7 +10,7 @@
  * No dependencies, by design - `tokens.css` is parsed as text, which is the
  * whole reason the tokens are a CSS file with one declaration per line.
  */
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -196,16 +196,35 @@ for (const n of ['semantic-live', 'semantic-loss']) {
 // "No hex literal appears outside tokens.css."
 console.log('\n7 · no hex literals outside tokens.css');
 {
-  const files = ['base.css', 'components.css'];
+  // Every stylesheet in the app except `tokens.css`, discovered rather than
+  // listed. The named list missed `cockpit.css` the day it was added, which is
+  // the failure mode of any allow-list that has to be remembered - and the whole
+  // point of this check is that it catches the file somebody forgot.
+  const src = path.join(here, '..', 'src');
+  const sheets = [];
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.name.endsWith('.css') && entry.name !== 'tokens.css') sheets.push(full);
+    }
+  };
+  walk(src);
+
   let stray = 0;
-  for (const f of files) {
-    const body = readFileSync(path.join(here, '..', 'src', 'design', f), 'utf8');
-    for (const m of body.matchAll(/#[0-9a-fA-F]{3,8}\b/g)) {
+  for (const full of sheets) {
+    const name = path.relative(src, full).replace(/\\/g, '/');
+    // Comments stripped first. The rule is that no hex SHIPS as a colour, and a
+    // comment ships nothing - `tokens.css` documents hexes in prose itself. It
+    // also stops the check tripping over an issue reference: `#159` is three hex
+    // digits and reads as a colour to a regex that cannot see it is English.
+    const declarations = readFileSync(full, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '');
+    for (const m of declarations.matchAll(/#[0-9a-fA-F]{3,8}\b/g)) {
       stray += 1;
-      fail(`${f} contains a raw hex ${m[0]}`);
+      fail(`${name} contains a raw hex ${m[0]}`);
     }
   }
-  if (stray === 0) pass(`${files.join(' and ')} reach only for tokens`);
+  if (stray === 0) pass(`${sheets.length} stylesheets reach only for tokens`);
 }
 
 console.log(`\n${checks} checks passed, ${failures} failed\n`);
