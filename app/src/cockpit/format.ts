@@ -50,3 +50,93 @@ const BOUNDARIES: Readonly<Record<string, string>> = {
 export function boundary(name: string): string {
   return BOUNDARIES[name] ?? name;
 }
+
+/**
+ * How a run ended, in the footer's words.
+ *
+ * `tone` follows the design's own reading of the three kickers: `alarm` for a
+ * state that is wrong, `accent` for one that wants you but is not, `quiet` for a
+ * verdict. `next` is the action, and it is null wherever there genuinely is not
+ * one - an empty line is better than an invented instruction.
+ */
+export interface Ending {
+  tone: 'alarm' | 'accent' | 'quiet';
+  kicker: string;
+  detail: string;
+  next: string | null;
+}
+
+/**
+ * The eight exit codes, one phrase each, and **they are not eight flavours of
+ * failure** (#162).
+ *
+ * Two of them are cases where the word "failed" is simply wrong. `UNVERIFIED` is
+ * documented in `src/charge.ts` as *"not an error and not a stall: the work is
+ * done, reviewed and committed"* - a banner calling that a failure would send
+ * somebody looking for a bug in finished work. `NEEDS_HUMAN` is the ordinary way
+ * a long run ends: it wrote a file, it is waiting to be answered, and it resumes
+ * onto the same run.
+ *
+ * A code this build has no phrase for renders as the number, the same way
+ * `boundary()` shows an unknown boundary as itself. That is the honest answer;
+ * a generic "the run failed" would be a claim about what happened, invented for
+ * a code whose meaning this build does not know.
+ */
+const ENDINGS: Readonly<Record<number, Ending>> = {
+  0: {
+    tone: 'quiet',
+    kicker: 'finished',
+    // Not "every gate passed". `verificationIncomplete` returns null for a
+    // plan-only run and for one with verification off, and neither of those ran
+    // a gate at all - so this says what the exit code actually means.
+    detail: 'the loop finished, and nothing it required was left unverified.',
+    next: null,
+  },
+  1: {
+    tone: 'alarm',
+    kicker: 'failed',
+    detail: 'the run stopped on an error.',
+    next: null,
+  },
+  2: {
+    tone: 'accent',
+    kicker: 'needs you',
+    detail: 'the run stopped on a question it could not answer for itself.',
+    next: 'Answer the questions in NEEDS-INPUT.md, then resume the run — it picks up from here.',
+  },
+  3: {
+    tone: 'alarm',
+    kicker: 'no convergence',
+    detail: 'the loop stopped making progress, and stopped rather than spend more on it.',
+    next: 'The findings that would not clear are in the file it wrote. Resuming raises the caps.',
+  },
+  4: {
+    tone: 'alarm',
+    kicker: 'budget',
+    detail: 'a ceiling in `budget` was reached before the run finished.',
+    next: 'Raise the ceiling and resume, or narrow the task. The file it wrote says what was open.',
+  },
+  5: {
+    tone: 'alarm',
+    kicker: 'rate limited',
+    detail: "an agent's rate limit left no window to continue in.",
+    next: 'Resume once the window resets — nothing is lost, and the run continues where it stopped.',
+  },
+  6: {
+    tone: 'alarm',
+    kicker: 'preflight',
+    detail: 'a precondition of the phases ahead was not satisfied. Nothing was implemented.',
+    next: 'Fix what is named above, then start the run again.',
+  },
+  7: {
+    tone: 'accent',
+    kicker: 'unverified',
+    detail: 'the work is done, reviewed and committed. What is missing is the evidence that it runs.',
+    next: 'A required verification gate never ran. Run it yourself, or fix why it could not.',
+  },
+};
+
+/** Null for a code this build has no phrase for. The caller shows the number. */
+export function ending(exit: number): Ending | null {
+  return ENDINGS[exit] ?? null;
+}
