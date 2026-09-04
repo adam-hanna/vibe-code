@@ -90,6 +90,20 @@ Two rules the cockpit inherits from the design and must not quietly drop:
 - **A missing measurement is drawn as absent with its reason**, never as a blank and never as
   a zero. The two lines of `6a` that have no source name the issue that would supply them
   (#136, #114), so the row completes when they land instead of being redesigned.
+- **Every way a run can end has a phrase, and they are not eight flavours of failure.** The
+  footer maps each of the eight exit codes to one sentence, and a code this build does not
+  know renders as the number rather than as a phrase invented for it. Two of them must never
+  say "failed": exit 7 is documented in `src/charge.ts` as *"not an error and not a stall"*,
+  and exit 2 is how an ordinary long run pauses. `app/src/cockpit/format.ts` holds the map and
+  `contract.test.ts` fails on the commit that adds a ninth code.
+
+**A host is told how a run ended; it never picks the ending out of the log.** `run_escalated`
+and `run_failed` are narration ids `execute` emits at the places it gives up, carrying the
+exit code and the one-line reason. The alternative — selecting the most recent alarming line
+from the output pane — is the English-matching #133 exists to prevent, and it picks the wrong
+line: an escalation narrates at `warn`, and a healthy run is full of warnings that are not the
+ending. `run_failed` also prints a stack while carrying the sentence separately, because a
+terminal wants the frames and a footer wants the answer to "what now" (#162).
 
 ## Repo map
 
@@ -131,6 +145,7 @@ app/src/design/      tokens.css, base.css, components.css, and the sixteen primi
 app/src/Gallery.tsx  every component in every state - the design system's acceptance test
 app/src/host.ts      the webview's end of the wire: typed frames, and nothing re-derived
 app/src/cockpit/model.ts   frames in, a run out - the ONLY logic in the app, and it is pure
+app/src/cockpit/format.ts  durations, counts, and the closed maps: boundaries and exit codes
 app/src/cockpit/           the loop column, the running row, the output pane, the gate footer
 app/src-tauri/       Rust: window, tray, single instance, spawning and relaying
 app/src/pilot/       the pilot's credentials - store and check, never read

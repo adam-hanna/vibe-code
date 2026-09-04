@@ -3,6 +3,9 @@ import { expect, test } from 'vitest';
 // `node:fs`: adding node types to the app's tsconfig would let any component in
 // a webview import a filesystem, and no test is worth that.
 import orchestrator from '../../../src/orchestrator.ts?raw';
+import charge from '../../../src/charge.ts?raw';
+import cli from '../../../src/cli.ts?raw';
+import { ending } from './format';
 import { CYCLE_OF } from './model';
 
 /**
@@ -48,4 +51,73 @@ test('every phase the core narrates has a cycle to sit in', () => {
   for (const phase of narratedPhases()) {
     expect(Object.keys(CYCLE_OF)).toContain(phase);
   }
+});
+
+/** The `EXIT` table in `src/charge.ts`, as `[name, code]` pairs. */
+function exitCodes(): Array<[string, number]> {
+  const table = /export const EXIT = \{([\s\S]*?)\n\} as const;/.exec(charge)?.[1];
+  // A hard failure rather than an empty list. An empty one would make every
+  // assertion below vacuously pass, which is the shape of guard that reports
+  // green for years after the thing it watched moved.
+  if (table === undefined) throw new Error('EXIT table not found in src/charge.ts');
+  const found: Array<[string, number]> = [];
+  for (const m of table.matchAll(/^\s{2}([A-Z_]+): (\d+),$/gm)) {
+    const [, name, code] = m;
+    if (name !== undefined && code !== undefined) found.push([name, Number(code)]);
+  }
+  return found;
+}
+
+test('the eight exit codes this build has phrases for', () => {
+  // Pinned so the set is visible here and not only in the core. A ninth code is
+  // a decision about what to tell somebody it happened to - read the diff before
+  // extending this.
+  expect(exitCodes()).toEqual([
+    ['OK', 0],
+    ['ERROR', 1],
+    ['NEEDS_HUMAN', 2],
+    ['NO_CONVERGENCE', 3],
+    ['BUDGET', 4],
+    ['RATE_LIMITED', 5],
+    ['PREFLIGHT', 6],
+    ['UNVERIFIED', 7],
+  ]);
+});
+
+test('every exit code the core can return has a phrase in the footer', () => {
+  for (const [name, code] of exitCodes()) {
+    expect(ending(code), `${name} (${code}) has no phrase`).not.toBeNull();
+  }
+});
+
+test('neither of the two endings that are not failures uses the word failed', () => {
+  // `UNVERIFIED` is documented in the core as "not an error and not a stall",
+  // and `NEEDS_HUMAN` is how an ordinary long run pauses. Calling either a
+  // failure sends somebody looking for a bug in work that is fine, which is the
+  // specific smoothing #162 was filed to prevent.
+  for (const code of [2, 7]) {
+    const how = ending(code);
+    expect(how).not.toBeNull();
+    const text = `${how?.kicker} ${how?.detail} ${how?.next ?? ''}`.toLowerCase();
+    expect(text).not.toContain('fail');
+    expect(text).not.toContain('error');
+  }
+});
+
+test('a code from a newer core has no phrase invented for it', () => {
+  expect(ending(8)).toBeNull();
+  expect(ending(-1)).toBeNull();
+});
+
+/**
+ * The two narration ids the footer's reason line depends on.
+ *
+ * Reading the core's source rather than trusting a comment, because the failure
+ * mode is silent in exactly the way #159's phase map was: drop the id from
+ * `cli.ts` and the footer simply stops showing why a run failed, with nothing
+ * anywhere going red. This fails in the repo that removed it.
+ */
+test('the core still marks the two places a run ends badly', () => {
+  expect(cli).toContain("id: 'run_escalated'");
+  expect(cli).toContain("id: 'run_failed'");
 });

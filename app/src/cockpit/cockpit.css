@@ -393,6 +393,32 @@
   border-top: 2px solid var(--accent-border);
 }
 
+/* An ending is a halt too, and gets the same weight in the same place (#162). */
+.v-footer--ended {
+  background: var(--surface-active);
+  border-top: 2px solid var(--rule-strong);
+}
+
+/* `--text-emphasis` is reserved for alarm across the whole product, and an
+   ending that went wrong is one. An ending that did not - exit 0, 2 or 7 - must
+   not wear it, which is why this is a second class rather than part of the
+   first. */
+.v-footer--alarm {
+  border-top-color: var(--text-emphasis);
+}
+
+/* The core's own sentence, which may be long and is not ours to trim. Scrolls
+   rather than clips: a truncated reason is a reason nobody can act on, and the
+   footer must not grow without limit either. */
+.v-footer__why {
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 7em;
+  overflow-y: auto;
+}
+
 .v-footer__banner {
   display: flex;
   align-items: center;

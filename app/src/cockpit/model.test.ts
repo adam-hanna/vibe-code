@@ -292,6 +292,67 @@ describe('the output pane', () => {
   });
 });
 
+describe('a run that ends badly says so, and says why (#162)', () => {
+  test('a turn timeout is an ending, not an idle cockpit', () => {
+    // The run that produced the issue: a Codex critique stalled and was killed
+    // at its 45-minute ceiling. Every one of these frames arrived; nothing read
+    // the last two, so the footer said `idle`.
+    const run = fold([
+      say('phase_started', { phase: 'critique', round: 0 }),
+      say('turn_started', { role: 'critic', kind: 'critique', round: 0 }),
+      say(
+        'run_failed',
+        { code: 1, reason: 'the critic turn exceeded criticTimeoutMs' },
+        'Error: the critic turn exceeded criticTimeoutMs\n    at claudeTurn (...)',
+      ),
+      { type: 'result', id: 1, exit: 1 },
+    ]);
+
+    expect(run.reason).toEqual({ code: 1, message: 'the critic turn exceeded criticTimeoutMs' });
+    expect(run.completed).toEqual({ exit: 1 });
+    // `ended` stays null and that is correct: the LOOP never said anything about
+    // itself here. The two are different facts and neither stands in for the
+    // other - which is the whole reason a third field exists.
+    expect(run.ended).toBeNull();
+  });
+
+  test('the sentence is preferred over the stack, and the stack is the fallback', () => {
+    // `run_escalated` carries no `reason` because its message already IS the
+    // sentence; `run_failed` prints a stack and carries one. One field, read the
+    // same way `gate_stopped` reads its own.
+    const withReason = fold([say('run_failed', { code: 1, reason: 'the short one' }, 'the stack')]);
+    expect(withReason.reason?.message).toBe('the short one');
+
+    const without = fold([say('run_escalated', { code: 2 }, 'Three questions are unanswered.')]);
+    expect(without.reason).toEqual({ code: 2, message: 'Three questions are unanswered.' });
+  });
+
+  test('a code that did not arrive stays null rather than becoming zero', () => {
+    // Zero is `EXIT.OK`. A frame from a build that sent no code must never fold
+    // into the one value that means the run was fine.
+    const run = fold([say('run_failed', { reason: 'something went wrong' })]);
+    expect(run.reason?.code).toBeNull();
+  });
+
+  test('the ending does not close the open turn - the result frame does', () => {
+    const upTo = fold([
+      say('phase_started', { phase: 'planning' }),
+      say('turn_started', { role: 'planner', kind: 'plan' }),
+      say('run_failed', { code: 1, reason: 'boom' }),
+    ]);
+    // The command is still writing artifacts and a summary. Ending the turn here
+    // would stamp an endedAt nobody measured.
+    expect(upTo.running).not.toBeNull();
+
+    const done = reduce(upTo, { type: 'result', id: 1, exit: 1 }, 2_000_000);
+    expect(done.running).toBeNull();
+  });
+
+  test('a clean pass carries no reason at all', () => {
+    expect(fold(CLEAN).reason).toBeNull();
+  });
+});
+
 describe('a second run is a second column', () => {
   test('starting again clears the run and keeps what belongs to the host', () => {
     const first = reduce(fold(CLEAN), { type: 'ready', protocol: 1, pid: 9 }, 1);
@@ -299,6 +360,7 @@ describe('a second run is a second column', () => {
     expect(second.cycles).toEqual([]);
     expect(second.output).toEqual([]);
     expect(second.ended).toBeNull();
+    expect(second.reason).toBeNull();
     expect(second.completed).toBeNull();
     // The protocol version described the process, not the work.
     expect(second.protocol).toBe(1);

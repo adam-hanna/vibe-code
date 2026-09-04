@@ -1334,16 +1334,31 @@ export async function execute(
       recordEvent(state, 'escalation', { code: err.code, message: err.message });
       const file = writeEscalation(state, err);
       log.heading('Stopped for input');
-      log.warn(err.message);
+      // The id, and the reason a host needs one here (#162). An app watching
+      // this stream has the exit code from the `result` frame - which says the
+      // CATEGORY of the ending - and nothing at all saying what happened, unless
+      // it picks the most recent alarming-looking line out of the output pane.
+      // That is the English-matching #133 exists to prevent, and it would pick
+      // the wrong line: this path narrates at `warn`, and the run before it is
+      // full of warnings that are not the ending.
+      log.warn(err.message, { id: 'run_escalated', data: { code: err.code, file } });
       log.info(`Details: ${file}`);
       log.info(`Resume:  vibe resume ${state.id}`);
       summary(state, started, recovery);
       return err.code;
     }
     state.status = 'error';
-    recordEvent(state, 'error', { message: err instanceof Error ? err.message : String(err) });
+    const failure = err instanceof Error ? err.message : String(err);
+    recordEvent(state, 'error', { message: failure });
     log.heading('Failed');
-    log.fail(err instanceof Error ? (err.stack ?? err.message) : String(err));
+    // The stack is printed and the sentence is carried, because they are for
+    // different readers. A terminal wants the stack; a footer wants the one line
+    // that says what went wrong, and a stack rendered into a banner is a wall of
+    // frames where the answer to "what now" is supposed to be.
+    log.fail(err instanceof Error ? (err.stack ?? err.message) : String(err), {
+      id: 'run_failed',
+      data: { code: EXIT.ERROR, reason: failure },
+    });
     summary(state, started, recovery);
     return EXIT.ERROR;
   } finally {
@@ -1437,7 +1452,7 @@ export async function runPreflight(
   const blocked = await gitPrecondition(state.targetDir, ahead);
   if (blocked !== null) {
     log.heading('Preflight');
-    log.fail(blocked);
+    log.fail(blocked, { id: 'run_failed', data: { code: EXIT.PREFLIGHT, reason: blocked } });
     state.status = 'error';
     recordEvent(state, 'preflight-failed', { reasons: [blocked] });
     // Deliberately NOT followed by the probe path's "re-run with --skip-probe
@@ -1480,7 +1495,8 @@ export async function runPreflight(
   try {
     report = await preflight(state.targetDir, cfg, phases, state.dir, probes);
   } catch (err) {
-    log.fail(`environment probe failed: ${err instanceof Error ? err.message : String(err)}`);
+    const why = `environment probe failed: ${err instanceof Error ? err.message : String(err)}`;
+    log.fail(why, { id: 'run_failed', data: { code: EXIT.PREFLIGHT, reason: why } });
     return EXIT.PREFLIGHT;
   }
 
@@ -1512,7 +1528,16 @@ export async function runPreflight(
     for (const reason of report.blockingReasons) log.fail(reason);
     state.status = 'error';
     recordEvent(state, 'preflight-failed', { reasons: report.blockingReasons });
-    log.info('Fix the environment, or re-run with --skip-probe to proceed anyway.');
+    // The `run_failed` id goes here and not on the `log.fail` loop above,
+    // because this is the only line on this path that is about the ending
+    // rather than about one of its causes (#162). Tagging the loop would make
+    // whichever reason happened to be last look like *the* reason, and the
+    // order of `blockingReasons` carries no such claim - so the whole list
+    // travels, exactly as it does into the event record on the line above.
+    log.info('Fix the environment, or re-run with --skip-probe to proceed anyway.', {
+      id: 'run_failed',
+      data: { code: EXIT.PREFLIGHT, reason: report.blockingReasons.join('; ') },
+    });
   }
 
   // Charged after the verdict has been logged and recorded, so the run record

@@ -119,6 +119,21 @@ export interface Run {
   /** Set when the run ended, with how. Null while it is going. */
   ended: { how: 'approved' | 'stopped'; detail: string } | null;
   /**
+   * Why the command is ending, in the core's own words (#162).
+   *
+   * **Told, never picked.** `run_failed` and `run_escalated` are narration ids
+   * the core emits at the two places `execute` gives up, so this is the sentence
+   * the CLI prints under `Failed` or `Stopped for input` - not the most recent
+   * alarming-looking line in the output pane. Selecting by level would find the
+   * wrong one: an escalation narrates at `warn`, and a healthy run is full of
+   * warnings that are not the ending.
+   *
+   * `code` is what that site says its exit code will be, which is not the same
+   * fact as `completed.exit` - the process may still fail on the way out - so
+   * the two are kept apart rather than reconciled.
+   */
+  reason: { code: number | null; message: string } | null;
+  /**
    * The exit code the command returned, once it has.
    *
    * Separate from `ended`, and the two are different facts. `ended` is what the
@@ -150,6 +165,7 @@ export function emptyRun(): Run {
     gate: null,
     output: [],
     ended: null,
+    reason: null,
     completed: null,
     protocol: null,
     seq: 0,
@@ -381,6 +397,23 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
 
       case 'review_approved':
         return { ...next, ended: { how: 'approved', detail: frame.message } };
+
+      case 'run_escalated':
+      case 'run_failed':
+        // Deliberately not `endRunning`. This says why the run is ending; it is
+        // not itself the end. The command still writes artifacts and a summary,
+        // and `result` closes the open turn when it actually returns - which is
+        // the same rule every other ending here follows.
+        return {
+          ...next,
+          reason: {
+            code: num(data['code']),
+            // `run_failed` prints a stack and carries the sentence, so the two
+            // are not interchangeable. `gate_stopped` reads its data the same
+            // way, for the same reason.
+            message: str(data['reason']) ?? frame.message,
+          },
+        };
 
       default:
         // Prose with no id, or an id from a newer core. Both reach the output
