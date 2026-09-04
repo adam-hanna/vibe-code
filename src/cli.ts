@@ -190,7 +190,26 @@ interface ParsedArgs {
   };
 }
 
-export async function main(argv: readonly string[]): Promise<ExitCode> {
+export async function main(
+  argv: readonly string[],
+  /**
+   * The loop these commands run, injected for the same reason `execute` already
+   * takes one (#153).
+   *
+   * The host process is a second entry point over exactly these functions, and
+   * the only thing it needs to change about them is that `orchestrate` is called
+   * with a `Host` attached. Threading the loop rather than re-implementing the
+   * command is what keeps ONE definition of a legal invocation - which flags
+   * exist, when the lock is taken relative to the first state write, what a
+   * resume does with NEEDS-INPUT.md. Trailing and optional, so `src/main.ts` and
+   * every test calling `main(argv)` is unchanged.
+   *
+   * Only `run`, `plan` and `resume` take it, because they are the only commands
+   * that run a loop. `fork` deliberately creates and stops; `list` and `doctor`
+   * never start one.
+   */
+  loop: RunLoop = orchestrate,
+): Promise<ExitCode> {
   const cmd = argv[0];
   if (cmd === undefined || cmd === '-h' || cmd === '--help') {
     console.log(USAGE);
@@ -200,11 +219,11 @@ export async function main(argv: readonly string[]): Promise<ExitCode> {
   try {
     switch (cmd) {
       case 'run':
-        return await cmdRun(argv.slice(1), false);
+        return await cmdRun(argv.slice(1), false, loop);
       case 'plan':
-        return await cmdRun(argv.slice(1), true);
+        return await cmdRun(argv.slice(1), true, loop);
       case 'resume':
-        return await cmdResume(argv.slice(1));
+        return await cmdResume(argv.slice(1), loop);
       case 'fork':
         return await cmdFork(argv.slice(1));
       case 'list':
@@ -468,7 +487,11 @@ export function buildOverrides(flags: ParsedArgs['flags']): ConfigOverrides {
   return { claude, codex, loop, budget, git: gitCfg, questions, context, verify, progress };
 }
 
-async function cmdRun(args: readonly string[], planOnly: boolean): Promise<ExitCode> {
+async function cmdRun(
+  args: readonly string[],
+  planOnly: boolean,
+  loop: RunLoop = orchestrate,
+): Promise<ExitCode> {
   const { positional, flags } = parseArgs(args);
   if (flags.help) {
     console.log(USAGE);
@@ -515,7 +538,17 @@ async function cmdRun(args: readonly string[], planOnly: boolean): Promise<ExitC
   }
 
   try {
-    return await startRun(targetDir, task, planOnly, cfg, allocated, extraContext, flags, handle);
+    return await startRun(
+      targetDir,
+      task,
+      planOnly,
+      cfg,
+      allocated,
+      extraContext,
+      flags,
+      handle,
+      loop,
+    );
   } finally {
     // Every path out, including the ones that never reach `execute`: the throws
     // from `loadConfig`-adjacent work, an escalation, or an ordinary return.
@@ -538,6 +571,7 @@ async function startRun(
   extraContext: string | null,
   flags: ParsedArgs['flags'],
   handle: LockHandle,
+  loop: RunLoop = orchestrate,
 ): Promise<ExitCode> {
   const state = createRun(targetDir, task, planOnly, { allocated, config: cfg, extraContext });
 
@@ -588,7 +622,7 @@ async function startRun(
     );
   }
 
-  return execute(state, cfg, false, flags.skipProbe === true, REAL_GATE, orchestrate, handle);
+  return execute(state, cfg, false, flags.skipProbe === true, REAL_GATE, loop, handle);
 }
 
 /**
@@ -647,7 +681,10 @@ export function resumeConfig(targetDir: string, state: RunState, flags: ParsedAr
   return cfg;
 }
 
-async function cmdResume(args: readonly string[]): Promise<ExitCode> {
+async function cmdResume(
+  args: readonly string[],
+  loop: RunLoop = orchestrate,
+): Promise<ExitCode> {
   const { positional, flags } = parseArgs(args);
   if (flags.help) {
     console.log(USAGE);
@@ -709,7 +746,7 @@ async function cmdResume(args: readonly string[]): Promise<ExitCode> {
   }
 
   try {
-    return await resumeRun(targetDir, id, flags, handle);
+    return await resumeRun(targetDir, id, flags, handle, loop);
   } finally {
     // Covers the no-answers early return and every throw between here and the
     // end of `execute`, which is why acquisition and this sit in one function.
@@ -723,6 +760,7 @@ async function resumeRun(
   id: string,
   flags: ParsedArgs['flags'],
   handle: LockHandle,
+  loop: RunLoop = orchestrate,
 ): Promise<ExitCode> {
   const state = loadRun(targetDir, id);
   const stored = state.config;
@@ -743,7 +781,7 @@ async function resumeRun(
       log.info('Previous stop reported findings, not questions - continuing with raised limits.');
       renameSync(answersFile, path.join(state.dir, `stalled-${state.planRound}.md`));
       log.heading(`Resuming ${state.id}`);
-      return execute(state, cfg, true, flags.skipProbe === true, REAL_GATE, orchestrate, handle);
+      return execute(state, cfg, true, flags.skipProbe === true, REAL_GATE, loop, handle);
     }
 
     const answers = parseHumanAnswers(raw);
@@ -770,7 +808,7 @@ async function resumeRun(
   }
 
   log.heading(`Resuming ${state.id}`);
-  return execute(state, cfg, true, flags.skipProbe === true, REAL_GATE, orchestrate, handle);
+  return execute(state, cfg, true, flags.skipProbe === true, REAL_GATE, loop, handle);
 }
 
 /**
