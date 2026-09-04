@@ -148,10 +148,13 @@ app/src/cockpit/model.ts   frames in, a run out - the ONLY logic in the app, and
 app/src/cockpit/format.ts  durations, counts, and the closed maps: boundaries and exit codes
 app/src/cockpit/           the loop column, the running row, the output pane, the gate footer
 app/src-tauri/       Rust: window, tray, single instance, spawning and relaying
-app/src/pilot/       the pilot's credentials - store and check, never read
+app/src/pilot/       credentials, the wire, and the pane - transcript.ts is the pure part
 app/src-tauri/src/host.rs    supervising the host process, and the \\?\ path fix
 app/src-tauri/src/reaper.rs  making a killed app take the host with it
 app/src-tauri/src/keys.rs    the OS keychain, and the read the window cannot reach
+app/src-tauri/src/pilot/     the only network code in the product - two adapters, one vocabulary
+app/src-tauri/src/pilot/sse.rs      the wire format both vendors share, and nothing else
+app/src-tauri/src/pilot/event.rs    PilotEvent and Usage - every count an Option, on purpose
 app/scripts/         contrast.mjs, stage-sidecar.mjs, make-icon.mjs - all dependency-free
 ```
 
@@ -190,7 +193,26 @@ reports bad values *by name*, which is the one thing that must never happen to a
 external call is a child process"* exactly, and the published package gains no HTTP
 dependency and no credential handling. If this ever moves into `src/` "because the CLI might
 want it too", that sentence stops being true of everything shipped — and it is a sentence
-people choose this tool for.
+people choose this tool for. `keys.test.ts` checks both halves: `dependencies` is `{}` *and*
+the lockfile installs nothing outside `devDependencies`, because a manifest cannot prove what
+a transitive dependency would drag in.
+
+**Two named adapters, and deliberately not an abstraction over them.** `pilot/anthropic.rs`
+and `pilot/openai.rs` each turn one vendor's stream into `PilotEvent`, and each says what its
+own vendor actually does — a system prompt is a top-level field for one and a message for the
+other; usage arrives in two events for one and one for the other; **OpenAI has no cache-write
+count to report at all**, so `Usage.cache_write` is `None` on every OpenAI turn. Every one of
+those differences survives into the vocabulary as an absent field rather than a smoothed one,
+for the same reason Codex cost is unreported: an abstraction that hides a difference has to
+invent the thing it hid. `sse.rs` *is* shared, and that is not a contradiction — it parses a
+wire format both vendors implement to the same specification, and sharing a format is not
+sharing a meaning.
+
+**A vendor's error message can contain the key you sent it.** OpenAI's 401 reads `Incorrect
+API key provided: sk-proj-…`, quoting it back in full — found by the live reachability test,
+which asserts no failure carries the key it was given. Redaction is at the single seam every
+pilot event leaves through, not in an adapter, because Anthropic not echoing today is not a
+promise either vendor is making.
 
 **The host dies when the app does, and the kernel is what enforces it.** `stop()` handles the
 graceful endings by closing stdin, so the host finishes the turn it is in; a Windows Job

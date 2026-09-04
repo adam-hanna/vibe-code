@@ -98,3 +98,106 @@
   border: 1px solid var(--rule-card);
   padding: var(--space-2) var(--space-3);
 }
+
+/* ---------------------------------------------------------- the pilot pane
+ *
+ * The clients, proved (#143). Not hi-fi 5: the designed chat drives the
+ * session, and every one of those capabilities is #144's.
+ */
+
+.v-pilot {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-page);
+}
+
+.v-pilot__controls {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--rule-structure);
+}
+
+.v-pilot__select {
+  font: var(--type-body-sm);
+  color: var(--text-primary);
+  background: var(--surface-card);
+  border: 1px solid var(--rule-control);
+  padding: var(--space-1) var(--space-2);
+}
+
+.v-pilot__log {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.v-pilot__reply {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  border-left: 2px solid var(--rule-card);
+  padding-left: var(--space-3);
+}
+
+.v-pilot__meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+/* `pre-wrap`, because a reply's own line breaks are the model's and not ours
+   to normalise away. */
+.v-pilot__text {
+  font: var(--type-body);
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.v-pilot__why {
+  font: var(--type-body-sm);
+  color: var(--text-emphasis);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.v-pilot__spend,
+.v-pilot__note {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+}
+
+.v-pilot__composer {
+  flex: none;
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--rule-structure);
+}
+
+.v-pilot__entry {
+  flex: 1;
+  min-width: 0;
+  resize: none;
+  font: var(--type-body-sm);
+  color: var(--text-primary);
+  background: var(--surface-card);
+  border: 1px solid var(--rule-control);
+  padding: var(--space-2);
+}
+
+.v-pilot__entry:focus-visible {
+  outline: 2px solid var(--accent-solid);
+  outline-offset: 2px;
+}

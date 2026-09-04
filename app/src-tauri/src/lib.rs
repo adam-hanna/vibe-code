@@ -26,10 +26,12 @@
 
 mod host;
 mod keys;
+mod pilot;
 mod reaper;
 
 use host::{host_send, host_start, host_status, launch, HostProcess};
 use keys::{key_clear, key_set, key_status};
+use pilot::{pilot_cancel, pilot_send, Pilot};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Manager, WindowEvent};
@@ -56,17 +58,25 @@ pub fn run() {
             show(app);
         }))
         .manage(HostProcess::default())
+        .manage(Pilot::default())
         // Every command the window may call, and the list is worth reading as a
-        // whole: three that talk to a process this crate already started, and
-        // three that manage a credential the window can store and check but
-        // **never read back**. There is deliberately no `key_get` (#143).
+        // whole: three that talk to a process this crate already started, three
+        // that manage a credential the window can store and check but **never
+        // read back**, and two that start and stop a pilot turn.
+        //
+        // There is deliberately no `key_get` and there is deliberately no
+        // command that returns a reply. The key is read inside `pilot_send`'s
+        // thread and the answer arrives as events, so a credential never crosses
+        // this boundary in either direction (#143).
         .invoke_handler(tauri::generate_handler![
             host_start,
             host_send,
             host_status,
             key_set,
             key_clear,
-            key_status
+            key_status,
+            pilot_send,
+            pilot_cancel
         ])
         .setup(|app| {
             // Before the tray, and before a window can ask. The host process IS

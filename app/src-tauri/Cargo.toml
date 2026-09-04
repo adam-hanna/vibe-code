@@ -31,6 +31,7 @@ keyring = { version = "3", features = [
   "windows-native",
   "sync-secret-service",
 ] }
+ureq = { version = "3.2.1", default-features = false, features = ["rustls", "json"] }
 
 # The job object that makes a killed app take the host with it (#157). Already
 # in the tree via Tauri, so this adds nothing to the build; `windows-sys` rather

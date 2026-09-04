@@ -2,6 +2,9 @@ import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { LivenessDot, MetaChip, StateKicker } from '../design';
 import * as host from '../host';
 import { Credentials } from '../pilot/Credentials';
+// `PilotPane`, not `Pilot`: `pilot.ts` beside it is the wire, and two files
+// differing only in case is a compile error on Windows and macOS both.
+import { PilotPane } from '../pilot/PilotPane';
 import { Footer } from './Footer';
 import { Launch } from './Launch';
 import { LoopColumn } from './LoopColumn';
@@ -57,7 +60,7 @@ export function Cockpit() {
   });
   const [busy, setBusy] = useState(false);
   const [launched, setLaunched] = useState(false);
-  const [tab, setTab] = useState<'output' | 'keys'>('output');
+  const [tab, setTab] = useState<'output' | 'pilot' | 'keys'>('output');
   const [now, setNow] = useState(() => Date.now());
   const requests = useRef(0);
 
@@ -214,8 +217,16 @@ export function Cockpit() {
             >
               Output
             </button>
-            {/* The pilot's credentials, until the pilot itself has a pane to put
-                them behind (#143). Settings is where they will finally live. */}
+            {/* The pilot's clients, proved (#143). It sends a conversation and
+                streams the reply; it cannot yet drive the session, which is what
+                #144 gives it. */}
+            <button
+              className={`v-cockpit__tab ${tab === 'pilot' ? 'v-cockpit__tab--on' : ''}`}
+              onClick={() => setTab('pilot')}
+            >
+              Pilot
+            </button>
+            {/* The pilot's credentials, until Settings exists to put them in. */}
             <button
               className={`v-cockpit__tab ${tab === 'keys' ? 'v-cockpit__tab--on' : ''}`}
               onClick={() => setTab('keys')}
@@ -235,7 +246,9 @@ export function Cockpit() {
               Prompt
             </span>
           </div>
-          {tab === 'output' ? <OutputPane lines={run.output} /> : <Credentials />}
+          {tab === 'output' && <OutputPane lines={run.output} />}
+          {tab === 'pilot' && <PilotPane />}
+          {tab === 'keys' && <Credentials />}
           {wire.unknown.length > 0 && (
             <div className="v-cockpit__unknown">
               {wire.unknown.length} unrecognised frame(s): {wire.unknown[wire.unknown.length - 1]}
