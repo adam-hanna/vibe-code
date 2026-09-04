@@ -454,7 +454,7 @@ async function runPhases(
     // turn must not leave the reviewer pointed at an earlier round's report.
     beginReport(state);
 
-    log.heading('Implementing');
+    log.heading('Implementing', { id: 'phase_started', data: { phase: 'implementing' } });
     const impl = await runTurn(
       state,
       cfg,
@@ -539,7 +539,7 @@ async function planPhase(
   if (state.plan) {
     plan = state.plan;
   } else {
-    log.heading('Planning');
+    log.heading('Planning', { id: 'phase_started', data: { phase: 'planning' } });
     ({ plan, activity: planActivity } = await runPlan(state, cfg, cwd, roles, turns));
   }
 
@@ -663,7 +663,14 @@ async function planPhase(
       continue;
     }
 
-    log.heading(`Plan critique (round ${state.planRound + 1})`);
+    log.heading(`Plan critique (round ${state.planRound + 1})`, {
+      id: 'phase_started',
+      // The RAW round, not the `+ 1` the sentence shows. The artifact this round
+      // writes is `plan-critique-${state.planRound}.json`, so this is the number
+      // that correlates a card with the file behind it; the display adds one
+      // because humans count from one and the archive does not.
+      data: { phase: 'critique', round: state.planRound },
+    });
     // The record of the turn is written by the callback, not after the wrapper
     // returns: a concurrent rotation can now raise a budget escalation, and
     // `withConcurrentCompaction` surfaces it once `work` has resolved. Anything
@@ -841,7 +848,10 @@ async function reviewPhase(
       saveState(state);
       beginReport(state);
 
-      log.step('Fixing the verification failure');
+      log.step('Fixing the verification failure', {
+        id: 'turn_started',
+        data: { role: 'implementer', kind: 'verify-fix', round: state.verifyRound },
+      });
       const repair = await runTurn(
         state,
         cfg,
@@ -895,7 +905,12 @@ async function reviewPhase(
       break;
     }
 
-    log.heading(`Code review (round ${state.reviewRound + 1})`);
+    log.heading(`Code review (round ${state.reviewRound + 1})`, {
+      id: 'phase_started',
+      // Raw, for the reason the critique heading above gives: this round writes
+      // `code-review-${state.reviewRound}.json`.
+      data: { phase: 'review', round: state.reviewRound },
+    });
     // Inside the callback, for the reason given at the critique call site: a
     // held budget escalation must not cost the run the record of the review it
     // paid for.
@@ -951,6 +966,14 @@ async function reviewPhase(
       log.step(
         `Incorporating ${decision.tolerated.length} carried P1(s), then finishing: ` +
           decision.tolerated.map((f) => f.id).join(', '),
+        {
+          id: 'turn_started',
+          data: {
+            role: 'implementer',
+            kind: 'final-fix',
+            carried: decision.tolerated.map((f) => f.id),
+          },
+        },
       );
       for (const f of decision.tolerated) log.info(`  ~ ${f.title}`);
 
@@ -1037,7 +1060,15 @@ async function runFixRound(
   saveState(state);
   beginReport(state);
 
-  log.step(`Fixing ${blockingFindings(findings).length} blocking finding(s)`);
+  log.step(`Fixing ${blockingFindings(findings).length} blocking finding(s)`, {
+    id: 'turn_started',
+    data: {
+      role: 'implementer',
+      kind: 'review-fix',
+      round: state.reviewRound,
+      blocking: blockingFindings(findings).length,
+    },
+  });
   const fix = await runTurn(
     state,
     cfg,
@@ -1812,7 +1843,7 @@ async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Findi
   }
 
   for (const gate of gates) {
-    log.step(`Verifying: ${gate.name}`);
+    log.step(`Verifying: ${gate.name}`, { id: 'verify_started', data: { gate: gate.name } });
     const result = await runGateCommand(cwd, gate, cfg.toolchain);
 
     if (result.unavailable !== null) {
@@ -2609,7 +2640,10 @@ async function withRateLimitRetry<T>(
       recordEvent(state, 'rate_limited', { label, waitMs, resetsAt: err.resetsAt?.toISOString() ?? null });
       log.warn(`Rate limited during "${label}". ${describeReset(err)} Waiting ${minutes} min.`);
       await sleep(waitMs);
-      log.step(`Resuming "${label}" after rate-limit wait`);
+      log.step(`Resuming "${label}" after rate-limit wait`, {
+        id: 'rate_limit_resumed',
+        data: { label },
+      });
     }
   }
 }
@@ -2674,7 +2708,10 @@ async function runPlan(
   roles: RoleTable,
   turns: AgentTurns,
 ): Promise<PlannedTurn> {
-  log.step(`${holderLabel('planner', roles)} is planning (read-only)`);
+  log.step(`${holderLabel('planner', roles)} is planning (read-only)`, {
+    id: 'turn_started',
+    data: { role: 'planner', kind: 'plan' },
+  });
   const outcome = await runTurn(
     state,
     cfg,
@@ -2725,7 +2762,10 @@ async function revisePlan(
 ): Promise<PlannedTurn> {
   state.planRound += 1;
   saveState(state);
-  log.step(`${holderLabel('planner', roles)} is revising the plan (round ${state.planRound})`);
+  log.step(`${holderLabel('planner', roles)} is revising the plan (round ${state.planRound})`, {
+    id: 'turn_started',
+    data: { role: 'planner', kind: 'revise', round: state.planRound },
+  });
 
   const outcome = await runTurn(
     state,
@@ -3103,7 +3143,10 @@ async function runCritique(
    */
   planActivity?: TurnActivity | undefined,
 ): Promise<FindingsReport> {
-  log.step(`${holderLabel('critic', roles)} is critiquing the plan`);
+  log.step(`${holderLabel('critic', roles)} is critiquing the plan`, {
+    id: 'turn_started',
+    data: { role: 'critic', kind: 'critique', round: state.planRound },
+  });
   const outcome = await runTurn(
     state,
     cfg,
@@ -3178,7 +3221,10 @@ async function runReview(
     );
   }
 
-  log.step(`${holderLabel('reviewer', roles)} is reviewing the implementation`);
+  log.step(`${holderLabel('reviewer', roles)} is reviewing the implementation`, {
+    id: 'turn_started',
+    data: { role: 'reviewer', kind: 'review', round: state.reviewRound },
+  });
   const { chunks, files } = await git.diffChunks(cwd, state.baseSha);
 
   // The round's own report, before the round is bought again. A process that
@@ -3392,6 +3438,7 @@ async function resolveQuestions(
   const blockingCount = questions.filter((q) => q.blocking).length;
   log.heading(
     `${questions.length} open question(s) - ${blockingCount} blocking, ${questions.length - blockingCount} advisory`,
+    { id: 'questions_opened', data: { total: questions.length, blocking: blockingCount } },
   );
   for (const q of questions) log.info(`- [${q.kind}${q.blocking ? ', blocking' : ''}] ${q.question}`);
 
@@ -3403,7 +3450,10 @@ async function resolveQuestions(
     throw new Escalation(EXIT.NEEDS_HUMAN, 'Blocking questions need answers.', [...blockers]);
   }
 
-  log.step(`${answerer} is answering`);
+  log.step(`${answerer} is answering`, {
+    id: 'turn_started',
+    data: { role: 'answerer', kind: 'answer', questions: questions.length },
+  });
   const outcome = await runTurn(
     state,
     cfg,

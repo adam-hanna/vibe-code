@@ -252,6 +252,9 @@ export async function rotateSession(
     baseline
       ? 'Compacting Claude session (context was measured under another model)'
       : `Compacting Claude session (context at ${(measured * 100).toFixed(0)}%)`,
+    // `measured` is null on the baseline branch and reported as null, never as a
+    // ratio nobody took - the same rule the sentence itself follows.
+    { id: 'session_compacting', data: { slot, model, measured } },
   );
 
   // Ask the model that grew the conversation, not the one that is about to
