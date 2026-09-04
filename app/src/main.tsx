@@ -1,14 +1,16 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { Gallery } from './Gallery';
+import { Shell } from './Shell';
+import './shell.css';
 
-// Until the cockpit exists, the gallery IS the app: it is what the contrast
-// audit runs against and what proves a component has every state it claims.
+// The gallery is still what fills the window - it is the thing that either draws
+// correctly or visibly does not, which is what makes a launch a verification
+// rather than a hope. `Shell` puts the host strip above it (#154).
 const root = document.getElementById('root');
 if (root === null) throw new Error('#root is missing from index.html');
 
 createRoot(root).render(
   <StrictMode>
-    <Gallery />
+    <Shell />
   </StrictMode>,
 );

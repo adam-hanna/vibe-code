@@ -33,16 +33,37 @@ every commit is the whole gate, and it is on you to run it. Node 20+ (`engines`)
 ```bash
 cd app
 npm install
-npm run typecheck     # tsc --noEmit, same strictness as the core
-npm run build         # typecheck, then vite build
-npm run dev           # vite on :1420 — the gallery, not the cockpit
+npm run typecheck      # tsc --noEmit, same strictness as the core
+npm run build          # typecheck, then vite build
+npm run dev            # vite on :1420 — the webview alone, no host
 npm run audit:contrast # the design system's own gate
+npm run app:test       # cargo test — the Rust side
+npm run stage:sidecar  # copy `dist/src` + a node runtime into the bundle
+npm run app:build      # the whole thing: vite, staging, cargo, installer
 ```
 
 **The app has its own `package.json` and its own gate.** `npm run typecheck && npm test` at
-the root still covers the core and does not see `app/`; run the app's three commands as well
-when you touch it. `app/` is *not* in `files`, so it never ships to npm — the published
-package stays the CLI, and the app ships as a Tauri bundle.
+the root still covers the core and does not see `app/`; run the app's commands as well when
+you touch it. `app/` is *not* in `files`, so it never ships to npm — the published package
+stays the CLI, and the app ships as a Tauri bundle.
+
+**Verify the app from `npm run app:build`, never from a `cargo build` or `tauri dev`.** This
+has now cost time twice, for two different reasons, and both are invisible until you build
+properly:
+
+- **Resource paths.** Under a dev build, resources resolve to an ordinary relative path; in a
+  bundle they come back as `\\?\C:\...`, which Node refuses as a main module (`EISDIR ...
+  lstat 'C:'`). `strip_verbatim` in `src-tauri/src/host.rs` fixes it.
+- **`cargo build --release` is still a dev build.** `tauri-build` sets `cfg(dev)` unless the
+  build went through `tauri build`, so the exe in `target/release/` loads `devUrl` —
+  `http://localhost:1420`. With no Vite server running that is a blank error page, and every
+  symptom looks like a broken front end: the window opens, nothing invokes, nothing logs.
+  A bundled build is on `http://tauri.localhost/`; check the webview URL first when the app
+  seems inert.
+
+`npm run app:build` needs Rust on PATH (`~/.cargo/bin`) and runs `stage:sidecar` itself. The
+staged tree is ~92 MB of Node plus ~1.5 MB of compiled core, and both are gitignored — they
+are copies of things the repo already has.
 
 `npm run audit:contrast` is the design system's equivalent of `npm test`: it parses
 `tokens.css` and checks the two rules the build spec names as most likely to slip — the text
@@ -87,7 +108,11 @@ tests/               node:test, one file per concern
 app/                 the desktop app - Vite + React, its own package.json and gate
 app/src/design/      tokens.css, base.css, components.css, and the sixteen primitives
 app/src/Gallery.tsx  every component in every state - the design system's acceptance test
-app/scripts/         contrast.mjs, which audits the tokens rather than a rendered page
+app/src/host.ts      the webview's end of the wire: typed frames, and nothing re-derived
+app/src/Shell.tsx    the window's content until the cockpit exists
+app/src-tauri/       Rust: window, tray, single instance, spawning and relaying
+app/src-tauri/src/host.rs   supervising the host process, and the \\?\ path fix
+app/scripts/         contrast.mjs, stage-sidecar.mjs, make-icon.mjs - all dependency-free
 ```
 
 **The app and the CLI are two front ends over one core.** The app links `src/` and calls
@@ -99,6 +124,19 @@ Concretely: `src/main.ts → cli.ts` renders the loop to a terminal, and `src/ho
 serve.ts` renders it to a pipe. **Both call `main()`** — a host request carries the same argv
 the CLI takes, so which flags exist, when the lock is taken relative to the first state write
 and what a resume does with `NEEDS-INPUT.md` all have exactly one definition.
+
+The third process is Rust, and what it owns is **window, tray, single instance, spawning and
+relaying — nothing else**. The core is Node ESM that spawns `claude` and `codex` through
+`node:child_process`: it cannot run in a webview and it cannot run in Rust, so every line of
+judgement about a run stays on the Node side. The relay parses exactly one thing — whether a
+line of stdout is JSON at all — and only so a line that is not can be labelled rather than
+passed off as a frame. **The moment Rust decides something about a run there are two
+definitions of a legal run.**
+
+The webview is given **no shell permission at all**. The host is spawned from Rust with a
+path Rust resolved, and `host_send` writes one line to a process that is already running.
+There is deliberately no command that takes a program name — the pilot chat (#144) will be
+able to drive the session, and "run this program" must never be in reach of it.
 
 Two rules the host process depends on, and neither is optional:
 
