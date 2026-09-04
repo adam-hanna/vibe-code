@@ -133,8 +133,10 @@ app/src/host.ts      the webview's end of the wire: typed frames, and nothing re
 app/src/cockpit/model.ts   frames in, a run out - the ONLY logic in the app, and it is pure
 app/src/cockpit/           the loop column, the running row, the output pane, the gate footer
 app/src-tauri/       Rust: window, tray, single instance, spawning and relaying
+app/src/pilot/       the pilot's credentials - store and check, never read
 app/src-tauri/src/host.rs    supervising the host process, and the \\?\ path fix
 app/src-tauri/src/reaper.rs  making a killed app take the host with it
+app/src-tauri/src/keys.rs    the OS keychain, and the read the window cannot reach
 app/scripts/         contrast.mjs, stage-sidecar.mjs, make-icon.mjs - all dependency-free
 ```
 
@@ -160,6 +162,20 @@ The webview is given **no shell permission at all**. The host is spawned from Ru
 path Rust resolved, and `host_send` writes one line to a process that is already running.
 There is deliberately no command that takes a program name — the pilot chat (#144) will be
 able to drive the session, and "run this program" must never be in reach of it.
+
+**The pilot's keys live in the OS keychain, and the webview can never read one.** Three
+commands exist — store, forget, ask whether one is present — and the absence of a fourth is
+the design: `keys::read` is `pub(crate)`, called by Rust, unreachable from the window, so the
+key never crosses the IPC boundary. The CSP agrees from the other side, since `connect-src
+'self' ipc: http://ipc.localhost` means the page could not reach a vendor even holding one.
+Not `vibe.config.json`: that is a project file meant to be committed, and `validateConfig`
+reports bad values *by name*, which is the one thing that must never happen to a secret.
+
+**All the network code lives in `app/` and none of it in `src/`.** The core keeps *"every
+external call is a child process"* exactly, and the published package gains no HTTP
+dependency and no credential handling. If this ever moves into `src/` "because the CLI might
+want it too", that sentence stops being true of everything shipped — and it is a sentence
+people choose this tool for.
 
 **The host dies when the app does, and the kernel is what enforces it.** `stop()` handles the
 graceful endings by closing stdin, so the host finishes the turn it is in; a Windows Job

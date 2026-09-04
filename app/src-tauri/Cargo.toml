@@ -21,6 +21,17 @@ tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# The OS keychain for the pilot's credentials (#143): Windows Credential
+# Manager, macOS Keychain, the Secret Service on Linux. `apple-native` and
+# `windows-native` are the platform stores themselves rather than a file-backed
+# fallback - a fallback would put the key on disk, which is the one thing this
+# dependency exists to avoid.
+keyring = { version = "3", features = [
+  "apple-native",
+  "windows-native",
+  "sync-secret-service",
+] }
+
 # The job object that makes a killed app take the host with it (#157). Already
 # in the tree via Tauri, so this adds nothing to the build; `windows-sys` rather
 # than `windows` because three raw calls do not need the safe wrapper's weight.
