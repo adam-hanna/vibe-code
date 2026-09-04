@@ -104,6 +104,15 @@ export interface Status {
   ready: Ready | null;
   /** Why there is no host, when there is none. Null while one is running. */
   failure: string | null;
+  /**
+   * Why killing this app would leave the host running, or null if it would not.
+   *
+   * Null is a real guarantee here rather than an absence: on Windows the host is
+   * in a job object the kernel empties when the app dies, however it dies. On a
+   * platform with no such mechanism this carries the reason, because an
+   * unenforced guarantee nobody can see is the same as no guarantee (#157).
+   */
+  uncontained: string | null;
 }
 
 /** Whether this page is inside the desktop shell at all. */

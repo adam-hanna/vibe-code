@@ -20,3 +20,12 @@ tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# The job object that makes a killed app take the host with it (#157). Already
+# in the tree via Tauri, so this adds nothing to the build; `windows-sys` rather
+# than `windows` because three raw calls do not need the safe wrapper's weight.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_JobObjects",
+] }
