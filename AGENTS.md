@@ -54,6 +54,10 @@ floor across every surface, and the ramps — plus that no hex literal exists ou
 ```
 src/main.ts          bin entry point — the thing package.json points at
 src/cli.ts           argument parsing, the five commands, run summary
+src/hostmain.ts      bin entry point for the app's sidecar — the second front end
+src/serve.ts         the host session: NDJSON over stdio, gates as awaits
+src/protocol.ts      the frames those two processes agree on
+src/host.ts          what a host may be told at a boundary, and may answer
 src/orchestrator.ts  the loop: planPhase, reviewPhase, the guards, the prompt dispatch
 src/run.ts           run state, artifacts, checkpoints, convergence maths (assessConvergence et al)
 src/fork.ts          `vibe fork`: preflight that only reads, then a commit phase that creates
@@ -90,6 +94,20 @@ app/scripts/         contrast.mjs, which audits the tokens rather than a rendere
 `orchestrate()` in its own process; it does not shell out to `vibe`. That is what makes a
 gate an `await` at a phase boundary rather than an exit-and-resume, and it is why pausing
 keeps the agent session warm.
+
+Concretely: `src/main.ts → cli.ts` renders the loop to a terminal, and `src/hostmain.ts →
+serve.ts` renders it to a pipe. **Both call `main()`** — a host request carries the same argv
+the CLI takes, so which flags exist, when the lock is taken relative to the first state write
+and what a resume does with `NEEDS-INPUT.md` all have exactly one definition.
+
+Two rules the host process depends on, and neither is optional:
+
+- **stdout is the protocol; stderr is the prose.** `installProtocolStdout` moves `console.log`
+  to stderr before anything can narrate. One `log.step()` sharing stdout with the protocol
+  puts an unparseable frame in the stream — the packaging spike reproduced it.
+- **Refuse, never repair.** An unreadable frame is reported back to the id that sent it, and
+  an unreadable *decision* becomes `stop`. Continuing on an instruction nobody could parse
+  spends tokens on the strength of a message that may have said the opposite.
 
 `src/orchestrator.ts` is the biggest file by a wide margin and is where most changes land.
 Read the phase you are touching end to end before editing it; the guards interact.
