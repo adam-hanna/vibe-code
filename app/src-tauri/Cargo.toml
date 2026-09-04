@@ -1,0 +1,22 @@
+[package]
+name = "vibe-desktop"
+version = "0.1.0"
+description = "The vibe desktop app: window, tray, and the process that does the work"
+authors = ["Adam Hanna"]
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+# Tauri's mobile targets need a cdylib and the desktop binary needs a lib to call
+# into. `_lib` because a lib and a bin cannot share a name.
+name = "vibe_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

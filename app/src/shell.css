@@ -1,0 +1,91 @@
+/*
+ * The host strip (#154).
+ *
+ * Not part of the design system, and deliberately in its own file rather than in
+ * `components.css`. The sixteen components there are transcribed from the build
+ * spec and every value in them was argued about; this is scaffolding for one
+ * issue, and the cockpit replaces it. Mixing the two would make it impossible to
+ * tell later which rules came from the spec.
+ *
+ * Every value is a token even so. Reaching past one for a raw hex re-derives a
+ * decision that has already been made twice, whatever the file it happens in -
+ * and `audit:contrast` refuses a hex literal outside `tokens.css` regardless.
+ */
+
+.v-hoststrip {
+  background: var(--surface-chrome);
+  border-bottom: 1px solid var(--rule-structure);
+  padding: var(--space-4) var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.v-hoststrip__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.v-hoststrip__title {
+  font: var(--type-label);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.v-hoststrip__spacer {
+  flex: 1;
+}
+
+.v-hoststrip__failure {
+  font: var(--type-body-sm);
+  color: var(--text-primary);
+  background: var(--surface-alarm);
+  border: 1px solid var(--rule-card);
+  padding: var(--space-3) var(--space-4);
+}
+
+/*
+ * The wire, as it arrived.
+ *
+ * Monospaced because these are frames rather than prose, and a fixed height so
+ * the strip stays a strip - the gallery below is the content of this window and
+ * a log that grew would push it off the screen.
+ */
+.v-hoststrip__lines {
+  font: var(--type-mono-sm);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 9rem;
+  overflow-y: auto;
+  background: var(--surface-page);
+  border: 1px solid var(--rule-inner);
+}
+
+.v-hoststrip__line {
+  padding: var(--space-1) var(--space-3);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* The floor, and no dimmer: below `--text-tertiary` this is a border, not text. */
+.v-hoststrip__line--log {
+  color: var(--text-tertiary);
+}
+
+.v-hoststrip__line--frame {
+  color: var(--text-primary);
+}
+
+/*
+ * A frame this version did not recognise, and a host that ended. Both are facts
+ * the window owns rather than problems to hide, so both are drawn at full
+ * strength rather than dimmed.
+ */
+.v-hoststrip__line--unknown,
+.v-hoststrip__line--exit {
+  color: var(--text-emphasis);
+  border-left: 2px solid var(--accent-border);
+}
