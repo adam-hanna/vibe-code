@@ -149,6 +149,8 @@ app/src/cockpit/format.ts  durations, counts, and the closed maps: boundaries an
 app/src/cockpit/           the loop column, the running row, the output pane, the gate footer
 app/src-tauri/       Rust: window, tray, single instance, spawning and relaying
 app/src/pilot/       credentials, the wire, and the pane - transcript.ts is the pure part
+app/src/pilot/tools.ts     what the pilot may touch: the table, its executors, and propose-only
+app/src/cockpit/argv.ts    a form to an argv - the button and the pilot build the same one
 app/src-tauri/src/host.rs    supervising the host process, and the \\?\ path fix
 app/src-tauri/src/reaper.rs  making a killed app take the host with it
 app/src-tauri/src/keys.rs    the OS keychain, and the read the window cannot reach
@@ -178,8 +180,37 @@ definitions of a legal run.**
 
 The webview is given **no shell permission at all**. The host is spawned from Rust with a
 path Rust resolved, and `host_send` writes one line to a process that is already running.
-There is deliberately no command that takes a program name — the pilot chat (#144) will be
-able to drive the session, and "run this program" must never be in reach of it.
+There is deliberately no command that takes a program name — the pilot chat can drive the
+session, and "run this program" must never be in reach of it.
+
+**Every pilot capability is a host request the app already makes** (#144). The four tools in
+`app/src/pilot/tools.ts` produce an `invoke` or an `answer` — the two inbound frames in
+`src/protocol.ts` — built by the same `launchArgv` the Launch form uses and handed *up* to
+`Cockpit`, which owns the one `host.send` in the window. So `consistency.ts` stays the only
+definition of a legal run, and a pilot capability the UI does not also have is a missing
+control rather than a pilot feature. `keys.test.ts` fails on a third effect kind.
+
+**Declared on this side, executed on this side.** Rust forwards a tool declaration and parses
+a call; it never runs one, for the same reason the relay never decides what a frame means.
+Because the table and its executors are one file, a tool cannot exist without an
+implementation — a stronger guarantee than a list somebody has to keep in step.
+
+**Propose only.** A tool that would change a run returns a `proposes` settlement instead of
+doing it: the pane draws the exact argv or the exact decision and a person fires it. The
+enforcement is not in the component — a proposal appends no tool result, so the call stays in
+`unanswered()` and the conversation is unsendable until somebody answers. This is decision 1
+of the five #144 asks for, and the wireframe's 45-second auto-answer is deliberately not
+built: if a proposal should ever fire on its own, that is one more column on #140's gate
+matrix. There is **no config tool** (decision 3) and **no archive tool** until #114 lands
+(decision 4), and both absences are pinned by a test rather than left as an omission.
+
+**A decision may say who shaped it, and only then is it recorded.** `readOrigin` in
+`src/host.ts` reads an `origin` off the same answer `readDecision` reads, and the two fail in
+opposite directions on purpose: an unreadable *decision* stops the run, an unreadable *origin*
+is dropped. `gate_released` is narrated but not recorded — the durability rule in
+`recordAndSay` — **except** when it carries an origin, because "who released this gate" is a
+question a later reader has and an unattributed release cannot answer it. A person pressing
+continue still leaves the archive exactly as it was.
 
 **The pilot's keys live in the OS keychain, and the webview can never read one.** Three
 commands exist — store, forget, ask whether one is present — and the absence of a fourth is

@@ -202,10 +202,90 @@
   outline-offset: 2px;
 }
 
-/* A tool the model asked for. Nothing runs one yet (#144). */
+/* A tool the model asked for, and what running it produced (#144). */
 .v-pilot__call {
   display: flex;
   align-items: baseline;
   gap: var(--space-2);
   flex-wrap: wrap;
+}
+
+/*
+ * A proposal: the one thing in this pane that is waiting on a person.
+ *
+ * Bordered and set apart, because it is not another line of chat - the run does
+ * not move until somebody answers it, and it has to read that way at a glance.
+ */
+.v-proposal {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  border: 1px solid var(--rule-control);
+  background: var(--surface-card);
+  padding: var(--space-4);
+}
+
+.v-proposal__summary {
+  font: var(--type-body);
+  color: var(--text-emphasis);
+}
+
+/*
+ * The exact argv, or the exact decision. A brief is the thing that decides
+ * whether a run converges, so it is shown in full and in a monospace face rather
+ * than summarised into a sentence nobody can check.
+ */
+.v-proposal__argv {
+  font: var(--type-mono-sm);
+  color: var(--text-primary);
+  background: var(--surface-panel);
+  border: 1px solid var(--rule-inner);
+  padding: var(--space-3);
+  margin: 0;
+  max-height: 16rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.v-proposal__note {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+}
+
+.v-proposal__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.v-proposal__reply {
+  flex: 1;
+  min-width: 0;
+  font: var(--type-body-sm);
+  color: var(--text-primary);
+  background: var(--surface-panel);
+  border: 1px solid var(--rule-control);
+  padding: var(--space-2) var(--space-3);
+}
+
+.v-proposal__reply:focus-visible {
+  outline: 2px solid var(--accent-solid);
+  outline-offset: 2px;
+}
+
+/*
+ * The pilot pane stays mounted whichever tab is showing, so a conversation - and
+ * a proposal waiting on somebody - survives a look at the output pane. `hidden`
+ * needs the explicit `display: none` because the rule below sets one.
+ */
+.v-cockpit__hidden {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.v-cockpit__hidden[hidden] {
+  display: none;
 }
