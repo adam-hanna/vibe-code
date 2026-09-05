@@ -862,9 +862,17 @@ async function cmdFork(args: readonly string[]): Promise<ExitCode> {
         continue;
       }
       const commit = meta.commit === null ? `no commit (${meta.commitNote})` : meta.commit.slice(0, 7);
+      // Omitted rather than shown as zero on a checkpoint written before #139:
+      // absent means the file never carried the counter, which is a different
+      // fact from a run that asked itself nothing, and only one of them is a
+      // measurement. Old snapshots therefore print exactly the line they always
+      // did.
+      const questions = meta.questionRound === undefined ? '' : ` / question ${meta.questionRound}`;
       console.log(
-        `  ${String(n).padStart(3)}  ${meta.boundary.padEnd(14)} ${meta.phase.padEnd(12)} ` +
-          `plan ${meta.planRound} / review ${meta.reviewRound} / verify ${meta.verifyRound}  ${commit}`,
+        // 15 rather than 14: `question-round` is exactly fourteen characters, so
+        // the old width left the longest boundary touching the column beside it.
+        `  ${String(n).padStart(3)}  ${meta.boundary.padEnd(15)} ${meta.phase.padEnd(12)} ` +
+          `plan ${meta.planRound}${questions} / review ${meta.reviewRound} / verify ${meta.verifyRound}  ${commit}`,
       );
     }
     log.info(`Fork one with: vibe fork ${sourceId} --at <n>`);
@@ -1821,7 +1829,21 @@ function summary(state: RunState, started: number, recovery?: RecoveryReport): v
     }
   }
   if (state.rateLimitWaits > 0) log.info(`Waits:    ${state.rateLimitWaits} rate-limit pause(s)`);
-  log.info(`Rounds:   ${state.planRound} plan revision(s), ${state.reviewRound} fix round(s)`);
+  // Question rounds sit beside the other two rather than being folded into the
+  // plan count, and they are the reason #139 exists: three revisions the critic
+  // asked for is the loop working, and three the planner asked itself is a
+  // planner circling something it cannot resolve from the repo. Those read the
+  // same as `3 plan revision(s)` and they are different diagnoses.
+  //
+  // Printed only when there were any, unlike the two beside it. This counter is
+  // zero on most runs, and a `0 question round(s)` on every clean summary would
+  // bury the line on the runs it was written for. It is a display choice about a
+  // number that is always measured, not an absence dressed as one.
+  const asked =
+    state.questionRound > 0 ? `, ${state.questionRound} question round(s)` : '';
+  log.info(
+    `Rounds:   ${state.planRound} plan revision(s)${asked}, ${state.reviewRound} fix round(s)`,
+  );
   if (state.sessionRotations > 0) log.info(`Compacted: ${state.sessionRotations} time(s)`);
   // A record of what `forkedFrom` holds, never a computation over it: the totals
   // above include the inherited spend, and this is what says so. Nothing here
