@@ -9,6 +9,9 @@ import lib from '../../src-tauri/src/lib.rs?raw';
 import pilotMod from '../../src-tauri/src/pilot/mod.rs?raw';
 import anthropicMod from '../../src-tauri/src/pilot/anthropic.rs?raw';
 import openaiMod from '../../src-tauri/src/pilot/openai.rs?raw';
+import eventMod from '../../src-tauri/src/pilot/event.rs?raw';
+import pane from './PilotPane.tsx?raw';
+import pilotWire from './pilot.ts?raw';
 import { PROVIDER_NAME, PROVIDERS, usable } from './keys';
 import type { KeyStatus } from './keys';
 
@@ -68,6 +71,32 @@ describe('the webview can store a key and can never read one', () => {
     const callers = [...pilotMod.matchAll(/keys::read\(/g)];
     expect(callers.length).toBe(1);
     expect(pilotMod).toContain('fn drive(');
+  });
+
+  test('the tool surface is empty, which is what makes this groundwork', () => {
+    // #144's plumbing landed with nothing declared, so a pilot turn is
+    // byte-identical to one made before it. The table and its executor are the
+    // next step; this fails on the commit that wires one up without saying so.
+    expect(pane).not.toMatch(/\btools:/);
+    expect(pilotWire).not.toMatch(/const TOOLS\b/);
+  });
+
+  test('the event vocabulary is the same set on both sides of the wire', () => {
+    // The cross-language guard `contract.test.ts` does for phases. Rust's
+    // `#[serde(rename_all = "snake_case")]` is what makes these comparable, and
+    // a variant added on one side and not the other is silent otherwise: the
+    // window would drop an event as unrecognised and count it.
+    // Sliced to the enum body first, so a `PilotEvent::Ended { .. }` in a match
+    // arm or a test cannot be mistaken for a variant declaration.
+    const start = eventMod.indexOf('pub enum PilotEvent {');
+    const body = eventMod.slice(start, eventMod.indexOf('\n}', start));
+    expect(start).toBeGreaterThan(-1);
+    const rustKinds = [...body.matchAll(/^ {4}([A-Z]\w+) \{/gm)]
+      .map((m) => m[1] ?? '')
+      .map((name) => name.replace(/(?<!^)([A-Z])/g, '_$1').toLowerCase());
+    const tsKinds = [...pilotWire.matchAll(/kind: '(\w+)'/g)].map((m) => m[1] ?? '');
+    expect(rustKinds.length).toBeGreaterThan(0);
+    expect([...new Set(tsKinds)].sort()).toEqual([...new Set(rustKinds)].sort());
   });
 
   test('no vendor URL is reachable from the webview', () => {

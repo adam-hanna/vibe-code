@@ -1,5 +1,13 @@
 import { describe, expect, test } from 'vitest';
-import { ask, emptyConversation, reduce, refuse, spendParts, unrecognised } from './transcript';
+import {
+  ask,
+  emptyConversation,
+  reduce,
+  refuse,
+  spendParts,
+  unanswered,
+  unrecognised,
+} from './transcript';
 import type { Conversation } from './transcript';
 import type { PilotEvent, Usage } from './pilot';
 
@@ -161,5 +169,125 @@ describe('a refusal is part of the history', () => {
 describe('an event this build does not know is counted, never discarded', () => {
   test('unrecognised events are visible', () => {
     expect(unrecognised(unrecognised(emptyConversation())).unknown).toBe(2);
+  });
+});
+
+describe('a tool call is recorded even though nothing runs one yet (#144)', () => {
+  test('a call joins the reply, with its arguments parsed', () => {
+    const done = fold([
+      { kind: 'tool_call', turn: 1, id: 'toolu_A', name: 'start_run', arguments: '{"task":"x"}' },
+      { kind: 'ended', turn: 1, stop: 'tool_use' },
+    ]);
+    expect(done.replies[0]?.calls).toEqual([
+      {
+        id: 'toolu_A',
+        name: 'start_run',
+        // The vendor's own bytes, kept as the record even though they parsed.
+        arguments: '{"task":"x"}',
+        input: { task: 'x' },
+        unreadable: null,
+      },
+    ]);
+  });
+
+  test('a call with no arguments is a tool that takes no input, not a broken one', () => {
+    // A tool whose schema takes nothing gets no argument fragments at all, and
+    // an empty string must not be read as a parse failure.
+    const done = fold([
+      { kind: 'tool_call', turn: 1, id: 'toolu_A', name: 'list_runs', arguments: '' },
+      { kind: 'ended', turn: 1, stop: 'tool_use' },
+    ]);
+    expect(done.replies[0]?.calls[0]?.input).toEqual({});
+    expect(done.replies[0]?.calls[0]?.unreadable).toBeNull();
+  });
+
+  test('arguments that do not parse are reported, not thrown', () => {
+    // A model emits truncated JSON when a turn hits its ceiling mid-call. The
+    // honest report is a call that cannot be run; a reducer that threw would
+    // take the whole pane down with it.
+    const done = fold([
+      { kind: 'tool_call', turn: 1, id: 'toolu_A', name: 'start_run', arguments: '{"task":' },
+      { kind: 'ended', turn: 1, stop: 'max_tokens' },
+    ]);
+    const call = done.replies[0]?.calls[0];
+    expect(call?.input).toBeUndefined();
+    expect(call?.unreadable).toBeTruthy();
+    // And the bytes survive, because they are the evidence.
+    expect(call?.arguments).toBe('{"task":');
+  });
+
+  test('a turn that said nothing and asked for something is not empty', () => {
+    // The common shape of a tool-calling turn. A test on the text alone would
+    // drop the assistant message and have the vendor answer a conversation
+    // that never happened.
+    const done = fold([
+      { kind: 'tool_call', turn: 1, id: 'toolu_A', name: 'start_run', arguments: '{}' },
+      { kind: 'ended', turn: 1, stop: 'tool_use' },
+    ]);
+    expect(done.messages).toEqual([
+      { role: 'user', content: 'hello' },
+      {
+        role: 'assistant',
+        content: '',
+        calls: [{ id: 'toolu_A', name: 'start_run', input: {} }],
+      },
+    ]);
+  });
+
+  test('calls keep the order they were asked in', () => {
+    const done = fold([
+      { kind: 'tool_call', turn: 1, id: 'a', name: 'first', arguments: '{}' },
+      { kind: 'tool_call', turn: 1, id: 'b', name: 'second', arguments: '{}' },
+      { kind: 'ended', turn: 1, stop: 'tool_use' },
+    ]);
+    expect(done.replies[0]?.calls.map((c) => c.id)).toEqual(['a', 'b']);
+  });
+});
+
+describe('a conversation that owes a result cannot be sent', () => {
+  test('an unanswered call is named', () => {
+    // Both vendors reject an assistant turn whose tool_use has no matching
+    // result. A real precondition, not a nicety.
+    const done = fold([
+      { kind: 'tool_call', turn: 1, id: 'toolu_A', name: 'start_run', arguments: '{}' },
+      { kind: 'ended', turn: 1, stop: 'tool_use' },
+    ]);
+    expect(unanswered(done).map((c) => c.id)).toEqual(['toolu_A']);
+  });
+
+  test('a result settles it, matched by the vendor id and nothing else', () => {
+    const done = fold([
+      { kind: 'tool_call', turn: 1, id: 'toolu_A', name: 'start_run', arguments: '{}' },
+      { kind: 'ended', turn: 1, stop: 'tool_use' },
+    ]);
+    const answered: Conversation = {
+      ...done,
+      messages: [
+        ...done.messages,
+        { role: 'tool', id: 'toolu_A', name: 'start_run', content: 'started' },
+      ],
+    };
+    expect(unanswered(answered)).toEqual([]);
+    // A result for a different id settles nothing - which is the case that
+    // would otherwise send a 400 and blame the wrong call.
+    const mismatched: Conversation = {
+      ...done,
+      messages: [
+        ...done.messages,
+        { role: 'tool', id: 'toolu_OTHER', name: 'start_run', content: 'started' },
+      ],
+    };
+    expect(unanswered(mismatched).map((c) => c.id)).toEqual(['toolu_A']);
+  });
+
+  test('an ordinary conversation owes nothing', () => {
+    expect(
+      unanswered(
+        fold([
+          { kind: 'text', turn: 1, delta: 'Hello.' },
+          { kind: 'ended', turn: 1, stop: 'end_turn' },
+        ]),
+      ),
+    ).toEqual([]);
   });
 });
