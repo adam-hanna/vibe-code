@@ -130,3 +130,40 @@ export function readDecision(v: unknown): Decision {
     reason: `the host answered "${typeof kind === 'string' ? kind : typeof kind}", which is not a decision this version understands`,
   };
 }
+
+/**
+ * How long an origin may be. Long enough to name a thing, short enough that it
+ * cannot become a message.
+ */
+const MAX_ORIGIN = 40;
+
+/**
+ * Who shaped this decision, when it was not simply the person at the window.
+ *
+ * **Read separately from the decision, and failing a different way on purpose.**
+ * `readDecision` turns an unreadable answer into `stop`, because an instruction
+ * nobody could parse is the dangerous thing to act on. An origin is not an
+ * instruction - it is a label on one - and refusing to run because a label was
+ * malformed would stop work for a reason that has nothing to do with the work.
+ * So this drops what it cannot read instead.
+ *
+ * The consequence is worth stating rather than discovering: **absent and
+ * unreadable are both `null` here**, and a null origin leaves no row in
+ * `state.events` at all. A record that says nothing about who released a gate is
+ * better than one that names somebody it might not have been - and the only
+ * writer of this field is the app itself, so an unreadable one means a host we
+ * could not account for either way.
+ *
+ * The core deliberately holds no vocabulary of origins. `roles.ts` is the table
+ * of things that are agents in the loop, and #144 refuses to add the pilot to
+ * it; a closed list here would be that same table under another name. This
+ * records the label it was given, and what a label means is the app's business.
+ */
+export function readOrigin(v: unknown): string | null {
+  if (!isRecord(v)) return null;
+  const origin = v['origin'];
+  if (typeof origin !== 'string') return null;
+  const trimmed = origin.trim();
+  if (trimmed === '' || trimmed.length > MAX_ORIGIN) return null;
+  return trimmed;
+}

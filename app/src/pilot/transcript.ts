@@ -1,6 +1,7 @@
 import { isFinal } from './pilot';
 import type { AssistantCall, PilotEvent, Message, Usage } from './pilot';
 import type { Provider } from './keys';
+import type { Settlement } from './tools';
 
 /**
  * The pilot conversation, assembled from events and from nothing else (#143).
@@ -11,11 +12,15 @@ import type { Provider } from './keys';
  * assembled from anything but the deltas that arrived, and a turn's outcome is
  * the terminal event the turn actually produced.
  *
- * **What this is not.** It is not the designed pilot chat. There is no tool
- * call, nothing reaches the loop, and no token counted here goes anywhere near
- * `budget.maxTokens` — those are #144 and #145, and #145 is the one with the
- * sharp constraint: a pilot's dollars are real money where a run's, on a
- * subscription, are documented as *"NOT money"*.
+ * **What this is not.** No token counted here goes anywhere near
+ * `budget.maxTokens`, and none of it is charged through `src/charge.ts` — that
+ * is #145, the one with the sharp constraint: a pilot's dollars are real money
+ * where a run's, on a subscription, are documented as *"NOT money"*.
+ *
+ * Tools land in #144, and the shape they take here is the whole of it: a call is
+ * settled by `settle`, and a settlement that needs a person appends **no**
+ * message, so the conversation cannot be sent until somebody has decided. That
+ * is `propose only` enforced by the data rather than by a component remembering.
  */
 
 /** How a turn ended, in the vendor's own word or the failure's own sentence. */
@@ -40,6 +45,15 @@ export interface Call {
   input: unknown;
   /** Why `input` is absent, or null. Never both. */
   unreadable: string | null;
+  /**
+   * What running it produced, or null while nothing has (#144).
+   *
+   * Set by `settle`, from `tools.execute`, which is pure and takes the run. A
+   * `proposes` settlement is the state that matters here: the call has been
+   * read, it has NOT been done, and the conversation cannot be sent until a
+   * person says yes or no to it.
+   */
+  settlement: Settlement | null;
 }
 
 export interface Reply {
@@ -52,10 +66,9 @@ export interface Reply {
   /**
    * What the model asked for, in the order it asked.
    *
-   * **Nothing runs these yet.** The table and its executor are the next step;
-   * this build declares no tools, so the list is empty on every real turn. It
-   * exists now because the adapters can already produce a call, and a call the
-   * transcript dropped would be invisible rather than unimplemented.
+   * Each carries its own settlement, because they do not settle together: a turn
+   * can read the run and propose a stop in one breath, and the read is answered
+   * immediately while the proposal waits for a person.
    */
   calls: readonly Call[];
   /** The latest running total the vendor reported. Null until it reports one. */
@@ -74,10 +87,17 @@ export interface Reply {
 export function readCall(id: string, name: string, args: string): Call {
   if (args.trim() === '') {
     // A tool whose schema takes no input gets no argument fragments at all.
-    return { id, name, arguments: args, input: {}, unreadable: null };
+    return { id, name, arguments: args, input: {}, unreadable: null, settlement: null };
   }
   try {
-    return { id, name, arguments: args, input: JSON.parse(args) as unknown, unreadable: null };
+    return {
+      id,
+      name,
+      arguments: args,
+      input: JSON.parse(args) as unknown,
+      unreadable: null,
+      settlement: null,
+    };
   } catch (err) {
     return {
       id,
@@ -85,6 +105,7 @@ export function readCall(id: string, name: string, args: string): Call {
       arguments: args,
       input: undefined,
       unreadable: err instanceof Error ? err.message : String(err),
+      settlement: null,
     };
   }
 }
@@ -118,9 +139,28 @@ export function ask(
   turn: number,
   provider: Provider,
 ): Conversation {
+  return follow(
+    { ...conversation, messages: [...conversation.messages, { role: 'user', content }] },
+    turn,
+    provider,
+  );
+}
+
+/**
+ * Open a turn that answers tool results rather than something the user said.
+ *
+ * The other half of a tool loop, and it appends no message because there is
+ * nothing new to append: the results are already in the conversation, put there
+ * by `settle`. Sharing `ask`'s body would have meant a user message with empty
+ * content, which is a message the vendor is asked to answer and nobody wrote.
+ */
+export function follow(
+  conversation: Conversation,
+  turn: number,
+  provider: Provider,
+): Conversation {
   return {
     ...conversation,
-    messages: [...conversation.messages, { role: 'user', content }],
     live: { turn, provider, model: null, text: '', calls: [], usage: null, outcome: null },
   };
 }
@@ -133,10 +173,15 @@ export function ask(
  * that never arrives on the wire. It is recorded as a reply rather than shown
  * as a toast, because a refusal is part of the conversation's history and a
  * toast is not.
+ *
+ * `content` is null when the turn that failed was a tool follow-up rather than
+ * something the user typed. There is nothing to append in that case, and
+ * appending an empty user message would put a line in the transcript that
+ * nobody wrote and that the next request would have to send.
  */
 export function refuse(
   conversation: Conversation,
-  content: string,
+  content: string | null,
   provider: Provider,
   message: string,
 ): Conversation {
@@ -154,7 +199,8 @@ export function refuse(
   };
   return {
     ...conversation,
-    messages: [...conversation.messages, { role: 'user', content }],
+    messages:
+      content === null ? conversation.messages : [...conversation.messages, { role: 'user', content }],
     live: null,
     replies: [...conversation.replies, reply],
   };
@@ -241,8 +287,10 @@ function asCall(call: Call): AssistantCall {
  * with its own 400 — so this is a real precondition rather than a nicety, and
  * the composer reads it.
  *
- * It is always empty in this build, because nothing declares a tool. It exists
- * now so the executor has a seam to fill rather than a rule to rediscover.
+ * It is also what makes `propose only` structural (#144). A proposal is a call
+ * with no result, so a conversation holding one is unsendable by the same
+ * mechanism that stops a dropped tool result reaching a vendor — the pane does
+ * not have to remember, and a component that forgot could not send anyway.
  */
 export function unanswered(conversation: Conversation): readonly Call[] {
   const answered = new Set(
@@ -251,6 +299,97 @@ export function unanswered(conversation: Conversation): readonly Call[] {
   return conversation.replies.flatMap((reply) =>
     reply.calls.filter((call) => !answered.has(call.id)),
   );
+}
+
+/**
+ * Apply `f` to one call, wherever it sits, and leave everything else alone.
+ *
+ * By id across every reply rather than the last one: a call can be settled long
+ * after its turn ended - a proposal waits for a person - and by then another
+ * turn may well have been made.
+ */
+function mapCall(conversation: Conversation, id: string, f: (call: Call) => Call): Conversation {
+  return {
+    ...conversation,
+    replies: conversation.replies.map((reply) =>
+      reply.calls.some((c) => c.id === id)
+        ? { ...reply, calls: reply.calls.map((c) => (c.id === id ? f(c) : c)) }
+        : reply,
+    ),
+  };
+}
+
+/** The result already sent for a call, or null if it is still owed one. */
+export function answerOf(conversation: Conversation, id: string): string | null {
+  const message = conversation.messages.find((m) => m.role === 'tool' && m.id === id);
+  return message === undefined || message.role !== 'tool' ? null : message.content;
+}
+
+/** Whether any reply holds this call at all. */
+function holds(conversation: Conversation, id: string): boolean {
+  return conversation.replies.some((reply) => reply.calls.some((c) => c.id === id));
+}
+
+/**
+ * Record what running a call produced, and answer it unless it needs a person.
+ *
+ * **A `proposes` settlement appends no message on purpose.** The call stays in
+ * `unanswered`, which is what stops the conversation being sent - so a proposal
+ * nobody has decided on cannot be quietly left behind while the chat moves on.
+ *
+ * Ignores a call that has already been answered, and one no reply holds. Both
+ * are the same rule `reduce` follows for an event about the wrong turn: a fact
+ * that cannot be attributed is not recorded, and settling something twice would
+ * put two results on the wire for one call, which both vendors reject.
+ */
+export function settle(
+  conversation: Conversation,
+  id: string,
+  settlement: Settlement,
+): Conversation {
+  if (!holds(conversation, id) || answerOf(conversation, id) !== null) return conversation;
+  const withSettlement = mapCall(conversation, id, (call) => ({ ...call, settlement }));
+  if (settlement.kind === 'proposes') return withSettlement;
+
+  const call = withSettlement.replies
+    .flatMap((reply) => reply.calls)
+    .find((c) => c.id === id);
+  return {
+    ...withSettlement,
+    messages: [
+      ...withSettlement.messages,
+      { role: 'tool', id, name: call?.name ?? '', content: settlement.content },
+    ],
+  };
+}
+
+/**
+ * A person's word on a proposal, which is the only thing that fires one.
+ *
+ * The model is told which of the two happened, in as many words. A declined
+ * proposal answered with silence would leave it reasoning about a request it has
+ * no idea was refused - and the next thing it does would be built on that.
+ */
+export function decide(
+  conversation: Conversation,
+  id: string,
+  accepted: boolean,
+  note: string,
+): Conversation {
+  if (answerOf(conversation, id) !== null) return conversation;
+  const call = conversation.replies.flatMap((reply) => reply.calls).find((c) => c.id === id);
+  if (call === undefined || call.settlement?.kind !== 'proposes') return conversation;
+
+  const said = note.trim();
+  const content =
+    (accepted
+      ? 'The user accepted this, and the request was sent to the loop.'
+      : 'The user declined this. Nothing was sent, and the run is unchanged.') +
+    (said === '' ? '' : ` They said: ${said}`);
+  return {
+    ...conversation,
+    messages: [...conversation.messages, { role: 'tool', id, name: call.name, content }],
+  };
 }
 
 /** Note an event this build did not recognise. Shown, never discarded. */

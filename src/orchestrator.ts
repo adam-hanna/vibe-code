@@ -11,7 +11,7 @@ import type { CodexTurnOptions, CodexTurnResult } from '@src/codex.js';
 import { preserveGateArtifacts, sweepGateArtifacts } from '@src/artifacts.js';
 import { downgradeInert, groundFindings, refusePlaceholderPlan } from '@src/evidence.js';
 import * as git from '@src/git.js';
-import { readDecision } from '@src/host.js';
+import { readDecision, readOrigin } from '@src/host.js';
 import type { GateContext, Host } from '@src/host.js';
 import * as log from '@src/log.js';
 import type { PathStyle } from '@src/pathstyle.js';
@@ -258,9 +258,31 @@ async function holdAt(
   // `gate_waiting` as exactly this case when it asked for stable ids.
   log.step(`Holding at ${boundary} - waiting on you`, { id: 'gate_waiting', data: { ...ctx } });
 
-  const decision = readDecision(await host.decide(ctx));
+  // Two readings of one answer, because they are two facts. `readDecision` says
+  // what to do and fails closed to `stop`; `readOrigin` says who shaped it and
+  // fails to absent. Neither can make the other's mistake.
+  const answer = await host.decide(ctx);
+  const decision = readDecision(answer);
+  const origin = readOrigin(answer);
+
   if (decision.kind === 'continue') {
-    log.ok(`Released at ${boundary}`, { id: 'gate_released', data: { boundary } });
+    // A released gate is not a transition and leaves no row - the durability
+    // rule in `recordAndSay`, and #133 named `gate_released` as exactly this
+    // case. It becomes one the moment something other than the operator shaped
+    // it (#144): "who released this gate" is a question a later reader has, and
+    // an unattributed release cannot answer it while an attributed one can.
+    //
+    // So the carve-out is precisely the attribution and nothing else. A person
+    // pressing continue in the window still records nothing, which is what
+    // keeps `state.events` from becoming the transcript #133 forbids.
+    if (origin === null) {
+      log.ok(`Released at ${boundary}`, { id: 'gate_released', data: { boundary } });
+    } else {
+      recordAndSay(state, 'ok', 'gate_released', `Released at ${boundary} - ${origin}`, {
+        boundary,
+        origin,
+      });
+    }
     return;
   }
 
@@ -270,6 +292,7 @@ async function holdAt(
   recordAndSay(state, 'warn', 'gate_stopped', `Stopped at ${boundary} - ${why}`, {
     boundary,
     reason: decision.reason,
+    origin,
   });
   // The exit-resumable path the round caps already use: `writeEscalation` ->
   // `status: 'needs-input'` -> `vibe resume`. A CLI run has no host to ask, so

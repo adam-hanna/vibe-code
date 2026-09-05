@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Button } from '../design';
+import { launchArgv } from './argv';
 
 /**
  * The minimum needed to have anything to watch.
@@ -34,10 +35,11 @@ export function Launch({
       onSubmit={(e) => {
         e.preventDefault();
         if (!ready || busy) return;
-        // `plan` and `run` are two commands rather than a flag, exactly as the
-        // CLI has them. Building the argv the CLI would have been given is what
-        // keeps the two front ends over one definition.
-        onLaunch([planOnly ? 'plan' : 'run', task.trim(), '-C', dir.trim()]);
+        // Building the argv the CLI would have been given is what keeps the two
+        // front ends over one definition. `launchArgv` rather than a literal
+        // here, because the pilot's `start_run` proposes the same thing and two
+        // spellings of it would drift (#144).
+        onLaunch(launchArgv(task, dir, planOnly));
       }}
     >
       <label className="v-launch__label" htmlFor="task">

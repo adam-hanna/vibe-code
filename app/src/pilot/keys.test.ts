@@ -10,8 +10,8 @@ import pilotMod from '../../src-tauri/src/pilot/mod.rs?raw';
 import anthropicMod from '../../src-tauri/src/pilot/anthropic.rs?raw';
 import openaiMod from '../../src-tauri/src/pilot/openai.rs?raw';
 import eventMod from '../../src-tauri/src/pilot/event.rs?raw';
-import pane from './PilotPane.tsx?raw';
 import pilotWire from './pilot.ts?raw';
+import tools from './tools.ts?raw';
 import { PROVIDER_NAME, PROVIDERS, usable } from './keys';
 import type { KeyStatus } from './keys';
 
@@ -73,12 +73,45 @@ describe('the webview can store a key and can never read one', () => {
     expect(pilotMod).toContain('fn drive(');
   });
 
-  test('the tool surface is empty, which is what makes this groundwork', () => {
-    // #144's plumbing landed with nothing declared, so a pilot turn is
-    // byte-identical to one made before it. The table and its executor are the
-    // next step; this fails on the commit that wires one up without saying so.
-    expect(pane).not.toMatch(/\btools:/);
-    expect(pilotWire).not.toMatch(/const TOOLS\b/);
+  test('every tool is a host request this window already makes', () => {
+    // #144's one sentence, checked as a boundary. The table may declare what it
+    // likes; what it may not do is reach the loop another way. Every effect is
+    // an `invoke` or an `answer` - the two inbound frames in `src/protocol.ts` -
+    // so a third `kind` here is a third definition of what a legal run is, and
+    // this is the commit it would fail on.
+    const effect = tools.slice(
+      tools.indexOf('export type Effect ='),
+      tools.indexOf('export const ORIGIN'),
+    );
+    const kinds = [...effect.matchAll(/kind: '(\w+)'/g)].map((m) => m[1]);
+    expect([...new Set(kinds)].sort()).toEqual(['answer', 'invoke']);
+    // And no other way out. The pane hands an accepted effect UP to the cockpit,
+    // which owns the one `host.send` in the window; a tool module that imported
+    // the wire could send its own frame past the launch and gate controls.
+    expect(tools).not.toMatch(/from '\.\.\/host'/);
+  });
+
+  test('the pilot cannot reach a credential, and does not have to be trusted not to', () => {
+    // Decision 5 of the five #144 asks for, and the only real answer to "what
+    // never goes to a provider": a key. Not a rule the table follows - a thing
+    // it has no path to. `ToolContext` is the whole of what a read may see, and
+    // it holds the run.
+    expect(tools).not.toMatch(/from '\.\/keys'/);
+    const context = tools.slice(
+      tools.indexOf('export interface ToolContext {'),
+      tools.indexOf('}', tools.indexOf('export interface ToolContext {')),
+    );
+    expect(context).toContain('run: Run');
+    expect(context).not.toMatch(/key|secret|token/i);
+  });
+
+  test('the two capabilities #144 refuses are absent, not merely undocumented', () => {
+    // Config (decision 3, answered no) and the run archive (decision 4, yes but
+    // #114 first). An absence is only a decision if something fails when it
+    // stops being one.
+    const declared = [...tools.matchAll(/^ {2}name: '(\w+)',$/gm)].map((m) => m[1] ?? '');
+    expect(declared.sort()).toEqual(['answer_gate', 'read_output', 'read_run', 'start_run']);
+    expect(declared.filter((n) => /config|archive|runs/.test(n))).toEqual([]);
   });
 
   test('the event vocabulary is the same set on both sides of the wire', () => {

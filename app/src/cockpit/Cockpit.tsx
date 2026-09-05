@@ -10,6 +10,7 @@ import { Launch } from './Launch';
 import { LoopColumn } from './LoopColumn';
 import { OutputPane } from './OutputPane';
 import { emptyRun, nextRun, reduce } from './model';
+import type { Effect } from '../pilot/tools';
 import type { Frame } from '../host';
 import type { Run } from './model';
 
@@ -61,6 +62,8 @@ export function Cockpit() {
   const [busy, setBusy] = useState(false);
   const [launched, setLaunched] = useState(false);
   const [tab, setTab] = useState<'output' | 'pilot' | 'keys'>('output');
+  /** Pilot proposals waiting on a person, so a hidden tab can say so (#144). */
+  const [proposals, setProposals] = useState(0);
   const [now, setNow] = useState(() => Date.now());
   const requests = useRef(0);
 
@@ -140,6 +143,57 @@ export function Cockpit() {
     [note],
   );
 
+  /**
+   * Start a run. **The one place this window does that**, and the pilot's
+   * `start_run` proposal comes through here rather than sending its own frame
+   * (#144) - so the request-id allocation, the column reset and the "one at a
+   * time" rule have exactly one definition each. A pilot capability the UI does
+   * not also have would be a missing control, which is a design bug rather than
+   * a pilot feature.
+   */
+  const launch = useCallback(
+    (argv: readonly string[]) => {
+      // A new run is a new column. Appending to the previous one's cycles would
+      // draw a single loop out of two runs.
+      dispatch({ type: 'reset' });
+      setLaunched(true);
+      requests.current += 1;
+      void send({ type: 'invoke', id: requests.current, argv });
+    },
+    [send],
+  );
+
+  /**
+   * Answer a waiting gate.
+   *
+   * The decision goes over the wire as the host gave us the id, and unnarrowed:
+   * `readDecision` in the core is where that vocabulary is defined, and checking
+   * it here as well would be a second definition of a legal decision. A
+   * pilot-proposed answer carries an `origin` alongside it, which `readOrigin`
+   * reads and `state.events` records - the same frame, one field further.
+   */
+  const answer = useCallback(
+    (askId: number, decision: object) => {
+      void send({ type: 'answer', id: askId, decision });
+    },
+    [send],
+  );
+
+  /**
+   * Fire a proposal the user accepted.
+   *
+   * Nothing here decides anything: the effect was built by `tools.ts` from what
+   * the model asked for, and a person pressed a button. This is the routing, and
+   * it routes to the same two functions the buttons call.
+   */
+  const onEffect = useCallback(
+    (effect: Effect) => {
+      if (effect.kind === 'invoke') launch(effect.argv);
+      else answer(effect.askId, effect.decision);
+    },
+    [launch, answer],
+  );
+
   const outside = !host.inShell();
 
   return (
@@ -183,30 +237,10 @@ export function Cockpit() {
               second invoke until the first settles, so a form shown any earlier
               would only produce a rejection. */}
           {(!launched || run.completed !== null) && !outside && (
-            <Launch
-              busy={busy || !wire.connected}
-              onLaunch={(argv) => {
-                // A new run is a new column. Appending to the previous one's
-                // cycles would draw a single loop out of two runs.
-                dispatch({ type: 'reset' });
-                setLaunched(true);
-                requests.current += 1;
-                void send({ type: 'invoke', id: requests.current, argv });
-              }}
-            />
+            <Launch busy={busy || !wire.connected} onLaunch={launch} />
           )}
           <LoopColumn run={run} now={now} />
-          <Footer
-            run={run}
-            busy={busy}
-            onDecide={(askId, decision) => {
-              // The decision goes over the wire as the host gave us the id, and
-              // unnarrowed: `readDecision` in the core is where that vocabulary
-              // is defined, and checking it here as well would be a second
-              // definition of a legal decision.
-              void send({ type: 'answer', id: askId, decision });
-            }}
-          />
+          <Footer run={run} busy={busy} onDecide={answer} />
         </div>
 
         <div className="v-cockpit__pane">
@@ -217,14 +251,14 @@ export function Cockpit() {
             >
               Output
             </button>
-            {/* The pilot's clients, proved (#143). It sends a conversation and
-                streams the reply; it cannot yet drive the session, which is what
-                #144 gives it. */}
+            {/* The pilot (#143, #144). It reads this run and proposes; the
+                count is proposals waiting on a person, and it is here because a
+                proposal nobody sees blocks the conversation silently. */}
             <button
               className={`v-cockpit__tab ${tab === 'pilot' ? 'v-cockpit__tab--on' : ''}`}
               onClick={() => setTab('pilot')}
             >
-              Pilot
+              Pilot{proposals > 0 ? ` · ${String(proposals)}` : ''}
             </button>
             {/* The pilot's credentials, until Settings exists to put them in. */}
             <button
@@ -247,7 +281,14 @@ export function Cockpit() {
             </span>
           </div>
           {tab === 'output' && <OutputPane lines={run.output} />}
-          {tab === 'pilot' && <PilotPane />}
+          {/* Mounted whatever tab is showing, and hidden rather than unmounted.
+              A conversation is state nobody can get back, and a proposal waiting
+              on a person would be destroyed by a glance at the output pane -
+              which is the one thing this tab must not do. The other two panes
+              hold nothing, so they stay conditional. */}
+          <div className="v-cockpit__hidden" hidden={tab !== 'pilot'}>
+            <PilotPane run={run} onEffect={onEffect} onPending={setProposals} />
+          </div>
           {tab === 'keys' && <Credentials />}
           {wire.unknown.length > 0 && (
             <div className="v-cockpit__unknown">
