@@ -144,6 +144,7 @@ src/scorecard.ts     what the run archive says about the loop, and what it canno
 src/fork.ts          `vibe fork`: preflight that only reads, then a commit phase that creates
 src/similarity.ts    the one similarity metric, its threshold, and the censuses behind it
 src/questions.ts     when two wordings are one question: the threshold, and REPHRASED.md
+src/raise.ts         a finding a human raised, and the file they raise it in
 src/roles.ts         who does what: the role table, refusals, warnings
 src/config.ts        DEFAULTS, config merge, validation
 src/consistency.ts   cross-field rules over status/phase/planOnly, applied by loadRun
@@ -361,6 +362,38 @@ Two rules the host process depends on, and neither is optional:
 - **Refuse, never repair.** An unreadable frame is reported back to the id that sent it, and
   an unreadable *decision* becomes `stop`. Continuing on an instruction nobody could parse
   spends tokens on the strength of a message that may have said the opposite.
+
+**A severity is a claim with an owner, and until #141 nothing recorded the owner.** Every
+`Finding` came from `parseFindings` reading a model's structured output, so "absent means an
+agent said it" was true by construction and therefore never written down. `Finding.raisedBy`
+is that field, stamped by `groundAndRecord` — the single point both writers pass through, and
+the only place that knows which role produced the report. `refusePlaceholderPlan` stamps
+`vibe`, because a mechanical fact about an artifact on disk was previously indistinguishable
+from the critic's own P1 about the same defect. **Absent still means absent**: every finding
+in every existing archive has none, so `authorOf` narrows and returns null rather than
+guessing, and a renderer that cannot name the author names nobody.
+
+That field is what makes a human finding possible without corrupting the record. `src/raise.ts`
+holds the whole surface: a block appended to every `NEEDS-INPUT.md`, parsed on the same resume
+that reads the answers, merged into `pendingFindings` rather than replacing them. Four things
+about it are load-bearing:
+
+- **Grounding runs; the inert guard does not.** A `*File:* src/run.ts:120` is an `Evidence`
+  entry of kind `code`, so `checkEvidence` is nearly a no-op on one — but running it keeps one
+  path instead of two and catches a line typed by hand that does not exist. `downgradeInert`
+  is a statement about a *turn*, and a human finding has none behind it.
+- **The gate counts it and the oscillation census does not.** A person can block their own
+  run, so `p1Tolerance` is no longer purely a judgement about the reviewer. The census is taken
+  from the review report and a raised finding is never in one, so the exclusion is structural;
+  what replaces it is `finding_reraised`, one sentence naming an id a human has raised before.
+- **Refuse, never repair, and note which way that points.** A block somebody began and did not
+  finish stops the resume. Defaulting the severity would put a claim nobody made into the one
+  record that exists to say who made which claim; dropping it would lose a person's work in
+  silence. Nothing has been spent at that point and the file is still there.
+- **No host frame.** `src/host.ts` says every `Decision` member that mutates run state needs
+  its own validator before it is offered, and a `raise` member is exactly that. `acceptRaised`
+  is the seam one would call, so there is one definition of what a raised finding costs and
+  what it is checked against — not two.
 
 **A rate is a fraction, and the denominator is part of the answer.** `src/scorecard.ts` reads
 the archive `vibe list` walks, and every derived count is a `Measure` — what matched, what

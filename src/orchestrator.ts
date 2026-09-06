@@ -11,6 +11,7 @@ import type { CodexTurnOptions, CodexTurnResult } from '@src/codex.js';
 import { preserveGateArtifacts, sweepGateArtifacts } from '@src/artifacts.js';
 import { downgradeInert, groundFindings, refusePlaceholderPlan } from '@src/evidence.js';
 import { gateMode } from '@src/gates.js';
+import { raiseSection } from '@src/raise.js';
 import * as git from '@src/git.js';
 import { readDecision, readOrigin } from '@src/host.js';
 import type { GateContext, Host } from '@src/host.js';
@@ -3245,6 +3246,26 @@ function pathStyleFor(state: RunState, role: Role, roles: RoleTable): PathStyle 
  * wrong. The *tally* is recorded for every role either way, so the question can
  * be reopened later on evidence the runs themselves recorded.
  */
+/**
+ * Stamp a finding with the role that produced it (#141).
+ *
+ * Here rather than in `parseFindings`, because the parser reads a report and has
+ * no idea who wrote it - this function is the single point both writers pass
+ * through, and it is already given the role. A finding that arrives already
+ * attributed keeps what it has: nothing produces one today, and the rule that
+ * matters is that this never overwrites an author with a different one.
+ *
+ * **Fail closed on an unattributable role.** Only `critic` and `reviewer` can
+ * produce a report; anything else leaves the field off rather than claiming a
+ * position that does not raise findings. Absent already means "nothing here says
+ * who", which is true, where `planner` would be a fabrication.
+ */
+function attribute(f: Finding, role: Role): Finding {
+  if (f.raisedBy !== undefined) return f;
+  if (role !== 'critic' && role !== 'reviewer') return f;
+  return { ...f, raisedBy: role };
+}
+
 function groundAndRecord(
   state: RunState,
   cwd: string,
@@ -3254,7 +3275,8 @@ function groundAndRecord(
   /** What the turn that produced `found` did. Absent when nothing measured it. */
   activity: TurnActivity | undefined,
 ): FindingsReport {
-  const grounded = groundFindings(found, cwd, state.dir, pathStyleFor(state, role, roles));
+  const attributed = { ...found, findings: found.findings.map((f) => attribute(f, role)) };
+  const grounded = groundFindings(attributed, cwd, state.dir, pathStyleFor(state, role, roles));
   const inert =
     role === 'reviewer'
       ? downgradeInert(grounded.report, activity)
@@ -3711,6 +3733,13 @@ export function writeEscalation(state: RunState, escalation: Escalation): string
       lines.push(`### ${f.title} \`${f.id}\`\n${f.detail}\n\n*Suggested fix:* ${f.suggested_fix}\n`);
     }
   }
+
+  // Last, and on every stop rather than only on the ones that asked something
+  // (#141). The thing a person most wants to raise a finding about is the diff,
+  // which exists at every stop after the plan - and a stop that reported
+  // findings rather than questions is exactly the moment somebody has read them
+  // and disagrees. Left untouched it parses to nothing.
+  lines.push(raiseSection(state.id));
 
   return artifact(state, 'NEEDS-INPUT.md', lines.join('\n'));
 }

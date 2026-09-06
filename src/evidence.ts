@@ -388,6 +388,14 @@ export function downgradeInert(
   const downgraded: Finding[] = [];
   const reason = `the turn that produced it used no tools (${describeActivity(activity)})`;
   const findings = report.findings.map((f) => {
+    // A human finding has no turn behind it, so this rule has nothing to read
+    // (#141, decision 2). "3 items, none of them a tool" is a statement about a
+    // model's turn; applying it to a person is a category error, and it would
+    // apply the *reviewer's* activity to a claim the reviewer did not make.
+    // Structural as well: human findings arrive through `pendingFindings` after
+    // the report was grounded, so none reaches here today. The guard is what
+    // keeps that true if a later merge ever runs the other way round.
+    if (f.raisedBy === 'human') return f;
     if (f.severity !== 'P0' && f.severity !== 'P1') return f;
     const next = toP2(f, {}, reason);
     downgraded.push(next);
@@ -519,6 +527,11 @@ export function refusePlaceholderPlan(
   const raised: Finding = {
     id: 'plan-body-is-a-placeholder',
     severity: 'P0',
+    // vibe's own, not the critic's (#141). The header below already says that
+    // two findings about one defect is the honest record - "one is the critic's
+    // judgement and one is a mechanical fact about the artifact on disk" - and
+    // until attribution existed the artifact could not tell the two apart.
+    raisedBy: 'vibe',
     title: 'The plan artifact holds a pointer, not a plan',
     detail:
       `\`plan_md\` in \`${artifactName}\` is ${shown === '' ? 'empty' : `\`${shown}\``}, which ` +

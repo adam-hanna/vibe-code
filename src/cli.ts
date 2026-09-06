@@ -28,6 +28,8 @@ import { describeEnding as describeProcessEnding, installEndingStamp } from '@sr
 import { commitFork, listForkPoints, planFork } from '@src/fork.js';
 import type { Liveness, LockHandle } from '@src/lock.js';
 import { reconcileAssumed, reconcileQuestionRecords } from '@src/questions.js';
+import { acceptRaised, parseRaised, raisePhase } from '@src/raise.js';
+import type { RaiseProblem } from '@src/raise.js';
 import { assertUsableRunId } from '@src/stored.js';
 import { Escalation, EXIT, orchestrate, writeEscalation } from '@src/orchestrator.js';
 import type { ExitCode } from '@src/orchestrator.js';
@@ -63,6 +65,7 @@ import type {
   Config,
   ConfigOverrides,
   Effort,
+  Finding,
   LoadedConfig,
   RunState,
 } from '@src/types.js';
@@ -816,12 +819,23 @@ async function resumeRun(
   const answersFile = path.join(state.dir, 'NEEDS-INPUT.md');
   if (existsSync(answersFile)) {
     const raw = readFileSync(answersFile, 'utf8');
+
+    // Checked before anything else and acted on last (#141). An unfinished
+    // "### Finding:" block stops the resume here, where nothing has been spent
+    // and the file is still on disk to be corrected; the findings themselves are
+    // taken in only on the two paths that retire the file, because this function
+    // has an early return that leaves it in place and a raise consumed twice
+    // would record a re-raise nobody made.
+    const raised = parseRaised(raw);
+    if (!reportIncompleteRaises(raised.problems)) return EXIT.NEEDS_HUMAN;
+
     // A round-cap or oscillation stall writes the same filename but reports
     // findings rather than questions. Demanding answers there made those runs
     // unresumable: there was nothing to answer, and the only way forward was
     // to delete the file by hand.
     if (!raw.includes('**Your answer:**')) {
       log.info('Previous stop reported findings, not questions - continuing with raised limits.');
+      takeRaisedFindings(state, targetDir, raised.findings);
       renameSync(answersFile, path.join(state.dir, `stalled-${state.planRound}.md`));
       log.heading(`Resuming ${state.id}`);
       return execute(state, cfg, true, flags.skipProbe === true, REAL_GATE, loop, handle);
@@ -831,8 +845,15 @@ async function resumeRun(
     if (answers.length === 0) {
       log.fail(`No answers found in ${answersFile}`);
       log.info('Fill in the "**Your answer:**" blocks (replace the empty "> " line), then resume.');
+      if (raised.findings.length > 0) {
+        log.info(
+          `The ${raised.findings.length} finding(s) you raised are still in the file and will be ` +
+            'taken in once the answers are there - nothing was lost and nothing was recorded.',
+        );
+      }
       return EXIT.NEEDS_HUMAN;
     }
+    takeRaisedFindings(state, targetDir, raised.findings);
     log.ok(`Picked up ${answers.length} answer(s) from NEEDS-INPUT.md`);
     state.pendingAnswers = answers;
     // On the same write that stores them, so there is no window where the run
@@ -966,6 +987,56 @@ async function cmdFork(args: readonly string[]): Promise<ExitCode> {
     );
   }
   return EXIT.OK;
+}
+
+/**
+ * A block somebody began and did not finish stops the resume. True to continue.
+ *
+ * **Refuse, never repair**, and the direction is the point. A block missing its
+ * severity could be defaulted to P2 - it would resume, and put a severity nobody
+ * chose into the one record that exists to say who chose what. It could be
+ * dropped - it would resume, and a person's work would vanish with no sign. So
+ * it is reported: nothing has been spent, the file is still there, and the run
+ * is still at its checkpoint.
+ */
+function reportIncompleteRaises(problems: readonly RaiseProblem[]): boolean {
+  if (problems.length === 0) return true;
+  log.fail(`${problems.length} "### Finding:" block(s) in NEEDS-INPUT.md are incomplete.`);
+  for (const p of problems) log.info(`  - ${p.heading}: ${p.reason}`);
+  log.info('Nothing was raised and nothing was spent. Complete or delete those blocks, then resume.');
+  return false;
+}
+
+/**
+ * Findings a human wrote into `NEEDS-INPUT.md`, taken into the run (#141).
+ *
+ * Beside `parseHumanAnswers` rather than inside `resumeRun`, for the reason that
+ * one is exported: this is a decision about a file, and both front ends reach it
+ * through `main()`.
+ */
+function takeRaisedFindings(state: RunState, cwd: string, findings: readonly Finding[]): void {
+  if (findings.length === 0) return;
+
+  const phase = raisePhase(resumePhase(state));
+  if (phase === null) {
+    // Said rather than dropped, and it does not stop the resume: the run has
+    // finished, so there is no turn left to hand this to, and recording it as
+    // carried would be a claim that something will act on it.
+    log.warn(
+      `${findings.length} finding(s) were raised in NEEDS-INPUT.md, but this run has already ` +
+        'finished - there is no round left to fix them. "vibe fork" a checkpoint to reopen it.',
+    );
+    return;
+  }
+
+  const { added, downgraded } = acceptRaised(state, cwd, phase, findings);
+  log.ok(`Raised ${findings.length} finding(s) by hand; ${added.length} carried into the next round.`);
+  if (downgraded.length > 0) {
+    log.warn(
+      `${downgraded.length} of them cited nothing that resolves and are carried as P2 - the same ` +
+        'rule the reviewer\'s findings are held to.',
+    );
+  }
 }
 
 /**
