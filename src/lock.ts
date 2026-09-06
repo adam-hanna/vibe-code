@@ -154,6 +154,35 @@ function parseLock(text: string): RunLock | null {
 }
 
 /**
+ * How the verdict asks the OS whether a pid is alive.
+ *
+ * A parameter with a default rather than a bare call, and the reason is a defect
+ * in this repo's own suite rather than an anticipated second implementation
+ * (#164). There is **no such thing as a portably dead pid**, so a test wanting
+ * the `interrupted` verdict had to *obtain* one - spawn a process, read its pid,
+ * let it exit - and that returns the pid at the top of the OS's allocation
+ * pointer, which is the single likeliest number for the next spawn to be handed
+ * back. This suite spawns a great many (`node --test` runs files in parallel,
+ * the loop harness runs real `git`, the preflight suites spawn probes), and it
+ * duly came back: a green `develop` went red with `livenessOf` giving the
+ * correct answer to the question it had been asked.
+ *
+ * The two obvious escapes do not exist. **A pid the OS cannot issue** is refused
+ * upstream of here - `parseLock` rejects any pid that is not a positive integer,
+ * so a lock naming `0` or `-1` reads as `unknown`, never as `interrupted`, and
+ * the probe never sees it. **A number simply larger than any real pid** is a
+ * guess about `pid_max` on one kernel that says nothing about Windows.
+ *
+ * So the premise becomes something a case can state instead of arrange. This is
+ * the same shape as `execute`'s `preflightGate` and `loop` parameters: a seam
+ * with a real default, not a mutable hook that production code has to consult.
+ * The real probe keeps its coverage - `pid-liveness.test.ts` drives it directly,
+ * and every case about a *live* process still uses a genuinely live one, because
+ * that half was never the flaky one.
+ */
+export type PidProbe = (pid: number) => 'running' | 'interrupted' | 'unknown';
+
+/**
  * What a pid probe can honestly conclude - three answers, not two.
  *
  * `process.kill(pid, 0)` sends no signal and only asks. Success and `EPERM` both
@@ -171,7 +200,7 @@ function parseLock(text: string): RunLock | null {
  * command line) is another platform-specific probe that can be wrong in the
  * unsafe direction.
  */
-function probePid(pid: number): 'running' | 'interrupted' | 'unknown' {
+export const probePid: PidProbe = (pid) => {
   try {
     process.kill(pid, 0);
     return 'running';
@@ -181,7 +210,7 @@ function probePid(pid: number): 'running' | 'interrupted' | 'unknown' {
     if (code === 'ESRCH') return 'interrupted';
     return 'unknown';
   }
-}
+};
 
 /**
  * Whether the run's stored config had the progress heartbeat switched off.
@@ -226,8 +255,11 @@ function quietSince(raw: unknown): number | null {
  *
  * `raw` is the parsed `state.json` when the caller already has it, and is only
  * used for the quiet figure. Omitting it costs the colour, never the verdict.
+ *
+ * `probe` defaults to the real one and exists so a caller can state a premise
+ * the OS will not reliably supply - see `PidProbe`.
  */
-export function livenessOf(dir: string, raw?: unknown): LivenessVerdict {
+export function livenessOf(dir: string, raw?: unknown, probe: PidProbe = probePid): LivenessVerdict {
   const quietMs = quietSince(raw);
   // Read unconditionally, including on the paths that go on to report a live
   // process. A stamp beside a live lock is a contradiction worth being able to
@@ -255,7 +287,7 @@ export function livenessOf(dir: string, raw?: unknown): LivenessVerdict {
   // Tri-state on purpose: a probe that failed for any reason other than "no such
   // process" is `unknown`, which refuses, rather than `interrupted`, which
   // proceeds. See `probePid`.
-  return { liveness: probePid(lock.pid), lock, quietMs, ending };
+  return { liveness: probe(lock.pid), lock, quietMs, ending };
 }
 
 function formatQuiet(ms: number): string {
@@ -351,11 +383,15 @@ function permits(liveness: Liveness): boolean {
  * dead - which reads as `interrupted`, which is exactly what happened and the
  * case the whole design is built around. Installing one would change how the
  * process exits and what code it returns, to make a stale lock slightly tidier.
+ *
+ * `probe` is passed straight to `livenessOf` and defaults to the real one; see
+ * `PidProbe` for why it is a parameter.
  */
 export function acquireLock(
   dir: string,
   id: string,
   force: boolean,
+  probe: PidProbe = probePid,
 ): { ok: boolean; verdict: LivenessVerdict; handle: LockHandle | null } {
   let raw: unknown;
   try {
@@ -365,7 +401,7 @@ export function acquireLock(
     // quiet figure is simply absent, which is what it is for.
     raw = undefined;
   }
-  const verdict = livenessOf(dir, raw);
+  const verdict = livenessOf(dir, raw, probe);
   if (!permits(verdict.liveness) && !force) return { ok: false, verdict, handle: null };
 
   const lock: RunLock = {

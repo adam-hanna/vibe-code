@@ -1,6 +1,5 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -11,6 +10,7 @@ import type { RunLock } from '@src/lock.js';
 import { createRun, saveState } from '@src/run.js';
 import { DEFAULTS } from '@src/config.js';
 import type { Config, RunState } from '@src/types.js';
+import { absentPid } from './helpers/pids.js';
 
 /**
  * What `vibe resume` does before it has permission.
@@ -63,13 +63,16 @@ function plant(dir: string, over: Partial<RunLock>): void {
   writeFileSync(lockPath(dir), JSON.stringify(lock, null, 2), 'utf8');
 }
 
-function deadPid(): number {
-  return Number(
-    execFileSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], {
-      encoding: 'utf8',
-    }).trim(),
-  );
-}
+/**
+ * The two cases below plant a pid the OS is not using, from `helpers/pids.js`.
+ *
+ * They drive the real `main`, so the real probe is part of the path they are
+ * about and there is nowhere to inject a `PidProbe` - unlike a case about what
+ * a verdict *means*, which now states its premise instead (#164). What they had
+ * before was a pid harvested by spawning a process and letting it exit, which is
+ * the number the OS is about to hand out next; the helper says what replaced it
+ * and what residual is left.
+ */
 
 /** Both streams: `log.fail` writes to stderr, and the refusals under test are fails. */
 async function captureLog<T>(work: () => Promise<T>): Promise<{ result: T; lines: string[] }> {
@@ -254,7 +257,7 @@ test('--force takes a live lock and says what it overrode', async () => {
 
 test('a resume over an interrupted lock needs no force', async () => {
   const { targetDir, state } = completed();
-  plant(state.dir, { pid: deadPid() });
+  plant(state.dir, { pid: absentPid() });
 
   const { result, lines } = await captureLog(() =>
     main(['resume', state.id, '-C', targetDir, '--skip-probe', '--no-progress']),
@@ -279,7 +282,7 @@ test('a resume over a dead lock says who held it, and how it went away', async (
   // is the one the pid could not supply: with no `ending.json` beside the lock,
   // the process ran none of its own code on the way out.
   const { targetDir, state } = completed();
-  const pid = deadPid();
+  const pid = absentPid();
   plant(state.dir, { pid, startedAt: '2026-08-26T09:00:00.000Z' });
 
   const { result, lines } = await captureLog(() =>
