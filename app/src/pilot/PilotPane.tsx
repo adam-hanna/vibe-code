@@ -4,6 +4,19 @@ import * as keys from './keys';
 import * as pilot from './pilot';
 import { declare, execute } from './tools';
 import {
+  costOf,
+  describeDay,
+  formatUsd,
+  limitVerdict,
+  readLedger,
+  readLimits,
+  record,
+  today,
+  writeLedger,
+  writeLimits,
+} from './ledger';
+import type { Ledger, PilotLimits } from './ledger';
+import {
   answerOf,
   ask,
   decide,
@@ -198,6 +211,91 @@ function CallCard({
   );
 }
 
+/**
+ * What this one turn is estimated to have cost, or why there is no figure (#145).
+ *
+ * **This is the first place in the product where a dollar is a dollar.** The
+ * run's `costUsd` is documented as *not money* — a proxy for work volume on a
+ * subscription — and this one is money, on a card, from an API key. So it says
+ * *estimated* and names the date the price was read, and it is never drawn
+ * anywhere the run's figure is drawn.
+ *
+ * A turn with no price reports the reason in the place the figure would have
+ * been, rather than a blank or a zero.
+ */
+function TurnPrice({ reply }: { reply: Reply }) {
+  if (reply.usage === null) return null;
+  const cost = costOf(reply.provider, reply.model, reply.usage);
+  if (cost.usd === null) {
+    return <span className="v-pilot__price v-pilot__price--absent"> · cost: {cost.why}</span>;
+  }
+  return (
+    <span className="v-pilot__price">
+      {' · '}~{formatUsd(cost.usd)} estimated
+      {cost.price !== null && (
+        <span className="v-pilot__price-note"> (published prices, read {cost.price.takenOn})</span>
+      )}
+    </span>
+  );
+}
+
+/**
+ * The pilot's own ceiling, set here and nowhere else (#145).
+ *
+ * **Two fields, both blank by default, and blank means no ceiling.** A hard
+ * default cap on a conversation is the kind of thing that stops you mid-sentence
+ * for no good reason - but this is the first real spend in the product, and a
+ * runaway loop in a chat is as possible as one anywhere else, so it exists and
+ * is off.
+ *
+ * Per day rather than per session: a conversation has no natural end, so
+ * `maxTokens`' shape does not transfer, and a day is the window both vendors'
+ * own dashboards use. The labels say *pilot* because the run has two ceilings of
+ * its own and a user must never wonder which one they just changed.
+ */
+function PilotLimitFields({
+  limits,
+  onChange,
+}: {
+  limits: PilotLimits;
+  onChange: (limits: PilotLimits) => void;
+}) {
+  // A blank field is no ceiling, and a value that is not a positive number is
+  // also no ceiling - refusing to store a ceiling nobody could have meant,
+  // rather than storing a zero that would stop everything.
+  const read = (raw: string): number | null => {
+    const n = Number(raw);
+    return raw.trim() !== '' && Number.isFinite(n) && n > 0 ? n : null;
+  };
+  return (
+    <span className="v-pilot__limits">
+      <label className="v-pilot__limit">
+        pilot tokens/day
+        <input
+          className="v-pilot__limit-input"
+          type="number"
+          min="1"
+          placeholder="no limit"
+          value={limits.dailyTokens ?? ''}
+          onChange={(e) => onChange({ ...limits, dailyTokens: read(e.target.value) })}
+        />
+      </label>
+      <label className="v-pilot__limit">
+        pilot $/day
+        <input
+          className="v-pilot__limit-input"
+          type="number"
+          min="0.01"
+          step="0.01"
+          placeholder="no limit"
+          value={limits.dailyUsd ?? ''}
+          onChange={(e) => onChange({ ...limits, dailyUsd: read(e.target.value) })}
+        />
+      </label>
+    </span>
+  );
+}
+
 function ReplyCard({
   reply,
   conversation,
@@ -244,7 +342,10 @@ function ReplyCard({
           part is missing from an OpenAI line — and a reader can tell that apart
           from a cache write of zero, which is the entire point. */}
       {reply.usage !== null && (
-        <div className="v-pilot__spend">{spendParts(reply.usage).join(' · ')}</div>
+        <div className="v-pilot__spend">
+          {spendParts(reply.usage).join(' · ')}
+          <TurnPrice reply={reply} />
+        </div>
       )}
       {reply.usage === null && outcome !== null && (
         <div className="v-pilot__spend">
@@ -279,6 +380,12 @@ export function PilotPane({ run, onEffect, onPending }: PilotPaneProps) {
   const [model, setModel] = useState<string>(pilot.MODELS.anthropic[0] ?? '');
   const [entry, setEntry] = useState('');
   const [live, setLive] = useState<number | null>(null);
+  // The pilot's own books (#145). Read from `localStorage` at mount, because a
+  // per-day ceiling that reset when the app restarted would not be a ceiling.
+  const [ledger, setLedger] = useState<Ledger>(readLedger);
+  const [limits, setLimits] = useState<PilotLimits>(readLimits);
+  /** Turns already in the books, so a re-render cannot bill one twice. */
+  const counted = useRef<Set<number>>(new Set());
   /** The chain ran out and the pilot is holding for a person. */
   const [stalled, setStalled] = useState(false);
 
@@ -332,6 +439,39 @@ export function PilotPane({ run, onEffect, onPending }: PilotPaneProps) {
     }
   }, [conversation.replies, run]);
 
+  // Each finished turn into the pilot's books, once (#145).
+  //
+  // On the terminal event rather than on each `spent`: a `spent` carries the
+  // turn's RUNNING TOTAL, so adding them as they arrive would bill the same
+  // tokens once per event - the expensive twin of the undercount `parseClaudeLine`
+  // documents on the core side.
+  //
+  // Only turns the vendor reported usage for. A turn that failed before it said
+  // anything spent nothing anyone can attribute, and recording it would put a
+  // zero where "measured nothing" belongs and a tick in `unpriced`, which means
+  // something else entirely.
+  useEffect(() => {
+    const fresh = conversation.replies.filter(
+      (reply) => reply.outcome !== null && reply.usage !== null && !counted.current.has(reply.turn),
+    );
+    if (fresh.length === 0) return;
+    let next = ledger;
+    const at = new Date();
+    for (const reply of fresh) {
+      counted.current.add(reply.turn);
+      if (reply.usage === null) continue;
+      next = record(next, costOf(reply.provider, reply.model, reply.usage), at);
+    }
+    setLedger(next);
+    writeLedger(next);
+  }, [conversation.replies, ledger]);
+
+  const day = today(ledger, new Date());
+  // Checked before a turn rather than during one: a ceiling that stopped a reply
+  // half-written would spend the tokens and lose the answer, which is worse than
+  // either outcome it is choosing between.
+  const verdict = limitVerdict(ledger, limits, new Date());
+
   const start = useCallback(
     (messages: readonly pilot.Message[], said: string | null) => {
       void pilot
@@ -369,6 +509,11 @@ export function PilotPane({ run, onEffect, onPending }: PilotPaneProps) {
   // second pass finds the turn already sent rather than sending it twice.
   useEffect(() => {
     if (!owesReply) return;
+    // The pilot's ceiling stops the unattended half too, and this is the
+    // unattended half: a chain of tool calls answering itself is exactly the
+    // runaway a spend limit exists for (#145). The banner below says which
+    // limit stopped it, so this does not look like the stall above.
+    if (!verdict.allowed) return;
     if (chain.current >= MAX_CHAIN) {
       // State rather than a ref read during render: nothing else re-renders at
       // this point, so a banner conditioned on the ref would never appear and
@@ -380,9 +525,17 @@ export function PilotPane({ run, onEffect, onPending }: PilotPaneProps) {
     sentAt.current = conversation.messages.length;
     chain.current += 1;
     start(conversation.messages, null);
-  }, [owesReply, conversation.messages, start]);
+  }, [owesReply, conversation.messages, start, verdict.allowed]);
 
-  const ready = statuses !== null && keys.usable(statuses).includes(provider) && owed.length === 0;
+  const ready =
+    statuses !== null &&
+    keys.usable(statuses).includes(provider) &&
+    owed.length === 0 &&
+    // The pilot's own ceiling, which is off unless somebody set one. It gates
+    // the tool loop as well as the composer: a chain of tool calls is exactly
+    // the runaway this exists to stop, and stopping only the human's messages
+    // would guard the half that is already attended.
+    verdict.allowed;
 
   useEffect(() => {
     onPending?.(proposals.length);
@@ -459,6 +612,27 @@ export function PilotPane({ run, onEffect, onPending }: PilotPaneProps) {
           </span>
         )}
       </div>
+
+      {/* The pilot's own books, in the pilot's own row (#145).
+          NEVER beside the run's figure and never summed with it: the word `cost`
+          means two things on one screen — a proxy for work volume beside a run,
+          which is not money, and this, which is. Hi-fi 11 solved the harder
+          version of the same problem by making the asymmetry the point. */}
+      <div className="v-pilot__books">
+        <span className="v-pilot__note">{describeDay(day)}</span>
+        <PilotLimitFields
+          limits={limits}
+          onChange={(next) => {
+            setLimits(next);
+            writeLimits(next);
+          }}
+        />
+      </div>
+      {!verdict.allowed && verdict.why !== null && (
+        <div className="v-pilot__note v-pilot__note--alarm">
+          The pilot has stopped: {verdict.why}
+        </div>
+      )}
 
       <div className="v-pilot__log">
         {conversation.replies.length === 0 && conversation.live === null && (
