@@ -618,6 +618,15 @@ than the module (`convergence.test.ts`, `failure-accounting.test.ts`,
   look broken. Compute times relative to now.
 - **No network, no real agent invocations.** `tests/helpers/fake-transport.ts` and
   `tests/helpers/stub-server.ts` are the injection points.
+- **A fixture that shells out says what the command said.** `initGit` ran four `git`
+  invocations under `stdio: 'ignore'`, so the day two of them failed the suite went red
+  with `Command failed: git config user.email …`, `stderr: null`, and no way to choose
+  between an index lock, a held handle and a scanner (#182). Capturing stderr is the
+  prerequisite for deciding anything else on evidence. **A retry is allowed only where
+  running the command twice leaves the same repository** — `gitRetryable` is that rule, and
+  `commit` is deliberately outside it — and a retry that fires **says so on stderr**, because
+  a suite that went green because of one has to admit it. Note the direction this points:
+  `commitAll` already tolerates a git failure, so the harness was stricter than the product.
 
 The phase loop **is** drivable from a test: `tests/helpers/loop-harness.ts` runs `orchestrate`
 end to end with injected agents that record every turn's label in order, a run state in a
