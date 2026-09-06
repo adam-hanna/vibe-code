@@ -299,6 +299,85 @@ export interface RunOptions {
   commit?: boolean;
 }
 
+/** One `git` invocation against a fixed directory. A seam, so a case can decide what fails. */
+export type GitRunner = (args: readonly string[]) => void;
+
+/**
+ * What git said, or an honest account of it having said nothing.
+ *
+ * `stdio: 'ignore'` used to discard this, so a failure read `Command failed: git
+ * config user.email vibe@example.invalid` with `stderr: null` and the cause was
+ * a guess forever after - an index lock, a handle held on a just-created
+ * `.git/config`, a scanner, all consistent with the evidence and none of them
+ * distinguishable from it (#182). An empty stderr is itself a finding and is
+ * reported as one rather than dressed up: git failing silently and git failing
+ * with a reason are different things to be told.
+ */
+function gitSaid(err: unknown): string {
+  const said = (err as { stderr?: unknown } | null)?.stderr;
+  const text = typeof said === 'string' ? said.trim() : '';
+  if (text !== '') return text;
+  const message = (err as { message?: unknown } | null)?.message;
+  return `git said nothing on stderr (${typeof message === 'string' ? message : String(err)})`;
+}
+
+/** The real runner. Exported so a case can watch a genuine git failure carry git's own words. */
+export function gitIn(targetDir: string): GitRunner {
+  return (args) => {
+    try {
+      // stderr piped rather than ignored: it is the whole point. stdout is piped
+      // and dropped, which is what `ignore` achieved for the quiet commands here.
+      execFileSync('git', [...args], {
+        cwd: targetDir,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (err: unknown) {
+      throw new Error(`git ${args.join(' ')} failed in ${targetDir}: ${gitSaid(err)}`);
+    }
+  };
+}
+
+/**
+ * Whether a failed `git <args>` may simply be run again.
+ *
+ * A property, not a list of what has been seen to fail: these three leave the
+ * same repository whether they run once or twice, so a second attempt cannot
+ * make anything worse than the first already did. `commit` is deliberately not
+ * among them - an attempt that committed and then failed on the way out would
+ * meet `nothing to commit` on the retry, turning an environmental blip into a
+ * failure that means something else entirely.
+ *
+ * This is the harness catching up with the product rather than going past it:
+ * `commitAll` already warns and returns null when git fails, so the loop has
+ * always tolerated what the fixture treated as impossible.
+ */
+export function gitRetryable(args: readonly string[]): boolean {
+  return args[0] === 'init' || args[0] === 'config' || args[0] === 'add';
+}
+
+/** Run it, and once more if that is safe - saying so either way. */
+function runGit(run: GitRunner, args: readonly string[]): void {
+  try {
+    run(args);
+    return;
+  } catch (err: unknown) {
+    if (!gitRetryable(args)) throw err;
+    // On stderr and not swallowed: a suite that went green because of a retry
+    // has to say so in its own output, or this becomes the retry that hides a
+    // real defect - the move `src/verify.ts` names as one of the three cheap
+    // ways to make a noisy gate pass.
+    process.stderr.write(`initGit: retrying once after a failure (#182): ${String(err)}\n`);
+    try {
+      run(args);
+    } catch (second: unknown) {
+      throw new Error(
+        `git ${args.join(' ')} failed twice. First: ${String(err)} Second: ${String(second)}`,
+      );
+    }
+  }
+}
+
 /**
  * A git repo the loop can be pointed at.
  *
@@ -306,19 +385,27 @@ export interface RunOptions {
  * `commitAll` warns and returns null when `git commit` fails, so a missing
  * `user.email` would make a commit assertion read as "the loop did not commit"
  * instead of "the fixture is broken".
+ *
+ * That sentence is also what rules out the tidiest-looking fix for #182 -
+ * dropping the three `git config` calls and passing `-c user.email=...` on the
+ * invocations that need them. It would remove three processes and three writes
+ * to `.git/config`, and it would fix the wrong git: `src/git.ts` builds its own
+ * argv and spawns its own child, so the identity has to be *in the repository*
+ * for the loop's commits to work at all. The harness's own flags never reach it.
  */
-export function initGit(targetDir: string, options: { commit?: boolean } = {}): void {
-  const git = (...args: string[]): void => {
-    execFileSync('git', args, { cwd: targetDir, stdio: 'ignore' });
-  };
-  git('init', '-q', '-b', 'main');
-  git('config', 'user.email', 'vibe@example.invalid');
-  git('config', 'user.name', 'vibe tests');
-  git('config', 'commit.gpgsign', 'false');
+export function initGit(
+  targetDir: string,
+  options: { commit?: boolean; run?: GitRunner } = {},
+): void {
+  const run = options.run ?? gitIn(targetDir);
+  runGit(run, ['init', '-q', '-b', 'main']);
+  runGit(run, ['config', 'user.email', 'vibe@example.invalid']);
+  runGit(run, ['config', 'user.name', 'vibe tests']);
+  runGit(run, ['config', 'commit.gpgsign', 'false']);
   if (options.commit === true) {
     writeFileSync(path.join(targetDir, 'README.md'), '# base\n', 'utf8');
-    git('add', '-A');
-    git('commit', '-q', '-m', 'base');
+    runGit(run, ['add', '-A']);
+    runGit(run, ['commit', '-q', '-m', 'base']);
   }
 }
 

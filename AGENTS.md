@@ -627,6 +627,15 @@ than the module (`convergence.test.ts`, `failure-accounting.test.ts`,
   rule lives. **Raising the timeout is not the fix**: it is already 25× the worst loaded
   start-up measured, and every second added is a second a real hang looks like a slow
   machine, times the 24 children one case spawns.
+- **A fixture that shells out says what the command said.** `initGit` ran four `git`
+  invocations under `stdio: 'ignore'`, so the day two of them failed the suite went red
+  with `Command failed: git config user.email …`, `stderr: null`, and no way to choose
+  between an index lock, a held handle and a scanner (#182). Capturing stderr is the
+  prerequisite for deciding anything else on evidence. **A retry is allowed only where
+  running the command twice leaves the same repository** — `gitRetryable` is that rule, and
+  `commit` is deliberately outside it — and a retry that fires **says so on stderr**, because
+  a suite that went green because of one has to admit it. Note the direction this points:
+  `commitAll` already tolerates a git failure, so the harness was stricter than the product.
 
 The phase loop **is** drivable from a test: `tests/helpers/loop-harness.ts` runs `orchestrate`
 end to end with injected agents that record every turn's label in order, a run state in a
