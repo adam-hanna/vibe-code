@@ -144,6 +144,13 @@ export {
 } from '@src/charge.js';
 export type { ExitCode, TurnCharge, TurnSpend } from '@src/charge.js';
 
+// Aliased on import, because `describeEnding` also names the *process*-ending
+// renderer in @src/ending.js and the two answer different questions - "the
+// child was killed by SIGKILL" against "this vibe process was sent SIGTERM".
+// One name for both in the file that records the first would be the confusion
+// the pair exists to remove (#131).
+import { describeEnding as describeChildEnding, endingOf, isAbnormal } from '@src/proc.js';
+
 /**
  * A write turn is about to start, so this run can no longer vouch for any
  * report (#50).
@@ -2661,6 +2668,28 @@ async function withRateLimitRetry<T>(
       return await work();
     } catch (err) {
       onFailure?.(err);
+      // How the child ended, before the charge and independent of it (#131).
+      //
+      // Not folded into `turn_failed`: `chargeFailure` returns early without an
+      // event when the attempt spent nothing, and a turn killed in its first
+      // seconds is exactly the case that spends nothing AND is exactly the case
+      // whose ending a reader most wants. Tying the record of *how* to the
+      // record of *how much* would have lost it precisely there.
+      //
+      // Silent when the failure carried no ending, because most do not: a rate
+      // limit detected mid-stream and a schema the adapter refused are not
+      // children ending, and reporting `exit 0` for them would put an ending on
+      // every failure in the run and make the real ones unfindable.
+      const ending = endingOf(err);
+      if (ending !== null && isAbnormal(ending)) {
+        recordAndSay(
+          state,
+          'warn',
+          'child_ended',
+          `The ${provider} process for "${label}" ${describeChildEnding(ending)}.`,
+          { label, provider, code: ending.code, signal: ending.signal },
+        );
+      }
       // What this attempt spent, whether or not it is retryable, and per attempt
       // rather than per turn: a turn that burns tokens, fails, waits and burns
       // them again used to have nothing consulted between the two. Any ceiling

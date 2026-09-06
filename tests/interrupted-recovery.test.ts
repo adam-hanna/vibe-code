@@ -45,7 +45,7 @@ function config(over: Partial<Config> = {}): Config {
 /** A handle as `acquireLock` would have produced it for a given verdict. */
 function handleFor(liveness: LivenessVerdict['liveness'], forced: boolean): LockHandle {
   return {
-    verdict: { liveness, lock: null, quietMs: null },
+    verdict: { liveness, lock: null, quietMs: null, ending: null },
     forced,
     release: () => {},
   };

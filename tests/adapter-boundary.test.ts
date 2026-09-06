@@ -46,11 +46,22 @@ function progressRecorder(): { options: ProgressOptions; sources: string[] } {
  * Without it there would be no line for `flush` to persist, and every assertion
  * about flushing would pass vacuously.
  */
-function fakeExec(code: number | null, lines: readonly string[], after?: () => void): RunFn {
+function fakeExec(
+  code: number | null,
+  lines: readonly string[],
+  after?: () => void,
+  /** How the child died, where the case is about that rather than about output. */
+  signal: NodeJS.Signals | null = null,
+): RunFn {
   return (_bin, _args, options): Promise<RunResult> => {
     for (const line of lines) options?.onLine?.(line);
     after?.();
-    return Promise.resolve({ code, stdout: lines.map((line) => `${line}\n`).join(''), stderr: '' });
+    return Promise.resolve({
+      code,
+      signal,
+      stdout: lines.map((line) => `${line}\n`).join(''),
+      stderr: '',
+    });
   };
 }
 
@@ -360,6 +371,7 @@ function capture(): { args: string[][]; exec: RunFn } {
       for (const line of [ASSISTANT, SUCCESS]) options?.onLine?.(line);
       return Promise.resolve({
         code: 0,
+        signal: null,
         stdout: `${ASSISTANT}\n${SUCCESS}\n`,
         stderr: '',
       });
@@ -433,12 +445,17 @@ function codexWithFork(
     if (argv[2] === '--help') {
       return Promise.resolve(
         flags === null
-          ? { code: 1, stdout: '', stderr: '' }
-          : { code: 0, stdout: `Usage: codex exec fork\n\n${flags.join('\n')}\n`, stderr: '' },
+          ? { code: 1, signal: null, stdout: '', stderr: '' }
+          : {
+              code: 0,
+              signal: null,
+              stdout: `Usage: codex exec fork\n\n${flags.join('\n')}\n`,
+              stderr: '',
+            },
       );
     }
     writeFileSync(outPath(dir), JSON.stringify({ verdict: 'APPROVE' }), 'utf8');
-    return Promise.resolve({ code: 0, stdout: '', stderr: '', ...extra(argv) });
+    return Promise.resolve({ code: 0, signal: null, stdout: '', stderr: '', ...extra(argv) });
   };
   return { args, exec };
 }
@@ -474,7 +491,7 @@ test('codex: an ordinary one-shot turn is still `exec`, and a resume still `exec
   const exec: RunFn = (_bin, argv): Promise<RunResult> => {
     args.push([...argv]);
     writeFileSync(outPath(dir), JSON.stringify({ verdict: 'APPROVE' }), 'utf8');
-    return Promise.resolve({ code: 0, stdout: '', stderr: '' });
+    return Promise.resolve({ code: 0, signal: null, stdout: '', stderr: '' });
   };
 
   await codexTurn(codexOptions(dir, options), exec);

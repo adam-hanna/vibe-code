@@ -253,6 +253,26 @@ The pid probe sends no signal; it only asks whether the process exists. Its answ
 
 A resume over an *interrupted* lock proceeds and says so first, naming the process that did not finish — whether or not it left anything to recover.
 
+### Which process died first
+
+*Interrupted* is a verdict about a pid, and a pid cannot say why it is gone. It has always covered two opposite situations: vibe decided to stop and never got to tidy up, and something killed it mid-turn. Two runs in August 2026 were stopped that way with no error, no exit code and nothing in the OS event log, and nothing in the product could tell those apart.
+
+So a departing process now writes `ending.json` beside its lock, and both halves of a stopped run are recorded:
+
+| lock | `ending.json` | what happened |
+|---|---|---|
+| dead pid | present | the process ended under its own control — the lock is litter |
+| dead pid | absent | something terminated it without running a line of its own code |
+| live pid | absent | a run is going on right now |
+
+The middle row is the point. It is not a diagnosis — it does not say *what* terminated the process — but every ending vibe is capable of choosing writes a stamp, so no stamp rules all of them out. A resume prints the previous process's ending before it starts and records it in the event log, because installing a new stamp destroys the old one and that record is the whole finding.
+
+**Ctrl-C is untouched.** `SIGINT` is deliberately not stamped: the three signals that are — `SIGTERM`, `SIGBREAK` and `SIGHUP`, none of which can arrive from a keyboard — are recorded and then re-raised, so the process dies exactly as it would have, with the same exit status. Ctrl-C still leaves a lock behind with a dead pid and no stamp, exactly as before.
+
+On the child's side, `close(code, signal)` always carried the signal and vibe always dropped it, so a killed turn and a turn that exited non-zero reached the run record as the same fact. A turn whose child ends abnormally now records `child_ended` with the code, the signal and which agent it was — and it is recorded independently of the charge, because a turn killed in its first seconds spends nothing to charge and is exactly the one whose ending you want.
+
+**One limit, and it is Windows-shaped.** Windows has no signals. Task Manager, `Stop-Process`, and any kill from a process that did not spawn the child all become `TerminateProcess`, so the child closes with an exit code and no signal at all — *an outside kill is not observable as a kill there*. The signal is the sharper answer where the OS supplies one and never the complete one, which is why the parent's own stamp is the half that carries the finding on Windows.
+
 A refusal prints who holds the lock and, where the run kept the liveness timestamps, how long it has been since vibe observed anything. That line is omitted for a run whose progress heartbeat is off, including one that recorded activity before it was turned off: nothing is advancing that timestamp any more, so quoting it would report a silence nobody is measuring. That figure is stated as an observation and never as a verdict, for the reason above.
 
 ### What a resume can recover, and what it cannot
@@ -438,6 +458,7 @@ NEEDS-INPUT.md             written when the run stops for you
 OUTSTANDING.md             carried P1s: fixed in a final round, but not re-reviewed
 FOLLOW-UPS.md              deferred findings and the plan's declared out-of-scope work
 state.json                 resumable state, tokens, cost, event log, turnStartedAt/lastActivityAt/lastOutputAt
+ending.json                how the last process to hold this run went away — absent means it never got to say
 checkpoint-1.json ...      the state as it stood at each phase/round boundary — what `vibe fork` reads
 transcript.log
 codex/                     raw schema and output files

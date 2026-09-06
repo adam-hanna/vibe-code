@@ -265,11 +265,19 @@ test('a resume over an interrupted lock needs no force', async () => {
   assert.equal(existsSync(lockPath(state.dir)), false, 'and the lock was released at the end');
 });
 
-test('a resume over an interrupted lock says the previous process was interrupted', async () => {
+test('a resume over a dead lock says who held it, and how it went away', async () => {
   // A completed run with nothing in flight: the recovery report has nothing to
   // say, and before this the resume was silent about the kill entirely. The
   // fact that the last process did not finish is the lock's to report, not the
   // accounting's, and it is true whether or not anything was left to charge.
+  //
+  // This used to assert the word "interrupted", and that part of the claim did
+  // not survive #131: a dead pid has two opposite causes and the pid alone was
+  // never evidence for the worse one. What it was really pinning - that the
+  // resume announces the previous process, names it and says when it started -
+  // is unchanged and is still asserted. The new clause is the third fact, which
+  // is the one the pid could not supply: with no `ending.json` beside the lock,
+  // the process ran none of its own code on the way out.
   const { targetDir, state } = completed();
   const pid = deadPid();
   plant(state.dir, { pid, startedAt: '2026-08-26T09:00:00.000Z' });
@@ -280,7 +288,8 @@ test('a resume over an interrupted lock says the previous process was interrupte
 
   assert.equal(result, EXIT.OK);
   const said = lines.join('\n');
-  assert.match(said, /interrupted/);
+  assert.match(said, /no longer running/);
+  assert.match(said, /nothing recorded how it ended/);
   assert.match(said, new RegExp(`pid ${String(pid)}`), 'names who it was');
   assert.match(said, /2026-08-26T09:00:00\.000Z/, 'and when it started');
 });

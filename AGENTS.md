@@ -105,6 +105,29 @@ line: an escalation narrates at `warn`, and a healthy run is full of warnings th
 ending. `run_failed` also prints a stack while carrying the sentence separately, because a
 terminal wants the frames and a footer wants the answer to "what now" (#162).
 
+**That covers the endings vibe chooses. `run.lock` plus `ending.json` covers the ones it
+does not.** A dead pid holding a lock has always meant two opposite things at once — vibe
+decided to stop and never tidied up, or something killed it mid-turn — and #131 is what
+separates them. Every ending vibe is *capable* of choosing writes a stamp beside the lock, so
+a lock with no stamp beside it rules all of them out. That is not a diagnosis and does not
+try to be one; it eliminates a class of causes, which is what the #87 investigation could not
+do and therefore could not look past.
+
+Two things about it are load-bearing and neither is obvious:
+
+- **`SIGINT` is deliberately not stamped**, for the reason `acquireLock` gives in the same
+  words: Ctrl-C keeps working exactly as it does. `SIGTERM`, `SIGBREAK` and `SIGHUP` are
+  stamped and then **re-raised** rather than exited — the listener is removed before it runs,
+  so the raise finds the default disposition and the process dies exactly as it would have.
+  If the re-raise ever goes, this becomes the handler `acquireLock` refuses and that refusal
+  applies to it.
+- **On Windows a child killed from outside is not observable as killed.** There are no
+  signals: Task Manager, `Stop-Process` and any `process.kill` against a process this one did
+  not spawn all become `TerminateProcess`, and the child closes with an exit code and no
+  signal. `RunResult.signal` is the sharper answer where it exists and never the complete
+  one, so the recording site asks `isAbnormal`, not `signal !== null` — and on the platform
+  this repo is developed on the *parent's* stamp is the half that carries the finding.
+
 ## Repo map
 
 ```
@@ -138,7 +161,8 @@ src/verify.ts        the verification gates — resolves the list, runs each com
 src/progress.ts      in-turn heartbeat
 src/schemas.ts       the JSON schemas both CLIs are pinned to
 src/validate.ts      parser vocabulary for model output
-src/proc.ts          child-process plumbing
+src/proc.ts          child-process plumbing, and how a child ended
+src/ending.ts        how this process ended - the stamp beside the lock
 src/git.ts           branch and commit operations
 tests/               node:test, one file per concern
 

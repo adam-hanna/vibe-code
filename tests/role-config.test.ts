@@ -483,7 +483,7 @@ function fakeExec(write: (args: readonly string[]) => void): {
     exec: (_bin, args): Promise<RunResult> => {
       argv.push([...args]);
       write(args);
-      return Promise.resolve({ code: 0, stdout: '', stderr: '' });
+      return Promise.resolve({ code: 0, signal: null, stdout: '', stderr: '' });
     },
   };
 }
