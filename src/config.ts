@@ -13,10 +13,12 @@ import {
 import type { Role, RoleProviders, RolePatches, RoleTable } from '@src/roles.js';
 import { setOwn } from '@src/runtime.js';
 import type { AgentProvider, ToolchainContract, ToolRequirement, Phase } from '@src/runtime.js';
+import { DEFAULT_GATES, validateGates } from '@src/gates.js';
 import { EFFORTS } from '@src/types.js';
 import type {
   Config,
   ConfigOverrides,
+  GatesConfig,
   LoadedConfig,
   Sandbox,
   VerifyConfig,
@@ -137,6 +139,9 @@ export const DEFAULTS: Config = {
     compactAboveRatio: 0.5,
     compactDuringCodex: true,
   },
+  // Every row `step`, which is what the loop did before there was a table -
+  // see DEFAULT_GATES for why that, and not the default anyone would choose.
+  gates: DEFAULT_GATES,
   verify: {
     enabled: true,
     // Auto-detected from package.json unless set.
@@ -237,6 +242,24 @@ function mergeRoles(base: RoleProviders, override: unknown): RoleProviders {
   return out as unknown as RoleProviders;
 }
 
+/**
+ * Merge the gate matrix, keeping anything wrong for validation to name.
+ *
+ * `mergeRoles`' shape and `mergeRoles`' reason. `mergeSection` iterates the
+ * *base's* keys, so `"final-fix": "stop"` or a misspelt `"plan_approved"` would
+ * be dropped in silence - and a dropped gate is worse than a dropped setting,
+ * because the user's next act is to start a run and wait at a boundary that will
+ * never hold. `setOwn` for the `__proto__` case, which reaches validation by
+ * being an own key rather than a prototype write.
+ */
+function mergeGates(base: GatesConfig, override: unknown): GatesConfig {
+  if (override === undefined) return base;
+  if (!isRecord(override)) return override as GatesConfig;
+  const out: Record<string, unknown> = { ...base };
+  for (const [key, value] of Object.entries(override)) setOwn(out, key, value);
+  return out as unknown as GatesConfig;
+}
+
 function mergeConfig(base: Config, override: unknown): Config {
   if (!isRecord(override)) return base;
   return {
@@ -248,6 +271,7 @@ function mergeConfig(base: Config, override: unknown): Config {
     questions: mergeSection(base.questions, override['questions']),
     git: mergeSection(base.git, override['git']),
     context: mergeSection(base.context, override['context']),
+    gates: mergeGates(base.gates, override['gates']),
     verify: mergeSection(base.verify, override['verify']),
     progress: mergeSection(base.progress, override['progress']),
     toolchain: mergeToolchain(base.toolchain, override['toolchain']),
@@ -378,6 +402,7 @@ const SECTIONS = [
   'questions',
   'git',
   'context',
+  'gates',
   'verify',
   'progress',
 ] as const;
@@ -621,6 +646,10 @@ function validate(cfg: Config): void {
       throw new Error(`codex.${key} must be a positive number`);
     }
   }
+  // Its own function for `validateRoles`' reason: the keys are refused as well
+  // as the values, so it cannot share `mergeSection`'s "unknown keys are not
+  // your business" contract with the sections above.
+  validateGates(cfg.gates);
   validateVerify(cfg.verify);
   // A floor rather than "positive": the heartbeat also drives a state write, and
   // a sub-second cadence would rewrite state.json continuously for a line

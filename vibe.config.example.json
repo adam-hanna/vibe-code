@@ -55,6 +55,14 @@
     "compactAboveRatio": 0.5,
     "compactDuringCodex": true
   },
+  "gates": {
+    "plan-round": "step",
+    "question-round": "step",
+    "plan-approved": "step",
+    "implemented": "step",
+    "verify-round": "step",
+    "review-round": "step"
+  },
   "progress": {
     "enabled": true,
     "intervalMs": 30000

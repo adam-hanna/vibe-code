@@ -143,6 +143,7 @@ test('a gate that outlived its run cannot be answered by the next one', async ()
         boundary: 'plan-approved',
         phase: 'planning',
         planRound: 0,
+        questionRound: 0,
         reviewRound: 0,
         verifyRound: 0,
       });

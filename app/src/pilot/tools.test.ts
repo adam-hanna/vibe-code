@@ -168,7 +168,14 @@ describe('answer_gate proposes a decision the core will judge', () => {
   const holding = run({
     type: 'ask',
     id: 9,
-    context: { boundary: 'plan-approved', phase: 'implementing', planRound: 1, reviewRound: 0, verifyRound: 0 },
+    context: {
+      boundary: 'plan-approved',
+      phase: 'implementing',
+      planRound: 1,
+      questionRound: 0,
+      reviewRound: 0,
+      verifyRound: 0,
+    },
   });
 
   test('a continue carries the gate id the host allocated, and who asked', () => {

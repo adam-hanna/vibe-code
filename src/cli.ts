@@ -49,6 +49,7 @@ import { applyCharge, fmtTokens, takeInFlight } from '@src/charge.js';
 import { gitPrecondition, preflight, REAL_PROBES } from '@src/preflight.js';
 import type { PreflightProbes, PreflightReport } from '@src/preflight.js';
 import { closeCodexRateLimits, describeLimits, readCodexRateLimits } from '@src/ratelimits.js';
+import { describeGates } from '@src/gates.js';
 import { resolveGates } from '@src/verify.js';
 import type { AgentPreflight } from '@src/preflight.js';
 import * as git from '@src/git.js';
@@ -92,6 +93,13 @@ Options
                              rather than replacing it, so --role reviewer:effort=max keeps a
                              model vibe.config.json named, and provider is not required.
                              e.g. --role reviewer:model=gpt-5.6-pro --role critic:timeoutMs=600000
+  --gate <boundary>=<mode>   Where the loop hands control back, repeatable. The boundary is
+                             one of plan-round, question-round, plan-approved, implemented,
+                             verify-round, review-round; the mode is auto (run through),
+                             step (hold and ask - needs the desktop app, since a terminal
+                             cannot answer, so from here it runs through) or stop (end the
+                             run there, resumably with vibe resume).
+                             e.g. --gate implemented=stop --gate plan-round=auto
   --codex-context-window <n> The Codex model's context window in tokens. Unset by default:
                              the protocol never reports it for a codex exec thread, so
                              occupancy is reported in tokens with no ratio until you say
@@ -186,6 +194,8 @@ interface ParsedArgs {
      * parser and half in the consumer.
      */
     role?: string[];
+    /** Raw `--gate <boundary>=<mode>` arguments, unparsed for `--role`'s reason (#140). */
+    gate?: string[];
     help?: boolean;
   };
 }
@@ -279,6 +289,7 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       case '--codex-context-window': out.flags.codexContextWindow = nextNum(); break;
       // Repeatable, and collected raw: see the field's comment.
       case '--role': (out.flags.role ??= []).push(next()); break;
+      case '--gate': (out.flags.gate ??= []).push(next()); break;
       case '--max-plan-rounds': out.flags.maxPlanRounds = nextNum(); break;
       case '--max-review-rounds': out.flags.maxReviewRounds = nextNum(); break;
       case '--max-verify-rounds': out.flags.maxVerifyRounds = nextNum(); break;
@@ -448,6 +459,24 @@ export function buildOverrides(flags: ParsedArgs['flags']): ConfigOverrides {
   const context: Partial<Config['context']> = {};
   const verify: Partial<Config['verify']> = {};
   const progress: Partial<Config['progress']> = {};
+  const gates: Partial<Config['gates']> = {};
+
+  // Split here and judged in config.ts, so `--gate implemented=never` and a
+  // `"gates": {"implemented": "never"}` in the file get the same sentence. Only
+  // the shape is this parser's business - `mergeGates` keeps whatever comes out
+  // of here so `validateGates` can name it, which is why a bad boundary does not
+  // need catching twice.
+  for (const raw of flags.gate ?? []) {
+    const at = raw.indexOf('=');
+    if (at <= 0 || at === raw.length - 1) {
+      throw new Error(
+        `--gate expects <boundary>=<mode>, got "${raw}". e.g. --gate implemented=stop`,
+      );
+    }
+    // Last wins, as `--role` does, and for the same reason: one rule, resolved
+    // in one place.
+    setOwn(gates as Record<string, unknown>, raw.slice(0, at), raw.slice(at + 1));
+  }
 
   if (flags.claudeModel !== undefined) claude.model = flags.claudeModel;
   if (flags.claudeEffort !== undefined) claude.effort = asEffort(flags.claudeEffort, '--claude-effort');
@@ -484,7 +513,7 @@ export function buildOverrides(flags: ParsedArgs['flags']): ConfigOverrides {
   // Seconds here rather than minutes: a heartbeat cadence is on that scale.
   if (flags.progressInterval !== undefined) progress.intervalMs = flags.progressInterval * 1000;
 
-  return { claude, codex, loop, budget, git: gitCfg, questions, context, verify, progress };
+  return { claude, codex, loop, budget, git: gitCfg, questions, context, gates, verify, progress };
 }
 
 async function cmdRun(
@@ -2007,6 +2036,12 @@ async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
     } else {
       log.info('  verify: off - the loop will not check that the code runs');
     }
+    // The effective matrix, which is the thing about a gate a reader cannot work
+    // out from anywhere else: a `step` row does nothing from a terminal, and the
+    // only other way to learn that is to run and watch a boundary go past. One
+    // line per mode rather than per row - six lines of `auto` is six lines of
+    // nothing happening.
+    for (const line of describeGates(cfg.gates)) log.info(`  ${line}`);
   } catch (err) {
     log.fail(`config: ${err instanceof Error ? err.message : String(err)}`);
     bad++;

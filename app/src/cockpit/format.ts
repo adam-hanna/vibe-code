@@ -39,6 +39,9 @@ export function counted(n: number, unit: string): string {
  */
 const BOUNDARIES: Readonly<Record<string, string>> = {
   'plan-round': 'the end of a plan round',
+  // Reachable since #140 gave it a row and `GateContext` the counter that makes
+  // it answerable. #139 made it a checkpoint and left it ungateable.
+  'question-round': 'a round of the planner answering itself',
   'plan-approved': 'the approved plan',
   implemented: 'the finished implementation',
   'verify-round': 'a verification round',

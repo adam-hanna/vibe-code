@@ -41,6 +41,8 @@ export interface Ask {
     boundary: string;
     phase: string | null;
     planRound: number;
+    /** Beside the other three since #140, which is what made `question-round` holdable. */
+    questionRound: number;
     reviewRound: number;
     verifyRound: number;
   };
