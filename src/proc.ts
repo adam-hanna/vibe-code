@@ -116,8 +116,97 @@ export interface RunOptions {
 
 export interface RunResult {
   code: number | null;
+  /**
+   * The signal that ended the child, or null when it exited under its own power.
+   *
+   * `close` has always carried this and it was always thrown away, so a turn
+   * whose child was killed and one whose child exited non-zero arrived here as
+   * the same fact - `code: null` - and the run record could not tell them apart
+   * (#131). Exactly one of the two is ever set: Node gives `(code, null)` on an
+   * exit and `(null, signal)` on a signal death, and both null is the shape a
+   * child that could not be spawned at all leaves behind, which never reaches
+   * `close`.
+   *
+   * Required rather than optional, so every producer - including a test's fake
+   * transport - has to say which it observed. An absent signal defaulted to
+   * `null` would read as "exited normally" on a killed turn, which is the one
+   * claim this field exists to stop being made.
+   *
+   * **`signal === null` does not mean the child was not killed, on Windows.**
+   * Windows has no signals: an outside kill - Task Manager, `Stop-Process`, a
+   * parent that did not spawn this child - becomes `TerminateProcess`, and the
+   * child closes with an exit code and no signal at all. Only a kill vibe sends
+   * to its *own* child handle, as the timeout path does, survives as a signal
+   * there. So this field is the sharper answer where it is available and never
+   * the complete one, which is why `isAbnormal` and not `signal !== null` is
+   * what the recording site asks - and why #131's other half stamps the parent.
+   */
+  signal: NodeJS.Signals | null;
   stdout: string;
   stderr: string;
+}
+
+/**
+ * How a child process ended, keyed by the error raised because it ended that
+ * way.
+ *
+ * A side table for the reason `SPENT` in `src/charge.ts` is one, and modelled on
+ * it deliberately: every error raised today must still be raised with the same
+ * type and reach the same handler, and this value has to ride on a
+ * `RateLimitError` as readily as on a plain `Error`. Nothing in `err.message`,
+ * `err.stack` or the `error` event changes.
+ *
+ * Unlike `SPENT`, an ending of "exit 0, no signal" is still recorded when a
+ * throw site attaches one. The accounting can treat a spend of nothing as
+ * nothing to say; a *cause of death* has no equivalent zero, and "the child
+ * exited cleanly and the adapter rejected its output anyway" is a different
+ * finding from "the child was killed", which is the distinction #131 exists to
+ * preserve.
+ */
+const ENDED = new WeakMap<object, ChildEnding>();
+
+/** What `close` reported about a child, carried out on the error it caused. */
+export interface ChildEnding {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+}
+
+/**
+ * Record how the child ended on the error that ends this turn. Returns `err`,
+ * so a throw site can attach and throw in one expression.
+ */
+export function attachEnding<E>(err: E, ending: ChildEnding): E {
+  if (typeof err === 'object' && err !== null) ENDED.set(err, ending);
+  return err;
+}
+
+/**
+ * How the child behind this error ended, or null when nobody attached one.
+ *
+ * Null is a real answer and is not the same as `{code: null, signal: null}`: it
+ * means this failure did not come from a child ending at all - a rate limit
+ * detected mid-stream, a schema the adapter refused - so the reader must not
+ * report an ending for it. Read without consuming, because unlike a spend an
+ * ending is not paid and cannot be double-counted.
+ */
+export function endingOf(err: unknown): ChildEnding | null {
+  if (typeof err !== 'object' || err === null) return null;
+  return ENDED.get(err) ?? null;
+}
+
+/** Whether an ending is worth a reader's attention: a signal, or a bad exit. */
+export function isAbnormal(ending: ChildEnding): boolean {
+  return ending.signal !== null || ending.code !== 0;
+}
+
+/** "killed by SIGKILL", "exit 1", or "neither an exit code nor a signal". */
+export function describeEnding(ending: ChildEnding): string {
+  if (ending.signal !== null) return `killed by ${ending.signal}`;
+  if (ending.code !== null) return `exit ${ending.code}`;
+  // Not reachable from `close`, which always supplies one of the two - but a
+  // caller may construct an ending from a source that observed neither, and
+  // saying so is the point of the issue rather than an oversight in it.
+  return 'neither an exit code nor a signal';
 }
 
 /**
@@ -215,17 +304,29 @@ export function run(bin: string, args: readonly string[], options: RunOptions = 
     if (timeoutMs !== undefined) {
       timer = setTimeout(() => {
         child.kill('SIGKILL');
-        settle(() => reject(new Error(`${path.basename(bin)} timed out after ${timeoutMs}ms`)));
+        // The SIGKILL is attached even though vibe sent it, and that is not a
+        // false alarm: the reader of a run record wants to know the child died
+        // on a signal, and the message beside it already says who sent it and
+        // why. An ending omitted here because "we know this one" is a hole the
+        // next reader has to know about (#131).
+        settle(() =>
+          reject(
+            attachEnding(new Error(`${path.basename(bin)} timed out after ${timeoutMs}ms`), {
+              code: null,
+              signal: 'SIGKILL',
+            }),
+          ),
+        );
       }, timeoutMs);
     }
 
     child.on('error', (err: Error) => settle(() => reject(err)));
-    child.on('close', (code: number | null) => {
+    child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
       // Before `settle`: a single-line output with no trailing newline must
       // still reach the hook, while on the timeout path `settled` is already
       // true and this emits nothing.
       drain(true);
-      settle(() => resolve({ code, stdout, stderr }));
+      settle(() => resolve({ code, signal, stdout, stderr }));
     });
 
     if (input !== undefined) child.stdin.write(input, 'utf8');

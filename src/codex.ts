@@ -1,8 +1,8 @@
 ﻿import { writeFileSync, readFileSync, existsSync, renameSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { attachSpend } from '@src/charge.js';
-import { resolveBin, run } from '@src/proc.js';
-import type { RunFn } from '@src/proc.js';
+import { attachEnding, describeEnding, resolveBin, run } from '@src/proc.js';
+import type { ChildEnding, RunFn } from '@src/proc.js';
 import { detail, warn } from '@src/log.js';
 import { createHeartbeat, parseCodexLine, withHeartbeat } from '@src/progress.js';
 import type { ProgressOptions } from '@src/progress.js';
@@ -556,16 +556,20 @@ export async function codexTurn(
         provider: 'codex',
       })
     : null;
+  // See the note at the same point in claude.ts: one holder, read from the one
+  // attach point below (#131).
+  const ended: { seen: ChildEnding | null } = { seen: null };
   // Validation runs inside the heartbeat's work, not after it: the end-of-turn
   // flush is a claim that the turn completed, and while only `run()` was wrapped
   // a turn that wrote no usable output still persisted as one that had.
   return withHeartbeat(heartbeat, async () => {
-    const { code, stdout, stderr } = await exec(codexBin(), args, {
+    const { code, signal, stdout, stderr } = await exec(codexBin(), args, {
       input: prompt,
       cwd,
       timeoutMs,
       ...(heartbeat === null ? {} : { onLine: heartbeat.onLine }),
     });
+    ended.seen = { code, signal };
 
     const events = parseEvents(stdout);
     // `resumeAfterFork` is in the chain because the two-call path takes its turn
@@ -593,7 +597,7 @@ export async function codexTurn(
       const cause = events.failure === null ? '' : `\ncodex reported: ${events.failure}`;
       throw attachSpend(
         new Error(
-          `codex wrote no structured output (exit ${code}).${cause}\n` +
+          `codex wrote no structured output (${describeEnding({ code, signal })}).${cause}\n` +
             `stderr:\n${stderr.slice(-2000)}\nstdout:\n${stdout.slice(-1000)}`,
         ),
         spent,
@@ -606,7 +610,10 @@ export async function codexTurn(
       // earlier phase of the same turn; accepting it would hand the loop a
       // result the agent said was not one.
       throw attachSpend(
-        new Error(`codex reported the turn failed (exit ${code}): ${events.failure ?? 'no detail'}`),
+        new Error(
+          `codex reported the turn failed (${describeEnding({ code, signal })}): ` +
+            `${events.failure ?? 'no detail'}`,
+        ),
         spent,
       );
     }
@@ -630,9 +637,13 @@ export async function codexTurn(
       }
     }
 
-    if (code !== 0) {
-      // Logged, not thrown: see the exit-status note above.
-      warn(`codex exited ${String(code)} but wrote schema-conformant output; accepting it.`);
+    if (code !== 0 || signal !== null) {
+      // Logged, not thrown: see the exit-status note above, and the matching one
+      // in claude.ts for why the signal is named rather than folded into the
+      // exit code (#131).
+      warn(
+        `codex ${describeEnding({ code, signal })} but wrote schema-conformant output; accepting it.`,
+      );
     }
 
     // See the note at the same point in claude.ts: read after the output was
@@ -646,5 +657,8 @@ export async function codexTurn(
       tokens: events.tokens,
       ...(activity === undefined ? {} : { activity }),
     };
+  }).catch((err: unknown) => {
+    // See the note at the same point in claude.ts.
+    throw ended.seen === null ? err : attachEnding(err, ended.seen);
   });
 }

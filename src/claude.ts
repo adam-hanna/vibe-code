@@ -1,6 +1,6 @@
 import { attachSpend } from '@src/charge.js';
-import { resolveBin, run } from '@src/proc.js';
-import type { RunFn } from '@src/proc.js';
+import { attachEnding, describeEnding, resolveBin, run } from '@src/proc.js';
+import type { ChildEnding, RunFn } from '@src/proc.js';
 import { detail, warn } from '@src/log.js';
 import { createHeartbeat, parseClaudeLine, withHeartbeat } from '@src/progress.js';
 import type { ProgressOptions } from '@src/progress.js';
@@ -149,26 +149,36 @@ export async function claudeTurn(
         provider: 'claude',
       })
     : null;
+  // How the child ended, in a holder rather than a closed-over `let`, so it can
+  // be read from the catch below whether or not the closure got as far as
+  // setting it. Null there means `exec` itself rejected - a timeout, which
+  // attaches its own ending in proc.ts, or a spawn that never produced a child -
+  // and in that case there is nothing here to add (#131).
+  const ended: { seen: ChildEnding | null } = { seen: null };
   // Validation runs inside the heartbeat's work, not after it: the end-of-turn
   // flush is a claim that the turn completed, and while only `run()` was wrapped
   // a turn whose output failed every check below still persisted as one that
   // had.
   return withHeartbeat(heartbeat, async () => {
-    const { code, stdout, stderr } = await exec(claudeBin(), args, {
+    const { code, signal, stdout, stderr } = await exec(claudeBin(), args, {
       input: prompt,
       cwd,
       timeoutMs,
       ...(heartbeat === null ? {} : { onLine: heartbeat.onLine }),
     });
+    ended.seen = { code, signal };
 
     if (!stdout.trim()) {
-      throw new Error(`claude produced no output (exit ${code}). stderr:\n${stderr.slice(-2000)}`);
+      throw new Error(
+        `claude produced no output (${describeEnding({ code, signal })}). ` +
+          `stderr:\n${stderr.slice(-2000)}`,
+      );
     }
 
     const { result: parsed, lastAssistantUsage } = parseStream(stdout);
     if (!parsed) {
       throw new Error(
-        `claude emitted no result event (exit ${code}):\n${stdout.slice(-2000)}`,
+        `claude emitted no result event (${describeEnding({ code, signal })}):\n${stdout.slice(-2000)}`,
       );
     }
 
@@ -195,11 +205,15 @@ export async function claudeTurn(
     const denialsRaw = parsed['permission_denials'];
     const text = typeof parsed['result'] === 'string' ? parsed['result'] : '';
 
-    if (code !== 0) {
+    if (code !== 0 || signal !== null) {
       // Logged, not thrown: see the exit-status note above. Worth saying out
       // loud so that if it ever becomes routine, it is visible in the run log
-      // rather than being mistaken for an oversight.
-      warn(`claude exited ${String(code)} but returned a complete successful result; accepting it.`);
+      // rather than being mistaken for an oversight. The signal is named here
+      // too, because "was killed and returned a complete result anyway" is a far
+      // stranger sentence than a non-zero exit and should not read as one (#131).
+      warn(
+        `claude ${describeEnding({ code, signal })} but returned a complete successful result; accepting it.`,
+      );
     }
 
     // Read here, inside the heartbeat's work and after the output was accepted:
@@ -219,6 +233,14 @@ export async function claudeTurn(
       usage: extractUsage(parsed, lastAssistantUsage),
       tokens: extractTokens(parsed),
     };
+  }).catch((err: unknown) => {
+    // One attach point rather than one per throw site, so a failure mode added
+    // to the body later carries the ending without anybody remembering to. The
+    // ending is the child's, not the turn's: `attachEnding` records it even for
+    // an exit 0, because "the child finished and the adapter refused its output"
+    // and "the child was killed" are different findings that used to arrive
+    // here as the same error (#131).
+    throw ended.seen === null ? err : attachEnding(err, ended.seen);
   });
 }
 

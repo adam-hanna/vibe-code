@@ -17,12 +17,14 @@ import {
   resumePhase,
   saveState,
   statePresence,
+  tryRecordEvent,
   unavailableGates,
   verificationCaveat,
   verificationIncomplete,
 } from '@src/run.js';
 import type { AllocatedRun } from '@src/run.js';
 import { acquireLock, describeLiveness } from '@src/lock.js';
+import { describeEnding as describeProcessEnding, installEndingStamp } from '@src/ending.js';
 import { commitFork, listForkPoints, planFork } from '@src/fork.js';
 import type { Liveness, LockHandle } from '@src/lock.js';
 import { reconcileAssumed, reconcileQuestionRecords } from '@src/questions.js';
@@ -780,7 +782,10 @@ async function cmdResume(
     // it finds an in-flight entry: a run killed between turns, or one killed
     // with progress disabled, has nothing to recover and would otherwise resume
     // in silence, with no indication that the last process did not finish.
-    log.info(`Previous process was interrupted: ${describeLiveness(verdict)}`);
+    // Not "was interrupted" any more. A dead pid has always had two causes and
+    // the sentence now says which one this was, so a prefix that named the
+    // worse of them would contradict the clause it introduces (#131).
+    log.info(`Picking up after another process: ${describeLiveness(verdict)}`);
   }
 
   try {
@@ -1291,6 +1296,30 @@ export async function execute(
 
   reportRoles(cfg);
 
+  // Installed here and released in the `finally`, so the stamp's lifetime is
+  // exactly the lock's: this process is either driving this run or it is not,
+  // and an ending recorded outside that window would be attributed to a run
+  // nobody was working on. Both front ends get it from one place, because both
+  // reach the loop through here (#131).
+  const stamp = installEndingStamp(state.dir);
+  // The ending this installation displaced, recorded before anything overwrites
+  // it. `installEndingStamp` clears the file, so this is the only moment the
+  // previous process's account of itself still exists - and it is the account
+  // this issue exists to create, which a resume must not delete on its way to
+  // reading it. Recorded even when it says "exited cleanly": the resume's own
+  // recovery path reports what the interruption COST, and this reports what the
+  // interruption WAS, which are different questions with different answers.
+  if (stamp.previous !== null) {
+    tryRecordEvent(state, 'previous_ending', {
+      how: stamp.previous.how,
+      code: stamp.previous.code,
+      signal: stamp.previous.signal,
+      pid: stamp.previous.pid,
+      at: stamp.previous.at,
+    });
+    log.info(`How the previous process ended: ${describeProcessEnding(stamp.previous)}.`);
+  }
+
   try {
     // After the lock and before preflight: this is spend that has already
     // happened, and the ceilings have to see it before the run buys anything
@@ -1412,6 +1441,11 @@ export async function execute(
     // for an exit neither of them covers - and it must still fire, because the
     // facts are the point and losing them to an unfamiliar path is the defect.
     flushRecovery();
+    // Every path that reaches here unwound, which means the process was never
+    // stopped - so there is nothing for the stamp to record and it comes off
+    // with the run it was covering. The signal path never gets here, which is
+    // the point: it dies inside the handler, having written first.
+    stamp.uninstall();
   }
 }
 
