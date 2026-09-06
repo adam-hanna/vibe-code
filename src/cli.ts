@@ -17,6 +17,7 @@ import {
   resumePhase,
   saveState,
   statePresence,
+  takePendingFindings,
   tryRecordEvent,
   unavailableGates,
   verificationCaveat,
@@ -28,8 +29,8 @@ import { describeEnding as describeProcessEnding, installEndingStamp } from '@sr
 import { commitFork, listForkPoints, planFork } from '@src/fork.js';
 import type { Liveness, LockHandle } from '@src/lock.js';
 import { reconcileAssumed, reconcileQuestionRecords } from '@src/questions.js';
-import { acceptRaised, parseRaised, raisePhase } from '@src/raise.js';
-import type { RaiseProblem } from '@src/raise.js';
+import { acceptMoves, acceptRaised, parseMoves, parseRaised, raisePhase } from '@src/raise.js';
+import type { RaiseProblem, RequestedMove, RequestedMoves } from '@src/raise.js';
 import { assertUsableRunId } from '@src/stored.js';
 import { Escalation, EXIT, orchestrate, writeEscalation } from '@src/orchestrator.js';
 import type { ExitCode } from '@src/orchestrator.js';
@@ -827,7 +828,19 @@ async function resumeRun(
     // has an early return that leaves it in place and a raise consumed twice
     // would record a re-raise nobody made.
     const raised = parseRaised(raw);
-    if (!reportIncompleteRaises(raised.problems)) return EXIT.NEEDS_HUMAN;
+    // Both parses before either is acted on, so an unfinished block anywhere in
+    // the file stops the resume before half of it has been applied (#142).
+    const moves = parseRequestedMoves(state, raw);
+    if (!reportIncompleteRaises([...moves.problems, ...raised.problems])) return EXIT.NEEDS_HUMAN;
+
+    // Moves before raises, on both paths below. A move can only name a finding
+    // the run was already carrying - it is rendered from that list - so nothing
+    // raised in the same file can be its target, and applying them the other way
+    // round would make the order of two independent decisions matter.
+    const applyEdits = (): void => {
+      takeRequestedMoves(state, moves.moves);
+      takeRaisedFindings(state, targetDir, raised.findings);
+    };
 
     // A round-cap or oscillation stall writes the same filename but reports
     // findings rather than questions. Demanding answers there made those runs
@@ -835,7 +848,7 @@ async function resumeRun(
     // to delete the file by hand.
     if (!raw.includes('**Your answer:**')) {
       log.info('Previous stop reported findings, not questions - continuing with raised limits.');
-      takeRaisedFindings(state, targetDir, raised.findings);
+      applyEdits();
       renameSync(answersFile, path.join(state.dir, `stalled-${state.planRound}.md`));
       log.heading(`Resuming ${state.id}`);
       return execute(state, cfg, true, flags.skipProbe === true, REAL_GATE, loop, handle);
@@ -845,15 +858,16 @@ async function resumeRun(
     if (answers.length === 0) {
       log.fail(`No answers found in ${answersFile}`);
       log.info('Fill in the "**Your answer:**" blocks (replace the empty "> " line), then resume.');
-      if (raised.findings.length > 0) {
+      const pending = raised.findings.length + moves.moves.length;
+      if (pending > 0) {
         log.info(
-          `The ${raised.findings.length} finding(s) you raised are still in the file and will be ` +
-            'taken in once the answers are there - nothing was lost and nothing was recorded.',
+          `The ${pending} edit(s) you made are still in the file and will be taken in once the ` +
+            'answers are there - nothing was lost and nothing was recorded.',
         );
       }
       return EXIT.NEEDS_HUMAN;
     }
-    takeRaisedFindings(state, targetDir, raised.findings);
+    applyEdits();
     log.ok(`Picked up ${answers.length} answer(s) from NEEDS-INPUT.md`);
     state.pendingAnswers = answers;
     // On the same write that stores them, so there is no window where the run
@@ -990,6 +1004,33 @@ async function cmdFork(args: readonly string[]): Promise<ExitCode> {
 }
 
 /**
+ * Severity changes a person asked for, checked against what the run is carrying
+ * (#142).
+ *
+ * The carried list is read here rather than inside `parseMoves` so that parsing
+ * stays pure and so both front ends check a move against the same list the
+ * acceptance will merge into. A completed run carries nothing, which is the
+ * right answer rather than a special case: there is no next round to read a
+ * severity, so every block in the file names an id that cannot be moved and each
+ * is reported as such.
+ */
+function parseRequestedMoves(state: RunState, raw: string): RequestedMoves {
+  const carry = raisePhase(resumePhase(state));
+  const carried = carry === null ? [] : (takePendingFindings(state, carry) ?? []);
+  return parseMoves(raw, carried);
+}
+
+/** Apply them, and say what moved. Nothing at all when nobody asked for one. */
+function takeRequestedMoves(state: RunState, moves: readonly RequestedMove[]): void {
+  if (moves.length === 0) return;
+  const carry = raisePhase(resumePhase(state));
+  if (carry === null) return;
+
+  const { applied } = acceptMoves(state, carry, moves);
+  for (const a of applied) log.ok(`Severity changed by hand: ${a.id} ${a.from} -> ${a.to}`);
+}
+
+/**
  * A block somebody began and did not finish stops the resume. True to continue.
  *
  * **Refuse, never repair**, and the direction is the point. A block missing its
@@ -1001,7 +1042,7 @@ async function cmdFork(args: readonly string[]): Promise<ExitCode> {
  */
 function reportIncompleteRaises(problems: readonly RaiseProblem[]): boolean {
   if (problems.length === 0) return true;
-  log.fail(`${problems.length} "### Finding:" block(s) in NEEDS-INPUT.md are incomplete.`);
+  log.fail(`${problems.length} block(s) in NEEDS-INPUT.md could not be acted on.`);
   for (const p of problems) log.info(`  - ${p.heading}: ${p.reason}`);
   log.info('Nothing was raised and nothing was spent. Complete or delete those blocks, then resume.');
   return false;

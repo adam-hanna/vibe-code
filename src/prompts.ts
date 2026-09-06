@@ -1,7 +1,7 @@
 import { describedRole, ROLES } from '@src/roles.js';
 import { EVIDENCE_RULE } from '@src/schemas.js';
 import { inspectedItems } from '@src/evidence.js';
-import { authorOf, readEvidence } from '@src/validate.js';
+import { authorOf, readEvidence, severityChangesOf } from '@src/validate.js';
 import type { RoleTable } from '@src/roles.js';
 import type { EnvironmentFacts } from '@src/runtime.js';
 import type {
@@ -1289,6 +1289,32 @@ function raisedNote(f: Finding): string {
     : '';
 }
 
+/**
+ * The severity a person moved, and away from what (#142).
+ *
+ * Rendered only when somebody moved one, so a run in which nobody did produces
+ * the prompt it produced before this existed - the same rule `raisedNote`
+ * follows and for the same reason.
+ *
+ * The **guard's** reason is named too when there was one, because that is the
+ * whole shape of the case: `[P0] ... a guard downgraded this to P2 for citing
+ * nothing that resolves, and a person put it back` tells the fixer both that the
+ * severity is deliberate and that the citation is still missing. Only the last
+ * move is printed - the history is on the finding and in the artifact, and a
+ * prompt is not the place to replay it.
+ */
+function movedNote(f: Finding): string {
+  const changes = severityChangesOf(f);
+  const last = changes[changes.length - 1];
+  if (last === undefined) return '';
+  const guard =
+    f.downgraded === undefined
+      ? ''
+      : ` A guard had downgraded it from ${f.downgraded.from} - ${f.downgraded.reason} - and that` +
+        ' still stands as a fact about the citation, whatever the severity now says.';
+  return `\n\n*Severity moved from ${last.from} to ${last.to} by the person running this: ${last.reason}.${guard}*`;
+}
+
 function formatFinding(f: Finding): string {
   // Omitted rather than printed empty. A human raising a finding is reporting a
   // defect, not designing the repair, and `*Suggested fix:* ` with nothing after
@@ -1296,7 +1322,7 @@ function formatFinding(f: Finding): string {
   // - the schema requires it - so no existing prompt changes.
   const fix = f.suggested_fix.trim() === '' ? '' : `\n\n*Suggested fix:* ${f.suggested_fix}`;
   return `### [${f.severity}] ${f.title}  \`${f.id}\`
-${f.detail}${fix}${citation(f, '\n')}${raisedNote(f)}${f.defer === true ? `\n\n${DEFERRED_MARK}` : ''}`;
+${f.detail}${fix}${citation(f, '\n')}${raisedNote(f)}${movedNote(f)}${f.defer === true ? `\n\n${DEFERRED_MARK}` : ''}`;
 }
 
 /**

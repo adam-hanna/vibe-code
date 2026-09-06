@@ -9,8 +9,8 @@ import { DEFAULTS } from '@src/config.js';
 import { Escalation, EXIT, orchestrate, writeEscalation } from '@src/orchestrator.js';
 import type { AgentTurns } from '@src/orchestrator.js';
 import { reconcileQuestionRecords } from '@src/questions.js';
-import { acceptRaised, parseRaised, raisePhase } from '@src/raise.js';
-import { createRun, resumePhase, saveState } from '@src/run.js';
+import { acceptMoves, acceptRaised, parseMoves, parseRaised, raisePhase } from '@src/raise.js';
+import { createRun, resumePhase, saveState, takePendingFindings } from '@src/run.js';
 import type {
   Answer,
   ClaudeTurnResult,
@@ -677,6 +677,52 @@ export function raiseInNeedsInput(
   const phase = raisePhase(resumePhase(state));
   if (phase === null) throw new Error('this run has finished, so nothing can be raised on it');
   return acceptRaised(state, cwd, phase, findings);
+}
+
+/**
+ * What `vibe resume` does with a NEEDS-INPUT.md somebody moved a severity in
+ * (#142).
+ *
+ * The third of these, and it mirrors `resumeRun` to the same depth as the other
+ * two: the exported `parseMoves` and `acceptMoves` are the real ones, and only
+ * the CLI glue between them is uncovered. The file is written afresh through the
+ * real `writeEscalation` on every call, so the block being edited is the block a
+ * run actually ships - including the `*Currently:*` clause, which is what a
+ * person reads before deciding to override a guard.
+ */
+export function moveInNeedsInput(
+  state: RunState,
+  moves: readonly { id: string; to: Severity; why: string }[],
+): ReturnType<typeof acceptMoves> {
+  writeEscalation(state, new Escalation(EXIT.NO_CONVERGENCE, 'the round cap'));
+  const file = path.join(state.dir, 'NEEDS-INPUT.md');
+
+  let filled = readFileSync(file, 'utf8');
+  for (const m of moves) {
+    // Anchored on the block's own heading, so a file with several rows has each
+    // one edited where a person would edit it rather than all at the first.
+    const head = filled.indexOf(`### Move: \`${m.id}\``);
+    if (head === -1) throw new Error(`no move block for ${m.id} - it is not being carried`);
+    const rest = filled
+      .slice(head)
+      .replace(/\*Move to:\* <[^>]*>/, `*Move to:* ${m.to}`)
+      .replace(/\*\*Why:\*\*\n\n>/, `**Why:**\n\n> ${m.why}`);
+    filled = `${filled.slice(0, head)}${rest}`;
+  }
+  writeFileSync(file, filled, 'utf8');
+
+  const carry = raisePhase(resumePhase(state));
+  if (carry === null) throw new Error('this run has finished, so it carries nothing to move');
+  const { moves: parsed, problems } = parseMoves(readFileSync(file, 'utf8'), takeCarried(state, carry));
+  if (problems.length > 0) {
+    throw new Error(`the harness wrote a block the parser refused: ${problems[0]?.reason ?? ''}`);
+  }
+  return acceptMoves(state, carry, parsed);
+}
+
+/** What the run is carrying for a phase, or an empty list. */
+export function takeCarried(state: RunState, phase: 'plan' | 'review'): Finding[] {
+  return takePendingFindings(state, phase) ?? [];
 }
 
 // ---- known stalls ----------------------------------------------------------

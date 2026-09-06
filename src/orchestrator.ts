@@ -11,7 +11,7 @@ import type { CodexTurnOptions, CodexTurnResult } from '@src/codex.js';
 import { preserveGateArtifacts, sweepGateArtifacts } from '@src/artifacts.js';
 import { downgradeInert, groundFindings, refusePlaceholderPlan } from '@src/evidence.js';
 import { gateMode } from '@src/gates.js';
-import { raiseSection } from '@src/raise.js';
+import { moveSection, raisePhase, raiseSection } from '@src/raise.js';
 import * as git from '@src/git.js';
 import { readDecision, readOrigin } from '@src/host.js';
 import type { GateContext, Host } from '@src/host.js';
@@ -3755,6 +3755,16 @@ export function writeEscalation(state: RunState, escalation: Escalation): string
       lines.push(`### ${f.title} \`${f.id}\`\n${f.detail}\n\n*Suggested fix:* ${f.suggested_fix}\n`);
     }
   }
+
+  // Before the raise block, because it is the cheaper decision of the two: a
+  // person who disagrees with a finding's severity does not have to write one
+  // (#142). Rendered from what the run is actually carrying rather than from
+  // `escalation.findings`, which is a message about the stop - a severity moved
+  // on a finding nothing will read changes nothing, and the two lists differ on
+  // every stop that reported questions.
+  const carry = raisePhase(resumePhase(state));
+  const carried = carry === null ? null : takePendingFindings(state, carry);
+  if (carried !== null) lines.push(moveSection(carried));
 
   // Last, and on every stop rather than only on the ones that asked something
   // (#141). The thing a person most wants to raise a finding about is the diff,

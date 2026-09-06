@@ -236,15 +236,40 @@ function citedBy(f: Finding): unknown[] {
 }
 
 /**
+ * Move a severity, and hand back the one it had.
+ *
+ * **The single construction every severity change in the product goes through**,
+ * and the reason it is shared is `from`: captured here, at the instant of the
+ * move, from the finding itself. No caller can supply one, so no caller can
+ * eventually name a severity the finding never had. That was already why the two
+ * guards shared `toP2`; #142 widened it rather than adding a third path beside
+ * it, because a human demotion to P3 and a human restore to P0 both need a
+ * target the caller chooses and neither may choose the source.
+ *
+ * What is *recorded* about the move is deliberately not decided here. A guard
+ * writes `downgraded` and a person writes `severityChanges`, and those are two
+ * different claims about a finding rather than one claim with two spellings -
+ * see `Finding.downgraded`.
+ */
+export function move(
+  f: Finding,
+  to: Severity,
+  extra: Partial<Finding> = {},
+): { from: Severity; next: Finding } {
+  const from: Severity = f.severity;
+  return { from, next: { ...f, ...extra, severity: to } };
+}
+
+/**
  * A blocking finding, kept but no longer blocking, with the reason on it.
  *
- * The one construction both guards share, so `downgraded.from` always names the
+ * The guards' wrapper around `move`, so `downgraded.from` always names the
  * severity the model actually gave and the shape `groundAndRecord`,
  * `OUTSTANDING.md` and `FOLLOW-UPS.md` read cannot drift between them.
  */
 function toP2(f: Finding, extra: Partial<Finding>, reason: string): Finding {
-  const from: Severity = f.severity;
-  return { ...f, ...extra, severity: 'P2', downgraded: { from, reason } };
+  const { from, next } = move(f, 'P2', extra);
+  return { ...next, downgraded: { from, reason } };
 }
 
 /**

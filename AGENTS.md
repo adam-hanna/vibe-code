@@ -144,7 +144,7 @@ src/scorecard.ts     what the run archive says about the loop, and what it canno
 src/fork.ts          `vibe fork`: preflight that only reads, then a commit phase that creates
 src/similarity.ts    the one similarity metric, its threshold, and the censuses behind it
 src/questions.ts     when two wordings are one question: the threshold, and REPHRASED.md
-src/raise.ts         a finding a human raised, and the file they raise it in
+src/raise.ts         what a person does to a run's findings: raise one, move a severity
 src/roles.ts         who does what: the role table, refusals, warnings
 src/config.ts        DEFAULTS, config merge, validation
 src/consistency.ts   cross-field rules over status/phase/planOnly, applied by loadRun
@@ -394,6 +394,39 @@ about it are load-bearing:
   its own validator before it is offered, and a `raise` member is exactly that. `acceptRaised`
   is the seam one would call, so there is one definition of what a raised finding costs and
   what it is checked against — not two.
+
+**A severity can move both ways, and only a person moves it back** (#142). Until then it moved
+in exactly one direction, was written by exactly one function, and could never be moved back:
+every `Finding.downgraded` in the product came from `toP2` — a machine, always landing on P2,
+always for a mechanical reason, permanent. That is right for a rule running unattended, and
+it is also why a P1 that was **true** and cited a file the reviewer described from memory is
+demoted for the same reason a false one is. The only thing that can tell those apart is a
+person reading the finding, and they had no way to act on it. Four things carry the design:
+
+- **`move` in `src/evidence.ts` is the one construction every severity change goes through**,
+  and the reason it is shared is `from`: captured from the finding at the instant of the move,
+  so no caller can name a severity it never had. `toP2` is now the guards' wrapper around it —
+  widened rather than joined by a third path, which is what the issue asked for.
+- **A restore is not a downgrade, and must not be written as one.** `downgraded` is the
+  guards' field and is never rewritten or cleared; `severityChanges` is the person's,
+  append-only. Two questions with two answers — *did a guard fire, and why* and *how did this
+  reach the severity it has* — rather than one answer serving both. Overwriting `downgraded`
+  on a restore would erase the fact the guard fired, which is what #48 added it for.
+- **`by` is `FindingAuthor`, not a second vocabulary.** #141 answered "how does this record
+  name a source" on the same record; a parallel enum a month later is how two fields come to
+  disagree about what `human` means.
+- **The same answers as #141 on the two shared questions.** The gate counts it — a restored P0
+  blocks whatever the tolerance says. The oscillation census does not, and here for a
+  different structural reason: it is taken from the review report at the moment the round was
+  recorded, and a decision made afterwards does not rewrite history.
+
+**The round's own `code-review-N.json` is deliberately not rewritten** when a severity moves.
+It is the record of what the reviewer produced, and editing it afterwards makes it a record of
+something else — the same reason #141 keeps a human's finding out of it. The changed findings
+land on `state.pendingFindings`, which is what the next round reads, and in their own
+artifact; both hold `downgraded` and `severityChanges` together, so the issue's *"shows both
+transitions and names who made each one"* is satisfied on the artifact that holds the finding
+after the change rather than on the one that predates it.
 
 **A gate that fails has more than one sample, and a flaky suite is told apart from a broken
 one** (#135). `verify.runs` has defaulted to 3 since the gate existed and `config.ts` argues

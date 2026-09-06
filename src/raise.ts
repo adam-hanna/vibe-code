@@ -1,5 +1,11 @@
-import { groundFindings } from '@src/evidence.js';
-import { artifact, mergePendingFindings, recordAndSay } from '@src/run.js';
+import { groundFindings, move } from '@src/evidence.js';
+import {
+  artifact,
+  mergePendingFindings,
+  recordAndSay,
+  saveState,
+  takePendingFindings,
+} from '@src/run.js';
 import type {
   Evidence,
   Finding,
@@ -9,10 +15,18 @@ import type {
   RunState,
   Severity,
 } from '@src/types.js';
-import { slug } from '@src/validate.js';
+import { severityChangesOf, slug } from '@src/validate.js';
 
 /**
- * A finding a human raised, and the file they raise it in (#141).
+ * What a person does to a run's findings, and the file they do it in.
+ *
+ * Two operations, one file, one resume: **raise** a finding the agents missed
+ * (#141), and **move** a severity a guard already decided (#142). They are here
+ * together because they are the same seam - a person's judgement entering the
+ * loop through `NEEDS-INPUT.md` - and because the second half of this header
+ * would otherwise have to restate the first.
+ *
+ * ## A finding a human raised (#141)
  *
  * Until this existed the human's position in the loop was asymmetric in a way
  * nobody decided. They could **dispose** of a finding - accept it into the next
@@ -401,4 +415,260 @@ export function acceptRaised(
   }
 
   return { added, downgraded, repeated };
+}
+
+/**
+ * ## Moving a severity a guard already decided (#142)
+ *
+ * The other half of what a person can do to a run's findings, and it was missing
+ * in a way nobody chose. A severity moved in exactly one direction, was written
+ * by exactly one function, and could never be moved back: every instance in the
+ * product came from `toP2`, always landing on P2, always for a mechanical
+ * reason, and permanent.
+ *
+ * That is correct for a rule that runs unattended, and both guards are
+ * deliberately blunt about it - grounding *"cannot judge a claim; it can only
+ * check that the claim names a real place"*, and inertness is `activity.tool ===
+ * 0` exactly. Bluntness is also why **a true P1 that happened to cite a file the
+ * reviewer described from memory is demoted for the same reason a false one
+ * is**, and the only thing in the system that can tell those apart is a person
+ * reading the finding. Until now they could see the downgrade, agree it was
+ * wrong, and do nothing about it.
+ *
+ * The complement of the raise above: that one is about a person who sees
+ * something both agents missed, this one about a person who sees that a guard
+ * fired on a finding that was right.
+ *
+ * Three things are shaped so this cannot corrupt the record:
+ *
+ * - **A restore is not a downgrade.** `downgraded` is untouched, so the guard's
+ *   reason is still readable after the move that overrode it. See
+ *   `Finding.downgraded`.
+ * - **`move` in `src/evidence.ts` is the one construction**, so `from` is taken
+ *   from the finding rather than typed by a caller.
+ * - **Only what the next round will read can be moved.** Changing the severity
+ *   of a finding nothing will act on does nothing, and an id that names no
+ *   carried finding is reported rather than dropped - a person editing a stale
+ *   file must not come away believing they changed something.
+ */
+
+const MOVE_HEADING = 'Move:';
+const WHY = '**Why:**';
+const MOVE_LINE = /^\*Move to:\*\s*(.*)$/im;
+
+/** "### Move: `some-id`" - the id in a code span, which is how it is rendered. */
+const MOVE_ID = /^Move:\s*`?([^`\s]+)`?/;
+
+/** What a person is being asked to override, in one clause. */
+function currently(f: Finding): string {
+  const d = f.downgraded;
+  const changes = severityChangesOf(f);
+  const last = changes[changes.length - 1];
+  if (last !== undefined) {
+    return `${f.severity} (you moved it from ${last.from} - ${last.reason})`;
+  }
+  if (d !== undefined) {
+    return `${f.severity} (a guard downgraded it from ${d.from} - ${d.reason})`;
+  }
+  return f.severity;
+}
+
+/**
+ * The block listing what the next round will act on, or nothing.
+ *
+ * Rendered per carried finding rather than as a blank form, because the id is
+ * the key and asking a person to copy one out of another section is asking them
+ * to mistype it. Omitted entirely when nothing is carried: a form over an empty
+ * list is a form that can only be filled in wrongly.
+ *
+ * Each row says what it would be overriding. *"Overriding a guard should be
+ * possible and never inviting"* is the design note this comes from, and showing
+ * the guard's own reason is what makes it the first without making it the
+ * second.
+ */
+export function moveSection(findings: readonly Finding[]): string {
+  if (findings.length === 0) return '';
+
+  const blocks = findings.map(
+    (f) =>
+      `### ${MOVE_HEADING} \`${f.id}\`\n\n` +
+      `*${f.title}*\n\n` +
+      `*Currently:* ${currently(f)}\n` +
+      `*Move to:* <P0, P1, P2 or P3 - leave this to change nothing>\n\n` +
+      `${WHY}\n\n>\n`,
+  );
+
+  return `## Change a severity
+
+These are the findings the next round will act on. To move one, replace the
+\`*Move to:*\` placeholder and say why; leave it exactly as it is and nothing
+changes. A move with no reason, or a reason with no move, is reported rather than
+guessed at.
+
+A guard's downgrade is shown with the reason it fired, so you can see what you
+would be overriding. Overriding one is legitimate: grounding checks that a claim
+names a real place and cannot judge whether it is true, so a finding that was
+right and cited a file from memory is demoted for the same reason a wrong one is.
+The guard's reason stays on the record either way.
+
+${blocks.join('\n')}`;
+}
+
+/** One severity a person asked to move. */
+export interface RequestedMove {
+  id: string;
+  to: Severity;
+  reason: string;
+}
+
+export interface RequestedMoves {
+  moves: RequestedMove[];
+  problems: RaiseProblem[];
+}
+
+/**
+ * Every severity change a person wrote into a `NEEDS-INPUT.md`.
+ *
+ * `carried` is what the run will act on, and it is passed in rather than looked
+ * up so this stays pure and so the check is against the same list the acceptance
+ * will merge into. An id naming nothing in it is a problem: the file may be from
+ * an earlier stop, and a person who edited a stale block must find that out
+ * rather than resume believing a P0 is waiting.
+ *
+ * **Refuse, never repair**, in the same direction `parseRaised` refuses. A move
+ * with no reason could be accepted with the reason left empty - and the record
+ * that exists to say who moved a severity and why would hold a move nobody
+ * explained. A reason with no move could be dropped - and a person's decision
+ * would vanish silently.
+ */
+export function parseMoves(md: string, carried: readonly Finding[]): RequestedMoves {
+  const moves: RequestedMove[] = [];
+  const problems: RaiseProblem[] = [];
+  const byId = new Map(carried.map((f) => [f.id, f]));
+
+  for (const block of md.split(/^### /m).slice(1)) {
+    const firstLine = block.split('\n')[0] ?? '';
+    const named = MOVE_ID.exec(firstLine.trim());
+    if (named === null) continue;
+
+    const heading = firstLine.trim();
+    const id = named[1] ?? '';
+    const to = withoutPlaceholders(MOVE_LINE.exec(block)?.[1] ?? '');
+    const reason = quoted(block, WHY);
+
+    // The untouched template. Silent, because every stop renders one row per
+    // carried finding and reporting them would make every resume report.
+    if (to === '' && reason === '') continue;
+
+    const missing: string[] = [];
+    if (to === '') missing.push('a `*Move to:*` severity');
+    else if (!(SEVERITIES as readonly string[]).includes(to)) {
+      missing.push(`a \`*Move to:*\` of P0, P1, P2 or P3 - not "${to}"`);
+    }
+    if (reason === '') missing.push('a `**Why:**` blockquote');
+    if (missing.length > 0) {
+      problems.push({ heading, reason: `it needs ${missing.join(', and ')}` });
+      continue;
+    }
+
+    const target = byId.get(id);
+    if (target === undefined) {
+      problems.push({
+        heading,
+        reason:
+          `\`${id}\` is not one of the findings this run is carrying, so moving it would ` +
+          'change nothing. This file may be from an earlier stop.',
+      });
+      continue;
+    }
+    if (target.severity === to) {
+      // Reported rather than treated as a no-op: somebody typed a severity and
+      // a reason, and letting the resume proceed in silence would leave them
+      // believing the run had been changed.
+      problems.push({ heading, reason: `\`${id}\` is already ${to}` });
+      continue;
+    }
+
+    moves.push({ id, to: to as Severity, reason });
+  }
+
+  return { moves, problems };
+}
+
+/**
+ * Move one severity, appending the record of the move.
+ *
+ * Through `move`, so `from` is the severity the finding actually had. Append,
+ * never replace: a finding grounding demoted and a person restored twice has a
+ * history of three steps, and the first of them is still the guard's.
+ */
+export function changeSeverity(f: Finding, to: Severity, reason: string, at: string): Finding {
+  const { from, next } = move(f, to);
+  return {
+    ...next,
+    severityChanges: [...severityChangesOf(f), { from, to, by: 'human', reason, at }],
+  };
+}
+
+export interface Moved {
+  /** The findings as they now stand, in carry order. */
+  findings: Finding[];
+  /** What changed, oldest request first. */
+  applied: readonly { id: string; from: Severity; to: Severity }[];
+}
+
+/**
+ * Apply severity changes to what the run is carrying, and record them.
+ *
+ * The sibling seam to `acceptRaised`, and the reason both live here: a host
+ * member offering "downgrade P1 to P2" - one of the four `src/host.ts` names as
+ * needing its own validator - would call this rather than reimplement what a
+ * legal move is.
+ *
+ * **The round's own `code-review-N.json` is deliberately not rewritten.** It is
+ * the record of what the reviewer produced in that round, and a later edit would
+ * make it a record of something else - the same reason #141 keeps a human's
+ * finding out of it. The changed findings are written to their own artifact and
+ * carried on `state.pendingFindings`, which is what the next round reads and
+ * what a resume in another process picks up, and both hold `downgraded` and
+ * `severityChanges` together.
+ */
+export function acceptMoves(
+  state: RunState,
+  phase: PendingFindings['phase'],
+  moves: readonly RequestedMove[],
+  now: () => string = () => new Date().toISOString(),
+): Moved {
+  const carried = takePendingFindings(state, phase) ?? [];
+  const wanted = new Map(moves.map((m) => [m.id, m]));
+  const applied: { id: string; from: Severity; to: Severity }[] = [];
+
+  const findings = carried.map((f) => {
+    const m = wanted.get(f.id);
+    if (m === undefined || m.to === f.severity) return f;
+    applied.push({ id: f.id, from: f.severity, to: m.to });
+    return changeSeverity(f, m.to, m.reason, now());
+  });
+
+  if (applied.length === 0) return { findings, applied };
+
+  // Before the state write, for the reason `acceptRaised` writes its artifact
+  // first: a process that dies between the two leaves the record of what a
+  // person decided rather than only the fact that they decided something.
+  artifact(state, `severity-${phase}-${state.planRound}-${state.reviewRound}.json`, findings);
+  state.pendingFindings = { phase, findings };
+  saveState(state);
+
+  for (const a of applied) {
+    const reason = wanted.get(a.id)?.reason ?? '';
+    recordAndSay(
+      state,
+      a.to === 'P0' || a.to === 'P1' ? 'warn' : 'ok',
+      'finding_severity_changed',
+      `Moved ${a.id} from ${a.from} to ${a.to} by hand - ${reason}`,
+      { id: a.id, from: a.from, to: a.to, by: 'human', reason, phase },
+    );
+  }
+
+  return { findings, applied };
 }

@@ -747,6 +747,32 @@ export interface Evidence {
  */
 export type FindingAuthor = 'critic' | 'reviewer' | 'human' | 'vibe';
 
+/**
+ * One move of a severity, and who made it (#142).
+ *
+ * `by` is `FindingAuthor` rather than a second vocabulary: #141 already answered
+ * "how does this record name a source", on the same record, and inventing a
+ * parallel enum a month later is how two fields come to disagree about what
+ * `human` means. Only `human` is ever written today - the guards write
+ * `downgraded`, which says the same thing in the field that is theirs - and the
+ * type is the shared one so that a later writer has a name already waiting.
+ *
+ * `from` is captured by `move` in `src/evidence.ts` at the instant of the change
+ * and can never be supplied by a caller. That is the whole reason the guards
+ * share a construction, and it is why widening it was the right shape rather
+ * than adding a third path beside it: a `from` a caller could type is a `from`
+ * that eventually names a severity the finding never had.
+ */
+export interface SeverityChange {
+  from: Severity;
+  to: Severity;
+  by: FindingAuthor;
+  /** Why, in the person's own words. Required: a move nobody explained is noise. */
+  reason: string;
+  /** ISO 8601, so the order in the list is checkable rather than asserted. */
+  at: string;
+}
+
 export interface Finding {
   id: string;
   severity: Severity;
@@ -784,8 +810,39 @@ export interface Finding {
    * On the finding itself, not only in the event log: a downgrade that appeared
    * in a log line alone would be invisible by the time anyone read the round's
    * artifact.
+   *
+   * **The guards' field, and theirs alone** (#142). `toP2` is the only writer,
+   * nothing clears it, and a person restoring the severity afterwards does not
+   * touch it - overwriting it on a restore would erase the fact that a guard
+   * fired, which is the exact thing #48 added the field for. What a person did
+   * lands in `severityChanges` beside it, so the two questions a reader has -
+   * *did a guard fire, and why* and *how did this reach the severity it has* -
+   * each have their own answer rather than one answer that has to serve both.
    */
   downgraded?: { from: Severity; reason: string };
+  /**
+   * Severity changes a **person** made, oldest first (#142).
+   *
+   * Until this existed a severity moved in exactly one direction, was written by
+   * exactly one function, and could never be moved back: every instance came
+   * from `toP2`, always landing on P2, always for a mechanical reason, and
+   * permanent. That is correct for a rule running unattended - grounding
+   * *"cannot judge a claim; it can only check that the claim names a real
+   * place"* - and it means a true P1 that cited a file the reviewer described
+   * from memory is demoted for the same reason a false one is. The only thing in
+   * the system that can tell those apart is a person reading the finding, and
+   * they could see the downgrade, agree it was wrong, and do nothing about it.
+   *
+   * A list rather than a field, because a finding grounding demoted and a person
+   * restored has a history of two steps and the artifact should show both.
+   * Append-only: nothing here is ever rewritten, so the guard's reason stays
+   * readable after the restore that overrode it.
+   *
+   * Absent on every finding nobody touched, which is almost all of them, and an
+   * empty list is never written - a run in which no severity moved produces the
+   * artifacts it produced before this existed, byte for byte.
+   */
+  severityChanges?: SeverityChange[];
   /**
    * Real, worth doing, and belongs in separate work rather than in this change.
    *

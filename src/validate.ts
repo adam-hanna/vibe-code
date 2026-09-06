@@ -15,6 +15,7 @@ import type {
   Plan,
   QuestionKind,
   Severity,
+  SeverityChange,
   Verdict,
 } from '@src/types.js';
 
@@ -284,6 +285,44 @@ export function authorOf(f: Finding): FindingAuthor | null {
   return typeof raw === 'string' && (AUTHORS as readonly string[]).includes(raw)
     ? (raw as FindingAuthor)
     : null;
+}
+
+/**
+ * The severity changes a person made, in order, or none (#142).
+ *
+ * Narrowed at the point of use, for the reason `authorOf` is: `readFinding`
+ * carries a stored finding through unvalidated, so this can be handed a list a
+ * hand-edited state invented. An entry missing a field or naming a severity that
+ * does not exist is **dropped** rather than costing the whole list - the same
+ * direction `readEvidence` takes, and for the same reason: this is a record of
+ * what happened, not an input anything computes from. The severity the loop acts
+ * on is `f.severity` itself, which was moved when the change was made.
+ */
+export function severityChangesOf(f: Finding): SeverityChange[] {
+  const raw: unknown = f.severityChanges;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((entry): SeverityChange | null => {
+      if (typeof entry !== 'object' || entry === null) return null;
+      const e = entry as Record<string, unknown>;
+      const from = e['from'];
+      const to = e['to'];
+      const by = e['by'];
+      const reason = e['reason'];
+      const at = e['at'];
+      if (!(SEVERITIES as readonly unknown[]).includes(from)) return null;
+      if (!(SEVERITIES as readonly unknown[]).includes(to)) return null;
+      if (!(AUTHORS as readonly unknown[]).includes(by)) return null;
+      if (typeof reason !== 'string' || typeof at !== 'string') return null;
+      return {
+        from: from as Severity,
+        to: to as Severity,
+        by: by as FindingAuthor,
+        reason,
+        at,
+      };
+    })
+    .filter((c): c is SeverityChange => c !== null);
 }
 
 /**
