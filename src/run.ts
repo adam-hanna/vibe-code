@@ -1440,6 +1440,71 @@ export function artifactDir(state: RunState, name: string): string {
 }
 
 /**
+ * Why an artifact may not be read, or null (#129).
+ *
+ * The third of the three sites in this family, and the last one #102 named when
+ * it closed the checkpoint: #53 closed the run entry and its `state.json`, #102
+ * closed `checkpoint-<n>.json`, and this closes the ordinary artifacts beside
+ * them. The consequence here is different from either and is the reason it was
+ * left for its own issue - a checkpoint *becomes* a run and goes through
+ * `loadRun`'s validators on the way, while an artifact's bytes are handed
+ * **straight to a model** with nothing in between. A link at `implementation-
+ * report.md` points the reviewer's prompt at a file of the linker's choosing.
+ *
+ * The predicate is `linkageOf`, the same one `linkedRunReason` and
+ * `linkedCheckpointReason` use. One rule, three messages, because the three
+ * name different things to a reader.
+ *
+ * **The caller must have established `name` is a basename first.** This joins it
+ * onto a directory, exactly as `readArtifact` and `commitFork` do; it is not
+ * where `../` is caught, and `isReportBasename` is not moved in here for the
+ * reason `resolveInside` is not - one question, one function.
+ */
+export function linkedArtifactReason(dir: string, name: string): string | null {
+  const linkage = linkageOf(path.join(dir, name));
+  if (linkage !== 'link' && linkage !== 'unknown') return null;
+  const what =
+    linkage === 'link'
+      ? 'is a symlink or a junction, so it points outside the run archive'
+      : 'could not be classified, so it cannot be ruled out as a link';
+  return (
+    `${name} ${what}. vibe never creates one - every artifact it writes is a real file - so ` +
+    'this was not written by a run. Nothing was read from it.'
+  );
+}
+
+/**
+ * What is at an artifact's name: its text, nothing usable, or a link.
+ *
+ * Three answers rather than two, and the third exists for the distinction #53
+ * drew and #102 kept: `absent` says a file was opened and could not be used,
+ * `linked` says vibe never looked inside it. A caller that narrates must be able
+ * to tell a reader which of those happened, and a reader must never be told a
+ * file was unreadable when it was never read.
+ *
+ * Callers that do not narrate keep `artifactText` below and get `null` for all
+ * three, which is the fail-closed direction: a future caller that never heard of
+ * this reads no link by default.
+ */
+export type ArtifactRead =
+  | { kind: 'text'; text: string }
+  | { kind: 'absent' }
+  | { kind: 'linked'; reason: string };
+
+export function readArtifact(state: RunState, name: string): ArtifactRead {
+  // Before the read, and before anything that would `stat` through it. #53's
+  // rule: refuse, rather than find out what is on the other side and then
+  // report about that.
+  const reason = linkedArtifactReason(state.dir, name);
+  if (reason !== null) return { kind: 'linked', reason };
+  try {
+    return { kind: 'text', text: readFileSync(path.join(state.dir, name), 'utf8') };
+  } catch {
+    return { kind: 'absent' };
+  }
+}
+
+/**
  * An artifact's text, or null when there is nothing readable there.
  *
  * Null rather than a throw for a directory of that name or an unreadable file.
@@ -1448,14 +1513,14 @@ export function artifactDir(state: RunState, name: string): string {
  * for the last write turn's report, and a file it cannot read is no report at
  * all - missing and unreadable render the reviewer the same notice, so they are
  * the same answer here too (#50).
+ *
+ * A link is null as well, and *silently* so - which is right for a caller that
+ * is deciding rather than reporting, and wrong for one that has to say what
+ * happened. `latestReport` therefore uses `readArtifact` directly (#129).
  */
 export function artifactText(state: RunState, name: string): string | null {
-  const file = path.join(state.dir, name);
-  try {
-    return readFileSync(file, 'utf8');
-  } catch {
-    return null;
-  }
+  const read = readArtifact(state, name);
+  return read.kind === 'text' ? read.text : null;
 }
 
 /**

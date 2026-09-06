@@ -67,6 +67,7 @@ import {
   measuredRatio,
   p1Signature,
   persistenceNotice,
+  readArtifact,
   recordAndSay,
   recordEvent,
   recordPendingFindings,
@@ -264,12 +265,23 @@ function recordReport(state: RunState, name: string, text: string): void {
 /**
  * The last write turn's report, or null when this run has none it can vouch for.
  *
- * Null for four causes - no pointer at all, a pointer `beginReport` cleared for
+ * Null for five causes - no pointer at all, a pointer `beginReport` cleared for
  * a turn that never finished recording, a pointer this version will not join
- * onto a path, and a file that is missing, unreadable or blank - and every one
- * of them renders the same notice. What differs is the record: the first two
- * are silence, the other two are run events, because a pointer that does not
- * resolve is a fact about this run rather than about the reviewer's job (#50).
+ * onto a path, a file that is a link out of the archive, and a file that is
+ * missing, unreadable or blank - and every one of them renders the same notice.
+ * What differs is the record: the first two are silence, the other three are run
+ * events, because a pointer that does not resolve is a fact about this run
+ * rather than about the reviewer's job (#50).
+ *
+ * **The link is degraded, not fatal** (#129), and that is the choice the issue
+ * asks for rather than a detail. `planFork` can refuse outright because nothing
+ * has run; this is called mid-run with a prompt half-built, and ending an
+ * otherwise healthy run over one artifact would cost more than the artifact is
+ * worth. Option 2 of the three, and it has a precedent rather than being
+ * invented here: the reviewer is *told* there is no report, and told explicitly
+ * that this is not a statement that there were no concerns. What it must not do
+ * is share `report_unreadable`, which says a file was opened and could not be
+ * used - the one thing that is not true of a file vibe refused to open.
  */
 function latestReport(state: RunState): string | null {
   const name = state.lastReport;
@@ -286,8 +298,12 @@ function latestReport(state: RunState): string | null {
     );
     return null;
   }
-  const text = artifactText(state, name);
-  if (text === null || text.trim() === '') {
+  const read = readArtifact(state, name);
+  if (read.kind === 'linked') {
+    recordAndSay(state, 'warn', 'report_linked', `The recorded report ${read.reason}`, { name });
+    return null;
+  }
+  if (read.kind === 'absent' || read.text.trim() === '') {
     recordAndSay(
       state,
       'warn',
@@ -297,7 +313,7 @@ function latestReport(state: RunState): string | null {
     );
     return null;
   }
-  return text;
+  return read.text;
 }
 
 /**
