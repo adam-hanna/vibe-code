@@ -460,6 +460,25 @@ export interface VerifyConfig {
    * and nothing yet wants two.
    */
   artifactMaxBytes: number | null;
+  /**
+   * Whether a reviewer's reproducer is placed and run (#113).
+   *
+   * True by default. Two things make that the right default rather than an
+   * opt-in: a run whose reviewer supplies no reproducer is byte-identical either
+   * way, so nothing changes for anyone until a reviewer writes one; and a
+   * feature nobody turns on proves nothing about false findings, which is the
+   * whole point of it.
+   *
+   * What turning it off buys is the one thing it costs: a gate run per blocking
+   * finding that carries a reproducer, at that gate's own timeout. There is no
+   * cap on how many, deliberately - a number here would be invented, and the
+   * ceiling that exists is the reviewer's own willingness to write tests.
+   *
+   * Off also means the file is never written into the working tree. That is a
+   * real reason to want it off on a repository where an unexpected file would
+   * matter, even though the implementer writes files there every round.
+   */
+  reproducers: boolean;
 }
 
 export interface ProgressConfig {
@@ -773,6 +792,106 @@ export interface SeverityChange {
   at: string;
 }
 
+/**
+ * A test the reviewer wrote to make its own finding fail - the executable
+ * witness (#113).
+ *
+ * `src/evidence.ts` says what grounding can and cannot do, in its own words:
+ * *"Not whether it is correct. Nothing here can judge a claim; it can only check
+ * that the claim names a real place."* A finding that is **wrong** and cites a
+ * real line is passed by both guards and cannot be told from a true one - #44's
+ * P1 is the standing example, and it bought a fix round that edited working code
+ * to satisfy a premise `tsc` refutes in four seconds. This is the field that
+ * makes that case observable.
+ *
+ * **A file, never a command**, and that is the whole shape of the design.
+ * `src/verify.ts` states the rule at the one place a shell is used at all -
+ * *"Model-authored text is never passed to a shell"* - so a reviewer-supplied
+ * `command` would hand a Codex turn the user's own privileges on the user's own
+ * machine. What ships instead: the reviewer returns a test file, vibe places it,
+ * and the command executed is **byte-identical to the gate the user configured**.
+ * No new execution authority, and nothing model-authored on a command line.
+ *
+ * Writing a model-authored *file* into the tree is not new authority either -
+ * the implementer does it every round, and the gate runs what it wrote. What is
+ * new is that vibe does the writing, so the containment, the refusal to
+ * overwrite and the removal afterwards are all in `src/reproducer.ts` rather
+ * than in an agent's judgement.
+ */
+export interface Reproducer {
+  /**
+   * Where the file goes, repo-relative.
+   *
+   * Model-authored, so it is resolved through the same containment
+   * `checkEvidence` applies to a citation - and then held to more, because this
+   * one writes: an existing path is refused rather than overwritten, and a
+   * symlinked ancestor is refused rather than followed.
+   */
+  path: string;
+  /** The file itself, written verbatim. */
+  contents: string;
+  /**
+   * Which configured gate runs it, by name.
+   *
+   * A name matched against `resolveGates`, never a command: the reviewer chooses
+   * *which* of the user's own gates observes the file, and cannot choose what
+   * that gate runs. Absent is legal and resolves to the sole gate when there is
+   * exactly one - which is every legacy config, since `resolveGates` synthesizes
+   * a single gate named `verification`.
+   */
+  gate?: string;
+}
+
+/**
+ * What running a reproducer observed. Three answers, and one of them is "cannot
+ * tell" (#113).
+ *
+ * - `reproduced` - the gate passed on this tree without the file and failed with
+ *   it. The finding points at something that actually happens.
+ * - `did-not-reproduce` - the gate passed with the file present. The test the
+ *   reviewer wrote to make its own finding fail did not fail.
+ * - `unproven` - nothing was observed: the file could not be placed, no gate
+ *   could be resolved, the gate could not run, or it failed with no observed
+ *   baseline to attribute the failure to.
+ *
+ * **The two directions need different amounts of evidence, and that asymmetry is
+ * the design.** A *pass* is self-certifying: the added test ran inside a suite
+ * that exited 0, so nothing else was broken and the test itself passed. A
+ * *failure* is not: without an observed pass of the same gate on the same tree
+ * without the file, the failure may be any other test in the suite. So
+ * `reproduced` requires the baseline and `did-not-reproduce` does not, and a
+ * failure with no baseline is `unproven` rather than a proof.
+ */
+export type ReproducerVerdict = 'reproduced' | 'did-not-reproduce' | 'unproven';
+
+export interface ReproducerOutcome {
+  verdict: ReproducerVerdict;
+  /**
+   * Which moment this observation is from.
+   *
+   * `review` is before the fix, and is what decides whether the finding blocks.
+   * `final-fix` is after the round that is deliberately never re-reviewed, and
+   * is the one thing that has ever been able to turn OUTSTANDING.md's *"worked
+   * on and unconfirmed"* into a fact.
+   */
+  at: 'review' | 'final-fix';
+  /** The gate that ran it, or null when none could be resolved. */
+  gate: string | null;
+  /** What was executed - the configured gate's command, unchanged. Null when nothing ran. */
+  command: string | null;
+  /** Null when the command never ran, or ended without one. */
+  exitCode?: number | null;
+  /**
+   * Whether a pass of the same gate on the same tree *without* the file was
+   * observed. Only `gate-passed` can support `reproduced`.
+   */
+  baseline: 'gate-passed' | 'not-observed';
+  /** Why it is unproven. Null on the two verdicts that observed a run. */
+  reason: string | null;
+  /** Where the file was kept under the run directory, or null when it was not. */
+  archived: string | null;
+}
+
 export interface Finding {
   id: string;
   severity: Severity;
@@ -843,6 +962,33 @@ export interface Finding {
    * artifacts it produced before this existed, byte for byte.
    */
   severityChanges?: SeverityChange[];
+  /**
+   * The test the reviewer wrote to make this finding fail (#113).
+   *
+   * Optional, and its absence is never held against the finding. Requiring one
+   * would mean a reviewer that cannot write a failing test loses its finding,
+   * which is the opposite of what a guard should cost - and it would put a
+   * schema requirement on a field the loop can only *sometimes* act on. A
+   * finding with none behaves exactly as every finding did before this existed.
+   */
+  reproducer?: Reproducer;
+  /**
+   * What running that test observed, oldest first (#113).
+   *
+   * A list because the same reproducer is run at two different moments and they
+   * answer two different questions: at `review`, does the defect happen at all;
+   * after the final fix, is it gone. Append-only, like `severityChanges` and for
+   * the same reason - each entry is a record of an observation, and an
+   * observation is not corrected by a later one.
+   *
+   * A `did-not-reproduce` at `review` costs the finding its blocking severity
+   * through `toP2`, so `downgraded` carries the demotion and this carries the
+   * evidence for it. Nothing here ever *raises* a severity: `reproduced` records
+   * that the finding is real and leaves it exactly where the reviewer put it,
+   * because promoting on a machine's say-so is the move #142 reserved for a
+   * person.
+   */
+  reproducerOutcomes?: ReproducerOutcome[];
   /**
    * Real, worth doing, and belongs in separate work rather than in this change.
    *

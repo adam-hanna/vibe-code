@@ -499,7 +499,27 @@ So **every turn, of every role, on both agents, now records what it did**: how m
 
 The threshold is zero tool items, exactly, and there is no other number in the rule. Across every review turn in this repo's own archive — 29 of them, over 23 runs — one ran nothing and the rest ran between 5 and 154 commands. That one produced the only false blocking finding in the archive, and it bought a fix round that edited working code to satisfy a premise four seconds of `tsc` would have refuted.
 
-A carried P1 is not dropped. In the plan phase it is written into the implementation prompt as a known open issue. In the review phase it gets one final fix round, which is committed and re-verified but deliberately **not** re-reviewed — a fresh review could raise something new and reopen the argument the tolerance just settled. So those findings are worked on but unconfirmed, and `OUTSTANDING.md` says so rather than calling them unfixed.
+### And it can be asked to prove it
+
+Both rules above are about the *form* of a claim — does it name a real place, did the turn look at anything. Neither can ask whether the finding is **true**, and `src/evidence.ts` says so in its own words: *"Nothing here can judge a claim; it can only check that the claim names a real place."* A finding that is wrong and cites a real line passes both, which is precisely what the false P1 above did.
+
+So a reviewer may attach a **reproducer**: a test file that fails because of the defect it is describing and would pass once it is fixed.
+
+```
+reproducer failed, on a tree the gate had just passed   -> reproduced. The defect is real.
+reproducer passed against the unfixed code              -> did not reproduce. Downgraded to P2.
+anything else                                           -> unproven. Nothing changes either way.
+```
+
+**It is a file, never a command.** `vibe` does not pass model-authored text to a shell, and a reviewer-supplied command would hand a model your privileges on your machine. What happens instead: the reviewer returns a path and the file's contents, `vibe` writes it, and then runs **your own already-configured gate command, unchanged**. The reviewer picks *which* of your gates observes the file, by name, and can pick nothing else.
+
+The file is refused rather than written if it would land outside the repository, under `.git` or `.vibe`, on a path that already exists, or through a symlinked directory. It is removed from the working tree as soon as the gate has run — a failing reproducer left behind would break your next verification round for a reason you did not choose — and kept in the run record under `reproducers/<finding-id>/`.
+
+Two directions, and they need different amounts of evidence. A **pass** certifies itself: the whole command exited 0 with the file present, so the test ran and passed and nothing else was broken. A **failure** does not: without an observed pass of the same gate on the same tree *without* the file, the failure could be any other test in the suite — so that is `unproven`, not a proof. Nothing here ever raises a severity; only a person does that.
+
+It costs one gate run per blocking finding that carries one, and it is optional in both directions: a reviewer that writes none loses nothing, and `verify.reproducers: false` turns it off entirely — a run with it off produces the same review prompt it produced before this existed.
+
+A carried P1 is not dropped. In the plan phase it is written into the implementation prompt as a known open issue. In the review phase it gets one final fix round, which is committed and re-verified but deliberately **not** re-reviewed — a fresh review could raise something new and reopen the argument the tolerance just settled. So those findings are worked on but unconfirmed, and `OUTSTANDING.md` says so rather than calling them unfixed — **unless one carried a reproducer**, which is run once more after that round. A test that failed before the fix and passes after it closes the finding by evidence, and the document says that instead.
 
 Brakes, all independent:
 
@@ -589,7 +609,7 @@ defaults rather than a sample — omit any section and you get exactly what is p
   "budget": { "maxCostUsd": 25, "maxTokens": 25000000, "planShare": 0.4,
               "codexLimitPercent": 95, "waitOnRateLimit": true, "maxWaitMinutes": 360 },
   "verify": { "enabled": true, "command": null, "runs": 3, "timeoutMs": 900000, "gates": null,
-              "artifactMaxBytes": null },
+              "artifactMaxBytes": null, "reproducers": true },
   "questions": { "askCodex": true, "answerNonBlocking": true,
                  "escalateOnDefer": true, "escalateOnLowConfidence": true },
   "git": { "useBranch": true, "branchPrefix": "vibe/", "commitEachRound": true },

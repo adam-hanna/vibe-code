@@ -1,7 +1,8 @@
 import { describedRole, ROLES } from '@src/roles.js';
-import { EVIDENCE_RULE } from '@src/schemas.js';
+import { EVIDENCE_RULE, REPRODUCER_RULE } from '@src/schemas.js';
 import { inspectedItems } from '@src/evidence.js';
-import { authorOf, readEvidence, severityChangesOf } from '@src/validate.js';
+import { describeOutcome } from '@src/reproducer.js';
+import { authorOf, readEvidence, reproductionAt, severityChangesOf } from '@src/validate.js';
 import type { RoleTable } from '@src/roles.js';
 import type { EnvironmentFacts } from '@src/runtime.js';
 import type {
@@ -1030,6 +1031,18 @@ export function reviewPrompt(
    * carries a report section - present, or the notice saying there is none.
    */
   report?: string | null | undefined,
+  /**
+   * The names of the gates a reproducer may be run by, or absent when this run
+   * does not run them (#113).
+   *
+   * Trailing and absent-renders-nothing, for the reason `chunk` is: a run with
+   * `verify.reproducers: false`, or with verification off entirely, must produce
+   * the prompt it produced before this existed, byte for byte. The names matter
+   * as much as the flag - the reviewer picks one by name and a name it invented
+   * resolves to nothing, so a list it can choose from is the difference between
+   * the field being usable and being a guess.
+   */
+  gates?: readonly string[] | undefined,
 ): string {
   return `You are reviewing a code change against the plan it was meant to implement.${
     round > 1 ? continuityNote(round, hasMemory, 'change') : ''
@@ -1059,7 +1072,7 @@ Give each finding a stable kebab-case \`id\`.
 ## Evidence
 
 ${EVIDENCE_RULE}
-
+${reproducerSection(gates)}
 ${scopeGuidance(outOfScope, 'change')}
 
 ## Acceptance criteria
@@ -1282,6 +1295,38 @@ function citation(f: Finding, indent: string): string {
  * it but explain why" is addressed to a disagreement with a model; here it is a
  * disagreement with the person who will read the answer.
  */
+/**
+ * The reproducer rule, and the gates it may name - or nothing at all (#113).
+ *
+ * Nothing when the caller passes no gate list, which is what a run with
+ * `verify.reproducers: false` does. Nothing again when the list is empty: a
+ * reviewer asked to choose a gate from none of them would either invent a name
+ * or waste a field, and both are worse than not being offered the field.
+ *
+ * The list is what makes `gate` answerable. `gateFor` matches a name against
+ * `resolveGates` and reports the list back when it misses, so a reviewer that
+ * has never been shown the names can only guess - and the single-gate case,
+ * which is every legacy config, is told it can leave the field null rather than
+ * being left to work that out.
+ */
+function reproducerSection(gates: readonly string[] | undefined): string {
+  if (gates === undefined || gates.length === 0) return '';
+  const choices =
+    gates.length === 1
+      ? `This run has one verification gate, \`${gates[0]}\`, so leave \`gate\` null - there is nothing to choose between.`
+      : `This run's verification gates, by name: ${gates.map((g) => `\`${g}\``).join(', ')}. ` +
+        'Name the one that would run a file at the path you chose. `gate` is not optional here - ' +
+        'with several gates, nothing chooses between them for you and the reproducer is discarded.';
+
+  return `
+## Reproducer
+
+${REPRODUCER_RULE}
+
+${choices}
+`;
+}
+
 function raisedNote(f: Finding): string {
   return authorOf(f) === 'human'
     ? '\n\n*Raised by the person running this, not by the reviewer. It cost no turn and no ' +
@@ -1315,6 +1360,28 @@ function movedNote(f: Finding): string {
   return `\n\n*Severity moved from ${last.from} to ${last.to} by the person running this: ${last.reason}.${guard}*`;
 }
 
+/**
+ * What running the finding's own test showed, when something ran (#113).
+ *
+ * Rendered only when there is an observation, so a run in which no reviewer
+ * wrote a reproducer produces the prompt it produced before this existed - the
+ * same rule `raisedNote` and `movedNote` follow.
+ *
+ * It is worth a line for the same reason `raisedNote` is: the instruction below
+ * it means something different. *"If you believe a finding is incorrect, fix
+ * nothing for it but explain why"* is a reasonable invitation against an
+ * assertion. Against a test that fails on this tree it is not, and the fixer
+ * should be told which of the two it is looking at. The `unproven` case is
+ * printed too, and says plainly that it settles nothing - a reader who sees a
+ * reproducer mentioned on some findings and not others would otherwise read the
+ * silence as a verdict.
+ */
+function provenNote(f: Finding): string {
+  const outcome = reproductionAt(f, 'review');
+  if (outcome === null) return '';
+  return `\n\n*Reproducer:* ${describeOutcome(outcome)}`;
+}
+
 function formatFinding(f: Finding): string {
   // Omitted rather than printed empty. A human raising a finding is reporting a
   // defect, not designing the repair, and `*Suggested fix:* ` with nothing after
@@ -1322,7 +1389,7 @@ function formatFinding(f: Finding): string {
   // - the schema requires it - so no existing prompt changes.
   const fix = f.suggested_fix.trim() === '' ? '' : `\n\n*Suggested fix:* ${f.suggested_fix}`;
   return `### [${f.severity}] ${f.title}  \`${f.id}\`
-${f.detail}${fix}${citation(f, '\n')}${raisedNote(f)}${movedNote(f)}${f.defer === true ? `\n\n${DEFERRED_MARK}` : ''}`;
+${f.detail}${fix}${citation(f, '\n')}${raisedNote(f)}${movedNote(f)}${provenNote(f)}${f.defer === true ? `\n\n${DEFERRED_MARK}` : ''}`;
 }
 
 /**

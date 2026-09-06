@@ -159,6 +159,7 @@ src/slots.ts         session-slot lifecycle (main = Claude, judge + review = Cod
 src/context.ts       context measurement, compaction, session rotation
 src/preflight.ts     toolchain contract enforcement, `vibe doctor`
 src/verify.ts        the verification gates — the list, every run, and broken vs flaky
+src/reproducer.ts    a reviewer's test: placed, run by the user's own gate, taken back out
 src/progress.ts      in-turn heartbeat
 src/work.ts          how far a write turn has got - measured, and labelled a proxy
 src/schemas.ts       the JSON schemas both CLIs are pinned to
@@ -451,6 +452,46 @@ short-circuit and costs exactly what it did. Three things about it:
 - **A flaky gate still blocks, and an unlaunchable one still short-circuits.** Retrying or
   excluding a flake hides a defect in the suite; re-running a command that could not start
   buys nothing, since no amount of retrying makes a mistyped path resolve.
+
+**A blocking finding can be asked to prove it, and the proof is a file rather than a
+command** (#113). Both existing guards are about the *form* of a claim, and `evidence.ts`
+says why in its own words: *"Nothing here can judge a claim; it can only check that the claim
+names a real place."* A finding that is **wrong** and cites a real line passes both — #44's
+P1 is the standing example, and it bought a fix round that edited working code to satisfy a
+premise `tsc` refutes in four seconds. `Finding.reproducer` is a test the reviewer writes to
+make its own finding fail, and `applyReproducerOutcomes` is the fourth guard in the same
+module. Four things carry it:
+
+- **A file, never a command, and that is the whole shape.** `src/verify.ts` states the rule
+  at the one place a shell is used at all — *"Model-authored text is never passed to a
+  shell"* — and the obvious implementation, the one the research review's own schema example
+  proposed, is a reviewer-supplied `command` that would hand a Codex turn the user's
+  privileges outside any sandbox. So the reviewer returns a path and contents, `vibe` writes
+  it, and the command executed is byte-identical to the gate `resolveGates` produced. The
+  reviewer picks **which** configured gate observes the file, by name, and nothing else.
+  Writing a model-authored *file* is not new authority — the implementer does it every round
+  — but **vibe** doing the writing is, so containment, the refusal to overwrite, the symlink
+  refusal and the removal afterwards are written down instead of left to an agent's judgement.
+  `resolveInside` is exported from `evidence.ts` rather than reimplemented, because two
+  answers to "is this path inside the repo" is how they come to differ at the edges.
+- **The two directions need different evidence, and the asymmetry is the design.** A **pass**
+  certifies itself: the whole command exited 0 with the file present. A **failure** does not,
+  because any other test could be what failed — it needs an observed pass of the same gate on
+  the same tree without the file, and `state.gateOutcomes` is where that comes from. No
+  baseline, no proof: the verdict is `unproven`, which is also where every other way this can
+  go wrong lands. Nothing here ever *raises* a severity; that is the move #142 reserved for a
+  person.
+- **`runs: 1`, and no cap on how many findings get one.** `verify.runs` is 3 because three
+  samples catch a flake in the project's own suite; this is a yes/no about one added file
+  against a tree that just came back green, and the issue names the constraint directly. A
+  cap on the number of reproducers would be an invented number, so the cost is stated
+  instead — one gate run per blocking finding that carries one — and `verify.reproducers:
+  false` is the off switch.
+- **It is what finally makes OUTSTANDING.md able to say something.** A carried P1 is fixed in
+  the round that is deliberately never re-reviewed, so the document has only ever been able
+  to say the finding was *"worked on, and nobody has confirmed they are gone"*. A reproducer
+  that failed before the fix and passes after it closes it by evidence, and the sentence
+  changes — counted, so a run where one of three closed does not read as though all three did.
 
 **A rate is a fraction, and the denominator is part of the answer.** `src/scorecard.ts` reads
 the archive `vibe list` walks, and every derived count is a `Measure` — what matched, what
