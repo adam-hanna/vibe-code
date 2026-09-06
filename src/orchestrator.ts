@@ -150,6 +150,7 @@ export type { ExitCode, TurnCharge, TurnSpend } from '@src/charge.js';
 // One name for both in the file that records the first would be the confusion
 // the pair exists to remove (#131).
 import { describeEnding as describeChildEnding, endingOf, isAbnormal } from '@src/proc.js';
+import { formatWork, withWorkProgress, workData } from '@src/work.js';
 
 /**
  * A write turn is about to start, so this run can no longer vouch for any
@@ -171,6 +172,64 @@ import { describeEnding as describeChildEnding, endingOf, isAbnormal } from '@sr
 function beginReport(state: RunState): void {
   delete state.lastReport;
   saveState(state);
+}
+
+/**
+ * A write turn, with the tree measured underneath it (#136).
+ *
+ * One function for the same four sites `recordReport` covers, and for a weaker
+ * version of the same reason: a fifth that forgot this would run correctly and
+ * only report less, where a fifth that forgot `recordReport` would point the
+ * reviewer at the wrong round.
+ *
+ * `runTurn` is called through unchanged when progress is off, so a run with the
+ * heartbeat disabled spawns no `git` and behaves exactly as it did. When it is
+ * on, the sampler narrates readings during the turn and hands over the last one
+ * for the single durable record - see `withWorkProgress` for why those are
+ * different things.
+ *
+ * The plan comes from `state`, not from a parameter: it is the plan of record,
+ * three of these four sites do not have the local variable in scope, and a
+ * proxy measured against something other than the approved plan would be a
+ * proxy over the wrong denominator.
+ */
+function writeTurn(
+  state: RunState,
+  cfg: Config,
+  cwd: string,
+  req: TurnRequest,
+  turns: AgentTurns,
+  roles: RoleTable,
+): Promise<TurnOutcome> {
+  if (!cfg.progress.enabled) return runTurn(state, cfg, req, turns, roles);
+  return withWorkProgress(
+    {
+      cwd,
+      baseSha: state.baseSha,
+      plan: state.plan,
+      label: req.label,
+      intervalMs: cfg.progress.workIntervalMs,
+      onReading: (work) => {
+        const line = formatWork(work);
+        // Once per write turn, where the samples during it were narration only.
+        // This is the fact worth keeping: what that turn left in the tree.
+        //
+        // Recorded even when that is *nothing*, and said in those words. A
+        // write turn that changed no file is the most interesting reading this
+        // ever produces - the run has just paid for a turn that produced no
+        // work - and it is the one case a "report only what there is to report"
+        // rule would have thrown away.
+        recordAndSay(
+          state,
+          'info',
+          'work_measured',
+          line === null ? `${req.label}: changed nothing in the tree` : `${req.label}: ${line}`,
+          { label: req.label, ...workData(work) },
+        );
+      },
+    },
+    () => runTurn(state, cfg, req, turns, roles),
+  );
 }
 
 /**
@@ -494,9 +553,10 @@ async function runPhases(
     beginReport(state);
 
     log.heading('Implementing', { id: 'phase_started', data: { phase: 'implementing' } });
-    const impl = await runTurn(
+    const impl = await writeTurn(
       state,
       cfg,
+      cwd,
       {
         role: 'implementer',
         // Re-filtered rather than trusted, as `writeFollowUps` re-filters:
@@ -914,9 +974,10 @@ async function reviewPhase(
         id: 'turn_started',
         data: { role: 'implementer', kind: 'verify-fix', round: state.verifyRound },
       });
-      const repair = await runTurn(
+      const repair = await writeTurn(
         state,
         cfg,
+        cwd,
         {
           role: 'implementer',
           prompt: P.fixPrompt(
@@ -1039,9 +1100,10 @@ async function reviewPhase(
       );
       for (const f of decision.tolerated) log.info(`  ~ ${f.title}`);
 
-      const finalFix = await runTurn(
+      const finalFix = await writeTurn(
         state,
         cfg,
+        cwd,
         {
           role: 'implementer',
           prompt: P.fixPrompt(review.findings, state.reviewRound, state.acceptanceCriteria),
@@ -1136,9 +1198,10 @@ async function runFixRound(
       blocking: blockingFindings(findings).length,
     },
   });
-  const fix = await runTurn(
+  const fix = await writeTurn(
     state,
     cfg,
+    cwd,
     {
       role: 'implementer',
       prompt: P.fixPrompt(findings, state.reviewRound, state.acceptanceCriteria),

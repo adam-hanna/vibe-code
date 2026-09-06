@@ -1,3 +1,5 @@
+import { readFileSync, statSync } from 'node:fs';
+import path from 'node:path';
 import { run, resolveBin } from '@src/proc.js';
 import { detail, warn } from '@src/log.js';
 
@@ -537,3 +539,157 @@ export async function diffChunks(
   return { chunks, files };
 }
 
+
+/**
+ * What the run has changed so far, measured rather than reported (#136).
+ *
+ * The one thing about a live implement turn that is a *measurement* and not a
+ * model's word for itself: git can be asked at any moment what is different
+ * from where the run started, and the answer is a fact about the tree.
+ *
+ * **Against `baseSha`, so this is the run's change set and not the turn's.**
+ * The first write turn is the whole of it, which is what the cockpit's running
+ * row is drawn during; a later fix round includes the rounds before it, which
+ * is still exactly "what this run has changed" and is what the label says.
+ *
+ * **Never throws, never writes, never stages.** `diffSince` runs `git add -A`
+ * on its no-base path and can afford to, because it runs between turns. This
+ * runs *while an agent is working in the same tree*, where touching the index
+ * would race with the agent's own git use - so untracked files are found with
+ * `ls-files --others` and counted by reading them, and the index is left alone.
+ */
+export interface ChangeSet {
+  /** Every path the run has changed, tracked and untracked, git's spelling. */
+  paths: string[];
+  /** How many of `paths` are new files git is not yet tracking. */
+  added: number;
+  /**
+   * Lines added and removed, or null where git could not be asked at all.
+   *
+   * Null rather than zero, for the reason every other measurement here is:
+   * "the diff reported nothing changed" and "the diff could not be run" are
+   * different facts, and only one of them is a number.
+   */
+  insertions: number | null;
+  deletions: number | null;
+  /**
+   * Files whose lines are in no total: binary, over `MAX_NEW_FILE_BYTES`, or
+   * past `MAX_NEW_FILES_READ`.
+   *
+   * Reported rather than silently dropped, because their absence is what makes
+   * `insertions` an undercount, and an undercount nobody flagged reads as a
+   * measurement.
+   */
+  uncounted: number;
+}
+
+/**
+ * A new file is read to count its lines, and both caps exist to bound that.
+ *
+ * The byte cap keeps one enormous generated file out of a progress reading; the
+ * file cap keeps a repo with no `.gitignore` from turning a 30-second sample
+ * into a directory walk. `--exclude-standard` already removes everything the
+ * repo ignores, so hitting either is unusual - and when it happens the count
+ * moves to `uncounted` rather than being approximated.
+ */
+const MAX_NEW_FILE_BYTES = 2_000_000;
+const MAX_NEW_FILES_READ = 200;
+
+/** Lines in a new file, or null when it should not be counted at all. */
+function countLines(file: string): number | null {
+  let text: Buffer;
+  try {
+    const stat = statSync(file);
+    if (!stat.isFile() || stat.size > MAX_NEW_FILE_BYTES) return null;
+    text = readFileSync(file);
+  } catch {
+    // Deleted between the listing and the read, or unreadable. Uncounted, which
+    // is the honest answer, rather than zero.
+    return null;
+  }
+  // Binary, by the same test git uses to decide a diff is not showable: a NUL
+  // byte near the start. A `+8000` on a compiled artifact would be a number
+  // about bytes wearing a label about lines.
+  if (text.subarray(0, 8000).includes(0)) return null;
+  if (text.length === 0) return 0;
+  let lines = 0;
+  for (const byte of text) if (byte === 0x0a) lines += 1;
+  // A last line with no trailing newline is still a line - git counts it as one.
+  return text[text.length - 1] === 0x0a ? lines : lines + 1;
+}
+
+export async function changeSet(cwd: string, baseSha: string | null): Promise<ChangeSet | null> {
+  try {
+    // `HEAD` when the run recorded no base: a repo with no commits has neither,
+    // and `allowFail` turns that into an unmeasured diff rather than a throw.
+    const rev = baseSha ?? 'HEAD';
+    const [numstat, named, others] = await Promise.all([
+      git(cwd, ['diff', '--numstat', rev], { allowFail: true, raw: true }),
+      git(cwd, ['diff', '--name-only', '-z', rev], { allowFail: true, raw: true }),
+      git(cwd, ['ls-files', '--others', '--exclude-standard', '-z'], { allowFail: true, raw: true }),
+    ]);
+
+    let insertions: number | null = null;
+    let deletions: number | null = null;
+    let uncounted = 0;
+    if (numstat.code === 0) {
+      insertions = 0;
+      deletions = 0;
+      for (const line of numstat.stdout.split('\n')) {
+        const parts = line.split('\t');
+        if (parts.length < 3) continue;
+        const add = parts[0];
+        const del = parts[1];
+        // git prints `-\t-\t<path>` for a binary file. Counted as uncounted
+        // rather than as zero changes, which is what it would otherwise add up
+        // to - and a binary file that changed is not a file that did not.
+        if (add === '-' || del === '-') {
+          uncounted += 1;
+          continue;
+        }
+        const plus = Number(add);
+        const minus = Number(del);
+        if (!Number.isFinite(plus) || !Number.isFinite(minus)) continue;
+        insertions += plus;
+        deletions += minus;
+      }
+    }
+
+    // Nothing could be listed at all - not a repository, or a git that would
+    // not run. There is no reading to give, and the empty one this would
+    // otherwise return says something quite different: an empty path set beside
+    // a plan that names fourteen files renders as "0 of the 14 files the plan
+    // names", which is a measurement of a tree nobody managed to look at.
+    if (named.code !== 0 && others.code !== 0) return null;
+    const tracked = named.code === 0 ? splitNul(named.stdout) : [];
+    const untracked = others.code === 0 ? splitNul(others.stdout) : [];
+
+    let read = 0;
+    for (const rel of untracked) {
+      if (read >= MAX_NEW_FILES_READ) {
+        uncounted += 1;
+        continue;
+      }
+      read += 1;
+      const lines = countLines(path.join(cwd, rel));
+      if (lines === null) {
+        uncounted += 1;
+        continue;
+      }
+      // Only where the tracked half was measured. Adding new-file lines onto a
+      // null would turn "the diff could not be run" into a partial figure that
+      // looks like the whole one.
+      if (insertions !== null) insertions += lines;
+    }
+
+    // Deduplicated because the two listings can legitimately overlap - a path
+    // deleted from the index and rewritten on disk appears in both - and a file
+    // counted twice would inflate the only number on the row that is a count of
+    // things rather than of lines.
+    const paths = [...new Set([...tracked, ...untracked])];
+    return { paths, added: untracked.length, insertions, deletions, uncounted };
+  } catch {
+    // A progress reading, and losing one must never cost a turn.
+    return null;
+  }
+}

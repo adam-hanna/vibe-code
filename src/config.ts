@@ -169,6 +169,13 @@ export const DEFAULTS: Config = {
     // event is not - a single implementation turn runs 28 agentic iterations
     // and emits thousands.
     intervalMs: 30_000,
+    // 60s, twice the heartbeat's gap, because this is the reading that costs
+    // something: three `git` invocations against the tree the agent is writing
+    // to. Measured on this repo at 40-90ms a sample, so ninety of them across a
+    // ninety-minute implement turn is under ten seconds of git in total - and
+    // an implement turn that changed nothing new in sixty seconds has not moved
+    // far enough for a second reading to differ.
+    workIntervalMs: 60_000,
   },
   toolchain: {
     // Deliberately minimal. `git` is needed in every phase because vibe commits
@@ -656,6 +663,13 @@ function validate(cfg: Config): void {
   // nobody can read that fast.
   if (!Number.isFinite(cfg.progress.intervalMs) || cfg.progress.intervalMs < 1000) {
     throw new Error('progress.intervalMs must be at least 1000ms');
+  }
+  // A higher floor than the heartbeat's, because the floor is about cost rather
+  // than about noise: a second is a reasonable minimum for incrementing a
+  // counter and an unreasonable one for spawning three `git` processes against
+  // a tree an agent is writing to.
+  if (!Number.isFinite(cfg.progress.workIntervalMs) || cfg.progress.workIntervalMs < 5000) {
+    throw new Error('progress.workIntervalMs must be at least 5000ms');
   }
   validateToolchain(cfg.toolchain);
 }

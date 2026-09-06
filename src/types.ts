@@ -466,6 +466,21 @@ export interface ProgressConfig {
   enabled: boolean;
   /** Minimum gap between heartbeat lines, and the tick interval for a silent turn. */
   intervalMs: number;
+  /**
+   * Gap between readings of what a write turn has changed in the tree (#136).
+   *
+   * Its own number rather than `intervalMs`, because the two cost different
+   * things. A heartbeat is a counter incremented by a line that had already
+   * arrived; a work reading is three `git` child processes against a tree an
+   * agent is writing to, and on a large repository that is not free. Halving
+   * the cadence halves the cost of the only part of in-turn progress that has
+   * one.
+   *
+   * `progress.enabled: false` turns this off with everything else - there is no
+   * second switch, because a run that does not want progress does not want this
+   * either.
+   */
+  workIntervalMs: number;
 }
 
 /**

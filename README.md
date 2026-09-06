@@ -234,6 +234,26 @@ Compaction can overlap a rotation turn with a Codex turn, so two turns are occas
 
 `--no-progress` turns the output off; `--progress-interval <sec>` changes the cadence. No compaction or rotation behaviour changes.
 
+### How far through is it?
+
+The heartbeat answers *is it moving*. It never answered *how far*, which is the only question a person watching a ninety-minute implement turn actually has.
+
+There is no honest way to answer it exactly. The plan is a numbered list of steps and nothing relates a turn's position to it; a step counter would have to come from the model's own account of itself, and this repo has learned not to take that — #116 changed a design because a model's claim about its own identity matched 19 of 21 while the claim *text* matched 21 of 21. A self-reported `step 9/14` would be wrong in exactly the way that is hardest to notice, because it looks authoritative.
+
+So vibe answers a question it can measure instead. While a write turn runs, it asks git what has changed since the run started:
+
+```
+implement: 12 files changed · +412 -38 · 9 of the 14 files the plan names
+```
+
+Every figure there is observed. The last clause is a **proxy** for progress, and it is worded as one: it counts *files*, it says whose count the denominator is, and it never renders as `9/14` beside a bar — which would read as a position in the plan's steps, which it is not. A plan that names no files gets no clause at all rather than `0 of 0`.
+
+The rest is straightforward accounting with one wrinkle worth stating: `git diff` cannot see a file git has never heard of, and most of an implement turn's output is new files. Those are found separately and their lines counted by reading them, so `+412` includes them. A new file that is binary, enormous, or past the read cap is reported as *not counted* rather than as zero — its absence is why the total would otherwise be short.
+
+Readings are narration, not history. A sample every 60 seconds through a long turn is a hundred-odd observations and `state.json` is not a transcript, so they go out at the same level as the heartbeat and only the **final** reading is recorded, once per write turn, as `work_measured`. That includes the reading nobody wants and everybody should see: a write turn that changed no file at all says so in those words, which is the most interesting thing this ever reports — the run has just paid for a turn that produced nothing.
+
+`progress.workIntervalMs` sets the cadence, separately from the heartbeat's because the two cost different things: a heartbeat increments a counter off a line that had already arrived, and this spawns three `git` processes against a tree an agent is writing to. `progress.enabled: false` turns it off with everything else, and a run with progress off spawns no `git` for this and records nothing.
+
 ## Is this run still alive?
 
 A run holds `run.lock` in its own run directory while it works, naming the pid, the host and when it started. `vibe list` prints a verdict per run, and `vibe resume` acts on it:

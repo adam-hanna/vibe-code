@@ -78,6 +78,13 @@ test('a clean pass is legible as a sequence of ids, with no sentence read', asyn
       'phase_started', // critique
       'turn_started', //  the critic
       'phase_started', // implementing
+      // What the implement turn left in the tree, once, as the turn ended
+      // (#136). The sampler's own `work_progress` readings would appear here
+      // too, and none do: they fire on a sixty-second timer and these turns are
+      // injected functions that return immediately. That is the sampler's
+      // cadence being real rather than the case being lucky - a write turn short
+      // enough to have no readings is one there was nothing to report about.
+      'work_measured',
       'verify_started',
       'phase_started', // review
       'turn_started', //  the reviewer

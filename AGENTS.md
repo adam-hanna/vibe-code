@@ -159,6 +159,7 @@ src/context.ts       context measurement, compaction, session rotation
 src/preflight.ts     toolchain contract enforcement, `vibe doctor`
 src/verify.ts        the verification gates — resolves the list, runs each command
 src/progress.ts      in-turn heartbeat
+src/work.ts          how far a write turn has got - measured, and labelled a proxy
 src/schemas.ts       the JSON schemas both CLIs are pinned to
 src/validate.ts      parser vocabulary for model output
 src/proc.ts          child-process plumbing, and how a child ended
@@ -364,6 +365,13 @@ Beyond the compiler:
   rather than derived from a price table; a missing progress field is omitted rather than
   filled in. Partial information beats a convincing fabrication, and most of the design notes
   in `README.md` exist to explain a place this rule was applied.
+- **A proxy is allowed; a proxy wearing another measurement's clothes is not.** `src/work.ts`
+  is the worked example. The wireframes draw `step 9/14` over an implement turn and no such
+  number exists, so what ships is *"9 of the 14 files the plan names"* — every part of it
+  measured, and worded as a count of files so it cannot be read as a position in the plan's
+  list of steps. The words are the labelling, and `implement-progress.test.ts` asserts the
+  line contains no `step` and no `%`. If you add a proxy, the sentence has to say what it
+  actually counted.
 - **Comments explain *why*, and cite the run that taught it.** The defaults in
   `src/config.ts` are the model: each non-obvious number says what was measured to pick it.
   Do not strip these; they are the institutional memory.
