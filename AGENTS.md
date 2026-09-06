@@ -618,6 +618,15 @@ than the module (`convergence.test.ts`, `failure-accounting.test.ts`,
   look broken. Compute times relative to now.
 - **No network, no real agent invocations.** `tests/helpers/fake-transport.ts` and
   `tests/helpers/stub-server.ts` are the injection points.
+- **A wait on a child process must be able to say which way it failed.** The suite spawns
+  around a hundred children per run, and "the child printed nothing" covered two opposite
+  states: one that had not begun running, and one that stalled after it did (#181). They
+  need opposite responses — the first can simply be spawned again, the second is the hang
+  `startKillHelper`'s timeout exists to diagnose and must never be retried past — so the
+  child prints a first line before it reads argv, and `retryable()` is the one place that
+  rule lives. **Raising the timeout is not the fix**: it is already 25× the worst loaded
+  start-up measured, and every second added is a second a real hang looks like a slow
+  machine, times the 24 children one case spawns.
 - **A fixture that shells out says what the command said.** `initGit` ran four `git`
   invocations under `stdio: 'ignore'`, so the day two of them failed the suite went red
   with `Command failed: git config user.email …`, `stderr: null`, and no way to choose
