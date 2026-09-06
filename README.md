@@ -170,6 +170,23 @@ When a run escalates it writes `NEEDS-INPUT.md` with each question, its options,
 
 This is the trade the tool makes deliberately: Codex answering *technical* questions keeps the loop unattended; Codex answering *product* questions would bake a guess about your intent into everything downstream, so those still come to you.
 
+### Raising a finding yourself
+
+The same file is how you put a finding of your own into the loop. Every `NEEDS-INPUT.md` ends with a **Raise a finding** block — one `### Finding:` heading, a `*Severity:*` line, an optional `*File:*` citation and two blockquotes. Fill one in per finding and resume; leave it untouched and nothing is raised.
+
+It exists because the human's position in the loop was asymmetric in a way nobody chose. You could always *dispose* of a finding — accept it into the next fix round, let the tolerance carry it, answer the question behind it — and you could not *raise* one. Every finding came from a model's structured output, so the case this tool most needs to handle, where both agents miss the same thing, had no remedy at all. It is also the cheapest review round there is: it costs no tokens and no turn.
+
+What you raise goes through the machinery a reviewer's finding goes through, with two deliberate exceptions:
+
+- **It is grounded.** A `*File:* src/run.ts:120` is an evidence citation like any other, so a P0 or P1 that cites nothing — or cites a line that does not exist — is carried as a P2 with the reason recorded, exactly as the reviewer's would be. Cite the line if you want it to block.
+- **The inert guard does not apply.** "The turn that produced it used no tools" is a statement about a *turn*, and yours has none behind it.
+- **The gate counts it.** You can block your own run, which means `loop.p1Tolerance` is no longer purely a judgement about the reviewer.
+- **The oscillation guard does not.** That guard fires when two models will not converge, and its remedies — decide it yourself, swap the reviewer — do not describe a fixer failing to satisfy a person. A finding you raise twice is named in its own line instead.
+
+Everything is attributed. `raisedBy` says `human`, `reviewer`, `critic`, or `vibe` for a mechanical fact the tool asserts about its own artifacts, and the fixer's prompt says out loud when a finding came from you rather than from the review. A finding recorded before attribution existed reads as absent, never as "an agent said it".
+
+A block you have *partly* filled in stops the resume and says which part is missing. Nothing is spent, the file is still there, and a severity you did not choose never reaches the record.
+
 ### What the planner knows about past runs
 
 Every run's record lands in `.vibe/runs/` in the repository being worked on, and since #52 the planning prompt carries a short index of the ones before it: run id, status, and the first line of the task, most recent first, capped at ten runs with every field truncated. It names the artifacts a run *may* contain and says the directory holds the full list. The same index is reattached once if the planner's session is rotated, because a rotation otherwise drops it silently.

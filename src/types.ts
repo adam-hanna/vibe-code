@@ -720,12 +720,52 @@ export interface Evidence {
   ref?: string;
 }
 
+/**
+ * Who made a claim (#141).
+ *
+ * A severity is an assertion with an owner - that is the whole design of #48 and
+ * #66 - and until this existed the archive could not name one. Every finding came
+ * from `parseFindings` reading a model's structured output, so "absent means an
+ * agent said it" was true by construction and therefore never written down. The
+ * moment a human can raise one, that inference is wrong, and a human finding
+ * indistinguishable from the reviewer's in `code-review-N.json` would corrupt the
+ * one record that says what the reviewer thought.
+ *
+ * Four members, and each is a different kind of claim:
+ *
+ * - `critic` / `reviewer` - a model's judgement, bought with a turn. Stamped by
+ *   `groundAndRecord`, which is the single point both writers pass through and
+ *   the only place that knows which role produced the report.
+ * - `human` - a person, through `src/raise.ts`. Costs no tokens and no turn.
+ * - `vibe` - a mechanical fact about an artifact on disk, asserted by the tool
+ *   itself. `refusePlaceholderPlan` is the only one today, and it used to be
+ *   indistinguishable from the critic's own P1 about the same defect.
+ *
+ * The seated *provider* is deliberately not part of this. `roles.ts` already
+ * records who holds a seat and it can change mid-run; this names the position
+ * that made the claim, which is what a later reader is asking about.
+ */
+export type FindingAuthor = 'critic' | 'reviewer' | 'human' | 'vibe';
+
 export interface Finding {
   id: string;
   severity: Severity;
   title: string;
   detail: string;
   suggested_fix: string;
+  /**
+   * Who raised it, or absent (#141).
+   *
+   * **Absent is not "an agent".** Every finding recorded before this field
+   * existed has none, and so does one whose author could not be attributed -
+   * `groundAndRecord` stamps only the two roles that can produce a report, and
+   * leaves the field off for anything else rather than guessing. A renderer that
+   * needs the value narrows it through `authorOf`, which returns null for
+   * anything outside the four members above: this rides through `readFinding`
+   * unvalidated, exactly as `evidence` does, because refusing a whole finding
+   * over a bad label would delete a claim to protect a caption.
+   */
+  raisedBy?: FindingAuthor;
   /**
    * Where this finding says to look. At least one entry, per the schema.
    *

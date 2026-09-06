@@ -1757,6 +1757,39 @@ export function takePendingFindings(
 }
 
 /**
+ * Add findings to whatever this phase is already carrying (#141).
+ *
+ * The wireframes' *"merged with the reviewer's own list"*, and a merge rather
+ * than a write because the two sets are bought differently: a review round's
+ * findings are already on `state.pendingFindings` when the run stops, and a
+ * human raising one on the way back in must not delete 15M tokens of review to
+ * add a sentence.
+ *
+ * **A phase mismatch replaces rather than merges, and that is deliberate.** The
+ * tag is what stops a plan-phase remnant reaching the fix turn - the same rule
+ * `takePendingFindings` applies on the way out - so findings tagged for another
+ * loop are not something to merge into; they are something this phase can never
+ * read. The caller decides the phase from the run's own resume point.
+ *
+ * Existing entries win on a repeated id. A human re-raising a finding the
+ * reviewer already made is one claim, not two, and the reviewer's carries the
+ * evidence it was grounded on.
+ */
+export function mergePendingFindings(
+  state: RunState,
+  phase: PendingFindings['phase'],
+  findings: readonly Finding[],
+): Finding[] {
+  const carried = takePendingFindings(state, phase) ?? [];
+  const seen = new Set(carried.map((f) => f.id));
+  const added = findings.filter((f) => !seen.has(f.id));
+  const merged = [...carried, ...added];
+  state.pendingFindings = { phase, findings: merged };
+  saveState(state);
+  return added;
+}
+
+/**
  * Mark the carried findings consumed.
  *
  * Written as an explicit null rather than deleted: the run record should say

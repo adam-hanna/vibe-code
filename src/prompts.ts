@@ -1,7 +1,7 @@
 import { describedRole, ROLES } from '@src/roles.js';
 import { EVIDENCE_RULE } from '@src/schemas.js';
 import { inspectedItems } from '@src/evidence.js';
-import { readEvidence } from '@src/validate.js';
+import { authorOf, readEvidence } from '@src/validate.js';
 import type { RoleTable } from '@src/roles.js';
 import type { EnvironmentFacts } from '@src/runtime.js';
 import type {
@@ -1268,11 +1268,35 @@ function citation(f: Finding, indent: string): string {
   return parts.length === 0 ? '' : `${indent}*Cited:* ${parts.join(', ')}`;
 }
 
-function formatFinding(f: Finding): string {
-  return `### [${f.severity}] ${f.title}  \`${f.id}\`
-${f.detail}
+/**
+ * Named only when a person raised it (#141).
+ *
+ * Deliberately not a line on every finding. Attribution exists in the record for
+ * every one of them, but printing `*Raised by:* reviewer` in the fixer's prompt
+ * would change every prompt in every run to state something the prompt's first
+ * sentence already says - and a run in which nobody raised anything has to
+ * behave exactly as it does today, byte for byte.
+ *
+ * It is worth saying for a human finding because the instruction below it means
+ * something different. "If you believe a finding is incorrect, fix nothing for
+ * it but explain why" is addressed to a disagreement with a model; here it is a
+ * disagreement with the person who will read the answer.
+ */
+function raisedNote(f: Finding): string {
+  return authorOf(f) === 'human'
+    ? '\n\n*Raised by the person running this, not by the reviewer. It cost no turn and no ' +
+        'tokens, and it has not been through a review round - judge it on what it says.*'
+    : '';
+}
 
-*Suggested fix:* ${f.suggested_fix}${citation(f, '\n')}${f.defer === true ? `\n\n${DEFERRED_MARK}` : ''}`;
+function formatFinding(f: Finding): string {
+  // Omitted rather than printed empty. A human raising a finding is reporting a
+  // defect, not designing the repair, and `*Suggested fix:* ` with nothing after
+  // it reads as a fix somebody forgot to write down. Every agent finding has one
+  // - the schema requires it - so no existing prompt changes.
+  const fix = f.suggested_fix.trim() === '' ? '' : `\n\n*Suggested fix:* ${f.suggested_fix}`;
+  return `### [${f.severity}] ${f.title}  \`${f.id}\`
+${f.detail}${fix}${citation(f, '\n')}${raisedNote(f)}${f.defer === true ? `\n\n${DEFERRED_MARK}` : ''}`;
 }
 
 /**

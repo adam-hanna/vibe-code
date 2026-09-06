@@ -9,7 +9,8 @@ import { DEFAULTS } from '@src/config.js';
 import { Escalation, EXIT, orchestrate, writeEscalation } from '@src/orchestrator.js';
 import type { AgentTurns } from '@src/orchestrator.js';
 import { reconcileQuestionRecords } from '@src/questions.js';
-import { createRun, saveState } from '@src/run.js';
+import { acceptRaised, parseRaised, raisePhase } from '@src/raise.js';
+import { createRun, resumePhase, saveState } from '@src/run.js';
 import type {
   Answer,
   ClaudeTurnResult,
@@ -21,6 +22,7 @@ import type {
   OpenQuestion,
   Plan,
   RunState,
+  Severity,
   TokenUsage,
   TurnActivity,
 } from '@src/types.js';
@@ -618,6 +620,63 @@ export function answerNeedsInput(
   reconcileQuestionRecords(state);
   renameSync(file, path.join(state.dir, `answered-${state.planRound}.md`));
   return answers;
+}
+
+/** One block, written the way a person filling in the template would leave it. */
+export interface RaiseInput {
+  title: string;
+  severity: Severity;
+  detail: string;
+  fix?: string;
+  /** The `*File:*` line, verbatim. Omitted leaves the placeholder in place. */
+  file?: string;
+}
+
+/**
+ * What `vibe resume` does with a NEEDS-INPUT.md somebody raised a finding in
+ * (#141).
+ *
+ * The sibling of `answerNeedsInput`, and it mirrors `resumeRun` for the same
+ * reason and to the same depth: the two exported halves - `parseRaised` and
+ * `acceptRaised` - are the real ones, and only the CLI glue between them is
+ * uncovered. A case that pushed findings onto `state.pendingFindings` by hand
+ * would be asserting on a fixture rather than on the flow.
+ *
+ * The blocks are appended rather than substituted into the template, because
+ * that is what a person does with a template: the one the file ships with is
+ * left untouched below them, which is also the case that must parse to nothing.
+ */
+export function raiseInNeedsInput(
+  state: RunState,
+  cwd: string,
+  inputs: readonly RaiseInput[],
+): ReturnType<typeof acceptRaised> {
+  const file = path.join(state.dir, 'NEEDS-INPUT.md');
+  // `orchestrate` throws the `Escalation`; `execute` is what turns one into this
+  // file, and the stall drivers stop at the first of those. Written through the
+  // real `writeEscalation` rather than forged, so the block being filled in is
+  // the block a run actually ships - and written afresh on every call, because
+  // `resumeRun` retires the file the moment it takes the raise in. Appending to
+  // the previous one would present a person's earlier blocks back to the parser
+  // a second time, which no resume ever does.
+  writeEscalation(state, new Escalation(EXIT.NO_CONVERGENCE, 'the round cap'));
+  const blocks = inputs.map(
+    (r) =>
+      `### Finding: ${r.title}\n\n` +
+      `*Severity:* ${r.severity}\n` +
+      (r.file === undefined ? '' : `*File:* ${r.file}\n`) +
+      `\n**What is wrong:**\n\n> ${r.detail}\n\n` +
+      `**Suggested fix:**\n\n> ${r.fix ?? ''}\n`,
+  );
+  writeFileSync(file, `${readFileSync(file, 'utf8')}\n${blocks.join('\n')}`, 'utf8');
+
+  const { findings, problems } = parseRaised(readFileSync(file, 'utf8'));
+  if (problems.length > 0) {
+    throw new Error(`the harness wrote a block the parser refused: ${problems[0]?.reason ?? ''}`);
+  }
+  const phase = raisePhase(resumePhase(state));
+  if (phase === null) throw new Error('this run has finished, so nothing can be raised on it');
+  return acceptRaised(state, cwd, phase, findings);
 }
 
 // ---- known stalls ----------------------------------------------------------

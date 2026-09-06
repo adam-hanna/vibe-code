@@ -8,6 +8,7 @@ import type {
   Evidence,
   EvidenceKind,
   Finding,
+  FindingAuthor,
   FindingsReport,
   OpenQuestion,
   OutOfScopeItem,
@@ -266,7 +267,31 @@ export function parseAnswers(raw: unknown): AnswersReport {
   return { answers };
 }
 
-function slug(s: string): string {
+const AUTHORS: readonly FindingAuthor[] = ['critic', 'reviewer', 'human', 'vibe'];
+
+/**
+ * Who raised a finding, or null when nothing usable says (#141).
+ *
+ * Narrowed at the point of use rather than on the way into state.json, for the
+ * reason `readEvidenceEntry` is: `readFinding` carries a stored finding through
+ * unvalidated, so this can be handed a label a hand-edited state invented. Null
+ * covers both "recorded before attribution existed" and "said something that is
+ * not an author", and both must render as absent - a caption naming the wrong
+ * author is worse than one naming none.
+ */
+export function authorOf(f: Finding): FindingAuthor | null {
+  const raw: unknown = f.raisedBy;
+  return typeof raw === 'string' && (AUTHORS as readonly string[]).includes(raw)
+    ? (raw as FindingAuthor)
+    : null;
+}
+
+/**
+ * A stable id from a title. Exported for `src/raise.ts`, which derives one the
+ * same way for a finding a person typed - the alternative is asking a human for
+ * a slug, and two derivations of an id that the oscillation guard keys on.
+ */
+export function slug(s: string): string {
   return (
     s
       .toLowerCase()
