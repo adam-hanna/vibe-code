@@ -74,7 +74,50 @@ vibe fork 20260811-142530-add-rate-limiting --at 3     # create the run, and sto
 vibe resume <the-new-run-id>                           # now run it
 
 vibe list
+
+# What every run in this repo says about the loop
+vibe stats
+vibe stats --json
 ```
+
+### What the archive says about the loop
+
+`.vibe/runs/` accumulates a full record of every run — every round, every turn's spend, every
+gate outcome, every downgraded finding — and until now nothing read it. `vibe stats` is the
+cross-run read: `vibe list` answers *what runs exist*, this answers *how is the loop
+behaving*.
+
+```
+  Rounds per run
+    plan revisions:            70 over 26 runs, max 10  [0x1 1x8 2x7 3x5 4x2 7x1 8x1 10x1]
+    question rounds:           37 over 26 runs, max 3  [0x1 1x16 2x6 3x3]
+    final fix round:           11 of 23 reviewed runs - 48%, 3 could not say
+
+  Turns  (cost is Claude-side and API-equivalent; Codex reports none)
+    implement:                   26  441,465,329 tok  ~$304.06
+    critique-N:                  61  231,971,784 tok  cost not reported
+    ran no tools:              0 of 34 turns - 0%, 231 could not say
+
+  Questions
+    re-asks suppressed:        not recorded by any run (26 could not say)
+```
+
+**Every rate carries its denominator, and the denominator is part of the answer.** Fields
+were added to a run's state over time, so most runs in a real archive predate most fields —
+of 265 turns in the archive above, 34 record the per-turn tool counts. So a dimension nothing
+recorded reports **absent**, never `0%`, and a rate that could only be taken over part of the
+archive says how much of it could not say. A histogram rather than a mean, for the same
+reason: `2.7 plan rounds` describes no run that ever happened.
+
+Entries that cannot be counted — a corrupt `state.json`, a symlinked run directory — are
+**listed as skipped with the reason**, never quietly dropped from the population.
+
+Four dimensions are named in the output as *not measured, and not estimated*: defect recall,
+finding precision, reviewer uplift and correlated miss rate. Each needs something the archive
+does not contain, and each says what.
+
+`--json` prints the same document the table is rendered from, with a `version` a reader can
+refuse. Nothing under `.vibe/runs/` is written.
 
 ### Forking a run
 

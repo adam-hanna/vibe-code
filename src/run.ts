@@ -44,7 +44,14 @@ import type {
   RunSummary,
 } from '@src/types.js';
 
-const RUNS_DIR = path.join('.vibe', 'runs');
+/**
+ * Where an archive lives, relative to the repo it belongs to.
+ *
+ * Exported since #114 so the scorecard reaches a run's `state.json` by the same
+ * path this module walked to find it - two spellings of one location is how a
+ * reader and a writer end up disagreeing about which directory is the archive.
+ */
+export const RUNS_DIR = path.join('.vibe', 'runs');
 
 function slugify(s: string): string {
   return (

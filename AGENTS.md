@@ -109,7 +109,7 @@ terminal wants the frames and a footer wants the answer to "what now" (#162).
 
 ```
 src/main.ts          bin entry point — the thing package.json points at
-src/cli.ts           argument parsing, the five commands, run summary
+src/cli.ts           argument parsing, the six commands, run summary
 src/hostmain.ts      bin entry point for the app's sidecar — the second front end
 src/serve.ts         the host session: NDJSON over stdio, gates as awaits
 src/protocol.ts      the frames those two processes agree on
@@ -117,6 +117,7 @@ src/host.ts          what a host may be told at a boundary, and may answer
 src/gates.ts         which boundaries hold a run, what a hold costs, and the two that cannot
 src/orchestrator.ts  the loop: planPhase, reviewPhase, the guards, the prompt dispatch
 src/run.ts           run state, artifacts, checkpoints, convergence maths (assessConvergence et al)
+src/scorecard.ts     what the run archive says about the loop, and what it cannot
 src/fork.ts          `vibe fork`: preflight that only reads, then a commit phase that creates
 src/similarity.ts    the one similarity metric, its threshold, and the censuses behind it
 src/questions.ts     when two wordings are one question: the threshold, and REPHRASED.md
@@ -299,6 +300,23 @@ Two rules the host process depends on, and neither is optional:
 - **Refuse, never repair.** An unreadable frame is reported back to the id that sent it, and
   an unreadable *decision* becomes `stop`. Continuing on an instruction nobody could parse
   spends tokens on the strength of a message that may have said the opposite.
+
+**A rate is a fraction, and the denominator is part of the answer.** `src/scorecard.ts` reads
+the archive `vibe list` walks, and every derived count is a `Measure` — what matched, what
+could be asked, and what could not. The reason is arithmetic: fields were added to `RunState`
+over time, so most runs in any real archive predate most fields. The census that shaped the
+module found `toolItems` (#66) on **34 of 265 recorded turns**, so "1 of 27 review turns ran
+no tools" over a population where 26 never recorded the fact is a fabrication that reads as
+authoritative. A dimension nothing recorded renders as absent, never as `0%`, and a histogram
+is printed rather than a mean because `2.7 plan rounds` describes no run that ever happened.
+
+It runs **over `listRuns` rather than beside it**. That matters for more than duplication:
+`listRuns` is the one thing that decides what an archive entry *is* — a real directory, a
+symlink (#53), something `lstat` could not classify — so a scorecard doing its own
+classification could disagree with `vibe list` about which runs exist. The cost is one extra
+read of each readable `state.json`, on a command nobody runs in a loop. Skipped entries are
+listed **with their reason**; a scorecard that quietly ignored three runs is the overclaim it
+exists to prevent.
 
 `src/orchestrator.ts` is the biggest file by a wide margin and is where most changes land.
 Read the phase you are touching end to end before editing it; the guards interact.
