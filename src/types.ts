@@ -468,6 +468,58 @@ export interface ProgressConfig {
   intervalMs: number;
 }
 
+/**
+ * What the loop does when it reaches a boundary that has a row in the matrix.
+ *
+ * Three modes, and the difference between the two that hold is **what a hold
+ * costs**, not how often it happens:
+ *
+ * - **`auto`** - the loop runs through. Nothing is asked and nothing is written.
+ * - **`step`** - the loop holds and asks. That costs nothing, because the app
+ *   links this source and a gate is an `await` at a phase boundary: the process
+ *   stays alive and the agent session stays warm. It needs somebody who can be
+ *   asked, and a terminal is not one - `vibe run` passes no host and a promise
+ *   is not answerable from a prompt - so from the CLI a `step` row runs through.
+ *   That is the mode's definition rather than a failure of it, and `vibe doctor`
+ *   prints it per row so it is not something you find out by not seeing it.
+ * - **`stop`** - the run **ends** here, resumably: `Escalation(NEEDS_HUMAN)` ->
+ *   `NEEDS-INPUT.md` -> `status: 'needs-input'` -> `vibe resume`. It asks
+ *   nobody, so it means exactly the same thing in both front ends, and it is the
+ *   mode to reach for from a terminal.
+ *
+ * The earlier reading of `step` - "hold the second and every later time this
+ * boundary is reached, where `stop` holds the first" - was rejected because it
+ * needs a durable per-boundary record of whether the run has been here before,
+ * and nothing in `RunState` carries one. Two modes that differ only in a count
+ * nobody stores is a distinction that survives a process and not a resume.
+ */
+export type GateMode = 'auto' | 'step' | 'stop';
+
+/**
+ * The boundaries that get a row. Two of the eight deliberately do not.
+ *
+ * **`complete`.** A gate holds *before the next thing*, and at `complete` there
+ * is no next thing. `holdAt` has excluded it since #134 and the reasoning is
+ * recorded there; this makes the exclusion a fact about the vocabulary rather
+ * than a line in one function.
+ *
+ * **`final-fix`.** Drawn locked in the settings design - *"notifies, never
+ * gates"* - and the loop agrees: the checkpoint is written, and then the loop
+ * goes *back to the top so the verification gate proves the final fix broke
+ * nothing*. Holding before that offers a decision made with strictly less
+ * information than the same decision one step later, and it converts a run that
+ * was one gate from finished into one that reports needing input. #134 shipped
+ * it gateable because nothing could configure a gate yet; naming it here is
+ * where that gets decided rather than defaulted.
+ *
+ * Both are refused by name in `vibe.config.json`, each with its own reason -
+ * dropping the key silently would leave someone believing they had armed a gate.
+ */
+export type GateableBoundary = Exclude<CheckpointBoundary, 'final-fix' | 'complete'>;
+
+/** A mode per gateable boundary. Every row is present; `auto` is a value, not an absence. */
+export type GatesConfig = Record<GateableBoundary, GateMode>;
+
 export interface Config {
   /**
    * Which agent holds each role on this run, and what model, effort and turn
@@ -487,6 +539,19 @@ export interface Config {
   questions: QuestionsConfig;
   git: GitConfig;
   context: ContextConfig;
+  /**
+   * Where the loop hands control back, and what that costs.
+   *
+   * One setting for both front ends. Before this there was exactly one gate in
+   * the product and it was a command name - `vibe plan` - and the six boundaries
+   * #134 made holdable were held at unconditionally by anything that passed a
+   * host, which is to say the app asked you to release every plan round and
+   * every review round of every run.
+   *
+   * `planOnly` is deliberately NOT folded in here, and that is a decision rather
+   * than an omission - see `RunState.planOnly`.
+   */
+  gates: GatesConfig;
   /**
    * Does the code actually run.
    *
@@ -1203,6 +1268,29 @@ export interface RunState {
    * never here.
    */
   sessionRegistered?: boolean;
+  /**
+   * This run has one phase, and it is planning.
+   *
+   * **Not a gate, and #140 deliberately did not make it one.** That issue asked
+   * for `vibe plan` to resolve to `gates['plan-approved'] = 'stop'` so there
+   * would not be two mechanisms for "stop after planning". They are not two
+   * mechanisms for one thing; they are two different things, and the difference
+   * is the one #140 itself insists on elsewhere - *a gate stop and a run that
+   * finished are not the same event*:
+   *
+   * - `planOnly` says there is no next phase. The run **completes**: `status:
+   *   'planned'`, `phase: 'complete'`, a `complete` checkpoint, exit 0. Nothing
+   *   is being held back, which is the same reason `complete` has no row in the
+   *   matrix at all.
+   * - `gates['plan-approved'] = 'stop'` says a full run halts before
+   *   implementing. It exits 2 with `status: 'needs-input'`, and `vibe resume`
+   *   carries on into the implementation it was always going to do.
+   *
+   * Folding the first into the second would make `vibe plan` exit 2 and report
+   * needing input on a run that produced exactly what it was asked for - which
+   * is the failure #140 describes as *"makes every scripted caller treat a
+   * planned stop as a problem"*, arrived at from the other direction.
+   */
   planOnly: boolean;
   answeredQuestions: string[];
   deferredQuestions: DeferredQuestion[];

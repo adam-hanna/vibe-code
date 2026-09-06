@@ -114,6 +114,7 @@ src/hostmain.ts      bin entry point for the app's sidecar — the second front 
 src/serve.ts         the host session: NDJSON over stdio, gates as awaits
 src/protocol.ts      the frames those two processes agree on
 src/host.ts          what a host may be told at a boundary, and may answer
+src/gates.ts         which boundaries hold a run, what a hold costs, and the two that cannot
 src/orchestrator.ts  the loop: planPhase, reviewPhase, the guards, the prompt dispatch
 src/run.ts           run state, artifacts, checkpoints, convergence maths (assessConvergence et al)
 src/fork.ts          `vibe fork`: preflight that only reads, then a commit phase that creates
@@ -203,6 +204,29 @@ of the five #144 asks for, and the wireframe's 45-second auto-answer is delibera
 built: if a proposal should ever fire on its own, that is one more column on #140's gate
 matrix. There is **no config tool** (decision 3) and **no archive tool** until #114 lands
 (decision 4), and both absences are pinned by a test rather than left as an omission.
+
+**One setting decides where the loop hands control back, and it means the same thing in
+both front ends.** `src/gates.ts` holds the matrix; `cfg.gates` is a mode per boundary, and
+the difference between the two modes that hold is *what a hold costs*. `step` holds and asks
+— free, because the app runs the loop in-process and the hold is an `await` — and a terminal
+cannot answer a promise, so from the CLI a `step` row runs through. `stop` asks nobody: the
+run ends there, resumably, whoever is listening, which is what makes gates usable from a
+terminal for the first time. `vibe doctor` prints the effective table, including which rows a
+terminal will honour, because the only other way to learn that is to run and not notice.
+
+Two boundaries have no row, and `GateableBoundary` makes that unrepresentable rather than
+conventional: `complete`, because a gate holds before the next thing and there is none, and
+`final-fix`, because the loop goes straight back to the verification gate to prove that fix
+broke nothing. A `vibe.config.json` is not TypeScript, so both are also refused **by name and
+with their own reason** — `mergeSection` would have dropped the key in silence, and someone
+who believes they armed a gate finds out by watching a run go past it.
+
+**`vibe plan` is deliberately not a row.** #140 asked for `planOnly` to resolve to
+`gates['plan-approved'] = 'stop'`; it does not, because they are two different things rather
+than two mechanisms for one. `planOnly` says there is no next phase, so the run *completes* —
+exit 0, `status: 'planned'`. A `stop` gate says a full run halts before implementing — exit 2,
+`needs-input`, and `vibe resume` finishes it. Folding the first into the second would make
+`vibe plan` report needing input on a run that produced exactly what it was asked for.
 
 **A decision may say who shaped it, and only then is it recorded.** `readOrigin` in
 `src/host.ts` reads an `origin` off the same answer `readDecision` reads, and the two fail in

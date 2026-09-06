@@ -53,6 +53,16 @@ export interface GateContext {
   /** Null when the stored phase was unreadable. Absent is never filled in. */
   phase: RunPhase | null;
   planRound: number;
+  /**
+   * How many rounds the planner has spent answering its own questions (#140).
+   *
+   * The field `question-round` was waiting for. #139 made it a checkpoint and
+   * deliberately left it ungateable, because a host asked to hold at the second
+   * of three question rounds would have been told everything except which round
+   * it was - and against `loop.maxQuestionRounds` that is the only number the
+   * decision turns on.
+   */
+  questionRound: number;
   reviewRound: number;
   verifyRound: number;
 }

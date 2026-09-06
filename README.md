@@ -450,6 +450,8 @@ defaults rather than a sample — omit any section and you get exactly what is p
                  "escalateOnDefer": true, "escalateOnLowConfidence": true },
   "git": { "useBranch": true, "branchPrefix": "vibe/", "commitEachRound": true },
   "context": { "enabled": true, "compactAboveRatio": 0.5, "compactDuringCodex": true },
+  "gates": { "plan-round": "step", "question-round": "step", "plan-approved": "step",
+             "implemented": "step", "verify-round": "step", "review-round": "step" },
   "progress": { "enabled": true, "intervalMs": 30000 },
   "toolchain": {
     "git":  { "probe": "git --version", "phases": ["plan", "implement", "review"] },
@@ -471,6 +473,40 @@ anything. Naming `agents` yourself on either one turns that off and your list is
 written.
 
 Binaries can be pinned with `VIBE_CLAUDE_BIN`, `VIBE_CODEX_BIN`, `VIBE_GIT_BIN`.
+
+### Where the loop hands control back
+
+`gates` says what happens when the loop reaches a boundary — one of the points where the
+work of a round is written down and the next has not begun. Each row takes one of three
+modes, and the difference between the two that hold is **what a hold costs**:
+
+| mode | what happens |
+|---|---|
+| `auto` | the loop runs through |
+| `step` | the loop holds and asks — **the desktop app only**; a terminal cannot answer, so `vibe run` goes straight through a `step` row |
+| `stop` | the run ends there, resumably: exit 2, `NEEDS-INPUT.md`, and `vibe resume <run-id>` carries on |
+
+`step` costs nothing because the app runs the loop in its own process: the hold is an
+`await`, so the Claude session stays warm and releasing it re-sends nothing. `stop` is the
+one that means the same thing whoever is listening — it asks nobody — and it is what to
+reach for from a terminal.
+
+```bash
+vibe run "$(cat brief.md)" --gate implemented=stop --gate plan-round=auto
+```
+
+**Two boundaries have no row and cannot be given one.** `complete` because a gate holds
+before the next thing and there is no next thing; `final-fix` because the loop goes straight
+back to the verification gate to prove the final fix broke nothing, so holding one step
+earlier is the same decision with less behind it. Naming either is refused rather than
+ignored, and the refusal says which of the two reasons applies.
+
+`vibe doctor` prints the effective table, including which rows a run from your terminal will
+actually honour.
+
+**`vibe plan` is not a gate**, and the distinction is worth having: it says the run has one
+phase, so the run *completes* — exit 0, and a plan you asked for. `"plan-approved": "stop"`
+says a full run halts before implementing, and `vibe resume` finishes it.
 
 ### Who does what
 

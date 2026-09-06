@@ -237,7 +237,14 @@ describe('the gate is the payoff', () => {
   const held: Frame = {
     type: 'ask',
     id: 7,
-    context: { boundary: 'plan-approved', phase: 'planning', planRound: 0, reviewRound: 0, verifyRound: 0 },
+    context: {
+      boundary: 'plan-approved',
+      phase: 'planning',
+      planRound: 0,
+      questionRound: 0,
+      reviewRound: 0,
+      verifyRound: 0,
+    },
   };
 
   test('an ask carries the id to answer and where in the run it is', () => {

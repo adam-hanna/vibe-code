@@ -10,6 +10,7 @@ import { codexTurn } from '@src/codex.js';
 import type { CodexTurnOptions, CodexTurnResult } from '@src/codex.js';
 import { preserveGateArtifacts, sweepGateArtifacts } from '@src/artifacts.js';
 import { downgradeInert, groundFindings, refusePlaceholderPlan } from '@src/evidence.js';
+import { gateMode } from '@src/gates.js';
 import * as git from '@src/git.js';
 import { readDecision, readOrigin } from '@src/host.js';
 import type { GateContext, Host } from '@src/host.js';
@@ -232,14 +233,41 @@ function latestReport(state: RunState): string | null {
  * stays alive, and the agent sessions stay warm. That is the property the app
  * exists to buy, and it costs no machinery at all.
  *
- * `complete` is deliberately not gated - see `GATED` below.
+ * Which boundaries hold, and how, is `cfg.gates` since #140 - see `src/gates.ts`
+ * for the table and for the two boundaries that have no row.
  */
 async function holdAt(
   state: RunState,
+  cfg: Config,
   host: Host | undefined,
   boundary: CheckpointBoundary,
 ): Promise<void> {
-  if (host === undefined || !GATED.has(boundary)) return;
+  const mode = gateMode(cfg.gates, boundary);
+  if (mode === 'auto') return;
+
+  // `stop` asks nobody. That is what makes it mean the same thing in both front
+  // ends: the CLI has no host and never will - a promise is not answerable from
+  // a prompt - so a mode that consulted one would be a setting that worked in
+  // the app and did nothing in a terminal. The run ends here on the exit-
+  // resumable path the round caps already use.
+  if (mode === 'stop') {
+    const why = 'the gate matrix stops the run at this boundary';
+    recordAndSay(state, 'warn', 'gate_stopped', `Stopped at ${boundary} - ${why}`, {
+      boundary,
+      reason: why,
+      // Named, and not left absent: nobody shaped this decision at the time, so
+      // "who released this" has an answer and it is the configuration. An
+      // absent origin here would read as an operator whose identity was lost.
+      origin: 'gates',
+    });
+    throw new Escalation(EXIT.NEEDS_HUMAN, `Stopped at the ${boundary} boundary. ${why}`);
+  }
+
+  // `step` holds and asks, and asking needs somebody who can answer. A terminal
+  // cannot, so from the CLI this runs through - the mode's definition rather
+  // than a failure of it, and `vibe doctor` prints it per row so it is not
+  // something you discover by not seeing it.
+  if (host === undefined) return;
 
   const ctx: GateContext = {
     boundary,
@@ -248,6 +276,11 @@ async function holdAt(
     // nobody could read would be told something no writer ever wrote.
     phase: state.phase ?? null,
     planRound: state.planRound,
+    // Beside the other three since #140, which is what let `question-round`
+    // become gateable: a host asked to hold at the second of three question
+    // rounds was previously told everything except which round it was, and that
+    // is the only number the decision turns on.
+    questionRound: state.questionRound,
     reviewRound: state.reviewRound,
     verifyRound: state.verifyRound,
   };
@@ -300,40 +333,6 @@ async function holdAt(
   // user would get from the terminal.
   throw new Escalation(EXIT.NEEDS_HUMAN, `Stopped at the ${boundary} boundary. ${why}`);
 }
-
-/**
- * The boundaries a host is asked about. Two checkpoints are deliberately not on
- * it, for two different reasons.
- *
- * **`complete`.** A gate exists to hold *before the next thing*. At `complete`
- * there is no next thing - the plan is approved or not, the code is written, the
- * review is finished - so a stop there could not prevent anything, and answering
- * it would convert a run that succeeded into one reported as needing input it
- * has no use for.
- *
- * Worth being explicit that `consistency.ts` would NOT catch that: `needs-input`
- * is in `COMPLETION_STATUSES`, precisely because W8 may overwrite a terminal
- * status without touching the phase. So `needs-input` beside `phase: 'complete'`
- * is a legal stored state and the guard would pass it. This is a decision about
- * what a gate MEANS, not a constraint the validators impose.
- *
- * **`question-round`.** It became a checkpoint in #139 and that issue puts
- * gate-stoppability out of its own scope on purpose - it had to be a real
- * boundary first. The concrete reason not to add it here yet is that `GateContext`
- * carries `planRound`, `reviewRound` and `verifyRound` and has no field for the
- * question counter, so a host asked to hold at the second of three question
- * rounds would be told everything except which round it was - and that is the
- * only number that makes the decision. The field and the row belong together, and
- * they are #140's, where the matrix decides which boundaries are gateable at all.
- */
-const GATED: ReadonlySet<CheckpointBoundary> = new Set<CheckpointBoundary>([
-  'plan-round',
-  'plan-approved',
-  'implemented',
-  'verify-round',
-  'review-round',
-  'final-fix',
-]);
 
 export async function orchestrate(
   state: RunState,
@@ -468,7 +467,7 @@ async function runPhases(
     }
     advancePhase(state, 'implementing');
     writeCheckpoint(state, 'plan-approved', NO_COMMIT);
-    await holdAt(state, host, 'plan-approved');
+    await holdAt(state, cfg, host, 'plan-approved');
   } else {
     const approved = state.plan;
     if (approved === null) {
@@ -534,7 +533,7 @@ async function runPhases(
     state.status = 'reviewing';
     saveState(state);
     writeCheckpoint(state, 'implemented', committed);
-    await holdAt(state, host, 'implemented');
+    await holdAt(state, cfg, host, 'implemented');
   }
 
   // ---- Review --------------------------------------------------------------
@@ -697,6 +696,11 @@ async function planPhase(
       // revised because it answered its own questions are different diagnoses,
       // and they used to share a name.
       writeCheckpoint(state, 'question-round', NO_COMMIT);
+      // Gateable since #140, which is when `GateContext` gained the counter that
+      // makes the decision answerable: this is the round of `maxQuestionRounds`
+      // a planner is spending on questions it raised itself, and a run doing
+      // that for a third time is the one an operator most wants to stop.
+      await holdAt(state, cfg, host, 'question-round');
       // The answerer may have declined every one; only revise if something came
       // back - and when nothing did, the plan and the turn that wrote it are
       // both still the ones already in hand.
@@ -929,7 +933,7 @@ async function reviewPhase(
         'verify-round',
         await maybeCommit(cfg, cwd, `vibe: fix verification failure (round ${state.verifyRound})`),
       );
-      await holdAt(state, host, 'verify-round');
+      await holdAt(state, cfg, host, 'verify-round');
       continue;
     }
 
@@ -1064,7 +1068,12 @@ async function reviewPhase(
         'final-fix',
         await maybeCommit(cfg, cwd, `vibe: address carried review findings (final round)`),
       );
-      await holdAt(state, host, 'final-fix');
+      // No hold here, and it is the one boundary that lost one (#140). The
+      // checkpoint stays - a fork of this point is worth having - but `final-fix`
+      // has no row in the matrix, so `holdAt` could only ever have returned. Two
+      // lines below is `continue`, which takes the loop back to the top so the
+      // verification gate proves this fix broke nothing; stopping in between is
+      // the same decision with less information behind it. See `UNGATEABLE`.
       recordEvent(state, 'review_approved', {
         findings: review.findings.length,
         carriedAndFixed: decision.tolerated.map((f) => f.id),
@@ -1143,7 +1152,7 @@ async function runFixRound(
     'review-round',
     await maybeCommit(cfg, cwd, `vibe: address review round ${state.reviewRound}`),
   );
-  await holdAt(state, host, 'review-round');
+  await holdAt(state, cfg, host, 'review-round');
 }
 
 /**
@@ -2864,7 +2873,7 @@ async function revisePlan(
   // record is complete. No commit here: the planning phase does not touch the
   // tree, and the note says that rather than implying a failure.
   writeCheckpoint(state, 'plan-round', NO_COMMIT);
-  await holdAt(state, host, 'plan-round');
+  await holdAt(state, cfg, host, 'plan-round');
   return { plan, ...(outcome.activity === undefined ? {} : { activity: outcome.activity }) };
 }
 
