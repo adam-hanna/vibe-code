@@ -121,10 +121,15 @@ test('a real git failure carries what git said, not just the command line', () =
   })();
 
   assert.ok(err instanceof Error, 'a failed git has to throw');
-  // git prefixes its diagnostics with `error: `, and none of that text is in the
-  // command line above - so its presence is what proves stderr was read rather
-  // than discarded. The old runner produced the command line and nothing else.
-  assert.match(err.message, /error: /);
+
+  // Asserted as "something survived beyond the command line" rather than by
+  // matching git's wording: git's diagnostics are translated when NLS is on, so
+  // a case pinned to `error: pathspec ...` would pass here and fail on a
+  // contributor's machine for a reason that has nothing to do with the claim.
+  // The old runner produced exactly this prefix and nothing after it.
+  const prefix = `git checkout definitely-not-a-branch failed in ${dir}: `;
+  assert.ok(err.message.startsWith(prefix), `unexpected shape: ${err.message}`);
+  assert.ok(err.message.length > prefix.length, 'nothing of what git said was kept');
   assert.doesNotMatch(err.message, /git said nothing/);
 });
 
