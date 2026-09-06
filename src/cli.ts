@@ -50,6 +50,7 @@ import { gitPrecondition, preflight, REAL_PROBES } from '@src/preflight.js';
 import type { PreflightProbes, PreflightReport } from '@src/preflight.js';
 import { closeCodexRateLimits, describeLimits, readCodexRateLimits } from '@src/ratelimits.js';
 import { describeGates } from '@src/gates.js';
+import { renderScorecard, scoreArchive } from '@src/scorecard.js';
 import { resolveGates } from '@src/verify.js';
 import type { AgentPreflight } from '@src/preflight.js';
 import * as git from '@src/git.js';
@@ -73,6 +74,7 @@ Usage
   vibe resume <run-id> [--force]   Continue a run that stopped for input
   vibe fork <run-id> --at <n>      Start a new run from a point in an old one
   vibe list                        Show runs in this repo
+  vibe stats [--json]              What every run in this repo says about the loop
   vibe doctor [options]            Verify both CLIs, and preview the config those options give
 
   "vibe fork <run-id>" with no --at lists the points that run can be forked from.
@@ -196,6 +198,8 @@ interface ParsedArgs {
     role?: string[];
     /** Raw `--gate <boundary>=<mode>` arguments, unparsed for `--role`'s reason (#140). */
     gate?: string[];
+    /** `vibe stats --json`: the document, rather than the table over it (#114). */
+    json?: boolean;
     help?: boolean;
   };
 }
@@ -238,6 +242,8 @@ export async function main(
         return await cmdFork(argv.slice(1));
       case 'list':
         return cmdList(argv.slice(1));
+      case 'stats':
+        return cmdStats(argv.slice(1));
       case 'doctor':
         return await cmdDoctor(argv.slice(1));
       default:
@@ -290,6 +296,9 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       // Repeatable, and collected raw: see the field's comment.
       case '--role': (out.flags.role ??= []).push(next()); break;
       case '--gate': (out.flags.gate ??= []).push(next()); break;
+      // Not a config setting and deliberately absent from `buildOverrides`: it
+      // chooses a rendering, and nothing about a run turns on it.
+      case '--json': out.flags.json = true; break;
       case '--max-plan-rounds': out.flags.maxPlanRounds = nextNum(); break;
       case '--max-review-rounds': out.flags.maxReviewRounds = nextNum(); break;
       case '--max-verify-rounds': out.flags.maxVerifyRounds = nextNum(); break;
@@ -1925,6 +1934,37 @@ function cmdList(args: readonly string[]): ExitCode {
     const fork = r.forkedFrom === undefined ? '' : `  [fork of ${r.forkedFrom.runId}@${r.forkedFrom.checkpoint}]`;
     console.log(log.dim(`    ${r.task}${fork}`));
   }
+  return EXIT.OK;
+}
+
+/**
+ * What the archive says about the loop (#114).
+ *
+ * **A sixth command rather than `vibe list --stats`**, and the argument is
+ * cardinality: `vibe list` produces one row per run and answers "what runs
+ * exist"; this produces one document about the archive and answers "how is the
+ * loop behaving". A flag that replaces a command's entire output is a second
+ * command wearing the first one's name - and `--json` behind it would then mean
+ * two incompatible documents under one contract, which is the half the app has
+ * to depend on.
+ *
+ * Both renderings come out of one `scoreArchive`, so the table and the JSON
+ * cannot report different numbers.
+ */
+function cmdStats(args: readonly string[]): ExitCode {
+  const { flags } = parseArgs(args);
+  const targetDir = path.resolve(flags.cwd ?? process.cwd());
+  const card = scoreArchive(targetDir);
+
+  if (flags.json === true) {
+    // Straight to stdout, unindented by nothing else: this is the shape #114
+    // promises a later GUI can depend on, and `log.*` would put prose beside it.
+    console.log(JSON.stringify(card, null, 2));
+    return EXIT.OK;
+  }
+
+  log.heading(`Runs in ${targetDir}`);
+  for (const line of renderScorecard(card)) console.log(line === '' ? '' : `  ${line}`);
   return EXIT.OK;
 }
 
