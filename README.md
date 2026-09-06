@@ -187,6 +187,33 @@ Everything is attributed. `raisedBy` says `human`, `reviewer`, `critic`, or `vib
 
 A block you have *partly* filled in stops the resume and says which part is missing. Nothing is spent, the file is still there, and a severity you did not choose never reaches the record.
 
+### Overriding a guard
+
+The same file also lists the findings the next round will act on, each with a `*Move to:*` line. Fill one in with `P0`, `P1`, `P2` or `P3` and say why, and the severity moves.
+
+This exists because a severity used to move in exactly one direction. Grounding downgrades a blocking finding that cites nothing that resolves, the inert guard downgrades one from a turn that used no tools, and **nothing could ever move one back**. Both guards are deliberately blunt — grounding *cannot judge a claim; it can only check that the claim names a real place* — which means a finding that was **right**, and cited a file the reviewer described from memory, is demoted for exactly the same reason a wrong one is. The only thing in the system that can tell those apart is you, and until now you could see the downgrade, agree it was wrong, and do nothing about it.
+
+Each row shows what you would be overriding, in the guard's own words:
+
+```markdown
+### Move: `race-in-the-retry-loop`
+
+*The retry loop never backs off*
+
+*Currently:* P2 (a guard downgraded it from P1 - it cited no evidence)
+*Move to:* <P0, P1, P2 or P3 - leave this to change nothing>
+```
+
+Three things follow, and each is deliberate:
+
+- **A restore is not a downgrade.** The guard's record is never rewritten, so its reason is still readable after you override it — and the fixer's prompt says both, because both are true: *the severity is deliberate, and the citation is still missing.*
+- **The next gate reads what you set.** A restored P0 blocks and is never carried, whatever `loop.p1Tolerance` says; a demotion stops forcing a round. There is no new control flow — the gate already runs at the top of every iteration.
+- **The oscillation guard does not see it.** That census is taken from the review report at the moment the round was recorded, and a decision you make afterwards does not go back and change what happened.
+
+Only findings the run is actually carrying can be moved. An id that names none of them stops the resume and says so, because a file left over from an earlier stop must not let you believe you changed something. So does a move with no reason, or a reason with no move, or a move to the severity it already has.
+
+Nothing is rewritten in the round's own `code-review-N.json`: that is the record of what the reviewer produced, and editing it afterwards would make it a record of something else. Your change lands on the carried findings and in its own artifact, both of which hold the guard's transition and yours together.
+
 ### What the planner knows about past runs
 
 Every run's record lands in `.vibe/runs/` in the repository being worked on, and since #52 the planning prompt carries a short index of the ones before it: run id, status, and the first line of the task, most recent first, capped at ten runs with every field truncated. It names the artifacts a run *may* contain and says the directory holds the full list. The same index is reattached once if the planner's session is rotated, because a rotation otherwise drops it silently.
