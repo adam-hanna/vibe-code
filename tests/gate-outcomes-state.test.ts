@@ -81,6 +81,56 @@ test('one unreadable entry discards the whole gate record', () => {
   assert.match(partial.repairs[0]?.replacedWith ?? '', /partial gate record/);
 });
 
+// ---- how many of the runs failed (#135) -------------------------------------
+
+test('a failed outcome recorded before the fraction existed keeps no fraction', () => {
+  // Every failing gate in every existing archive is one of these: until #135 the
+  // loop returned on the first non-zero exit, so `runs` was the attempt that
+  // failed and nothing recorded how many of the others did. A `0` here would
+  // assert that a failing gate failed nothing.
+  const { state, repairs } = read({
+    ...widest(),
+    gateOutcomes: [
+      { name: 'test', status: 'failed', command: 'npm test', runs: 1, required: true },
+    ],
+  });
+
+  assert.deepEqual(repairs, []);
+  const outcome = state.gateOutcomes?.[0];
+  assert.equal(outcome?.runs, 1);
+  assert.equal(outcome !== undefined && 'failed' in outcome, false);
+});
+
+test('the fraction round-trips, so "1 of 3" survives into the archive', () => {
+  const { state, repairs } = read({
+    ...widest(),
+    gateOutcomes: [
+      { name: 'test', status: 'failed', command: 'npm test', runs: 3, failed: 1, required: true },
+    ],
+  });
+
+  assert.deepEqual(repairs, []);
+  assert.equal(state.gateOutcomes?.[0]?.runs, 3);
+  assert.equal(state.gateOutcomes?.[0]?.failed, 1);
+});
+
+test('a fraction that is not a count is dropped, and does not cost the record', () => {
+  // Unlike `required` and `status`, nothing is computed from this: it tells a
+  // human whether the suite was noisy. So it repairs to absent by itself rather
+  // than discarding a gate record the exit code is read from.
+  const { state, repairs } = read({
+    ...widest(),
+    gateOutcomes: [
+      { name: 'test', status: 'failed', command: 'npm test', runs: 3, failed: 'lots', required: true },
+    ],
+  });
+
+  assert.deepEqual(repairs.map((r) => r.field), ['gateOutcomes[0].failed']);
+  const outcome = state.gateOutcomes?.[0];
+  assert.equal(outcome?.name, 'test');
+  assert.equal(outcome !== undefined && 'failed' in outcome, false);
+});
+
 test('a stored environment without verifyGates keeps its facts and invents no list', () => {
   const raw = widest();
   const environment = raw['environment'];

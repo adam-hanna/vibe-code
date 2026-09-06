@@ -158,7 +158,7 @@ src/charge.ts        the one seam every token and dollar is charged through
 src/slots.ts         session-slot lifecycle (main = Claude, judge + review = Codex)
 src/context.ts       context measurement, compaction, session rotation
 src/preflight.ts     toolchain contract enforcement, `vibe doctor`
-src/verify.ts        the verification gates — resolves the list, runs each command
+src/verify.ts        the verification gates — the list, every run, and broken vs flaky
 src/progress.ts      in-turn heartbeat
 src/work.ts          how far a write turn has got - measured, and labelled a proxy
 src/schemas.ts       the JSON schemas both CLIs are pinned to
@@ -394,6 +394,30 @@ about it are load-bearing:
   its own validator before it is offered, and a `raise` member is exactly that. `acceptRaised`
   is the seam one would call, so there is one definition of what a raised finding costs and
   what it is checked against — not two.
+
+**A gate that fails has more than one sample, and a flaky suite is told apart from a broken
+one** (#135). `verify.runs` has defaulted to 3 since the gate existed and `config.ts` argues
+it as a coin flip — but that reasoning is about *catching* a flake, and the loop returned on
+the first non-zero exit, so `runs: 3` meant *up to* three and **a failing run reported
+`runs: 1`**. The failure path now runs the remaining attempts; the pass path keeps its
+short-circuit and costs exactly what it did. Three things about it:
+
+- **The verdict is whole-gate, and that is option 1 of the three #135 offered.** `vibe` reads
+  exit codes and parses nobody's reporter. A per-test table means tracking TAP, JUnit XML and
+  `node --test` output forever — a standing maintenance liability bought for a column in a UI,
+  where the *prompt* is what saves the round. `verdictOf` answers `flaky` only on at least one
+  pass and at least one failure of the same command against the same tree, `failing` on all
+  failures, and **`unrun` on no attempts** — which is every gate outcome in every existing
+  archive, and must read as "cannot tell" rather than as a verdict. A `runs: 1` gate that
+  failed is `failing` and never `flaky`: one sample says nothing about determinism.
+- **`describeFailure` and `suggestedFix` live in one module** so the detail and the fix cannot
+  disagree about which kind of failure this is. The flaky fix names the three cheap ways to
+  make a noisy gate green — loosen the assertion, add a retry, add a sleep — because a model
+  asked to make a command pass will find all three, and all three leave the race in the
+  product.
+- **A flaky gate still blocks, and an unlaunchable one still short-circuits.** Retrying or
+  excluding a flake hides a defect in the suite; re-running a command that could not start
+  buys nothing, since no amount of retrying makes a mistyped path resolve.
 
 **A rate is a fraction, and the denominator is part of the answer.** `src/scorecard.ts` reads
 the archive `vibe list` walks, and every derived count is a `Measure` — what matched, what

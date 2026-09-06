@@ -901,6 +901,20 @@ export interface GateOutcome {
   command: string | null;
   /** Executions actually performed. Zero for unavailable and disabled. */
   runs: number;
+  /**
+   * How many of those `runs` failed (#135).
+   *
+   * The fraction is the whole point: `failed: 1` of `runs: 3` is a suite that is
+   * not deterministic, and `failed: 3` of `runs: 3` is one that is broken. Until
+   * this existed a failing gate returned on its first non-zero exit, so `runs`
+   * was the attempt that failed and no archive entry could tell the two apart.
+   *
+   * **Optional, and absent is not zero.** Every gate outcome recorded before
+   * this field existed has none, and a `0` there would assert that a failing
+   * gate failed nothing. Present on a `failed` outcome and absent on every other
+   * status, where the count is either meaningless or already implied by `runs`.
+   */
+  failed?: number;
   required: boolean;
   /**
    * What was preserved of what the failing command produced (#62).

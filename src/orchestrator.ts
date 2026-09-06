@@ -110,7 +110,14 @@ import {
   readCodexRateLimits,
   recordLimits,
 } from '@src/ratelimits.js';
-import { describeFailure, resolveGates, runGateCommand } from '@src/verify.js';
+import {
+  describeFailure,
+  failedRuns,
+  resolveGates,
+  runGateCommand,
+  suggestedFix,
+  verdictOf,
+} from '@src/verify.js';
 import type {
   Answer,
   CheckpointCommitNote,
@@ -2031,14 +2038,21 @@ async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Findi
       continue;
     }
 
+    // "failed 1 of 3 runs" rather than "attempt 1 of 3" (#135). The old line was
+    // read as a fraction and was not one: the loop returned on the first
+    // non-zero exit, so `runs` was the attempt that failed and the sentence said
+    // "attempt 1 of 1" for every failure of a three-run gate.
+    const flaky = verdictOf(result) === 'flaky';
     log.warn(
-      `Gate ${gate.name} failed: ${result.command} (attempt ${result.failedRun} of ${result.runs})`,
+      `Gate ${gate.name} failed ${failedRuns(result)} of ${result.runs} run(s): ${result.command}` +
+        (flaky ? ' - it is not deterministic' : ''),
     );
     const failed: GateOutcome = {
       name: gate.name,
       status: 'failed',
       command: result.command,
       runs: result.runs,
+      failed: failedRuns(result),
       required: gate.required,
     };
     outcomes.push(failed);
@@ -2047,6 +2061,12 @@ async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Findi
       command: result.command,
       failedRun: result.failedRun,
       exitCode: result.exitCode,
+      // The fraction, on the durable record: a reader of the archive asking
+      // "was this suite ever noisy" has no other way to find out, and the
+      // preserved output is one run's.
+      runs: result.runs,
+      failed: failedRuns(result),
+      verdict: verdictOf(result),
     });
     artifact(state, `verify-failure-${state.reviewRound}.txt`, result.output);
 
@@ -2107,10 +2127,12 @@ async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Findi
       // the fixer is pointed at the output it has to read (#48).
       evidence: [{ kind: 'artifact', path: `verify-failure-${state.reviewRound}.txt` }],
       detail: describeFailure(result),
-      suggested_fix:
-        `Make the ${result.name} gate's command pass. If it fails only sometimes, the defect ` +
-        'is a race - fix the underlying synchronisation rather than retrying or loosening ' +
-        'the test.',
+      // Beside `describeFailure` in `verify.ts` rather than written here (#135).
+      // The two sentences have to agree about which kind of failure this is -
+      // a detail that says "not deterministic" over a fix that says "make it
+      // pass" is worse than either alone - and they cannot disagree if one
+      // module owns both.
+      suggested_fix: suggestedFix(result),
     };
   }
 
