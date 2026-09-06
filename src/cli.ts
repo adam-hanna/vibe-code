@@ -69,7 +69,9 @@ import type {
   Finding,
   LoadedConfig,
   RunState,
+  RunSummary,
 } from '@src/types.js';
+import { findGateScratch } from '@src/artifacts.js';
 
 const USAGE = `
 vibe - automated plan/critique/implement/review loop (Claude Code + Codex)
@@ -2055,6 +2057,65 @@ function summary(state: RunState, started: number, recovery?: RecoveryReport): v
   log.info(`Files:    ${state.dir}`);
 }
 
+/** Bytes as a person reads them. Never rounded to zero: `0 B` means no bytes. */
+function fmtBytes(n: number): string {
+  if (n >= 1024 * 1024 * 1024) return `${(n / 1024 / 1024 / 1024).toFixed(1)} GB`;
+  if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${String(n)} B`;
+}
+
+/**
+ * What a run is still holding from a killed artifact preservation (#130).
+ *
+ * `sweepGateArtifacts` clears this at the top of every pass, so a run that
+ * resumes tidies itself. A run that is never resumed again never executes
+ * anything, and nothing else was ever going to look - which is the hole #111
+ * wrote into its own comment and left for this issue.
+ *
+ * **It reports and removes nothing**, which is option 3 of the three the issue
+ * offered and the one that composes with the other two later. The reasons are
+ * in `findGateScratch`; the short version is that a sweep needs a retention
+ * rule, a retention rule is a number, and the census taken for #130 found no
+ * evidence to derive one from.
+ *
+ * Two things it must get right, and both are about not overstating:
+ *
+ * - **A live run's scratch may be in flight.** `run.lock` is what says so, and
+ *   #77's probe already refuses to guess, so `running` and `unknown` get a
+ *   different sentence rather than being called leftovers or being hidden.
+ * - **An entry nothing may follow is not looked into at all.** `listRuns`
+ *   classified it (#53); a listing that walked inside a linked entry would be
+ *   enumerating somebody else's directory.
+ */
+function scratchLines(targetDir: string, r: RunSummary): string[] {
+  if (r.linked === true || r.unverified === true) return [];
+  const found = findGateScratch(path.join(targetDir, '.vibe', 'runs', r.id));
+  if (found.entries.length === 0 && found.unresolved.length === 0) return [];
+
+  const lines: string[] = [];
+  if (found.entries.length > 0) {
+    // `bytes` is null when the walk could not finish counting, and a partial
+    // total that reads as a whole one is the fabrication this repo refuses
+    // everywhere else.
+    const size =
+      found.bytes === null || found.files === null
+        ? 'size could not be measured'
+        : `${String(found.files)} file(s), ${fmtBytes(found.bytes)}`;
+    const claimed = r.liveness === 'running' || r.liveness === 'unknown';
+    lines.push(
+      claimed
+        ? `leftover gate scratch: ${String(found.entries.length)} entr(ies), ${size} - ` +
+            'something may still be writing them; do not delete while the run is claimed'
+        : `leftover gate scratch: ${String(found.entries.length)} entr(ies), ${size} - ` +
+            'nothing will remove these unless the run is resumed',
+    );
+    for (const e of found.entries) lines.push(`  ${e.at}`);
+  }
+  for (const u of found.unresolved) lines.push(`  ${u.at} - ${u.why}`);
+  return lines;
+}
+
 function cmdList(args: readonly string[]): ExitCode {
   const { flags } = parseArgs(args);
   const targetDir = path.resolve(flags.cwd ?? process.cwd());
@@ -2079,6 +2140,9 @@ function cmdList(args: readonly string[]): ExitCode {
     // for the rows that are not forks.
     const fork = r.forkedFrom === undefined ? '' : `  [fork of ${r.forkedFrom.runId}@${r.forkedFrom.checkpoint}]`;
     console.log(log.dim(`    ${r.task}${fork}`));
+    // Below the task line and only when there is something to say, so a healthy
+    // archive prints exactly what it printed before (#130).
+    for (const line of scratchLines(targetDir, r)) log.warn(`    ${line}`);
   }
   return EXIT.OK;
 }
