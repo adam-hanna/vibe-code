@@ -28,16 +28,41 @@ export interface ResolvedGate {
   artifacts: readonly string[];
 }
 
+/**
+ * What one execution of a gate's command did (#135).
+ *
+ * The whole of the per-run record, and deliberately no more: an exit code and
+ * whether it was zero. Naming *which test* failed would mean parsing somebody's
+ * reporter, and vibe parses no output formats - it reads exit codes. Option 3 of
+ * the three #135 offered is a standing maintenance liability taken on for a
+ * table in a UI, where option 1 is what changes the fixer's behaviour.
+ */
+export interface GateAttempt {
+  /** 1-based, matching `failedRun`. */
+  run: number;
+  ok: boolean;
+  exitCode: number | null;
+}
+
 export interface VerifyResult {
   /** Which gate this describes, so a failure can be filed under its own id. */
   name: string;
   ok: boolean;
   command: string | null;
-  /** Which attempt failed, 1-based. Null when every attempt passed. */
+  /** Which attempt failed FIRST, 1-based. Null when every attempt passed. */
   failedRun: number | null;
   runs: number;
+  /**
+   * What every attempt did, in order (#135).
+   *
+   * `failedRun` says which attempt failed; this says what the others did, which
+   * is the difference between "this suite is broken" and "this suite is not
+   * deterministic". Empty when the gate never ran - unavailable, disabled, or a
+   * result built before this field existed.
+   */
+  attempts: readonly GateAttempt[];
   exitCode: number | null;
-  /** Combined stdout/stderr of the failing attempt, tail-trimmed. */
+  /** Combined stdout/stderr of the FIRST failing attempt, tail-trimmed. */
   output: string;
   /**
    * Set when the gate could not run at all, as distinct from failing.
@@ -187,6 +212,34 @@ export function resolveGates(cfg: VerifyConfig, cwd: string): ResolvedGate[] {
  * Executed by vibe rather than by an agent. An agent reporting "tests pass" is
  * a claim; this is an observation, and it is the only thing in the loop that
  * distinguishes code that works from code that reads as though it does.
+ *
+ * ## Why a failure runs the rest of the attempts (#135)
+ *
+ * `verify.runs` has always defaulted to 3, and `config.ts` explains it as a coin
+ * flip: a racy lock failed roughly half its executions and a single sample called
+ * it green twice running. That reasoning is about **catching** a flake. Until
+ * this change nothing **identified** one - the loop returned on the first
+ * non-zero exit, so `runs: 3` meant *up to* three and **a run that failed had
+ * exactly one sample**.
+ *
+ * What that cost is a whole implementer turn against `maxVerifyRounds`, chasing
+ * something that was never wrong: the fixer was handed a failure and told to fix
+ * it, with no way to know whether the test was broken or noisy. A flaky suite
+ * also produces exactly the pattern `guardProgress` reads as the fixer making no
+ * progress, without any of the fixes being wrong.
+ *
+ * So: **the pass path keeps its short-circuit and costs exactly what it costs
+ * today** - three green runs and nothing changed. The failure path runs the
+ * remaining attempts and reports what each one did. A failing gate is then up to
+ * `runs` times more expensive, and only while it is already failing; against a
+ * wasted implementer turn that is not a close call. The ceiling is real and
+ * worth knowing: with the default `timeoutMs` of 15 minutes, three attempts that
+ * all time out is 45 minutes.
+ *
+ * **Except when the command never started.** No amount of re-running makes a
+ * mistyped path resolve, so `unlaunchable` returns immediately - the same
+ * reasoning `runGate` applies one level up when it refuses to send that to the
+ * fixer at all.
  */
 export async function runGateCommand(
   cwd: string,
@@ -200,6 +253,7 @@ export async function runGateCommand(
     command,
     failedRun: null,
     runs: 0,
+    attempts: [],
     exitCode: null,
     output: '',
     unavailable: null,
@@ -217,24 +271,75 @@ export async function runGateCommand(
   }
 
   const env = verificationEnv(contract);
-  const attempts = Math.max(1, gate.runs);
+  const wanted = Math.max(1, gate.runs);
+  const attempts: GateAttempt[] = [];
+  /** The first failure, which is the one every existing caller means. */
+  let first: { run: number; exitCode: number | null; output: string } | null = null;
 
-  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+  for (let run = 1; run <= wanted; run += 1) {
     const result = await execute(command, cwd, env, gate.timeoutMs);
-    if (result.code !== 0) {
+    const ok = result.code === 0;
+    attempts.push({ run, ok, exitCode: result.code });
+
+    if (ok) continue;
+    if (first === null) first = { run, exitCode: result.code, output: result.output };
+
+    const unlaunchable = launchFailure(result.output, result.code, command);
+    if (unlaunchable !== null) {
       return {
         ...base,
         ok: false,
-        failedRun: attempt,
-        runs: attempt,
-        exitCode: result.code,
-        output: tail(result.output),
-        unlaunchable: launchFailure(result.output, result.code, command),
+        failedRun: first.run,
+        runs: attempts.length,
+        attempts,
+        exitCode: first.exitCode,
+        output: tail(first.output),
+        unlaunchable,
       };
     }
   }
 
-  return { ...base, runs: attempts };
+  if (first === null) return { ...base, runs: wanted, attempts };
+
+  return {
+    ...base,
+    ok: false,
+    failedRun: first.run,
+    runs: attempts.length,
+    attempts,
+    exitCode: first.exitCode,
+    output: tail(first.output),
+    unlaunchable: null,
+  };
+}
+
+/**
+ * What the attempts add up to (#135).
+ *
+ * `flaky` needs two things and neither is optional: at least one failure, and at
+ * least one pass **of the same command against the same tree**. That is the one
+ * inference available without parsing anybody's reporter, and it is a strong one
+ * - the code did not change between runs, so something other than the code
+ * decided the outcome.
+ *
+ * `unrun` covers a gate that never executed and, deliberately, one recorded
+ * before `attempts` existed: the archive is full of those, and "no attempts
+ * recorded" must read as "cannot tell" rather than as a verdict. A gate with
+ * `runs: 1` that failed is `failing` and never `flaky`, because one sample says
+ * nothing about determinism - calling it either way would be the invented number
+ * this repo does not write.
+ */
+export type GateVerdict = 'passed' | 'failing' | 'flaky' | 'unrun';
+
+export function verdictOf(result: VerifyResult): GateVerdict {
+  if (result.attempts.length === 0) return 'unrun';
+  if (result.ok) return 'passed';
+  return result.attempts.some((a) => a.ok) ? 'flaky' : 'failing';
+}
+
+/** How many attempts failed. Zero for a gate that never ran. */
+export function failedRuns(result: VerifyResult): number {
+  return result.attempts.filter((a) => !a.ok).length;
 }
 
 /**
@@ -345,17 +450,87 @@ function tail(text: string, max = 8000): string {
   return text.length <= max ? text : `...\n${text.slice(-max)}`;
 }
 
-/** Render a failure as prose the fix prompt can act on. */
+/** "runs 1 and 3 passed, run 2 exited 1" - what actually happened, per attempt. */
+function perRun(result: VerifyResult): string {
+  const passed = result.attempts.filter((a) => a.ok).map((a) => a.run);
+  const failed = result.attempts.filter((a) => !a.ok);
+  const parts: string[] = [];
+  if (passed.length > 0) {
+    parts.push(`run${passed.length === 1 ? '' : 's'} ${list(passed)} passed`);
+  }
+  for (const a of failed) {
+    parts.push(`run ${a.run} exited ${a.exitCode ?? 'abnormally'}`);
+  }
+  return parts.join(', ');
+}
+
+function list(ns: readonly number[]): string {
+  if (ns.length <= 1) return String(ns[0] ?? '');
+  return `${ns.slice(0, -1).join(', ')} and ${ns[ns.length - 1]}`;
+}
+
+/**
+ * Render a failure as prose the fix prompt can act on - and say which kind of
+ * failure it is (#135).
+ *
+ * The data alone changes nothing. What saves the round is that a suite which
+ * failed 1 of 3 is described as **not deterministic**, in those words, rather
+ * than as a defect handed over with an instruction to repair it. A suite that
+ * failed every run is described as failing, which is what it is.
+ *
+ * A single-run gate says only what it saw. One sample cannot distinguish the
+ * two, and saying "it failed" when that is the whole of the evidence is the
+ * honest version.
+ */
 export function describeFailure(result: VerifyResult): string {
-  const attempt =
-    result.runs > 1
-      ? ` on attempt ${result.failedRun ?? '?'} of ${result.runs}`
-      : '';
-  // The gate is named, not just the command: with a list, "it exited 1" does not
-  // say which check the fixer has to make pass (#47, problem 2).
+  const command = `\`${result.command ?? 'verification'}\``;
+  const gate = `Gate \`${result.name}\``;
+  const detail = perRun(result);
+  const trailer = detail === '' ? '' : ` (${detail})`;
+
+  const headline =
+    verdictOf(result) === 'flaky'
+      ? `${gate}: ${command} **is not deterministic**. It failed ` +
+        `${failedRuns(result)} of ${result.runs} runs of the same command against the same ` +
+        `tree${trailer}. The output below is from the first failing run.`
+      : result.runs > 1
+        ? `${gate}: ${command} failed every one of ${result.runs} runs, exiting ` +
+          `${result.exitCode ?? 'abnormally'}${trailer}.`
+        : // The gate is named, not just the command: with a list, "it exited 1"
+          // does not say which check the fixer has to make pass (#47, problem 2).
+          `${gate}: ${command} exited ${result.exitCode ?? 'abnormally'}. It was run once, ` +
+          'so there is no second sample and nothing here says whether it is deterministic.';
+
+  return `${headline}\n\n\`\`\`\n${result.output}\n\`\`\``;
+}
+
+/**
+ * What the fixer is asked to do about it (#135).
+ *
+ * Two different jobs, and conflating them is what bought the wasted round. The
+ * old text carried the flaky case as a conditional - *"if it fails only
+ * sometimes, the defect is a race"* - which is the right advice offered to a
+ * reader who had no way to evaluate the condition. Now the run has evaluated it.
+ *
+ * The three things it forbids are the three cheap ways to make a flaky gate go
+ * green, and all of them hide the race rather than removing it. They are named
+ * explicitly because a model asked to make a command pass will find them.
+ */
+export function suggestedFix(result: VerifyResult): string {
+  if (verdictOf(result) === 'flaky') {
+    return (
+      `The \`${result.name}\` gate is not deterministic: the same command, on the same tree, ` +
+      'both passed and failed. Nothing about the behaviour under test changed between those ' +
+      'runs, so the defect is in what makes the outcome depend on something other than the ' +
+      'code - ordering between tests, a shared temp path or port, a real clock, an unawaited ' +
+      'promise, a resource one test leaves behind. Find that and remove it. Do NOT loosen or ' +
+      'delete the assertion, do NOT add a retry, and do NOT add a sleep: all three make the ' +
+      'gate green while leaving the race in the product.'
+    );
+  }
   return (
-    `Gate \`${result.name}\`: \`${result.command ?? 'verification'}\` exited ` +
-    `${result.exitCode ?? 'abnormally'}${attempt}.\n\n` +
-    `\`\`\`\n${result.output}\n\`\`\``
+    `Make the ${result.name} gate's command pass. If it fails only sometimes, the defect ` +
+    'is a race - fix the underlying synchronisation rather than retrying or loosening ' +
+    'the test.'
   );
 }

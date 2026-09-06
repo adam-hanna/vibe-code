@@ -1073,11 +1073,17 @@ function readGateOutcome(entry: unknown, at: string, ctx: ReadContext): GateOutc
   if (!(command === null || isString(command))) return null;
   if (!isCounter(entry['runs']) || !isBool(entry['required'])) return null;
   const artifacts = readGateArtifacts(`${at}.artifacts`, entry['artifacts'], ctx);
+  // Optional, and repaired to absent rather than to zero (#135). Every outcome
+  // recorded before this field existed has none, and a `0` on a failed gate
+  // would assert that nothing failed - which is the one reading the field exists
+  // to make impossible.
+  const failed = optionalNumber(`${at}.failed`, entry['failed'], ctx, isCounter);
   return {
     name: entry['name'],
     status,
     command,
     runs: entry['runs'],
+    ...(failed === undefined ? {} : { failed }),
     required: entry['required'],
     ...(artifacts === undefined ? {} : { artifacts }),
   };

@@ -338,6 +338,22 @@ So `vibe` runs the project's own commands itself, rather than believing a report
 
 It runs the command **`verify.runs` times (default 3)**, and this is not paranoia. The first run to reach implementation shipped a concurrency fix that failed roughly half its executions; the implementer ran it once, saw green, and reported success entirely truthfully. A single execution cannot distinguish working code from a race that happened to win.
 
+### A flaky gate is not a defect in the code
+
+Three runs is how a flake is *caught*. Identifying one is a separate thing, and until #135 nothing did: the gate returned on its first non-zero exit, so `runs: 3` meant *up to* three and **a run that failed had exactly one sample**. The fixer was handed a failure and told to repair it, with no way to know whether the test was broken or noisy — which buys a full implementation-sized turn against `maxVerifyRounds` chasing something that was never wrong.
+
+So a failure now runs the remaining attempts:
+
+- **Passing costs exactly what it did.** Three green runs, same short-circuit, same cost.
+- **A failure is classified.** Failed every run — a defect. Failed some but not all — the same command, on the same tree, both passed and failed, so the outcome depends on something other than the code.
+- **The fix prompt says which.** A flaky gate is described as **not deterministic**, with the fraction and what each run did, and the fixer is told to find the ordering, the shared path or port, the clock, the unawaited promise — and explicitly *not* to loosen the assertion, add a retry, or add a sleep, because all three make the gate green while leaving the race in the product.
+
+A failing gate is therefore up to `runs` times more expensive, and only while it is already failing. With the default 15-minute timeout, three attempts that all time out is 45 minutes; against a wasted implementer turn that is not a close call. A command that could not *start* is still not re-run — no amount of retrying makes a mistyped path resolve.
+
+A flaky gate still **blocks**. Retrying it or excluding it would be hiding it, and a flake is a defect in the suite.
+
+`vibe` reads exit codes and parses nobody's test reporter, so the verdict is whole-gate: it will tell you the suite is non-deterministic, not which test is. A per-test table would mean tracking TAP, JUnit XML and `node --test` output forever, which is a standing maintenance cost taken on for a column in a UI when the prompt is what saves the round.
+
 ### Named gates
 
 One command can only fail one way. `verify.gates` names as many as the project needs, in the order they run:
