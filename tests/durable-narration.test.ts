@@ -82,9 +82,23 @@ test('a clean pass records the events it always did, and no more', async () => {
 
   assert.deepEqual(
     [...new Set(state.events.map((e) => e.type))].sort(),
-    ['claude_turn', 'codex_turn', 'plan_approved', 'review_approved', 'verify_passed'],
+    [
+      'claude_turn',
+      'codex_turn',
+      'plan_approved',
+      'review_approved',
+      'verify_passed',
+      // Added by #136, and it is the guard working rather than being worked
+      // around. The work sampler takes a reading every sixty seconds through a
+      // write turn and records NONE of them: those are narration, at the
+      // heartbeat's level, for exactly the reason this case exists. What lands
+      // here is the one reading taken when the turn ended - a durable fact
+      // about what that turn left in the tree, one per write turn, and this
+      // clean pass has one write turn.
+      'work_measured',
+    ],
   );
-  assert.equal(state.events.length, 7);
+  assert.equal(state.events.length, 8);
 
   // And the run narrated several times that number, which is the ratio the rule
   // exists to protect. Asserted as an inequality, not a fixed count: the point

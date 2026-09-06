@@ -65,7 +65,8 @@
   },
   "progress": {
     "enabled": true,
-    "intervalMs": 30000
+    "intervalMs": 30000,
+    "workIntervalMs": 60000
   },
   "verify": {
     "enabled": true,
