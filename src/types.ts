@@ -898,9 +898,18 @@ export interface RunEvent {
  * looked like at any earlier point. These are the points at which a snapshot is
  * a coherent thing to resume from: each is taken after the work of a round has
  * been recorded and before the next round has begun.
+ *
+ * `question-round` joined them in #139, and its absence had been the one hole in
+ * that sentence: the question loop has its own counter and its own cap, it buys
+ * an answerer turn every time round, and it was the only round in the loop that
+ * left no snapshot. It also ends the blur - a revision driven by the planner's
+ * own questions used to be recorded as a plan round, which is a different
+ * diagnosis about a run wearing the same name.
  */
 export type CheckpointBoundary =
   | 'plan-round'
+  /** After the answerer's turn, whether or not a revision followed it (#139). */
+  | 'question-round'
   | 'plan-approved'
   | 'implemented'
   | 'verify-round'
@@ -943,6 +952,23 @@ export interface RunCheckpointMeta {
   planRound: number;
   reviewRound: number;
   verifyRound: number;
+  /**
+   * Question rounds spent so far. **Absent means the checkpoint predates #139**,
+   * which is not the same fact as zero and must not be drawn as one.
+   *
+   * Optional for exactly that reason: `readCheckpointShape` refuses a snapshot
+   * missing any field it requires, so requiring this would make every checkpoint
+   * written before this change unreadable - and `vibe fork` would report a
+   * directory of healthy snapshots as damaged.
+   *
+   * It is here rather than only in the snapshot body (which is a whole
+   * `RunState` and has always carried the counter) because this is the summary a
+   * reader actually gets: the fork listing and `ForkOrigin` read the meta, and a
+   * rounds fingerprint like `q3 p1` is unreadable without it - three rounds of
+   * the planner answering itself is a recognisable and unhealthy shape, and it
+   * looked identical to `p4`.
+   */
+  questionRound?: number;
   /** A full 40-hex object id, or null. Never abbreviated, never symbolic. */
   commit: string | null;
   commitNote: CheckpointCommitNote;

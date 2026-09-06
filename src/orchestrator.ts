@@ -302,19 +302,29 @@ async function holdAt(
 }
 
 /**
- * The boundaries a host is asked about: every checkpoint except `complete`.
+ * The boundaries a host is asked about. Two checkpoints are deliberately not on
+ * it, for two different reasons.
  *
- * A gate exists to hold *before the next thing*. At `complete` there is no next
- * thing - the plan is approved or not, the code is written, the review is
- * finished - so a stop there could not prevent anything, and answering it would
- * convert a run that succeeded into one reported as needing input it has no use
- * for.
+ * **`complete`.** A gate exists to hold *before the next thing*. At `complete`
+ * there is no next thing - the plan is approved or not, the code is written, the
+ * review is finished - so a stop there could not prevent anything, and answering
+ * it would convert a run that succeeded into one reported as needing input it
+ * has no use for.
  *
  * Worth being explicit that `consistency.ts` would NOT catch that: `needs-input`
  * is in `COMPLETION_STATUSES`, precisely because W8 may overwrite a terminal
  * status without touching the phase. So `needs-input` beside `phase: 'complete'`
  * is a legal stored state and the guard would pass it. This is a decision about
  * what a gate MEANS, not a constraint the validators impose.
+ *
+ * **`question-round`.** It became a checkpoint in #139 and that issue puts
+ * gate-stoppability out of its own scope on purpose - it had to be a real
+ * boundary first. The concrete reason not to add it here yet is that `GateContext`
+ * carries `planRound`, `reviewRound` and `verifyRound` and has no field for the
+ * question counter, so a host asked to hold at the second of three question
+ * rounds would be told everything except which round it was - and that is the
+ * only number that makes the decision. The field and the row belong together, and
+ * they are #140's, where the matrix decides which boundaries are gateable at all.
  */
 const GATED: ReadonlySet<CheckpointBoundary> = new Set<CheckpointBoundary>([
   'plan-round',
@@ -669,6 +679,24 @@ async function planPhase(
       saveState(state);
 
       const answers = await resolveQuestions(state, cfg, cwd, pending, plan, roles, turns);
+      // The snapshot for this round, taken here and in both branches below (#139).
+      //
+      // Here rather than inside the `answers.length > 0` branch, because *this*
+      // is the point the round's work is recorded and the next has not begun:
+      // the answerer's turn is charged, `answers-<n>.json` is on disk and every
+      // question asked is marked answered. The declined-everything path used to
+      // reach `continue` having written no snapshot at all - the one round in the
+      // loop that left none - so a fork of that run had to go back to the plan
+      // round before it and buy the answerer turn again.
+      //
+      // And it is `question-round`, not `plan-round`. `revisePlan` writes its own
+      // checkpoint a moment later on the revising branch, and that one is a plan
+      // round in every mechanical sense - it burns a planner turn, advances
+      // `planRound` and writes `plan-<n>.json`. What was missing is the record of
+      // WHY it happened: a plan revised because the critic objected and a plan
+      // revised because it answered its own questions are different diagnoses,
+      // and they used to share a name.
+      writeCheckpoint(state, 'question-round', NO_COMMIT);
       // The answerer may have declined every one; only revise if something came
       // back - and when nothing did, the plan and the turn that wrote it are
       // both still the ones already in hand.

@@ -1261,6 +1261,10 @@ export function writeCheckpoint(
     planRound: state.planRound,
     reviewRound: state.reviewRound,
     verifyRound: state.verifyRound,
+    // Written on every checkpoint, not only the ones taken at a question round
+    // (#139): the meta is a fingerprint of where the run has been, and a counter
+    // that appeared only on its own boundary could not be compared across two.
+    questionRound: state.questionRound,
     commit: commit.sha,
     commitNote: commit.note,
   };

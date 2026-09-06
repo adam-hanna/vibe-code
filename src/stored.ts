@@ -248,6 +248,7 @@ const PROVIDERS = {
 
 const BOUNDARIES = {
   'plan-round': 'plan-round',
+  'question-round': 'question-round',
   'plan-approved': 'plan-approved',
   implemented: 'implemented',
   'verify-round': 'verify-round',
@@ -1306,6 +1307,13 @@ export function readCheckpointShape(raw: unknown): RunCheckpointMeta | null {
   if (!isCounter(raw['planRound']) || !isCounter(raw['reviewRound']) || !isCounter(raw['verifyRound'])) {
     return null;
   }
+  // Absent is legal and means the checkpoint predates #139; present-and-unusable
+  // refuses the whole meta, exactly as the three counters above do. The two are
+  // different facts and only one of them is a damaged file - every snapshot in
+  // the archive today is missing this field, and treating that as damage would
+  // report a healthy run as unforkable.
+  const questionRound = raw['questionRound'];
+  if (questionRound !== undefined && !isCounter(questionRound)) return null;
   if (!(commit === null || (isString(commit) && FULL_SHA.test(commit)))) return null;
   return {
     n: raw['n'],
@@ -1315,6 +1323,10 @@ export function readCheckpointShape(raw: unknown): RunCheckpointMeta | null {
     planRound: raw['planRound'],
     reviewRound: raw['reviewRound'],
     verifyRound: raw['verifyRound'],
+    // Spread rather than assigned: `exactOptionalPropertyTypes` makes
+    // `questionRound: undefined` a different type from the property being
+    // missing, and it is the missing one that means "this file never had it".
+    ...(questionRound === undefined ? {} : { questionRound }),
     commit,
     commitNote,
   };
