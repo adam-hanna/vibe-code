@@ -9,6 +9,7 @@ import * as P from '@src/prompts.js';
 import {
   artifact,
   claimRunDir,
+  linkedArtifactReason,
   linkedCheckpointReason,
   linkedRunReason,
   listCheckpoints,
@@ -532,7 +533,28 @@ export async function commitFork(targetDir: string, plan: ForkPlan): Promise<For
       // the top of this function proved the two agree, and using the derived one
       // keeps that true for every read this function makes (#53).
       const source = path.join(sourceDir, report);
-      if (!isReportBasename(report) || !existsSync(source)) {
+      // `isReportBasename` FIRST and short-circuiting, because everything after
+      // it joins `report` onto a directory. Then the link question, before
+      // `existsSync` - which follows a link and would otherwise report the
+      // report present or absent according to whatever it points at, and then
+      // `copyFileSync` would follow it too and the child would hold a copy of
+      // that file under the child's identity, indistinguishable from something
+      // the child produced (#129, #53).
+      //
+      // A LOSS rather than a refusal, and deliberately not the outright refusal
+      // `planFork` gives a linked checkpoint. The report is not what a fork's
+      // identity rests on - the preflight already lists it as a thing that may
+      // not survive - and the two neighbouring branches here have always made a
+      // report that cannot be copied a loss. A fork that is otherwise sound is
+      // not worth standing down over one artifact, and `ForkResult.losses` is
+      // documented as carrying what was found while creating.
+      const linkedReport = isReportBasename(report)
+        ? linkedArtifactReason(sourceDir, report)
+        : null;
+      if (linkedReport !== null) {
+        delete child.lastReport;
+        losses.push(`the last report was not copied: ${linkedReport}`);
+      } else if (!isReportBasename(report) || !existsSync(source)) {
         delete child.lastReport;
         losses.push(`the last report (${report}) is not in the parent's directory, so it was not copied`);
       } else {

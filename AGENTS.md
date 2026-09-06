@@ -493,6 +493,34 @@ module. Four things carry it:
   that failed before the fix and passes after it closes it by evidence, and the sentence
   changes — counted, so a run where one of three closed does not read as though all three did.
 
+**Nothing under `.vibe/runs/` is read through a link, and there is one predicate for all
+three levels.** `linkageOf` in `src/run.ts` is `lstat(...).isSymbolicLink()`, which is true of
+a POSIX symlink, a Node `'junction'` and an `mklink /J` junction alike — one measurement, no
+platform split — and it **fails closed**: an `lstat` that threw is `unknown`, which refuses,
+because an entry that cannot be classified cannot be ruled out as a link. Three callers name
+what they are refusing, and the wording of each is the point: `linkedRunReason` for the run
+entry and its `state.json` (#53), `linkedCheckpointReason` for `checkpoint-<n>.json` (#102),
+`linkedArtifactReason` for everything else in the directory (#129). Two rules travel with it:
+
+- **Refuse before `existsSync`**, which follows a link and would otherwise report a file
+  present or absent according to its *target*, and then read through it. Every site does the
+  link question first for that reason, and the comment at each says so.
+- **"Unreadable" and "linked" are different findings and must never share a message.** One
+  says a file was opened and could not be used; the other says vibe never looked inside it.
+  That is why `readArtifact` has three answers rather than two, and why `latestReport` narrates
+  `report_linked` rather than reusing `report_unreadable`.
+
+**Where the artifacts differ from the two levels above them is what is on the other side of
+the read.** A run entry and a checkpoint go through `loadRun`'s validators before anything
+acts on them; an artifact's bytes go **straight into a prompt**, and `commitFork` copies one
+into a child under a new identity. So the refusal is on the *live* path, and the choice #129
+had to make is what a refusal costs there. It **degrades**: the reviewer is told there is no
+report — the same notice a missing one produces, since the two differ in what went wrong and
+not in what the reviewer should do — and the fork records a loss rather than standing down.
+`planFork` can refuse outright because nothing has run; ending a healthy mid-flight run over
+one artifact would cost more than the artifact is worth. TOCTOU is out of scope here exactly
+as #53 declared it: a check-then-open race is a different design, not a stronger check.
+
 **A rate is a fraction, and the denominator is part of the answer.** `src/scorecard.ts` reads
 the archive `vibe list` walks, and every derived count is a `Measure` — what matched, what
 could be asked, and what could not. The reason is arithmetic: fields were added to `RunState`

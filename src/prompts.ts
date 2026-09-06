@@ -959,11 +959,11 @@ The change was too large to show in one turn, so it is being reviewed a few file
  * notice: silence here would read as a clean bill of health, which is precisely
  * the failure #50 is about. A non-empty string is the report itself.
  *
- * ONE notice for both causes of absence. A missing pointer and a pointer to
- * something unreadable differ in what went wrong, not in what the reviewer
- * should do, and that difference belongs in the run events and the repair log.
- * `artifactText` already collapses missing and unreadable to `null` for the
- * same reason.
+ * ONE notice for every cause of absence. A missing pointer, a pointer to
+ * something unreadable and a pointer to a link out of the archive (#129) differ
+ * in what went wrong, not in what the reviewer should do, and that difference
+ * belongs in the run events and the repair log. `artifactText` already collapses
+ * all three to `null` for the same reason.
  *
  * Both halves of the framing are stated, because they pull opposite ways and
  * only one of them is obvious. The report is untrusted - a "verified" line is a
