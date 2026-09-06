@@ -289,3 +289,67 @@
 .v-cockpit__hidden[hidden] {
   display: none;
 }
+
+/* The pilot's own books (#145).
+   A row of its own, deliberately: the run's spend figure lives in the cockpit
+   and this one is money. They are never adjacent, never in one column and never
+   summed - see `describeDay`. */
+.v-pilot__books {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  padding: var(--space-2) var(--space-4);
+  border-bottom: 1px solid var(--rule-structure);
+}
+
+.v-pilot__limits {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.v-pilot__limit {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+}
+
+.v-pilot__limit-input {
+  width: 8ch;
+  font: var(--type-body-sm);
+  color: var(--text-primary);
+  background: var(--surface-card);
+  border: 1px solid var(--rule-control);
+  padding: var(--space-1) var(--space-2);
+}
+
+.v-pilot__limit-input:focus-visible {
+  outline: 2px solid var(--accent-solid);
+  outline-offset: 1px;
+}
+
+/* The per-turn estimate, beside the counts it was computed from and never
+   instead of them: the tokens are what the vendor said and the dollars are what
+   this build worked out, so a reader can check one against the other. */
+.v-pilot__price {
+  color: var(--text-secondary);
+}
+
+/* An absent figure carries its reason, in the place the figure would have been.
+   Dimmer than the figure, because it is a statement about the measurement
+   rather than a measurement. */
+.v-pilot__price--absent,
+.v-pilot__price-note {
+  color: var(--text-tertiary);
+}
+
+.v-pilot__note--alarm {
+  color: var(--text-emphasis);
+  background: var(--surface-alarm);
+  padding: var(--space-2) var(--space-4);
+}

@@ -177,6 +177,7 @@ app/src/cockpit/           the loop column, the running row, the output pane, th
 app/src-tauri/       Rust: window, tray, single instance, spawning and relaying
 app/src/pilot/       credentials, the wire, and the pane - transcript.ts is the pure part
 app/src/pilot/tools.ts     what the pilot may touch: the table, its executors, and propose-only
+app/src/pilot/ledger.ts    the pilot's own books - the one place a dollar is a dollar
 app/src/cockpit/argv.ts    a form to an argv - the button and the pilot build the same one
 app/src-tauri/src/host.rs    supervising the host process, and the \\?\ path fix
 app/src-tauri/src/reaper.rs  making a killed app take the host with it
@@ -302,6 +303,41 @@ rather than smoothed away: the schema field is `input_schema` for one and a nest
 for one and a `tool` message for the other; **Anthropic requires every result for a turn in a
 single message and OpenAI requires one message each** (both are a 400 if broken); and a call
 closes with its own event for one while the other says nothing until the whole turn ends.
+
+**The pilot spends money and the run does not, so they are two sets of books and
+never one** (#145). `app/src/pilot/ledger.ts` is the second accounting path, parallel to
+`src/charge.ts` and never through it. Two rules, both structural rather than promised, and
+`ledger.test.ts` fails on either:
+
+- The ledger imports exactly `./keys` and `./pilot` — nothing from the core, so there is no
+  path to `applyCharge` even by accident. A pilot conversation counting toward
+  `budget.maxTokens` would stop the thing being built because of a discussion about what to
+  build, reported as `EXIT.BUDGET`, which already means something else.
+- `src/types.ts`, `src/charge.ts` and `src/orchestrator.ts` contain no `pilot`. A run's
+  `state.json` is byte-identical whether the pane was open or closed.
+
+**This is the one place in the product where a dollar is a dollar, and it is not a
+contradiction with the settled decision.** *"Codex cost is not reported and will not be
+estimated"* stands, because a Codex turn runs on a subscription where **nothing is billed at
+all** — so a dollar figure is fictional in kind, with no quantity to be an estimate *of*, and
+`budget.maxCostUsd` says exactly that about itself. A pilot turn runs on an API key: money
+moves, the vendor publishes the usage on every response, and the price is published too. The
+rule was never *don't report cost*, it was **never invent a number**.
+
+What that buys, and what it costs: every `Price` entry carries the URL it was read from and
+the date it was read, the UI shows that date beside the figure, and a model with no entry
+reports **no figure at all**. Longest matching prefix wins, so `gpt-5-mini` can never be
+answered by `gpt-5`'s price — without that the table's *order* would decide what a turn cost.
+A turn still streaming is not priced from the half that arrived. The word used is
+*estimated*, never *billed*.
+
+The ceiling is `dailyTokens`/`dailyUsd`, deliberately not spelled `maxTokens`/`maxCostUsd`,
+and it is **off by default** — a hard default cap on a conversation stops you mid-sentence for
+no good reason. Per day rather than per session, because a conversation has no natural end and
+a day is the window both vendors' dashboards use. It gates the tool loop as well as the
+composer: a chain answering itself is the unattended half, which is the half a spend limit is
+for. It lives in `localStorage` and not in `vibe.config.json`, which is a project file meant
+to be committed, and not in the keychain, which holds one kind of secret.
 
 **A vendor's error message can contain the key you sent it.** OpenAI's 401 reads `Incorrect
 API key provided: sk-proj-…`, quoting it back in full — found by the live reachability test,
@@ -550,7 +586,11 @@ needs new evidence, not a fresh opinion.
 
 - **Codex cost is not reported and will not be estimated.** No output mode returns one, and
   no app-server endpoint returns money. `budget.maxTokens` is the ceiling that covers both
-  agents. See "Notes and limitations" in `README.md`.
+  agents. See "Notes and limitations" in `README.md`. **The pilot's price table is not a
+  counter-example** (#145): a subscription bills nothing at all, so a dollar figure for a
+  Codex turn has no quantity to be an estimate *of*, while a pilot turn on an API key does.
+  The rule stands and is the reason the pilot's figure says *estimated* and carries the date
+  its price was read.
 - **The Codex context window is a setting, not a derivation.** `modelContextWindow` exists
   only on an app-server push notification, and `vibe` drives Codex as a plain child process.
 - **A persisted Codex thread cannot hold a writing role.** `codex exec resume` takes no `-s`
