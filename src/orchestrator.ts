@@ -9,7 +9,13 @@ import {
 import { codexTurn } from '@src/codex.js';
 import type { CodexTurnOptions, CodexTurnResult } from '@src/codex.js';
 import { preserveGateArtifacts, sweepGateArtifacts } from '@src/artifacts.js';
-import { downgradeInert, groundFindings, refusePlaceholderPlan } from '@src/evidence.js';
+import {
+  applyReproducerOutcomes,
+  downgradeInert,
+  groundFindings,
+  refusePlaceholderPlan,
+} from '@src/evidence.js';
+import { describeOutcome, observe } from '@src/reproducer.js';
 import { gateMode } from '@src/gates.js';
 import { moveSection, raisePhase, raiseSection } from '@src/raise.js';
 import * as git from '@src/git.js';
@@ -90,6 +96,8 @@ import {
   parseFindings,
   parsePlan,
   readEvidence,
+  reproducerOutcomesOf,
+  reproductionAt,
 } from '@src/validate.js';
 import {
   markOccupancyWarned,
@@ -127,6 +135,7 @@ import type {
   FindingsReport,
   GateOutcome,
   OpenQuestion,
+  ReproducerOutcome,
   RoundRecord,
   Plan,
   RunState,
@@ -1130,14 +1139,20 @@ async function reviewPhase(
       // once the gate has passed. Same order as `runFixRound`.
       clearPendingFindings(state);
 
+      // After the fix and before the artifact that describes it. This is the
+      // round the loop deliberately never reviews again, so OUTSTANDING.md has
+      // always had to say the findings were "worked on, and nobody has confirmed
+      // they are gone" - and for a finding that carried a reproducer, running it
+      // once more is the only thing that has ever been able to replace that
+      // sentence with a fact (#113).
+      const settled = await confirmFixed(state, cfg, cwd, roles, decision.tolerated);
+      state.outstanding = settled;
+      saveState(state);
+
       // Written `pending`: the gate has not run yet at this point in the loop,
       // so the file cannot say how it went. `finaliseOutstanding` rewrites it
       // from the completion branch once it has.
-      const file = artifact(
-        state,
-        'OUTSTANDING.md',
-        renderOutstanding(state, decision.tolerated, 'pending'),
-      );
+      const file = artifact(state, 'OUTSTANDING.md', renderOutstanding(state, settled, 'pending'));
       log.info(`Carried findings and what was done about them: ${path.relative(cwd, file)}`);
 
       writeCheckpoint(
@@ -1231,6 +1246,88 @@ async function runFixRound(
     await maybeCommit(cfg, cwd, `vibe: address review round ${state.reviewRound}`),
   );
   await holdAt(state, cfg, host, 'review-round');
+}
+
+/**
+ * Run the carried findings' reproducers once more, after the round nothing
+ * reviews (#113).
+ *
+ * The prize the issue names, and the one weakness in the loop it can actually
+ * remove: a tolerated P1 is fixed in a round that is *by design* not re-reviewed,
+ * so OUTSTANDING.md has never been able to say more than that somebody worked on
+ * it. A test that failed before the fix and passes after it says the rest.
+ *
+ * **Only the findings whose reproducer reproduced.** A finding whose test passed
+ * against the unfixed code was downgraded to P2 and is not in `tolerated` at all;
+ * one that was `unproven` had nothing observed to confirm, and running it again
+ * would produce another unattributable result at the same price. This is the
+ * question "is the thing we saw still there", and it is only a question for the
+ * findings something was seen for.
+ *
+ * **The baseline is deliberately empty here**, and that is why a failure comes
+ * back `unproven` rather than as "still broken". `state.gateOutcomes` names the
+ * gates that passed *before* the review, and the fix round has changed the tree
+ * since - so a failing gate now could be this finding or could be the fix having
+ * broken something else. The very next thing the loop does is run the gates for
+ * real, and `verificationCaveat` is what reports that. A pass needs no baseline,
+ * for the reason `observe` gives, so the answer this exists to get is the one it
+ * can still give honestly.
+ */
+async function confirmFixed(
+  state: RunState,
+  cfg: Config,
+  cwd: string,
+  roles: RoleTable,
+  carried: readonly Finding[],
+): Promise<Finding[]> {
+  if (!cfg.verify.reproducers || !cfg.verify.enabled) return [...carried];
+
+  const gates = resolveGates(cfg.verify, cwd);
+  const settled: Finding[] = [];
+  for (const f of carried) {
+    const reproducer = f.reproducer;
+    if (reproducer === undefined || reproductionAt(f, 'review')?.verdict !== 'reproduced') {
+      settled.push(f);
+      continue;
+    }
+
+    log.step(`Re-running the reproducer for ${f.id} after the fix`, {
+      id: 'reproducer_started',
+      data: { id: f.id, path: reproducer.path, gate: reproducer.gate ?? null },
+    });
+    const outcome = await observe(f, reproducer, {
+      cwd,
+      runDir: state.dir,
+      gates,
+      contract: cfg.toolchain,
+      style: pathStyleFor(state, 'reviewer', roles),
+      // See the header: the tree has changed since the last observed gate pass.
+      passedGates: new Set<string>(),
+      at: 'final-fix',
+    });
+    recordAndSay(
+      state,
+      outcome.verdict === 'did-not-reproduce' ? 'ok' : 'warn',
+      'reproducer_observed',
+      `Reproducer for ${f.id} after the fix: ${outcome.verdict} - ${describeOutcome(outcome)}`,
+      {
+        id: f.id,
+        verdict: outcome.verdict,
+        at: outcome.at,
+        gate: outcome.gate,
+        command: outcome.command,
+        exitCode: outcome.exitCode ?? null,
+        baseline: outcome.baseline,
+        reason: outcome.reason,
+        archived: outcome.archived,
+      },
+    );
+    // Appended to the finding, not through `applyReproducerOutcomes`: that
+    // function's job is the severity, and there is no severity left to move -
+    // the run ends after this and the finding is a record rather than an input.
+    settled.push({ ...f, reproducerOutcomes: [...reproducerOutcomesOf(f), outcome] });
+  }
+  return settled;
 }
 
 /**
@@ -1335,11 +1432,34 @@ function renderOutstanding(
   stage: 'pending' | 'settled',
 ): string {
   const body = findings
-    .map(
-      (f) =>
-        `## ${f.title} \`${f.id}\`\n\n${f.detail}\n\n*Suggested fix:* ${f.suggested_fix}\n`,
-    )
+    .map((f) => {
+      // Only the observation from *after* the fix. The review-time one says the
+      // defect was real, which the finding above already says; this section is
+      // answering "and is it gone" (#113).
+      const after = reproductionAt(f, 'final-fix');
+      const proof = after === null ? '' : `\n*Reproducer:* ${describeOutcome(after)}\n`;
+      return `## ${f.title} \`${f.id}\`\n\n${f.detail}\n\n*Suggested fix:* ${f.suggested_fix}\n${proof}`;
+    })
     .join('\n');
+
+  // "Nobody has confirmed they are gone" is the whole point of this document and
+  // it stops being true the moment a reproducer passes after the fix. Counted
+  // rather than assumed, and the sentence names the split: a run where one of
+  // three carried findings closed by evidence must not read as though all three
+  // did, and must not read as though none did either.
+  const closed = findings.filter(
+    (f) => reproductionAt(f, 'final-fix')?.verdict === 'did-not-reproduce',
+  ).length;
+  const confirmation =
+    closed === 0
+      ? 'So these were worked on, and nobody has confirmed they are gone.'
+      : closed === findings.length
+        ? 'Every one of them carried a test the reviewer wrote to make it fail, and every one of ' +
+          'those tests passes now. That is an observation rather than an assertion, and it is ' +
+          'what closes them - not a second opinion about the fix.'
+        : `${closed} of them carried a test the reviewer wrote to make it fail, and those tests ` +
+          'pass now, which closes them by evidence. The rest were worked on and nobody has ' +
+          'confirmed they are gone.';
 
   const caveat = verificationCaveat(state);
   const verification =
@@ -1361,7 +1481,7 @@ function renderOutstanding(
     `The last review raised ${findings.length} P1 finding(s), within \`loop.p1Tolerance\`. ` +
     `${verification}, but that round was ` +
     `deliberately **not reviewed again** - re-reviewing would reopen the loop the tolerance ` +
-    `exists to close. So these were worked on, and nobody has confirmed they are gone.\n\n` +
+    `exists to close. ${confirmation}\n\n` +
     `Worth a human eye. Set \`loop.p1Tolerance\` to 0 to require a spotless review instead, ` +
     `at the cost of runs that cannot converge.\n\n` +
     body
@@ -3304,8 +3424,21 @@ function groundAndRecord(
       ? downgradeInert(grounded.report, activity)
       : { report: grounded.report, downgraded: [] as Finding[] };
   const report = inert.report;
-  const downgraded = [...grounded.downgraded, ...inert.downgraded];
+  recordDowngrades(state, [...grounded.downgraded, ...inert.downgraded]);
+  return report;
+}
 
+/**
+ * Say and record that a guard moved a severity - one sentence, whichever guard
+ * fired.
+ *
+ * Its own function since #113 added a fourth guard that runs *after*
+ * `groundAndRecord` rather than inside it: the reproducer cannot be observed
+ * until the whole round's findings are merged, because a chunked review produces
+ * the same id in two parts. Two copies of this loop would be two wordings for
+ * one event, and `finding_downgraded` is what a reader greps for.
+ */
+function recordDowngrades(state: RunState, downgraded: readonly Finding[]): void {
   for (const f of downgraded) {
     // Set by construction in `groundFindings`; narrowed rather than asserted.
     const d = f.downgraded;
@@ -3322,7 +3455,6 @@ function groundAndRecord(
       kinds: [...new Set(readEvidence(f.evidence).map((e) => e.kind))],
     });
   }
-  return report;
 }
 
 async function runCritique(
@@ -3507,6 +3639,11 @@ async function runReview(
           // nothing, and a real round must always say something about the
           // report, even when the thing it says is that there is none (#50).
           report,
+          // Absent unless this run would actually place and run one, which is
+          // what keeps a `verify.reproducers: false` review byte-identical to
+          // the one before #113. Only gates with a command: a gate the run
+          // cannot execute is not a choice the reviewer has.
+          reproducerGates(cfg, cwd),
         ),
         cwd,
         // Unchanged when there is one chunk: this string is Codex's output name
@@ -3554,8 +3691,136 @@ async function runReview(
   }
 
   const [only] = reports;
-  if (reports.length === 1 && only !== undefined) return only;
-  return mergeReviewReports(reports);
+  const merged = reports.length === 1 && only !== undefined ? only : mergeReviewReports(reports);
+  // Inside `runReview` and after the merge, which are two separate decisions
+  // (#113).
+  //
+  // After the merge, because a chunked round is several turns and the same id
+  // can come back from two of them - `mergeReviewReports` picks the most
+  // blocking, and running a reproducer per part would place the same file twice
+  // and observe a severity the round did not end up with.
+  //
+  // Inside `runReview` rather than beside it in `reviewPhase`, because the
+  // caller writes `code-review-<n>.json` and `recordPendingFindings` from what
+  // this returns. Doing it outside would mean either a record written before the
+  // observations - which a resume could not see - or rewriting the round's own
+  // artifact afterwards, which #142 settled against for the reason that applies
+  // here too: that file is the record of what the reviewer produced. Written
+  // once, containing what the reviewer said and what vibe observed about it, is
+  // exactly what it already does for `downgraded`.
+  return proveFindings(state, cfg, cwd, roles, merged);
+}
+
+/**
+ * The gate names a reproducer could be run by, or undefined when none could
+ * (#113).
+ *
+ * Undefined and not `[]`, because the two are different instructions to
+ * `reviewPrompt`: undefined renders no section at all, which is what a run with
+ * the feature off has to produce. It also collapses to undefined for a config
+ * with no runnable gate, since offering a reviewer a choice between nothing is
+ * how a field gets filled in with an invented name.
+ */
+function reproducerGates(cfg: Config, cwd: string): readonly string[] | undefined {
+  if (!cfg.verify.reproducers || !cfg.verify.enabled) return undefined;
+  const names = resolveGates(cfg.verify, cwd)
+    .filter((g) => g.command !== null)
+    .map((g) => g.name);
+  return names.length > 0 ? names : undefined;
+}
+
+/**
+ * Run every blocking finding's reproducer, attach what was observed, and
+ * downgrade the ones whose own test passed (#113).
+ *
+ * ## Which findings, and why not all of them
+ *
+ * Blocking only - P0 and P1. A reproducer's whole effect is on whether a finding
+ * blocks, so running one for a P3 buys a gate execution to change nothing. This
+ * is also the issue's open question *"which severities require one"*, answered
+ * in the direction that costs nothing: none of them require one. A reviewer that
+ * cannot express a defect as a failing test keeps its finding and is judged as
+ * findings have always been judged, and the schema says so.
+ *
+ * ## The cost, stated rather than capped
+ *
+ * One gate execution per blocking finding that carries a reproducer, at that
+ * gate's own timeout, on a tree the gate just passed on. There is deliberately
+ * no cap: a number here would be invented, and against the alternative - the
+ * measured case is a false P1 that bought a ~1.3M-token fix round editing
+ * working code - a 90-second suite run is not a close call. `verify.reproducers:
+ * false` is the off switch, and it is one setting rather than a ceiling because
+ * a ceiling would silently drop the reproducers past it.
+ *
+ * ## The baseline
+ *
+ * `state.gateOutcomes` is reset by every `runGate` call and this runs after the
+ * one that just came back clean, so it names the gates observed to pass on this
+ * exact tree. Nothing else in this function assumes a baseline: a gate that was
+ * disabled, unavailable, or simply not in that list produces `unproven` on a
+ * failure rather than a proof.
+ */
+async function proveFindings(
+  state: RunState,
+  cfg: Config,
+  cwd: string,
+  roles: RoleTable,
+  report: FindingsReport,
+): Promise<FindingsReport> {
+  if (!cfg.verify.reproducers || !cfg.verify.enabled) return report;
+
+  const pending = report.findings.filter(
+    (f) => (f.severity === 'P0' || f.severity === 'P1') && f.reproducer !== undefined,
+  );
+  if (pending.length === 0) return report;
+
+  const gates = resolveGates(cfg.verify, cwd);
+  const passed = new Set(
+    (state.gateOutcomes ?? []).filter((o) => o.status === 'passed').map((o) => o.name),
+  );
+  const outcomes = new Map<string, ReproducerOutcome>();
+
+  for (const f of pending) {
+    const reproducer = f.reproducer;
+    if (reproducer === undefined) continue;
+    log.step(`Running the reproducer for ${f.id}`, {
+      id: 'reproducer_started',
+      data: { id: f.id, path: reproducer.path, gate: reproducer.gate ?? null },
+    });
+    const outcome = await observe(f, reproducer, {
+      cwd,
+      runDir: state.dir,
+      gates,
+      contract: cfg.toolchain,
+      // The *reviewer's* convention, because the reviewer typed the path - the
+      // same read `groundAndRecord` makes for the same reason.
+      style: pathStyleFor(state, 'reviewer', roles),
+      passedGates: passed,
+      at: 'review',
+    });
+    outcomes.set(f.id, outcome);
+    recordAndSay(
+      state,
+      outcome.verdict === 'unproven' ? 'warn' : 'info',
+      'reproducer_observed',
+      `Reproducer for ${f.id}: ${outcome.verdict} - ${describeOutcome(outcome)}`,
+      {
+        id: f.id,
+        verdict: outcome.verdict,
+        at: outcome.at,
+        gate: outcome.gate,
+        command: outcome.command,
+        exitCode: outcome.exitCode ?? null,
+        baseline: outcome.baseline,
+        reason: outcome.reason,
+        archived: outcome.archived,
+      },
+    );
+  }
+
+  const applied = applyReproducerOutcomes(report, outcomes);
+  recordDowngrades(state, applied.downgraded);
+  return applied.report;
 }
 
 /** Most blocking first, so a later chunk can only ever raise a finding's severity. */

@@ -162,6 +162,11 @@ export const DEFAULTS: Config = {
     // reporter writes, so any default would be invented - and a user who named
     // an artifact path opted in to it being copied (#62).
     artifactMaxBytes: null,
+    // On, because a run whose reviewer writes no reproducer is byte-identical
+    // with it either way - and because the case this exists to catch, a finding
+    // that is wrong and cites a real line, is invisible to both existing guards
+    // by their own admission (#113).
+    reproducers: true,
   },
   progress: {
     enabled: true,
@@ -857,6 +862,14 @@ function validateVerify(verify: VerifyConfig): void {
           'ceiling',
       );
     }
+  }
+
+  // Above the `gates === null` return for the reason `artifactMaxBytes` is: a
+  // legacy config is the shape most runs still have, and it would otherwise
+  // accept `reproducers: "no"` - which is truthy - and run them (#113).
+  const reproducers: unknown = verify.reproducers;
+  if (reproducers !== undefined && typeof reproducers !== 'boolean') {
+    throw new Error('verify.reproducers must be true or false');
   }
 
   const gates: unknown = verify.gates;

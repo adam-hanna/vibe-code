@@ -2,8 +2,15 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { fromAgentPath } from '@src/pathstyle.js';
 import type { PathStyle } from '@src/pathstyle.js';
-import type { Evidence, Finding, FindingsReport, Severity, TurnActivity } from '@src/types.js';
-import { readEvidenceEntry } from '@src/validate.js';
+import type {
+  Evidence,
+  Finding,
+  FindingsReport,
+  ReproducerOutcome,
+  Severity,
+  TurnActivity,
+} from '@src/types.js';
+import { readEvidenceEntry, reproducerOutcomesOf } from '@src/validate.js';
 
 /**
  * Is a finding grounded - does it point at something that exists?
@@ -40,7 +47,7 @@ import { readEvidenceEntry } from '@src/validate.js';
  */
 
 /** Nothing here writes, copies, or surfaces file content. See `resolveInside`. */
-interface Resolution {
+export interface Resolution {
   /** Host-native absolute path, or null when the citation does not resolve. */
   absolute: string | null;
   /**
@@ -78,8 +85,17 @@ const NOT_RESOLVED: Resolution = { absolute: null, relative: null };
  * safe to leave here because this code only ever *reads* to answer a yes/no
  * question. It writes nothing, copies nothing, and puts no file content into
  * any artifact or any prompt.
+ *
+ * **Exported for `src/reproducer.ts`, which does write**, and the export is the
+ * point: one containment rule for every model-authored path in the product
+ * rather than a second one written a month later that disagrees at the edges a
+ * lexical check has - a repository at a filesystem root, an absolute path that
+ * is legitimately inside, a Git Bash path arriving from a PowerShell reviewer.
+ * The paragraph above is the reason placement cannot stop here: this function's
+ * safety argument rests on only ever reading, so the caller that writes adds the
+ * symlink and no-overwrite refusals on top rather than relaxing anything here.
  */
-function resolveInside(root: string, cited: string, style: PathStyle | null): Resolution {
+export function resolveInside(root: string, cited: string, style: PathStyle | null): Resolution {
   if (cited.trim() === '') return NOT_RESOLVED;
   // No style means no probe on this run - a legacy state, or `--no-preflight`.
   // Guessing one would be inventing a fact the run never observed, so the
@@ -423,6 +439,68 @@ export function downgradeInert(
     if (f.raisedBy === 'human') return f;
     if (f.severity !== 'P0' && f.severity !== 'P1') return f;
     const next = toP2(f, {}, reason);
+    downgraded.push(next);
+    return next;
+  });
+
+  return { report: { ...report, findings }, downgraded };
+}
+
+/**
+ * Attach what running each reproducer observed, and downgrade a blocker whose
+ * own test passed against the unfixed code (#113).
+ *
+ * The fourth guard that rewrites a report before the gate reads it, and the
+ * first one that can say anything about whether a finding is *correct*. The
+ * other three are all about the claim's form - does it name a real place, did
+ * the turn look at anything, is the plan a plan - because that is the whole of
+ * what a static check can do, and `checkEvidence` says so in its own header.
+ * This one has an observation behind it: the test the reviewer wrote to make its
+ * own finding fail did not fail.
+ *
+ * **Only `did-not-reproduce` moves anything, and only downwards.** A
+ * `reproduced` verdict is attached and changes no severity: the finding is
+ * exactly as blocking as the reviewer said, and promoting it on a machine's
+ * say-so is the move #142 reserved for a person. An `unproven` verdict is
+ * attached and changes nothing either - that is the fail-closed direction the
+ * issue asks for in the same words, *"unproven, not blocking"* meaning it does
+ * not gain blocking force it did not have, not that it loses the force the
+ * reviewer gave it.
+ *
+ * Only P0 and P1 are downgraded, for the reason `groundFindings` gives: a
+ * severity below the gate has nothing to lose, and rewriting a P2 to a P2 would
+ * put a `downgraded` record on a finding nothing happened to.
+ *
+ * Pure with respect to its input, as the three guards above are: the artifact
+ * and `state.pendingFindings` are written from these objects.
+ */
+export function applyReproducerOutcomes(
+  report: FindingsReport,
+  outcomes: ReadonlyMap<string, ReproducerOutcome>,
+): { report: FindingsReport; downgraded: Finding[] } {
+  if (outcomes.size === 0) return { report, downgraded: [] };
+
+  const downgraded: Finding[] = [];
+  const findings = report.findings.map((f) => {
+    const outcome = outcomes.get(f.id);
+    if (outcome === undefined) return f;
+    // Appended, never replaced. The same reproducer is observed at two moments
+    // and each answers a different question; an entry rewritten by the later one
+    // would leave a run saying the defect never reproduced when what happened is
+    // that it was fixed.
+    const recorded: Finding = {
+      ...f,
+      reproducerOutcomes: [...reproducerOutcomesOf(f), outcome],
+    };
+    if (outcome.verdict !== 'did-not-reproduce') return recorded;
+    if (f.severity !== 'P0' && f.severity !== 'P1') return recorded;
+
+    const where = outcome.command === null ? '' : ` (${outcome.gate ?? 'gate'}: \`${outcome.command}\`)`;
+    const next = toP2(
+      recorded,
+      {},
+      `its own reproducer passed against the unfixed code${where}`,
+    );
     downgraded.push(next);
     return next;
   });

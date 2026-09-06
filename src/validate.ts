@@ -14,6 +14,9 @@ import type {
   OutOfScopeItem,
   Plan,
   QuestionKind,
+  Reproducer,
+  ReproducerOutcome,
+  ReproducerVerdict,
   Severity,
   SeverityChange,
   Verdict,
@@ -233,6 +236,12 @@ export function parseFindings(raw: unknown): FindingsReport {
     // a list. Both read the same downstream - `groundFindings` downgrades a
     // blocker either way - but only one of them is true.
     const evidence = readEvidence(r['evidence']);
+    // Absent rather than a repaired half-object, for the reason the evidence
+    // list is tolerant: the schema asks for `null` when there is no reproducer,
+    // and a model that returns a path with no contents has described no test
+    // (#113). The finding is kept either way - a missing witness has never been
+    // held against a finding and is not now.
+    const reproducer = readReproducer(r['reproducer']);
     return {
       id,
       severity,
@@ -241,6 +250,7 @@ export function parseFindings(raw: unknown): FindingsReport {
       suggested_fix: str(r, 'suggested_fix', `report.findings[${i}]`, raw),
       defer,
       ...(evidence.length > 0 ? { evidence } : {}),
+      ...(reproducer === null ? {} : { reproducer }),
     };
   });
 
@@ -323,6 +333,99 @@ export function severityChangesOf(f: Finding): SeverityChange[] {
       };
     })
     .filter((c): c is SeverityChange => c !== null);
+}
+
+const VERDICTS_REPRODUCED: readonly ReproducerVerdict[] = [
+  'reproduced',
+  'did-not-reproduce',
+  'unproven',
+];
+
+/**
+ * The reviewer's executable witness, or null when there is not a usable one
+ * (#113).
+ *
+ * Both fields required and non-empty, because either alone is not a reproducer:
+ * contents with no path names nowhere to put it, and a path with no contents
+ * would place an empty file the gate would happily pass. Refusing here rather
+ * than repairing is the same direction every other reader in this file takes -
+ * the finding survives, it simply has no witness, which is the state almost
+ * every finding is in.
+ *
+ * The path is **not** validated here. Containment, the refusal to overwrite and
+ * the symlink check all need the filesystem and all live in
+ * `src/reproducer.ts`, where the write happens; duplicating a boundary is how
+ * two answers to "is this path allowed" come to disagree.
+ */
+export function readReproducer(raw: unknown): Reproducer | null {
+  if (!isRecord(raw)) return null;
+  const path = raw['path'];
+  const contents = raw['contents'];
+  if (typeof path !== 'string' || path.trim() === '') return null;
+  if (typeof contents !== 'string' || contents.trim() === '') return null;
+  const gate = raw['gate'];
+  return {
+    path: path.trim(),
+    contents,
+    ...(typeof gate === 'string' && gate.trim() !== '' ? { gate: gate.trim() } : {}),
+  };
+}
+
+/**
+ * What running a finding's reproducer observed, in order, or none (#113).
+ *
+ * Narrowed at the point of use for the reason `severityChangesOf` is:
+ * `readFinding` carries a stored finding through unvalidated, so this can be
+ * handed a list a hand-edited state invented. A malformed entry is dropped
+ * rather than costing the list - this is a record of observations, and one
+ * unreadable entry does not make the others untrue.
+ *
+ * `baseline` is defaulted to `not-observed` when it is missing or unrecognised,
+ * and that is the only defaulting in this function: it is the fail-closed
+ * direction, since `gate-passed` is the claim that licenses `reproduced`.
+ */
+export function reproducerOutcomesOf(f: Finding): ReproducerOutcome[] {
+  const raw: unknown = f.reproducerOutcomes;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((entry): ReproducerOutcome | null => {
+      if (!isRecord(entry)) return null;
+      const verdict = entry['verdict'];
+      const at = entry['at'];
+      if (!(VERDICTS_REPRODUCED as readonly unknown[]).includes(verdict)) return null;
+      if (at !== 'review' && at !== 'final-fix') return null;
+      const gate = entry['gate'];
+      const command = entry['command'];
+      const reason = entry['reason'];
+      const exitCode = entry['exitCode'];
+      return {
+        verdict: verdict as ReproducerVerdict,
+        at,
+        gate: typeof gate === 'string' ? gate : null,
+        command: typeof command === 'string' ? command : null,
+        baseline: entry['baseline'] === 'gate-passed' ? 'gate-passed' : 'not-observed',
+        reason: typeof reason === 'string' ? reason : null,
+        archived: typeof entry['archived'] === 'string' ? (entry['archived'] as string) : null,
+        ...(typeof exitCode === 'number' && Number.isInteger(exitCode) ? { exitCode } : {}),
+      };
+    })
+    .filter((o): o is ReproducerOutcome => o !== null);
+}
+
+/**
+ * The most recent observation at a given moment, or null.
+ *
+ * The list is append-only and a resume can run the same stage twice, so "what
+ * does the run currently know" is the *last* entry for that stage rather than
+ * the first - and asking for a stage rather than scanning the whole list is what
+ * stops a `review` observation being read as a statement about the fixed code.
+ */
+export function reproductionAt(
+  f: Finding,
+  at: ReproducerOutcome['at'],
+): ReproducerOutcome | null {
+  const matching = reproducerOutcomesOf(f).filter((o) => o.at === at);
+  return matching[matching.length - 1] ?? null;
 }
 
 /**

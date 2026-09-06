@@ -543,6 +543,50 @@ export function gateRuns(state: RunState, name: string): number {
 }
 
 /**
+ * A gate whose verdict depends on the file a reproducer places (#113).
+ *
+ * Every other gate fixture here decides its outcome from a run counter, which
+ * cannot show the thing this one exists to show: that the *contents* the
+ * reviewer wrote are what the user's own command observed. This walks a
+ * directory and exits non-zero when any file in it contains `FAIL`, so a
+ * reproducer that asserts a real defect and one that asserts nothing are two
+ * different files producing two different exit codes through one unchanged
+ * command.
+ *
+ * It exits 0 when the directory does not exist, which is the baseline the loop
+ * observes before any reproducer is placed - and the thing that makes
+ * `reproduced` attributable rather than a guess.
+ *
+ * `fixedBy` names a marker file that makes it pass whatever is in the directory:
+ * a defect that has been repaired, so the same reproducer that failed before the
+ * fix passes after it. That sequence is the only way to reach the "closed by
+ * evidence" branch of OUTSTANDING.md, and it cannot be reached by varying the
+ * reproducer, because the reproducer is the one thing the fix turn cannot edit.
+ */
+export function reproducerGate(
+  state: RunState,
+  options: { dir?: string; fixedBy?: string } = {},
+): string {
+  const script = 'vibe-repro-gate.mjs';
+  const fixed =
+    options.fixedBy === undefined
+      ? ''
+      : `if (existsSync(${JSON.stringify(options.fixedBy)})) process.exit(0);\n`;
+  writeFileSync(
+    path.join(state.targetDir, script),
+    "import { existsSync, readdirSync, readFileSync } from 'node:fs';\n" +
+      `const dir = ${JSON.stringify(options.dir ?? 'repro')};\n` +
+      fixed +
+      'if (!existsSync(dir)) process.exit(0);\n' +
+      'const bad = readdirSync(dir).some((f) => ' +
+      "readFileSync(`${dir}/${f}`, 'utf8').includes('FAIL'));\n" +
+      'process.exit(bad ? 1 : 0);\n',
+    'utf8',
+  );
+  return `node ${script}`;
+}
+
+/**
  * A `package.json` with a real `test` script in the target tree.
  *
  * For the cases that have to prove auto-detection did NOT happen: without a

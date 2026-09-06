@@ -152,6 +152,40 @@ export const EVIDENCE_RULE =
   'place you actually looked: an unresolvable citation costs the finding its severity, and ' +
   '`external` on a claim you could have pointed at in the code is visible for what it is.';
 
+/**
+ * The executable witness, its consequence, and the one thing it may not be
+ * (#113).
+ *
+ * Exported for the same reason `EVIDENCE_RULE` is: `reviewPrompt` states it in
+ * prose and the schema states it on the field, and a model told the same rule in
+ * two wordings has to guess which one the code implements.
+ *
+ * It says **a file, never a command**, in the imperative, because the obvious
+ * thing for a model to want is a command - the research review's own schema
+ * example proposed one - and being told the shape without being told why leaves
+ * a reviewer trying to smuggle a shell string into `contents`. It also says what
+ * a wrong reproducer costs, because a model told only the rule guesses at the
+ * cost and a model told the cost complies.
+ */
+export const REPRODUCER_RULE =
+  'Optional, and only for a P0 or P1 in a **code review** - null everywhere else, always ' +
+  'null when critiquing a plan, since there is no implementation to run a test against.\n\n' +
+  'A test that FAILS because of the defect you are describing and would pass once it is ' +
+  'fixed. Give the file, not a command: you name a path and the whole contents, this ' +
+  'orchestrator writes it and runs **the project\'s own already-configured verification ' +
+  'command, unchanged**. You cannot choose what is executed, only which of the configured ' +
+  'gates executes it. Nothing you write reaches a shell.\n\n' +
+  'What it buys you: a finding whose reproducer fails before the fix is **proven**, and the ' +
+  'fixer is told so. It is the difference between an assertion and an observation.\n\n' +
+  'What it costs: if the test **passes** against the unfixed code, the finding did not ' +
+  'reproduce and is downgraded to P2, exactly as an unresolvable citation is. So write one ' +
+  'only when you are confident the defect is real and you can express it as a failing test. ' +
+  'Omitting it costs nothing - a finding with no reproducer is judged exactly as findings ' +
+  'have always been judged.\n\n' +
+  'The file must stand alone under this project\'s existing test setup, must not already ' +
+  'exist, and must test the defect rather than the fix you have in mind. It is removed from ' +
+  'the working tree after it has been run and kept in the run record.';
+
 /** Shared shape for both plan critique and post-implementation code review. */
 export const FINDINGS_SCHEMA = {
   type: 'object',
@@ -169,7 +203,20 @@ export const FINDINGS_SCHEMA = {
       items: {
         type: 'object',
         additionalProperties: false,
-        required: ['id', 'severity', 'title', 'detail', 'suggested_fix', 'defer', 'evidence'],
+        required: [
+          'id',
+          'severity',
+          'title',
+          'detail',
+          'suggested_fix',
+          'defer',
+          'evidence',
+          // Nullable rather than omitted, for the reason the evidence entry's
+          // keys are: Codex refuses a closed object whose `required` does not
+          // cover every property (#68), and `schema-shape.test.ts` is what
+          // caught this one before a run did.
+          'reproducer',
+        ],
         properties: {
           id: {
             type: 'string',
@@ -271,6 +318,42 @@ export const FINDINGS_SCHEMA = {
                     '`external` only: the URL, spec, or tool documentation being relied on. ' +
                     'Required for `external`; null for the other kinds.',
                 },
+              },
+            },
+          },
+          reproducer: {
+            // Nullable and required, for the reason the evidence entry's
+            // optional keys are: Codex's `--output-schema` refuses an object
+            // whose `required` does not cover all of `properties` (#68). A
+            // finding with no reproducer sets this to null.
+            type: ['object', 'null'],
+            description: REPRODUCER_RULE,
+            additionalProperties: false,
+            required: ['path', 'contents', 'gate'],
+            properties: {
+              path: {
+                type: ['string', 'null'],
+                description:
+                  'Repo-relative path for the new test file, e.g. ' +
+                  '"tests/retry-backoff.test.ts". It must NOT already exist - an existing ' +
+                  'path is refused rather than overwritten, and the reproducer is discarded. ' +
+                  'Put it where this project keeps the tests the gate below already runs.',
+              },
+              contents: {
+                type: ['string', 'null'],
+                description:
+                  'The whole file. It is written verbatim and nothing is added to it, so it ' +
+                  'must compile and run under this project\'s existing test setup with no ' +
+                  'further edits. Assert the defect: the test must FAIL against the code as ' +
+                  'it stands.',
+              },
+              gate: {
+                type: ['string', 'null'],
+                description:
+                  'Which of the run\'s configured verification gates runs this file, by ' +
+                  'name. Null is correct when the run has exactly one gate. This chooses ' +
+                  'which existing command observes the file; it cannot change what that ' +
+                  'command is.',
               },
             },
           },
