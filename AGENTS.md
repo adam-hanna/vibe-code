@@ -510,6 +510,25 @@ read of each readable `state.json`, on a command nobody runs in a loop. Skipped 
 listed **with their reason**; a scorecard that quietly ignored three runs is the overclaim it
 exists to prevent.
 
+**The scratch a killed preservation leaves is swept by the run and *reported* by the archive,
+and those are one definition** (#130). `sweepGateArtifacts` runs at the top of every pass, so
+a run that resumes tidies itself; #111 wrote its own limit into its own comment, because a run
+that never resumes never executes anything and nothing else was going to look. `walkScratch`
+is the one walk both go through — `findGateScratch` reads it for `vibe list` and the sweep
+acts on it — so what the listing names and what the sweep takes cannot drift apart.
+
+**It reports and deletes nothing, and the census is why.** A sweep across `.vibe/runs` needs a
+retention rule, every retention rule is a number, and the number could not be borrowed from
+evidence either: across **349 run records in 28 archives**, 20 runs recorded a gate failure —
+the trigger — and **not one had configured any gate `artifacts` paths**, so every one of those
+preservations had nothing to copy. The 0 MB on disk is a fact about configuration, not about
+accumulation. That is option 3 of the three #130 offered, it is #96's shape (notice first, act
+later), and it composes with a `vibe prune` or a startup sweep later. Two things it must not
+overstate, both pinned by tests: a run holding a live lock is *described differently* rather
+than called a leftover or hidden, because #77's probe refuses to guess and the copy may be in
+flight; and a superseded round with no `round-N` installed beside it is **never listed as
+removable**, because it may be the only copy of that evidence.
+
 `src/orchestrator.ts` is the biggest file by a wide margin and is where most changes land.
 Read the phase you are touching end to end before editing it; the guards interact.
 

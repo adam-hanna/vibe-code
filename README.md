@@ -415,6 +415,18 @@ Refused at config load, too: an absolute path (in every spelling, on every host)
 
 Nothing copied can reach a commit: `.vibe/` contains a `.gitignore` holding `*`, so the whole subtree is self-ignoring whatever the project's own ignore rules say.
 
+**A killed copy leaves scratch, and `vibe list` says so.** The copy stages into a `.staging-…` tree beside the round and renames it in, so a process killed mid-preservation leaves that tree behind — a copy of whatever your gate produced, with no ceiling on it unless you set one. Every later pass of the run sweeps it, so a run you resume tidies itself; a run you never resume never executes anything again, and nothing was going to look. So `vibe list` now names what is there and how big it is:
+
+```
+  20260811-142530-add-rate-limiting        error        $2.14  interrupted
+    add rate limiting to the public API
+    leftover gate scratch: 2 entr(ies), 143 file(s), 8.4 MB - nothing will remove these unless the run is resumed
+      artifacts/qa/.staging-round-1-7
+      artifacts/qa/.staging-round-2-9
+```
+
+**It deletes nothing, and that is the decision rather than an omission.** Deleting needs a retention rule, every retention rule is an age or a size, and this repo does not invent numbers — nor could this one be borrowed from evidence: across 349 run records in 28 archives, 20 runs recorded a gate failure and **none had configured any `artifacts` paths at all**, so nothing has ever been copied and the 0 MB on disk says nothing about how fast it would accumulate for you. You can see it and delete what you like. A run something still holds a lock on gets a different sentence — it may be mid-copy — and a run entry that is a symlink is not looked inside at all.
+
 **Ordering.** A **failure stops the sequence** — the fixer gets one problem, and running a suite against code that does not typecheck buys an opinion about the wrong thing. An **unavailable gate does not** stop it: a `typecheck` gate nobody configured must not prevent `test` from running.
 
 **Four states, and where each one lands:**
