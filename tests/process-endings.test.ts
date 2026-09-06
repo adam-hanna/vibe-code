@@ -16,6 +16,7 @@ import {
 } from '@src/ending.js';
 import type { ProcessHooks, RunEnding } from '@src/ending.js';
 import { describeLiveness, livenessOf } from '@src/lock.js';
+import type { PidProbe } from '@src/lock.js';
 import { orchestrate } from '@src/orchestrator.js';
 import { agents, config, freshRun } from './helpers/loop-harness.js';
 import type { RunState } from '@src/types.js';
@@ -324,30 +325,31 @@ function deadLock(dir: string, pid: number): void {
 }
 
 /**
- * A pid that is certainly not running.
+ * The pid these four cases plant, and the probe that says it is gone.
  *
- * Not a hardcoded number: `probePid` answers `unknown` rather than
- * `interrupted` for anything it cannot resolve, and a pid that happens to be
- * live on the machine running the suite would take the case with it. This
- * process's own pid plus a large offset is the cheapest reliably-absent one,
- * and it is re-probed rather than assumed.
+ * They used to find a real pid the OS was not using and let the real probe
+ * agree - which is the fixture #164 is about. It made the case's premise
+ * something to be *arranged*, in a suite that spawns processes in parallel, and
+ * it is not what any of these four are testing: every one of them is about the
+ * pairing of a dead lock with the `ending.json` beside it, and a pid probe is
+ * what supplies the word "dead", not what the claim is about.
+ *
+ * So the premise is stated. `PidProbe` is a parameter on `livenessOf` with the
+ * real probe as its default, so nothing about the shipped path changes and no
+ * process is spawned to make one of these true. The number is arbitrary and
+ * only has to be one `parseLock` accepts - it is never probed - but it must
+ * match `hooks.pid` where a stamp is written, because that agreement is exactly
+ * what the last case checks the absence of.
  */
-function absentPid(): number {
-  for (let candidate = process.pid + 100_000; ; candidate += 1) {
-    try {
-      process.kill(candidate, 0);
-    } catch (err: unknown) {
-      if ((err as { code?: unknown }).code === 'ESRCH') return candidate;
-    }
-  }
-}
+const DEAD_PID = 424_242;
+const gone: PidProbe = () => 'interrupted';
 
 test('a dead pid with no ending says the process ran none of its own code', () => {
   const dir = runDir();
-  const pid = absentPid();
+  const pid = DEAD_PID;
   deadLock(dir, pid);
 
-  const verdict = livenessOf(dir);
+  const verdict = livenessOf(dir, undefined, gone);
   assert.equal(verdict.liveness, 'interrupted');
   assert.equal(verdict.ending, null);
   // The finding, not the absence of one: every ending vibe is capable of
@@ -360,14 +362,14 @@ test('a dead pid with no ending says the process ran none of its own code', () =
 
 test('a dead pid with its own ending beside it says the process chose to stop', () => {
   const dir = runDir();
-  const pid = absentPid();
+  const pid = DEAD_PID;
   deadLock(dir, pid);
   const hooks = fakeHooks(2);
   hooks.pid = pid;
   installEndingStamp(dir, hooks);
   hooks.fireExit();
 
-  const verdict = livenessOf(dir);
+  const verdict = livenessOf(dir, undefined, gone);
   assert.equal(verdict.liveness, 'interrupted');
   assert.equal(verdict.ending?.how, 'exit');
   // "it was interrupted" was the run's whole account of a dead pid, and it
@@ -378,26 +380,29 @@ test('a dead pid with its own ending beside it says the process chose to stop', 
 
 test('a dead pid sent a signal says which one', () => {
   const dir = runDir();
-  const pid = absentPid();
+  const pid = DEAD_PID;
   deadLock(dir, pid);
   const hooks = fakeHooks();
   hooks.pid = pid;
   installEndingStamp(dir, hooks);
   hooks.fireSignal('SIGHUP');
 
-  assert.match(describeLiveness(livenessOf(dir)), /was sent SIGHUP and recorded it before going/);
+  assert.match(
+    describeLiveness(livenessOf(dir, undefined, gone)),
+    /was sent SIGHUP and recorded it before going/,
+  );
 });
 
 test("another process's ending is not reported as this one's", () => {
   const dir = runDir();
-  const pid = absentPid();
+  const pid = DEAD_PID;
   deadLock(dir, pid);
   const hooks = fakeHooks(0);
   hooks.pid = pid + 1;
   installEndingStamp(dir, hooks);
   hooks.fireExit();
 
-  const verdict = livenessOf(dir);
+  const verdict = livenessOf(dir, undefined, gone);
   // Carried, because a stamp that disagrees with the lock beside it is itself
   // worth seeing - but never spoken as this process's ending.
   assert.equal(verdict.ending?.pid, pid + 1);
@@ -405,6 +410,9 @@ test("another process's ending is not reported as this one's", () => {
 });
 
 test('the ending is read even beside a live lock, where it is a contradiction', () => {
+  // The real probe, deliberately: this half was never the flaky one. A pid that
+  // is alive can be had for nothing - it is this process - and asking the OS
+  // about it is the whole of what makes the case a `running` case.
   const dir = runDir();
   writeFileSync(
     path.join(dir, 'run.lock'),
