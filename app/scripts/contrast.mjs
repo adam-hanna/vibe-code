@@ -227,5 +227,48 @@ console.log('\n7 · no hex literals outside tokens.css');
   if (stray === 0) pass(`${sheets.length} stylesheets reach only for tokens`);
 }
 
+// ---------------------------------------------------------------- 8 · leading
+// Added by #190, and the reason it is here is that this audit passed on every
+// one of the three panes that were reported as unreadable. It measured colour
+// and nothing else, so `400 11px/1` - a monospace log line whose own wrapped
+// rows touch - was invisible to it. A ratio is half of legibility and this is
+// the other half.
+//
+// The split is between styles that WRAP and styles that cannot. A tab, a label,
+// a section heading and a title are one line by construction, and `1` is the
+// right value for them; anything a sentence or a path can flow into needs
+// leading, and 1.4 is the floor rather than the target.
+console.log('\n8 · every style that can wrap has leading');
+{
+  const WRAPS = ['type-lead', 'type-body', 'type-body-sm', 'type-mono', 'type-mono-sm'];
+  const styles = new Map();
+  for (const m of css.matchAll(/--(type-[a-z-]+):\s*(\d+)\s+(\d+(?:\.\d+)?)px\/([\d.]+(?:px)?)\s/g)) {
+    styles.set(m[1], { size: Number(m[3]), leading: m[4] });
+  }
+  for (const n of WRAPS) {
+    const style = styles.get(n);
+    if (style === undefined) {
+      fail(`--${n} is not defined, or its shorthand no longer parses`);
+      continue;
+    }
+    // A `px` line-height is legal CSS and is used by the two chip styles, which
+    // do not wrap. On a wrapping style it would be a fixed leading that stops
+    // tracking the size, so it is refused here rather than converted.
+    if (style.leading.endsWith('px')) {
+      fail(`--${n} has a px line-height (${style.leading}); a wrapping style needs a ratio`);
+    } else if (Number(style.leading) < 1.4) {
+      fail(`--${n} is ${style.size}px/${style.leading}; below the 1.4 leading floor`);
+    } else {
+      pass(`--${n} is ${style.size}px/${style.leading}`);
+    }
+  }
+  // And the size floor. 11px monospace was the smallest thing in the product
+  // and it is what the report was about; 9 and 10px survive only on chips and
+  // labels, which are short, uppercase and never a paragraph.
+  const smallest = Math.min(...WRAPS.map((n) => styles.get(n)?.size ?? Infinity));
+  if (smallest < 12) fail(`the smallest wrapping style is ${smallest}px, below the 12px floor`);
+  else pass(`the smallest wrapping style is ${smallest}px`);
+}
+
 console.log(`\n${checks} checks passed, ${failures} failed\n`);
 process.exit(failures > 0 ? 1 : 0);

@@ -34,9 +34,13 @@
   color: var(--text-primary);
 }
 
+/* Prose, so it is on the prose tier. `--text-tertiary` is documented as
+   "labels, timestamps" and this is a two-sentence paragraph about where a
+   credential lives - the tier was wrong independently of what its value is
+   (#190). Same correction below for the pilot's notes and a proposal's. */
 .v-creds__note {
   font: var(--type-body-sm);
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
   border-top: 1px solid var(--rule-inner);
   padding-top: var(--space-3);
 }
@@ -174,7 +178,7 @@
 .v-pilot__spend,
 .v-pilot__note {
   font: var(--type-body-sm);
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
 }
 
 .v-pilot__composer {
@@ -250,7 +254,7 @@
 
 .v-proposal__note {
   font: var(--type-body-sm);
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
 }
 
 .v-proposal__actions {

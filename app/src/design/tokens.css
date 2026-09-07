@@ -13,11 +13,20 @@
  *
  * Two rules the spec names as the ones most likely to slip, both checkable:
  *
- *   - The text floor is `--text-tertiary`. It is the last step that passes
- *     4.5:1 on these grounds (5.47-6.09 depending on ground). Anything dimmer
- *     is a border, not text. Recession below it is built with size and weight.
+ *   - The text floor is `--text-tertiary`. Anything dimmer is a border, not
+ *     text. Recession below it is built with size and weight.
  *   - Solid fill means interactive. The one exception is the single state label
  *     that leads a banner. Never two solids of the same fill in one region.
+ *
+ * **The floor moved up one step in revision 2, and the reason is #190.** It sat
+ * at #8f9498 - the last step that passes 4.5:1 on every ground, at 4.78 on the
+ * accent tint - and being *the last passing step* was treated as the argument
+ * for it. It is not one. 4.5:1 is a threshold for normal text, and the places
+ * this floor is actually spent are 11-12px monospace log lines; a ratio 6% clear
+ * of a threshold that was never about them is a floor with no margin in it.
+ * The first manual pass of the built app reported all three dense panes as hard
+ * to read, and the audit passed on every one, which is what a floor set at the
+ * limit buys you.
  */
 
 :root {
@@ -44,8 +53,16 @@
   --text-display: #e7e9eb;          /* 15.4 - titles only */
   --text-emphasis: #dbe4ec;         /* 14.0 - the live value */
   --text-primary: #c3c8cc;          /* 10.7 - measurements, body */
-  --text-secondary: #9aa0a5;        /*  6.7 - prose, log history */
-  --text-tertiary: #8f9498;         /*  5.9 - labels, timestamps. THE FLOOR */
+  --text-secondary: #a8aeb3;        /*  8.0 - prose, log history */
+  --text-tertiary: #9aa0a5;         /*  6.8 - labels, timestamps. THE FLOOR */
+
+  /* #8f9498 was the floor until #190 and is deliberately NOT listed below with
+   * the retired greys, because it does not belong there and the audit says so:
+   * check 2 fails a `--retired-*` that passes on all ten surfaces, and this one
+   * passes on all ten. It was not too dim to be text. It was too dim to be the
+   * *floor*, which is a different claim - a floor has to hold at the smallest
+   * size the system permits, and 11px mono is that size. It is gone rather than
+   * renamed, so nothing can reach for it by habit. */
 
   /* Documentation only - never ship as text. Retired in ramp revision 2 and
    * kept named so the retirement stays legible: someone reaching for a quieter
@@ -164,8 +181,15 @@
   --type-lead: 400 14px/1.62 var(--font-sans);
   --type-body: 400 13px/1.6 var(--font-sans);
   --type-body-sm: 400 12px/1.55 var(--font-sans);
-  --type-mono: 400 12px/1.5 var(--font-mono);
-  --type-mono-sm: 400 11px/1 var(--font-mono);
+  /* Both moved up one step in #190, and the leading is the half that mattered.
+   * `--type-mono-sm` was `11px/1`, and a line-height of 1 in a wrapping
+   * monospace log means the wrapped rows of one entry touch - the output pane's
+   * `pre-wrap` plus `overflow-wrap: anywhere` makes that the common case rather
+   * than the edge one. The per-line padding hid it between entries and could not
+   * hide it inside one. 11px is gone from the product; nothing was set in it
+   * that is not better at 12. */
+  --type-mono: 400 13px/1.55 var(--font-mono);
+  --type-mono-sm: 400 12px/1.5 var(--font-mono);
   --type-chip: 700 10px/16px var(--font-sans);
   --type-chip-micro: 700 9px/14px var(--font-sans);
 

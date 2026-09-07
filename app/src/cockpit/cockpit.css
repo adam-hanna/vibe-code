@@ -234,9 +234,10 @@
   padding: var(--space-1) 0;
 }
 
+/* A sentence, not a label - so the prose tier, not the floor (#190). */
 .v-phase__silent {
   font: var(--type-body-sm);
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
 }
 
 .v-version {
