@@ -270,5 +270,40 @@ console.log('\n8 · every style that can wrap has leading');
   else pass(`the smallest wrapping style is ${smallest}px`);
 }
 
+// ------------------------------------------------- 9 · nothing inherits UA chrome
+// The hole the tab buttons fell through, and it is a different shape from every
+// check above. Those measure the pairings the TOKENS permit; this one is about
+// an element that reached for **no token at all** and got the platform's own
+// button face - near-white, under `--text-primary`, at about 1.7:1. No pairing
+// in `tokens.css` is wrong, so nothing here could have caught it.
+//
+// Reported twice from a manual pass before it was found, because it is invisible
+// to a reader of the stylesheets: the rule that breaks it is the ABSENCE of a
+// declaration.
+console.log('\n9 · the element reset leaves no user-agent ground showing');
+{
+  const base = readFileSync(path.join(here, '..', 'src', 'design', 'base.css'), 'utf8');
+  const declarations = base.replace(/\/\*[\s\S]*?\*\//g, '');
+  // A `button { … }` block that neutralises the platform's background. Matched
+  // on the selector rather than anywhere in the file, so a `background` set on
+  // some other rule cannot satisfy it.
+  const rule = /(^|\})\s*button\s*\{([^}]*)\}/m.exec(declarations);
+  const body = rule?.[2] ?? '';
+  if (!/background\s*:/.test(body)) {
+    fail('base.css has no `button` rule clearing the user-agent background');
+  } else {
+    pass('button chrome is reset, so an unstyled control cannot take the UA ground');
+  }
+  // And the three that had the bug now say what colour they are, rather than
+  // inheriting one that was only ever correct against a ground they did not have.
+  const cockpit = readFileSync(path.join(here, '..', 'src', 'cockpit', 'cockpit.css'), 'utf8');
+  const tab = /\.v-cockpit__tab\s*\{([^}]*)\}/.exec(cockpit.replace(/\/\*[\s\S]*?\*\//g, ''));
+  if (tab === null || !/color\s*:/.test(tab[1] ?? '')) {
+    fail('.v-cockpit__tab does not state its own colour');
+  } else {
+    pass('.v-cockpit__tab states its own colour');
+  }
+}
+
 console.log(`\n${checks} checks passed, ${failures} failed\n`);
 process.exit(failures > 0 ? 1 : 0);

@@ -75,10 +75,24 @@
   flex: none;
 }
 
+/*
+ * Stated rather than inherited. These were the app's only unstyled buttons, so
+ * they took the user agent's ground and `--text-primary` on top of it; naming
+ * the colour here is what stops the next unstyled control being invisible in a
+ * different way. An unselected tab is navigation you are not in, which is the
+ * prose tier - `--on` below takes it to emphasis.
+ */
 .v-cockpit__tab {
   font: var(--type-tab);
   text-transform: uppercase;
   letter-spacing: 0.06em;
+  color: var(--text-secondary);
+  background: none;
+  cursor: pointer;
+}
+
+.v-cockpit__tab:hover {
+  color: var(--text-primary);
 }
 
 .v-cockpit__tab--on {
