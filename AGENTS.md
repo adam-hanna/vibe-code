@@ -151,6 +151,7 @@ src/consistency.ts   cross-field rules over status/phase/planOnly, applied by lo
 src/types.ts         shared types, including RunState
 src/prompts.ts       every prompt the agents receive
 src/claude.ts        Claude Code adapter (stream-json)
+src/pilotchat.ts     one pilot chat turn on the subscription - a child process, not a client
 src/codex.ts         Codex adapter (codex exec --json)
 src/appserver.ts     Codex app-server JSON-RPC client (rate limits only)
 src/ratelimits.ts    rate-limit windows and the brake
@@ -272,6 +273,40 @@ key never crosses the IPC boundary. The CSP agrees from the other side, since `c
 'self' ipc: http://ipc.localhost` means the page could not reach a vendor even holding one.
 Not `vibe.config.json`: that is a project file meant to be committed, and `validateConfig`
 reports bad values *by name*, which is the one thing that must never happen to a secret.
+
+**A pilot turn can also be a child process, and that is not a hole in the rule
+below — it is the rule** (#193). `src/pilotchat.ts` spawns the same `claude` the
+loop spawns, so the pilot can run on the subscription the user already pays for
+instead of a second bill. It ships as groundwork with nothing calling it. Three
+things about it are load-bearing:
+
+- **It is deliberately not `claudeTurn`.** That function narrates through
+  `log.ts`, and in the host that sink *is* the run's narration stream — a pilot
+  turn would put its own prose in the output pane and, through `recordAndSay`, in
+  `state.json`. A conversation about a run is not part of the run's record. It
+  also carries `sessionArgs`, the fork/resume dispatch and a heartbeat that
+  reports into the run's progress, none of which a chat wants. What the two
+  *share* is where two answers would be one too many: `claudeBin`,
+  `extractTokens`, `detectRateLimit`.
+- **`PilotChatResult` has no money field and there is nowhere to invent one.** A
+  subscription turn bills nothing at all, so a dollar figure has no quantity to be
+  an estimate *of* — the same sentence that makes Codex cost unreportable, and the
+  same one #145 uses to explain why the API-backed pilot's price table is not a
+  counter-example. The tokens are real and are reported.
+- **The real cost is contention, and it is named rather than solved.** These
+  tokens come out of the same subscription window the run draws on, so a long
+  conversation beside a long run can push that run into a `ratelimits.ts` wait.
+  Today the pilot cannot do that because it spends different money. Whoever wires
+  this up owes that an answer; the module's part is to raise a `RateLimitError` as
+  itself so there is something to act on.
+
+**Chat only, and the open question is on the issue rather than in the code.**
+`--permission-mode plan` is the enforcement — the CLI's own permission layer, not
+a list this repo maintains — with a deny-list beside it as a second layer that is
+described as defence in depth, because a deny-list is open at the top. Plan mode
+still permits *reads*, so such a turn could look at files an API-backed pilot
+cannot. That is not a capability #144 granted and it must not be granted by
+omission.
 
 **All the network code lives in `app/` and none of it in `src/`.** The core keeps *"every
 external call is a child process"* exactly, and the published package gains no HTTP

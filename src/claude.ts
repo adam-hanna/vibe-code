@@ -248,8 +248,13 @@ export async function claudeTurn(
  * Total tokens moved by the turn. The envelope's aggregated `usage` is exactly
  * right for this - it is only wrong for measuring live context, which is what
  * extractUsage handles separately.
+ *
+ * Exported for `pilotchat.ts` (#193), which reads the same `result` envelope off
+ * the same `--output-format stream-json` stream. A second reader of the same four
+ * fields would be a second answer to "what did this turn spend", and the two
+ * would disagree the first time the CLI renamed one.
  */
-function extractTokens(envelope: Record<string, unknown>): TokenUsage {
+export function extractTokens(envelope: Record<string, unknown>): TokenUsage {
   const usage = envelope['usage'];
   if (!isRecord(usage)) {
     return { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, total: 0 };
