@@ -139,8 +139,15 @@ function bad(v: string | { why: string }): v is { why: string } {
  * that has no idea when the message was composed. What goes out instead is the
  * loop's **own** measurement of the turn it is in, which is a duration and is
  * true whenever it is read.
+ *
+ * **Exported since #191, and that is the whole reason the system prompt does not
+ * describe the run itself.** The prompt carries the one fact no tool can supply -
+ * the brief this window launched with - and this function for everything else, so
+ * "what is the run doing" has one answer whether the model reads the prompt or
+ * calls `read_run`. A second description written for the prompt would be a second
+ * answer, and the two would disagree on the first field either one gained.
  */
-function describeRun(run: Run): Record<string, unknown> {
+export function describeRun(run: Run): Record<string, unknown> {
   return {
     protocol: run.protocol,
     running:
