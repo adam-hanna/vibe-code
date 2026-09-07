@@ -337,15 +337,53 @@ describe('the gate is the payoff', () => {
     },
   };
 
-  test('an ask carries the id to answer and where in the run it is', () => {
+  test('an ask carries the id to answer, where in the run it is, and after what', () => {
     const run = fold([...CLEAN, held]);
+    // The turn the person is deciding about (#202), named by the reducer so the
+    // column does not have to work out that "the last one" is the right one.
+    // Read off the run rather than written as a literal: the identities come
+    // from `seq`, and pinning one here would make this fail on any change to
+    // how many a clean pass hands out.
+    const turns = run.cycles.flatMap((c) => c.phases.flatMap((p) => p.turns));
     expect(run.gate).toEqual({
       askId: 7,
       boundary: 'plan-approved',
       planRound: 0,
       reviewRound: 0,
       verifyRound: 0,
+      turnId: turns[turns.length - 1]?.id,
     });
+  });
+
+  test('a held gate has no live turn, and the one before it has ended', () => {
+    // The whole of #202. A run held at `question-round` overnight drew
+    // `5h40m / last activity 5h39m ago` on a turn that had taken a minute -
+    // two inches above a footer correctly saying the loop was waiting for a
+    // human. The card said kill it; the footer said press continue.
+    const run = fold([...CLEAN, held]);
+    expect(run.running).toBeNull();
+    const turns = run.cycles.flatMap((c) => c.phases.flatMap((p) => p.turns));
+    expect(turns.every((t) => t.endedAt !== null)).toBe(true);
+  });
+
+  test('the settled turn keeps its measurements and stops both clocks', () => {
+    // Not deleted, because the moment before somebody presses continue is
+    // exactly when they want to see what the turn did. `runningRow` measures to
+    // `endedAt`, so an hour of waiting is not reported as an hour of work.
+    const run = fold([...CLEAN, held], 1_000_000);
+    const turns = run.cycles.flatMap((c) => c.phases.flatMap((p) => p.turns));
+    const settled = turns.find((t) => t.id === run.gate?.turnId);
+    if (settled === undefined) throw new Error('the gate named no turn');
+
+    const atOnce = runningRow(settled, settled.endedAt ?? 0);
+    const anHourLater = runningRow(settled, (settled.endedAt ?? 0) + 3_600_000);
+    expect(anHourLater.elapsedMs).toBe(atOnce.elapsedMs);
+    expect(anHourLater.quietMs).toBe(atOnce.quietMs);
+  });
+
+  test('a gate reached before any turn names none, rather than naming a wrong one', () => {
+    const run = fold([held]);
+    expect(run.gate?.turnId).toBeNull();
   });
 
   test('releasing clears the gate and the run carries on', () => {
@@ -355,7 +393,12 @@ describe('the gate is the payoff', () => {
     const run = fold([...mid, held, say('gate_released', { boundary: 'plan-approved' })]);
     expect(run.gate).toBeNull();
     expect(run.ended).toBeNull();
-    expect(run.running?.role).toBe('planner');
+    // Nothing is running, and that is the change #202 made. This used to assert
+    // the planner was still live, which was only true because the `ask` failed
+    // to close it - the loop is between turns here and the next `turn_started`
+    // is what starts one.
+    expect(run.running).toBeNull();
+    expect(run.cycles[0]?.phases[0]?.turns[0]?.role).toBe('planner');
   });
 
   test('stopping ends the run and keeps the reason the host gave', () => {

@@ -25,14 +25,26 @@ import type { Turn } from './model';
  *
  * The pulsing dot is the only moving element. It carries "alive" so nothing else
  * has to imply it.
+ *
+ * ## `live={false}` is the same row with nothing claiming to be happening
+ *
+ * A gate holds after a turn has ended, and that is the one moment somebody wants
+ * to see what the turn *did* before deciding whether to continue - so the card
+ * stays, with its measurements, rather than collapsing to a duration (#202).
+ *
+ * What it gives up is the live treatment: the accent border, the active ground
+ * and the pulsing dot. **One live card is a rule the column already obeys**, and
+ * while a gate is held there is no live card at all, so nothing may wear it. The
+ * clocks are stopped in `runningRow` rather than here, because a stopped clock
+ * is a fact about the turn and not about how it is drawn.
  */
-export function RunningRow({ turn, now }: { turn: Turn; now: number }) {
+export function RunningRow({ turn, now, live = true }: { turn: Turn; now: number; live?: boolean }) {
   const row = runningRow(turn, now);
 
   return (
-    <div className="v-running">
+    <div className={`v-running${live ? '' : ' v-running--settled'}`}>
       <div className="v-running__head">
-        <LivenessDot state="live" />
+        <LivenessDot state={live ? 'live' : 'quiet'} />
         <span className="v-running__who">
           {turn.role} · {turn.kind}
           {turn.round === null ? '' : ` · round ${turn.round}`}

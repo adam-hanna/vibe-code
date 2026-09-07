@@ -35,8 +35,22 @@ function status(cycle: Cycle): string {
   return `${rounds} ${noun}`;
 }
 
-function Version({ turn, running, now }: { turn: Turn; running: boolean; now: number }) {
-  if (running) return <RunningRow turn={turn} now={now} />;
+/**
+ * How much of a turn to draw.
+ *
+ * `settled` is the turn a held gate is showing the result of (#202): the full
+ * row, with its final numbers, and none of the live treatment. It exists because
+ * the moment before somebody presses continue is exactly when they want to see
+ * what the turn did - and because a card still counting while the loop waits for
+ * a human reads as a hang.
+ */
+type Draw = 'live' | 'settled' | 'done';
+
+const drawOf = (turn: Turn, runningId: number | null, settledId: number | null): Draw =>
+  turn.id === runningId ? 'live' : turn.id === settledId ? 'settled' : 'done';
+
+function Version({ turn, draw, now }: { turn: Turn; draw: Draw; now: number }) {
+  if (draw !== 'done') return <RunningRow turn={turn} now={now} live={draw === 'live'} />;
   return (
     <div className="v-version">
       <span className="v-version__who">
@@ -60,7 +74,17 @@ function Version({ turn, running, now }: { turn: Turn; running: boolean; now: nu
  */
 const isAnswerer = (turn: Turn): boolean => turn.role === 'answerer';
 
-function Phase({ phase, runningId, now }: { phase: PhaseGroup; runningId: number | null; now: number }) {
+function Phase({
+  phase,
+  runningId,
+  settledId,
+  now,
+}: {
+  phase: PhaseGroup;
+  runningId: number | null;
+  settledId: number | null;
+  now: number;
+}) {
   const turns = phase.turns.filter((t) => !isAnswerer(t));
   return (
     <div className="v-phase">
@@ -77,7 +101,7 @@ function Phase({ phase, runningId, now }: { phase: PhaseGroup; runningId: number
         </div>
       ))}
       {turns.map((turn) => (
-        <Version key={turn.id} turn={turn} running={turn.id === runningId} now={now} />
+        <Version key={turn.id} turn={turn} draw={drawOf(turn, runningId, settledId)} now={now} />
       ))}
       {turns.length === 0 && phase.gates.length === 0 && (
         // The implementing phase is the one that reaches this: it has never had
@@ -90,6 +114,9 @@ function Phase({ phase, runningId, now }: { phase: PhaseGroup; runningId: number
 
 export function LoopColumn({ run, now }: { run: Run; now: number }) {
   const runningId = run.running?.id ?? null;
+  // Told, not worked out. `reduce` names the turn a gate opened after, so the
+  // column does not have to decide that "the last one" is the right turn (#202).
+  const settledId = run.gate?.turnId ?? null;
 
   return (
     <section className="v-loop" aria-label="loop">
@@ -104,7 +131,13 @@ export function LoopColumn({ run, now }: { run: Run; now: number }) {
             <span className="v-cycle__status">{status(cycle)}</span>
           </div>
           {cycle.phases.map((phase) => (
-            <Phase key={phase.id} phase={phase} runningId={runningId} now={now} />
+            <Phase
+              key={phase.id}
+              phase={phase}
+              runningId={runningId}
+              settledId={settledId}
+              now={now}
+            />
           ))}
 
           {/* `7a` — the question loop is drawn NESTED inside cycle 1, indented
@@ -120,7 +153,12 @@ export function LoopColumn({ run, now }: { run: Run; now: number }) {
               {cycle.phases
                 .flatMap((p) => p.turns.filter(isAnswerer))
                 .map((turn) => (
-                  <Version key={turn.id} turn={turn} running={turn.id === runningId} now={now} />
+                  <Version
+                    key={turn.id}
+                    turn={turn}
+                    draw={drawOf(turn, runningId, settledId)}
+                    now={now}
+                  />
                 ))}
               {/* The explicit panel `7a` asks for. Two full turns of legitimate
                   work run and the outer counter correctly does not move, which

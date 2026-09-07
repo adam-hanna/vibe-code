@@ -90,6 +90,15 @@ Two rules the cockpit inherits from the design and must not quietly drop:
 - **A missing measurement is drawn as absent with its reason**, never as a blank and never as
   a zero. The two lines of `6a` that have no source name the issue that would supply them
   (#136, #114), so the row completes when they land instead of being redesigned.
+- **While a gate is held there is no live card, and the turn before it is still drawn.** An
+  `ask` closes the running turn, exactly as `phase_started`, `turn_started`, `gate_stopped`
+  and `result` do — a gate holds *between* things, so nothing is executing while one is
+  outstanding. Leaving it open was not cosmetic: a run held overnight drew `5h40m · last
+  activity 5h39m ago` on a turn that took a minute, two inches above a footer correctly
+  saying the loop was waiting for a human. The card said kill it and the footer said press
+  continue. The turn stays on screen with its measurements — that is what a person is
+  deciding about — and gives up the accent border, the active ground and the pulsing dot
+  (#202). `Gate.turnId` names it, so the column is told rather than picking the last one.
 - **Every way a run can end has a phrase, and they are not eight flavours of failure.** The
   footer maps each of the eight exit codes to one sentence, and a code this build does not
   know renders as the number rather than as a phrase invented for it. Two of them must never

@@ -301,6 +301,19 @@
   margin: var(--space-2) 0;
 }
 
+/* The same card with nothing claiming to be happening (#202).
+ *
+ * A gate holds after a turn has ended, so the card stays open with its
+ * measurements - that is what a person is deciding about - and gives up the two
+ * things that say *live*: the accent border and the active ground. The dot goes
+ * with them, in the component, because `quiet` is a state `LivenessDot` already
+ * has. One live card is a rule the column obeys, and while a gate is held there
+ * is no live card at all. */
+.v-running--settled {
+  border-color: var(--rule-card);
+  background: var(--surface-card);
+}
+
 .v-running__head {
   display: flex;
   align-items: center;
