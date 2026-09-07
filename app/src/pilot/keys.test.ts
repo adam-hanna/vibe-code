@@ -11,6 +11,9 @@ import anthropicMod from '../../src-tauri/src/pilot/anthropic.rs?raw';
 import openaiMod from '../../src-tauri/src/pilot/openai.rs?raw';
 import eventMod from '../../src-tauri/src/pilot/event.rs?raw';
 import pilotWire from './pilot.ts?raw';
+import pilotPane from './PilotPane.tsx?raw';
+import credentials from './Credentials.tsx?raw';
+import cockpit from '../cockpit/Cockpit.tsx?raw';
 import tools from './tools.ts?raw';
 import { PROVIDER_NAME, PROVIDERS, usable } from './keys';
 import type { KeyStatus } from './keys';
@@ -191,5 +194,38 @@ describe('the core is untouched', () => {
       .filter(([name, meta]) => name !== '' && meta.dev !== true)
       .map(([name]) => name);
     expect(shipped).toEqual([]);
+  });
+});
+
+describe('the window reads the keychain in one place', () => {
+  test('exactly one component asks, and it is the one that owns the window', () => {
+    // #188: two panes each fetched their own copy of "which providers have a
+    // key". The pilot pane is mounted for the whole session and hidden rather
+    // than unmounted - a conversation is state nobody can get back - so its copy
+    // was taken at launch and never retaken. Storing a key updated the Keys form
+    // and nothing else, and the composer stayed disabled behind a snapshot from
+    // before the key existed.
+    //
+    // Asserted over the source because the defect is structural and there is
+    // nothing left in a component to test once it is fixed: the guarantee is
+    // that only one call site exists, not that any particular render is right.
+    const callers = [
+      ['Cockpit.tsx', cockpit],
+      ['PilotPane.tsx', pilotPane],
+      ['Credentials.tsx', credentials],
+    ] as const;
+
+    const asking = callers.filter(([, source]) => /keys\s*\.\s*status\s*\(/.test(source));
+    expect(asking.map(([name]) => name)).toEqual(['Cockpit.tsx']);
+  });
+
+  test('the two panes take it as a prop rather than holding it', () => {
+    // The other half. A component could stop calling `keys.status()` and still
+    // keep its own `useState` copy fed from somewhere else, which would be the
+    // same bug wearing a different import.
+    for (const source of [pilotPane, credentials]) {
+      expect(source).not.toMatch(/useState<readonly KeyStatus\[\]/);
+    }
+    expect(cockpit).toMatch(/useState<readonly KeyStatus\[\] \| null>/);
   });
 });

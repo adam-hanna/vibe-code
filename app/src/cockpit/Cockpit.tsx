@@ -2,6 +2,8 @@ import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { LivenessDot, MetaChip, StateKicker } from '../design';
 import * as host from '../host';
 import { Credentials } from '../pilot/Credentials';
+import * as keys from '../pilot/keys';
+import type { KeyStatus } from '../pilot/keys';
 // `PilotPane`, not `Pilot`: `pilot.ts` beside it is the wire, and two files
 // differing only in case is a compile error on Windows and macOS both.
 import { PilotPane } from '../pilot/PilotPane';
@@ -64,8 +66,36 @@ export function Cockpit() {
   const [tab, setTab] = useState<'output' | 'pilot' | 'keys'>('output');
   /** Pilot proposals waiting on a person, so a hidden tab can say so (#144). */
   const [proposals, setProposals] = useState(0);
+  /**
+   * Which providers have a key, read here and nowhere else (#188).
+   *
+   * Two panes need this fact and each used to fetch its own. The pilot pane is
+   * mounted for the whole session and hidden rather than unmounted, so its copy
+   * was taken at launch and never taken again: entering a key updated the Keys
+   * form, and the pilot went on refusing to let anybody type, correctly
+   * according to a snapshot from before the key existed. One reader, one fact.
+   */
+  const [keyStatuses, setKeyStatuses] = useState<readonly KeyStatus[] | null>(null);
+  const [keyFailure, setKeyFailure] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const requests = useRef(0);
+
+  const refreshKeys = useCallback(() => {
+    void keys
+      .status()
+      .then((next) => {
+        setKeyStatuses(next);
+        setKeyFailure(null);
+      })
+      // The Keys tab shows this and the pilot pane treats it as "no key", which
+      // is the fail-closed direction: a request made on an unreadable keychain
+      // fails anyway, later, with a worse explanation.
+      .catch((err: unknown) => {
+        setKeyStatuses([]);
+        setKeyFailure(err instanceof Error ? err.message : String(err));
+      });
+  }, []);
+  useEffect(refreshKeys, [refreshKeys]);
 
   // A local tick, because the heartbeat lands every 30 seconds
   // (`progress.intervalMs`) and a clock that only moved when one arrived would
@@ -287,9 +317,16 @@ export function Cockpit() {
               which is the one thing this tab must not do. The other two panes
               hold nothing, so they stay conditional. */}
           <div className="v-cockpit__hidden" hidden={tab !== 'pilot'}>
-            <PilotPane run={run} onEffect={onEffect} onPending={setProposals} />
+            <PilotPane
+              run={run}
+              onEffect={onEffect}
+              onPending={setProposals}
+              statuses={keyStatuses}
+            />
           </div>
-          {tab === 'keys' && <Credentials />}
+          {tab === 'keys' && (
+            <Credentials statuses={keyStatuses} failure={keyFailure} onChanged={refreshKeys} />
+          )}
           {wire.unknown.length > 0 && (
             <div className="v-cockpit__unknown">
               {wire.unknown.length} unrecognised frame(s): {wire.unknown[wire.unknown.length - 1]}

@@ -14,6 +14,7 @@
     "tauri": "tauri",
     "app:dev": "tauri dev",
     "app:build": "tauri build",
+    "app:exe": "tauri build --no-bundle",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
     "test:web": "vitest run",
     "app:test": "npm run test:web && npm run test:rust"
