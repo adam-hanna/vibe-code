@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useState } from 'react';
 import { Button, MetaChip, StateKicker } from '../design';
 import * as keys from './keys';
 import type { KeyStatus, Provider } from './keys';
@@ -92,19 +92,23 @@ function Row({
   );
 }
 
-export function Credentials() {
-  const [statuses, setStatuses] = useState<readonly KeyStatus[] | null>(null);
-  const [failure, setFailure] = useState<string | null>(null);
+/**
+ * What this form is given and what it hands back.
+ *
+ * Neither is state it owns. Storing a key changes a fact the pilot pane needs as
+ * much as this form does, and #188 is what happened when each held its own copy:
+ * this one refreshed, the pilot did not, and the composer stayed disabled behind
+ * a snapshot taken at launch. The window reads the keychain in one place now.
+ */
+export interface CredentialsProps {
+  statuses: readonly KeyStatus[] | null;
+  /** Why presence could not be read at all, or null. */
+  failure: string | null;
+  /** Something changed; ask the keychain again. */
+  onChanged: () => void;
+}
 
-  const refresh = useCallback(() => {
-    void keys
-      .status()
-      .then(setStatuses)
-      .catch((err: unknown) => setFailure(err instanceof Error ? err.message : String(err)));
-  }, []);
-
-  useEffect(refresh, [refresh]);
-
+export function Credentials({ statuses, failure, onChanged }: CredentialsProps) {
   if (failure !== null) {
     return (
       <div className="v-creds">
@@ -133,7 +137,7 @@ export function Credentials() {
       </div>
 
       {statuses.map((status) => (
-        <Row key={status.provider} status={status} onChanged={refresh} />
+        <Row key={status.provider} status={status} onChanged={onChanged} />
       ))}
 
       <div className="v-creds__note">

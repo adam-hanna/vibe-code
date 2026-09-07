@@ -371,11 +371,24 @@ export interface PilotPaneProps {
   onEffect: (effect: Effect) => void;
   /** How many proposals are waiting on a person, so a hidden tab can say so. */
   onPending?: (count: number) => void;
+  /**
+   * Which providers have a key, as the window last read it. Null until it has.
+   *
+   * **A prop rather than this pane's own state, and #188 is why.** This pane is
+   * mounted for the whole session and hidden rather than unmounted - a
+   * conversation is state nobody can get back - so anything it fetched once on
+   * mount it holds until the app restarts. It fetched this, the Keys tab fetched
+   * its own copy, and storing a key updated only the copy belonging to the form
+   * you typed into. The composer stayed disabled behind a snapshot taken before
+   * the key existed.
+   *
+   * One reader, in `Cockpit`, for the same reason it owns the one `host.send`.
+   */
+  statuses: readonly KeyStatus[] | null;
 }
 
-export function PilotPane({ run, onEffect, onPending }: PilotPaneProps) {
+export function PilotPane({ run, onEffect, onPending, statuses }: PilotPaneProps) {
   const [conversation, dispatch] = useReducer(apply, undefined, emptyConversation);
-  const [statuses, setStatuses] = useState<readonly KeyStatus[] | null>(null);
   const [provider, setProvider] = useState<Provider>('anthropic');
   const [model, setModel] = useState<string>(pilot.MODELS.anthropic[0] ?? '');
   const [entry, setEntry] = useState('');
@@ -414,17 +427,6 @@ export function PilotPane({ run, onEffect, onPending }: PilotPaneProps) {
       stop?.();
     };
   }, []);
-
-  const refresh = useCallback(() => {
-    void keys
-      .status()
-      .then(setStatuses)
-      // An unreachable keychain leaves the pane saying no key is configured,
-      // which is the fail-closed direction: the request would fail anyway, and
-      // later, with a worse explanation.
-      .catch(() => setStatuses([]));
-  }, []);
-  useEffect(refresh, [refresh]);
 
   // Every call that has not been run yet, run. `execute` is pure and `settle`
   // ignores a call it has already answered, so this is safe to re-enter — which
