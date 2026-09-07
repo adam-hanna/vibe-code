@@ -364,6 +364,27 @@ Two rules the host process depends on, and neither is optional:
   an unreadable *decision* becomes `stop`. Continuing on an instruction nobody could parse
   spends tokens on the strength of a message that may have said the opposite.
 
+**Where to look when the app is the thing that is wrong.** There are two logs and they cover
+different halves. `<repo>/.vibe/runs/<run-id>/transcript.log` covers a *run*, and it exists
+under the app for free because `serve.ts` hands its argv to the same `main()` the CLI uses.
+`%LOCALAPPDATA%\dev.vibecode.desktop\logs\vibe-desktop.log` covers everything either side of
+one — the host spawn and the two paths it resolved, containment, an unparseable line on the
+protocol stream, the exit code — because `attachTranscript` happens once a run exists and a
+release build is `windows_subsystem = "windows"`, so before #186 those sentences went to a
+console that is not there. Four things about `applog` are load-bearing:
+
+- **Prose, never protocol**, the same split the host depends on one layer down. A frame is
+  never written; a line of stdout that *failed* to parse is, because failing is what makes
+  it prose.
+- **Nothing from the pilot.** A vendor's error can quote the API key it was sent — OpenAI's
+  401 does, in full — and `redact` covers the path to the window. A durable file is a second
+  destination, and an absence is a stronger guarantee than a second redaction.
+- **Appended, never rotated**, and that is #130's answer rather than an oversight: a cap
+  needs a size or an age, and there is no measurement here to choose one from.
+- **A force-killed app writes no exit line**, by construction — that path runs no user code
+  at all, which is the same reason `reaper.rs` exists. An exit line means the host died while
+  the app was alive, which is the case worth reading.
+
 **A severity is a claim with an owner, and until #141 nothing recorded the owner.** Every
 `Finding` came from `parseFindings` reading a model's structured output, so "absent means an
 agent said it" was true by construction and therefore never written down. `Finding.raisedBy`

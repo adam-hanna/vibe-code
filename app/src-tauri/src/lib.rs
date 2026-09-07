@@ -24,6 +24,7 @@
 //! a program name - the app will grow a pilot chat that can drive the session
 //! (#144), and "run this program" must never be in reach of it.
 
+mod applog;
 mod host;
 mod keys;
 mod pilot;
@@ -79,6 +80,19 @@ pub fn run() {
             pilot_cancel
         ])
         .setup(|app| {
+            // Before `launch`, because the first thing worth keeping is why the
+            // host did not start. A release build has no console for it (#186).
+            match applog::open(app.handle()) {
+                Some(path) => applog::app(&format!(
+                    "vibe-desktop {} starting; log at {}",
+                    env!("CARGO_PKG_VERSION"),
+                    path.display()
+                )),
+                // Said the only way left. Nothing else changes: the app runs
+                // exactly as it did before there was a log to fail to open.
+                None => eprintln!("no app log could be opened; this session is console-only"),
+            }
+
             // Before the tray, and before a window can ask. The host process IS
             // the app; a webview that fails to load should leave a running host
             // and a stderr line saying so, not a silent nothing.
