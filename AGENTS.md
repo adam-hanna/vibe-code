@@ -90,6 +90,16 @@ Two rules the cockpit inherits from the design and must not quietly drop:
 - **A missing measurement is drawn as absent with its reason**, never as a blank and never as
   a zero. The two lines of `6a` that have no source name the issue that would supply them
   (#136, #114), so the row completes when they land instead of being redesigned.
+- **The wait before the first phase is preflight, and it now says so.** `preflight` spawns a
+  probe turn against each agent and narrated nothing while it did, so the seconds after the
+  one action a new user knows how to take were seconds with nothing true to draw — reported
+  from a manual pass as *"it appeared like nothing happened for a while"*. `preflight_started`
+  carries `PROBE_ORDER` so the window draws the whole step before the first child starts,
+  `probe_started` fires **before** each probe because the spawn is the wait, and
+  `preflight_passed` ends it so the row does not sit mid-probe for the rest of the run (#205).
+  There is no bar and no percentage: `2 of 2` is a position in a list the loop named. The
+  announcement is a **parameter** on `preflight()` rather than a `log.*` call inside it,
+  because `vibe doctor` shares that function and its output is scripted against.
 - **While a gate is held there is no live card, and the turn before it is still drawn.** An
   `ask` closes the running turn, exactly as `phase_started`, `turn_started`, `gate_stopped`
   and `result` do — a gate holds *between* things, so nothing is executing while one is

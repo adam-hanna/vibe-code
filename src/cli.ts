@@ -51,7 +51,7 @@ import { codexBin } from '@src/codex.js';
 // The accounting seam, from the leaf it lives in: orchestrator.js re-exports
 // applyCharge but not fmtTokens, and charge.js imports nothing that imports this.
 import { applyCharge, fmtTokens, takeInFlight } from '@src/charge.js';
-import { gitPrecondition, preflight, REAL_PROBES } from '@src/preflight.js';
+import { gitPrecondition, preflight, PROBE_ORDER, REAL_PROBES } from '@src/preflight.js';
 import type { PreflightProbes, PreflightReport } from '@src/preflight.js';
 import { closeCodexRateLimits, describeLimits, readCodexRateLimits } from '@src/ratelimits.js';
 import { describeGates } from '@src/gates.js';
@@ -1696,11 +1696,22 @@ export async function runPreflight(
   // nothing before #71 and still prints nothing now.
   if (options.skipProbe === true) return null;
 
-  log.heading('Preflight');
+  // Carries the agents it is about to probe, in the order it will probe them,
+  // so a window can draw the whole step before the first child starts rather
+  // than discovering it one line at a time (#205). `PROBE_ORDER` rather than a
+  // literal, so the announcement cannot describe a different sequence from the
+  // one `preflight` runs.
+  log.heading('Preflight', { id: 'preflight_started', data: { agents: [...PROBE_ORDER] } });
 
   let report: Awaited<ReturnType<typeof preflight>>;
   try {
-    report = await preflight(state.targetDir, cfg, phases, state.dir, probes);
+    report = await preflight(state.targetDir, cfg, phases, state.dir, probes, (agent) => {
+      // Said before each probe, because each one spawns a child and the two of
+      // them are the whole of the silence between launching a run and its first
+      // phase (#205). Naming what is being probed is not a prediction: the
+      // order is `PROBE_ORDER` and preflight always runs first.
+      log.step(`Probing ${agent}`, { id: 'probe_started', data: { agent } });
+    });
   } catch (err) {
     const why = `environment probe failed: ${err instanceof Error ? err.message : String(err)}`;
     log.fail(why, { id: 'run_failed', data: { code: EXIT.PREFLIGHT, reason: why } });
@@ -1729,7 +1740,10 @@ export async function runPreflight(
     // the other's environment from its own.
     state.environment = environmentFacts(report, cfg, state.targetDir);
     if (repairArgs.length > 0) log.info('Environment repair will be applied to every Claude turn');
-    log.ok('Toolchain contract satisfied');
+    // The step is over. A window drawing preflight needs the end as well as the
+    // start, or the row stays mid-probe for the rest of the run (#205). The
+    // failure path already has an ending: `run_failed`.
+    log.ok('Toolchain contract satisfied', { id: 'preflight_passed' });
     recordEvent(state, 'preflight-ok', { repairArgs: repairArgs.length > 0 });
   } else {
     for (const reason of report.blockingReasons) log.fail(reason);

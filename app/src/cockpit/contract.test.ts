@@ -5,6 +5,7 @@ import { expect, test } from 'vitest';
 import orchestrator from '../../../src/orchestrator.ts?raw';
 import charge from '../../../src/charge.ts?raw';
 import cli from '../../../src/cli.ts?raw';
+import preflight from '../../../src/preflight.ts?raw';
 import work from '../../../src/work.ts?raw';
 // Aliased: `work` is already the core's source above, and this is the renderer
 // that has to agree with it. Two things named for one measurement is the
@@ -124,6 +125,30 @@ test('a code from a newer core has no phrase invented for it', () => {
 test('the core still marks the two places a run ends badly', () => {
   expect(cli).toContain("id: 'run_escalated'");
   expect(cli).toContain("id: 'run_failed'");
+});
+
+/**
+ * The three ids the preflight row reads (#205).
+ *
+ * The row exists to fill the one stretch of a run where the window had nothing
+ * true to say, so an id dropped from the core puts the silence back — and the
+ * row would sit on "checking…" for the rest of the run if only the ending went.
+ * The order claim matters as much: `PROBE_ORDER` is what the announcement is
+ * built from, so the list a window draws cannot describe a different sequence
+ * from the one that runs.
+ */
+test('the core narrates preflight starting, each probe, and the verdict', () => {
+  expect(cli).toContain("id: 'preflight_started'");
+  expect(cli).toContain("id: 'probe_started'");
+  expect(cli).toContain("id: 'preflight_passed'");
+  expect(cli).toContain('agents: [...PROBE_ORDER]');
+  expect(preflight).toContain('export const PROBE_ORDER');
+  // Announced immediately before each probe rather than after, which is the
+  // whole point: the child process is the wait.
+  const body = /export async function preflight\([\s\S]*?\n\}/.exec(preflight)?.[0];
+  if (body === undefined) throw new Error('preflight not found in src/preflight.ts');
+  expect(body.indexOf("announce('claude')")).toBeLessThan(body.indexOf('probes.claude('));
+  expect(body.indexOf("announce('codex')")).toBeLessThan(body.indexOf('probes.codex('));
 });
 
 /**

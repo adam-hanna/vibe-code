@@ -82,11 +82,28 @@ export interface PreflightProbes {
 export const REAL_PROBES: PreflightProbes = { claude: preflightClaude, codex: preflightCodex };
 
 /**
+ * The order the probes run in, which is the order they are announced in.
+ *
+ * Exported because a caller announcing what is about to happen has to be able
+ * to say it before the first probe starts, and a second hardcoded list is how
+ * an announcement comes to describe a different sequence from the one that
+ * runs (#205).
+ */
+export const PROBE_ORDER: readonly AgentProvider[] = ['claude', 'codex'];
+
+/**
  * Verify both agents can run what the phases ahead require.
  *
  * Runs before any planning token is spent. The failure this prevents took 35
  * minutes and two plan-revision rounds to surface, and surfaced as a plan-stage
  * P1 from the reviewer rather than as an environment error.
+ *
+ * `announce` is called immediately before each probe (#205). This function
+ * spawns two child processes and, until now, said nothing at all between
+ * starting and reporting - which in the desktop app is a blank window for the
+ * seconds after the one action a new user knows how to take. It is a parameter
+ * rather than a `log.*` call because `vibe doctor` shares this function and its
+ * output is scripted against; only the run path passes one.
  */
 export async function preflight(
   targetDir: string,
@@ -94,12 +111,14 @@ export async function preflight(
   phases: readonly Phase[],
   workDir: string,
   probes: PreflightProbes = REAL_PROBES,
+  announce: (agent: AgentProvider) => void = () => undefined,
 ): Promise<PreflightReport> {
   const contract = contractForPhases(cfg.toolchain, phases);
   // The run's own table, so enforcement follows who actually takes a turn.
   const roles = rolesFor(cfg);
 
   // Each agent is probed only against the tools it is responsible for running.
+  announce('claude');
   const claude = await probes.claude(
     targetDir,
     cfg,
@@ -107,6 +126,7 @@ export async function preflight(
     phases,
     workDir,
   );
+  announce('codex');
   const codex = await probes.codex(targetDir, cfg, contractForAgent(contract, 'codex'), phases);
 
   const verdicts: AgentVerdict[] = [
