@@ -66,18 +66,49 @@ const done = (over: Record<string, unknown> = {}): string =>
 
 // ---- what goes out ---------------------------------------------------------
 
-test('a chat turn is denied the tools that act, at the permission layer and by name', () => {
+test('a chat turn may read the repository and reach nothing else', () => {
+  // #193 decided the pilot may read - that is what makes it better than a
+  // generic assistant - and deciding it is what allowed the CLOSED form. This
+  // case previously asserted a deny-list of seven built-ins; that mechanism was
+  // replaced rather than loosened, and the claim underneath it is unchanged and
+  // still asserted below: nothing that acts is reachable.
   const args = pilotChatArgs(options());
-  // Plan mode is the guarantee: it is the CLI's own enforcement and it is not a
-  // list this repo has to keep current.
-  assert.ok(args.includes('--permission-mode'));
+
+  // An allow-list, so a tool a future release adds is absent by default. It has
+  // to be last because it is variadic - a flag after it is swallowed as a tool
+  // name - and it also re-admits anything `--restricted` removed that it names,
+  // which is why it names only reads.
+  const tools = args.indexOf('--tools');
+  assert.ok(tools !== -1);
+  assert.deepEqual(args.slice(tools + 1), ['Read', 'Glob', 'Grep']);
+  assert.ok(!args.slice(tools + 1).some((a) => a.startsWith('--')), 'a flag after a variadic one');
+
+  // The three layers around it, each independent of the list above.
+  assert.ok(args.includes('--restricted'), 'code-running tools, and reads outside the cwd');
+  assert.ok(args.includes('--strict-mcp-config'), 'globally configured MCP servers (#138)');
   assert.equal(args[args.indexOf('--permission-mode') + 1], 'plan');
-  // The deny-list is the second layer, and it has to be last because it is
-  // variadic - a flag after it would be swallowed as a tool name.
-  const denied = args.indexOf('--disallowed-tools');
-  assert.ok(denied !== -1);
-  for (const tool of ['Bash', 'Edit', 'Write']) assert.ok(args.slice(denied).includes(tool));
-  assert.ok(!args.slice(denied + 1).some((a) => a.startsWith('--')), 'a flag after a variadic one');
+});
+
+test('nothing that acts is named, and a shell least of all', () => {
+  // The claim the old deny-list case was really making, kept. `Bash` is the one
+  // worth naming on its own: `READ_ONLY_TOOLS` in `roles.ts` includes it, so
+  // this list being narrower than that one is a decision rather than an
+  // oversight - a run's read-only seat is a shell under a sandbox in work a
+  // person launched, and this is a chat the model drives turn by turn.
+  const args = pilotChatArgs(options());
+  for (const tool of ['Bash', 'Edit', 'Write', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Task']) {
+    assert.ok(!args.includes(tool), `${tool} is reachable from a pilot turn`);
+  }
+});
+
+test('no MCP server reaches a pilot turn, which is the half #138 is open about', () => {
+  // `--strict-mcp-config` with no `--mcp-config` beside it means none at all.
+  // #138 exists because every role reaches whatever the user configured
+  // globally, and a read-only seat can hold a write tool that way; the pilot is
+  // the last surface that should inherit it.
+  const args = pilotChatArgs(options());
+  assert.ok(args.includes('--strict-mcp-config'));
+  assert.ok(!args.includes('--mcp-config'));
 });
 
 test('the system prompt replaces Claude Code’s rather than appending to it', () => {
@@ -104,8 +135,8 @@ test('the first turn names the session and every turn after it resumes one', () 
 });
 
 test('the prompt goes over stdin and never into the argv', async () => {
-  // A settled decision in this repo, and the reason is right here: `--tools` and
-  // `--disallowed-tools` are variadic and would swallow a positional.
+  // A settled decision in this repo, and the reason is right here: `--tools` is
+  // variadic and would swallow a positional.
   let sawInput: string | undefined;
   let sawArgs: readonly string[] = [];
   const exec: RunFn = async (_bin, args, opts) => {
@@ -113,9 +144,9 @@ test('the prompt goes over stdin and never into the argv', async () => {
     sawArgs = args;
     return { code: 0, signal: null, stdout: done(), stderr: '' };
   };
-  await pilotChat(options({ prompt: 'a question with --disallowed-tools in it' }), exec);
-  assert.equal(sawInput, 'a question with --disallowed-tools in it');
-  assert.ok(!sawArgs.includes('a question with --disallowed-tools in it'));
+  await pilotChat(options({ prompt: 'a question with --tools in it' }), exec);
+  assert.equal(sawInput, 'a question with --tools in it');
+  assert.ok(!sawArgs.includes('a question with --tools in it'));
 });
 
 // ---- what comes back -------------------------------------------------------

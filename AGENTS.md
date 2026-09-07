@@ -300,13 +300,36 @@ things about it are load-bearing:
   this up owes that an answer; the module's part is to raise a `RateLimitError` as
   itself so there is something to act on.
 
-**Chat only, and the open question is on the issue rather than in the code.**
-`--permission-mode plan` is the enforcement — the CLI's own permission layer, not
-a list this repo maintains — with a deny-list beside it as a second layer that is
-described as defence in depth, because a deny-list is open at the top. Plan mode
-still permits *reads*, so such a turn could look at files an API-backed pilot
-cannot. That is not a capability #144 granted and it must not be granted by
-omission.
+**It may read the repository and nothing else, and the four layers are named in
+the argv.** #193 decided the read: a pilot that can open `PLAN.md` and the diff is
+what somebody asking *"what is this doing"* wants, and it is what makes this
+better than a generic assistant. The two providers are therefore asymmetric — the
+API-backed pilot has no filesystem at all — and that is accepted and written down
+rather than discovered.
+
+Deciding it is what made the **closed** form possible, which is the part worth
+copying. The first cut denied seven built-ins by name and said so as a weakness:
+a deny-list is open at the top, and a tool a future release adds would not be on
+it. Knowing exactly what to permit means naming that instead:
+
+- **`--tools Read Glob Grep`** — the built-in allow-list. Anything unnamed is
+  unavailable, including tools that do not exist yet.
+- **`--restricted`** — drops the built-ins that run commands or code, and
+  **confines the file tools to the working directory**, so "read the repository"
+  means *that* repository. It also ignores user, project and local settings, so
+  what a turn can do is decided in this argv rather than by the machine.
+- **`--strict-mcp-config`** with no `--mcp-config` — **no MCP servers at all**.
+  #138 is open because every role reaches whatever the user configured globally
+  and a read-only seat can hold a write tool that way; the pilot is the last
+  surface that should inherit it.
+- **`--permission-mode plan`** — the permission layer under all of it.
+
+**`Bash` is absent, so this list is narrower than `READ_ONLY_TOOLS` in
+`roles.ts`.** That set is read-only in the sense a *run's* seats are — a shell
+under a sandbox, in work a person launched. This is a chat surface the model
+drives turn by turn, and the standing rule was written about exactly it: *"'run
+this program' must never be in reach of it"* (#144). A shell is not what "read the
+repo" means.
 
 **All the network code lives in `app/` and none of it in `src/`.** The core keeps *"every
 external call is a child process"* exactly, and the published package gains no HTTP

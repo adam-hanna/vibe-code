@@ -39,21 +39,43 @@ import type { TokenUsage } from '@src/types.js';
  * many: `claudeBin` resolves the same executable, `extractTokens` reads the same
  * envelope, and `detectRateLimit` decides the same question.
  *
- * ## What this turn may do, and the layer that enforces it
+ * ## What this turn may do, and the four layers that decide it
  *
- * **Chat only.** `--permission-mode plan` is the enforcement, and it is the CLI's
- * own permission layer rather than a list of names this file maintains: nothing
- * in plan mode edits a file or runs a command. The deny-list beside it is a
- * second, independent layer over the built-ins that act, and it is deliberately
- * described as defence in depth rather than as the guarantee - a deny-list is
- * open at the top, and a built-in added by a future CLI release would not be on
- * it.
+ * **It may read the repository and it may do nothing else.** That is a decision
+ * taken on #193 rather than a consequence of a flag: a pilot that can read
+ * `PLAN.md` and the diff is the thing somebody asking *"what is this doing"*
+ * actually wants, and it is the capability that makes this better than a generic
+ * assistant. It does mean the two providers are asymmetric - the API-backed
+ * pilot has no filesystem at all - and that asymmetry is accepted and written
+ * down rather than discovered.
  *
- * **The open question, named rather than answered.** Plan mode still permits
- * *reads*, so a turn here can look at files an API-backed pilot cannot. That is
- * not a capability #144 granted, and it is not one this file should grant by
- * omission - it is recorded on the issue instead, because the answer is a product
- * decision about what a pilot is, not a flag.
+ * Granting it deliberately is what makes the *closed* form possible, and that is
+ * the real change. Before the decision this file denied seven built-ins by name,
+ * which is open at the top: a tool a future release adds would not have been on
+ * the list. Knowing exactly what to permit means naming it instead.
+ *
+ * - **`--tools Read Glob Grep`** - the CLI's built-in allow-list. Anything not
+ *   named is unavailable, including tools that do not exist yet.
+ * - **`--restricted`** - removes the built-ins that run commands or code, and
+ *   **confines the file tools to the working directory**, so "read the
+ *   repository" means that repository and not the rest of the disk. It also
+ *   ignores user, project and local settings files, so what this turn can do is
+ *   decided here rather than by whatever the machine happens to be configured
+ *   with.
+ * - **`--strict-mcp-config`**, with no `--mcp-config` beside it, which means **no
+ *   MCP servers at all**. #138 is open precisely because every role reaches
+ *   whatever MCP servers the user configured globally, and a read-only seat can
+ *   end up holding a write tool that way. The pilot is the last surface that
+ *   should inherit that, so it does not.
+ * - **`--permission-mode plan`** - the permission layer underneath all of it,
+ *   which refuses an edit even if the layers above were wrong.
+ *
+ * **`Bash` is deliberately absent, and this list is narrower than
+ * `READ_ONLY_TOOLS` in `roles.ts` because of it.** That toolset is read-only in
+ * the sense a *run's* seats are - a shell under a sandbox, in work a person
+ * launched. This is a chat surface the model drives turn by turn, and the app's
+ * standing rule is written about exactly this case: *"'run this program' must
+ * never be in reach of it"* (#144). A shell is not what "read the repo" means.
  *
  * ## What it costs, and what it does not
  *
@@ -126,22 +148,17 @@ export interface PilotChatResult {
 }
 
 /**
- * The built-ins that act, denied by name.
+ * Everything this turn may reach, named.
  *
- * Defence in depth behind `--permission-mode plan`, and stated as such: this list
- * is open at the top, so a tool a future release adds is not on it. Plan mode is
- * the guarantee; this is what makes the intent legible in the argv a reader sees
- * in a process list.
+ * A closed list, which is the whole reason it replaced a deny-list: a tool a
+ * future CLI release adds is not on it and therefore is not available, where a
+ * deny-list would have silently gained it.
+ *
+ * Narrower than `READ_ONLY_TOOLS` in `roles.ts` on purpose - see the module
+ * comment. That set includes `Bash`, `WebSearch` and `WebFetch`, which are right
+ * for a run's read-only seats and wrong for a chat the model drives.
  */
-const DENIED: readonly string[] = [
-  'Bash',
-  'Edit',
-  'Write',
-  'NotebookEdit',
-  'WebFetch',
-  'WebSearch',
-  'Task',
-];
+const READS: readonly string[] = ['Read', 'Glob', 'Grep'];
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -158,6 +175,12 @@ export function pilotChatArgs(options: PilotChatOptions): readonly string[] {
     // Without it the stream carries whole assistant messages and the pane would
     // sit blank for the length of a reply.
     '--include-partial-messages',
+    // The three layers above the permission mode. Each is independent, each is
+    // stated in the module comment, and all three are visible in a process list
+    // - which is the point of putting them in the argv rather than in a settings
+    // file this turn would then have to be trusted to have.
+    '--restricted',
+    '--strict-mcp-config',
     '--permission-mode',
     'plan',
     '--system-prompt',
@@ -168,8 +191,10 @@ export function pilotChatArgs(options: PilotChatOptions): readonly string[] {
   // thing a chat has no use for.
   args.push(options.resume ? '--resume' : '--session-id', options.sessionId);
   args.push('--model', options.model);
-  // Variadic, so last: it greedily consumes the tokens after it.
-  args.push('--disallowed-tools', ...DENIED);
+  // Variadic, so last: it greedily consumes the tokens after it. Note this also
+  // re-admits anything `--restricted` removed that it names - which is why it
+  // names only reads.
+  args.push('--tools', ...READS);
   return args;
 }
 
