@@ -12,6 +12,8 @@ import { Launch } from './Launch';
 import { LoopColumn } from './LoopColumn';
 import { OutputPane } from './OutputPane';
 import { emptyRun, nextRun, reduce } from './model';
+import { readLaunchArgv } from './argv';
+import type { Launched } from './argv';
 import type { Effect } from '../pilot/tools';
 import type { Frame } from '../host';
 import type { Run } from './model';
@@ -63,6 +65,17 @@ export function Cockpit() {
   });
   const [busy, setBusy] = useState(false);
   const [launched, setLaunched] = useState(false);
+  /**
+   * The launch this window sent, kept so the pilot can be told about it (#191).
+   *
+   * **Not a re-derivation.** Every other thing on this screen comes from a frame,
+   * and the brief is the one fact no frame carries - the loop narrates phases,
+   * turns and gates, never the text it was given. This is the window remembering
+   * its own outbound message, read back through `readLaunchArgv` so the reader
+   * and the builder cannot drift. An argv it does not recognise leaves this null,
+   * which the prompt says out loud rather than papering over.
+   */
+  const [sentLaunch, setSentLaunch] = useState<Launched | null>(null);
   const [tab, setTab] = useState<'output' | 'pilot' | 'keys'>('output');
   /** Pilot proposals waiting on a person, so a hidden tab can say so (#144). */
   const [proposals, setProposals] = useState(0);
@@ -187,6 +200,7 @@ export function Cockpit() {
       // draw a single loop out of two runs.
       dispatch({ type: 'reset' });
       setLaunched(true);
+      setSentLaunch(readLaunchArgv(argv));
       requests.current += 1;
       void send({ type: 'invoke', id: requests.current, argv });
     },
@@ -319,6 +333,7 @@ export function Cockpit() {
           <div className="v-cockpit__hidden" hidden={tab !== 'pilot'}>
             <PilotPane
               run={run}
+              launched={sentLaunch}
               onEffect={onEffect}
               onPending={setProposals}
               statuses={keyStatuses}

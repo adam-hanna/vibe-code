@@ -2,6 +2,7 @@ import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { Button, MetaChip, StateKicker } from '../design';
 import * as keys from './keys';
 import * as pilot from './pilot';
+import { systemPrompt } from './brief';
 import { declare, execute } from './tools';
 import {
   costOf,
@@ -32,6 +33,7 @@ import {
 import type { KeyStatus, Provider } from './keys';
 import type { Effect, Settlement } from './tools';
 import type { Call, Conversation, Reply } from './transcript';
+import type { Launched } from '../cockpit/argv';
 import type { Run } from '../cockpit/model';
 
 /**
@@ -385,9 +387,18 @@ export interface PilotPaneProps {
    * One reader, in `Cockpit`, for the same reason it owns the one `host.send`.
    */
   statuses: readonly KeyStatus[] | null;
+  /**
+   * The launch this window sent, or null if it sent none (#191).
+   *
+   * The brief is the one thing about a run that no frame carries, so it cannot
+   * come out of `run` and it cannot come out of a tool. Null is a real state -
+   * a window that has launched nothing, or a run started from the CLI - and the
+   * prompt says which rather than describing a task nobody gave it.
+   */
+  launched: Launched | null;
 }
 
-export function PilotPane({ run, onEffect, onPending, statuses }: PilotPaneProps) {
+export function PilotPane({ run, launched, onEffect, onPending, statuses }: PilotPaneProps) {
   const [conversation, dispatch] = useReducer(apply, undefined, emptyConversation);
   const [provider, setProvider] = useState<Provider>('anthropic');
   const [model, setModel] = useState<string>(pilot.MODELS.anthropic[0] ?? '');
@@ -480,7 +491,13 @@ export function PilotPane({ run, onEffect, onPending, statuses }: PilotPaneProps
         // The table goes out on every request. Declared from here and executed
         // here, which is what makes "no tool without an implementation" a fact
         // about the file rather than a promise about a list.
-        .send({ provider, model, messages, tools: declare() })
+        //
+        // So does the system prompt, rebuilt from the run as it stands at this
+        // moment rather than as it stood when the conversation opened (#191). A
+        // model is only ever sent the most recent one, so there is no earlier
+        // description for this to contradict - see `brief.ts` for why that
+        // settles the staleness question rather than trading it away.
+        .send({ provider, model, messages, tools: declare(), system: systemPrompt(run, launched) })
         .then((turn) => {
           setLive(turn);
           if (said === null) dispatch({ type: 'follow', turn, provider });
@@ -495,7 +512,7 @@ export function PilotPane({ run, onEffect, onPending, statuses }: PilotPaneProps
           }),
         );
     },
-    [model, provider],
+    [model, provider, run, launched],
   );
 
   const owed = unanswered(conversation);
