@@ -26,11 +26,13 @@
 //!
 //! ## This does not replace `stop()`
 //!
-//! `stop()` closes stdin first, which `serve()` reads as a shutdown, so the host
-//! finishes the turn it is in and leaves the run resumable. That is the ending
-//! we want and the job must not change it. **The job is the backstop for the
-//! paths `stop()` never reaches**, and it is safe for the same reason `stop()`'s
-//! own kill is: a killed run resumes.
+//! `stop()` closes stdin first, which `serve()` reads as the supervisor going
+//! away, so the host stops at once and leaves under its own control - with the
+//! run resumable and an `ending.json` stamp saying vibe chose to go (#206). That
+//! is the ending we want and the job must not change it. **The job is the
+//! backstop for the paths `stop()` never reaches** - `End task`, `Stop-Process
+//! -Force`, a panic - which run no user code at all, and it is safe for the same
+//! reason `stop()`'s own kill is: a killed run resumes.
 
 //! ## The shape of `adopt`
 //!

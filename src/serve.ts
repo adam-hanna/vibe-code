@@ -59,15 +59,65 @@ export interface Session {
   /**
    * Stop accepting requests, without a frame having said so.
    *
-   * The supervisor closing stdin means what a `shutdown` request means, and it
-   * arrives as an event rather than as a line. Calling this is how that event is
-   * honoured; synthesising a `shutdown` frame with an invented id would put a
-   * `result` on the wire answering a request nobody made.
+   * Same meaning as a `shutdown` frame - no more requests are coming, and an
+   * in-flight run is left to reach its own next boundary - for a caller that
+   * has no id to answer. Synthesising a `shutdown` frame with an invented id
+   * would put a `result` on the wire answering a request nobody made.
    */
   shutdown(): void;
-  /** Resolves once a shutdown has been asked for and nothing is in flight. */
-  finished(): Promise<void>;
+  /**
+   * The supervisor has gone. Stop **now**, not at the next boundary (#206).
+   *
+   * Deliberately not `shutdown()`, which is what this used to call, and the
+   * difference is not a matter of degree. `shutdown` says *no more requests are
+   * coming*; this says *there is nobody left to send one, and nobody left to
+   * read a frame*. Two things follow that make waiting incoherent rather than
+   * merely slow:
+   *
+   * - **A gate can never be answered again.** `host.decide` resolves only on an
+   *   `answer` frame, and the stream that carries one has closed. A run holding
+   *   at a boundary when this arrives would hold for ever.
+   * - **`running` covers the whole of `main()`.** So even for a run that will
+   *   reach a boundary, "wait for it" is tens of minutes - against a supervisor
+   *   that closed stdin because it is about to kill this process (`QUIT_GRACE`
+   *   in `app/src-tauri/src/host.rs` is five seconds).
+   *
+   * So `finished()` resolves immediately, naming the request that was
+   * abandoned. What that costs is nothing the CLI does not already cost: the
+   * run is resumable from its last checkpoint, and the process leaving under
+   * its own control is what gets `ending.json` written - which is the whole
+   * point, because the alternative is the kill, and a killed process writes no
+   * stamp at all (#131).
+   */
+  closing(): void;
+  /** Resolves once nothing is left to do, saying what was left undone. */
+  finished(): Promise<Departure>;
 }
+
+/** How the session ended, for the process that has to choose an exit code. */
+export interface Departure {
+  /**
+   * The request still running when the supervisor left, or null.
+   *
+   * Null covers both ordinary endings - a `shutdown` frame whose run then
+   * finished, and a close with nothing in flight - because in both the process
+   * is leaving with the work done. Non-null is the one case that is not, and
+   * `serve()` is what turns it into a code and a sentence.
+   */
+  abandoned: number | null;
+}
+
+/**
+ * The host's own exit code when it left with a run in flight (#206).
+ *
+ * **Outside `EXIT`'s 0-7 on purpose** (`src/charge.ts`). Those eight are a
+ * *run's* endings: they arrive on a `result` frame and the app's footer maps
+ * each to a sentence. This is the *process* saying how it left, on a different
+ * frame (`host://exit`) for a different question, and a number inside that
+ * range would be read as one of them by the first person to see it. Seventy
+ * carries no meaning of its own beyond being clear of them.
+ */
+export const HOST_EXIT_ABANDONED = 70;
 
 export interface SessionDeps {
   /**
@@ -110,14 +160,14 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
   // A no-op initializer rather than `null`: the executor below runs
   // synchronously and always assigns, but the compiler cannot see that through
   // a callback and narrows the variable to its initial type at every use.
-  let settleFinished: () => void = () => undefined;
-  const finishedPromise = new Promise<void>((resolve) => {
+  let settleFinished: (departure: Departure) => void = () => undefined;
+  const finishedPromise = new Promise<Departure>((resolve) => {
     settleFinished = resolve;
   });
 
   /** Nothing left to do and told to stop. Both halves, or the process lingers. */
   const settleIfDone = (): void => {
-    if (shuttingDown && running === null) settleFinished();
+    if (shuttingDown && running === null) settleFinished({ abandoned: null });
   };
 
   const host: Host = {
@@ -233,6 +283,13 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       shuttingDown = true;
       settleIfDone();
     },
+    closing: () => {
+      shuttingDown = true;
+      // Resolving with the id rather than after it: a promise settles once, so
+      // the run's own `.finally` calling `settleIfDone` afterwards cannot
+      // overwrite this with `abandoned: null` and report an ordinary quit.
+      settleFinished({ abandoned: running });
+    },
     finished: () => finishedPromise,
   };
 }
@@ -282,14 +339,14 @@ export async function serve(): Promise<void> {
   process.stdin.on('data', (chunk: string) => {
     session.write(chunk);
   });
-  // The supervisor closing stdin is the other way this ends, and it means the
-  // same thing a `shutdown` does: no more requests are coming. An in-flight run
-  // is still left to reach its own next boundary - `finished()` waits for it.
+  // The supervisor closing stdin is the other way this ends, and it is the
+  // stronger one: nobody is left to send a request, and nobody is left to answer
+  // a gate. See `closing()` for why that is not a `shutdown`.
   process.stdin.on('end', () => {
-    session.shutdown();
+    session.closing();
   });
 
-  await session.finished();
+  const departure = await session.finished();
 
   // Found by driving the built process from a pipe, and invisible to every
   // in-process test: `finished()` resolving means the WORK is done, and an open
@@ -297,4 +354,28 @@ export async function serve(): Promise<void> {
   // acknowledges the shutdown, writes nothing more, and never exits - which a
   // supervisor can only resolve by killing it.
   process.stdin.pause();
+
+  if (departure.abandoned === null) return;
+
+  // Stderr, because this is prose and stdout is the protocol - and because it
+  // is the app's own log that keeps it (`applog::host`), which is where somebody
+  // asking why a quit abandoned a turn will be looking (#186).
+  process.stderr.write(
+    `the app closed while request ${departure.abandoned} was still running; ` +
+      `stopping now rather than waiting for a boundary nothing is left to answer\n`,
+  );
+
+  // `process.exit` rather than falling off the end, and the two reasons are
+  // different. The run's children - `claude`, `codex` - hold the event loop
+  // open, so returning here would not end the process at all; and the exit
+  // hook `installEndingStamp` registered is what writes `ending.json`, so
+  // leaving under our own control is the difference between an archive that
+  // says vibe stopped and one that says something killed it without running a
+  // line of its code (#131).
+  //
+  // Those children are not killed here. On Windows the job object in
+  // `reaper.rs` takes them with the app; where it cannot, `Status.uncontained`
+  // already says so rather than the app pretending otherwise.
+  process.exitCode = HOST_EXIT_ABANDONED;
+  process.exit(HOST_EXIT_ABANDONED);
 }
