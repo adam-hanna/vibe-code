@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "What the main window may do. Deliberately almost nothing: the three host commands are the app's entire capability surface, and every one of them is a message to a process this crate already started.",
+  "description": "What the main window may do. Deliberately almost nothing: the host, key and pilot commands are messages to a process this crate already started, and the one plugin capability granted here is `dialog:allow-open` - a directory chooser the OS draws and a person drives, which returns a path and launches nothing. Every other dialog permission (`save`, `message`, `ask`, `confirm`) arrives with `dialog:default` and is deliberately not taken, because none of them has a caller.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["core:default", "dialog:allow-open"]
 }

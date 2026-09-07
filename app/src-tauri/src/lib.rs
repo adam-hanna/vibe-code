@@ -23,6 +23,13 @@
 //! process that is already running. There is deliberately no command that takes
 //! a program name - the app will grow a pilot chat that can drive the session
 //! (#144), and "run this program" must never be in reach of it.
+//!
+//! **A directory chooser is not that** (#189). `dialog:allow-open` returns a path
+//! the OS itself produced through a UI a person drove; it starts no process and
+//! reads no file. It is still a capability reaching the window, so it is granted
+//! by name in `capabilities/default.json` rather than by taking `dialog:default`,
+//! and the path it returns is not trusted any further than a typed one: the host
+//! decides what a usable repository is, exactly as it does today.
 
 mod applog;
 mod host;
@@ -58,6 +65,11 @@ pub fn run() {
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             show(app);
         }))
+        // The repository field's directory chooser (#189), and the only plugin
+        // besides single-instance that the window can reach. A plugin command is
+        // not on the `generate_handler!` list below, so the guard that pins that
+        // list pins this line too - a third plugin has to be added on purpose.
+        .plugin(tauri_plugin_dialog::init())
         .manage(HostProcess::default())
         .manage(Pilot::default())
         // Every command the window may call, and the list is worth reading as a
