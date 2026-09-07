@@ -406,12 +406,34 @@ pilot event leaves through, not in an adapter, because Anthropic not echoing tod
 promise either vendor is making.
 
 **The host dies when the app does, and the kernel is what enforces it.** `stop()` handles the
-graceful endings by closing stdin, so the host finishes the turn it is in; a Windows Job
-Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` handles the ones that run no user code at
-all — `End task`, `Stop-Process -Force`, a panic. There is nothing to hook for those by
-design, so the mechanism has to be declared in advance and left to the OS. macOS and Linux
-have no equivalent yet and **say so** through `Status.uncontained`, which the window shows:
-an unenforced guarantee nobody can see is the same as no guarantee.
+graceful endings by closing stdin; a Windows Job Object with
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` handles the ones that run no user code at all — `End
+task`, `Stop-Process -Force`, a panic. There is nothing to hook for those by design, so the
+mechanism has to be declared in advance and left to the OS. macOS and Linux have no
+equivalent yet and **say so** through `Status.uncontained`, which the window shows: an
+unenforced guarantee nobody can see is the same as no guarantee.
+
+**A closed stdin means the supervisor has gone, and that is stronger than a `shutdown`**
+(#206). Both used to call the same thing, and the equivalence was wrong in a way that made
+the graceful path unreachable: `running` in `serve.ts` covers the whole of `main()`, so
+"finish the turn you are in" was really "finish the run", tens of minutes against a
+`QUIT_GRACE` of five seconds. Every quit during a run expired it and was a kill. Worse, a run
+*holding at a gate* would have waited for ever — `host.decide` resolves only on an `answer`
+frame, and the stream that carries one has closed.
+
+So `closing()` abandons the request and names it, `finished()` resolves at once, and the
+process leaves under its own control with `HOST_EXIT_ABANDONED`. **Leaving under its own
+control is the whole point**: that is what runs the exit hook `installEndingStamp` registered,
+so the archive says vibe chose to stop rather than showing a lock with no stamp beside it,
+which is #131's "something terminated it without running a line of its code". The five
+seconds remain as a ceiling for a host that will not go, and reaching them is now an
+`applog` line, because after this it should not happen. Nothing is lost that the CLI does not
+already lose: the run is resumable from its last checkpoint.
+
+`HOST_EXIT_ABANDONED` is **outside `EXIT`'s 0–7 on purpose**, and a test pins it there. Those
+eight are a *run's* endings, arriving on a `result` frame and mapped to a sentence by the
+footer; this is the *process* saying how it left, on `host://exit`, answering a different
+question.
 
 Two rules the host process depends on, and neither is optional:
 

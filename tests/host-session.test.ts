@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createSession, installProtocolStdout } from '@src/serve.js';
-import { orchestrate } from '@src/orchestrator.js';
+import { createSession, HOST_EXIT_ABANDONED, installProtocolStdout } from '@src/serve.js';
+import { EXIT, orchestrate } from '@src/orchestrator.js';
 import * as log from '@src/log.js';
 import { encode } from '@src/protocol.js';
 import type { Send, Session } from '@src/serve.js';
@@ -188,6 +188,87 @@ test('a shutdown is acknowledged at once, and finishing waits for the run', asyn
   release();
   await session.finished();
   assert.deepEqual(last(sent), { type: 'result', id: 1, exit: 0 });
+});
+
+test('the supervisor going away abandons the run rather than waiting for it', async () => {
+  // The other half of the test above, and the whole of #206. A `shutdown` frame
+  // waits; stdin closing does not, because nobody is left to send a request and
+  // nobody is left to read a frame. Until this, both called `shutdown()`, so a
+  // quit waited for `main()` to return - tens of minutes - against a supervisor
+  // that kills after five seconds.
+  const sent: Outbound[] = [];
+  const session = createSession((m) => void sent.push(m), {
+    invoke: () => new Promise<number>(() => undefined),
+  });
+
+  session.receive(line({ type: 'invoke', id: 1, argv: ['run', 'x'] }));
+  session.closing();
+
+  assert.deepEqual(await session.finished(), { abandoned: 1 });
+});
+
+test('a gate holding when the supervisor goes is abandoned, not held for ever', async () => {
+  // The case that makes waiting incoherent rather than merely slow. `decide`
+  // resolves only on an `answer` frame, and the stream that carries one has
+  // closed - so "let the run reach its next boundary" is waiting for something
+  // that can never arrive.
+  const sent: Outbound[] = [];
+  let session: Session | null = null;
+  session = createSession((m) => void sent.push(m), {
+    invoke: () =>
+      session?.host.decide({
+        boundary: 'plan-approved',
+        phase: 'planning',
+        planRound: 0,
+        questionRound: 0,
+        reviewRound: 0,
+        verifyRound: 0,
+      }) as Promise<number>,
+  });
+
+  session.receive(line({ type: 'invoke', id: 4, argv: ['run', 'x'] }));
+  await settle();
+  assert.equal(sent.some((m) => m.type === 'ask'), true, 'the run is holding at a gate');
+
+  session.closing();
+  assert.deepEqual(await session.finished(), { abandoned: 4 });
+});
+
+test('a close with nothing in flight is an ordinary departure', async () => {
+  const { session } = collecting();
+  session.closing();
+  assert.deepEqual(await session.finished(), { abandoned: null });
+});
+
+test('the abandoned id is not overwritten by the run settling afterwards', async () => {
+  // A promise settles once, so the run's own `.finally` calling `settleIfDone`
+  // cannot turn this back into `abandoned: null` and report an ordinary quit.
+  // Reachable in practice: `main` catches internally and returns a code, and a
+  // turn already in its last microtask will do exactly this.
+  const sent: Outbound[] = [];
+  let release: (code: number) => void = () => undefined;
+  const held = new Promise<number>((resolve) => {
+    release = resolve;
+  });
+  const session = createSession((m) => void sent.push(m), { invoke: () => held });
+
+  session.receive(line({ type: 'invoke', id: 2, argv: ['run', 'x'] }));
+  session.closing();
+  release(0);
+  await settle();
+
+  assert.deepEqual(await session.finished(), { abandoned: 2 });
+});
+
+test('the host exit code cannot be read as one of a run\'s eight endings', () => {
+  // `host://exit` and a `result` frame answer different questions, and the app
+  // draws them differently. A host code that collided with `EXIT` would be
+  // mapped to a run's sentence by the first person to see it.
+  assert.equal(
+    (Object.values(EXIT) as number[]).includes(HOST_EXIT_ABANDONED),
+    false,
+    'HOST_EXIT_ABANDONED must stay clear of every run exit code',
+  );
 });
 
 test('a request arriving after a shutdown is refused rather than started', async () => {

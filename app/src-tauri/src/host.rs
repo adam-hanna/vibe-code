@@ -30,11 +30,16 @@ pub const EXIT_EVENT: &str = "host://exit";
 
 /// How long a quit waits for the host to leave on its own before killing it.
 ///
-/// Closing stdin is a request, not a guarantee: the host finishes the turn it is
-/// in first, and a Claude turn can run for half an hour. Waiting that long on a
-/// quit would look like a hang. Killing after this is safe *because* the run is
-/// resumable - `vibe resume` picks up a killed process, which is a guarantee the
-/// CLI already gives and the app inherits unchanged.
+/// **A ceiling, not a wait.** The host reads a closed stdin as *the supervisor
+/// has gone* and leaves at once, abandoning an in-flight run rather than
+/// finishing it - `closing()` in `src/serve.ts` says why, and until #206 it
+/// waited for the whole run instead, so this five seconds expired every single
+/// time and the "graceful" path was the kill path in every case that mattered.
+///
+/// What is left is the fallback for a host that will not go: killing after this
+/// is safe *because* the run is resumable, which the CLI already guarantees and
+/// the app inherits unchanged. It costs the `ending.json` stamp, which is
+/// exactly why the ordinary path no longer comes here.
 const QUIT_GRACE: Duration = Duration::from_secs(5);
 
 /// Strip Windows' extended-length prefix from a path.
@@ -348,11 +353,12 @@ impl HostProcess {
         }
     }
 
-    /// Close stdin, wait `QUIT_GRACE`, then kill.
+    /// Close stdin, wait up to `QUIT_GRACE`, then kill.
     ///
-    /// Closing stdin is what `serve()` reads as a shutdown, so the host finishes
-    /// the turn it is in and leaves the run resumable. The kill is the fallback
-    /// for a host that will not go.
+    /// Closing stdin is what `serve()` reads as the supervisor going away, so
+    /// the host stops now and leaves the run resumable with an `ending.json`
+    /// stamp beside its lock. The kill is the fallback for a host that will not
+    /// go, and reaching it is a fact worth recording rather than a normal quit.
     pub fn stop(&self) {
         let Ok(mut guard) = self.inner.lock() else {
             return;
@@ -360,6 +366,7 @@ impl HostProcess {
         let Some(mut running) = guard.take() else {
             return;
         };
+        let pid = running.pid;
         drop(running.stdin);
         let deadline = Instant::now() + QUIT_GRACE;
         loop {
@@ -375,6 +382,14 @@ impl HostProcess {
             }
             std::thread::sleep(Duration::from_millis(50));
         }
+        // Said out loud, because after #206 this is the path that should not
+        // happen: the host leaving on its own is what writes the stamp, and a
+        // kill writes none. Somebody looking at a run with no ending needs to be
+        // able to find out here whether the quit is what did it.
+        crate::applog::app(&format!(
+            "host pid {pid} did not leave within {}s of stdin closing; killed",
+            QUIT_GRACE.as_secs()
+        ));
         let _ = running.child.kill();
         let _ = running.child.wait();
     }
