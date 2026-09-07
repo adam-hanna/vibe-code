@@ -178,6 +178,21 @@ export interface Run {
   /** The protocol version the host stated, or null before `ready`. */
   protocol: number | null;
   /**
+   * Which run this is, once the loop has said so (#207).
+   *
+   * Null until `run_started` arrives, and null for ever on a core that predates
+   * it - the window states what it was told or states nothing, and there is no
+   * way to derive a run id from anything else on the wire.
+   *
+   * `dir` is the run's own directory, which is where `PLAN.md`, every critique
+   * and every review report already live. Carrying it is not a viewer and does
+   * not open one: the window has no filesystem, and #207 is explicit that
+   * reading an artifact is a separate decision with `#129`'s link refusal
+   * attached to it. It is here because "which run" and "where is it" are the
+   * same question to the person asking, and the host is holding both.
+   */
+  identity: { runId: string; dir: string; resumed: boolean } | null;
+  /**
    * The next identity to hand out, carried in the run rather than in a module
    * variable.
    *
@@ -200,6 +215,7 @@ export function emptyRun(): Run {
     reason: null,
     completed: null,
     protocol: null,
+    identity: null,
     seq: 0,
   };
 }
@@ -456,6 +472,16 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
             phases: cycle.phases.map((p) => ({ ...p, turns: p.turns.map(patch) })),
           })),
         };
+      }
+
+      case 'run_started': {
+        const runId = str(data['runId']);
+        const dir = str(data['dir']);
+        // Both or neither. An identity holding a run id and no directory would
+        // be a half-answer the window then has to explain, and the two always
+        // travel together because the site that emits them has both in hand.
+        if (runId === null || dir === null) return next;
+        return { ...next, identity: { runId, dir, resumed: data['resumed'] === true } };
       }
 
       case 'verify_started': {

@@ -99,6 +99,51 @@ describe('the loop column is built from ids and never from sentences', () => {
   });
 });
 
+describe('which run this is', () => {
+  test('the identity is what the loop said, and nothing until it says', () => {
+    expect(emptyRun().identity).toBeNull();
+    const run = fold([
+      say('run_started', { runId: '20260907-031221-a-task', dir: '/repo/.vibe/runs/20260907-031221-a-task', resumed: false }),
+    ]);
+    expect(run.identity).toEqual({
+      runId: '20260907-031221-a-task',
+      dir: '/repo/.vibe/runs/20260907-031221-a-task',
+      resumed: false,
+    });
+  });
+
+  test('a resume is the same id, saying so', () => {
+    const run = fold([say('run_started', { runId: 'r', dir: '/d', resumed: true })]);
+    expect(run.identity?.resumed).toBe(true);
+  });
+
+  test('a half-carried identity is no identity, not a run id with a blank home', () => {
+    // Both fields or neither. The emitting site has both in hand, so one
+    // arriving alone means something is wrong with the frame rather than with
+    // the run - and a window that showed the id beside an empty path would be
+    // presenting that as a fact about the run.
+    for (const data of [{ runId: 'r' }, { dir: '/d' }, {}, { runId: 7, dir: '/d' }]) {
+      expect(fold([say('run_started', data)]).identity).toBeNull();
+    }
+  });
+
+  test('a second run does not inherit the first one\'s identity', () => {
+    // `nextRun` carries the protocol and the sequence because both are facts
+    // about the process. An identity is a fact about the run, and showing the
+    // last one beside a fresh launch would point a person at the wrong
+    // directory on disk.
+    const run = fold([say('run_started', { runId: 'first', dir: '/d', resumed: false })]);
+    expect(nextRun(run).identity).toBeNull();
+    expect(nextRun(run).protocol).toBe(run.protocol);
+  });
+
+  test('an older core that never says it leaves the window unable to name the run', () => {
+    // Absent, not guessed. There is nothing else on the wire a run id could be
+    // derived from, and the honest state is that the window does not know.
+    expect(fold(CLEAN).identity).toBeNull();
+  });
+});
+
 describe('a turn ends because the next thing starts', () => {
   test('a new turn closes the one before it', () => {
     const run = fold(CLEAN);

@@ -622,7 +622,10 @@ async function startRun(
   const state = createRun(targetDir, task, planOnly, { allocated, config: cfg, extraContext });
 
   log.attachTranscript(path.join(state.dir, 'transcript.log'));
-  log.heading(`Run ${state.id}`);
+  log.heading(`Run ${state.id}`, {
+    id: 'run_started',
+    data: { runId: state.id, dir: state.dir, resumed: false },
+  });
   log.info(`Repo:    ${targetDir}`);
   log.info(`Claude:  ${cfg.claude.model} / ${cfg.claude.effort}`);
   // The thread count is read off the table rather than stated: since #45 the
@@ -852,7 +855,10 @@ async function resumeRun(
       log.info('Previous stop reported findings, not questions - continuing with raised limits.');
       applyEdits();
       renameSync(answersFile, path.join(state.dir, `stalled-${state.planRound}.md`));
-      log.heading(`Resuming ${state.id}`);
+      log.heading(`Resuming ${state.id}`, {
+        id: 'run_started',
+        data: { runId: state.id, dir: state.dir, resumed: true },
+      });
       return execute(state, cfg, true, flags.skipProbe === true, REAL_GATE, loop, handle);
     }
 
@@ -887,7 +893,14 @@ async function resumeRun(
     renameSync(answersFile, path.join(state.dir, `answered-${state.planRound}.md`));
   }
 
-  log.heading(`Resuming ${state.id}`);
+  // Both resume paths carry it, and both are `run_started` rather than a
+  // `run_resumed` of their own. A host asking "which run am I looking at" has
+  // the same question either way, and `resumed` is the field that answers the
+  // one thing that differs (#207).
+  log.heading(`Resuming ${state.id}`, {
+    id: 'run_started',
+    data: { runId: state.id, dir: state.dir, resumed: true },
+  });
   return execute(state, cfg, true, flags.skipProbe === true, REAL_GATE, loop, handle);
 }
 

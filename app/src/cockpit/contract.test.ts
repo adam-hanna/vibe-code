@@ -127,6 +127,26 @@ test('the core still marks the two places a run ends badly', () => {
 });
 
 /**
+ * The id that says which run this is (#207).
+ *
+ * Three sites, and the count is the claim worth pinning: one start and two
+ * resume paths, because a resumed run is the one a person is most likely to be
+ * looking for on disk and the one that would silently have no identity if a
+ * path were missed. `runId` and `dir` are required by the reducer together, so
+ * a site that carried only one would produce a run the window still cannot
+ * name.
+ */
+test('every path that begins a run says which run it is', () => {
+  const sites = [...cli.matchAll(/id: 'run_started'/g)];
+  expect(sites.length, 'one start and two resume paths').toBe(3);
+  for (const field of ['runId:', 'dir:', 'resumed:']) {
+    const carried = [...cli.matchAll(/id: 'run_started',\s*data: \{([^}]*)\}/g)];
+    expect(carried.length).toBe(3);
+    for (const m of carried) expect(m[1] ?? '', `run_started no longer sends ${field}`).toContain(field);
+  }
+});
+
+/**
  * The two ids the diffstat line depends on, and the fields it reads (#198).
  *
  * The same silent failure mode as the phase map, and it already happened once:
