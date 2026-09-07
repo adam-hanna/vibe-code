@@ -31,6 +31,51 @@ export function counted(n: number, unit: string): string {
 }
 
 /**
+ * The tree the loop measured, in the terminal's own words (#198).
+ *
+ * **A transcription of `formatWork` in `src/work.ts`, deliberately.** The same
+ * measurement rendered two ways is two chances to say something different about
+ * it, so this keeps that file's segments, that file's order and that file's
+ * wording - including the clause that is load-bearing.
+ *
+ * That clause is the proxy: **`N of the M files the plan names`, never `step
+ * N/M` and never a percentage.** `9/14` reads as a position in the plan's list
+ * of steps, and this is a count of files that happen to be named there. It is
+ * also why there is no bar: the plan's file count is not the amount of work the
+ * turn has to do, so it is not a denominator, and *if you cannot name the
+ * denominator it is not a bar*.
+ *
+ * A zero here is a real measurement and gets the sentence the loop uses for it.
+ * `formatWork` returns null in that case because a log line saying nothing
+ * happened is noise; a row that exists all turn has to say something, and the
+ * something is what the orchestrator already writes at the end of the turn.
+ */
+export function work(w: {
+  files: number;
+  insertions: number | null;
+  deletions: number | null;
+  uncounted: number | null;
+  plan: { named: number; touched: number } | null;
+}): string {
+  if (w.files === 0) return 'changed nothing in the tree';
+  const parts: string[] = [`${counted(w.files, 'file')} changed`];
+  // Both or neither, exactly as `formatWork` has it: one half of a diffstat is
+  // not a diffstat, and supplying the other as zero would be a count nobody took.
+  if (w.insertions !== null && w.deletions !== null) {
+    parts.push(`+${w.insertions} -${w.deletions}`);
+  }
+  if (w.uncounted !== null && w.uncounted > 0) {
+    // Named rather than folded in, because their absence is what makes the
+    // figure above an undercount.
+    parts.push(`${counted(w.uncounted, 'file')} whose lines were not counted`);
+  }
+  if (w.plan !== null) {
+    parts.push(`${w.plan.touched} of the ${counted(w.plan.named, 'file')} the plan names`);
+  }
+  return parts.join(' · ');
+}
+
+/**
  * The boundary a gate is holding at, in words.
  *
  * A closed map rather than a prettifier over the string: a boundary this version

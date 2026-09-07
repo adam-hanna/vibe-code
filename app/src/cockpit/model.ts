@@ -63,6 +63,36 @@ export interface Beat {
   at: number;
 }
 
+/**
+ * What a work reading measured (#198).
+ *
+ * The tree as git described it, sampled during a write turn. Every field is a
+ * field the record carried, and the two kinds of missing are kept apart exactly
+ * as `workData` sends them: `files: 0` is a measurement - the turn has changed
+ * nothing yet - while an absent `insertions` means git could not be asked, and
+ * rendering the second as `+0` would be a number nobody produced.
+ */
+export interface Work {
+  /** How many paths the turn has changed. A real zero is possible and means it. */
+  files: number;
+  /** Absent when git could not count lines. Never zero for "unknown". */
+  insertions: number | null;
+  deletions: number | null;
+  /** Files whose lines could not be counted, which is what makes the above an undercount. */
+  uncounted: number | null;
+  /**
+   * The proxy, or null when the plan named no files to be a proxy over.
+   *
+   * **Not a denominator for a bar**, and `src/work.ts` says why in its own words:
+   * `9/14` beside a bar reads as a position in the plan's list of steps and this
+   * measurement is not one. It is rendered as a count of files, in a sentence
+   * naming whose count it is.
+   */
+  plan: { named: number; touched: number } | null;
+  /** When this reading reached us. */
+  at: number;
+}
+
 export interface Turn {
   id: number;
   role: string;
@@ -73,6 +103,8 @@ export interface Turn {
   startedAt: number;
   endedAt: number | null;
   beat: Beat | null;
+  /** The most recent work reading, or null before one has arrived. */
+  work: Work | null;
 }
 
 export interface PhaseGroup {
@@ -216,6 +248,31 @@ function readBeat(data: Record<string, unknown>, at: number): Beat | null {
   };
 }
 
+/**
+ * Read a work reading's record. Every absent field stays absent.
+ *
+ * `files` is the one field that must be there: it is the count `workData` always
+ * sends, so a record without it is not a reading this version understands and is
+ * dropped rather than filled in.
+ */
+function readWork(data: Record<string, unknown>, at: number): Work | null {
+  const files = num(data['files']);
+  if (files === null) return null;
+  const named = num(data['planNamed']);
+  const touched = num(data['planTouched']);
+  return {
+    files,
+    insertions: num(data['insertions']),
+    deletions: num(data['deletions']),
+    uncounted: num(data['uncounted']),
+    // Both halves or neither. One without the other is not a coverage figure,
+    // and choosing a value for the missing one would invent the very number the
+    // proxy exists to avoid inventing.
+    plan: named === null || touched === null ? null : { named, touched },
+    at,
+  };
+}
+
 /** Append to a cycle, creating it in the order the phases arrived. */
 function withPhase(cycles: readonly Cycle[], kind: CycleKind, phase: PhaseGroup): Cycle[] {
   const existing = cycles.find((c) => c.kind === kind);
@@ -341,6 +398,7 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
           startedAt: at,
           endedAt: null,
           beat: null,
+          work: null,
         };
         const closed = endRunning(next, at);
         return {
@@ -360,6 +418,36 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
         const turnId = next.running.id;
         const startedAt = at - beat.elapsedMs;
         const patch = (t: Turn): Turn => (t.id === turnId ? { ...t, beat, startedAt } : t);
+        return {
+          ...next,
+          running: patch(next.running),
+          cycles: next.cycles.map((cycle) => ({
+            ...cycle,
+            phases: cycle.phases.map((p) => ({ ...p, turns: p.turns.map(patch) })),
+          })),
+        };
+      }
+
+      /**
+       * The tree, as the loop measured it (#198).
+       *
+       * **Two ids, because the loop emits two and they are not the same fact.**
+       * `work_progress` is a sample during the turn, narrated every
+       * `progress.workIntervalMs` and never recorded; `work_measured` is the
+       * final reading, recorded once, and it arrives even when the turn changed
+       * nothing. Both carry the record `workData` builds, so both land here -
+       * the row wants whichever is most recent, and reading only the second
+       * would leave it blank for the whole ninety minutes it exists for.
+       */
+      case 'work_progress':
+      case 'work_measured': {
+        const work = readWork(data, at);
+        // Same rule the heartbeat follows, for the same reason: a reading with
+        // no turn open cannot be attributed, and a measurement that cannot be
+        // attributed is not recorded.
+        if (work === null || next.running === null) return next;
+        const turnId = next.running.id;
+        const patch = (t: Turn): Turn => (t.id === turnId ? { ...t, work } : t);
         return {
           ...next,
           running: patch(next.running),
@@ -429,9 +517,17 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
 /**
  * What the running row can say, and what it cannot.
  *
- * Two of `6a`'s six lines have no source on the wire and are reported as absent
- * with the issue that would supply them. Drawing a zero or a blank for either
+ * One of `6a`'s six lines still has no source on the wire and is reported as
+ * absent with the issue that would supply it. Drawing a zero or a blank for it
  * would be the invented denominator that element has failed on three times.
+ *
+ * **The diffstat line was the other one until #198.** `6a` shipped with both
+ * lines naming the issue that would fill them, on the promise that *"the row
+ * completes when they land instead of being redesigned"* - and #136 landed, and
+ * the row went on saying the loop reported no file counts while the loop was
+ * narrating them. The mechanism was right and nothing connected the two halves,
+ * which is worth remembering the next time a line names an issue: the naming is
+ * what makes the gap legible, not what closes it.
  */
 export interface RunningRow {
   elapsedMs: number;
@@ -460,9 +556,16 @@ export interface RunningRow {
    * is the reason this is the only bar in the app in the first place.
    */
   context: { used: number; window: number } | null;
-  /** Why the diffstat line is missing. Always set until #136 lands. */
-  diffstat: string;
-  /** Why the comparable-turns line is missing. Always set until #114 lands. */
+  /**
+   * The tree as the loop last measured it, or null before any reading.
+   *
+   * Never both this and `noWork`: a measurement is present, or it is absent with
+   * a reason, and the two are one question with one answer.
+   */
+  work: Work | null;
+  /** Why there is no reading. Null once one has arrived. */
+  noWork: string | null;
+  /** Why the comparable-turns line is missing. Always set until a frame carries the archive. */
   comparable: string;
 }
 
@@ -478,7 +581,20 @@ export function runningRow(turn: Turn, now: number): RunningRow {
       beat === null || beat.contextWindow === null || beat.promptTokens <= 0
         ? null
         : { used: beat.promptTokens, window: beat.contextWindow },
-    diffstat: 'no diffstat yet — the loop reports no file counts (#136)',
-    comparable: 'no comparable turns — nothing reads the run archive yet (#114)',
+    work: turn.work,
+    // Only the write turns are sampled - `withWorkProgress` wraps those and
+    // nothing else - so this says which turns have a reading rather than
+    // implying one is late. A planning turn never gets one and should not look
+    // as though it is still waiting.
+    noWork:
+      turn.work === null
+        ? 'no reading yet — the loop measures the tree during write turns'
+        : null,
+    // Narrowed rather than left as it was. `nothing reads the run archive yet`
+    // stopped being true when `scorecard.ts` landed; what is still true is that
+    // no frame carries it here, which is a different sentence and the one a
+    // reader of this row needs.
+    comparable:
+      'no comparable turns — vibe scorecard reads the archive, but no frame carries it here (#114)',
   };
 }
