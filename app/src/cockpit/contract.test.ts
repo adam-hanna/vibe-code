@@ -5,7 +5,11 @@ import { expect, test } from 'vitest';
 import orchestrator from '../../../src/orchestrator.ts?raw';
 import charge from '../../../src/charge.ts?raw';
 import cli from '../../../src/cli.ts?raw';
-import { ending } from './format';
+import work from '../../../src/work.ts?raw';
+// Aliased: `work` is already the core's source above, and this is the renderer
+// that has to agree with it. Two things named for one measurement is the
+// confusion this whole file exists to catch.
+import { ending, work as render } from './format';
 import { CYCLE_OF } from './model';
 
 /**
@@ -120,4 +124,65 @@ test('a code from a newer core has no phrase invented for it', () => {
 test('the core still marks the two places a run ends badly', () => {
   expect(cli).toContain("id: 'run_escalated'");
   expect(cli).toContain("id: 'run_failed'");
+});
+
+/**
+ * The two ids the diffstat line depends on, and the fields it reads (#198).
+ *
+ * The same silent failure mode as the phase map, and it already happened once:
+ * the row named #136 as the issue that would supply it, #136 landed, and nobody
+ * connected the two - so for the whole of v1.4 the row said the loop reported no
+ * file counts while the loop narrated them every thirty seconds. Nothing went
+ * red, because an id the reducer does not recognise reaches the output pane and
+ * that is correct behaviour.
+ *
+ * This fails in the repo that renames either id or drops a field, which is the
+ * only moment anybody is in a position to notice.
+ */
+test('the core narrates the two work ids the running row reads', () => {
+  expect(work).toContain("id: 'work_progress'");
+  expect(orchestrator).toContain("'work_measured'");
+});
+
+test('the record still carries the fields the row reads out of it', () => {
+  // Read from `workData`'s own body rather than from a comment about it. `files`
+  // is the one the reducer requires; the rest are optional on the wire and
+  // optional here, which is the distinction that keeps absent from becoming
+  // zero.
+  const body = /export function workData\([\s\S]*?\n\}/.exec(work)?.[0];
+  if (body === undefined) throw new Error('workData not found in src/work.ts');
+  for (const field of ['files', 'insertions', 'deletions', 'uncounted', 'planNamed', 'planTouched']) {
+    expect(body, `workData no longer sends ${field}`).toContain(field);
+  }
+});
+
+test('the proxy is worded as a count of files, never as a position in the plan', () => {
+  // `src/work.ts` states the rule and `implement-progress.test.ts` guards the
+  // terminal's half of it. This is the cockpit's half, and it matters more here:
+  // `9/14` on the primary screen, beside a duration, during the phase somebody
+  // watches for ninety minutes, is the most prominent fabricated number the
+  // product could show. It is a count of files that happen to be named in the
+  // plan - not step nine of fourteen.
+  const line = render({
+    files: 9,
+    insertions: 412,
+    deletions: 38,
+    uncounted: 2,
+    plan: { named: 14, touched: 9 },
+  });
+  expect(line).toContain('9 of the 14 files the plan names');
+  expect(line).not.toMatch(/step/i);
+  expect(line).not.toContain('%');
+  expect(line).not.toContain('9/14');
+});
+
+test('a turn that changed nothing says so, and a diffstat half-measured is omitted', () => {
+  expect(render({ files: 0, insertions: null, deletions: null, uncounted: 0, plan: null })).toBe(
+    'changed nothing in the tree',
+  );
+  // One half of a diffstat is not a diffstat. Supplying the other as zero would
+  // be a count nobody took.
+  expect(
+    render({ files: 3, insertions: 40, deletions: null, uncounted: 0, plan: null }),
+  ).toBe('3 files changed');
 });

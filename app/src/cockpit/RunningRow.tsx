@@ -1,5 +1,5 @@
 import { LivenessDot } from '../design';
-import { counted, elapsed, tokens } from './format';
+import { counted, elapsed, tokens, work } from './format';
 import { runningRow } from './model';
 import type { Turn } from './model';
 
@@ -7,8 +7,14 @@ import type { Turn } from './model';
  * `6a` — the element on screen longer than anything else in the app.
  *
  * The design says *"build this exactly"* and lists six measurements with no
- * derived quantity. Four are on the wire today; two name the issue that would
- * supply them and are drawn as absences rather than as blanks.
+ * derived quantity. Five are on the wire today; the last names the issue that
+ * would supply it and is drawn as an absence rather than as a blank.
+ *
+ * The diffstat joined them in #198, and the way it was missed is worth keeping:
+ * it named #136, #136 landed, and nobody connected the two - so the row went on
+ * printing *"the loop reports no file counts"* while the loop narrated them
+ * every thirty seconds. Naming an issue makes a gap legible; it does not close
+ * it.
  *
  * **Each earlier attempt at this element failed the same way: inventing a
  * denominator to make waiting feel measured.** There is no bar here. The only
@@ -44,10 +50,15 @@ export function RunningRow({ turn, now }: { turn: Turn; now: number }) {
           <li className="v-running__line v-running__line--activity">{row.lastActivity}</li>
         )}
 
-        {/* Absent with the reason, which is the design's own rule for a missing
-            quantity. Naming the issue means the row completes without being
-            redesigned when the data arrives. */}
-        <li className="v-running__line v-running__line--absent">{row.diffstat}</li>
+        {/* The measurement where there is one, and the reason where there is
+            not - never a blank and never a zero standing in for either. This
+            line was an absence naming #136 until that landed and #198 connected
+            it; the other absence below is still waiting on its own. */}
+        {row.work !== null ? (
+          <li className="v-running__line">{work(row.work)}</li>
+        ) : (
+          <li className="v-running__line v-running__line--absent">{row.noWork}</li>
+        )}
 
         {row.quietMs !== null && (
           <li className="v-running__line">last activity {elapsed(row.quietMs)} ago</li>

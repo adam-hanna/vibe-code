@@ -223,13 +223,103 @@ describe('the running row reports absence as absence', () => {
     expect(row.activities).toEqual({ count: 47, unit: 'event' });
   });
 
-  test('the two lines with no source name the issue that would supply them', () => {
+  test('the line with no source still names the issue that would supply it', () => {
     // Drawn as absent with a reason rather than as a blank or a zero. `6a` has
-    // failed three times by inventing a denominator; these two say why they are
-    // missing instead.
+    // failed three times by inventing a denominator; this says why it is missing
+    // instead.
+    //
+    // **This case used to assert the same of the diffstat line, and that half is
+    // gone because the contract moved, not because it was inconvenient (#198).**
+    // #136 landed and the loop began narrating file counts, so an assertion that
+    // the row still says it does not would have been pinning the defect. The
+    // part that still holds - a missing measurement is absent WITH A REASON - is
+    // kept here and asserted of the diffstat's own absence below.
     const row = runningRow(started.running!, 0);
-    expect(row.diffstat).toMatch(/#136/);
     expect(row.comparable).toMatch(/#114/);
+  });
+
+  test('a turn with no reading says which turns get one, rather than looking late', () => {
+    // Only write turns are sampled - `withWorkProgress` wraps those and nothing
+    // else - so a planning turn has no reading and never will. Saying "not yet"
+    // about it would be a promise the loop is not going to keep.
+    const row = runningRow(started.running!, 0);
+    expect(row.work).toBeNull();
+    expect(row.noWork).toMatch(/write turns/);
+  });
+});
+
+describe('the tree the loop measured reaches the row', () => {
+  const writing = (...readings: readonly Frame[]): Run =>
+    fold([
+      say('phase_started', { phase: 'implementing' }),
+      say('turn_started', { role: 'implementer', kind: 'implement' }),
+      ...readings,
+    ]);
+
+  const reading = (id: string, over: Record<string, unknown> = {}): Frame =>
+    say(id, { label: 'implement', files: 9, added: 2, uncounted: 0, ...over });
+
+  test('both work ids land, because the loop emits two and they are not one fact', () => {
+    // `work_progress` is a sample during the turn and `work_measured` is the
+    // final reading. Reading only the second would leave this line blank for the
+    // entire ninety minutes it exists for.
+    for (const id of ['work_progress', 'work_measured']) {
+      expect(runningRow(writing(reading(id)).running!, 0).work?.files).toBe(9);
+    }
+  });
+
+  test('the most recent reading wins', () => {
+    const run = writing(reading('work_progress', { files: 3 }), reading('work_measured', { files: 9 }));
+    expect(runningRow(run.running!, 0).work?.files).toBe(9);
+  });
+
+  test('a reading with no turn open is dropped rather than attributed', () => {
+    // The rule the heartbeat already follows, for the same reason.
+    const run = fold([reading('work_progress')]);
+    expect(run.running).toBeNull();
+  });
+
+  test('a record with no file count is not a reading this version understands', () => {
+    // Fails closed. `files` is the one field `workData` always sends, so a
+    // record without it came from something this build cannot read - and a zero
+    // filled in for it would claim the turn had changed nothing.
+    const run = writing(say('work_progress', { label: 'implement', insertions: 40 }));
+    expect(runningRow(run.running!, 0).work).toBeNull();
+  });
+
+  test('lines git could not count are absent, and are not zero', () => {
+    // The distinction `workData` sends and the row has to keep: `insertions`
+    // omitted means git could not be asked, which is not `+0`.
+    const run = writing(reading('work_measured'));
+    const work = runningRow(run.running!, 0).work;
+    expect(work?.insertions).toBeNull();
+    expect(work?.deletions).toBeNull();
+  });
+
+  test('a turn that changed nothing is a measurement, not an absence', () => {
+    // `files: 0` is a real reading and the most interesting one this ever
+    // produces: the run has just paid for a turn that produced no change.
+    const run = writing(reading('work_measured', { files: 0 }));
+    const row = runningRow(run.running!, 0);
+    expect(row.work).toEqual({
+      files: 0,
+      insertions: null,
+      deletions: null,
+      uncounted: 0,
+      plan: null,
+      at: expect.any(Number) as unknown as number,
+    });
+    expect(row.noWork).toBeNull();
+  });
+
+  test('the plan proxy needs both halves or it is not a figure', () => {
+    // One without the other is not a coverage figure, and choosing a value for
+    // the missing half would invent the number the proxy exists to avoid.
+    const half = writing(reading('work_measured', { planNamed: 14 }));
+    expect(runningRow(half.running!, 0).work?.plan).toBeNull();
+
+    const whole = writing(reading('work_measured', { planNamed: 14, planTouched: 9 }));
+    expect(runningRow(whole.running!, 0).work?.plan).toEqual({ named: 14, touched: 9 });
   });
 });
 
