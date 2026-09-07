@@ -130,6 +130,20 @@ export interface Gate {
   planRound: number;
   reviewRound: number;
   verifyRound: number;
+  /**
+   * The turn that had just ended when this gate opened, or null (#202).
+   *
+   * A gate holds **between** things: every `GateableBoundary` is reached after a
+   * turn completes and before the next starts, so nothing is executing while the
+   * ask is outstanding. This is the turn whose result a person is deciding
+   * about, and naming it is what lets the column keep that card open with its
+   * measurements instead of collapsing it to a duration.
+   *
+   * An id rather than the turn itself: the turn lives in `cycles` and is the
+   * same object the column is already drawing. Copying it here would be two
+   * records of one turn, and the copy would be the stale one.
+   */
+  turnId: number | null;
 }
 
 /** One line for the output pane, at the density the terminal prints it. */
@@ -343,14 +357,27 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
   if (frame.type === 'ready') return { ...run, protocol: frame.protocol };
 
   if (frame.type === 'ask') {
+    // The turn is over. A gate holds between things - every `GateableBoundary`
+    // is reached after a turn completes and before the next one starts - so an
+    // `ask` is the same true statement `phase_started`, `turn_started`,
+    // `gate_stopped` and `result` all make, arriving from the one boundary that
+    // was missed (#202).
+    //
+    // Leaving it open was not cosmetic. A run held at `question-round` overnight
+    // drew `5h40m / last activity 5h39m ago` on a turn that took a minute, two
+    // inches above a footer correctly saying the loop was waiting for a human.
+    // The reasonable response to the card is to kill the run; the reasonable
+    // response to the footer is to press continue.
+    const settled = run.running;
     return {
-      ...run,
+      ...endRunning(run, at),
       gate: {
         askId: frame.id,
         boundary: frame.context.boundary,
         planRound: frame.context.planRound,
         reviewRound: frame.context.reviewRound,
         verifyRound: frame.context.verifyRound,
+        turnId: settled === null ? null : settled.id,
       },
     };
   }
@@ -597,11 +624,16 @@ export interface RunningRow {
 
 export function runningRow(turn: Turn, now: number): RunningRow {
   const beat = turn.beat;
+  // Both clocks stop when the turn does. A turn drawn after it ended - which is
+  // every turn a held gate is showing the result of - has a final elapsed and a
+  // final quiet period, and ticking either against `now` would report the wait
+  // for a human as time the turn spent (#202).
+  const end = turn.endedAt ?? now;
   return {
-    elapsedMs: Math.max(0, now - turn.startedAt),
+    elapsedMs: Math.max(0, end - turn.startedAt),
     activities: beat === null ? null : { count: beat.activities, unit: beat.unit },
     lastActivity: beat?.lastActivity ?? null,
-    quietMs: beat === null ? null : Math.max(0, now - beat.at),
+    quietMs: beat === null ? null : Math.max(0, end - beat.at),
     tokens: beat === null || beat.tokens <= 0 ? null : beat.tokens,
     context:
       beat === null || beat.contextWindow === null || beat.promptTokens <= 0
