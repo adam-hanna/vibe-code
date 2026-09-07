@@ -114,6 +114,32 @@ textarea {
   color: inherit;
 }
 
+/*
+ * The user agent's own button chrome, removed.
+ *
+ * `color: inherit` above without this is the worst possible half: the text
+ * becomes `--text-primary` and the ground stays the platform's near-white
+ * button face, which is **1.7:1** and unreadable. Every button that goes
+ * through `Button` sets its own background and never showed it; the three tab
+ * buttons in `Cockpit.tsx` do not, and they were the whole of the bug - three
+ * light-grey-on-white controls in the primary chrome, reported twice from a
+ * manual pass.
+ *
+ * `audit:contrast` cannot see this and that is not a gap in the audit's rules:
+ * it checks the pairings the TOKENS permit, and here no token was applied at
+ * all. An element reaching for nothing is a different failure from an element
+ * reaching for the wrong thing, so it gets its own check rather than a wider
+ * version of the existing one.
+ *
+ * Scoped to `button` on purpose. The fields all set their own ground already,
+ * and stripping a text input's chrome by default is how one of them ends up
+ * invisible on a platform nobody tested.
+ */
+button {
+  background: none;
+  border: none;
+}
+
 /* ============================================ the six interaction states
  * The screens draw one state per component. These are the other five, stated
  * once each, exactly as the spec words them.
