@@ -190,6 +190,17 @@ impl HostProcess {
 
         let pid = child.id();
 
+        // The two paths and the pid, kept. `strip_verbatim` is the bug this
+        // resolves around, and it is invisible from a dev build - so when the
+        // app is inert, what the bundle actually resolved is the first thing
+        // worth being able to read afterwards (#186).
+        crate::applog::app(&format!(
+            "host started as pid {pid}: {} {} (cwd {})",
+            node.display(),
+            entry.display(),
+            cwd.display()
+        ));
+
         // Immediately after the spawn and before anything else touches the
         // child. There is a window between `spawn` and this in which a kill
         // would still orphan the host - it cannot be closed, because a process
@@ -206,7 +217,7 @@ impl HostProcess {
             // worth a line in whatever captured this app's stderr, because the
             // person who finds the orphan later will be looking there.
             if let Some(reason) = why {
-                eprintln!("host is not contained: {reason}");
+                crate::applog::app(&format!("host is not contained: {reason}"));
             }
         }
 
@@ -244,15 +255,20 @@ impl HostProcess {
                     // is exactly the failure the stdout/stderr split exists to
                     // prevent, and dropping it is how that would go unnoticed.
                     Err(_) => {
-                        let _ = to_webview.emit(
-                            LOG_EVENT,
-                            format!("unparseable line on the protocol stream: {line}"),
-                        );
+                        let notice = format!("unparseable line on the protocol stream: {line}");
+                        crate::applog::host(&notice);
+                        let _ = to_webview.emit(LOG_EVENT, notice);
                     }
                 }
             }
             let state = to_webview.state::<HostProcess>();
             let code = state.reap();
+            crate::applog::app(&match code {
+                Some(code) => format!("host exited with code {code}"),
+                // Not "code 0" and not a guess: on Windows a child killed from
+                // outside closes without one, and that absence is the finding.
+                None => "host ended without an exit code".to_string(),
+            });
             // Emitted whatever the code, and emitted even for an ordinary quit.
             // A host that ends is a fact the window owns - the run is resumable
             // and the user is the one who has to be told that is what happened.
@@ -265,6 +281,10 @@ impl HostProcess {
         std::thread::spawn(move || {
             for line in BufReader::new(stderr).lines() {
                 let Ok(line) = line else { break };
+                // Kept as well as shown. The window is the live view and it goes
+                // away when the window does; a person debugging afterwards has
+                // only the file (#186).
+                crate::applog::host(&line);
                 let _ = to_log.emit(LOG_EVENT, line);
             }
         });
@@ -378,7 +398,7 @@ pub fn launch(app: &AppHandle) -> Result<u32, String> {
     // to report it. A debug build has a console; a release build's stderr is
     // still capturable by whatever launched it.
     if let Err(reason) = &result {
-        eprintln!("host failed to start: {reason}");
+        crate::applog::app(&format!("host failed to start: {reason}"));
     }
     result
 }
