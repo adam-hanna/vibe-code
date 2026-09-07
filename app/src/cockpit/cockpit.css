@@ -124,6 +124,24 @@
   color: var(--text-tertiary);
 }
 
+/* The field and its chooser, on one line. The field takes the slack because a
+   path is the long thing here and the button's label never changes width. */
+.v-launch__row {
+  display: flex;
+  gap: var(--space-2);
+  align-items: stretch;
+}
+
+.v-launch__row .v-launch__dir {
+  flex: 1;
+  min-width: 0;
+}
+
+.v-launch__note {
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
 .v-launch__task,
 .v-launch__dir {
   font: var(--type-body-sm);

@@ -6,6 +6,8 @@ import corePackage from '../../../package.json?raw';
 import coreLock from '../../../package-lock.json?raw';
 import rust from '../../src-tauri/src/keys.rs?raw';
 import lib from '../../src-tauri/src/lib.rs?raw';
+import defaultCapability from '../../src-tauri/capabilities/default.json?raw';
+import pick from '../cockpit/pick.ts?raw';
 import pilotMod from '../../src-tauri/src/pilot/mod.rs?raw';
 import anthropicMod from '../../src-tauri/src/pilot/anthropic.rs?raw';
 import openaiMod from '../../src-tauri/src/pilot/openai.rs?raw';
@@ -48,8 +50,12 @@ describe('the webview can store a key and can never read one', () => {
 
   test('the handler list is exactly those three plus the host and pilot commands', () => {
     // The second half of the same guard: a command is only reachable once it is
-    // registered, so the registration is worth pinning too. Every name the
-    // window can reach is on this list and nowhere else.
+    // registered, so the registration is worth pinning too.
+    //
+    // This list is no longer the whole of what the window can reach, and saying
+    // so is the point: since #189 a plugin also registers commands, and it does
+    // it somewhere this regex cannot see. The plugin list below is the other
+    // half, and the two together are the surface.
     const registered = lib
       .slice(lib.indexOf('generate_handler!['), lib.indexOf(']', lib.indexOf('generate_handler![')))
       .match(/\b\w+\b/g)
@@ -64,6 +70,38 @@ describe('the webview can store a key and can never read one', () => {
       'pilot_cancel',
       'pilot_send',
     ]);
+  });
+
+  test('a plugin is a capability surface too, and there are two', () => {
+    // #189 added the first plugin whose commands the window actually calls, and
+    // a plugin command does not appear in `generate_handler!` - so the list
+    // above stopped being the complete answer to "what can the page invoke" on
+    // the commit that added it. This is the half that keeps the question
+    // answerable: a third plugin fails here, which is the moment to ask what it
+    // put within reach.
+    const plugins = [...lib.matchAll(/\.plugin\(tauri_plugin_(\w+)::/g)].map((m) => m[1]);
+    expect(plugins.sort()).toEqual(['dialog', 'single_instance']);
+  });
+
+  test('the dialog plugin is granted one permission by name, not its default set', () => {
+    // `dialog:default` carries `save`, `message`, `ask` and `confirm` as well,
+    // and none of those has a caller. Taking the whole set to get the one is how
+    // a capability file stops describing the app - and the file is the only
+    // place a reader can find out what the window may do.
+    const capability = JSON.parse(defaultCapability) as { permissions: string[] };
+    expect(capability.permissions.sort()).toEqual(['core:default', 'dialog:allow-open']);
+  });
+
+  test('the chooser returns a path and the window judges nothing about it', () => {
+    // The rule #189 is written around: a chosen directory is exactly as trusted
+    // as a typed one. `consistency.ts` and the preflight are the definition of a
+    // usable repository, and a second definition in a webview is the
+    // re-derivation the whole app is arranged against.
+    expect(pick).not.toMatch(/\.git|isRepo|exists|readDir|readTextFile/);
+    // And it opens a directory chooser rather than a file one. `directory: true`
+    // is what makes the result a path to hand the host; without it this is a
+    // file picker wearing the same label.
+    expect(pick).toContain('directory: true');
   });
 
   test('the one thing that reads a key is the one thing that makes the request', () => {

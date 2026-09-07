@@ -18,6 +18,14 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-single-instance = "2"
+
+# The native directory chooser behind the Launch form's repository field (#189).
+# It is the one place the window is allowed to learn a path it did not already
+# hold, and it launches nothing: the OS draws the dialog, a person drives it, and
+# what comes back is a string. `dialog:allow-open` is the only permission granted
+# in `capabilities/default.json` - `save`, `message`, `ask` and `confirm` come
+# with `dialog:default` and none of them has a caller.
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

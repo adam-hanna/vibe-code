@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Button } from '../design';
 import { launchArgv } from './argv';
+import { pickDirectory } from './pick';
 
 /**
  * The minimum needed to have anything to watch.
@@ -26,8 +27,25 @@ export function Launch({
   const [task, setTask] = useState('');
   const [dir, setDir] = useState('');
   const [planOnly, setPlanOnly] = useState(true);
+  const [pickFailed, setPickFailed] = useState<string | null>(null);
 
   const ready = task.trim() !== '' && dir.trim() !== '';
+
+  // A chooser that could not open is said out loud rather than swallowed: the
+  // field still works, so the failure is recoverable, and a button that does
+  // nothing twice is how somebody concludes the app is broken.
+  //
+  // Both a choice and a cancel clear a previous failure, because either one
+  // means the dialog opened - and a cancel changes nothing else, which is why
+  // `null` cannot be allowed to reach `setDir`.
+  const choose = () => {
+    void pickDirectory()
+      .then((chosen) => {
+        setPickFailed(null);
+        if (chosen !== null) setDir(chosen);
+      })
+      .catch((err: unknown) => setPickFailed(err instanceof Error ? err.message : String(err)));
+  };
 
   return (
     <form
@@ -57,13 +75,23 @@ export function Launch({
       <label className="v-launch__label" htmlFor="dir">
         repository
       </label>
-      <input
-        id="dir"
-        className="v-launch__dir"
-        value={dir}
-        placeholder="an absolute path to a git worktree"
-        onChange={(e) => setDir(e.target.value)}
-      />
+      {/* The field stays. A pasted path is a legitimate way to fill this in,
+          and anybody who came here from a terminal will paste. */}
+      <div className="v-launch__row">
+        <input
+          id="dir"
+          className="v-launch__dir"
+          value={dir}
+          placeholder="an absolute path to a git worktree"
+          onChange={(e) => setDir(e.target.value)}
+        />
+        <Button type="button" onClick={choose} disabled={busy}>
+          choose…
+        </Button>
+      </div>
+      {pickFailed !== null && (
+        <p className="v-launch__note">the chooser did not open: {pickFailed} — type or paste instead</p>
+      )}
 
       <label className="v-launch__toggle">
         <input type="checkbox" checked={planOnly} onChange={(e) => setPlanOnly(e.target.checked)} />
