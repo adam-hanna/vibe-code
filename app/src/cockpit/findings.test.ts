@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { blocking, emptyRun, reduce } from './model';
+import { blocking, emptyRun, persistence, reduce } from './model';
 import type { Run } from './model';
 import type { Frame } from '../host';
 
@@ -165,5 +165,54 @@ describe('the blocking count is the latest round’s, and it is decided here', (
 
   test('no rounds is zero, and that is a real zero', () => {
     expect(blocking(emptyRun())).toBe(0);
+  });
+});
+
+describe('a finding that survived a fix round is the loop arguing with itself', () => {
+  // `4c`: **persisted** is the state that matters, and it is what the
+  // oscillation guard counts. What is asserted here is the narrower claim the
+  // app can actually make - this id was in the previous round's census too -
+  // because `persistentStreak` runs over `state.roundHistory`, which is not on
+  // this wire.
+  const round = (phase: string, ...ids: readonly string[]): Frame =>
+    say('findings_reported', {
+      phase,
+      counts: { P0: 0, P1: ids.length, P2: 0, P3: 0 },
+      tolerance: 1,
+      pass: false,
+      reason: 'blocked',
+      tolerated: [],
+      findings: ids.map((id) => ({ id, severity: 'P1', title: id })),
+    });
+
+  test('a finding in three consecutive rounds counts three', () => {
+    const run = fold([
+      round('review', 'a', 'b'),
+      round('review', 'a'),
+      round('review', 'a', 'c'),
+    ]);
+    const seen = persistence(run.censuses);
+    expect(seen.get('a')).toBe(3);
+    // `c` is new this round, so it has survived nothing.
+    expect(seen.get('c')).toBe(1);
+  });
+
+  test('a gap ends the streak rather than being counted through', () => {
+    // A finding that went away and came back is not the same as one that never
+    // cleared - the second is the loop failing to fix it, and only the second
+    // is what the guard is about.
+    const run = fold([round('review', 'a'), round('review', 'b'), round('review', 'a')]);
+    expect(persistence(run.censuses).get('a')).toBe(1);
+  });
+
+  test('the two cycles are counted apart', () => {
+    // A plan finding and a review finding sharing an id are two claims about
+    // two different artifacts, so a plan round must not extend a review streak.
+    const run = fold([round('plan', 'a'), round('plan', 'a'), round('review', 'a')]);
+    expect(persistence(run.censuses).get('a')).toBe(1);
+  });
+
+  test('no rounds is an empty map, not a zero for everything', () => {
+    expect(persistence([]).size).toBe(0);
   });
 });

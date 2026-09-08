@@ -65,6 +65,10 @@ export function Footer({ run, onDecide, onPause, onStop, onResume, pausing, busy
   // could hide a gate the run is genuinely blocked on, with no way to answer it.
   if (run.gate !== null) {
     const gate = run.gate;
+    // The gate that failed, from the most recent pass, so `5d`'s card can name
+    // it. Told rather than inferred: the verdict is the loop's word, and a
+    // window recomputing it from the fraction would disagree about flaky.
+    const failing = run.verify[run.verify.length - 1]?.gates.find((g) => g.status === 'failed');
     return (
       <div className="v-footer v-footer--holding">
         <div className="v-footer__banner">
@@ -79,13 +83,63 @@ export function Footer({ run, onDecide, onPause, onStop, onResume, pausing, busy
           plan {gate.planRound} · verify {gate.verifyRound} · review {gate.reviewRound}
         </div>
 
+        {/*
+          `5d`'s gate card, and it is only reachable because `verify-round` is a
+          real `GateableBoundary` - the loop genuinely stops here when the matrix
+          says `step`. What changes is the wording, because at this one boundary
+          "continue" means something specific and unobvious: it sends the round
+          to FIX, which costs an implementation-sized turn.
+
+          **"Fix myself" is real**, as the design insists, and it turns out to
+          need no mechanism at all: the loop is already waiting, so fixing it
+          yourself is what happens if you simply do not answer. What the app adds
+          is saying so, and giving you the path.
+        */}
+        {gate.boundary === 'verify-round' && (
+          <div className="v-footer__verify">
+            {failing !== undefined && (
+              <div className="v-footer__note">
+                <strong>{failing.name}</strong> failed{' '}
+                {failing.failed === null
+                  ? ''
+                  : `${failing.failed} of ${failing.runs} run${failing.runs === 1 ? '' : 's'}`}
+                {failing.verdict === 'flaky' && ' — and it is not deterministic'}.
+              </div>
+            )}
+            <div className="v-footer__note">
+              Continuing sends this round to FIX, which is a full implement turn. Doing nothing
+              is <strong>fix it yourself</strong>: the loop is already waiting and will keep
+              waiting — edit the worktree, then continue.
+            </div>
+            {run.identity !== null && (
+              <div className="v-footer__path">
+                <code>{run.identity.dir}</code>
+                <button
+                  className="v-footer__copy"
+                  onClick={() => void navigator.clipboard.writeText(run.identity?.dir ?? '')}
+                >
+                  copy
+                </button>
+              </div>
+            )}
+            {/* Named rather than drawn. A manual re-run would have to re-enter
+                the gate out of band and no frame does that - and the design is
+                explicit that a rerun spends a round, so a button that silently
+                did not would be worse than none. */}
+            <div className="v-footer__note">
+              There is no <em>rerun</em> button: nothing on this wire can re-enter the gate, and
+              a rerun costs one of the verify rounds, which is the scarce thing here.
+            </div>
+          </div>
+        )}
+
         <div className="v-footer__note">
           Nothing further has run. The session is still warm, so continuing re-sends no context.
         </div>
 
         <div className="v-footer__actions">
           <Button level="primary" disabled={busy} onClick={() => onDecide(gate.askId, { kind: 'continue' })}>
-            ⏭ continue
+            {gate.boundary === 'verify-round' ? '⏭ let FIX run' : '⏭ continue'}
           </Button>
           <input
             className="v-footer__reason"

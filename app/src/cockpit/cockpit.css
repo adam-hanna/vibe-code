@@ -2202,3 +2202,38 @@
 .v-loop__waiting p {
   margin: 0;
 }
+
+/* ------------------------------------------------------------ the gate card (5d) */
+
+.v-footer__verify {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  border-left: 2px solid var(--accent-border);
+  padding-left: var(--space-3);
+  margin-bottom: var(--space-2);
+}
+
+.v-footer__path {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.v-footer__path code {
+  font: var(--type-mono-sm);
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.v-footer__copy {
+  font: var(--type-label);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--accent-on-tint);
+  background: none;
+  border: 1px solid var(--accent-border);
+  padding: var(--space-1) var(--space-2);
+  cursor: pointer;
+  flex: none;
+}

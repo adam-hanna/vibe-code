@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Card, MetaChip, SeverityChip, StateKicker } from '../design';
-import { SEVERITIES } from './model';
+import { SEVERITIES, persistence } from './model';
 import type { Severity } from '../design';
 import type { Census, FindingRow } from './model';
 
@@ -111,7 +111,7 @@ function History({ finding }: { finding: FindingRow }) {
   );
 }
 
-function Finding({ finding }: { finding: FindingRow }) {
+function Finding({ finding, rounds }: { finding: FindingRow; rounds: number }) {
   const w = weight(finding.severity);
   return (
     <Card severity={w ?? undefined}>
@@ -136,6 +136,14 @@ function Finding({ finding }: { finding: FindingRow }) {
           <MetaChip kind="checkable">
             {finding.evidence} citation{finding.evidence === 1 ? '' : 's'}
           </MetaChip>
+        )}
+        {/* `4c`'s persisted state, worded as what it actually is. A finding
+            surviving a fix round is the loop arguing with itself, and it is
+            what the oscillation guard counts — but the guard's own streak runs
+            over `state.roundHistory`, which is not on this wire, so this says
+            *seen in* rather than claiming the guard's verdict. */}
+        {rounds > 1 && (
+          <MetaChip kind="alarm">seen in the last {rounds} rounds — it survived a fix</MetaChip>
         )}
       </div>
       <History finding={finding} />
@@ -172,6 +180,7 @@ export function FindingsPane({ censuses }: { censuses: readonly Census[] }) {
   const latest = censuses[censuses.length - 1];
   if (latest === undefined) return null;
   const sameCycle = censuses.filter((c) => c.phase === latest.phase);
+  const surviving = persistence(censuses);
 
   return (
     <div className="v-find">
@@ -203,7 +212,7 @@ export function FindingsPane({ censuses }: { censuses: readonly Census[] }) {
               onClick={() => setOpen((cur) => (cur === f.id ? null : f.id))}
               aria-expanded={open === f.id}
             >
-              <Finding finding={f} />
+              <Finding finding={f} rounds={surviving.get(f.id) ?? 1} />
             </button>
           ))
         )}

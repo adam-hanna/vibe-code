@@ -1530,6 +1530,48 @@ export function staleness(run: Run, now: number): Staleness {
 }
 
 /**
+ * How many consecutive rounds each finding in the latest census has survived
+ * (`4c`).
+ *
+ * **The state the design says matters**: *"a finding surviving a fix round is
+ * the loop arguing with itself, and it is what the oscillation guard counts."*
+ * Without it `4c`'s timeline stops at *fixer claims resolved* and never reaches
+ * the interesting end of it.
+ *
+ * ## This is a count of appearances, and it is not the loop's verdict
+ *
+ * `persistentStreak` in `src/run.ts` is the authority, it runs over
+ * `state.roundHistory`, and **that is not on the wire**. So this counts
+ * something narrower and says so wherever it is drawn: *this id was in the
+ * previous round's census as well.* Same phase only — a plan finding and a
+ * review finding sharing an id are two claims about two artifacts.
+ *
+ * It is a set operation over two things the loop stated, not a quantity computed
+ * out of two others, which is the line `model.ts` is written to. A window that
+ * printed the word *persisted* on its own authority would be claiming the
+ * guard's judgement; a window that says *seen in the last 3 rounds* is reporting
+ * what it was told, twice.
+ */
+export function persistence(censuses: readonly Census[]): ReadonlyMap<string, number> {
+  const latest = censuses[censuses.length - 1];
+  const out = new Map<string, number>();
+  if (latest === undefined) return out;
+
+  // Only this cycle's rounds, newest first, so a gap in one round ends a streak
+  // rather than being counted through.
+  const sameCycle = censuses.filter((c) => c.phase === latest.phase);
+  for (const finding of latest.findings) {
+    let rounds = 0;
+    for (let i = sameCycle.length - 1; i >= 0; i -= 1) {
+      if (!(sameCycle[i]?.findings.some((f) => f.id === finding.id) ?? false)) break;
+      rounds += 1;
+    }
+    out.set(finding.id, rounds);
+  }
+  return out;
+}
+
+/**
  * How many findings are blocking in the most recent round, or zero.
  *
  * **In the model rather than in the tab bar**, which is the rule this file
