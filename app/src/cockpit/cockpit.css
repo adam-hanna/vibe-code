@@ -205,6 +205,39 @@
   padding: var(--space-4);
 }
 
+/*
+ * The step before the first phase (#205).
+ *
+ * Drawn as a card because it is a step of the run, and it keeps its place above
+ * cycle 1 after it passes: `5c` shows the preflight result, and a row that
+ * vanished on success would make the only visible preflight the one that failed.
+ * Done recedes by opacity, the same way a not-started cycle does - the text
+ * floor is a floor, and recession below it is never a greyer grey.
+ */
+.v-preflight {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  border: 1px solid var(--rule-card);
+  background: var(--surface-card);
+  padding: var(--space-3) var(--space-4);
+}
+
+.v-preflight--done {
+  opacity: 0.72;
+}
+
+.v-preflight__label {
+  font: var(--type-label);
+  letter-spacing: 0.08em;
+  color: var(--text-emphasis);
+}
+
+.v-preflight__state {
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
 .v-cycle {
   border: 1px solid var(--rule-card);
   background: var(--surface-card);

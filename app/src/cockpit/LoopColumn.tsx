@@ -1,7 +1,7 @@
 import { MetaChip } from '../design';
 import { elapsed } from './format';
 import { RunningRow } from './RunningRow';
-import type { Cycle, CycleKind, PhaseGroup, Run, Turn } from './model';
+import type { Cycle, CycleKind, PhaseGroup, Preflight, Run, Turn } from './model';
 
 /**
  * The centre column from `3a`, at the width the design fixes it at.
@@ -112,6 +112,36 @@ function Phase({
   );
 }
 
+/**
+ * What preflight is doing, before there is a phase to draw (#205).
+ *
+ * The seconds between pressing launch and the first phase used to have nothing
+ * true to say in them: preflight spawns a probe turn against each agent and
+ * narrated nothing while it did. This is the fix's visible half, and every part
+ * of it is a fact the loop sent.
+ *
+ * **No bar, no percentage, no spinner.** `2 of 2` is a position in a list the
+ * loop named, not a fraction of the run - and it is omitted entirely when the
+ * list did not arrive, rather than being counted from the agent in hand.
+ */
+function PreflightRow({ preflight }: { preflight: Preflight }) {
+  const at = preflight.probing === null ? -1 : preflight.agents.indexOf(preflight.probing);
+  const position = at < 0 ? '' : ` · ${String(at + 1)} of ${String(preflight.agents.length)}`;
+
+  const state = preflight.passed
+    ? 'toolchain contract satisfied'
+    : preflight.probing !== null
+      ? `probing ${preflight.probing}${position}`
+      : 'checking that both agents can run what this run needs';
+
+  return (
+    <div className={`v-preflight${preflight.passed ? ' v-preflight--done' : ''}`}>
+      <span className="v-preflight__label">PREFLIGHT</span>
+      <span className="v-preflight__state">{state}</span>
+    </div>
+  );
+}
+
 export function LoopColumn({ run, now }: { run: Run; now: number }) {
   const runningId = run.running?.id ?? null;
   // Told, not worked out. `reduce` names the turn a gate opened after, so the
@@ -120,7 +150,12 @@ export function LoopColumn({ run, now }: { run: Run; now: number }) {
 
   return (
     <section className="v-loop" aria-label="loop">
-      {run.cycles.length === 0 && (
+      {run.preflight !== null && <PreflightRow preflight={run.preflight} />}
+
+      {/* Only when there is genuinely nothing to say. Preflight running IS
+          something happening, and two lines claiming the opposite of each other
+          is the disagreement #202 was about. */}
+      {run.cycles.length === 0 && run.preflight === null && (
         <div className="v-loop__empty">nothing has run yet</div>
       )}
 

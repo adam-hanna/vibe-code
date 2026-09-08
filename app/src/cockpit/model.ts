@@ -122,6 +122,28 @@ export interface Cycle {
   phases: PhaseGroup[];
 }
 
+/**
+ * The step that runs before the first phase (#205).
+ *
+ * Preflight spawns a probe turn against each agent, and until #205 it narrated
+ * nothing between starting and reporting - so the seconds after the one action
+ * a new user knows how to take were seconds in which the window could say
+ * nothing true. This is what it says instead.
+ *
+ * **Nothing here is a fraction of the run.** `agents` is the list preflight was
+ * about to probe, in the order it will probe them, sent by the site that owns
+ * that order; a position in a named list is not a proxy for how far through
+ * anything is, and there is deliberately no bar.
+ */
+export interface Preflight {
+  /** Who this run probes, in order. Empty when only a probe frame was seen. */
+  agents: readonly string[];
+  /** The agent being probed now. Null before the first and after the verdict. */
+  probing: string | null;
+  /** Set when the toolchain contract was satisfied. A failure is `reason`. */
+  passed: boolean;
+}
+
 /** A boundary the loop is holding at, waiting to be told what to do. */
 export interface Gate {
   /** The id to answer. Allocated by the host, not by us. */
@@ -206,6 +228,8 @@ export interface Run {
    * same question to the person asking, and the host is holding both.
    */
   identity: { runId: string; dir: string; resumed: boolean } | null;
+  /** The step before the first phase, while it is running and after it (#205). */
+  preflight: Preflight | null;
   /**
    * The next identity to hand out, carried in the run rather than in a module
    * variable.
@@ -230,6 +254,7 @@ export function emptyRun(): Run {
     completed: null,
     protocol: null,
     identity: null,
+    preflight: null,
     seq: 0,
   };
 }
@@ -255,6 +280,24 @@ function num(v: unknown): number | null {
 
 function str(v: unknown): string | null {
   return typeof v === 'string' && v !== '' ? v : null;
+}
+
+/**
+ * A list of strings, or an empty one.
+ *
+ * Every element has to be a usable string or the whole list is dropped: a
+ * partly-readable list would be shown as though it were the whole of what the
+ * frame carried, which is the absent-is-not-zero rule applied to a sequence.
+ */
+function strings(v: unknown): readonly string[] {
+  if (!Array.isArray(v)) return [];
+  const out: string[] = [];
+  for (const item of v as unknown[]) {
+    const s = str(item);
+    if (s === null) return [];
+    out.push(s);
+  }
+  return out;
 }
 
 /** Read a heartbeat's record. Every absent field stays absent. */
@@ -498,6 +541,34 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
             ...cycle,
             phases: cycle.phases.map((p) => ({ ...p, turns: p.turns.map(patch) })),
           })),
+        };
+      }
+
+      case 'preflight_started':
+        return {
+          ...next,
+          preflight: { agents: strings(data['agents']), probing: null, passed: false },
+        };
+
+      case 'probe_started': {
+        const agent = str(data['agent']);
+        if (agent === null) return next;
+        // An older core narrates a probe without having announced the list, and
+        // a `--skip-probe` run narrates neither. So the list is what was sent or
+        // it is empty; it is never filled in from the agent in hand, which would
+        // be the window deciding how many probes a run has.
+        const before = next.preflight;
+        return {
+          ...next,
+          preflight: { agents: before?.agents ?? [], probing: agent, passed: false },
+        };
+      }
+
+      case 'preflight_passed': {
+        const before = next.preflight;
+        return {
+          ...next,
+          preflight: { agents: before?.agents ?? [], probing: null, passed: true },
         };
       }
 

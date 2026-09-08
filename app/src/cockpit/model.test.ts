@@ -99,6 +99,52 @@ describe('the loop column is built from ids and never from sentences', () => {
   });
 });
 
+describe('the step before the first phase', () => {
+  test('preflight says what it will probe, then which one it is probing', () => {
+    const started = fold([say('preflight_started', { agents: ['claude', 'codex'] })]);
+    expect(started.preflight).toEqual({ agents: ['claude', 'codex'], probing: null, passed: false });
+
+    const probing = fold([
+      say('preflight_started', { agents: ['claude', 'codex'] }),
+      say('probe_started', { agent: 'codex' }),
+    ]);
+    expect(probing.preflight).toEqual({
+      agents: ['claude', 'codex'],
+      probing: 'codex',
+      passed: false,
+    });
+  });
+
+  test('passing clears the agent in flight, so the row does not stay mid-probe', () => {
+    const run = fold([
+      say('preflight_started', { agents: ['claude', 'codex'] }),
+      say('probe_started', { agent: 'codex' }),
+      say('preflight_passed', null),
+    ]);
+    expect(run.preflight).toEqual({ agents: ['claude', 'codex'], probing: null, passed: true });
+  });
+
+  test('a probe from a core that never announced the list leaves the list empty', () => {
+    // Never counted from the agent in hand. A window that filled in `['codex']`
+    // would be deciding how many probes a run has, and would then draw
+    // `1 of 1` on a run that probes two.
+    const run = fold([say('probe_started', { agent: 'codex' })]);
+    expect(run.preflight).toEqual({ agents: [], probing: 'codex', passed: false });
+  });
+
+  test('a list that is not wholly readable is no list rather than a partial one', () => {
+    for (const agents of [['claude', 7], 'claude', [''], null]) {
+      expect(fold([say('preflight_started', { agents })]).preflight?.agents).toEqual([]);
+    }
+  });
+
+  test('a skipped or older preflight leaves the row absent, not empty', () => {
+    // `--skip-probe` narrates none of these, and neither does a core that
+    // predates them. Absent is what is true, and the column draws nothing.
+    expect(fold(CLEAN).preflight).toBeNull();
+  });
+});
+
 describe('which run this is', () => {
   test('the identity is what the loop said, and nothing until it says', () => {
     expect(emptyRun().identity).toBeNull();
