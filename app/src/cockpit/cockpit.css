@@ -205,6 +205,148 @@
   padding: var(--space-4);
 }
 
+/* ---------------------------------------------------------------- diagnostics
+ * Hi-fi 15. `HOST 43804` and `PROTOCOL 1` came out of the titlebar and landed
+ * here; what stays in the chrome is a `•••` and, only when something disagrees,
+ * one alarm chip.
+ *
+ * **A popover, not a modal, and the difference is the missing scrim.** It wears
+ * the modal's border, corner marks and the product's one shadow - elevation is
+ * carried by those rather than by a pale surface, because this palette spent its
+ * light end on severity. What it does not do is block: diagnostics are read
+ * while looking at whatever went wrong, so this is the only elevated surface in
+ * the product you can see past.
+ */
+.v-cockpit__diag {
+  margin-left: auto;
+  padding: 0 var(--space-2);
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  background: none;
+  border: none;
+  cursor: pointer;
+  letter-spacing: 0.12em;
+}
+
+.v-cockpit__diag:hover {
+  color: var(--text-primary);
+}
+
+.v-diag {
+  position: absolute;
+  top: var(--space-7);
+  right: var(--space-4);
+  z-index: 20;
+  min-width: 26rem;
+  max-width: min(34rem, calc(100vw - var(--space-6)));
+  padding: var(--space-4);
+  border: 1px solid var(--accent-border);
+  background: var(--surface-card);
+  box-shadow: 0 18px 48px rgb(0 0 0 / 55%);
+}
+
+/* The modal's corner marks, so it reads as the same kind of surface. */
+.v-diag::before,
+.v-diag::after {
+  content: '';
+  position: absolute;
+  width: var(--dim-corner-mark);
+  height: var(--dim-corner-mark);
+  border-color: var(--accent-solid);
+  border-style: solid;
+}
+
+.v-diag::before {
+  top: -1px;
+  left: -1px;
+  border-width: 1px 0 0 1px;
+}
+
+.v-diag::after {
+  bottom: -1px;
+  right: -1px;
+  border-width: 0 1px 1px 0;
+}
+
+.v-diag__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--rule-inner);
+  margin-bottom: var(--space-3);
+}
+
+.v-diag__title {
+  font: var(--type-label);
+  letter-spacing: 0.08em;
+  color: var(--text-display);
+}
+
+.v-diag__close {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+.v-diag__close:hover {
+  color: var(--text-primary);
+}
+
+.v-diag__fact {
+  display: grid;
+  grid-template-columns: 5rem 1fr auto;
+  align-items: baseline;
+  gap: var(--space-2) var(--space-3);
+  padding: var(--space-2) 0;
+}
+
+.v-diag__label {
+  font: var(--type-label);
+  letter-spacing: 0.08em;
+  color: var(--text-tertiary);
+}
+
+/* Mono because these are strings destined for a bug report, and a run id
+ * retyped from a proportional face is how the wrong run gets investigated. */
+.v-diag__value {
+  font: var(--type-mono);
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.v-diag__copy {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  background: none;
+  border: 1px solid var(--rule-control);
+  padding: 0 var(--space-2);
+  cursor: pointer;
+}
+
+.v-diag__copy:hover {
+  color: var(--text-primary);
+  border-color: var(--rule-strong);
+}
+
+/* The sentence that makes the value usable, under it and across the row. */
+.v-diag__note {
+  grid-column: 2 / -1;
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+/* A fact this build cannot establish, named with its reason. Never a blank and
+ * never a placeholder that reads like a value. */
+.v-diag__absent {
+  grid-column: 2 / -1;
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+}
+
 /*
  * The step before the first phase (#205).
  *

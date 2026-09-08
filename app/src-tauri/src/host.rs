@@ -83,6 +83,43 @@ pub struct Ended {
     pub code: Option<i32>,
 }
 
+/// Which build this is (#201).
+///
+/// **Two builds of one version are otherwise identical**, and single-instance
+/// makes that expensive: a fresh build launched while an installed copy is
+/// running raises the old window and exits, so the app under test is the old
+/// one and every symptom reads as the fix not working.
+///
+/// `commit` and `at` are `Option` because a tree with no git cannot answer, and
+/// an absence is reported as one. `version` always exists - it is the crate's,
+/// which `tauri.conf.json` and `Cargo.toml` agree on.
+#[derive(Clone, Serialize)]
+pub struct Build {
+    pub version: String,
+    pub commit: Option<String>,
+    /// Milliseconds since the epoch, formatted by the window in the viewer's own
+    /// locale rather than in the builder's.
+    pub at: Option<i64>,
+}
+
+/// Read the stamp `build.rs` compiled in.
+///
+/// The empty string is the agreed spelling of *this tree could not say*, and it
+/// becomes `None` here rather than reaching a window that would print it.
+pub fn build_stamp() -> Build {
+    let commit = env!("VIBE_BUILD_COMMIT");
+    let at = env!("VIBE_BUILD_AT");
+    Build {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        commit: if commit.is_empty() {
+            None
+        } else {
+            Some(commit.to_string())
+        },
+        at: at.parse::<i64>().ok(),
+    }
+}
+
 /// What the webview is told when it asks.
 ///
 /// **The `ready` frame is in here because the window cannot have heard it.** The
@@ -92,16 +129,33 @@ pub struct Ended {
 ///
 /// Nothing else needs the same treatment: every other frame is a consequence of
 /// a request, and there are no requests before the window is up.
+///
+/// **The build stamp rides here rather than on a command of its own** (#201).
+/// `keys.rs` pins the registered handler list precisely so a new door into this
+/// process is a decision somebody makes on purpose, and this is not one: three
+/// of the four facts the diagnostics panel shows already arrive on this call, so
+/// they cannot disagree about which process they describe.
+/// Renamed for the window's benefit, and safe to add now: every field that
+/// existed before `uptime_secs` is one word, so camelCase leaves all of them
+/// exactly as they were. A field added later gets the window's spelling for
+/// free instead of arriving as a snake_case key nothing reads.
 #[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Status {
     pub running: bool,
     pub pid: Option<u32>,
+    /// How long the running host has been up, or null when none is. Measured
+    /// from a monotonic clock on this side, so it carries no question about
+    /// which process's wall clock is right.
+    pub uptime_secs: Option<u64>,
     pub ready: Option<serde_json::Value>,
     /// Why there is no host, when there is none. Null while one is running.
     pub failure: Option<String>,
     /// Why a kill of this app would leave the host running, or null if it would
     /// not. Reported rather than assumed either way - see `reaper.rs`.
     pub uncontained: Option<String>,
+    /// Which build the window is running in. Static; asked for with the rest.
+    pub build: Build,
 }
 
 /// The running host, if there is one.
@@ -125,6 +179,8 @@ struct Running {
     child: Child,
     stdin: ChildStdin,
     pid: u32,
+    /// When this host was spawned, on a monotonic clock (#201).
+    started: Instant,
 }
 
 /// Where the two staged pieces ended up in the bundle.
@@ -294,7 +350,12 @@ impl HostProcess {
             }
         });
 
-        *guard = Some(Running { child, stdin, pid });
+        *guard = Some(Running {
+            child,
+            stdin,
+            pid,
+            started: Instant::now(),
+        });
         Ok(pid)
     }
 
@@ -336,9 +397,11 @@ impl HostProcess {
             Ok(guard) => Status {
                 running: guard.is_some(),
                 pid: guard.as_ref().map(|r| r.pid),
+                uptime_secs: guard.as_ref().map(|r| r.started.elapsed().as_secs()),
                 ready,
                 failure,
                 uncontained,
+                build: build_stamp(),
             },
             // A poisoned lock means a panic happened while it was held, which is
             // not the same fact as "no host is running" - so the reason says so
@@ -346,9 +409,14 @@ impl HostProcess {
             Err(_) => Status {
                 running: false,
                 pid: None,
+                // Not zero. A lock nobody could read says nothing about how long
+                // the host has been up, and zero would read as "just started".
+                uptime_secs: None,
                 ready,
                 failure: Some("cannot tell: the host lock was poisoned by a panic".into()),
                 uncontained,
+                // Still answerable: the stamp is compiled in and needs no lock.
+                build: build_stamp(),
             },
         }
     }
@@ -436,6 +504,63 @@ pub fn host_status(state: tauri::State<'_, HostProcess>) -> Status {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_serialises_the_keys_the_window_reads() {
+        // The one failure mode that is silent in both directions. serde's
+        // default is the Rust spelling, so `uptime_secs` would arrive at a
+        // window reading `uptimeSecs` as `undefined` - which the panel would
+        // render as "up for an unknown time" on a host that is up and fine.
+        // Nothing goes red on either side; the number is simply always missing.
+        let status = HostProcess::default().status();
+        let json = serde_json::to_value(&status).expect("Status serialises");
+        let object = json.as_object().expect("Status is an object");
+
+        for key in [
+            "running",
+            "pid",
+            "uptimeSecs",
+            "ready",
+            "failure",
+            "uncontained",
+            "build",
+        ] {
+            assert!(object.contains_key(key), "Status no longer sends {key}");
+        }
+        assert!(
+            !object.contains_key("uptime_secs"),
+            "Status is sending the Rust spelling; the window reads uptimeSecs"
+        );
+
+        // No host is running, so both of these are absences rather than zeroes.
+        assert_eq!(object["pid"], serde_json::Value::Null);
+        assert_eq!(object["uptimeSecs"], serde_json::Value::Null);
+
+        let build = object["build"].as_object().expect("build is an object");
+        for key in ["version", "commit", "at"] {
+            assert!(build.contains_key(key), "Build no longer sends {key}");
+        }
+    }
+
+    #[test]
+    fn the_build_stamp_reports_an_absence_rather_than_a_placeholder() {
+        // #201's whole point is that a reader can tell two builds apart, so a
+        // value that cannot be established has to be visibly missing. A tree
+        // with no git produces `None` here, never `"unknown"` and never `""` -
+        // both of which a window would happily print beside the real fields.
+        let build = build_stamp();
+        assert_eq!(build.version, env!("CARGO_PKG_VERSION"));
+        if let Some(commit) = &build.commit {
+            assert!(!commit.is_empty(), "an empty commit must be None, not Some");
+            assert!(
+                commit.chars().all(|c| c.is_ascii_hexdigit()),
+                "a commit that is not hex was not read from git: {commit}"
+            );
+        }
+        // The build happened, so the clock was readable; a stamp of zero would
+        // mean 1970 and is not something to report as a build time.
+        assert!(build.at.is_none_or(|at| at > 0));
+    }
 
     #[test]
     fn a_verbatim_drive_path_loses_its_prefix() {

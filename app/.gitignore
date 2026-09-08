@@ -10,6 +10,11 @@ src-tauri/gen/
 src-tauri/binaries/
 src-tauri/host/
 
+# The commit and timestamp `stage:sidecar` hands `build.rs` (#201). Regenerated
+# on every bundle build, and committing it would pin every later build to the
+# commit that happened to be checked out when it was added.
+src-tauri/.build-stamp
+
 # The 1024px square `make-icon.mjs` draws. The script is the source; this is its
 # output, and it is regenerated in one command.
 #

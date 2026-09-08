@@ -93,9 +93,26 @@ export interface Handlers {
   exit(code: number | null): void;
 }
 
+/**
+ * Which build the window is running in (#201).
+ *
+ * `commit` and `at` are nullable because a tree with no git cannot answer, and
+ * the Rust side reports that as an absence rather than as `unknown`. A build
+ * that cannot say which one it is has to say *that* — the whole value of the
+ * stamp is that a reader can tell two builds of one version apart.
+ */
+export interface Build {
+  version: string;
+  commit: string | null;
+  /** Milliseconds since the epoch, formatted here in the viewer's own locale. */
+  at: number | null;
+}
+
 export interface Status {
   running: boolean;
   pid: number | null;
+  /** Seconds the running host has been up, or null when none is. Never zero for unknown. */
+  uptimeSecs: number | null;
   /**
    * The `ready` frame, kept by the Rust side.
    *
@@ -115,6 +132,8 @@ export interface Status {
    * unenforced guarantee nobody can see is the same as no guarantee (#157).
    */
   uncontained: string | null;
+  /** Which build this window is running in. Static, and asked for with the rest. */
+  build: Build;
 }
 
 /** Whether this page is inside the desktop shell at all. */

@@ -7,6 +7,7 @@ import type { KeyStatus } from '../pilot/keys';
 // `PilotPane`, not `Pilot`: `pilot.ts` beside it is the wire, and two files
 // differing only in case is a compile error on Windows and macOS both.
 import { PilotPane } from '../pilot/PilotPane';
+import { Diagnostics } from './Diagnostics';
 import { Footer } from './Footer';
 import { Launch } from './Launch';
 import { LoopColumn } from './LoopColumn';
@@ -39,6 +40,14 @@ interface Wire {
   hostPid: number | null;
   uncontained: string | null;
   failure: string | null;
+  /**
+   * The whole status, kept for the diagnostics panel (#201).
+   *
+   * The fields above are read on nearly every render and stay unpacked; this is
+   * the same object they came from, held so the panel can show the build stamp
+   * and the uptime without a second shape to keep in step.
+   */
+  status: host.Status | null;
   /** Prose from the host's stderr and any stdout line the relay could not parse. */
   log: readonly string[];
   /** A frame this version does not recognise. Shown, never discarded. */
@@ -60,9 +69,12 @@ export function Cockpit() {
     hostPid: null,
     uncontained: null,
     failure: null,
+    status: null,
     log: [],
     unknown: [],
   });
+  /** Whether the diagnostics popover is open (#201, #204). ⌘⇧D toggles it. */
+  const [diagnostics, setDiagnostics] = useState(false);
   const [busy, setBusy] = useState(false);
   const [launched, setLaunched] = useState(false);
   /**
@@ -123,6 +135,44 @@ export function Cockpit() {
     setWire((w) => ({ ...w, [key]: [...w[key], text].slice(-200) }));
   }, []);
 
+  // ⌘⇧D / Ctrl+Shift+D, and Escape to close. Hi-fi 15 gives the panel a
+  // shortcut because it is what somebody reaches for while writing a bug report,
+  // and `event.code` rather than `event.key` so it survives a keyboard layout
+  // where shift+d is not "D".
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        setDiagnostics(false);
+        return;
+      }
+      if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.code === 'KeyD') {
+        event.preventDefault();
+        setDiagnostics((open) => !open);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  // Re-asked when the panel opens. Uptime is the one fact in it that moves, and
+  // a figure measured at connect would be however long ago that was - stated as
+  // though it were now.
+  useEffect(() => {
+    if (!diagnostics || !host.inShell()) return;
+    let cancelled = false;
+    void host
+      .status()
+      .then((status) => {
+        if (!cancelled) setWire((w) => ({ ...w, status }));
+      })
+      // Left as it was. A refresh that failed is not a reason to blank four
+      // facts the window already has; the panel says when it has none.
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [diagnostics]);
+
   useEffect(() => {
     if (!host.inShell()) return;
     let stop: (() => void) | null = null;
@@ -159,6 +209,7 @@ export function Cockpit() {
           hostPid: status.pid,
           failure: status.failure,
           uncontained: status.uncontained,
+          status,
         }));
         if (status.ready !== null) dispatch(status.ready);
       } catch (err) {
@@ -249,18 +300,38 @@ export function Cockpit() {
           <MetaChip>browser · no shell</MetaChip>
         ) : (
           <>
-            {wire.hostPid !== null && <MetaChip kind="checkable">host {wire.hostPid}</MetaChip>}
-            {run.protocol !== null && (
-              <MetaChip kind={run.protocol === host.EXPECTED_PROTOCOL ? 'checkable' : 'default'}>
-                protocol {run.protocol}
-                {run.protocol === host.EXPECTED_PROTOCOL
-                  ? ''
-                  : ` · expected ${String(host.EXPECTED_PROTOCOL)}`}
+            {/* Hi-fi 15: a chip **only when a value is wrong**, and it names the
+                disagreement rather than the value. `HOST 43804` and
+                `PROTOCOL 1` sat here permanently and a manual pass reported
+                that they mean nothing to a user (#204) - which is true right up
+                until one of them is wrong, which is why they moved into the
+                panel instead of being deleted. */}
+            {run.protocol !== null && run.protocol !== host.EXPECTED_PROTOCOL && (
+              <MetaChip kind="alarm">
+                protocol {run.protocol} · expected {host.EXPECTED_PROTOCOL}
               </MetaChip>
             )}
+            <button
+              className="v-cockpit__diag"
+              onClick={() => setDiagnostics((open) => !open)}
+              aria-label="diagnostics"
+              aria-expanded={diagnostics}
+              title="Diagnostics (Ctrl+Shift+D)"
+            >
+              •••
+            </button>
           </>
         )}
       </header>
+
+      {diagnostics && (
+        <Diagnostics
+          status={wire.status}
+          expected={host.EXPECTED_PROTOCOL}
+          identity={run.identity}
+          onClose={() => setDiagnostics(false)}
+        />
+      )}
 
       {wire.failure !== null && (
         <div className="v-cockpit__alarm">
