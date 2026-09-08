@@ -25,6 +25,7 @@ import {
 } from '@src/run.js';
 import type { AllocatedRun } from '@src/run.js';
 import { acquireLock, describeLiveness } from '@src/lock.js';
+import { cancelRequested, clearCancel } from '@src/cancel.js';
 import { describeEnding as describeProcessEnding, installEndingStamp } from '@src/ending.js';
 import { commitFork, listForkPoints, planFork } from '@src/fork.js';
 import type { Liveness, LockHandle } from '@src/lock.js';
@@ -1411,6 +1412,11 @@ export async function execute(
    */
   lock?: LockHandle,
 ): Promise<ExitCode> {
+  // A latch from a previous run in this process, cleared before this one starts
+  // (#209). The host allows a second `invoke` once the first has settled, and a
+  // cancel that survived into it would kill its first agent turn instantly -
+  // reported as the run being stopped by somebody who stopped a different one.
+  clearCancel();
   const started = Date.now();
   const recovery = emptyRecovery();
   let reported = false;
@@ -1529,6 +1535,28 @@ export async function execute(
     // report holding what was recovered before it fired, which is the case the
     // one-shot guard exists for: the walk's own flush never ran.
     flushRecovery();
+    // Before the `Escalation` branch, and it becomes one (#209).
+    //
+    // **A cancel is not a second way for a run to end.** #131 closed the
+    // ambiguity between "vibe chose to stop" and "something killed it", and a
+    // cancel that exited some other way would reopen it with a button attached.
+    // So it takes the ending a round cap already takes: `needs-input`, a
+    // `NEEDS-INPUT.md` naming why, `EXIT.NEEDS_HUMAN`, and a process that leaves
+    // under its own control - which is what gets `ending.json` written saying
+    // vibe stopped rather than that it died.
+    //
+    // Caught here rather than at the turn, because between the two are the
+    // retry logic and the loop's own handlers: whatever any of them made of the
+    // killed child, the latch is still set and this is the one place every path
+    // out of `orchestrate` passes through.
+    const cancelled = cancelRequested();
+    if (cancelled !== null && !(err instanceof Escalation)) {
+      err = new Escalation(
+        EXIT.NEEDS_HUMAN,
+        `The run was stopped: ${cancelled}. The turn in flight was killed and is redone from ` +
+          'the top on resume; its spend is already charged. Nothing before it was lost.',
+      );
+    }
     if (err instanceof Escalation) {
       state.status = err.code === EXIT.NEEDS_HUMAN ? 'needs-input' : 'stalled';
       // recordEvent persists, so the status and the event that explains it land

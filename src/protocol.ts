@@ -114,7 +114,22 @@ export type Inbound =
    * the frame says the request was accepted rather than that a hold has happened
    * - the `ask` that follows is what says the second thing.
    */
-  | { type: 'pause'; id: number };
+  | { type: 'pause'; id: number }
+  /**
+   * Kill the turn in flight and end the run, resumably (#209).
+   *
+   * **The other half of `pause`, and they must never be confused.** A pause
+   * holds at the next boundary and costs nothing; this kills a child that may be
+   * forty minutes in, and that turn is redone from the top. Its spend is charged
+   * either way - the tokens were used - which is what a confirmation has to say
+   * out loud.
+   *
+   * Not a kill of the *process*: the run ends the way a round cap ends it, with
+   * `NEEDS-INPUT.md` written and `vibe resume` able to pick it up from the last
+   * checkpoint. That is what keeps this from being a second definition of how a
+   * run ends - it takes the one that already exists.
+   */
+  | { type: 'cancel'; id: number; reason?: string };
 
 export function encode(msg: Outbound): string {
   return `${JSON.stringify(msg)}\n`;
@@ -192,6 +207,19 @@ export function decode(line: string): Decoded {
       return { ok: true, message: { type: 'shutdown', id } };
     case 'pause':
       return { ok: true, message: { type: 'pause', id } };
+    case 'cancel': {
+      // Optional, and refused rather than coerced when present but unusable.
+      // The reason reaches `NEEDS-INPUT.md` and the run record, so a number
+      // there would be a sentence nobody wrote.
+      const why = parsed['reason'];
+      if (why !== undefined && (typeof why !== 'string' || why === '')) {
+        return { ok: false, id, reason: 'cancel carried a reason that was not a sentence' };
+      }
+      return {
+        ok: true,
+        message: why === undefined ? { type: 'cancel', id } : { type: 'cancel', id, reason: why },
+      };
+    }
     default:
       return {
         ok: false,

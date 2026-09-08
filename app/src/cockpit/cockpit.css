@@ -205,6 +205,141 @@
   padding: var(--space-4);
 }
 
+/* -------------------------------------------------------- pause and stop
+ * Hi-fi 18. Two controls, one above the other, **neither a primary**, and the
+ * visual difference between them is deliberately small: two controls that look
+ * wildly different stop reading as alternatives, and these are alternatives.
+ *
+ * **The labels carry the distinction, not the colour.** They differ in when it
+ * happens and what it acts on, and each carries its cost on a second line. What
+ * separates them visually is one step of border weight and an `ends the run`
+ * kicker - not a red button, which would say *dangerous* where the honest word
+ * is *different*.
+ */
+.v-footer__controls {
+  display: grid;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.v-control {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1);
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--rule-control);
+  background: none;
+  cursor: pointer;
+  text-align: left;
+}
+
+.v-control--grave {
+  border-color: var(--rule-strong);
+}
+
+.v-control:hover:not(:disabled) {
+  border-color: var(--text-emphasis);
+}
+
+.v-control:disabled {
+  cursor: default;
+  border-style: dashed;
+}
+
+.v-control__label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font: var(--type-body-sm);
+  color: var(--text-primary);
+}
+
+/* The second line, always present. A control whose cost is only in a tooltip is
+   a control somebody presses without reading it. */
+.v-control__cost {
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+/* ------------------------------------------------------- the stop confirmation
+ * `7d`'s cost table, reused. The rows are measurements or named absences; the
+ * primary action is **Keep running**, because a confirmation whose primary is
+ * the destructive one is a speed bump.
+ */
+.v-stop__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.v-stop__title {
+  font: var(--type-title);
+  color: var(--text-display);
+}
+
+.v-stop__lead {
+  font: var(--type-lead);
+  color: var(--text-primary);
+  margin: 0 0 var(--space-4);
+}
+
+.v-stop__cost {
+  display: grid;
+  grid-template-columns: 9rem 1fr;
+  gap: var(--space-1) var(--space-3);
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--rule-inner);
+}
+
+.v-stop__label {
+  font: var(--type-label);
+  letter-spacing: 0.08em;
+  color: var(--text-tertiary);
+}
+
+.v-stop__value {
+  font: var(--type-mono);
+  color: var(--text-primary);
+}
+
+.v-stop__note {
+  grid-column: 2;
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+/* A figure this build cannot produce, named with its reason. Never a zero: a
+   turn killed before it completes may report no usage at all, and `0 tok` would
+   be a claim that it spent nothing. */
+.v-stop__absent {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+}
+
+.v-stop__middle {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--rule-inner);
+}
+
+.v-stop__actions {
+  display: flex;
+  gap: var(--space-3);
+  margin-top: var(--space-5);
+}
+
+/* The primary sits last, so the destructive action is not what the eye or the
+   pointer lands on first. */
+.v-stop__actions .v-btn:last-child {
+  margin-left: auto;
+}
+
 /* ---------------------------------------------------------------- diagnostics
  * Hi-fi 15. `HOST 43804` and `PROTOCOL 1` came out of the titlebar and landed
  * here; what stays in the chrome is a `•••` and, only when something disagrees,

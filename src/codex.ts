@@ -567,6 +567,11 @@ export async function codexTurn(
       input: prompt,
       cwd,
       timeoutMs,
+      // The other agent turn a person may stop mid-flight (#209). The `exec
+      // fork` call above is deliberately NOT interruptible: it mints a thread
+      // id and takes no model turn, so killing it buys nothing and could leave
+      // a registered id with no conversation behind it (#74).
+      interruptible: true,
       ...(heartbeat === null ? {} : { onLine: heartbeat.onLine }),
     });
     ended.seen = { code, signal };

@@ -12,6 +12,7 @@ import { Footer } from './Footer';
 import { Launch } from './Launch';
 import { LoopColumn } from './LoopColumn';
 import { OutputPane } from './OutputPane';
+import { StopConfirm } from './StopConfirm';
 import { emptyRun, nextRun, reduce } from './model';
 import { readLaunchArgv } from './argv';
 import type { Launched } from './argv';
@@ -75,6 +76,17 @@ export function Cockpit() {
   });
   /** Whether the diagnostics popover is open (#201, #204). ⌘⇧D toggles it. */
   const [diagnostics, setDiagnostics] = useState(false);
+  /**
+   * A pause this window has asked for and not yet seen honoured (#210).
+   *
+   * The window's own memory of its own outbound message, like `sentLaunch` — not
+   * a re-derivation. The loop is the one that decides when a pause is taken, and
+   * it says so with `requested` on `gate_waiting`; this only stops the button
+   * being pressed twice while nothing appears to happen.
+   */
+  const [pausing, setPausing] = useState(false);
+  /** Whether the stop confirmation is up. Hi-fi 18: a stop confirms first. */
+  const [confirmStop, setConfirmStop] = useState(false);
   const [busy, setBusy] = useState(false);
   const [launched, setLaunched] = useState(false);
   /**
@@ -275,6 +287,39 @@ export function Cockpit() {
   );
 
   /**
+   * The two controls hi-fi 18 draws together (#209, #210).
+   *
+   * Kept side by side here as well as on screen, because the difference is the
+   * whole point: `pause` holds at the next boundary and costs nothing, `stop`
+   * kills a child that may be forty minutes in. Neither is a kill of the
+   * process, and both leave the run resumable.
+   */
+  const pause = useCallback(() => {
+    setPausing(true);
+    void host.pause().catch((err: unknown) => {
+      // Un-armed on failure. A button that stayed disabled after a request that
+      // never landed would be a window claiming a hold it has not asked for.
+      setPausing(false);
+      note('log', String(err));
+    });
+  }, [note]);
+
+  const stop = useCallback(
+    (reason: string) => {
+      setConfirmStop(false);
+      void host.cancel(reason).catch((err: unknown) => note('log', String(err)));
+    },
+    [note],
+  );
+
+  // The loop honoured the pause, so the window stops saying it is armed. Told,
+  // not guessed: `gate_waiting` carries `requested` precisely so this is not the
+  // window deciding a hold must have been the one it asked for.
+  useEffect(() => {
+    if (run.gate !== null) setPausing(false);
+  }, [run.gate]);
+
+  /**
    * Fire a proposal the user accepted.
    *
    * Nothing here decides anything: the effect was built by `tools.ts` from what
@@ -324,6 +369,19 @@ export function Cockpit() {
         )}
       </header>
 
+      {confirmStop && (
+        <StopConfirm
+          turn={run.running}
+          busy={busy}
+          onStop={() => stop('stopped from the window')}
+          onPause={() => {
+            setConfirmStop(false);
+            pause();
+          }}
+          onKeep={() => setConfirmStop(false)}
+        />
+      )}
+
       {diagnostics && (
         <Diagnostics
           status={wire.status}
@@ -355,7 +413,14 @@ export function Cockpit() {
             <Launch busy={busy || !wire.connected} onLaunch={launch} />
           )}
           <LoopColumn run={run} now={now} hostPid={wire.hostPid} />
-          <Footer run={run} busy={busy} onDecide={answer} />
+          <Footer
+            run={run}
+            busy={busy}
+            onDecide={answer}
+            onPause={pause}
+            onStop={() => setConfirmStop(true)}
+            pausing={pausing}
+          />
         </div>
 
         <div className="v-cockpit__pane">

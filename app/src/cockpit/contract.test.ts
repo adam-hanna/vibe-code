@@ -6,6 +6,7 @@ import orchestrator from '../../../src/orchestrator.ts?raw';
 import charge from '../../../src/charge.ts?raw';
 import cli from '../../../src/cli.ts?raw';
 import preflight from '../../../src/preflight.ts?raw';
+import protocol from '../../../src/protocol.ts?raw';
 import work from '../../../src/work.ts?raw';
 // Aliased: `work` is already the core's source above, and this is the renderer
 // that has to agree with it. Two things named for one measurement is the
@@ -125,6 +126,25 @@ test('a code from a newer core has no phrase invented for it', () => {
 test('the core still marks the two places a run ends badly', () => {
   expect(cli).toContain("id: 'run_escalated'");
   expect(cli).toContain("id: 'run_failed'");
+});
+
+/**
+ * The two frames the footer's controls send (#209, #210).
+ *
+ * `host.pause()` and `host.cancel()` put a line on a wire the core has to
+ * recognise, and the failure is quiet in a way a user would never diagnose: an
+ * unknown `type` is refused with an `error` frame, which lands in the log pane
+ * rather than anywhere near the button that was pressed. So the button appears
+ * to do nothing, twice, and the run carries on.
+ *
+ * Read from `decode`'s own switch rather than from the `Inbound` union, because
+ * the union is a type and the switch is what actually runs.
+ */
+test('the core still accepts the two frames the footer sends', () => {
+  const body = /export function decode\([\s\S]*?\n\}/.exec(protocol)?.[0];
+  if (body === undefined) throw new Error('decode not found in src/protocol.ts');
+  expect(body).toContain("case 'pause':");
+  expect(body).toContain("case 'cancel':");
 });
 
 /**

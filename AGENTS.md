@@ -242,6 +242,7 @@ src/work.ts          how far a write turn has got - measured, and labelled a pro
 src/schemas.ts       the JSON schemas both CLIs are pinned to
 src/validate.ts      parser vocabulary for model output
 src/proc.ts          child-process plumbing, and how a child ended
+src/cancel.ts        stopping a turn that is already running - the latch, and what it may kill
 src/ending.ts        how this process ended - the stamp beside the lock
 src/git.ts           branch and commit operations
 tests/               node:test, one file per concern
@@ -344,6 +345,39 @@ answers an `ask` that is already open, and the point of a pause is to be asked f
 gate is holding. And not a **stop**: `gate_waiting` carries `requested` so a window can tell
 the two reasons for a hold apart, because a control that blurred *hold at the next boundary,
 free* with *kill the turn in flight* would let somebody end a run believing they had paused it.
+
+**A stop kills the turn in flight, and it is not a second way for a run to end** (#209).
+Every other ending waits for a boundary — a `stop` gate row ends the run at the next
+checkpoint, a round cap raises an `Escalation` between turns, `shutdown` is documented as *"not
+a kill"* — so until now the only way to end a live turn was to kill the process.
+`src/cancel.ts` is the latch, `RunOptions.interruptible` is what it may kill, and `execute`
+turns it into the ending a round cap already takes: `needs-input`, `EXIT.NEEDS_HUMAN`, a
+`NEEDS-INPUT.md` naming why, and a process that leaves under its own control so `ending.json`
+says vibe stopped rather than that it died. A cancel exiting some other way would reopen the
+exact ambiguity #131 closed, with a button attached.
+
+Four things about it are load-bearing:
+
+- **A module latch, not a token threaded down.** A cancel has to reach a child that is already
+  spawned, several layers below whoever asked; a parameter on every function between them is a
+  place for a future call site to forget it, and a turn silently uncancellable is worse than no
+  cancel at all because the button is still there. It is safe because of a rule that already
+  exists and is enforced elsewhere: **one run per process**, which `src/lock.ts` is written
+  expecting and `serve.ts` enforces.
+- **It kills only what it was told it may.** `git`, the verification gate and the app-server
+  client all go through the same `run()` and none is interruptible. A `git commit` killed
+  mid-write leaves an index a later resume has to recover from, and the gate is the **user's
+  own command** — a suite killed half-way is a `failing` verdict about a run nobody completed.
+- **It latches, and the next agent child refuses to start.** The killed turn's error travels up
+  through the retry logic and the loop's handlers, any of which could decide to have another
+  go. `execute` calls `clearCancel()` on the way in, so a latch never survives into the next
+  run in the same process.
+- **The confirmation states the cost in the tool's own units, and the cost is not a re-send.**
+  A killed run resumes its conversation by session id. What a stop destroys is the turn in
+  flight: its spend is charged anyway and the turn is redone. `"Unsaved work may be lost"` is
+  the sentence people learn to click through; a token figure is checkable. A **Codex** turn
+  killed mid-flight reports no usage at all, so that row says the spend is unknown and why
+  rather than showing `0 tok`.
 
 **`vibe plan` is deliberately not a row.** #140 asked for `planOnly` to resolve to
 `gates['plan-approved'] = 'stop'`; it does not, because they are two different things rather

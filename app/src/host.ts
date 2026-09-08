@@ -192,6 +192,22 @@ export function send(request: object): Promise<void> {
   return invoke('host_send', { line: JSON.stringify(request) });
 }
 
+/**
+ * Hold at the next boundary (#210), or kill the turn in flight (#209).
+ *
+ * Two functions rather than one with a flag, because they are alternatives
+ * rather than degrees. `pause` costs nothing and the run carries on; `cancel`
+ * kills a child that may be forty minutes in and ends the run. The one thing
+ * they share is that both are resumable, and neither is a kill of the process.
+ */
+export function pause(): Promise<void> {
+  return send({ type: 'pause', id: nextRequestId() });
+}
+
+export function cancel(reason: string): Promise<void> {
+  return send({ type: 'cancel', id: nextRequestId(), reason });
+}
+
 /** Ids the app allocates for its own requests. Gate ids come from the host. */
 let nextId = 0;
 export function nextRequestId(): number {
