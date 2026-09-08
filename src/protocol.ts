@@ -1,5 +1,6 @@
 import type { Level, Narration } from '@src/log.js';
 import type { GateContext } from '@src/host.js';
+import type { RunSummary } from '@src/types.js';
 
 /**
  * The wire between the loop and whatever is driving it (#153).
@@ -87,7 +88,23 @@ export type Outbound =
       text: string;
       sessionId: string;
       tokens: { input: number; output: number; cacheRead: number; cacheCreation: number; total: number };
-    };
+    }
+  /**
+   * The archive, in reply to an `archive` request (#223, `1b`).
+   *
+   * **A reply, and deliberately not narration.** Every other outbound frame
+   * describes a run in progress; this describes runs that are over, and it is
+   * asked for rather than pushed - a window that wanted the history would
+   * otherwise have to wait for something to happen before it could learn that
+   * nothing had.
+   *
+   * `runs` is `RunSummary[]` verbatim, because `listRuns` is **the** definition
+   * of what an archive entry is: a real directory, a symlink it refused to
+   * follow (#53), something `lstat` could not classify. A second classifier here
+   * would eventually disagree with `vibe list` about which runs exist, and the
+   * one that disagreed would be the one on screen.
+   */
+  | { type: 'archive'; id: number; dir: string; runs: RunSummary[] };
 
 /** What the thing driving the loop says. */
 export type Inbound =
@@ -173,7 +190,22 @@ export type Inbound =
       /** The conversation to continue, or to create on the first turn. */
       sessionId: string;
       resume: boolean;
-    };
+    }
+  /**
+   * Ask what runs the archive holds (#223, `1b`).
+   *
+   * **A read, and the only inbound frame that changes nothing.** `listRuns` is
+   * documented as never throwing and never writing, which is what makes this
+   * safe to answer while a run is going - and it has to be answerable then,
+   * because *"triage after a night of unattended work"* is the moment the screen
+   * exists for.
+   *
+   * `dir` is the repository to look in, sent rather than assumed: the host's own
+   * cwd is where it was spawned, and a window that has been pointed at a
+   * different checkout would otherwise be shown the wrong archive with no way to
+   * tell.
+   */
+  | { type: 'archive'; id: number; dir: string };
 
 export function encode(msg: Outbound): string {
   return `${JSON.stringify(msg)}\n`;
@@ -279,6 +311,18 @@ export function decode(line: string): Decoded {
           resume,
         },
       };
+    }
+    case 'archive': {
+      // Required and checked, for the reason `pilot`'s fields are: there is no
+      // `parseArgs` below this to catch it. An empty `dir` would resolve to the
+      // host's cwd, which is a *different repository's* archive presented as
+      // this one's - the worst possible way for this to fail, because it
+      // succeeds and shows somebody else's runs.
+      const dir = parsed['dir'];
+      if (typeof dir !== 'string' || dir === '') {
+        return { ok: false, id, reason: 'archive carried no dir' };
+      }
+      return { ok: true, message: { type: 'archive', id, dir } };
     }
     case 'cancel': {
       // Optional, and refused rather than coerced when present but unusable.

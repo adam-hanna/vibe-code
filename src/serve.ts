@@ -4,11 +4,13 @@ import { pilotChat } from '@src/pilotchat.js';
 import * as log from '@src/log.js';
 import { createLineReader, decode, encode, PROTOCOL_VERSION } from '@src/protocol.js';
 import { orchestrate } from '@src/orchestrator.js';
+import { listRuns } from '@src/run.js';
 import type { RunLoop } from '@src/cli.js';
 import type { GateContext, Host } from '@src/host.js';
 import type { Narration } from '@src/log.js';
 import type { PilotChatOptions, PilotChatResult } from '@src/pilotchat.js';
 import type { Outbound } from '@src/protocol.js';
+import type { RunSummary } from '@src/types.js';
 
 /**
  * The second entry point over `execute()` (#153).
@@ -160,11 +162,22 @@ export interface SessionDeps {
    * an `error` rather than an empty reply.
    */
   pilot?: (options: PilotChatOptions) => Promise<PilotChatResult>;
+  /**
+   * What reads the archive. Defaults to `listRuns` (#223).
+   *
+   * A seam for the same reason as the other two, and this one is also the point:
+   * `listRuns` is the **only** thing that decides what an archive entry is - a
+   * real directory, a symlink it refused to follow (#53), something `lstat`
+   * could not classify - so a test substituting it is substituting the whole
+   * definition rather than a fixture around one.
+   */
+  archive?: (dir: string) => RunSummary[];
 }
 
 export function createSession(send: Send, deps: SessionDeps = {}): Session {
   const invoke = deps.invoke ?? ((argv, loop) => main(argv, loop));
   const chat = deps.pilot ?? pilotChat;
+  const archive = deps.archive ?? ((dir: string) => listRuns(dir));
 
   /**
    * Gates awaiting an answer, by the id this process allocated for them.
@@ -274,6 +287,31 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       // for it.
       send({ type: 'result', id: msg.id, exit: 0 });
       settleIfDone();
+      return;
+    }
+
+    if (msg.type === 'archive') {
+      // **Outside the one-at-a-time rule too, and for a stronger reason than the
+      // pilot's.** `listRuns` is documented as never throwing and never writing,
+      // so answering it while a run is going cannot affect that run - and
+      // `1b`'s whole subject is triage after a night of unattended work, which
+      // is exactly the moment a run is still going.
+      //
+      // Synchronous, because `listRuns` is: it reads a directory and parses what
+      // it finds, and wrapping a sync call in a promise to look asynchronous
+      // would add a tick between the request and the answer for no gain.
+      try {
+        send({ type: 'archive', id: msg.id, dir: msg.dir, runs: archive(msg.dir) });
+      } catch (err: unknown) {
+        // `listRuns` promises not to throw and this is the belt on that: a
+        // window that asked for the archive and got silence would sit on a
+        // spinner for ever, and an `error` frame is answerable.
+        send({
+          type: 'error',
+          id: msg.id,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
       return;
     }
 

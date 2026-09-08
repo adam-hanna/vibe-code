@@ -83,7 +83,53 @@ export interface PilotReply {
   tokens: { input: number; output: number; cacheRead: number; cacheCreation: number; total: number };
 }
 
-export type Frame = Ready | Narration | Ask | Result | HostError | PilotDelta | PilotReply;
+/**
+ * One archive entry, as `listRuns` returned it (#223, `1b`).
+ *
+ * A transcription of the core's `RunSummary`, and every optional field here is
+ * optional there for a stated reason. **The ones that matter most say what could
+ * not be read**, and the core keeps three different failures apart rather than
+ * collapsing them:
+ *
+ * - `linked` — an entry vibe **refused to follow** because it is a symlink or a
+ *   junction (#53). It never looked inside.
+ * - `unverified` — an `lstat` that threw, so whether it is a link could not be
+ *   established at all. The fail-closed half of `linked`, and a separate field
+ *   because one is a measurement and the other is the absence of one.
+ * - `status: 'unreadable'` — a `state.json` that **was** opened and could not be
+ *   used. The entry itself was never in doubt.
+ *
+ * `costUsd: null` is a cost that is unknown rather than zero: `$0.00` would
+ * assert that an unreadable run cost nothing.
+ */
+export interface ArchiveRun {
+  id: string;
+  status: string;
+  task: string;
+  costUsd: number | null;
+  liveness?: string;
+  forkedFrom?: { runId: string; checkpoint: number };
+  linked?: true;
+  unverified?: true;
+}
+
+/** The archive, in reply to a request for it. */
+export interface Archive {
+  type: 'archive';
+  id: number;
+  dir: string;
+  runs: readonly ArchiveRun[];
+}
+
+export type Frame =
+  | Ready
+  | Narration
+  | Ask
+  | Result
+  | HostError
+  | PilotDelta
+  | PilotReply
+  | Archive;
 
 /**
  * Whether a value is a frame this version recognises.
@@ -107,7 +153,10 @@ export function isFrame(v: unknown): v is Frame {
     // reads. Recognised here or they would be reported as unknown frames and
     // land in the diagnostics list instead of in the conversation (#193).
     type === 'pilot_delta' ||
-    type === 'pilot_reply'
+    type === 'pilot_reply' ||
+    // The archive, which the cockpit's reducer also ignores: it describes runs
+    // that are over, and `Run` is about the one in progress (#223).
+    type === 'archive'
   );
 }
 
@@ -257,6 +306,57 @@ export async function onPilotFrame(
     if (frame.type === 'pilot_delta' || frame.type === 'pilot_reply' || frame.type === 'error') {
       handler(frame);
     }
+  });
+}
+
+/**
+ * Ask for the archive, and resolve with what came back (#223, `1b`).
+ *
+ * **A request/response, unlike everything else on this wire**, and it is the one
+ * place that shape is right: the archive is not a thing that happens to a run,
+ * it is a question with an answer, and a screen that had to wait for a run to
+ * narrate before it could learn the history would be unusable on the exact
+ * screen it is for — triage after a night of unattended work, when nothing is
+ * happening.
+ *
+ * The listener is torn down whichever way it settles, including the timeout. A
+ * frame that never arrives has to fail rather than hang: an unanswered promise
+ * on this wire is a spinner nobody can clear, and `listRuns` has an unreadable
+ * archive to survive.
+ */
+const ARCHIVE_TIMEOUT_MS = 15_000;
+
+export async function archive(dir: string): Promise<readonly ArchiveRun[]> {
+  const id = nextRequestId();
+  return new Promise<readonly ArchiveRun[]>((resolve, reject) => {
+    let stop: (() => void) | null = null;
+    const timer = setTimeout(() => {
+      stop?.();
+      reject(new Error('the host did not answer with the archive'));
+    }, ARCHIVE_TIMEOUT_MS);
+    const done = (f: () => void): void => {
+      clearTimeout(timer);
+      stop?.();
+      f();
+    };
+    void listen<unknown>('host://frame', (event) => {
+      const frame: unknown = event.payload;
+      if (!isFrame(frame)) return;
+      // By id, because two windows could ask at once and a `dir` match would
+      // hand one of them the other's answer.
+      if (frame.type === 'archive' && frame.id === id) done(() => resolve(frame.runs));
+      else if (frame.type === 'error' && frame.id === id) {
+        done(() => reject(new Error(frame.message)));
+      }
+    })
+      .then((off) => {
+        stop = off;
+        // After the listener is attached, never before: the host answers
+        // synchronously, and a request sent first can be answered before there
+        // is anything listening for it.
+        return send({ type: 'archive', id, dir });
+      })
+      .catch((err: unknown) => done(() => reject(err instanceof Error ? err : new Error(String(err)))));
   });
 }
 
