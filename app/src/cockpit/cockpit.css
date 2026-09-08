@@ -365,8 +365,88 @@
   padding: var(--space-3) var(--space-4);
 }
 
+/*
+ * While it runs, preflight IS the live card (hi-fi 16). Accent border and the
+ * one pulsing dot, because it is a real turn against a real CLI - which is what
+ * makes this the cockpit with one card in it rather than a launching screen
+ * with a vocabulary of its own. There is no other live card at this point in a
+ * run, so the one-pulse rule holds.
+ */
+.v-preflight--live {
+  border-color: var(--accent-border);
+  background: var(--surface-active);
+}
+
 .v-preflight--done {
   opacity: 0.72;
+}
+
+/* Pushed to the end of the row, where a running card carries its elapsed. */
+.v-preflight__elapsed {
+  margin-left: auto;
+  font: var(--type-mono-sm);
+  color: var(--text-secondary);
+}
+
+/*
+ * The launching checklist (hi-fi 16).
+ *
+ * This is what replaces a progress bar, and the substitution is the design:
+ * there is no denominator here - no phase, no turn, no total - so the honest
+ * drawing is three facts, each carrying its own evidence.
+ */
+.v-starting {
+  border: 1px dashed var(--rule-control-dim);
+  padding: var(--space-3) var(--space-4);
+}
+
+.v-starting__steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.v-starting__step {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: var(--space-1) 0;
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+.v-starting__mark {
+  width: 1em;
+  color: var(--text-tertiary);
+}
+
+.v-starting__step--done .v-starting__mark {
+  color: var(--accent-solid);
+}
+
+.v-starting__what {
+  color: var(--text-primary);
+}
+
+.v-starting__detail {
+  margin-left: auto;
+  font: var(--type-mono-sm);
+  color: var(--text-secondary);
+}
+
+/*
+ * What nothing has reported yet, named and attributed.
+ *
+ * Without this the next reader assumes four numbers were forgotten. Dashed and
+ * never dimmed, which is the design's rule for absence: dimming reads as
+ * "disabled for you", dashed reads as "nothing has filled this in".
+ */
+.v-starting__unknown {
+  margin: var(--space-2) 0 0;
+  padding-top: var(--space-2);
+  border-top: 1px dashed var(--rule-control-dim);
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
 }
 
 .v-preflight__label {
@@ -392,6 +472,18 @@
  */
 .v-cycle--idle {
   opacity: 0.72;
+  /* Dashed and hatched (hi-fi 16): "these three stages exist and none has
+     begun". It is what replaces a skeleton - a skeleton implies content is
+     arriving into that exact shape, and none of these has a shape yet. */
+  border-style: dashed;
+  border-color: var(--rule-control-dim);
+  background: repeating-linear-gradient(
+    135deg,
+    var(--surface-card),
+    var(--surface-card) 4px,
+    var(--rule-hatch) 4px,
+    var(--rule-hatch) 5px
+  );
 }
 
 .v-cycle__head {

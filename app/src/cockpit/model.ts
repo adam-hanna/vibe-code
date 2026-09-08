@@ -142,6 +142,15 @@ export interface Preflight {
   probing: string | null;
   /** Set when the toolchain contract was satisfied. A failure is `reason`. */
   passed: boolean;
+  /**
+   * When preflight started, on our clock (hi-fi 16).
+   *
+   * **This is what makes it a live card rather than a spinner.** Preflight is a
+   * real turn against a real CLI, so it gets the treatment a turn gets - a
+   * pulsing dot and an elapsed time - and the elapsed time is measured from
+   * here. A spinner would say the same thing while measuring nothing.
+   */
+  at: number;
 }
 
 /** A boundary the loop is holding at, waiting to be told what to do. */
@@ -227,7 +236,7 @@ export interface Run {
    * attached to it. It is here because "which run" and "where is it" are the
    * same question to the person asking, and the host is holding both.
    */
-  identity: { runId: string; dir: string; resumed: boolean } | null;
+  identity: { runId: string; dir: string; resumed: boolean; at: number } | null;
   /** The step before the first phase, while it is running and after it (#205). */
   preflight: Preflight | null;
   /**
@@ -547,7 +556,7 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
       case 'preflight_started':
         return {
           ...next,
-          preflight: { agents: strings(data['agents']), probing: null, passed: false },
+          preflight: { agents: strings(data['agents']), probing: null, passed: false, at },
         };
 
       case 'probe_started': {
@@ -560,7 +569,10 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
         const before = next.preflight;
         return {
           ...next,
-          preflight: { agents: before?.agents ?? [], probing: agent, passed: false },
+          // `at` is kept from the announcement where there was one, so the
+          // elapsed clock measures preflight rather than restarting at each
+          // probe. An older core that announced nothing starts it here.
+          preflight: { agents: before?.agents ?? [], probing: agent, passed: false, at: before?.at ?? at },
         };
       }
 
@@ -568,7 +580,7 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
         const before = next.preflight;
         return {
           ...next,
-          preflight: { agents: before?.agents ?? [], probing: null, passed: true },
+          preflight: { agents: before?.agents ?? [], probing: null, passed: true, at: before?.at ?? at },
         };
       }
 
@@ -579,7 +591,10 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
         // be a half-answer the window then has to explain, and the two always
         // travel together because the site that emits them has both in hand.
         if (runId === null || dir === null) return next;
-        return { ...next, identity: { runId, dir, resumed: data['resumed'] === true } };
+        // `at` is when the core said this, which is the honest answer to *when
+        // did the task reach the core* - the window's own send time would be
+        // when it asked, not when anything happened (hi-fi 16).
+        return { ...next, identity: { runId, dir, resumed: data['resumed'] === true, at } };
       }
 
       case 'verify_started': {

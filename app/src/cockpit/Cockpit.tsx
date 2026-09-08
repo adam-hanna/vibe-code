@@ -354,7 +354,7 @@ export function Cockpit() {
           {(!launched || run.completed !== null) && !outside && (
             <Launch busy={busy || !wire.connected} onLaunch={launch} />
           )}
-          <LoopColumn run={run} now={now} />
+          <LoopColumn run={run} now={now} hostPid={wire.hostPid} />
           <Footer run={run} busy={busy} onDecide={answer} />
         </div>
 

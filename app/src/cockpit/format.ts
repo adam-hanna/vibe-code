@@ -19,6 +19,23 @@ export function elapsed(ms: number): string {
 }
 
 /**
+ * `14:52` — an instant, in the viewer's own locale (#202, hi-fi 17).
+ *
+ * **The counterpart to `elapsed`, and the two are not interchangeable.** A
+ * relative time is a claim that has to keep being true: `activity 6s ago` is
+ * right for one second and is a lie for every second after it, which is how a
+ * card at a held gate came to read `last activity 5h39m ago` on a turn that had
+ * taken a minute. An instant is true forever, so it is what a settled card uses.
+ */
+export function clock(ms: number): string {
+  const at = new Date(ms);
+  // A time from another process, so an unusable one is possible. `Invalid Date`
+  // sitting where a timestamp goes would read as something somebody measured.
+  if (Number.isNaN(at.getTime())) return 'an unrecorded time';
+  return at.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+}
+
+/**
  * `up 3h04m`, `up 12m30s`, `up 8s` — a host's uptime from a count of seconds.
  *
  * Its own function rather than `elapsed(secs * 1000)` at the call site, because
