@@ -284,6 +284,23 @@ broke nothing. A `vibe.config.json` is not TypeScript, so both are also refused 
 with their own reason** — `mergeSection` would have dropped the key in silence, and someone
 who believes they armed a gate finds out by watching a run go past it.
 
+**A pause is one hold, and deliberately not a seventh mode** (#210). `AGENTS.md` has said
+since the app landed that pausing is free — the loop runs in-process, so a hold is an `await`
+at a boundary it was crossing anyway and both agent sessions stay warm. The mechanism was
+real; **the control did not exist**, and the only way to make a run hold was to hand-edit
+`cfg.gates` before starting it. The `pause` frame arms one hold, `Host.takePause()` consumes
+it at the next boundary, and `holdAt` takes it **before** acting on the mode and **whatever**
+the mode is — a boundary that read it, ran through on `auto` and left it armed would hold at
+some later boundary nobody was looking at, which is indistinguishable from a stall.
+
+Three things it is not, each for its own reason. Not a **gate mode**: `cfg.gates` is the run's
+standing answer to where control comes back, decided before the run starts, and a mode would
+mean a run's configuration changed underneath it. Not a **`Decision` member**: a decision
+answers an `ask` that is already open, and the point of a pause is to be asked for when no
+gate is holding. And not a **stop**: `gate_waiting` carries `requested` so a window can tell
+the two reasons for a hold apart, because a control that blurred *hold at the next boundary,
+free* with *kill the turn in flight* would let somebody end a run believing they had paused it.
+
 **`vibe plan` is deliberately not a row.** #140 asked for `planOnly` to resolve to
 `gates['plan-approved'] = 'stop'`; it does not, because they are two different things rather
 than two mechanisms for one. `planOnly` says there is no next phase, so the run *completes* —

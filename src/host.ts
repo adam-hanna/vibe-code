@@ -107,6 +107,41 @@ export type Decision =
  */
 export interface Host {
   decide(ctx: GateContext): Promise<unknown>;
+  /**
+   * Has somebody asked the loop to hold at the next boundary? (#210)
+   *
+   * **Take, not read**, and the name says so: answering `true` consumes the
+   * request. A pause is one hold rather than a mode, so a getter that could be
+   * asked twice would either hold twice or need a second call to clear it - and
+   * a boundary that consulted it and then decided not to hold would leave the
+   * request armed against a boundary nobody was looking at.
+   *
+   * ## Why this is not a seventh gate mode, or a `Decision` member
+   *
+   * `cfg.gates` is the run's **standing** answer to *where does control come
+   * back*, decided before the run starts and true for every round. This is a
+   * person, mid-run, saying *hold at the next one* — a different question, and
+   * `gates.ts` is deliberately the only definition of the first. Making it a
+   * mode would mean a run's configuration changed underneath it, which
+   * `validateConfig` and `consistency.ts` are both written assuming cannot
+   * happen.
+   *
+   * It is not a `Decision` either, for the reason the vocabulary above gives:
+   * a `Decision` answers an `ask` that is already open, and the whole point of a
+   * pause is to be asked for when no gate is holding.
+   *
+   * ## What it costs, which is nothing
+   *
+   * A hold is an `await` at a boundary the loop was about to cross anyway. The
+   * process stays alive, both agent sessions stay warm, and continuing re-sends
+   * no context — the property `AGENTS.md` calls *"what makes `⏸ pause` free"*.
+   * That is the whole difference between this and a stop, and it is why they
+   * must never be drawn as two shades of the same control.
+   *
+   * Optional, so every existing `Host` — the tests' fakes, and any future one —
+   * is one that simply never pauses.
+   */
+  takePause?(): boolean;
 }
 
 const CONTINUE: Decision = { kind: 'continue' };

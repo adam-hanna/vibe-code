@@ -170,6 +170,15 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
     if (shuttingDown && running === null) settleFinished({ abandoned: null });
   };
 
+  /**
+   * A hold asked for since the last boundary, waiting to be taken (#210).
+   *
+   * One boolean rather than a count: two `pause` frames before the loop reaches
+   * a boundary are the same request twice, and holding twice for them would be
+   * the app deciding a person meant something they did not say.
+   */
+  let pauseRequested = false;
+
   const host: Host = {
     decide: (ctx: GateContext) =>
       new Promise<unknown>((resolve) => {
@@ -177,6 +186,11 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
         asks.set(id, resolve);
         send({ type: 'ask', id, context: ctx });
       }),
+    takePause: () => {
+      const asked = pauseRequested;
+      pauseRequested = false;
+      return asked;
+    },
   };
 
   // The whole difference between this entry point and the CLI's, in one line:
@@ -227,6 +241,20 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       // for it.
       send({ type: 'result', id: msg.id, exit: 0 });
       settleIfDone();
+      return;
+    }
+
+    if (msg.type === 'pause') {
+      pauseRequested = true;
+      // Accepted, not honoured — and the two are different facts, the same way
+      // a `shutdown` is acknowledged before the run it is waiting on has ended.
+      // What says a hold actually happened is the `ask` that follows it.
+      //
+      // Accepted with no run in flight too, and deliberately: a person who
+      // presses pause a moment before a run starts meant to hold that run, and
+      // refusing it would be this seam deciding their timing was wrong. It costs
+      // nothing, because `takePause` clears itself at the first boundary.
+      send({ type: 'result', id: msg.id, exit: 0 });
       return;
     }
 

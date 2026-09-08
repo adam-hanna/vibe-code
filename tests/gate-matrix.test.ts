@@ -77,6 +77,30 @@ function answering(answer: unknown): Host & { asked: GateContext[] } {
   return { asked, decide: (ctx) => (asked.push(ctx), Promise.resolve(answer)) };
 }
 
+/**
+ * A host that has been asked to hold once, and records what it was asked (#210).
+ *
+ * `takes` counts how many times the loop consumed the request, which is the
+ * claim that matters: a pause is one hold, so a boundary that read it and ran
+ * through would leave it armed against a later boundary nobody was watching.
+ */
+function paused(answer: unknown): Host & { asked: GateContext[]; takes: number } {
+  const asked: GateContext[] = [];
+  let armed = true;
+  const host = {
+    asked,
+    takes: 0,
+    decide: (ctx: GateContext) => (asked.push(ctx), Promise.resolve(answer)),
+    takePause: () => {
+      host.takes += 1;
+      const was = armed;
+      armed = false;
+      return was;
+    },
+  };
+  return host;
+}
+
 function muted<T>(body: () => Promise<T>): Promise<T> {
   const realLog = console.log;
   const realError = console.error;
@@ -183,6 +207,57 @@ test('a config written before gates existed still loads, with the default table'
 });
 
 // ---- with a host ------------------------------------------------------------
+
+test('a pause holds at the next auto boundary, and at exactly one', async () => {
+  // #210. `AGENTS.md` has said since the app landed that pausing is free, and
+  // the mechanism was real - the app runs the loop in its own process, so a hold
+  // is an `await` and both sessions stay warm. What did not exist was any way to
+  // ask for one without hand-editing `cfg.gates` before the run started.
+  const state = fullRun('vibe-gates-pause-');
+  const host = paused({ kind: 'continue' });
+  await muted(() =>
+    orchestrate(
+      state,
+      config({}, { ...committing(), ...verifying(state), gates: matrix() }),
+      false,
+      agents(passing(state), []),
+      host,
+    ),
+  );
+
+  // Exactly one hold, at the FIRST boundary the loop reached - not at all of
+  // them, which is what a pause read as a mode would have done.
+  assert.equal(host.asked.length, 1, 'a pause is one hold, not a mode');
+  assert.equal(state.status, 'done');
+
+  // And it was consulted at every boundary, so the one that took it is the one
+  // that held. A request read once and left armed is the failure this pins.
+  assert.ok(host.takes > 1, 'every boundary asks; only the first one gets a yes');
+});
+
+test('a pause changes nothing on a row that was already holding', async () => {
+  // `step` holds anyway and `stop` ends the run anyway, so on those a pause is a
+  // request the loop was about to honour. What it must not do is hold twice.
+  const state = fullRun('vibe-gates-pause-step-');
+  const host = paused({ kind: 'continue' });
+  await muted(() =>
+    orchestrate(
+      state,
+      config(
+        {},
+        { ...committing(), ...verifying(state), gates: matrix({ implemented: 'step' }) },
+      ),
+      false,
+      agents(passing(state), []),
+      host,
+    ),
+  );
+
+  // One hold from the pause and one from the `implemented` row. They are two
+  // different boundaries, which is the point: neither swallowed the other.
+  assert.equal(host.asked.length, 2);
+  assert.ok(host.asked.some((c) => c.boundary === 'implemented'));
+});
 
 test('the matrix is what arms a gate: auto is not asked, step is', async () => {
   // The behaviour #140 exists to add. Before this a host was asked at all six

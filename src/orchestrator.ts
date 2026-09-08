@@ -342,7 +342,17 @@ async function holdAt(
   boundary: CheckpointBoundary,
 ): Promise<void> {
   const mode = gateMode(cfg.gates, boundary);
-  if (mode === 'auto') return;
+
+  // A pause asked for mid-run (#210). Taken before the mode is acted on, and
+  // taken *whatever* the mode is, so the request is consumed exactly once - a
+  // boundary that read it, ran through on `auto`, and left it armed would hold
+  // at some later boundary nobody was looking at.
+  //
+  // It only changes an `auto` row. A `step` row is already holding and a `stop`
+  // row is already ending, so on those this is a request the loop was about to
+  // honour anyway.
+  const paused = host?.takePause?.() === true;
+  if (mode === 'auto' && !paused) return;
 
   // `stop` asks nobody. That is what makes it mean the same thing in both front
   // ends: the CLI has no host and never will - a promise is not answerable from
@@ -388,7 +398,14 @@ async function holdAt(
   // in `recordAndSay`: a gate that is waiting is not a transition - nothing
   // resumes from "was waiting", and nothing judges the run by it. #133 named
   // `gate_waiting` as exactly this case when it asked for stable ids.
-  log.step(`Holding at ${boundary} - waiting on you`, { id: 'gate_waiting', data: { ...ctx } });
+  // `requested` says which of the two reasons this hold has: the matrix, or a
+  // person who pressed pause. A window that could not tell them apart would show
+  // an armed pause as a gate the user configured and never say the pause was
+  // honoured (#210).
+  log.step(`Holding at ${boundary} - waiting on you`, {
+    id: 'gate_waiting',
+    data: { ...ctx, requested: paused },
+  });
 
   // Two readings of one answer, because they are two facts. `readDecision` says
   // what to do and fails closed to `stop`; `readOrigin` says who shaped it and
