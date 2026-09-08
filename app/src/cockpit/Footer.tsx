@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Button, StateKicker } from '../design';
 import { boundary, ending } from './format';
+import type { Raise } from './argv';
 import type { Run } from './model';
 
 /**
@@ -35,7 +36,9 @@ export interface FooterProps {
    * says needs its own validator before it is offered. Buttons that produced no
    * frame would be the `proposed` chip shipped as behaviour.
    */
-  onResume: (runId: string, dir: string) => void;
+  onResume: (runId: string, dir: string, raise?: Raise) => void;
+  /** The caps in force, so a raise can be relative. Null until the config is read. */
+  caps: Caps | null;
   /** Whether a pause is armed and waiting for the next boundary. */
   pausing: boolean;
   busy: boolean;
@@ -56,7 +59,76 @@ export interface FooterProps {
  */
 const RESUMABLE: ReadonlySet<number> = new Set([1, 2, 3, 4, 5, 7]);
 
-export function Footer({ run, onDecide, onPause, onStop, onResume, pausing, busy }: FooterProps) {
+/**
+ * What a halt offers beyond a plain resume (`4d`, #223).
+ *
+ * `4d` gives every halt state a choice, marks exactly one primary, and demotes
+ * the lossy option to a link. The choices it names — `+2 rounds`, `+2M and
+ * resume` — are all **caps raised on the way back in**, which is what AGENTS.md
+ * already tells a human to do by hand.
+ *
+ * **Keyed on the exit code, never on the reason sentence.** Two of `4d`'s eight
+ * states share exit 3 — a plan round cap and an oscillation stall — and the only
+ * thing separating them is the prose, so a window that split them would be
+ * matching English to decide which buttons to draw. They get one card, and the
+ * loop's own sentence is on it.
+ *
+ * `4d`'s other states are not here for stated reasons rather than by omission:
+ * **rate limit** is `7e` and is not a halt at all; **app restarted** would need a
+ * drift diff nothing computes; **worktree dirty** and **verify can't run** both
+ * arrive as exit 6, which is refused *before* anything is implemented and so has
+ * no resume to offer.
+ */
+/**
+ * The caps in force, as the config frame reported them, or null.
+ *
+ * **A raise has to be relative to the current value, and the current value is
+ * not guessable.** `+2 rounds` written as an absolute `7` assumes the default of
+ * 5 — and on a project configured to 10 that button would silently *lower* the
+ * cap while claiming to raise it. So the offer only exists once the config has
+ * been read, and a build that could not read it falls back to a plain resume.
+ */
+export interface Caps {
+  maxPlanRounds: number;
+  maxReviewRounds: number;
+  maxTokens: number;
+}
+
+function raiseFor(exit: number, caps: Caps | null): { label: string; note: string; raise: Raise } | null {
+  if (caps === null) return null;
+  if (exit === 3) {
+    return {
+      // `+2` is the design's own figure and it is a suggestion rather than a
+      // measurement, which is why the note says what the button does instead of
+      // implying two is the right number.
+      label: `+2 rounds and resume (${caps.maxPlanRounds} → ${caps.maxPlanRounds + 2})`,
+      note: 'A finding coming back is not evidence it cannot be fixed, so more rounds is a real option — but so is deciding it yourself and stopping the argument.',
+      raise: {
+        'max-plan-rounds': caps.maxPlanRounds + 2,
+        'max-review-rounds': caps.maxReviewRounds + 2,
+      },
+    };
+  }
+  if (exit === 4) {
+    return {
+      label: '+2M tokens and resume',
+      note: 'Raises the ceiling that covers both agents — the only one that bounds Codex work.',
+      raise: { 'max-tokens': caps.maxTokens + 2_000_000 },
+    };
+  }
+  return null;
+}
+
+export function Footer({
+  run,
+  onDecide,
+  onPause,
+  onStop,
+  onResume,
+  caps,
+  pausing,
+  busy,
+}: FooterProps) {
   const [reason, setReason] = useState('');
 
   // A waiting gate outranks everything, including a run that has said it is
@@ -170,6 +242,7 @@ export function Footer({ run, onDecide, onPause, onStop, onResume, pausing, busy
   if (run.completed !== null) {
     const exit = run.completed.exit;
     const how = ending(exit);
+    const raise = raiseFor(exit, caps);
     return (
       <div className={`v-footer v-footer--ended${how?.tone === 'alarm' ? ' v-footer--alarm' : ''}`}>
         <div className="v-footer__banner">
@@ -207,21 +280,51 @@ export function Footer({ run, onDecide, onPause, onStop, onResume, pausing, busy
           do nothing.
         */}
         {RESUMABLE.has(exit) && run.identity !== null && (
-          <div className="v-footer__actions">
-            <Button
-              level="primary"
-              disabled={busy}
-              onClick={() => {
-                if (run.identity !== null) onResume(run.identity.runId, run.identity.dir);
-              }}
-            >
-              ▶ resume this run
-            </Button>
-            <span className="v-footer__note">
-              It picks up from the last checkpoint on the same agent sessions. Nothing before the
-              halt is redone.
-            </span>
-          </div>
+          <>
+            <div className="v-footer__actions">
+              <Button
+                level="primary"
+                disabled={busy}
+                onClick={() => {
+                  if (run.identity !== null) onResume(run.identity.runId, run.identity.dir);
+                }}
+              >
+                ▶ resume this run
+              </Button>
+              <span className="v-footer__note">
+                It picks up from the last checkpoint on the same agent sessions. Nothing before
+                the halt is redone.
+              </span>
+            </div>
+
+            {/* `4d`'s second choice, and never a peer of the first: exactly one
+                primary, because somebody reading a halt banner is already
+                frustrated and four equal-weight buttons make them read all four
+                every time. */}
+            {raise !== null && (
+              <div className="v-footer__actions">
+                <button
+                  className="v-footer__demoted"
+                  disabled={busy}
+                  onClick={() => {
+                    if (run.identity !== null) {
+                      onResume(run.identity.runId, run.identity.dir, raise.raise);
+                    }
+                  }}
+                >
+                  {raise.label}
+                </button>
+                <span className="v-footer__note">{raise.note}</span>
+              </div>
+            )}
+            {raise === null && (exit === 3 || exit === 4) && (
+              <div className="v-footer__note">
+                Raising the cap on the way back in is the usual answer here, and this build has
+                not read the project&apos;s current one — so it is not offered rather than
+                offered against a number it guessed. Settings has the caps.
+              </div>
+            )}
+          </>
         )}
         {RESUMABLE.has(exit) && run.identity === null && (
           <div className="v-footer__note">

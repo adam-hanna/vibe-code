@@ -130,6 +130,17 @@ export type Outbound =
       modes: readonly string[];
       /** The two boundaries with no row, each with its own reason. */
       ungateable: Readonly<Record<string, string>>;
+      /**
+       * The role table's vocabulary (#223, `1i`).
+       *
+       * Sent for the same reason `gateable` is: a form built from a list it
+       * wrote itself can offer a role the loop does not have or a provider it
+       * cannot seat, and the refusal would arrive as a validator error on save
+       * instead of as a control that was never offered.
+       */
+      roleNames: readonly string[];
+      providers: readonly string[];
+      efforts: readonly string[];
     }
   /**
    * The diff a run has produced, in reply to a `diff` request (#223, `1d`).

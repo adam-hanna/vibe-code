@@ -143,6 +143,17 @@ export interface ConfigFrame {
   gateable: readonly string[];
   modes: readonly string[];
   ungateable: Readonly<Record<string, string>>;
+  /**
+   * The role table's vocabulary (`1i`).
+   *
+   * Sent for the same reason `gateable` is: a form built from a list it wrote
+   * itself can offer a role the loop does not have or a provider it cannot seat,
+   * and the refusal would arrive as a validator error on save rather than as a
+   * control that was never offered.
+   */
+  roleNames: readonly string[];
+  providers: readonly string[];
+  efforts: readonly string[];
 }
 
 /**

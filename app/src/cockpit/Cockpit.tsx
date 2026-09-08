@@ -27,7 +27,8 @@ import { VerifyPane } from './VerifyPane';
 import { StalenessStrip } from './Staleness';
 import { blocking, emptyRun, nextRun, reduce, staleness } from './model';
 import { readLaunchArgv, resumeArgv } from './argv';
-import type { Launched } from './argv';
+import type { Launched, Raise } from './argv';
+import type { Caps } from './Footer';
 import type { Effect } from '../pilot/tools';
 import type { Frame } from '../host';
 import type { Run } from './model';
@@ -157,6 +158,41 @@ export function Cockpit() {
    * reports it once and owns the conversation itself.
    */
   const [opening, setOpening] = useState<string | null>(null);
+  /**
+   * The round and token caps in force, or null (#223, `4d`).
+   *
+   * Read here because a halt banner offering *"+2 rounds and resume"* has to
+   * know what it is adding two to. Written as an absolute `7` it would assume
+   * the default of 5 and **silently lower** a project configured to 10 — so the
+   * offer does not exist until this does, which is the fail-closed direction.
+   */
+  const [caps, setCaps] = useState<Caps | null>(null);
+  useEffect(() => {
+    if (repoDir.trim() === '' || !host.inShell()) return;
+    let cancelled = false;
+    void host
+      .config(repoDir)
+      .then((frame) => {
+        const loop = (frame.effective as { loop?: Partial<Caps> }).loop;
+        if (cancelled || loop === undefined) return;
+        const { maxPlanRounds, maxReviewRounds, maxTokens } = loop;
+        // All three or none: a partial set would let one button be relative and
+        // another be a guess, which is the worse of the two failures.
+        if (
+          typeof maxPlanRounds === 'number' &&
+          typeof maxReviewRounds === 'number' &&
+          typeof maxTokens === 'number'
+        ) {
+          setCaps({ maxPlanRounds, maxReviewRounds, maxTokens });
+        }
+      })
+      // Left null. The banner says it did not read them rather than offering a
+      // raise against a number it invented.
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [repoDir]);
   const [tab, setTab] = useState<
     | 'output'
     | 'pilot'
@@ -360,7 +396,7 @@ export function Cockpit() {
    * same reason the pilot's `start_run` proposal comes through there (#144).
    */
   const resume = useCallback(
-    (runId: string, dir: string) => launch(resumeArgv(runId, dir)),
+    (runId: string, dir: string, raise?: Raise) => launch(resumeArgv(runId, dir, raise ?? {})),
     [launch],
   );
 
@@ -575,6 +611,7 @@ export function Cockpit() {
             onPause={pause}
             onStop={() => setConfirmStop(true)}
             onResume={resume}
+            caps={caps}
             pausing={pausing}
           />
         </div>

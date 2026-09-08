@@ -2237,3 +2237,22 @@
   cursor: pointer;
   flex: none;
 }
+
+/* The demoted choice on a halt banner: never a peer of the primary (4d). */
+.v-footer__demoted {
+  font: var(--type-label);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--accent-on-tint);
+  background: none;
+  border: 0;
+  border-bottom: 1px solid var(--accent-border);
+  padding: var(--space-1) 0;
+  cursor: pointer;
+  flex: none;
+}
+
+.v-footer__demoted:disabled {
+  cursor: default;
+  opacity: 0.72;
+}

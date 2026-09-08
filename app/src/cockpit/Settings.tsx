@@ -112,8 +112,12 @@ export function Settings({ dir }: { dir: string }) {
     );
   }
 
-  const effective = frame.effective as { gates?: Record<string, string> };
+  const effective = frame.effective as {
+    gates?: Record<string, string>;
+    roles?: Record<string, string | { provider?: string; effort?: string }>;
+  };
   const gates = effective.gates ?? {};
+  const roles = effective.roles ?? {};
   // Which rows the FILE claims, as opposed to which are in force. That is the
   // whole reason `raw` travels beside `effective`.
   const claimed = (frame.raw['gates'] ?? {}) as Record<string, unknown>;
@@ -202,6 +206,91 @@ export function Settings({ dir }: { dir: string }) {
             ))}
           </tbody>
         </table>
+      </section>
+
+      <section className="v-set__block">
+        <h3 className="v-set__h">who does what</h3>
+        {/*
+          `1i`'s roles table, and the only part of global settings that is real
+          configuration with a real validator behind it. The other three things
+          `1i` draws are absent for stated reasons rather than by omission — see
+          the note under the table.
+
+          A role object **patches** rather than replaces, exactly as `--role`
+          does, so changing one field leaves a model `vibe.config.json` named
+          alone. That is `roleSetting`'s behaviour and this sends the same shape.
+        */}
+        <table className="v-set__matrix">
+          <thead>
+            <tr>
+              <th>role</th>
+              <th>agent</th>
+              <th>effort</th>
+            </tr>
+          </thead>
+          <tbody>
+            {frame.roleNames.map((role) => {
+              const seat = roles[role];
+              const current = typeof seat === 'string' ? { provider: seat } : (seat ?? {});
+              return (
+                <tr key={role}>
+                  <td>
+                    <code>{role}</code>
+                    {(frame.raw['roles'] as Record<string, unknown> | undefined)?.[role] ===
+                      undefined && <MetaChip>default</MetaChip>}
+                  </td>
+                  <td>
+                    <select
+                      value={current.provider ?? ''}
+                      disabled={busy}
+                      onChange={(e) =>
+                        save({ roles: { [role]: { ...current, provider: e.target.value } } })
+                      }
+                    >
+                      {frame.providers.map((p) => (
+                        <option key={p} value={p}>
+                          {p}
+                        </option>
+                      ))}
+                    </select>
+                  </td>
+                  <td>
+                    <select
+                      value={current.effort ?? ''}
+                      disabled={busy}
+                      onChange={(e) =>
+                        save({ roles: { [role]: { ...current, effort: e.target.value } } })
+                      }
+                    >
+                      {/* An empty option, because "not set" is a legal state and
+                          the role then takes its agent's default. Removing it
+                          would make every row claim an effort somebody chose. */}
+                      <option value="">— agent default —</option>
+                      {frame.efforts.map((e) => (
+                        <option key={e} value={e}>
+                          {e}
+                        </option>
+                      ))}
+                    </select>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        <p className="v-set__note">
+          {/* The refusal that is a rule rather than a bug, worth saying here
+              because this is the form that can produce it. */}
+          Two roles on the same agent is allowed; a <strong>writing</strong> role on a persisted
+          Codex thread is refused outright rather than repaired, because{' '}
+          <code>codex exec resume</code> takes no sandbox flag and the setting would silently
+          revert after the first turn.
+        </p>
+        <p className="v-set__note">
+          The rest of <code>1i</code> is not here: <strong>accounts</strong> want each CLI&apos;s
+          detected version and its rate-limit headroom, and no frame carries either;{' '}
+          <strong>MCP servers</strong> are #138 and v1.5.
+        </p>
       </section>
 
       <section className="v-set__block">

@@ -78,8 +78,37 @@ export function launchArgv(
  * id is the one #207 put on the wire, so this is the window repeating a fact it
  * was told rather than reconstructing a path.
  */
-export function resumeArgv(runId: string, dir: string): readonly string[] {
-  return ['resume', runId.trim(), '-C', dir.trim()];
+export function resumeArgv(
+  runId: string,
+  dir: string,
+  raise: Raise = {},
+): readonly string[] {
+  const argv = ['resume', runId.trim(), '-C', dir.trim()];
+  // Sorted for the reason `launchArgv`'s overrides are: the same choice must
+  // always build the same command, or the one in a bug report is not the one
+  // that ran.
+  for (const [flag, value] of Object.entries(raise).sort()) {
+    if (typeof value === 'number') argv.push(`--${flag}`, String(value));
+  }
+  return argv;
+}
+
+/**
+ * What a halt banner may raise on the way back in (`4d`, #223).
+ *
+ * `4d` gives every halt a choice — `+2 rounds`, `+2M and resume` — and each of
+ * those is a **cap raised on the resume**, which is exactly what AGENTS.md
+ * already tells a human to do by hand: *"`vibe resume <run-id>`, usually with a
+ * raised `--max-tokens`."* So the button does the documented thing rather than a
+ * new one.
+ *
+ * The keys are flag names without their dashes, so nothing here can name a flag
+ * `parseArgs` does not take without it being visible at the call site.
+ */
+export interface Raise {
+  'max-plan-rounds'?: number;
+  'max-review-rounds'?: number;
+  'max-tokens'?: number;
 }
 
 /** What a launch asked for. Every field came out of the argv that was sent. */

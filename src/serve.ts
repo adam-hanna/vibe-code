@@ -8,6 +8,8 @@ import { listRuns } from '@src/run.js';
 import { loadConfig, readRawConfig, writeConfigPatch } from '@src/config.js';
 import { GATEABLE, GATE_MODES, UNGATEABLE } from '@src/gates.js';
 import { diffSinceWithLimit } from '@src/git.js';
+import { PROVIDERS, ROLE_NAMES } from '@src/roles.js';
+import { EFFORTS } from '@src/types.js';
 import type { LoadedConfig } from '@src/types.js';
 import type { RunLoop } from '@src/cli.js';
 import type { GateContext, Host } from '@src/host.js';
@@ -393,6 +395,9 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
           gateable: GATEABLE,
           modes: GATE_MODES,
           ungateable: UNGATEABLE,
+          roleNames: ROLE_NAMES,
+          providers: PROVIDERS,
+          efforts: EFFORTS,
         });
       } catch (err: unknown) {
         // `validate`'s own message, naming the field - which is what lets a
