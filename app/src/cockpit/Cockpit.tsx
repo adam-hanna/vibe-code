@@ -8,6 +8,7 @@ import type { KeyStatus } from '../pilot/keys';
 // differing only in case is a compile error on Windows and macOS both.
 import { PilotPane } from '../pilot/PilotPane';
 import { Diagnostics } from './Diagnostics';
+import { DiffPane } from './DiffPane';
 import { FindingsPane } from './FindingsPane';
 import { Footer } from './Footer';
 import { Launch } from './Launch';
@@ -158,6 +159,7 @@ export function Cockpit() {
     | 'questions'
     | 'runs'
     | 'settings'
+    | 'diff'
   >('output');
   /** Pilot proposals waiting on a person, so a hidden tab can say so (#144). */
   const [proposals, setProposals] = useState(0);
@@ -640,12 +642,17 @@ export function Cockpit() {
             >
               Settings
             </button>
-            {/* Named rather than omitted, each with the issue that would fill
-                it. A tab bar that showed only what works reads as a finished
-                app with three tabs. */}
-            <span className="v-cockpit__tab v-cockpit__tab--off" title="#113">
+            {/* `1d`. Enabled only once the run has a base to diff against: a
+                diff with no base is the request that stages the whole working
+                tree, so there is nothing to offer before then. */}
+            <button
+              className={`v-cockpit__tab ${tab === 'diff' ? 'v-cockpit__tab--on' : ''}`}
+              onClick={() => setTab('diff')}
+            >
               Diff
-            </span>
+            </button>
+            {/* Named rather than omitted, with the issue that would fill it. A
+                tab bar that showed only what works reads as a finished app. */}
             <span className="v-cockpit__tab v-cockpit__tab--off" title="#137 — v1.5">
               Prompt
             </span>
@@ -656,6 +663,7 @@ export function Cockpit() {
           {tab === 'spend' && <SpendPane run={run} />}
           {tab === 'questions' && <QuestionsPane questions={run.questions} />}
           {tab === 'settings' && <Settings dir={repoDir} />}
+          {tab === 'diff' && <DiffPane dir={repoDir} baseSha={run.baseSha} />}
           {tab === 'runs' && (
             <Workstreams dir={repoDir} onResume={(runId) => resume(runId, repoDir)} />
           )}

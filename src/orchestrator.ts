@@ -603,7 +603,15 @@ async function runPhases(
     // turn must not leave the reviewer pointed at an earlier round's report.
     beginReport(state);
 
-    log.heading('Implementing', { id: 'phase_started', data: { phase: 'implementing' } });
+    // The base travels with the phase that establishes it (#223, `1d`). It is
+    // the commit every diff in this run is taken against, and a window has no
+    // other way to learn it - `state.baseSha` is run state, and the wire carries
+    // no run state by design. Null when the repository had nothing to mark, which
+    // is a real state and not a missing field.
+    log.heading('Implementing', {
+      id: 'phase_started',
+      data: { phase: 'implementing', baseSha: state.baseSha },
+    });
     const impl = await writeTurn(
       state,
       cfg,

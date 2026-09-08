@@ -145,6 +145,23 @@ export interface ConfigFrame {
   ungateable: Readonly<Record<string, string>>;
 }
 
+/**
+ * The diff a run has produced (#223, `1d`).
+ *
+ * `truncated` is a **flag, not a marker in the text**. The design's truncation
+ * band is a judgement about what the reviewer actually read, and a window
+ * matching English to find out would break on the next wording change — which is
+ * the failure #133 exists to prevent, at the moment somebody is deciding whether
+ * a review was thorough.
+ */
+export interface DiffFrame {
+  type: 'diff';
+  id: number;
+  dir: string;
+  patch: string;
+  truncated: boolean;
+}
+
 export type Frame =
   | Ready
   | Narration
@@ -154,7 +171,8 @@ export type Frame =
   | PilotDelta
   | PilotReply
   | Archive
-  | ConfigFrame;
+  | ConfigFrame
+  | DiffFrame;
 
 /**
  * Whether a value is a frame this version recognises.
@@ -182,7 +200,8 @@ export function isFrame(v: unknown): v is Frame {
     // The archive, which the cockpit's reducer also ignores: it describes runs
     // that are over, and `Run` is about the one in progress (#223).
     type === 'archive' ||
-    type === 'config'
+    type === 'config' ||
+    type === 'diff'
   );
 }
 
@@ -436,6 +455,29 @@ export async function config(
     'config',
     'the host did not answer with the configuration',
   );
+}
+
+/**
+ * Read the diff a run has produced (#223, `1d`).
+ *
+ * `baseSha` is **required and comes from `phase_started`**, which carries it from
+ * the moment the implement phase marks it. Nothing here invents one: given no
+ * base, `diffSince` runs `git add -A` before it diffs and stages the user's whole
+ * working tree, so a read that could not name its base is refused at the decoder
+ * rather than falling into that path.
+ */
+export async function diff(
+  dir: string,
+  baseSha: string,
+): Promise<{ patch: string; truncated: boolean }> {
+  const id = nextRequestId();
+  const frame = await ask<DiffFrame>(
+    { type: 'diff', id, dir, baseSha },
+    id,
+    'diff',
+    'the host did not answer with the diff',
+  );
+  return { patch: frame.patch, truncated: frame.truncated };
 }
 
 /** What one subscription-backed pilot turn needs (#193). */

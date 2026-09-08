@@ -447,6 +447,17 @@ export interface Run {
   censuses: readonly Census[];
   /** What the run has spent, from the one seam every token goes through. */
   spend: Spend;
+  /**
+   * The commit every diff in this run is taken against, or null (#223, `1d`).
+   *
+   * Told, on the `phase_started` that establishes it, and there is no other way
+   * to know it: `state.baseSha` is run state and this wire carries no run state
+   * by design. Null before the implement phase and null on a repository that had
+   * nothing to mark, and the pane says so rather than asking for a diff with no
+   * base - which is the request `diffSince` would answer by staging the user's
+   * whole working tree.
+   */
+  baseSha: string | null;
   /** The turn with no `endedAt`, if any. */
   running: Turn | null;
   gate: Gate | null;
@@ -517,6 +528,7 @@ export function emptyRun(): Run {
     verify: [],
     censuses: [],
     spend: { tokens: null, costUsd: null, codexTokens: null, charges: [] },
+    baseSha: null,
     running: null,
     gate: null,
     output: [],
@@ -1000,6 +1012,10 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
         const closed = endRunning(next, at);
         return {
           ...closed,
+          // Kept when a later phase carries none, rather than cleared: the base
+          // is established once, by the implement phase, and every phase after
+          // it diffs against the same commit.
+          baseSha: str(data['baseSha']) ?? closed.baseSha,
           cycles: withPhase(closed.cycles, kind, {
             id: id(),
             phase,

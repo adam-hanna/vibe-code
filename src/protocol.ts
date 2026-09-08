@@ -130,7 +130,17 @@ export type Outbound =
       modes: readonly string[];
       /** The two boundaries with no row, each with its own reason. */
       ungateable: Readonly<Record<string, string>>;
-    };
+    }
+  /**
+   * The diff a run has produced, in reply to a `diff` request (#223, `1d`).
+   *
+   * `patch` is `git diff` output verbatim, tail-trimmed by `diffSince` at its own
+   * ceiling - so `truncated` is what stops a window presenting a partial diff as
+   * a whole one. The band the design draws over a truncated diff is a judgement
+   * about what the reviewer *read*, and it cannot be drawn without knowing that
+   * this happened.
+   */
+  | { type: 'diff'; id: number; dir: string; patch: string; truncated: boolean };
 
 /** What the thing driving the loop says. */
 export type Inbound =
@@ -246,7 +256,22 @@ export type Inbound =
    * rule, not this frame's, so there is one definition of a legal config and it
    * is the CLI's.
    */
-  | { type: 'config'; id: number; dir: string; patch?: Record<string, unknown> };
+  | { type: 'config'; id: number; dir: string; patch?: Record<string, unknown> }
+  /**
+   * Read the diff a run has produced (#223, `1d`).
+   *
+   * **A read, and it must stay one.** `diffSince` has two paths and only one of
+   * them is safe here: given a base it runs `git diff <base>..HEAD`, and given
+   * none it runs `git add -A` first, which stages the user's whole working tree.
+   * So `baseSha` is **required** - a diff request that could not name its base
+   * would be refused rather than fall into the staging path, because a read frame
+   * that modified the index would be the worst kind of surprise.
+   *
+   * The base comes from `phase_started`, which carries it from the moment the
+   * implement phase marks it. A window that never saw that frame has no base and
+   * cannot ask, which is the honest state rather than a reason to guess one.
+   */
+  | { type: 'diff'; id: number; dir: string; baseSha: string };
 
 export function encode(msg: Outbound): string {
   return `${JSON.stringify(msg)}\n`;
@@ -364,6 +389,20 @@ export function decode(line: string): Decoded {
         return { ok: false, id, reason: 'archive carried no dir' };
       }
       return { ok: true, message: { type: 'archive', id, dir } };
+    }
+    case 'diff': {
+      const dir = parsed['dir'];
+      if (typeof dir !== 'string' || dir === '') {
+        return { ok: false, id, reason: 'diff carried no dir' };
+      }
+      // Required, and refused rather than defaulted to null. `diffSince(cwd,
+      // null)` runs `git add -A` before it diffs, which stages the user's whole
+      // working tree - a read frame must never reach that path.
+      const baseSha = parsed['baseSha'];
+      if (typeof baseSha !== 'string' || baseSha === '') {
+        return { ok: false, id, reason: 'diff carried no baseSha, and there is no safe default' };
+      }
+      return { ok: true, message: { type: 'diff', id, dir, baseSha } };
     }
     case 'config': {
       const dir = parsed['dir'];

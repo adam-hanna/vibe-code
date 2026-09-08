@@ -7,6 +7,7 @@ import { orchestrate } from '@src/orchestrator.js';
 import { listRuns } from '@src/run.js';
 import { loadConfig, readRawConfig, writeConfigPatch } from '@src/config.js';
 import { GATEABLE, GATE_MODES, UNGATEABLE } from '@src/gates.js';
+import { diffSinceWithLimit } from '@src/git.js';
 import type { LoadedConfig } from '@src/types.js';
 import type { RunLoop } from '@src/cli.js';
 import type { GateContext, Host } from '@src/host.js';
@@ -187,6 +188,8 @@ export interface SessionDeps {
    * an `error` carrying the validator's own sentence.
    */
   writeConfig?: (dir: string, patch: Record<string, unknown>) => { path: string };
+  /** What reads a diff. Defaults to `diffSince` (#223), which shells out to git. */
+  diff?: (dir: string, baseSha: string) => Promise<{ patch: string; truncated: boolean }>;
 }
 
 export function createSession(send: Send, deps: SessionDeps = {}): Session {
@@ -195,6 +198,8 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
   const archive = deps.archive ?? ((dir: string) => listRuns(dir));
   const readConfig = deps.config ?? ((dir: string) => loadConfig(dir));
   const writeConfig = deps.writeConfig ?? writeConfigPatch;
+  const readDiff =
+    deps.diff ?? ((dir: string, baseSha: string) => diffSinceWithLimit(dir, baseSha));
 
   /**
    * Gates awaiting an answer, by the id this process allocated for them.
@@ -329,6 +334,29 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
           message: err instanceof Error ? err.message : String(err),
         });
       }
+      return;
+    }
+
+    if (msg.type === 'diff') {
+      // A read, beside a run, like the archive - `git diff <base>..HEAD` writes
+      // nothing. The `git add -A` path in `diffSince` is unreachable from here
+      // because `decode` refuses a request with no base.
+      const id = msg.id;
+      void readDiff(msg.dir, msg.baseSha)
+        .then(({ patch, truncated }) => {
+          // `truncated` as a flag rather than a marker in the text: the design's
+          // truncation band is a judgement about what the reviewer READ, and a
+          // window matching English for it would break on the next wording
+          // change - which is the failure #133 exists to prevent.
+          send({ type: 'diff', id, dir: msg.dir, patch, truncated });
+        })
+        .catch((err: unknown) => {
+          send({
+            type: 'error',
+            id,
+            message: err instanceof Error ? err.message : String(err),
+          });
+        });
       return;
     }
 

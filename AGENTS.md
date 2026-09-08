@@ -204,6 +204,40 @@ event type**, never a name of its own: `applyCharge` narrates under `claude_turn
 `codex_turn`, the same string it just recorded, so a host acting on the fact and an archive
 holding it agree about one fact rather than two spellings of it.
 
+**Three frames are reads, and a read runs beside a run** (#223). `archive`, `config` and
+`diff` answer a question rather than describing something that happened, which is a shape
+the wire did not have — every other outbound frame is pushed. They are exempt from
+`serve.ts`'s one-at-a-time rule for a stronger reason than the pilot is: that rule exists
+because two *runs* would interleave their narration, and `listRuns` is documented as never
+throwing and never writing. A second `invoke` is still refused, which is what keeps the
+exemption honest.
+
+Three things about them are load-bearing:
+
+- **A config *write* is refused during a run, and a read is not.** A run reads
+  `vibe.config.json` once, at the top of `main`, so saving mid-run cannot affect the run in
+  flight — but it would leave the settings screen and the running loop describing different
+  configurations with nothing on screen saying so.
+- **`diff` requires its base and there is no default.** `diffSince(cwd, null)` runs `git add
+  -A` before it diffs, staging the user's whole working tree; a read frame that modified the
+  index would be the worst kind of surprise, so the decoder refuses a request that cannot
+  name a base rather than letting it reach that path. The base comes from `phase_started`,
+  which carries it from the moment the implement phase marks it.
+- **`writeConfigPatch` merges into the *raw* file, never the effective config.** A form
+  editing what `loadConfig` returns and writing it back would bake every current default into
+  the project file, so the next release's improved default would never reach that repository
+  — and nobody could tell which values were chosen from which were merely observed. Both
+  travel on the frame for that reason. It runs the same pipeline `loadConfig` runs and writes
+  only if the whole candidate validates, so a refusal leaves the file exactly as it was.
+
+**A human finding still has no host frame, and the diff pane is what that looks like built.**
+`1d`'s composer fills in `src/raise.ts`'s block — the citation taken from the hunk, so the
+finding is grounded by construction — and hands it over to be pasted into `NEEDS-INPUT.md`.
+That is propose-only in the #144 sense, and the markers are duplicated in `app/src/cockpit/raise.ts`
+rather than imported, so a drift produces a block the resume **refuses with a reason** rather
+than one it misreads. A test reads `src/raise.ts` as source and fails on the commit that
+renames a marker.
+
 **That covers the endings vibe chooses. `run.lock` plus `ending.json` covers the ones it
 does not.** A dead pid holding a lock has always meant two opposite things at once — vibe
 decided to stop and never tidied up, or something killed it mid-turn — and #131 is what

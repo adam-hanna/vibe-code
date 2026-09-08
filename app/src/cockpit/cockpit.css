@@ -1969,3 +1969,124 @@
   align-self: flex-start;
   margin: 0 var(--space-4) var(--space-3);
 }
+
+/* ------------------------------------------------------------ diff pane (1d) */
+
+.v-dp {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--surface-page);
+  padding: var(--space-4) var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.v-dp--empty {
+  color: var(--text-secondary);
+  font: var(--type-body);
+  gap: var(--space-2);
+  align-items: flex-start;
+}
+
+.v-dp__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+}
+
+.v-dp code {
+  font: var(--type-mono-sm);
+  color: var(--text-secondary);
+}
+
+.v-dp__section {
+  display: flex;
+  flex-direction: column;
+}
+
+/* The row is the design system's; the button is this pane's. */
+.v-dp__line {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+/* Propose only: the composer builds the block and nothing is sent. */
+.v-dp__composer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  border: 1px solid var(--accent-border);
+  background: var(--surface-card);
+  padding: var(--space-3);
+}
+
+.v-dp__field {
+  font: var(--type-body-sm);
+  color: var(--text-primary);
+  background: var(--surface-page);
+  border: 1px solid var(--rule-control);
+  padding: var(--space-2);
+  resize: vertical;
+}
+
+.v-dp__sevs {
+  display: flex;
+  gap: var(--space-3);
+}
+
+.v-dp__sev {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  font: var(--type-label);
+  letter-spacing: var(--track-label);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.v-dp__block {
+  font: var(--type-mono-sm);
+  color: var(--text-secondary);
+  background: var(--surface-panel);
+  border: 1px solid var(--rule-inner);
+  padding: var(--space-2) var(--space-3);
+  margin: 0;
+  max-height: 24vh;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+.v-dp__foot {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+
+.v-dp__note {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  max-width: 62ch;
+}
+
+.v-dp__again {
+  font: var(--type-label);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--accent-on-tint);
+  background: none;
+  border: 1px solid var(--accent-border);
+  padding: var(--space-1) var(--space-2);
+  cursor: pointer;
+  flex: none;
+}
