@@ -523,6 +523,31 @@ describe('the gate is the payoff', () => {
     expect(anHourLater.quietMs).toBe(atOnce.quietMs);
   });
 
+  test('a settled turn carries the instants a card needs to stop aging', () => {
+    // Hi-fi 17. Stopping the clocks was half the fix; the other half is that a
+    // *relative* time on a card that has stopped moving keeps aging into a lie.
+    // `quietMs` stays for the live card and these two are what the settled one
+    // reads, so both are on the row rather than the component choosing between
+    // a number and a date it computed itself.
+    const t0 = 1_000_000;
+    const run = fold([...CLEAN.slice(0, 2), beat(60_000), held], t0);
+    const turns = run.cycles.flatMap((c) => c.phases.flatMap((p) => p.turns));
+    const settled = turns.find((t) => t.id === run.gate?.turnId);
+    if (settled === undefined) throw new Error('the gate named no turn');
+
+    const row = runningRow(settled, t0 + 9_999_999);
+    expect(row.endedAt).toBe(settled.endedAt);
+    expect(row.lastBeatAt).toBe(settled.beat?.at);
+    // And they do not move, however long the gate is held.
+    expect(runningRow(settled, t0 + 99_999_999).lastBeatAt).toBe(row.lastBeatAt);
+  });
+
+  test('a running turn has no ended instant to report', () => {
+    const run = fold(CLEAN);
+    expect(run.running).not.toBeNull();
+    expect(runningRow(run.running!, 2_000_000).endedAt).toBeNull();
+  });
+
   test('a gate reached before any turn names none, rather than naming a wrong one', () => {
     const run = fold([held]);
     expect(run.gate?.turnId).toBeNull();

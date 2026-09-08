@@ -155,8 +155,17 @@ Two rules the cockpit inherits from the design and must not quietly drop:
   activity 5h39m ago` on a turn that took a minute, two inches above a footer correctly
   saying the loop was waiting for a human. The card said kill it and the footer said press
   continue. The turn stays on screen with its measurements — that is what a person is
-  deciding about — and gives up the accent border, the active ground and the pulsing dot
-  (#202). `Gate.turnId` names it, so the column is told rather than picking the last one.
+  deciding about — and gives up the accent border, the active ground, the accent on its label
+  and **the liveness dot entirely**, because exactly one element on screen pulses and while a
+  gate is held nothing should. A `held` kicker names why it is still, so a completely
+  motionless card does not read as a failed one. `Gate.turnId` names the turn, so the column
+  is told rather than picking the last one.
+- **On a card that has stopped, every relative time becomes absolute** (hi-fi 17). Stopping the
+  clocks was only half of #202: `last activity 6s ago` is a claim that has to keep being true,
+  and on a still card it ages into a lie — which is literally how a run held overnight came to
+  read `5h39m ago` about a turn that took a minute. `clock()` beside `elapsed()` is the pair,
+  and `runningRow` carries `lastBeatAt` and `endedAt` **beside** `quietMs` rather than instead
+  of it, because a live card wants the relative form and a settled one cannot have it.
 - **Every way a run can end has a phrase, and they are not eight flavours of failure.** The
   footer maps each of the eight exit codes to one sentence, and a code this build does not
   know renders as the number rather than as a phrase invented for it. Two of them must never
