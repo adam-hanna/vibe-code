@@ -121,6 +121,30 @@ export interface Archive {
   runs: readonly ArchiveRun[];
 }
 
+/**
+ * The configuration in force, and what the file itself claims (#223, `1h`).
+ *
+ * **Both, and they are not the same thing.** `effective` is what a run will do;
+ * `raw` is what `vibe.config.json` says on its own. A form given only the first
+ * would bake every current default into the file the moment it saved.
+ *
+ * `gateable`, `modes` and `ungateable` come from `src/gates.ts` rather than
+ * being written here, so the matrix cannot offer a boundary the loop does not
+ * have or a mode it does not honour — and the two boundaries with **no** row
+ * arrive with their own reasons rather than being silently missing.
+ */
+export interface ConfigFrame {
+  type: 'config';
+  id: number;
+  dir: string;
+  effective: unknown;
+  raw: Record<string, unknown>;
+  path: string | null;
+  gateable: readonly string[];
+  modes: readonly string[];
+  ungateable: Readonly<Record<string, string>>;
+}
+
 export type Frame =
   | Ready
   | Narration
@@ -129,7 +153,8 @@ export type Frame =
   | HostError
   | PilotDelta
   | PilotReply
-  | Archive;
+  | Archive
+  | ConfigFrame;
 
 /**
  * Whether a value is a frame this version recognises.
@@ -156,7 +181,8 @@ export function isFrame(v: unknown): v is Frame {
     type === 'pilot_reply' ||
     // The archive, which the cockpit's reducer also ignores: it describes runs
     // that are over, and `Run` is about the one in progress (#223).
-    type === 'archive'
+    type === 'archive' ||
+    type === 'config'
   );
 }
 
@@ -324,16 +350,31 @@ export async function onPilotFrame(
  * on this wire is a spinner nobody can clear, and `listRuns` has an unreadable
  * archive to survive.
  */
-const ARCHIVE_TIMEOUT_MS = 15_000;
+const ASK_TIMEOUT_MS = 15_000;
 
-export async function archive(dir: string): Promise<readonly ArchiveRun[]> {
-  const id = nextRequestId();
-  return new Promise<readonly ArchiveRun[]>((resolve, reject) => {
+/**
+ * Send a request and resolve with the frame that answers it.
+ *
+ * Shared by both readers rather than written twice, and the shared part is the
+ * three things that are easy to get wrong once and impossible to get wrong twice
+ * the same way: **the listener goes up before the request goes out** (the host
+ * answers synchronously, so a request sent first can be answered before anything
+ * is listening); **the match is on the id**, because two asks in flight with a
+ * `dir` match would hand one of them the other's answer; and **it times out**,
+ * because an unanswered promise on this wire is a spinner nobody can clear.
+ */
+async function ask<T extends Frame>(
+  request: object,
+  id: number,
+  wanted: T['type'],
+  missing: string,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
     let stop: (() => void) | null = null;
     const timer = setTimeout(() => {
       stop?.();
-      reject(new Error('the host did not answer with the archive'));
-    }, ARCHIVE_TIMEOUT_MS);
+      reject(new Error(missing));
+    }, ASK_TIMEOUT_MS);
     const done = (f: () => void): void => {
       clearTimeout(timer);
       stop?.();
@@ -342,22 +383,59 @@ export async function archive(dir: string): Promise<readonly ArchiveRun[]> {
     void listen<unknown>('host://frame', (event) => {
       const frame: unknown = event.payload;
       if (!isFrame(frame)) return;
-      // By id, because two windows could ask at once and a `dir` match would
-      // hand one of them the other's answer.
-      if (frame.type === 'archive' && frame.id === id) done(() => resolve(frame.runs));
+      // `Ready` carries no id, so the union has none in common. Narrowed on the
+      // wanted type first and read through a record after, rather than widening
+      // `Frame` to give every member an id it does not have.
+      const carried: unknown = (frame as { id?: unknown }).id;
+      if (frame.type === wanted && carried === id) done(() => resolve(frame as T));
       else if (frame.type === 'error' && frame.id === id) {
         done(() => reject(new Error(frame.message)));
       }
     })
       .then((off) => {
         stop = off;
-        // After the listener is attached, never before: the host answers
-        // synchronously, and a request sent first can be answered before there
-        // is anything listening for it.
-        return send({ type: 'archive', id, dir });
+        return send(request);
       })
-      .catch((err: unknown) => done(() => reject(err instanceof Error ? err : new Error(String(err)))));
+      .catch((err: unknown) =>
+        done(() => reject(err instanceof Error ? err : new Error(String(err)))),
+      );
   });
+}
+
+export async function archive(dir: string): Promise<readonly ArchiveRun[]> {
+  const id = nextRequestId();
+  const frame = await ask<Archive>(
+    { type: 'archive', id, dir },
+    id,
+    'archive',
+    'the host did not answer with the archive',
+  );
+  return frame.runs;
+}
+
+/**
+ * Read the configuration, or write a patch into it (#223, `1h`).
+ *
+ * **One function for both, because a write answers with what resulted.** A form
+ * that saved and then assumed its own patch was in force would be the second
+ * definition of the configuration that `AGENTS.md` says must not exist — the
+ * form and the raw file are the same file the CLI reads, and this is how that
+ * stays true rather than being hoped for.
+ *
+ * A patch that does not validate comes back as a rejection carrying the core
+ * validator's own sentence, which names the field. Nothing was written.
+ */
+export async function config(
+  dir: string,
+  patch?: Record<string, unknown>,
+): Promise<ConfigFrame> {
+  const id = nextRequestId();
+  return ask<ConfigFrame>(
+    patch === undefined ? { type: 'config', id, dir } : { type: 'config', id, dir, patch },
+    id,
+    'config',
+    'the host did not answer with the configuration',
+  );
 }
 
 /** What one subscription-backed pilot turn needs (#193). */

@@ -104,7 +104,33 @@ export type Outbound =
    * would eventually disagree with `vibe list` about which runs exist, and the
    * one that disagreed would be the one on screen.
    */
-  | { type: 'archive'; id: number; dir: string; runs: RunSummary[] };
+  | { type: 'archive'; id: number; dir: string; runs: RunSummary[] }
+  /**
+   * The configuration in force, and what the file itself claims (#223, `1h`).
+   *
+   * **Both, and they are not the same thing.** `effective` is `DEFAULTS` merged
+   * with the file, which is what a run will actually do; `raw` is what
+   * `vibe.config.json` says on its own. A form given only the first would bake
+   * every current default into the file the moment it saved, so the next
+   * release's improved default would never reach this repository - and nobody
+   * could tell which values were chosen from which were merely observed.
+   *
+   * `path` is null when there is no file, which is a different fact from an
+   * empty one and is what tells a form whether saving creates or edits.
+   */
+  | {
+      type: 'config';
+      id: number;
+      dir: string;
+      effective: unknown;
+      raw: Record<string, unknown>;
+      path: string | null;
+      /** The boundaries that can hold, and the modes they may take (#140). */
+      gateable: readonly string[];
+      modes: readonly string[];
+      /** The two boundaries with no row, each with its own reason. */
+      ungateable: Readonly<Record<string, string>>;
+    };
 
 /** What the thing driving the loop says. */
 export type Inbound =
@@ -205,7 +231,22 @@ export type Inbound =
    * different checkout would otherwise be shown the wrong archive with no way to
    * tell.
    */
-  | { type: 'archive'; id: number; dir: string };
+  | { type: 'archive'; id: number; dir: string }
+  /**
+   * Read the configuration, or write a patch into it (#223, `1h`).
+   *
+   * One frame with an optional `patch` rather than two, because they are the
+   * same question asked twice: **a write answers with the config that resulted**,
+   * so a form never has to assume its own save took effect. That is what keeps
+   * *"the form and the raw file are the same file the CLI reads"* true rather
+   * than hoped for.
+   *
+   * The patch is merged **one level deep, per section** into the raw file and
+   * refused as a whole if the result does not validate - `writeConfigPatch`'s
+   * rule, not this frame's, so there is one definition of a legal config and it
+   * is the CLI's.
+   */
+  | { type: 'config'; id: number; dir: string; patch?: Record<string, unknown> };
 
 export function encode(msg: Outbound): string {
   return `${JSON.stringify(msg)}\n`;
@@ -323,6 +364,21 @@ export function decode(line: string): Decoded {
         return { ok: false, id, reason: 'archive carried no dir' };
       }
       return { ok: true, message: { type: 'archive', id, dir } };
+    }
+    case 'config': {
+      const dir = parsed['dir'];
+      if (typeof dir !== 'string' || dir === '') {
+        return { ok: false, id, reason: 'config carried no dir' };
+      }
+      const patch = parsed['patch'];
+      // Absent is a read. Present-but-not-an-object is refused rather than
+      // treated as one: a `patch: null` that read as "no patch" would answer a
+      // save with the unchanged config and look like it had worked.
+      if (patch === undefined) return { ok: true, message: { type: 'config', id, dir } };
+      if (!isRecord(patch)) {
+        return { ok: false, id, reason: 'config carried a patch that was not an object' };
+      }
+      return { ok: true, message: { type: 'config', id, dir, patch } };
     }
     case 'cancel': {
       // Optional, and refused rather than coerced when present but unusable.

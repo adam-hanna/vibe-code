@@ -5,6 +5,9 @@ import * as log from '@src/log.js';
 import { createLineReader, decode, encode, PROTOCOL_VERSION } from '@src/protocol.js';
 import { orchestrate } from '@src/orchestrator.js';
 import { listRuns } from '@src/run.js';
+import { loadConfig, readRawConfig, writeConfigPatch } from '@src/config.js';
+import { GATEABLE, GATE_MODES, UNGATEABLE } from '@src/gates.js';
+import type { LoadedConfig } from '@src/types.js';
 import type { RunLoop } from '@src/cli.js';
 import type { GateContext, Host } from '@src/host.js';
 import type { Narration } from '@src/log.js';
@@ -172,12 +175,26 @@ export interface SessionDeps {
    * definition rather than a fixture around one.
    */
   archive?: (dir: string) => RunSummary[];
+  /** What reads the config. Defaults to `loadConfig` (#223). */
+  config?: (dir: string) => LoadedConfig;
+  /**
+   * What writes a config patch. Defaults to `writeConfigPatch` (#223).
+   *
+   * A seam because the default **touches the user's repository**, and a test
+   * that had to write a real `vibe.config.json` to check the framing would be
+   * testing the filesystem. What is worth testing here is that a write is
+   * refused while a run is going, and that a refusal from the validator becomes
+   * an `error` carrying the validator's own sentence.
+   */
+  writeConfig?: (dir: string, patch: Record<string, unknown>) => { path: string };
 }
 
 export function createSession(send: Send, deps: SessionDeps = {}): Session {
   const invoke = deps.invoke ?? ((argv, loop) => main(argv, loop));
   const chat = deps.pilot ?? pilotChat;
   const archive = deps.archive ?? ((dir: string) => listRuns(dir));
+  const readConfig = deps.config ?? ((dir: string) => loadConfig(dir));
+  const writeConfig = deps.writeConfig ?? writeConfigPatch;
 
   /**
    * Gates awaiting an answer, by the id this process allocated for them.
@@ -306,6 +323,53 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
         // `listRuns` promises not to throw and this is the belt on that: a
         // window that asked for the archive and got silence would sit on a
         // spinner for ever, and an `error` frame is answerable.
+        send({
+          type: 'error',
+          id: msg.id,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+      return;
+    }
+
+    if (msg.type === 'config') {
+      // **A read runs beside a run; a WRITE does not.** `vibe.config.json` is
+      // read once, at the top of `main`, so changing it mid-run cannot affect
+      // the run in flight - but it would mean the settings screen and the
+      // running loop disagreed about the configuration with nothing on screen
+      // saying so. Refused with a reason rather than queued, exactly as a second
+      // `invoke` is.
+      if (msg.patch !== undefined && running !== null) {
+        send({
+          type: 'error',
+          id: msg.id,
+          message:
+            `request ${String(running)} is still running; a run reads vibe.config.json once at ` +
+            'the start, so saving now would leave the screen and the loop describing different ' +
+            'configurations',
+        });
+        return;
+      }
+      try {
+        const path = msg.patch === undefined ? null : writeConfig(msg.dir, msg.patch).path;
+        // The config that RESULTED, whether this was a read or a write, so a
+        // form never has to assume its own save took effect.
+        const loaded = readConfig(msg.dir);
+        send({
+          type: 'config',
+          id: msg.id,
+          dir: msg.dir,
+          effective: loaded,
+          raw: readRawConfig(msg.dir),
+          path: path ?? loaded.configPath,
+          gateable: GATEABLE,
+          modes: GATE_MODES,
+          ungateable: UNGATEABLE,
+        });
+      } catch (err: unknown) {
+        // `validate`'s own message, naming the field - which is what lets a
+        // settings form say WHICH value it refused rather than that something
+        // was wrong. Refuse, never repair: nothing was written.
         send({
           type: 'error',
           id: msg.id,

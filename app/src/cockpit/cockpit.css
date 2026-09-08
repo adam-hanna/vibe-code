@@ -1686,3 +1686,129 @@
 .v-switch__foot {
   border-top: 1px solid var(--rule-inner);
 }
+
+/* ------------------------------------------------------------ settings (1h) */
+
+.v-set {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--surface-page);
+  padding: var(--space-4) var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.v-set--empty {
+  color: var(--text-secondary);
+  font: var(--type-body);
+  gap: var(--space-2);
+  align-items: flex-start;
+}
+
+.v-set__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+}
+
+.v-set code {
+  font: var(--type-mono-sm);
+  color: var(--text-secondary);
+}
+
+.v-set__block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.v-set__h {
+  font: var(--type-section);
+  letter-spacing: var(--track-section);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin: 0;
+}
+
+.v-set__matrix {
+  border-collapse: collapse;
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+.v-set__matrix th {
+  font: var(--type-label);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--rule-inner);
+}
+
+.v-set__matrix td {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--rule-inner);
+  vertical-align: top;
+}
+
+.v-set__radio {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  cursor: pointer;
+  max-width: 22ch;
+}
+
+/* A boundary that cannot hold is shown with its reason, not omitted. */
+.v-set__row--off code {
+  color: var(--text-tertiary);
+}
+
+.v-set__why {
+  color: var(--text-tertiary);
+  max-width: 68ch;
+}
+
+.v-set__refused {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface-alarm);
+  color: var(--text-primary);
+  font: var(--type-body-sm);
+}
+
+.v-set__note {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  margin: 0;
+  max-width: 78ch;
+}
+
+.v-set__raw {
+  font: var(--type-mono-sm);
+  color: var(--text-secondary);
+  background: var(--surface-panel);
+  border: 1px solid var(--rule-inner);
+  padding: var(--space-3);
+  margin: 0;
+  max-height: 30vh;
+  overflow: auto;
+}
+
+.v-set__again {
+  font: var(--type-label);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--accent-on-tint);
+  background: none;
+  border: 1px solid var(--accent-border);
+  padding: var(--space-1) var(--space-2);
+  cursor: pointer;
+}

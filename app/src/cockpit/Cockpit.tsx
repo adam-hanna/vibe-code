@@ -15,6 +15,7 @@ import { LoopColumn } from './LoopColumn';
 import { OutputPane } from './OutputPane';
 import { QuestionsPane } from './QuestionsPane';
 import { RateLimitStrip } from './RateLimit';
+import { Settings } from './Settings';
 import { SpendPane } from './SpendPane';
 import { StopConfirm } from './StopConfirm';
 import { Summary } from './Summary';
@@ -145,7 +146,15 @@ export function Cockpit() {
    */
   const [sentLaunch, setSentLaunch] = useState<Launched | null>(null);
   const [tab, setTab] = useState<
-    'output' | 'pilot' | 'keys' | 'verify' | 'findings' | 'spend' | 'questions' | 'runs'
+    | 'output'
+    | 'pilot'
+    | 'keys'
+    | 'verify'
+    | 'findings'
+    | 'spend'
+    | 'questions'
+    | 'runs'
+    | 'settings'
   >('output');
   /** Pilot proposals waiting on a person, so a hidden tab can say so (#144). */
   const [proposals, setProposals] = useState(0);
@@ -596,6 +605,14 @@ export function Cockpit() {
             >
               Spend
             </button>
+            {/* `1h`, and #140's payoff: the gate matrix has been configuration
+                since it landed and there has been no way to configure it. */}
+            <button
+              className={`v-cockpit__tab ${tab === 'settings' ? 'v-cockpit__tab--on' : ''}`}
+              onClick={() => setTab('settings')}
+            >
+              Settings
+            </button>
             {/* Named rather than omitted, each with the issue that would fill
                 it. A tab bar that showed only what works reads as a finished
                 app with three tabs. */}
@@ -611,6 +628,7 @@ export function Cockpit() {
           {tab === 'findings' && <FindingsPane censuses={run.censuses} />}
           {tab === 'spend' && <SpendPane run={run} />}
           {tab === 'questions' && <QuestionsPane questions={run.questions} />}
+          {tab === 'settings' && <Settings dir={repoDir} />}
           {tab === 'runs' && (
             <Workstreams dir={repoDir} onResume={(runId) => resume(runId, repoDir)} />
           )}
