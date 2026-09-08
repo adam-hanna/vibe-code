@@ -98,7 +98,23 @@ export type Inbound =
    * the resumable ending; killing the process is the supervisor's job and is a
    * different, more expensive thing (see `@src/host.js` on pause).
    */
-  | { type: 'shutdown'; id: number };
+  | { type: 'shutdown'; id: number }
+  /**
+   * Hold at the next boundary, whatever the gate matrix says about it (#210).
+   *
+   * **One hold, not a mode.** `cfg.gates` is the run's standing answer to where
+   * control comes back and is decided before the run starts; this is a person
+   * mid-run saying *hold at the next one*, and it is consumed by the boundary
+   * that honours it. A second `pause` before that boundary is the same request
+   * again, not a second hold.
+   *
+   * It costs nothing, which is the whole reason it is separate from stopping:
+   * a hold is an `await` at a boundary the loop was crossing anyway, the process
+   * stays alive and both agent sessions stay warm. Answered immediately, because
+   * the frame says the request was accepted rather than that a hold has happened
+   * - the `ask` that follows is what says the second thing.
+   */
+  | { type: 'pause'; id: number };
 
 export function encode(msg: Outbound): string {
   return `${JSON.stringify(msg)}\n`;
@@ -174,6 +190,8 @@ export function decode(line: string): Decoded {
       return { ok: true, message: { type: 'answer', id, decision: parsed['decision'] } };
     case 'shutdown':
       return { ok: true, message: { type: 'shutdown', id } };
+    case 'pause':
+      return { ok: true, message: { type: 'pause', id } };
     default:
       return {
         ok: false,
