@@ -37,9 +37,30 @@ import type { Run } from './model';
  * The cockpit, at the slice #159 scopes it to.
  *
  * Three of `3a`'s four regions - loop column, output pane, footer - plus the
- * minimum launch input needed to have anything to watch. **The left rail is
- * absent** because projects and workstreams need the archive reader (#114), and
- * `serve.ts` allows one run at a time anyway.
+ * pilot, which since #211 is where you land and where a run is started from.
+ *
+ * ## The left rail is absent, and the reason has changed
+ *
+ * It used to be *"projects and workstreams need the archive reader (#114)"*, and
+ * that stopped being true when the `archive` frame landed: the rail's data is
+ * readable now.
+ *
+ * The reason it is still absent is the second half of that sentence, which is
+ * the load-bearing one. **`serve.ts` runs one run at a time**, so there is never
+ * more than one live workstream to switch between - and a rail over the
+ * *archive* is `1b` in a sidebar. There are already two switchers over that data
+ * and the design insisted on both for stated reasons: `1b` is triage, a reading
+ * task with sorting and history, and ⌘K answers *"take me to
+ * fix-ratelimit-wait"*. A third would be the third spelling #211 warns about, in
+ * the region with the least room for it.
+ *
+ * What the rail uniquely carries in `3a` is the **needs-you dot** and `4e`'s
+ * rule that waiting workstreams sort to the top. With one run per process that
+ * is a single boolean about the run in front of you, and the footer is where the
+ * design already puts it.
+ *
+ * This becomes worth building the day a host drives more than one run. Nothing
+ * here should be read as it being hard.
  *
  * Everything on screen comes from a frame. There is no state here that was
  * inferred: `reduce` is the only thing that decides what the run looks like, and
@@ -167,14 +188,22 @@ export function Cockpit() {
    * offer does not exist until this does, which is the fail-closed direction.
    */
   const [caps, setCaps] = useState<Caps | null>(null);
+  /** The gate matrix in force, so `3a`'s footer can say where the run holds. */
+  const [gates, setGates] = useState<Readonly<Record<string, string>> | null>(null);
   useEffect(() => {
     if (repoDir.trim() === '' || !host.inShell()) return;
     let cancelled = false;
     void host
       .config(repoDir)
       .then((frame) => {
-        const loop = (frame.effective as { loop?: Partial<Caps> }).loop;
-        if (cancelled || loop === undefined) return;
+        const effective = frame.effective as {
+          loop?: Partial<Caps>;
+          gates?: Record<string, string>;
+        };
+        if (cancelled) return;
+        if (effective.gates !== undefined) setGates(effective.gates);
+        const loop = effective.loop;
+        if (loop === undefined) return;
         const { maxPlanRounds, maxReviewRounds, maxTokens } = loop;
         // All three or none: a partial set would let one button be relative and
         // another be a guess, which is the worse of the two failures.
@@ -612,6 +641,7 @@ export function Cockpit() {
             onStop={() => setConfirmStop(true)}
             onResume={resume}
             caps={caps}
+            gates={gates}
             pausing={pausing}
           />
         </div>

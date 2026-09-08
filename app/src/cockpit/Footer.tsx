@@ -39,6 +39,14 @@ export interface FooterProps {
   onResume: (runId: string, dir: string, raise?: Raise) => void;
   /** The caps in force, so a raise can be relative. Null until the config is read. */
   caps: Caps | null;
+  /**
+   * The gate matrix in force, or null (`3a`).
+   *
+   * A readout, not a control — see the mode note at the bottom of this file.
+   * Null means the config has not been read, and the footer says that rather
+   * than describing a matrix it does not have.
+   */
+  gates: Readonly<Record<string, string>> | null;
   /** Whether a pause is armed and waiting for the next boundary. */
   pausing: boolean;
   busy: boolean;
@@ -126,10 +134,19 @@ export function Footer({
   onStop,
   onResume,
   caps,
+  gates,
   pausing,
   busy,
 }: FooterProps) {
   const [reason, setReason] = useState('');
+  // The two holding modes, kept apart because the difference is what a hold
+  // costs: `step` is an await and free, `stop` ends the run resumably.
+  const holding = Object.entries(gates ?? {})
+    .filter(([, mode]) => mode !== 'auto')
+    .map(([b]) => b);
+  const stopping = Object.entries(gates ?? {})
+    .filter(([, mode]) => mode === 'stop')
+    .map(([b]) => b);
 
   // A waiting gate outranks everything, including a run that has said it is
   // done. `review_approved` fires while the loop is still going - verification,
@@ -386,11 +403,41 @@ export function Footer({
             : `${run.running.role} · ${run.running.kind}`}
         </span>
       </div>
+      {/*
+        `3a`'s mode control, and it is a **readout rather than a control**.
+
+        The design asks for the mode to be readable at a glance and says why:
+        *"mode is a mode, not an action."* Editing it belongs in one place, and
+        that place is the gate matrix in Settings — a segmented control here
+        would be a second form over one file, which is how two answers to "where
+        does this run hold" come to exist.
+
+        It lists **which boundaries hold** rather than naming a next stop. The
+        matrix is a fact the loop stated; *which one comes next* would need a
+        phase-to-boundary ordering written here, and a wrong one is a promise the
+        app cannot keep — the same reason this line used to say nothing at all.
+      */}
       <div className="v-footer__note">
-        {/* Not "next stop: verify gate". This slice is not given the gate matrix
-            (#140), so it holds at whatever `serve.ts` reaches - and naming a
-            boundary it might not stop at would be a promise the app cannot keep. */}
-        Every boundary holds. Which ones is configuration this build does not have yet (#140).
+        {gates === null ? (
+          <>Where this run hands control back is in `vibe.config.json`; this build has not read it.</>
+        ) : holding.length === 0 ? (
+          <>
+            No boundary holds — every row is <code>auto</code>, so the loop runs to the end
+            without asking.
+          </>
+        ) : (
+          <>
+            Holds at {holding.map((b) => boundary(b)).join(', ')}.{' '}
+            {stopping.length > 0 && (
+              <>
+                {/* The difference that costs something. A `step` row is an
+                    await and free; a `stop` row ENDS the run, resumably. */}
+                {stopping.map((b) => boundary(b)).join(', ')}{' '}
+                {stopping.length === 1 ? 'ends' : 'end'} the run there rather than asking.
+              </>
+            )}
+          </>
+        )}
       </div>
 
       {/*
