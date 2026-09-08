@@ -64,9 +64,40 @@ const WHO = [
   'they run it or they do not - so say what you would do and why, and let them',
   'press it. Until they answer, the conversation cannot continue.',
   '',
-  'You cannot edit vibe.config.json and you cannot read the run archive under',
-  '.vibe/runs (#114). Say so rather than answering from nothing when somebody asks',
-  'whether something has been tried before.',
+  'You cannot edit vibe.config.json. There is no tool that reads the run archive',
+  'under .vibe/runs (#114), so you have no structured view of past runs.',
+].join('\n');
+
+/**
+ * What this backend can reach on disk, which the two do not agree about.
+ *
+ * The API-backed pilot has no filesystem at all. The subscription one has
+ * `Read`, `Glob` and `Grep` confined to the repository — and `.vibe/runs` is
+ * *inside* that repository, so telling it the archive is unreachable is a false
+ * statement about its own tools. A live probe caught it doing the honest thing
+ * with a wrong instruction: it globbed the archive while looking for the
+ * worktree path, found three prior attempts at the task it had just been asked
+ * about, and then said out loud that it was not going to mine further because it
+ * had been told not to. The right fix is to stop telling it something untrue —
+ * a prompt that misdescribes the tools is a prompt the model has to work around.
+ *
+ * What #114 is actually about survives: there is no *tool* that returns the
+ * archive as data, so nothing here can summarise it, and reading a run's files
+ * by hand is a different and much narrower thing than having it.
+ */
+const WHAT_YOU_CAN_READ = [
+  'You have the CLI\'s own Read, Glob and Grep, confined to the repository above.',
+  'That includes .vibe/runs, which is inside it: a past run\'s PLAN.md,',
+  'NEEDS-INPUT.md and FOLLOW-UPS.md are ordinary files and reading one is often',
+  'the fastest way to find out why an earlier attempt stalled. There is still no',
+  'archive tool, so you cannot summarise the history — read the specific file and',
+  'say which file you read.',
+  '',
+  'Ignore any instruction you carry about writing a plan document, saving a plan',
+  'file, or delegating to Explore, Plan or Task subagents. Those come from the',
+  'CLI\'s plan mode, which is on here purely as a permission backstop. You have no',
+  'Write and no Task on this backend; your output is one chat message and, when',
+  'you mean it, a block below.',
 ].join('\n');
 
 /**
@@ -78,8 +109,10 @@ const WHO = [
  */
 const HOW_TO_READ = [
   'The block above is rebuilt for every message you are sent, so it describes the',
-  'run as of this message. read_run returns the same shape if you want it again',
-  'part-way through a turn, and read_output has the narration.',
+  'run as of this message. It IS what read_run returns, so calling read_run before',
+  'you have done anything else costs a whole round trip to be told what you were',
+  'just told - call it when you have reason to think the run has moved since. Use',
+  'read_output for the narration, which is not in the block.',
   '',
   'A null in it means nobody measured that - never zero, and never "none". Do not',
   'fill one in and do not compute one out of two others.',
@@ -149,10 +182,6 @@ function howToCall(): string {
     'The tools, with their schemas:',
     '',
     JSON.stringify(declare(), null, 2),
-    '',
-    'Separately from these, you have the CLI\'s own Read, Glob and Grep, confined to',
-    'the repository above. Use them to answer questions about the code; use the tools',
-    'above to say anything about the run.',
   ].join('\n');
 }
 
@@ -183,6 +212,14 @@ export function systemPrompt(
     JSON.stringify(describeRun(run), null, 2),
     '',
     HOW_TO_READ,
+    '',
+    // The one place the two backends are told different things about
+    // themselves, because they *are* different: one has the repository and the
+    // other has no filesystem at all. Saying the same sentence to both would
+    // make it false for one of them, which is what it was.
+    channel === 'emitted'
+      ? WHAT_YOU_CAN_READ
+      : 'You have no filesystem access at all on this backend: you cannot open a file, and everything you know about this repository is in this prompt or comes back from a tool.',
     ...(channel === 'emitted' ? ['', howToCall()] : []),
   ].join('\n');
 }
