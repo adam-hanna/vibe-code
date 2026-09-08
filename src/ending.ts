@@ -156,6 +156,8 @@ export interface ProcessHooks {
   onceSignal: (signal: NodeJS.Signals, fn: () => void) => void;
   offSignal: (signal: NodeJS.Signals, fn: () => void) => void;
   raise: (signal: NodeJS.Signals) => void;
+  /** The way out when the re-raise did not take. See `EXIT_UNRAISED`. */
+  exit: (code: number) => void;
 }
 
 export const nodeHooks: ProcessHooks = {
@@ -176,7 +178,23 @@ export const nodeHooks: ProcessHooks = {
   raise: (signal) => {
     process.kill(process.pid, signal);
   },
+  exit: (code) => {
+    process.exit(code);
+  },
 };
+
+/**
+ * What this process exits with when the re-raise could not end it.
+ *
+ * Not one of `EXIT`'s 0-7: those are a *run's* endings, and this is the process
+ * saying a termination signal arrived and the re-raise did not work - the same
+ * distinction `HOST_EXIT_ABANDONED` draws. 1 rather than a number of its own
+ * because that is what an uncaught throw in this handler already produced, so
+ * nothing downstream sees a code it has not seen; what changes is that the
+ * process leaves deliberately, with no stack in the log, and `ending.json` is
+ * already on disk saying which signal it was.
+ */
+export const EXIT_UNRAISED = 1;
 
 export interface EndingStamp {
   /** The stamp this installation displaced, so the caller can record it. */
@@ -252,7 +270,31 @@ export function installEndingStamp(dir: string, hooks: ProcessHooks = nodeHooks)
         code: null,
         signal,
       });
-      hooks.raise(signal);
+      // **The re-raise is allowed to fail, and this handler is not.**
+      //
+      // On Windows `process.kill(self, 'SIGHUP')` is `ENOSYS`: Node emulates
+      // the *delivery* of all three of these, and can re-raise none of them.
+      // The throw escaped a handler this module's own header promises never
+      // throws, so closing the app during a run killed the host with an
+      // uncaught exception and a stack in `vibe-desktop.log` - observed at
+      // 22:06 on a run holding at `plan-round`, on the platform this repo is
+      // developed on, which is to say every time.
+      //
+      // Nothing was lost: `write` runs first, so `ending.json` was already on
+      // disk saying `how: 'signal'` and naming it, which is the whole of what
+      // #131 wanted. What was wrong is how the process left.
+      try {
+        hooks.raise(signal);
+      } catch {
+        // See above. Swallowed, and then exited below - never rethrown from a
+        // handler that is already ending the process.
+      }
+      // Reached only when the raise did not end us: it threw, or it returned
+      // because the signal was blocked. Either way a process that has been told
+      // to terminate and is still running is the state `reaper.rs` exists for,
+      // and exiting is closer to "dies exactly as it would have" than surviving
+      // is. On the platforms where the raise works, this line is unreachable.
+      hooks.exit(EXIT_UNRAISED);
     };
     handlers.set(signal, handler);
     hooks.onceSignal(signal, handler);

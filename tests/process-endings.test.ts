@@ -138,13 +138,26 @@ interface FakeHooks extends ProcessHooks {
   /** Every signal a listener was installed for, in order. */
   listening: NodeJS.Signals[];
   raised: NodeJS.Signals[];
+  /** Exit codes this handler asked for, in order. Empty when the raise took. */
+  exited: number[];
   live: () => number;
 }
 
-function fakeHooks(exitCode: number | undefined = undefined): FakeHooks {
+function fakeHooks(
+  exitCode: number | undefined = undefined,
+  /**
+   * Make the re-raise throw, as Windows does.
+   *
+   * `process.kill(self, 'SIGHUP')` is `ENOSYS` there - Node emulates delivery
+   * of all three stamped signals and can re-raise none of them - so this is the
+   * real behaviour on the platform the repo is developed on, not a hypothetical.
+   */
+  raiseThrows = false,
+): FakeHooks {
   const signals = new Map<NodeJS.Signals, () => void>();
   const listening: NodeJS.Signals[] = [];
   const raised: NodeJS.Signals[] = [];
+  const exited: number[] = [];
   let onExit: (() => void) | null = null;
   return {
     pid: 4242,
@@ -164,7 +177,14 @@ function fakeHooks(exitCode: number | undefined = undefined): FakeHooks {
     },
     raise: (signal) => {
       raised.push(signal);
+      if (raiseThrows) {
+        throw Object.assign(new Error('kill ENOSYS'), { code: 'ENOSYS' });
+      }
     },
+    exit: (code) => {
+      exited.push(code);
+    },
+    exited,
     fireExit: () => onExit?.(),
     fireSignal: (signal) => {
       // `process.once` removes before invoking, and the re-raise depends on
@@ -180,6 +200,47 @@ function fakeHooks(exitCode: number | undefined = undefined): FakeHooks {
     live: () => signals.size + (onExit === null ? 0 : 1),
   };
 }
+
+test('a re-raise that cannot work leaves the stamp and still ends the process', () => {
+  // Found in `vibe-desktop.log` rather than reasoned about: closing the app
+  // during a run killed the host with `Error: kill ENOSYS` and a stack, out of
+  // the one handler whose own header says nothing here throws. On Windows Node
+  // emulates the DELIVERY of these three signals and can re-raise none of them,
+  // so this fired on every close, on the platform the repo is developed on.
+  const dir = runDir();
+  const hooks = fakeHooks(undefined, true);
+  installEndingStamp(dir, hooks);
+
+  // The throw does not escape, which is the header's promise.
+  assert.doesNotThrow(() => hooks.fireSignal('SIGHUP'));
+
+  // Nothing was lost even before this fix: `write` runs first, so the record
+  // #131 exists to create was already on disk. That is the half that was right.
+  const ending = readEnding(dir);
+  assert.equal(ending?.how, 'signal');
+  assert.equal(ending?.signal, 'SIGHUP');
+
+  // What was wrong is how the process left. It tried the raise, and having been
+  // told to terminate and not died, it exits rather than surviving - a host
+  // still running after a termination signal is the state `reaper.rs` is for.
+  assert.deepEqual(hooks.raised, ['SIGHUP']);
+  assert.deepEqual(hooks.exited, [1]);
+});
+
+test('a re-raise that works ends the process itself, and nothing exits after it', () => {
+  // The other direction, and the one that keeps "dies exactly as it would have"
+  // true on POSIX: a working raise never returns, so the fallback below it is
+  // unreachable. The fake returns, which is the pessimistic case - if the real
+  // handler ever grew an exit BEFORE the raise, this would catch it by seeing
+  // the two in the wrong order.
+  const dir = runDir();
+  const hooks = fakeHooks();
+  installEndingStamp(dir, hooks);
+  hooks.fireSignal('SIGTERM');
+
+  assert.deepEqual(hooks.raised, ['SIGTERM']);
+  assert.equal(readEnding(dir)?.signal, 'SIGTERM');
+});
 
 test('the exit hook stamps the code the process is leaving with', () => {
   const dir = runDir();

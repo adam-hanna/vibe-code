@@ -254,6 +254,16 @@ Two things about it are load-bearing and neither is obvious:
   so the raise finds the default disposition and the process dies exactly as it would have.
   If the re-raise ever goes, this becomes the handler `acquireLock` refuses and that refusal
   applies to it.
+- **The re-raise is allowed to fail, and the handler is not.** On Windows
+  `process.kill(self, 'SIGHUP')` is `ENOSYS` — Node emulates the *delivery* of all three and
+  can re-raise none of them — so the throw escaped the one handler whose header promises
+  nothing here throws, and closing the app during a run killed the host with a stack in
+  `vibe-desktop.log`. Every time, on the platform this repo is developed on. **Nothing was
+  lost**: `write` runs before the raise, so `ending.json` was already on disk naming the
+  signal, which is the whole of what #131 wanted; what was wrong was how the process left.
+  The raise is now attempted, its failure swallowed, and `EXIT_UNRAISED` taken — because a
+  process told to terminate and still running is the state `reaper.rs` exists for, and on a
+  platform where the raise works that line is unreachable.
 - **On Windows a child killed from outside is not observable as killed.** There are no
   signals: Task Manager, `Stop-Process` and any `process.kill` against a process this one did
   not spawn all become `TerminateProcess`, and the child closes with an exit code and no
