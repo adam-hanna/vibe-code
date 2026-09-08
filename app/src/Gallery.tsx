@@ -112,6 +112,11 @@ export function Gallery() {
             <MetaChip kind="checkable">code · src/auth.ts:41</MetaChip>
             <MetaChip kind="checkable">artifact · code-review-2.json</MetaChip>
             <MetaChip>external · no path</MetaChip>
+            {/* Hi-fi 15: the one kind that earns a place in the chrome, and only
+                while something disagrees. It names the disagreement rather than
+                the value — `PROTOCOL 1` alone meant nothing to the user who
+                reported it. */}
+            <MetaChip kind="alarm">protocol 1 · expected 2</MetaChip>
           </Row>
         </Section>
 

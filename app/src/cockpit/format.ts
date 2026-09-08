@@ -18,6 +18,47 @@ export function elapsed(ms: number): string {
   return `${seconds}s`;
 }
 
+/**
+ * `up 3h04m`, `up 12m30s`, `up 8s` — a host's uptime from a count of seconds.
+ *
+ * Its own function rather than `elapsed(secs * 1000)` at the call site, because
+ * the two measurements arrive in different units and multiplying at every use is
+ * how one of them eventually does not.
+ */
+export function uptime(seconds: number): string {
+  return elapsed(Math.max(0, seconds) * 1000);
+}
+
+/**
+ * `0.4.2 · 9f3ac81 · built 6 Sep, 18:22`, and less when less is known (#201).
+ *
+ * **Every part is dropped rather than filled in.** A tree with no git reports no
+ * commit, and a version alone is still a true answer — what must never appear is
+ * a placeholder that reads like a hash. The date is formatted here rather than
+ * in Rust so it lands in the viewer's locale rather than the builder's.
+ */
+export function buildStamp(build: { version: string; commit: string | null; at: number | null }): string {
+  const parts = [build.version];
+  if (build.commit !== null) parts.push(build.commit);
+  if (build.at !== null) {
+    const at = new Date(build.at);
+    // Guarded because a stamp is a number from another process: `new Date(NaN)`
+    // renders as `Invalid Date`, which would sit in the panel looking like a
+    // fact somebody measured.
+    if (!Number.isNaN(at.getTime())) {
+      parts.push(
+        `built ${at.toLocaleString(undefined, {
+          day: 'numeric',
+          month: 'short',
+          hour: '2-digit',
+          minute: '2-digit',
+        })}`,
+      );
+    }
+  }
+  return parts.join(' · ');
+}
+
 /** `2.14M`, `120k`, `47`. Matches the core's own `fmtTokens`. */
 export function tokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;

@@ -101,6 +101,16 @@
   border-color: var(--accent-border-dim);
   color: var(--accent-muted);
 }
+/* Hi-fi 15: a diagnostic that is WRONG, which is the only condition under which
+ * one of them belongs in the chrome. Solid, because a dashed border says
+ * "nothing verified this" and something did. `--text-emphasis` is the token file's
+ * reserved alarm colour, so this borrows the product's alarm rather than
+ * inventing a second one. */
+.v-meta--alarm {
+  border-style: solid;
+  border-color: var(--text-emphasis);
+  color: var(--text-emphasis);
+}
 
 /* ================================================================ 4 · button
  * Three levels, one primary per region. Solid means interactive, and this is

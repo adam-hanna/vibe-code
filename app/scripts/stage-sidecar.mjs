@@ -91,6 +91,33 @@ writeFileSync(
   )}\n`,
 );
 
+// The build stamp, read by `src-tauri/build.rs` (#201).
+//
+// Written from here rather than exported as an env var because this runs in a
+// child of `beforeBuildCommand` and anything it exports dies with the process.
+// A file also gives cargo an accurate `rerun-if-changed`: cargo rebuilds when
+// *Rust* changes, and the thing that usually changes is the webview, which it
+// cannot see. The timestamp is fresh every run, so the file always differs and
+// the binary is always re-stamped by a real bundle build.
+//
+// The commit is asked of git here, where the repository is, rather than from
+// inside `src-tauri`. A tree with no git writes an empty first line, and the
+// Rust side reports the absence rather than inventing a hash.
+function commit() {
+  try {
+    return execFileSync('git', ['rev-parse', '--short=7', 'HEAD'], {
+      cwd: repo,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+  } catch {
+    return '';
+  }
+}
+const stamped = commit();
+writeFileSync(path.join(tauri, '.build-stamp'), `${stamped}\n${String(Date.now())}\n`);
+console.log(`stamp   ${stamped === '' ? 'no commit - this tree has no git' : stamped}`);
+
 const triple = hostTriple();
 const ext = process.platform === 'win32' ? '.exe' : '';
 const binaries = path.join(tauri, 'binaries');

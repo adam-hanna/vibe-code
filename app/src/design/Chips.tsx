@@ -56,12 +56,19 @@ export function StateKicker({
  * fact. `proposed` is a promise the UI is making that the code has not kept -
  * any of these surviving into a shipped build is a screen running ahead of its
  * behaviour.
+ *
+ * `alarm` is hi-fi 15's: a diagnostic value that is **wrong**. It is the one
+ * kind that earns a place in the chrome, because the whole argument for moving
+ * `HOST 43804` and `PROTOCOL 1` into a panel is that they say nothing until one
+ * of them disagrees - and at that moment they are the most important thing on
+ * screen. It wears `--text-emphasis`, which the token file reserves for alarm
+ * across the whole product, rather than a colour chosen here.
  */
 export function MetaChip({
   kind = 'default',
   children,
 }: {
-  kind?: 'default' | 'checkable' | 'proposed';
+  kind?: 'default' | 'checkable' | 'proposed' | 'alarm';
   children: ReactNode;
 }) {
   const mod = kind === 'default' ? '' : ` v-meta--${kind}`;

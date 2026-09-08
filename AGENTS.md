@@ -103,6 +103,31 @@ Two rules the cockpit inherits from the design and must not quietly drop:
 - **A missing measurement is drawn as absent with its reason**, never as a blank and never as
   a zero. The two lines of `6a` that have no source name the issue that would supply them
   (#136, #114), so the row completes when they land instead of being redesigned.
+- **A diagnostic belongs in the chrome only while it is wrong.** `HOST 43804` and
+  `PROTOCOL 1` sat permanently in the titlebar and a manual pass reported the obvious: they
+  mean nothing to a user (#204). They are not deleted, because each becomes the most important
+  thing on screen the moment it disagrees — so hi-fi 15 moves them into a `•••` popover
+  (⌘⇧D) and leaves one **alarm** chip in the bar that names the disagreement rather than the
+  value: `protocol 1 · expected 2`, never `PROTOCOL 1`. The panel holds four facts, each with
+  the sentence that makes it usable, every value monospace with a copy control, because these
+  are strings destined for a bug report. **A popover, not a modal — no scrim**, since
+  diagnostics are read while looking at what went wrong; it is the only elevated surface in
+  the product that does not block.
+- **The build stamp is on `Status`, not on a command of its own** (#201). Two builds of one
+  version are otherwise identical and single-instance makes that expensive — a fresh build
+  launched while an installed copy runs raises the old window and exits, which has cost a test
+  cycle here. `build.rs` reads `src-tauri/.build-stamp`, written by `stage:sidecar`, and falls
+  back to asking git. The **file** is the mechanism rather than an env var for two reasons:
+  `beforeBuildCommand` runs in a child, so nothing it exports reaches cargo; and
+  `rerun-if-changed` on it is the accurate trigger, because cargo rebuilds when *Rust* changes
+  and the thing that usually changes is the webview, which it cannot see. A tree with no git
+  reports **no commit at all** rather than `unknown`. `keys.test.ts` still pins eight
+  commands: a new door into this process should be a decision somebody makes on purpose, and
+  three of the panel's four facts already arrive on `host_status`, so they cannot disagree
+  about which process they describe. `Status` is `rename_all = "camelCase"` and a Rust test
+  asserts the window's spelling of `uptimeSecs` — serde's default would arrive as `undefined`
+  and render as *"up for an unknown time"* on a host that is up and fine, with nothing going
+  red on either side.
 - **The wait before the first phase is preflight, and it now says so.** `preflight` spawns a
   probe turn against each agent and narrated nothing while it did, so the seconds after the
   one action a new user knows how to take were seconds with nothing true to draw — reported
