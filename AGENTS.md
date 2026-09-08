@@ -405,8 +405,7 @@ reports bad values *by name*, which is the one thing that must never happen to a
 **A pilot turn can also be a child process, and that is not a hole in the rule
 below — it is the rule** (#193). `src/pilotchat.ts` spawns the same `claude` the
 loop spawns, so the pilot can run on the subscription the user already pays for
-instead of a second bill. It ships as groundwork with nothing calling it. Three
-things about it are load-bearing:
+instead of a second bill. Three things about it are load-bearing:
 
 - **It is deliberately not `claudeTurn`.** That function narrates through
   `log.ts`, and in the host that sink *is* the run's narration stream — a pilot
@@ -424,9 +423,40 @@ things about it are load-bearing:
 - **The real cost is contention, and it is named rather than solved.** These
   tokens come out of the same subscription window the run draws on, so a long
   conversation beside a long run can push that run into a `ratelimits.ts` wait.
-  Today the pilot cannot do that because it spends different money. Whoever wires
-  this up owes that an answer; the module's part is to raise a `RateLimitError` as
-  itself so there is something to act on.
+  The module's part is to raise a `RateLimitError` as itself so there is
+  something to act on; the wiring's part is that the two sets of books stay
+  separate — `ledger.ts` is the pilot's own, precisely so a conversation cannot
+  stop a run by spending its ceiling. A **shared** budget is what is not built,
+  and that is the honest state of it rather than a solved problem.
+
+**It is wired in, and a pilot turn is not a run.** The `pilot` frame goes to
+`serve.ts`, which runs it **outside the one-at-a-time gate and outside
+`finished()`**. That rule is about *runs*: `src/lock.ts` expects one process per
+run and two runs would interleave their narration. A pilot turn takes no lock,
+writes no state and narrates nothing — and a conversation about a run is most
+useful *during* one, so refusing it then would refuse it exactly when it is
+wanted. A second `invoke` is still refused, which is what keeps the exemption
+honest.
+
+**A backend is not a provider** (`app/src/pilot/backend.ts`). `Provider` is the
+*keychain's* vocabulary — `key_set` and `key_status` refuse anything but the two,
+and `keys.test.ts` pins the list — so widening it would mean a third key slot for
+a backend that has no key. `Backend` is the wider axis and `needsKey` is the one
+place they meet, as a type guard rather than a boolean so a caller that has
+checked cannot then hand `'subscription'` to the keychain.
+
+**The two are asymmetric in both directions, and both are on purpose.** The
+API-backed pilot has no filesystem at all; the subscription one can read the
+repository. In the other direction the subscription pilot has **no vibe tools** —
+no `start_run`, no proposals — because tool declaration is a vendor-API feature
+and `claude -p` takes no schemas from us. That is a real limitation and
+`BACKEND_NOTE` says it under the selector, rather than leaving somebody to
+discover it by asking the pilot to launch a run and being ignored.
+
+**A subscription turn is counted in tokens and never in money**, and its `why` is
+deliberately not the unpriced-model sentence. Those are two different nulls: one
+is missing information, and this is a statement that there is no price to have.
+Collapsing them would make the second read as an omission somebody should fix.
 
 **It may read the repository and nothing else, and the four layers are named in
 the argv.** #193 decided the read: a pilot that can open `PLAN.md` and the diff is

@@ -1,7 +1,17 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { Button, MetaChip, StateKicker } from '../design';
+import * as host from '../host';
 import * as keys from './keys';
 import * as pilot from './pilot';
+import {
+  BACKEND_NAME,
+  BACKEND_NOTE,
+  BACKENDS,
+  modelsFor,
+  needsKey,
+  SUBSCRIPTION_MODELS,
+} from './backend';
+import type { Backend } from './backend';
 import { systemPrompt } from './brief';
 import { declare, execute } from './tools';
 import {
@@ -30,7 +40,7 @@ import {
   unanswered,
   unrecognised,
 } from './transcript';
-import type { KeyStatus, Provider } from './keys';
+import type { KeyStatus } from './keys';
 import type { Effect, Settlement } from './tools';
 import type { Call, Conversation, Reply } from './transcript';
 import type { Launched } from '../cockpit/argv';
@@ -67,9 +77,9 @@ import type { Run } from '../cockpit/model';
 const MAX_CHAIN = 8;
 
 type Action =
-  | { type: 'ask'; content: string; turn: number; provider: Provider }
-  | { type: 'follow'; turn: number; provider: Provider }
-  | { type: 'refuse'; content: string | null; provider: Provider; message: string }
+  | { type: 'ask'; content: string; turn: number; provider: Backend }
+  | { type: 'follow'; turn: number; provider: Backend }
+  | { type: 'refuse'; content: string | null; provider: Backend; message: string }
   | { type: 'event'; event: pilot.PilotEvent }
   | { type: 'settle'; id: string; settlement: Settlement }
   | { type: 'decide'; id: string; accepted: boolean; note: string }
@@ -313,7 +323,7 @@ function ReplyCard({
   return (
     <div className="v-pilot__reply">
       <div className="v-pilot__meta">
-        <MetaChip>{keys.PROVIDER_NAME[reply.provider]}</MetaChip>
+        <MetaChip>{BACKEND_NAME[reply.provider]}</MetaChip>
         {/* What ANSWERED, not what was asked for: an alias resolves to a dated
             version, and the resolved one is the fact worth showing. Absent until
             the vendor says so, rather than filled in from the request. */}
@@ -400,8 +410,30 @@ export interface PilotPaneProps {
 
 export function PilotPane({ run, launched, onEffect, onPending, statuses }: PilotPaneProps) {
   const [conversation, dispatch] = useReducer(apply, undefined, emptyConversation);
-  const [provider, setProvider] = useState<Provider>('anthropic');
-  const [model, setModel] = useState<string>(pilot.MODELS.anthropic[0] ?? '');
+  /**
+   * Where turns run (#193). **Subscription by default**, because it is the one
+   * that works with nothing configured - the whole point of the issue is that an
+   * API key is optional rather than a precondition for the pane doing anything.
+   */
+  const [provider, setProvider] = useState<Backend>('subscription');
+  const [model, setModel] = useState<string>(SUBSCRIPTION_MODELS[0] ?? '');
+  /**
+   * The conversation the CLI is keeping, once it has said what it is (#193).
+   *
+   * Allocated here on the first turn and then **replaced by whatever the CLI
+   * returns**, which is authoritative over ours. Null means the next turn opens
+   * a new conversation; a session id means it resumes one, which is what makes a
+   * subscription turn cost nothing in re-sent context.
+   */
+  const session = useRef<string | null>(null);
+  /**
+   * The host-backed turn whose frames we are listening for, or -1.
+   *
+   * Its own ref rather than `sentAt`, which counts messages for the tool loop.
+   * These are two different numbers and sharing one would make a turn id look
+   * like a message count on the frame after somebody changed either.
+   */
+  const hostTurn = useRef(-1);
   const [entry, setEntry] = useState('');
   const [live, setLive] = useState<number | null>(null);
   // The pilot's own books (#145). Read from `localStorage` at mount, because a
@@ -485,8 +517,93 @@ export function PilotPane({ run, launched, onEffect, onPending, statuses }: Pilo
   // either outcome it is choosing between.
   const verdict = limitVerdict(ledger, limits, new Date());
 
+  // The subscription backend's frames, folded into the same conversation the
+  // API-backed one produces (#193). Synthesised into `PilotEvent`s rather than
+  // given a second reducer: one model of a conversation, whichever wire fed it.
+  //
+  // No `started` is synthesised, so `Reply.model` stays null. The CLI is asked
+  // for a model and may answer on another one, and claiming the one we asked
+  // for would be the window stating something it was not told - the same rule
+  // the field's own comment states.
+  useEffect(() => {
+    let stop: (() => void) | null = null;
+    let cancelled = false;
+    void (async () => {
+      stop = await host.onPilotFrame((frame) => {
+        const turn = frame.id;
+        if (turn === null || turn !== hostTurn.current) return;
+        if (frame.type === 'pilot_delta') {
+          dispatch({ type: 'event', event: { kind: 'text', turn, delta: frame.text } });
+          return;
+        }
+        if (frame.type === 'error') {
+          dispatch({ type: 'event', event: { kind: 'failed', turn, message: frame.message } });
+          setLive(null);
+          return;
+        }
+        // The CLI's id wins over the one we proposed, always.
+        session.current = frame.sessionId;
+        dispatch({
+          type: 'event',
+          event: {
+            kind: 'spent',
+            turn,
+            usage: {
+              input: frame.tokens.input,
+              output: frame.tokens.output,
+              cache_read: frame.tokens.cacheRead,
+              cache_write: frame.tokens.cacheCreation,
+            },
+          },
+        });
+        dispatch({ type: 'event', event: { kind: 'ended', turn, stop: null } });
+        setLive(null);
+      });
+      if (cancelled) stop?.();
+    })();
+    return () => {
+      cancelled = true;
+      stop?.();
+    };
+  }, []);
+
   const start = useCallback(
     (messages: readonly pilot.Message[], said: string | null) => {
+      // The subscription path. It does not go through Rust at all: the host
+      // spawns `claude -p` with the closed read-only allow-list `pilotchat.ts`
+      // builds, so there is no key to have and nothing to bill.
+      //
+      // It also declares **no tools**. Tool declaration is a vendor-API feature
+      // and the CLI takes no schemas from us, so `declare()` has nowhere to go -
+      // which means no proposals from this backend, said out loud under the
+      // selector rather than left to be discovered.
+      if (!needsKey(provider)) {
+        const id = session.current;
+        void host
+          .pilotTurn({
+            prompt: said ?? '',
+            system: systemPrompt(run, launched),
+            model,
+            sessionId: id ?? crypto.randomUUID(),
+            resume: id !== null,
+          })
+          .then((turn) => {
+            hostTurn.current = turn;
+            setLive(turn);
+            if (said === null) dispatch({ type: 'follow', turn, provider });
+            else dispatch({ type: 'ask', content: said, turn, provider });
+          })
+          .catch((err: unknown) =>
+            dispatch({
+              type: 'refuse',
+              content: said,
+              provider,
+              message: err instanceof Error ? err.message : String(err),
+            }),
+          );
+        return;
+      }
+
       void pilot
         // The table goes out on every request. Declared from here and executed
         // here, which is what makes "no tool without an implementation" a fact
@@ -547,8 +664,10 @@ export function PilotPane({ run, launched, onEffect, onPending, statuses }: Pilo
   }, [owesReply, conversation.messages, start, verdict.allowed]);
 
   const ready =
-    statuses !== null &&
-    keys.usable(statuses).includes(provider) &&
+    // The subscription backend needs no key, which is the whole of #193: the
+    // pane does something useful with nothing configured. The key check is for
+    // the two that reach a vendor.
+    (!needsKey(provider) || (statuses !== null && keys.usable(statuses).includes(provider))) &&
     owed.length === 0 &&
     // The pilot's own ceiling, which is off unless somebody set one. It gates
     // the tool loop as well as the composer: a chain of tool calls is exactly
@@ -599,27 +718,38 @@ export function PilotPane({ run, launched, onEffect, onPending, statuses }: Pilo
           className="v-pilot__select"
           value={provider}
           onChange={(e) => {
-            const next = e.target.value as Provider;
+            const next = e.target.value as Backend;
             setProvider(next);
-            setModel(pilot.MODELS[next][0] ?? '');
+            setModel(modelsFor(next, pilot.MODELS)[0] ?? '');
+            // A conversation belongs to the backend that is holding it. Carrying
+            // a CLI session id across to a vendor - or back - would resume a
+            // conversation on a wire that has never heard of it (#193).
+            session.current = null;
           }}
         >
-          {keys.PROVIDERS.map((p) => (
+          {BACKENDS.map((p) => (
             <option key={p} value={p}>
-              {keys.PROVIDER_NAME[p]}
+              {BACKEND_NAME[p]}
             </option>
           ))}
         </select>
         <select className="v-pilot__select" value={model} onChange={(e) => setModel(e.target.value)}>
-          {pilot.MODELS[provider].map((m) => (
+          {modelsFor(provider, pilot.MODELS).map((m) => (
             <option key={m} value={m}>
               {m}
             </option>
           ))}
         </select>
+        {/* What this backend can and cannot do. Said here rather than left to be
+            discovered by asking the subscription pilot to launch a run and being
+            ignored - it declares no tools, because tool declaration is a
+            vendor-API feature the CLI takes no schemas for (#193). */}
+        <span className="v-pilot__note">{BACKEND_NOTE[provider]}</span>
         {/* Names the provider rather than "a key". One provider configured is a
-            supported state, so this is the message for having picked the other. */}
-        {statuses !== null && !keys.usable(statuses).includes(provider) && (
+            supported state, so this is the message for having picked the other -
+            and the subscription backend never reaches it, which is the whole
+            point of the issue. */}
+        {needsKey(provider) && statuses !== null && !keys.usable(statuses).includes(provider) && (
           <span className="v-pilot__note">
             no {keys.PROVIDER_NAME[provider]} key — enter one under Keys
           </span>

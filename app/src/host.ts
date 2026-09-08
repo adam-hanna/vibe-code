@@ -60,7 +60,30 @@ export interface HostError {
   message: string;
 }
 
-export type Frame = Ready | Narration | Ask | Result | HostError;
+/** A fragment of a pilot reply, in order (#193). */
+export interface PilotDelta {
+  type: 'pilot_delta';
+  id: number;
+  text: string;
+}
+
+/**
+ * A pilot turn finished.
+ *
+ * **No money on it, and nowhere to put any.** A subscription turn bills nothing
+ * at all, so a dollar figure would have no quantity to be an estimate *of* —
+ * the same sentence that makes Codex cost unreportable. The tokens are real.
+ */
+export interface PilotReply {
+  type: 'pilot_reply';
+  id: number;
+  text: string;
+  /** What the CLI says the conversation is, which is authoritative over ours. */
+  sessionId: string;
+  tokens: { input: number; output: number; cacheRead: number; cacheCreation: number; total: number };
+}
+
+export type Frame = Ready | Narration | Ask | Result | HostError | PilotDelta | PilotReply;
 
 /**
  * Whether a value is a frame this version recognises.
@@ -79,7 +102,12 @@ export function isFrame(v: unknown): v is Frame {
     type === 'narration' ||
     type === 'ask' ||
     type === 'result' ||
-    type === 'error'
+    type === 'error' ||
+    // The pilot's two, which the cockpit's reducer ignores and the pilot pane
+    // reads. Recognised here or they would be reported as unknown frames and
+    // land in the diagnostics list instead of in the conversation (#193).
+    type === 'pilot_delta' ||
+    type === 'pilot_reply'
   );
 }
 
@@ -206,6 +234,57 @@ export function pause(): Promise<void> {
 
 export function cancel(reason: string): Promise<void> {
   return send({ type: 'cancel', id: nextRequestId(), reason });
+}
+
+/**
+ * Listen for the pilot's own frames, and for errors (#193).
+ *
+ * A second listener on the same event as `connect`, which Tauri allows and which
+ * is the right shape here: the cockpit reads run frames and the pilot pane reads
+ * pilot frames, and neither has to know the other exists. **Reading is not
+ * sending** - the one `host.send` still belongs to `Cockpit`, for #144's reason.
+ *
+ * `error` frames are included because a pilot turn that could not run at all
+ * arrives as one, carrying the id it was given. The pane matches on that id; a
+ * relay cannot, because it does not know whose id it is.
+ */
+export async function onPilotFrame(
+  handler: (frame: PilotDelta | PilotReply | HostError) => void,
+): Promise<() => void> {
+  return listen<unknown>('host://frame', (event) => {
+    const frame: unknown = event.payload;
+    if (!isFrame(frame)) return;
+    if (frame.type === 'pilot_delta' || frame.type === 'pilot_reply' || frame.type === 'error') {
+      handler(frame);
+    }
+  });
+}
+
+/** What one subscription-backed pilot turn needs (#193). */
+export interface PilotTurn {
+  prompt: string;
+  system: string;
+  model: string;
+  sessionId: string;
+  resume: boolean;
+}
+
+/**
+ * Run one pilot turn on the subscription, through the host.
+ *
+ * Returns the id its frames will carry, so a caller can tell its own turn's
+ * deltas from anything else on the stream — the same shape `pilot.send` returns
+ * for the API-backed path, and for the same reason.
+ *
+ * **The reply does not come back from here.** It arrives as `pilot_delta` and
+ * `pilot_reply` frames, exactly as a run's narration does, because the wire is
+ * one-way in that direction and a promise resolving with a whole reply would be
+ * a second way for one to arrive.
+ */
+export async function pilotTurn(turn: PilotTurn): Promise<number> {
+  const id = nextRequestId();
+  await send({ type: 'pilot', id, ...turn });
+  return id;
 }
 
 /** Ids the app allocates for its own requests. Gate ids come from the host. */
