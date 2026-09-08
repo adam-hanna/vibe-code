@@ -181,6 +181,29 @@ line: an escalation narrates at `warn`, and a healthy run is full of warnings th
 ending. `run_failed` also prints a stack while carrying the sentence separately, because a
 terminal wants the frames and a footer wants the answer to "what now" (#162).
 
+**A fact the run records and never says is a screen that cannot be built** (#223). The loop
+has always known whether the verification gate passed, what a round's four severity counts
+were and how they compared to the tolerance — it wrote every one of them to `state.events`
+and said none of them, so a host could watch a run for ninety minutes and never learn the
+verdict. Half the design corpus was blocked on that and not on a missing measurement.
+
+The move is a **promotion, never an invention**, and `recordAndSay`'s own rule is what makes
+it safe: *"narration never creates an event."* The durable set is exactly what `recordEvent`
+records, so turning `recordEvent` + `log.*` into one `recordAndSay` adds nothing to
+`state.json` — and where the two calls already sat beside each other, the terminal does not
+change by a byte. `narration-identity.test.ts` pins the id sequence of a clean pass and
+`durable-narration.test.ts` pins the event set, so the two halves of that claim fail
+separately.
+
+Two things travel with it. **A census is narration with no event**: `findings_reported` and
+`questions_answered` carry a round's counts and the answerer's confidence, and neither is in
+`state.events`, because both are derivable from the round's own artifact and a resume needs
+neither — #133 measured what happens when that question is answered casually, and the answer
+is that the run's memory roughly quadruples on the shortest possible run. And **the id is the
+event type**, never a name of its own: `applyCharge` narrates under `claude_turn` /
+`codex_turn`, the same string it just recorded, so a host acting on the fact and an archive
+holding it agree about one fact rather than two spellings of it.
+
 **That covers the endings vibe chooses. `run.lock` plus `ending.json` covers the ones it
 does not.** A dead pid holding a lock has always meant two opposite things at once — vibe
 decided to stop and never tidied up, or something killed it mid-turn — and #131 is what

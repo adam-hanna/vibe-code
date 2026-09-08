@@ -331,7 +331,33 @@ export function applyCharge(state: RunState, cfg: Config, charge: TurnCharge): v
         `${fmtTokens(charge.tokens)}; charged what was reported, and recorded the difference.`,
     );
   }
-  log.detail(charge.describe());
+  // The one seam every token is charged through, and until #223 the only place
+  // it went was `state.events` and a terminal line with no id on it. `5e` is the
+  // spend screen and it is drawn on this: the run total, the per-turn figure and
+  // which provider spent it, all of which this function is already holding.
+  //
+  // **The id is the event's type, not a name of its own** - `claude_turn` or
+  // `codex_turn`, whichever was recorded a line above - which is the identity
+  // rule `recordAndSay` states: a host acting on the fact and an archive
+  // recording it agree about one fact rather than two spellings of it. Not
+  // `recordAndSay` itself only because `detail` is deliberately not a `SayLevel`,
+  // and this line's level is not up for renegotiation here.
+  log.detail(charge.describe(), {
+    id: charge.event.type,
+    data: {
+      ...data,
+      label: charge.label,
+      provider: charge.provider,
+      tokens: charge.tokens,
+      // The run's totals after this charge, so a pane never has to add up a
+      // stream of turns and get a different answer from the one `state.json`
+      // holds. `costUsd` is Claude-side and says so on every screen that draws
+      // it - Codex reports none, which is a settled decision and not a gap.
+      runTokens: state.tokensUsed,
+      runCostUsd: state.costUsd,
+      codexTokens: state.codexTokens ?? null,
+    },
+  });
   for (const warning of charge.warnings) log.warn(warning);
 
   // Only where the provider reported a cost. The check has always lived on the
