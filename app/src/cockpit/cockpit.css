@@ -1812,3 +1812,160 @@
   padding: var(--space-1) var(--space-2);
   cursor: pointer;
 }
+
+/* ------------------------------------------------------------ new workstream (4a) */
+
+.v-new {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.v-new__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+}
+
+.v-new__label {
+  font: var(--type-label);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.v-new__task,
+.v-new__dir,
+.v-new__num {
+  font: var(--type-body);
+  color: var(--text-primary);
+  background: var(--surface-card);
+  border: 1px solid var(--rule-control);
+  padding: var(--space-2) var(--space-3);
+}
+
+.v-new__task {
+  resize: vertical;
+}
+
+.v-new__num {
+  width: 16ch;
+  font: var(--type-mono-sm);
+}
+
+.v-new__row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.v-new__dir {
+  flex: 1;
+  font: var(--type-mono-sm);
+}
+
+/* The overrides block: only what differs, and the count says how much. */
+.v-new__over {
+  border: 1px solid var(--rule-inner);
+  padding: var(--space-3);
+}
+
+.v-new__over summary {
+  font: var(--type-label);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.v-new__gates {
+  border-collapse: collapse;
+  margin-top: var(--space-3);
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+.v-new__gates td {
+  padding: var(--space-1) var(--space-3) var(--space-1) 0;
+}
+
+.v-new__gates code {
+  font: var(--type-mono-sm);
+}
+
+/* Changed rows tinted and labelled, which is the design's own instruction. */
+.v-new__gates tr.is-changed {
+  background: var(--surface-accent-tint);
+}
+
+.v-new__gates tr.is-changed code {
+  color: var(--accent-on-tint);
+}
+
+.v-new__dim {
+  color: var(--text-tertiary);
+}
+
+.v-new__note {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  margin: 0;
+  max-width: 72ch;
+}
+
+.v-new__bad {
+  font: var(--type-body-sm);
+  color: var(--text-primary);
+  background: var(--surface-alarm);
+  padding: var(--space-2);
+  margin: 0;
+}
+
+.v-new__toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+/* The exact command, because it is the one thing definitely true about what
+   pressing the button will do. */
+.v-new__argv {
+  font: var(--type-mono-sm);
+  color: var(--text-secondary);
+  background: var(--surface-panel);
+  border: 1px solid var(--rule-inner);
+  padding: var(--space-2) var(--space-3);
+  margin: 0;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.v-new__foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  border-top: 1px solid var(--rule-inner);
+  padding-top: var(--space-3);
+}
+
+.v-new__reset,
+.v-launch__more {
+  font: var(--type-label);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--accent-on-tint);
+  background: none;
+  border: 1px solid var(--accent-border);
+  padding: var(--space-1) var(--space-2);
+  cursor: pointer;
+}
+
+.v-launch__more {
+  align-self: flex-start;
+  margin: 0 var(--space-4) var(--space-3);
+}

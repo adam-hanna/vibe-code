@@ -59,12 +59,34 @@ describe('the brief reaches the pilot', () => {
       [],
       ['run'],
       ['resume', '20260101-000000-x'],
-      ['run', 'task', '-C', '/r', '--max-tokens', '900000'],
       ['run', 'task', '--dir', '/r'],
       ['plan', '', '-C', '/r'],
+      // A flag this build has never heard of. The brief and the directory are
+      // still in the first four slots and are still readable - and it is STILL
+      // null, because the reader accounting for the whole argv is what keeps the
+      // round trip above a real guard rather than a shape check on a prefix.
+      ['run', 'task', '-C', '/r', '--branch', 'feat/x'],
+      // A known flag with no value after it. Half a pair is not a pair.
+      ['run', 'task', '-C', '/r', '--max-tokens'],
     ]) {
       expect(readLaunchArgv(argv)).toBeNull();
     }
+  });
+
+  test('the overrides an argv carries do not cost it its brief (#223)', () => {
+    // `4a`'s overrides block emits `--gate`, `--role`, `--max-tokens` and
+    // `--p1-tolerance`, and the pilot still has to be able to say what run it is
+    // sitting beside. The brief and the repository are in the same two slots
+    // whatever follows them.
+    const argv = launchArgv('do the thing', 'C:/repo', false, {
+      gates: { 'plan-round': 'auto' },
+      maxTokens: 900_000,
+    });
+    expect(readLaunchArgv(argv)).toEqual({
+      task: 'do the thing',
+      dir: 'C:/repo',
+      planOnly: false,
+    });
   });
 
   test('the whole brief goes to the model, not a summary of it', () => {

@@ -11,12 +11,56 @@
  * So the button and the tool build the same argv here, and a test that pins the
  * shape pins both.
  */
-export function launchArgv(task: string, dir: string, planOnly: boolean): readonly string[] {
+/**
+ * What `4a`'s overrides block can express, and nothing it cannot.
+ *
+ * Every field here is a flag `parseArgs` already takes. That is the constraint
+ * the whole modal is built under: a control with no flag behind it would be a
+ * promise the app cannot keep, and the design's own overrides block is described
+ * as *"only what differs from project defaults"* — which means the form has to
+ * be able to send a difference, not a whole configuration.
+ */
+export interface Overrides {
+  /** `--max-tokens`. The one ceiling that bounds Codex work. Null leaves it alone. */
+  maxTokens?: number | null;
+  /** `--gate <boundary>=<mode>`, repeatable. Only the rows that differ. */
+  gates?: Readonly<Record<string, string>>;
+  /** `--role <role>:<key>=<value>`, repeatable, and it PATCHES rather than replaces. */
+  roles?: readonly { role: string; key: string; value: string }[];
+  /** `--p1-tolerance`. How many P1s a phase may carry rather than fix. */
+  p1Tolerance?: number | null;
+}
+
+export function launchArgv(
+  task: string,
+  dir: string,
+  planOnly: boolean,
+  over: Overrides = {},
+): readonly string[] {
   // `plan` and `run` are two commands rather than a flag, exactly as the CLI has
   // them. Trimmed here rather than by each caller, because a trailing newline in
   // a path is a directory that does not exist and the error it produces says so
   // in the least helpful possible way.
-  return [planOnly ? 'plan' : 'run', task.trim(), '-C', dir.trim()];
+  const argv: string[] = [planOnly ? 'plan' : 'run', task.trim(), '-C', dir.trim()];
+
+  // Sorted, so the same overrides always build the same argv. Two forms that
+  // differ only in the order a person clicked would otherwise produce two
+  // different commands, and one of them would be the one in a bug report.
+  for (const [boundary, mode] of Object.entries(over.gates ?? {}).sort()) {
+    argv.push('--gate', `${boundary}=${mode}`);
+  }
+  for (const r of [...(over.roles ?? [])].sort((a, b) =>
+    `${a.role}:${a.key}`.localeCompare(`${b.role}:${b.key}`),
+  )) {
+    argv.push('--role', `${r.role}:${r.key}=${r.value}`);
+  }
+  // Null and undefined both mean "leave it alone", and neither becomes a zero:
+  // `--max-tokens 0` turns the ceiling OFF, which is the opposite of not saying.
+  if (typeof over.maxTokens === 'number') argv.push('--max-tokens', String(over.maxTokens));
+  if (typeof over.p1Tolerance === 'number') {
+    argv.push('--p1-tolerance', String(over.p1Tolerance));
+  }
+  return argv;
 }
 
 /**
@@ -62,11 +106,37 @@ export interface Launched {
  * is `null` rather than a partially-understood launch. Absent is a legal answer
  * here and a guess is not.
  */
+/**
+ * The flags `launchArgv` can emit, each taking one value.
+ *
+ * **The reader accounts for every one rather than skipping the tail**, which is
+ * what keeps the round trip a real guard: a flag added to the builder and not
+ * added here makes this return `null`, and the test that pins the round trip
+ * fails. Ignoring anything after the fourth slot would have made the two halves
+ * silently free to drift, which is the failure this pair exists to catch.
+ */
+const KNOWN_FLAGS: ReadonlySet<string> = new Set([
+  '--gate',
+  '--role',
+  '--max-tokens',
+  '--p1-tolerance',
+]);
+
 export function readLaunchArgv(argv: readonly string[]): Launched | null {
-  if (argv.length !== 4) return null;
+  if (argv.length < 4) return null;
   const [command, task, dash, dir] = argv;
   if (command !== 'plan' && command !== 'run') return null;
   if (dash !== '-C') return null;
   if (task === undefined || dir === undefined || task === '' || dir === '') return null;
+
+  // Everything after the four positional slots must be a `--flag value` pair
+  // this build knows. An argv from a newer build, or one a pilot proposed with a
+  // flag this version has never seen, is `null` rather than a partially
+  // understood launch - absent is a legal answer here and a guess is not.
+  for (let i = 4; i < argv.length; i += 2) {
+    const flag = argv[i];
+    if (flag === undefined || !KNOWN_FLAGS.has(flag)) return null;
+    if (argv[i + 1] === undefined) return null;
+  }
   return { task, dir, planOnly: command === 'plan' };
 }

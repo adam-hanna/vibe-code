@@ -12,6 +12,7 @@ import { FindingsPane } from './FindingsPane';
 import { Footer } from './Footer';
 import { Launch } from './Launch';
 import { LoopColumn } from './LoopColumn';
+import { NewWorkstream } from './NewWorkstream';
 import { OutputPane } from './OutputPane';
 import { QuestionsPane } from './QuestionsPane';
 import { RateLimitStrip } from './RateLimit';
@@ -91,6 +92,8 @@ export function Cockpit() {
   const [diagnostics, setDiagnostics] = useState(false);
   /** Whether the ⌘K switcher is open (`5f`, #223). */
   const [switching, setSwitching] = useState(false);
+  /** Whether `4a`'s modal is open. The only modal in the product. */
+  const [composing, setComposing] = useState(false);
   /**
    * The repository this window is pointed at (#223).
    *
@@ -211,6 +214,7 @@ export function Cockpit() {
       if (event.key === 'Escape') {
         setDiagnostics(false);
         setSwitching(false);
+        setComposing(false);
         return;
       }
       if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.code === 'KeyD') {
@@ -457,6 +461,16 @@ export function Cockpit() {
         />
       )}
 
+      {composing && (
+        <NewWorkstream
+          dir={repoDir}
+          onDir={rememberRepo}
+          onLaunch={launch}
+          onClose={() => setComposing(false)}
+          busy={busy || !wire.connected}
+        />
+      )}
+
       {/* `5f`. A switcher, not a screen: it answers "take me to
           fix-ratelimit-wait" and nothing else, which is why it is an overlay
           over the cockpit rather than a tab beside `1b`. The two are different
@@ -507,12 +521,25 @@ export function Cockpit() {
               second invoke until the first settles, so a form shown any earlier
               would only produce a rejection. */}
           {(!launched || run.completed !== null) && !outside && (
-            <Launch
-              busy={busy || !wire.connected}
-              onLaunch={launch}
-              dir={repoDir}
-              onDir={rememberRepo}
-            />
+            <>
+              <Launch
+                busy={busy || !wire.connected}
+                onLaunch={launch}
+                dir={repoDir}
+                onDir={rememberRepo}
+              />
+              {/* `4a`, beside the plain form rather than replacing it. The
+                  design's own intent is that the honest path is type → create →
+                  keep talking; the modal is for the one moment somebody is
+                  deciding how THIS run should differ. */}
+              <button
+                className="v-launch__more"
+                onClick={() => setComposing(true)}
+                disabled={busy || !wire.connected}
+              >
+                or set this run&apos;s overrides…
+              </button>
+            </>
           )}
           <LoopColumn run={run} now={now} hostPid={wire.hostPid} />
           {/* `4g`, and only on the ending that means the loop finished. Every
