@@ -7,11 +7,12 @@ import charge from '../../../src/charge.ts?raw';
 import cli from '../../../src/cli.ts?raw';
 import preflight from '../../../src/preflight.ts?raw';
 import protocol from '../../../src/protocol.ts?raw';
+import gates from '../../../src/gates.ts?raw';
 import work from '../../../src/work.ts?raw';
 // Aliased: `work` is already the core's source above, and this is the renderer
 // that has to agree with it. Two things named for one measurement is the
 // confusion this whole file exists to catch.
-import { ending, work as render } from './format';
+import { ending, hold, work as render } from './format';
 import { CYCLE_OF } from './model';
 
 /**
@@ -113,6 +114,51 @@ test('neither of the two endings that are not failures uses the word failed', ()
 test('a code from a newer core has no phrase invented for it', () => {
   expect(ending(8)).toBeNull();
   expect(ending(-1)).toBeNull();
+});
+
+/** The `GATEABLE` list in `src/gates.ts` — every boundary a run can hold at. */
+function gateable(): string[] {
+  const list = /export const GATEABLE: readonly GateableBoundary\[\] = \[([\s\S]*?)\];/.exec(
+    gates,
+  )?.[1];
+  // Hard failure rather than an empty list, for `exitCodes`'s reason: an empty
+  // one makes every assertion below vacuously pass.
+  if (list === undefined) throw new Error('GATEABLE not found in src/gates.ts');
+  return [...list.matchAll(/'([a-z-]+)'/g)].map((m) => m[1] ?? '');
+}
+
+test('every boundary a run can hold at says what it is asking', () => {
+  // The silent failure this catches is the one #211 was reported as: a footer
+  // that names the boundary and nothing else leaves somebody pressing continue
+  // without knowing what it buys. A seventh gateable boundary would draw that
+  // same bare card, and nobody would find out from the app — so this fails in
+  // the repo that adds one, which is the only moment anybody can decide what to
+  // tell a person about it.
+  for (const boundary of gateable()) {
+    const held = hold(boundary);
+    expect(held, `${boundary} has no description`).not.toBeNull();
+    // All three, because a card missing any one of them is the bare card again:
+    // what finished, where to look, and what continuing spends.
+    expect(held?.what.length, `${boundary} says nothing about what finished`).toBeGreaterThan(0);
+    expect(held?.inspect.length, `${boundary} says nothing to inspect`).toBeGreaterThan(0);
+    expect(held?.cost.length, `${boundary} says nothing about the cost`).toBeGreaterThan(0);
+  }
+});
+
+test('the six this build describes, and no phrase invented for a seventh', () => {
+  expect(gateable()).toEqual([
+    'plan-round',
+    'question-round',
+    'plan-approved',
+    'implemented',
+    'verify-round',
+    'review-round',
+  ]);
+  // The two ungateable boundaries have no card either, and that is right: a run
+  // never holds at them, so a description of what to do there would describe a
+  // decision nobody is ever offered.
+  expect(hold('final-fix')).toBeNull();
+  expect(hold('complete')).toBeNull();
 });
 
 /**

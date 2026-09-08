@@ -2220,6 +2220,21 @@
 }
 
 /*
+ * What the gate is asking: what finished, what to read, what continuing costs.
+ *
+ * Shares the verify card's left rule so the two read as one block when both are
+ * drawn — the shared answer above the boundary-specific detail.
+ */
+.v-footer__hold {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  border-left: 2px solid var(--accent-border);
+  padding-left: var(--space-3);
+  margin-bottom: var(--space-2);
+}
+
+/*
  * One question at the question-round gate, with what came back for it.
  *
  * Scrolled rather than paged: a planner raising fifteen questions is a real

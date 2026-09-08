@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Button, StateKicker } from '../design';
-import { boundary, ending } from './format';
+import { boundary, ending, hold } from './format';
 import type { Raise } from './argv';
 import type { Run } from './model';
 
@@ -158,6 +158,9 @@ export function Footer({
     // it. Told rather than inferred: the verdict is the loop's word, and a
     // window recomputing it from the fraction would disagree about flaky.
     const failing = run.verify[run.verify.length - 1]?.gates.find((g) => g.status === 'failed');
+    // What this boundary is asking, or null if this build has no description of
+    // it - in which case nothing is drawn rather than something generic.
+    const held = hold(gate.boundary);
     return (
       <div className="v-footer v-footer--holding">
         <div className="v-footer__banner">
@@ -167,10 +170,53 @@ export function Footer({
 
         {/* The rounds travel with the boundary because a boundary alone does not
             say where in the run it is: `review-round` is reached up to
-            `maxReviewRounds` times and they are not the same decision. */}
+            `maxReviewRounds` times and they are not the same decision.
+
+            Against the cap where one is known, because "plan 1" is a position
+            and "plan 1 of 5" is a position in something — which is what makes it
+            a fact somebody can act on. Absent rather than guessed when the
+            config has not been read, for `raiseFor`'s reason. */}
         <div className="v-footer__rounds">
-          plan {gate.planRound} · verify {gate.verifyRound} · review {gate.reviewRound}
+          plan {gate.planRound}
+          {caps !== null && ` of ${caps.maxPlanRounds}`} · verify {gate.verifyRound} · review{' '}
+          {gate.reviewRound}
+          {caps !== null && ` of ${caps.maxReviewRounds}`}
         </div>
+
+        {/*
+          What this gate is actually asking, which `boundary()` alone never said
+          (#211). Three sentences: what has just finished, what to look at, and
+          what continuing spends. Absent for a boundary this build has no
+          description of, rather than filled in with something generic — the rule
+          `ending()` follows for an exit code it does not know.
+        */}
+        {held !== null && (
+          <div className="v-footer__hold">
+            <div className="v-footer__note">{held.what}</div>
+            <div className="v-footer__note">
+              <strong>To look at it:</strong> {held.inspect}
+            </div>
+            {/* The run's own directory, which is where PLAN.md, every critique
+                and every report already are. Carried on `run_started` rather
+                than assembled here, and copied rather than opened: the window
+                has no filesystem and #207 keeps reading an artifact a separate
+                decision with #129's link refusal attached. */}
+            {run.identity !== null && (
+              <div className="v-footer__path">
+                <code>{run.identity.dir}</code>
+                <button
+                  className="v-footer__copy"
+                  onClick={() => void navigator.clipboard.writeText(run.identity?.dir ?? '')}
+                >
+                  copy
+                </button>
+              </div>
+            )}
+            <div className="v-footer__note">
+              <strong>Continuing:</strong> {held.cost}
+            </div>
+          </div>
+        )}
 
         {/*
           `5d`'s gate card, and it is only reachable because `verify-round` is a
@@ -195,22 +241,13 @@ export function Footer({
                 {failing.verdict === 'flaky' && ' — and it is not deterministic'}.
               </div>
             )}
+            {/* The cost of continuing is on the shared card above. What is here
+                is the option that has no button, because it needs none: the
+                loop is already waiting. */}
             <div className="v-footer__note">
-              Continuing sends this round to FIX, which is a full implement turn. Doing nothing
-              is <strong>fix it yourself</strong>: the loop is already waiting and will keep
-              waiting — edit the worktree, then continue.
+              Doing nothing is <strong>fix it yourself</strong>: the loop will keep waiting — edit
+              the worktree, then continue. That path spends no round.
             </div>
-            {run.identity !== null && (
-              <div className="v-footer__path">
-                <code>{run.identity.dir}</code>
-                <button
-                  className="v-footer__copy"
-                  onClick={() => void navigator.clipboard.writeText(run.identity?.dir ?? '')}
-                >
-                  copy
-                </button>
-              </div>
-            )}
             {/* Named rather than drawn. A manual re-run would have to re-enter
                 the gate out of band and no frame does that - and the design is
                 explicit that a rerun spends a round, so a button that silently
@@ -251,14 +288,13 @@ export function Footer({
             ) : (
               <>
                 <div className="v-footer__note">
-                  The planner raised {run.questions.total} question
-                  {run.questions.total === 1 ? '' : 's'} it could not settle from the brief
+                  {run.questions.total} question{run.questions.total === 1 ? '' : 's'}
                   {run.questions.blocking > 0 && (
                     <>
                       , <strong>{run.questions.blocking} blocking</strong>
                     </>
                   )}
-                  . The answerer has already taken its turn — this is you checking what it said.
+                  :
                 </div>
                 {/* Blocking first, then declines, then the rest: the order is
                     what a person should read rather than the order they were
@@ -301,14 +337,14 @@ export function Footer({
                 )}
               </>
             )}
-            {/* The two options, in what they cost rather than in what they are
-                called. This is the sentence whose absence made `continue` the
-                only thing anybody pressed. */}
+            {/* The option the shared card does not cover, because it is specific
+                to this boundary: stopping here is how you answer them yourself,
+                and until the questions rode along on the stop it produced a
+                document with nothing in it to answer. */}
             <div className="v-footer__note">
-              <strong>Continue</strong> accepts those answers and spends a planner turn revising
-              the plan with them. <strong>Stop</strong> ends the run resumably and writes them
-              into <code>NEEDS-INPUT.md</code> with a blank under each — answer them there in your
-              own words and <code>vibe resume</code>, and yours are what the planner gets.
+              <strong>Stop</strong> ends the run resumably and writes these into{' '}
+              <code>NEEDS-INPUT.md</code> with a blank under each — answer them there in your own
+              words and <code>vibe resume</code>, and yours are what the planner gets instead.
             </div>
           </div>
         )}

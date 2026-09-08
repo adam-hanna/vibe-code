@@ -158,6 +158,78 @@ export function boundary(name: string): string {
 }
 
 /**
+ * What a gate is actually asking, in three parts (#211).
+ *
+ * `boundary()` names where the loop stopped and that turned out not to be
+ * enough. Reported from a manual pass at `plan-round`, and the question is the
+ * whole of it: *"It's holding at the end of a plan round, why? What am I
+ * supposed to do, what am I supposed to inspect?"* The footer said `holding at
+ * the end of a plan round`, listed three round counters, and offered two
+ * buttons. Everything a person needs in order to press one deliberately —
+ * what just finished, where to look at it, what continuing buys — was absent
+ * from every boundary.
+ *
+ * **`cost` is the part that stops a gate being a reflex.** Continuing is never
+ * free: at `plan-approved` it starts writing code, at `review-round` it buys an
+ * implement-sized fix turn. A card that says only *continue* is a card that gets
+ * pressed without the decision being made.
+ *
+ * A closed map, and an unknown boundary gets **no card at all** rather than a
+ * generic sentence — the rule `ending()` and `boundary()` already follow. A
+ * confident description of a boundary this build does not know would be worse
+ * than the silence it replaced.
+ */
+export interface Hold {
+  /** What has just finished. The reason it is holding here rather than anywhere. */
+  what: string;
+  /** Where to look before deciding, in the words of the thing to open. */
+  inspect: string;
+  /** What pressing continue spends. Never "carries on". */
+  cost: string;
+}
+
+const HOLDS: Readonly<Record<string, Hold>> = {
+  'plan-round': {
+    what: 'The planner has just rewritten the plan — because the critic objected, or because a question round came back with answers.',
+    inspect:
+      'PLAN.md is the plan as it now stands, plan-<round>.json is this revision on its own, and FOLLOW-UPS.md is what it decided to leave out. All three are in the run directory below.',
+    cost: 'Continuing sends it to the critic, which is one Codex turn. The plan is not approved yet and this round counts against the plan-round cap.',
+  },
+  'question-round': {
+    what: 'The planner raised questions it could not settle from the brief, and the answerer has already taken its turn on them.',
+    inspect: 'The questions and what came back for each are listed below, and in the Questions tab.',
+    cost: 'Continuing accepts those answers and spends a planner turn revising the plan with them.',
+  },
+  'plan-approved': {
+    what: 'The critic cleared the plan. This is the last gate before anything is written.',
+    inspect:
+      'PLAN.md, and the last plan-critique-<round>.json beside it — that file is what the critic actually said, including what it let through.',
+    cost: 'Continuing starts the implementer: it writes code in your worktree and commits it. This is the expensive one, and the only gate after which the tree changes.',
+  },
+  implemented: {
+    what: 'The implementer finished writing and committing. Nothing has checked it yet.',
+    inspect: 'The Diff tab has what changed, against the commit the phase started from.',
+    cost: 'Continuing runs your verification gates, then hands the diff to the reviewer — a Codex turn over the whole change.',
+  },
+  'verify-round': {
+    what: 'A verification gate did not pass.',
+    inspect: 'The Verify tab has each gate, how many of its runs failed, and whether it was deterministic.',
+    cost: 'Continuing sends the round to FIX, which is a full implement turn.',
+  },
+  'review-round': {
+    what: 'The reviewer has reported on the diff.',
+    inspect:
+      'The Findings tab has this round\'s findings with their severities, and code-review-<round>.json in the run directory is the report itself.',
+    cost: 'Continuing buys a fix round — an implement-sized turn — and counts against the review-round cap.',
+  },
+};
+
+/** Null for a boundary this build has no description of. The caller draws nothing. */
+export function hold(name: string): Hold | null {
+  return HOLDS[name] ?? null;
+}
+
+/**
  * How a run ended, in the footer's words.
  *
  * `tone` follows the design's own reading of the three kickers: `alarm` for a
