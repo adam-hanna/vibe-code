@@ -206,6 +206,68 @@ export interface VerifyPass {
   at: number;
 }
 
+/**
+ * One finding, at the density a frame carries it (#223, `1e`/`4c`).
+ *
+ * Deliberately not the whole `Finding`: the detail and the suggested fix stay in
+ * the round's artifact, because a frame carrying every finding in full would put
+ * a review's whole prose on the wire every round.
+ */
+export interface FindingRow {
+  id: string;
+  severity: string;
+  title: string;
+  /**
+   * Who raised it, or null (#141).
+   *
+   * **Absent is not "an agent".** Every finding in every archive written before
+   * that field existed has none, and `authorOf` narrows rather than guessing -
+   * so a renderer that cannot name the author names nobody.
+   */
+  raisedBy: string | null;
+  /**
+   * How many places the finding cites. Zero is what `4c` flags as **ungrounded**.
+   *
+   * A count rather than the entries, because what the pane needs to know is that
+   * there is nothing to open - not what would have been in it. The reviewer is
+   * held to the same standard as the implementer, and a claim pointing nowhere
+   * is the one the guards downgrade.
+   */
+  evidence: number;
+  /**
+   * A guard's downgrade, or null. **The guards' field, and theirs alone.**
+   *
+   * Never rewritten and never cleared, including by a person restoring the
+   * severity - overwriting it on a restore would erase the fact the guard fired,
+   * which is what #48 added it for.
+   */
+  downgraded: { from: string; reason: string; at?: string } | null;
+  /**
+   * What a person did to the severity, in order, or null (#142).
+   *
+   * The person's field, append-only, and beside `downgraded` rather than
+   * instead of it. Two questions with two answers - *did a guard fire, and why*
+   * and *how did this reach the severity it has* - rather than one field serving
+   * both and eventually disagreeing with itself.
+   */
+  severityChanges: readonly { from: string; to: string; by?: string; reason?: string }[] | null;
+}
+
+/** A round's findings, and what the gate made of them. */
+export interface Census {
+  phase: 'plan' | 'review';
+  /** All four, zeros included: where a gate decision is made, an absence is information. */
+  counts: Readonly<Record<string, number>>;
+  tolerance: number;
+  pass: boolean;
+  /** Why the loop stopped, or null when it may proceed. Null is an answer. */
+  reason: string | null;
+  /** P1s being carried into the next phase rather than fixed. */
+  tolerated: readonly string[];
+  findings: readonly FindingRow[];
+  at: number;
+}
+
 /** A boundary the loop is holding at, waiting to be told what to do. */
 export interface Gate {
   /** The id to answer. Allocated by the host, not by us. */
@@ -252,6 +314,14 @@ export interface Run {
    * drawn as the same thing.
    */
   verify: readonly VerifyPass[];
+  /**
+   * Every round's census, oldest first (#223, `1e`).
+   *
+   * A list rather than the latest, because the design's open-findings block
+   * draws the **trend in words** - `blocking 2 → 0` - and a trend needs the
+   * rounds behind it. Empty until a round reports one.
+   */
+  censuses: readonly Census[];
   /** The turn with no `endedAt`, if any. */
   running: Turn | null;
   gate: Gate | null;
@@ -319,6 +389,7 @@ export function emptyRun(): Run {
     cycles: [],
     questions: null,
     verify: [],
+    censuses: [],
     running: null,
     gate: null,
     output: [],
@@ -391,6 +462,95 @@ function readAttempts(v: unknown): { run: number; ok: boolean; exitCode: number 
     const run = num(row['run']);
     if (run === null || typeof row['ok'] !== 'boolean') return [];
     out.push({ run, ok: row['ok'], exitCode: num(row['exitCode']) });
+  }
+  return out;
+}
+
+/** The four severities, in the order the design's chips are drawn. */
+export const SEVERITIES: readonly string[] = ['P0', 'P1', 'P2', 'P3'];
+
+/**
+ * The four counts, or null.
+ *
+ * **All four or none.** The design's four-chip form shows zeros on purpose,
+ * because where a gate decision is being made an absence is information - so a
+ * record missing one severity is not a census this version understands, and
+ * filling the gap with a zero would be a count nobody took presented as one.
+ */
+function readCounts(v: unknown): Record<string, number> | null {
+  if (typeof v !== 'object' || v === null) return null;
+  const row = v as Record<string, unknown>;
+  const out: Record<string, number> = {};
+  for (const severity of SEVERITIES) {
+    const n = num(row[severity]);
+    if (n === null) return null;
+    out[severity] = n;
+  }
+  return out;
+}
+
+/** A guard's downgrade, or null. Both fields or neither. */
+function readDowngrade(v: unknown): FindingRow['downgraded'] {
+  if (typeof v !== 'object' || v === null) return null;
+  const row = v as Record<string, unknown>;
+  const from = str(row['from']);
+  const reason = str(row['reason']);
+  if (from === null || reason === null) return null;
+  const at = str(row['at']);
+  return at === null ? { from, reason } : { from, reason, at };
+}
+
+/**
+ * The severity moves a person made, or null.
+ *
+ * Null rather than `[]`: "nobody moved this" and "this build could not read the
+ * list" are different, and #142's whole point is that the record can say who
+ * made which claim. An unreadable entry drops the list rather than the finding.
+ */
+function readChanges(v: unknown): FindingRow['severityChanges'] {
+  if (!Array.isArray(v)) return null;
+  const out: { from: string; to: string; by?: string; reason?: string }[] = [];
+  for (const item of v as unknown[]) {
+    if (typeof item !== 'object' || item === null) return null;
+    const row = item as Record<string, unknown>;
+    const from = str(row['from']);
+    const to = str(row['to']);
+    if (from === null || to === null) return null;
+    const by = str(row['by']);
+    const reason = str(row['reason']);
+    out.push({ from, to, ...(by === null ? {} : { by }), ...(reason === null ? {} : { reason }) });
+  }
+  return out;
+}
+
+/**
+ * The findings a census listed.
+ *
+ * Per-entry rather than whole-list, unlike `readAttempts`: a finding missing its
+ * id or severity is one this version cannot place, and dropping the other
+ * fifteen with it would lose a person's view of a round over one bad row. The
+ * count of what was dropped is not reported, which is a real limit - but the
+ * gate's own four counts are carried separately and are the number that decides
+ * anything, so the pane can still tell you it is not showing everything.
+ */
+function readFindings(v: unknown): FindingRow[] {
+  if (!Array.isArray(v)) return [];
+  const out: FindingRow[] = [];
+  for (const item of v as unknown[]) {
+    if (typeof item !== 'object' || item === null) continue;
+    const row = item as Record<string, unknown>;
+    const id = str(row['id']);
+    const severity = str(row['severity']);
+    if (id === null || severity === null) continue;
+    out.push({
+      id,
+      severity,
+      title: str(row['title']) ?? id,
+      raisedBy: str(row['raisedBy']),
+      evidence: num(row['evidence']) ?? 0,
+      downgraded: readDowngrade(row['downgraded']),
+      severityChanges: readChanges(row['severityChanges']),
+    });
   }
   return out;
 }
@@ -830,6 +990,32 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
         };
       }
 
+      case 'findings_reported': {
+        const phase = str(data['phase']);
+        // Only the two the loop reports, and an unrecognised one is dropped
+        // rather than filed under a guess: a critique census drawn as a review
+        // one would put the plan cycle's argument in the review cycle's block.
+        if (phase !== 'plan' && phase !== 'review') return next;
+        const counts = readCounts(data['counts']);
+        if (counts === null) return next;
+        return {
+          ...next,
+          censuses: [
+            ...next.censuses,
+            {
+              phase,
+              counts,
+              tolerance: num(data['tolerance']) ?? 0,
+              pass: data['pass'] === true,
+              reason: str(data['reason']),
+              tolerated: strings(data['tolerated']),
+              findings: readFindings(data['findings']),
+              at,
+            },
+          ],
+        };
+      }
+
       case 'questions_opened':
         return {
           ...next,
@@ -875,6 +1061,24 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
   })();
 
   return { ...folded, seq };
+}
+
+/**
+ * How many findings are blocking in the most recent round, or zero.
+ *
+ * **In the model rather than in the tab bar**, which is the rule this file
+ * exists for: the components draw and this decides. It is a count over counts
+ * the loop sent - P0 plus P1 - and never a re-judgement of the gate, which
+ * already told us `pass`.
+ *
+ * The *latest* round rather than a total across all of them, because that is the
+ * number that decides whether the loop fixes again; a running total would move
+ * for reasons that change nothing.
+ */
+export function blocking(run: Run): number {
+  const latest = run.censuses[run.censuses.length - 1];
+  if (latest === undefined) return 0;
+  return (latest.counts['P0'] ?? 0) + (latest.counts['P1'] ?? 0);
 }
 
 /**

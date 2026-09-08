@@ -8,13 +8,14 @@ import type { KeyStatus } from '../pilot/keys';
 // differing only in case is a compile error on Windows and macOS both.
 import { PilotPane } from '../pilot/PilotPane';
 import { Diagnostics } from './Diagnostics';
+import { FindingsPane } from './FindingsPane';
 import { Footer } from './Footer';
 import { Launch } from './Launch';
 import { LoopColumn } from './LoopColumn';
 import { OutputPane } from './OutputPane';
 import { StopConfirm } from './StopConfirm';
 import { VerifyPane } from './VerifyPane';
-import { emptyRun, nextRun, reduce } from './model';
+import { blocking, emptyRun, nextRun, reduce } from './model';
 import { readLaunchArgv } from './argv';
 import type { Launched } from './argv';
 import type { Effect } from '../pilot/tools';
@@ -101,7 +102,7 @@ export function Cockpit() {
    * which the prompt says out loud rather than papering over.
    */
   const [sentLaunch, setSentLaunch] = useState<Launched | null>(null);
-  const [tab, setTab] = useState<'output' | 'pilot' | 'keys' | 'verify'>('output');
+  const [tab, setTab] = useState<'output' | 'pilot' | 'keys' | 'verify' | 'findings'>('output');
   /** Pilot proposals waiting on a person, so a hidden tab can say so (#144). */
   const [proposals, setProposals] = useState(0);
   /**
@@ -457,21 +458,29 @@ export function Cockpit() {
             >
               Keys
             </button>
+            {/* `1e`. The count is blocking findings in the latest round, not
+                all of them: that is the number that decides whether the loop
+                fixes again, and a total would move for reasons that change
+                nothing. */}
+            <button
+              className={`v-cockpit__tab ${tab === 'findings' ? 'v-cockpit__tab--on' : ''}`}
+              onClick={() => setTab('findings')}
+            >
+              Findings{blocking(run) > 0 ? ` · ${String(blocking(run))}` : ''}
+            </button>
             {/* Named rather than omitted, each with the issue that would fill
                 it. A tab bar that showed only what works reads as a finished
                 app with three tabs. */}
-            <span className="v-cockpit__tab v-cockpit__tab--off" title="#141, #113">
+            <span className="v-cockpit__tab v-cockpit__tab--off" title="#113">
               Diff
             </span>
-            <span className="v-cockpit__tab v-cockpit__tab--off" title="#142">
-              Findings
-            </span>
-            <span className="v-cockpit__tab v-cockpit__tab--off" title="#137">
+            <span className="v-cockpit__tab v-cockpit__tab--off" title="#137 — v1.5">
               Prompt
             </span>
           </div>
           {tab === 'output' && <OutputPane lines={run.output} />}
           {tab === 'verify' && <VerifyPane passes={run.verify} />}
+          {tab === 'findings' && <FindingsPane censuses={run.censuses} />}
           {/* Mounted whatever tab is showing, and hidden rather than unmounted.
               A conversation is state nobody can get back, and a proposal waiting
               on a person would be destroyed by a glance at the output pane -
