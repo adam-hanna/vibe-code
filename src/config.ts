@@ -139,8 +139,9 @@ export const DEFAULTS: Config = {
     compactAboveRatio: 0.5,
     compactDuringCodex: true,
   },
-  // Every row `step`, which is what the loop did before there was a table -
-  // see DEFAULT_GATES for why that, and not the default anyone would choose.
+  // Holds where the run's cost or its output changes hands, and runs through
+  // the two planning rounds the loop settles with another turn - see
+  // DEFAULT_GATES for where that line falls and why (#211).
   gates: DEFAULT_GATES,
   verify: {
     enabled: true,

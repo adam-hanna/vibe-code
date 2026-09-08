@@ -14,10 +14,18 @@ import type { ConfigFrame } from '../host';
  *
  * ## Why the matrix is the centre
  *
- * #140 made the gate matrix configuration and `DEFAULT_GATES` says in its own
- * comment that every row being `step` *"is very probably not the default anyone
- * wants to keep — but changing it is a decision for whoever has the settings
- * screen in front of them"*. This is that screen.
+ * #140 made the gate matrix configuration and left every row `step`, saying in
+ * `DEFAULT_GATES`'s own comment that this was *"very probably not the default
+ * anyone wants to keep — but changing it is a decision for whoever has the
+ * settings screen in front of them"*. This is that screen, and #211 is that
+ * decision being made: the two planning rounds now run through by default,
+ * because they are the loop arguing with itself and the critic reads the result
+ * either way. The four where code gets written, a diff appears, a gate fails or
+ * findings buy a fix turn still hold.
+ *
+ * Which makes this screen's job the opposite one — putting the holds back. A
+ * default that stops less is only safe if the person who wants more can see
+ * where it stopped stopping, which is the `default` chip on every unnamed row.
  *
  * The rows, the modes and the two boundaries that **cannot** hold all come from
  * `src/gates.ts` over the wire, so this cannot offer a boundary the loop does

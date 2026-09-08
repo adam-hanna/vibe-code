@@ -379,6 +379,26 @@ run ends there, resumably, whoever is listening, which is what makes gates usabl
 terminal for the first time. `vibe doctor` prints the effective table, including which rows a
 terminal will honour, because the only other way to learn that is to run and not notice.
 
+**The default holds in four of the six, and where that line falls is the decision** (#211).
+#140 shipped every row `step` — what the loop did before there was a table — and said so in
+`DEFAULT_GATES`'s own comment: *"very probably not the default anyone wants to keep, but
+changing it is a decision for whoever has the settings screen in front of them."* The report
+from somebody who had one was exact: *"remove the holding at the end of a plan round; we
+should only do that if I choose to."*
+
+The six are not one kind of decision. **`plan-round` and `question-round` are the loop
+arguing with itself** — the planner rewriting after a critique, the answerer taking its turn —
+and each is followed by another machine reading the result, because the critic reads every
+revision. Holding there asks a person to referee a draft that is about to be refereed, on
+every round of every run, with nothing written and nothing committed. **The other four are
+where the run's cost or its output changes hands**: `plan-approved` is the last gate before
+code is written, `implemented` the first sight of a diff, `verify-round` a gate that failed,
+`review-round` findings and the fix turn they buy. Those keep `step`.
+
+Nothing became `stop` by default, and a test pins that separately. A wrong `step` costs a
+pause somebody releases; a `stop` **ends the run**, whoever is listening, so a default that
+did it would end CLI runs nobody was watching.
+
 Two boundaries have no row, and `GateableBoundary` makes that unrepresentable rather than
 conventional: `complete`, because a gate holds before the next thing and there is none, and
 `final-fix`, because the loop goes straight back to the verification gate to prove that fix

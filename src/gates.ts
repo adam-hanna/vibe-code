@@ -53,18 +53,55 @@ export const UNGATEABLE: Readonly<Record<Exclude<CheckpointBoundary, GateableBou
 };
 
 /**
- * Every row `step`, which is exactly what the loop did before there was a table.
+ * Where a run hands control back when nobody has said otherwise.
  *
- * A host was asked at all six of these unconditionally from #134 until now, and
- * a terminal was asked at none of them, so this default leaves both front ends
- * behaving as they did. It is very probably not the default anyone wants to
- * *keep* - releasing every plan round of every run by hand is why this issue
- * exists - but changing it is a decision for whoever has the settings screen in
- * front of them, and not one to smuggle in under a groundwork change.
+ * This was every row `step` - what the loop did before there was a table - and
+ * the comment here said in as many words that it was *"very probably not the
+ * default anyone wants to keep"*, deferred to *"whoever has the settings screen
+ * in front of them"*. #211 is that person, and the report is the one the old
+ * comment predicted: **"remove the holding at the end of a plan round. We should
+ * only do that if I choose to."**
+ *
+ * ## The line the two halves fall on
+ *
+ * The six boundaries are not one kind of decision, and grouping them as one is
+ * what made the old default wrong rather than merely strict.
+ *
+ * **The planning ones are steps in an argument the loop is having with itself.**
+ * A plan round is the planner rewriting the plan because the critic objected or
+ * a question came back; a question round is the answerer taking its turn. Both
+ * are followed by another machine looking at the result - the critic reads every
+ * plan revision, which is the whole point of the phase. Holding there asks a
+ * person to referee a draft that is *about* to be refereed, on every round of
+ * every run. Nothing has been written, nothing has been committed, and the run
+ * is minutes from producing the thing actually worth reading.
+ *
+ * **The other four are the moments the run's cost or its output changes hands.**
+ * `plan-approved` is the last gate before code is written and committed;
+ * `implemented` is the first sight of a diff; `verify-round` is a gate that
+ * failed; `review-round` is a reviewer's findings and the fix turn they buy.
+ * Each is a decision a person would want to be asked about, and each happens
+ * once or a small number of times.
+ *
+ * So the planning pair defaults to `auto` and the other four keep `step`. That
+ * is a **default**, not a rule: `vibe.config.json` still decides, `--gate`
+ * still overrides, and the Settings matrix shows which rows are in force and
+ * which are merely observed. Somebody who wants to referee every plan round can
+ * still ask to.
+ *
+ * ## What this changes, said plainly
+ *
+ * A run in the app with no configuration now stops in four places rather than
+ * six. That is a behaviour change for anyone relying on the default, which is
+ * why it is a release note and not a quiet edit - and it is why the two rows
+ * that moved are the two where nothing irreversible happens on either side of
+ * the boundary.
  */
 export const DEFAULT_GATES: GatesConfig = {
-  'plan-round': 'step',
-  'question-round': 'step',
+  // The two the loop settles with another turn. See above.
+  'plan-round': 'auto',
+  'question-round': 'auto',
+  // The four where the run's cost or its output changes hands.
   'plan-approved': 'step',
   implemented: 'step',
   'verify-round': 'step',
