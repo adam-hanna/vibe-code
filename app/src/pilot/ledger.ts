@@ -1,3 +1,5 @@
+import { needsKey } from './backend';
+import type { Backend } from './backend';
 import type { Provider } from './keys';
 import type { Usage } from './pilot';
 
@@ -222,12 +224,32 @@ const PER_MILLION = 1_000_000;
  * the whole way. The exception is `cache_write` against a vendor that has no
  * such charge, where the absence is not missing information.
  */
-export function costOf(provider: Provider, model: string | null, usage: Usage): TurnCost {
+export function costOf(backend: Backend, model: string | null, usage: Usage): TurnCost {
   const counted = [usage.input, usage.output, usage.cache_read, usage.cache_write].filter(
     (n): n is number => n !== null,
   );
   const tokens = counted.length === 0 ? null : counted.reduce((a, b) => a + b, 0);
-  const price = priceFor(provider, model);
+
+  // A subscription turn is not an unpriced API turn, and the two must not share
+  // a sentence (#193). Everything below this line is about a price that could
+  // not be looked up - a model with no entry, a vendor that has not reported
+  // every count yet - and all of those are *missing information*. This is not:
+  // **nothing is billed at all**, so there is no quantity for a figure to be an
+  // estimate of. It is the same sentence that makes Codex cost unreportable,
+  // and it is why `PilotChatResult` has no cost field to read.
+  //
+  // The tokens are real and are counted, so a daily token ceiling still applies
+  // to a subscription conversation. Only the money is absent.
+  if (!needsKey(backend)) {
+    return {
+      tokens,
+      usd: null,
+      price: null,
+      why: 'a subscription turn bills nothing at all, so there is no figure to estimate',
+    };
+  }
+
+  const price = priceFor(backend, model);
 
   if (price === null) {
     return {

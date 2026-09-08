@@ -70,10 +70,19 @@ describe('the pilot spends nothing the run is counting', () => {
     expect(source).not.toContain('maxCostUsd');
     expect(source).not.toContain('tokensUsed');
     // No import from the core at all, of any kind. The ledger's only imports
-    // are its two sibling modules, so there is no path from here to the run's
-    // arithmetic even by accident.
+    // are sibling modules in this directory, so there is no path from here to
+    // the run's arithmetic even by accident.
+    //
+    // `./backend` joined the list in #193, and the claim is unchanged rather
+    // than weakened: it is a sibling like the other two, and it imports only
+    // `./keys`. What the list is guarding is the **shape** of the import - a
+    // relative path to a file beside this one - so it is asserted as that
+    // rather than as three names somebody has to remember to extend.
     const imports = [...source.matchAll(/from '([^']+)'/g)].map((m) => m[1]);
-    expect(imports).toEqual(['./keys', './pilot']);
+    expect(imports.sort()).toEqual(['./backend', './backend', './keys', './pilot']);
+    for (const from of imports) {
+      expect(from, `${String(from)} is not a sibling of ledger.ts`).toMatch(/^\.\/[a-z]+$/);
+    }
   });
 
   test('the run never learns the pilot exists', () => {

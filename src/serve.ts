@@ -1,11 +1,13 @@
 import { requestCancel } from '@src/cancel.js';
 import { main } from '@src/cli.js';
+import { pilotChat } from '@src/pilotchat.js';
 import * as log from '@src/log.js';
 import { createLineReader, decode, encode, PROTOCOL_VERSION } from '@src/protocol.js';
 import { orchestrate } from '@src/orchestrator.js';
 import type { RunLoop } from '@src/cli.js';
 import type { GateContext, Host } from '@src/host.js';
 import type { Narration } from '@src/log.js';
+import type { PilotChatOptions, PilotChatResult } from '@src/pilotchat.js';
 import type { Outbound } from '@src/protocol.js';
 
 /**
@@ -44,6 +46,25 @@ import type { Outbound } from '@src/protocol.js';
  * stdout with the protocol puts an unparseable frame in the stream, and it did.
  * Nothing here is worth more than that separation holding.
  */
+
+/**
+ * How long a pilot chat turn may take before its child is killed (#193).
+ *
+ * Its own number rather than a role's `timeoutMs`, and shorter than any of
+ * them: a role turn is a model working through a repository for as long as it
+ * needs, and this is somebody waiting for a sentence with the window open. Five
+ * minutes is generous for that and short enough that a wedged child does not sit
+ * there for the length of a run.
+ *
+ * **The contention this creates is named rather than solved.** These tokens come
+ * out of the same subscription window the run draws on, so a long conversation
+ * beside a long run can push that run into a `ratelimits.ts` wait -
+ * `src/pilotchat.ts` says so in its own words, and raising a `RateLimitError` as
+ * itself is what gives a caller something to act on. What is *not* here is a
+ * shared budget between the two: `app/src/pilot/ledger.ts` is the pilot's own
+ * books precisely so a conversation cannot stop a run by spending its ceiling.
+ */
+const PILOT_TIMEOUT_MS = 5 * 60_000;
 
 /** Where a frame goes. Behind a function so a test needs no pipe. */
 export type Send = (msg: Outbound) => void;
@@ -129,10 +150,21 @@ export interface SessionDeps {
    * tested.
    */
   invoke?: (argv: readonly string[], loop: RunLoop) => Promise<number>;
+  /**
+   * What runs one pilot chat turn. Defaults to `pilotChat` (#193).
+   *
+   * The second seam, and it exists for the reason the first does: this one
+   * spawns `claude`, and framing that had to spawn a CLI to be tested would not
+   * be tested. What is worth testing here is that a pilot turn runs **beside** a
+   * run rather than through the one-at-a-time gate, and that its failure becomes
+   * an `error` rather than an empty reply.
+   */
+  pilot?: (options: PilotChatOptions) => Promise<PilotChatResult>;
 }
 
 export function createSession(send: Send, deps: SessionDeps = {}): Session {
   const invoke = deps.invoke ?? ((argv, loop) => main(argv, loop));
+  const chat = deps.pilot ?? pilotChat;
 
   /**
    * Gates awaiting an answer, by the id this process allocated for them.
@@ -242,6 +274,53 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       // for it.
       send({ type: 'result', id: msg.id, exit: 0 });
       settleIfDone();
+      return;
+    }
+
+    if (msg.type === 'pilot') {
+      // **Outside the one-at-a-time rule, and outside `finished()`.** That rule
+      // is about *runs*: `src/lock.ts` expects one process per run and two runs
+      // would interleave their narration. A pilot turn takes no lock, writes no
+      // state and narrates nothing - it is a conversation about the run, and it
+      // is most useful *during* one, so refusing it while a run is going would
+      // refuse it exactly when it is wanted.
+      //
+      // It is also deliberately not awaited by `finished()`. A quit should not
+      // wait on a chat turn, and #206 already decided that a supervisor going
+      // away abandons work rather than finishing it.
+      const id = msg.id;
+      void chat({
+        prompt: msg.prompt,
+        system: msg.system,
+        model: msg.model,
+        sessionId: msg.sessionId,
+        resume: msg.resume,
+        cwd: process.cwd(),
+        timeoutMs: PILOT_TIMEOUT_MS,
+        onDelta: (text: string) => {
+          send({ type: 'pilot_delta', id, text });
+        },
+      })
+        .then((reply) => {
+          send({
+            type: 'pilot_reply',
+            id,
+            text: reply.text,
+            sessionId: reply.sessionId,
+            tokens: reply.tokens,
+          });
+        })
+        .catch((err: unknown) => {
+          // An `error` rather than an empty `pilot_reply`: a reply with no text
+          // would look like a model that had nothing to say, and this is a turn
+          // that did not happen. `RateLimitError` arrives here as itself, which
+          // is what the module raised it for.
+          send({
+            type: 'error',
+            id,
+            message: err instanceof Error ? err.message : String(err),
+          });
+        });
       return;
     }
 

@@ -1,6 +1,6 @@
-import { isFinal } from './pilot';
+﻿import { isFinal } from './pilot';
 import type { AssistantCall, PilotEvent, Message, Usage } from './pilot';
-import type { Provider } from './keys';
+import type { Backend } from './backend';
 import type { Settlement } from './tools';
 
 /**
@@ -58,7 +58,7 @@ export interface Call {
 
 export interface Reply {
   turn: number;
-  provider: Provider;
+  provider: Backend;
   /** What the vendor said answered, which is not always what was asked for. */
   model: string | null;
   /** The deltas, in order, concatenated. Never a summary and never trimmed. */
@@ -137,7 +137,7 @@ export function ask(
   conversation: Conversation,
   content: string,
   turn: number,
-  provider: Provider,
+  provider: Backend,
 ): Conversation {
   return follow(
     { ...conversation, messages: [...conversation.messages, { role: 'user', content }] },
@@ -157,7 +157,7 @@ export function ask(
 export function follow(
   conversation: Conversation,
   turn: number,
-  provider: Provider,
+  provider: Backend,
 ): Conversation {
   return {
     ...conversation,
@@ -182,7 +182,7 @@ export function follow(
 export function refuse(
   conversation: Conversation,
   content: string | null,
-  provider: Provider,
+  provider: Backend,
   message: string,
 ): Conversation {
   const reply: Reply = {

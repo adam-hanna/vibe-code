@@ -67,7 +67,27 @@ export type Outbound =
    * this process would not act on. Only the second one means "nothing was
    * started".
    */
-  | { type: 'error'; id: number | null; message: string };
+  | { type: 'error'; id: number | null; message: string }
+  /** A fragment of a pilot reply, in order (#193). */
+  | { type: 'pilot_delta'; id: number; text: string }
+  /**
+   * A pilot turn finished.
+   *
+   * **There is no money on it and there is nowhere to put any.** A subscription
+   * turn bills nothing at all, so a dollar figure would have no quantity to be
+   * an estimate *of* - the same sentence that makes Codex cost unreportable.
+   * The tokens are real and are reported.
+   *
+   * `sessionId` is what the CLI says the conversation is, which is authoritative
+   * over whatever the caller proposed.
+   */
+  | {
+      type: 'pilot_reply';
+      id: number;
+      text: string;
+      sessionId: string;
+      tokens: { input: number; output: number; cacheRead: number; cacheCreation: number; total: number };
+    };
 
 /** What the thing driving the loop says. */
 export type Inbound =
@@ -129,7 +149,31 @@ export type Inbound =
    * checkpoint. That is what keeps this from being a second definition of how a
    * run ends - it takes the one that already exists.
    */
-  | { type: 'cancel'; id: number; reason?: string };
+  | { type: 'cancel'; id: number; reason?: string }
+  /**
+   * One pilot chat turn, on the subscription (#193).
+   *
+   * **Deliberately not an `invoke`.** An invoke starts a *run*: it takes the
+   * lock, writes state, and `serve.ts` allows one at a time. A pilot turn does
+   * none of that - it spawns a read-only `claude` child through
+   * `src/pilotchat.ts`, writes nothing, and has to be able to happen *while* a
+   * run is going, because a conversation about a run is most useful during one.
+   *
+   * The API-backed pilot never comes through here at all: it is Rust talking to
+   * a vendor, and the two providers stay asymmetric on purpose. What this one
+   * buys is that **no key is needed** - it runs on the subscription the user
+   * already pays for.
+   */
+  | {
+      type: 'pilot';
+      id: number;
+      prompt: string;
+      system: string;
+      model: string;
+      /** The conversation to continue, or to create on the first turn. */
+      sessionId: string;
+      resume: boolean;
+    };
 
 export function encode(msg: Outbound): string {
   return `${JSON.stringify(msg)}\n`;
@@ -207,6 +251,35 @@ export function decode(line: string): Decoded {
       return { ok: true, message: { type: 'shutdown', id } };
     case 'pause':
       return { ok: true, message: { type: 'pause', id } };
+    case 'pilot': {
+      // Every field required and every one checked, because this one is not
+      // argv: an `invoke` hands its strings to `parseArgs`, which is the single
+      // definition of a legal invocation, and there is no equivalent below this
+      // to catch a missing model or an empty prompt.
+      const fields = ['prompt', 'system', 'model', 'sessionId'] as const;
+      for (const field of fields) {
+        const value = parsed[field];
+        if (typeof value !== 'string' || value === '') {
+          return { ok: false, id, reason: `pilot carried no ${field}` };
+        }
+      }
+      const resume = parsed['resume'];
+      if (typeof resume !== 'boolean') {
+        return { ok: false, id, reason: 'pilot did not say whether it resumes' };
+      }
+      return {
+        ok: true,
+        message: {
+          type: 'pilot',
+          id,
+          prompt: parsed['prompt'] as string,
+          system: parsed['system'] as string,
+          model: parsed['model'] as string,
+          sessionId: parsed['sessionId'] as string,
+          resume,
+        },
+      };
+    }
     case 'cancel': {
       // Optional, and refused rather than coerced when present but unusable.
       // The reason reaches `NEEDS-INPUT.md` and the run record, so a number
