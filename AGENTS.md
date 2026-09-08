@@ -138,6 +138,16 @@ Two rules the cockpit inherits from the design and must not quietly drop:
   There is no bar and no percentage: `2 of 2` is a position in a list the loop named. The
   announcement is a **parameter** on `preflight()` rather than a `log.*` call inside it,
   because `vibe doctor` shares that function and its output is scripted against.
+- **Launching is the cockpit with one card in it, not a screen of its own** (hi-fi 16). The
+  substitutions are the design: a progress bar becomes **three checkboxes** each carrying its
+  own evidence (task reached the core · a timestamp; host alive · a pid; preflight probing · an
+  elapsed), a spinner becomes the liveness dot plus that elapsed, a skeleton becomes **dashed
+  hatched cycle rows**, and a zero becomes a named absence. **Preflight takes the live card
+  while it runs** — accent border and the one pulse — because it is a real turn against a real
+  CLI. The one thing the design asks for that is *not* built is its ETA line, *"preflight
+  usually clears in under a minute"*: that is a claim about past runs and nothing here has read
+  one, so shipping it would be the same invention as `claude 38%` and `step 9/14`, both of
+  which the design itself struck. The row says what it cannot say and names #114.
 - **While a gate is held there is no live card, and the turn before it is still drawn.** An
   `ask` closes the running turn, exactly as `phase_started`, `turn_started`, `gate_stopped`
   and `result` do — a gate holds *between* things, so nothing is executing while one is

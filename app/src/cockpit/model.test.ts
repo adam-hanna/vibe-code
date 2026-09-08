@@ -101,35 +101,75 @@ describe('the loop column is built from ids and never from sentences', () => {
 
 describe('the step before the first phase', () => {
   test('preflight says what it will probe, then which one it is probing', () => {
-    const started = fold([say('preflight_started', { agents: ['claude', 'codex'] })]);
-    expect(started.preflight).toEqual({ agents: ['claude', 'codex'], probing: null, passed: false });
+    const started = fold([say('preflight_started', { agents: ['claude', 'codex'] })], 1_000_000);
+    expect(started.preflight).toEqual({
+      agents: ['claude', 'codex'],
+      probing: null,
+      passed: false,
+      // When it started, so the card can carry an elapsed instead of a spinner
+      // (hi-fi 16). `fold` steps one millisecond per frame from `t0`.
+      at: 1_000_000,
+    });
 
-    const probing = fold([
-      say('preflight_started', { agents: ['claude', 'codex'] }),
-      say('probe_started', { agent: 'codex' }),
-    ]);
+    const probing = fold(
+      [
+        say('preflight_started', { agents: ['claude', 'codex'] }),
+        say('probe_started', { agent: 'codex' }),
+      ],
+      1_000_000,
+    );
     expect(probing.preflight).toEqual({
       agents: ['claude', 'codex'],
       probing: 'codex',
       passed: false,
+      at: 1_000_000,
     });
   });
 
+  test('the elapsed clock measures preflight, not the probe it is on', () => {
+    // `at` is kept from the announcement rather than reset by each probe, so a
+    // card that has been up for forty seconds does not drop back to two the
+    // moment the second agent starts.
+    const run = fold(
+      [
+        say('preflight_started', { agents: ['claude', 'codex'] }),
+        say('probe_started', { agent: 'claude' }),
+        say('probe_started', { agent: 'codex' }),
+      ],
+      1_000_000,
+    );
+    expect(run.preflight?.at).toBe(1_000_000);
+  });
+
   test('passing clears the agent in flight, so the row does not stay mid-probe', () => {
-    const run = fold([
-      say('preflight_started', { agents: ['claude', 'codex'] }),
-      say('probe_started', { agent: 'codex' }),
-      say('preflight_passed', null),
-    ]);
-    expect(run.preflight).toEqual({ agents: ['claude', 'codex'], probing: null, passed: true });
+    const run = fold(
+      [
+        say('preflight_started', { agents: ['claude', 'codex'] }),
+        say('probe_started', { agent: 'codex' }),
+        say('preflight_passed', null),
+      ],
+      1_000_000,
+    );
+    expect(run.preflight).toEqual({
+      agents: ['claude', 'codex'],
+      probing: null,
+      passed: true,
+      at: 1_000_000,
+    });
   });
 
   test('a probe from a core that never announced the list leaves the list empty', () => {
     // Never counted from the agent in hand. A window that filled in `['codex']`
     // would be deciding how many probes a run has, and would then draw
-    // `1 of 1` on a run that probes two.
-    const run = fold([say('probe_started', { agent: 'codex' })]);
-    expect(run.preflight).toEqual({ agents: [], probing: 'codex', passed: false });
+    // `1 of 1` on a run that probes two. The clock starts here instead, which is
+    // the only honest reading available on a core that said nothing earlier.
+    const run = fold([say('probe_started', { agent: 'codex' })], 1_000_000);
+    expect(run.preflight).toEqual({
+      agents: [],
+      probing: 'codex',
+      passed: false,
+      at: 1_000_000,
+    });
   });
 
   test('a list that is not wholly readable is no list rather than a partial one', () => {
@@ -148,13 +188,24 @@ describe('the step before the first phase', () => {
 describe('which run this is', () => {
   test('the identity is what the loop said, and nothing until it says', () => {
     expect(emptyRun().identity).toBeNull();
-    const run = fold([
-      say('run_started', { runId: '20260907-031221-a-task', dir: '/repo/.vibe/runs/20260907-031221-a-task', resumed: false }),
-    ]);
+    const run = fold(
+      [
+        say('run_started', {
+          runId: '20260907-031221-a-task',
+          dir: '/repo/.vibe/runs/20260907-031221-a-task',
+          resumed: false,
+        }),
+      ],
+      1_000_000,
+    );
     expect(run.identity).toEqual({
       runId: '20260907-031221-a-task',
       dir: '/repo/.vibe/runs/20260907-031221-a-task',
       resumed: false,
+      // When the CORE said this, which is the honest answer to "when did the
+      // task reach the core". The window's own send time would be when it
+      // asked, not when anything happened (hi-fi 16).
+      at: 1_000_000,
     });
   });
 
