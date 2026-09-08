@@ -74,6 +74,19 @@ floor across every surface, and the ramps — plus that no hex literal exists ou
 `src/` rather than naming files**; the named list missed `cockpit.css` the day it appeared,
 which is the failure mode of any allow-list somebody has to remember to extend.
 
+**The screens the source keeps citing are in `app/src/design/HANDOFF.md`.** Twelve comments
+name a frame — `3a`, `4a`, `4h`, `5c`, `6a`, `7a`, `7c`, `7d`, `hi-fi 5`, `hi-fi 11` — and
+until it landed, none of those references could be followed from a checkout: `tokens.css`
+cites a `Vibe Design Spec.dc.html` this repo has never had. **The annotations are the spec**,
+which is why the markdown is worth committing and the artwork is not.
+
+Two things it is not. It is **not the palette** — the wireframe greys and `#5980a6` it lists
+are the low-fidelity convention and the document disowns them in its own "Fidelity" section;
+`tokens.css` is the design system and the only file here allowed to hold a hex. And it is
+**not current**: `7i — Provenance` sorts every frame into *real today* / *app-side* /
+*unbuilt*, and every issue that lands moves a name between those. Read that section as a claim
+about the day it was written, and check it before building from a frame rather than after.
+
 **The webview re-derives nothing.** Every card the cockpit draws comes from a frame it was
 sent: no phase inferred from a sentence, no default filled in for a field a frame did not
 carry, no quantity computed out of two others. `app/src/cockpit/model.ts` is the only file in
@@ -191,6 +204,7 @@ tests/               node:test, one file per concern
 
 app/                 the desktop app - Vite + React, its own package.json and gate
 app/src/design/      tokens.css, base.css, components.css, and the sixteen primitives
+app/src/design/HANDOFF.md  the design corpus - every screen a source comment cites, by name
 app/src/Gallery.tsx  every component in every state - the design system's acceptance test
 app/src/host.ts      the webview's end of the wire: typed frames, and nothing re-derived
 app/src/cockpit/model.ts   frames in, a run out - the ONLY logic in the app, and it is pure
