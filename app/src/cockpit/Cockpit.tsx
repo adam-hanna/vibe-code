@@ -13,6 +13,8 @@ import { Footer } from './Footer';
 import { Launch } from './Launch';
 import { LoopColumn } from './LoopColumn';
 import { OutputPane } from './OutputPane';
+import { QuestionsPane } from './QuestionsPane';
+import { RateLimitStrip } from './RateLimit';
 import { SpendPane } from './SpendPane';
 import { StopConfirm } from './StopConfirm';
 import { Summary } from './Summary';
@@ -106,7 +108,7 @@ export function Cockpit() {
    */
   const [sentLaunch, setSentLaunch] = useState<Launched | null>(null);
   const [tab, setTab] = useState<
-    'output' | 'pilot' | 'keys' | 'verify' | 'findings' | 'spend'
+    'output' | 'pilot' | 'keys' | 'verify' | 'findings' | 'spend' | 'questions'
   >('output');
   /** Pilot proposals waiting on a person, so a hidden tab can say so (#144). */
   const [proposals, setProposals] = useState(0);
@@ -415,6 +417,11 @@ export function Cockpit() {
           so it cannot sit inside one column. */}
       <StalenessStrip state={staleness(run, now)} />
 
+      {/* `7e`, above the columns for the same reason: an agent with no headroom
+          is a statement about the whole run, not about one pane. Quiet, and
+          with no action, because a rate limit asks nobody anything. */}
+      <RateLimitStrip wait={run.rateLimit} now={now} />
+
       {wire.failure !== null && (
         <div className="v-cockpit__alarm">
           <StateKicker tone="alarm">no host</StateKicker> {wire.failure}
@@ -495,6 +502,18 @@ export function Cockpit() {
             >
               Findings{blocking(run) > 0 ? ` · ${String(blocking(run))}` : ''}
             </button>
+            {/* `1f`. The count is blocking questions, not all of them: an
+                advisory question the answerer handled needs nobody, and a
+                badge that included it would train you to ignore the badge. */}
+            <button
+              className={`v-cockpit__tab ${tab === 'questions' ? 'v-cockpit__tab--on' : ''}`}
+              onClick={() => setTab('questions')}
+            >
+              Questions
+              {run.questions !== null && run.questions.blocking > 0
+                ? ` · ${String(run.questions.blocking)}`
+                : ''}
+            </button>
             {/* `5e`. No count: a token total in a tab label is a number you
                 cannot act on, and the design puts consumption in the tab BAR
                 rather than on the tab - which is a different element this
@@ -519,6 +538,7 @@ export function Cockpit() {
           {tab === 'verify' && <VerifyPane passes={run.verify} />}
           {tab === 'findings' && <FindingsPane censuses={run.censuses} />}
           {tab === 'spend' && <SpendPane run={run} />}
+          {tab === 'questions' && <QuestionsPane questions={run.questions} />}
           {/* Mounted whatever tab is showing, and hidden rather than unmounted.
               A conversation is state nobody can get back, and a proposal waiting
               on a person would be destroyed by a glance at the output pane -

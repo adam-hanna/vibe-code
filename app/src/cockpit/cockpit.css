@@ -1444,3 +1444,97 @@
   gap: var(--space-3);
   margin-top: var(--space-3);
 }
+
+/* ------------------------------------------------------------ rate limit (7e) */
+
+/* Waiting, not halted: it asks nobody anything, so it gets the quiet ground and
+   no weight. An alarm treatment here would train people to read alarms as noise. */
+.v-rate {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  padding: var(--space-2) var(--space-5);
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+  background: var(--surface-chrome);
+  border-bottom: 1px solid var(--rule-inner);
+}
+
+.v-rate--past {
+  color: var(--text-tertiary);
+}
+
+.v-rate__times {
+  font: var(--type-mono-sm);
+  color: var(--text-tertiary);
+}
+
+/* ------------------------------------------------------------ questions (1f) */
+
+.v-q {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--surface-page);
+  padding: var(--space-4) var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.v-q--empty {
+  color: var(--text-secondary);
+  font: var(--type-body);
+  gap: var(--space-2);
+  align-items: flex-start;
+}
+
+.v-q__summary {
+  font: var(--type-section);
+  letter-spacing: var(--track-section);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin: 0;
+}
+
+.v-q__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.v-q__question {
+  font: var(--type-lead);
+  color: var(--text-primary);
+  margin: var(--space-2) 0 0;
+}
+
+.v-q__answer {
+  margin-top: var(--space-3);
+  padding-left: var(--space-3);
+  border-left: 2px solid var(--accent-border);
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+/* A decline is an outcome, not a missing answer, and it is the one that ends
+   the run. It gets the severity rule rather than the accent one. */
+.v-q__answer--declined {
+  border-left-color: var(--severity-p0-rule);
+  border-left-width: var(--severity-p0-width);
+}
+
+.v-q__answer p {
+  margin: var(--space-1) 0 0;
+}
+
+.v-q__conf {
+  margin-bottom: var(--space-1);
+}
+
+.v-q__note {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  margin: var(--space-2) 0 0;
+}

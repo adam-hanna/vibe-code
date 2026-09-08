@@ -321,6 +321,53 @@ export interface Spend {
   charges: readonly Charge[];
 }
 
+/**
+ * A rate-limit wait (`7e`, #223).
+ *
+ * **This is `waiting`, not `halted`, and the distinction is the whole screen.**
+ * It requires no decision from a person, so it must not look as though it does -
+ * and other workstreams on the other provider keep running. The design demotes
+ * *"run this phase on the other agent"* to a text link for the same reason it
+ * exists at all: swapping providers mid-run is a fresh session with no memory of
+ * the conversation so far, so it is a different run rather than a faster route
+ * to the same one.
+ */
+export interface RateLimit {
+  /** The turn that hit it. */
+  label: string;
+  /** Which account is out of headroom, so the other one's work is left alone. */
+  provider: string | null;
+  /** How long the loop said it would wait. */
+  waitMs: number | null;
+  /** When the window resets, as the provider stated it. Null when it did not. */
+  resetsAt: string | null;
+  /** When the wait began, on our clock. */
+  at: number;
+  /** Set once `rate_limit_resumed` said the wait was over. */
+  resumedAt: number | null;
+}
+
+/** One open question, and the answer that came back for it (`1f`). */
+export interface Question {
+  kind: string;
+  question: string;
+  blocking: boolean;
+  /** The adversary's draft, once one arrives. Null while the round is open. */
+  answer: string | null;
+  /** `high` / `medium` / `low`, as the answerer stated it. */
+  confidence: string | null;
+  rationale: string | null;
+  /**
+   * Set when the answerer refused to guess.
+   *
+   * A decline is not a missing answer: it is the adversary saying this is
+   * product intent and it will not invent one, which `escalateOnDefer` then acts
+   * on. Drawing it as "no answer yet" would hide the one outcome that ends the
+   * run.
+   */
+  declined: boolean;
+}
+
 /** A boundary the loop is holding at, waiting to be told what to do. */
 export interface Gate {
   /** The id to answer. Allocated by the host, not by us. */
@@ -372,7 +419,14 @@ export interface OutputLine {
 export interface Run {
   cycles: readonly Cycle[];
   /** The question loop, nested inside cycle 1. Null until one opens. */
-  questions: { total: number; blocking: number } | null;
+  questions: { total: number; blocking: number; open: readonly Question[] } | null;
+  /**
+   * The rate-limit wait in flight, or the last one, or null (`7e`).
+   *
+   * Kept after it resolves rather than cleared: a run that waited forty minutes
+   * did so, and a screen that forgets it cannot explain where the time went.
+   */
+  rateLimit: RateLimit | null;
   /**
    * Every pass of the verification gate, oldest first (#223, `5d`).
    *
@@ -459,6 +513,7 @@ export function emptyRun(): Run {
   return {
     cycles: [],
     questions: null,
+    rateLimit: null,
     verify: [],
     censuses: [],
     spend: { tokens: null, costUsd: null, codexTokens: null, charges: [] },
@@ -622,6 +677,55 @@ function readFindings(v: unknown): FindingRow[] {
       evidence: num(row['evidence']) ?? 0,
       downgraded: readDowngrade(row['downgraded']),
       severityChanges: readChanges(row['severityChanges']),
+    });
+  }
+  return out;
+}
+
+/** The questions a round opened, dropping any row this version cannot place. */
+function readQuestions(v: unknown): Question[] {
+  if (!Array.isArray(v)) return [];
+  const out: Question[] = [];
+  for (const item of v as unknown[]) {
+    if (typeof item !== 'object' || item === null) continue;
+    const row = item as Record<string, unknown>;
+    const question = str(row['question']);
+    if (question === null) continue;
+    out.push({
+      question,
+      kind: str(row['kind']) ?? 'unlabelled',
+      // `blocking` decides whether a decline ends the run, so it fails **closed**:
+      // anything but an explicit `false` is treated as blocking. An advisory
+      // question shown as blocking is a person looking at it sooner than they
+      // had to; the other way round is a run ending unexplained.
+      blocking: row['blocking'] !== false,
+      answer: null,
+      confidence: null,
+      rationale: null,
+      declined: false,
+    });
+  }
+  return out;
+}
+
+/** The answerer's replies, or its refusals - which are not the same outcome. */
+function readAnswers(
+  v: unknown,
+  declined: boolean,
+): { question: string; answer: string | null; confidence: string | null; rationale: string | null; declined: boolean }[] {
+  if (!Array.isArray(v)) return [];
+  const out: ReturnType<typeof readAnswers> = [];
+  for (const item of v as unknown[]) {
+    if (typeof item !== 'object' || item === null) continue;
+    const row = item as Record<string, unknown>;
+    const question = str(row['question']);
+    if (question === null) continue;
+    out.push({
+      question,
+      answer: str(row['answer']),
+      confidence: str(row['confidence']),
+      rationale: str(row['rationale']),
+      declined,
     });
   }
   return out;
@@ -1163,8 +1267,62 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
       case 'questions_opened':
         return {
           ...next,
-          questions: { total: num(data['total']) ?? 0, blocking: num(data['blocking']) ?? 0 },
+          questions: {
+            total: num(data['total']) ?? 0,
+            blocking: num(data['blocking']) ?? 0,
+            open: readQuestions(data['questions']),
+          },
         };
+
+      /**
+       * The answers, matched back onto the questions by their text (#223, `1f`).
+       *
+       * **Matched, not appended.** The answerer is given the questions and
+       * returns answers keyed by the question string - which is exactly how the
+       * core pairs them, in `matches()` - so this is the same join rather than a
+       * second one. A question with no matching answer keeps its null, because
+       * an unanswered question and an answered one are the two states the pane
+       * exists to distinguish.
+       */
+      case 'questions_answered': {
+        const before = next.questions;
+        if (before === null) return next;
+        const answers = readAnswers(data['answers'], false);
+        const declined = readAnswers(data['declined'], true);
+        const found = [...answers, ...declined];
+        return {
+          ...next,
+          questions: {
+            ...before,
+            open: before.open.map((q) => {
+              const a = found.find((x) => x.question.trim() === q.question.trim());
+              return a === undefined ? q : { ...q, ...a };
+            }),
+          },
+        };
+      }
+
+      case 'rate_limited':
+        return {
+          ...next,
+          rateLimit: {
+            label: str(data['label']) ?? 'a turn',
+            provider: str(data['provider']),
+            waitMs: num(data['waitMs']),
+            resetsAt: str(data['resetsAt']),
+            at,
+            resumedAt: null,
+          },
+        };
+
+      case 'rate_limit_resumed': {
+        const before = next.rateLimit;
+        // Nothing is created here. A resume with no wait behind it cannot say
+        // when the wait began, and a card claiming a wait it never measured is
+        // worse than no card.
+        if (before === null) return next;
+        return { ...next, rateLimit: { ...before, resumedAt: at } };
+      }
 
       case 'gate_released':
         return { ...next, gate: null };
