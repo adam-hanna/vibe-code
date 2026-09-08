@@ -581,6 +581,19 @@
   background: var(--surface-card);
 }
 
+/* The version label loses its accent with everything else that said "live".
+ * What does NOT recede is the measurements: hi-fi 17 keeps the tool count, the
+ * last activity, the spend and the summary at primary weight, because those are
+ * what the pending decision rests on. Settled is not the same as unimportant. */
+.v-running--settled .v-running__who {
+  color: var(--text-tertiary);
+}
+
+/* The head is a flex row; the `held` kicker sits at its end. */
+.v-running--settled .v-running__head {
+  justify-content: space-between;
+}
+
 .v-running__head {
   display: flex;
   align-items: center;

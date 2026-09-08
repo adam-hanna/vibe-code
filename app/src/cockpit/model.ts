@@ -675,6 +675,20 @@ export interface RunningRow {
   /** Time since the last heartbeat. Null before the first one. */
   quietMs: number | null;
   /**
+   * When that heartbeat landed, as an instant. Null before the first one.
+   *
+   * Beside `quietMs` rather than instead of it, because the two are for the two
+   * states of the card (#202, hi-fi 17). A **live** card says `last activity 20s
+   * ago`, which is what somebody watching wants and is true for as long as it is
+   * on screen. A **settled** one says `last activity 14:52`, because a relative
+   * time on a card that has stopped moving keeps aging into a lie — which is
+   * exactly how a held gate came to read `5h39m ago` about a turn that took a
+   * minute.
+   */
+  lastBeatAt: number | null;
+  /** When the turn ended, as an instant, or null while it is still running. */
+  endedAt: number | null;
+  /**
    * Turn spend so far, or null at zero.
    *
    * **Null at zero on purpose**, and it is the formatter's own rule:
@@ -720,6 +734,8 @@ export function runningRow(turn: Turn, now: number): RunningRow {
     activities: beat === null ? null : { count: beat.activities, unit: beat.unit },
     lastActivity: beat?.lastActivity ?? null,
     quietMs: beat === null ? null : Math.max(0, end - beat.at),
+    lastBeatAt: beat?.at ?? null,
+    endedAt: turn.endedAt,
     tokens: beat === null || beat.tokens <= 0 ? null : beat.tokens,
     context:
       beat === null || beat.contextWindow === null || beat.promptTokens <= 0

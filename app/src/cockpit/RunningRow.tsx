@@ -1,5 +1,5 @@
-import { LivenessDot } from '../design';
-import { counted, elapsed, tokens, work } from './format';
+import { LivenessDot, StateKicker } from '../design';
+import { clock, counted, elapsed, tokens, work } from './format';
 import { runningRow } from './model';
 import type { Turn } from './model';
 
@@ -28,15 +28,25 @@ import type { Turn } from './model';
  *
  * ## `live={false}` is the same row with nothing claiming to be happening
  *
- * A gate holds after a turn has ended, and that is the one moment somebody wants
- * to see what the turn *did* before deciding whether to continue - so the card
- * stays, with its measurements, rather than collapsing to a duration (#202).
+ * Hi-fi 17. A gate holds after a turn has ended, and that is the one moment
+ * somebody wants to see what the turn *did* before deciding whether to continue
+ * - so the card stays, **fully measured**, rather than collapsing to a duration
+ * (#202). Settled is not the same as unimportant: a transcript's settled cards
+ * can recede, and a card a decision is pending on cannot.
  *
- * What it gives up is the live treatment: the accent border, the active ground
- * and the pulsing dot. **One live card is a rule the column already obeys**, and
- * while a gate is held there is no live card at all, so nothing may wear it. The
- * clocks are stopped in `runningRow` rather than here, because a stopped clock
- * is a fact about the turn and not about how it is drawn.
+ * What it gives up is everything that says *live*: the accent border, the active
+ * ground, the accent on the version label, and **the liveness dot entirely**. A
+ * quiet dot would still be a dot, and the rule the column obeys is that exactly
+ * one element on screen pulses - while a gate is held, nothing should.
+ *
+ * ## Every relative time becomes absolute, and that is the actual fix
+ *
+ * Stopping the clocks was half of it. `last activity 6s ago` is a claim that has
+ * to keep being true, and on a card that has stopped moving it ages into a lie -
+ * which is how a run held overnight came to read `5h39m ago` about a turn that
+ * had taken a minute. `last activity 14:52` is true forever.
+ *
+ * The elapsed line takes the past tense with it: `ran 4m12s · ended 14:52`.
  */
 export function RunningRow({ turn, now, live = true }: { turn: Turn; now: number; live?: boolean }) {
   const row = runningRow(turn, now);
@@ -44,15 +54,22 @@ export function RunningRow({ turn, now, live = true }: { turn: Turn; now: number
   return (
     <div className={`v-running${live ? '' : ' v-running--settled'}`}>
       <div className="v-running__head">
-        <LivenessDot state={live ? 'live' : 'quiet'} />
+        {live && <LivenessDot state="live" />}
         <span className="v-running__who">
           {turn.role} · {turn.kind}
           {turn.round === null ? '' : ` · round ${turn.round}`}
         </span>
+        {/* Names why nothing is moving, so a completely still card does not read
+            as a failed one. */}
+        {!live && <StateKicker tone="quiet">held</StateKicker>}
       </div>
 
       <ol className="v-running__lines">
-        <li className="v-running__line">{elapsed(row.elapsedMs)}</li>
+        <li className="v-running__line">
+          {live || row.endedAt === null
+            ? elapsed(row.elapsedMs)
+            : `ran ${elapsed(row.elapsedMs)} · ended ${clock(row.endedAt)}`}
+        </li>
 
         {row.activities !== null && (
           <li className="v-running__line">{counted(row.activities.count, row.activities.unit)}</li>
@@ -72,9 +89,15 @@ export function RunningRow({ turn, now, live = true }: { turn: Turn; now: number
           <li className="v-running__line v-running__line--absent">{row.noWork}</li>
         )}
 
-        {row.quietMs !== null && (
-          <li className="v-running__line">last activity {elapsed(row.quietMs)} ago</li>
-        )}
+        {/* The line the six-hour hang was really made of. Relative while the
+            card is live, absolute once it is not — see the header. */}
+        {live
+          ? row.quietMs !== null && (
+              <li className="v-running__line">last activity {elapsed(row.quietMs)} ago</li>
+            )
+          : row.lastBeatAt !== null && (
+              <li className="v-running__line">last activity {clock(row.lastBeatAt)}</li>
+            )}
 
         <li className="v-running__line v-running__line--absent">{row.comparable}</li>
       </ol>
