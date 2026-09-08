@@ -969,3 +969,1124 @@
 .v-output__line--detail .v-output__msg {
   color: var(--text-tertiary);
 }
+
+/* ------------------------------------------------------------ verify pane (5d) */
+
+.v-verify {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--surface-page);
+  padding: var(--space-4) var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.v-verify--empty {
+  color: var(--text-secondary);
+  font: var(--type-body);
+  gap: var(--space-2);
+  align-items: flex-start;
+}
+
+.v-verify__pass {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.v-verify__round {
+  font: var(--type-section);
+  letter-spacing: var(--track-section);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.v-verify__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+/* The verdict, large and first. 4b's draft gave it a 64px right-aligned label
+   while its annotation called it primary; this is the correction. */
+.v-verify__verdict {
+  font: var(--type-display);
+  letter-spacing: var(--track-display);
+  color: var(--text-display);
+}
+
+.v-verify__took {
+  margin-left: auto;
+  font: var(--type-mono-sm);
+  color: var(--text-tertiary);
+}
+
+.v-verify__reading {
+  font: var(--type-lead);
+  color: var(--text-primary);
+  margin: var(--space-2) 0 0;
+}
+
+.v-verify__cmd {
+  font: var(--type-mono-sm);
+  color: var(--text-secondary);
+  background: var(--surface-panel);
+  border: 1px solid var(--rule-inner);
+  padding: var(--space-2) var(--space-3);
+  margin: var(--space-3) 0 0;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.v-verify__runs {
+  list-style: none;
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.v-verify__run {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  border: 1px solid var(--rule-control);
+  padding: var(--space-2) var(--space-3);
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+/* Weight, not hue - the same rule the severity chips follow. */
+.v-verify__run--bad {
+  border-color: var(--severity-p0-rule);
+  border-width: var(--severity-p0-width);
+  color: var(--text-primary);
+}
+
+.v-verify__run-n {
+  font: var(--type-mono-sm);
+  color: var(--text-tertiary);
+}
+
+.v-verify__run-v {
+  font: var(--type-label);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+}
+
+.v-verify__means {
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+  margin: var(--space-3) 0 0;
+}
+
+.v-verify__means-label {
+  display: block;
+  font: var(--type-label);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin-bottom: var(--space-1);
+}
+
+/* A named absence, never a blank and never a zero. */
+.v-verify__absent,
+.v-verify__later {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  margin: var(--space-3) 0 0;
+}
+
+.v-verify__trend {
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+/* ------------------------------------------------------------ findings pane (1e / 4c) */
+
+.v-find {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--surface-page);
+  padding: var(--space-4) var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.v-find--empty {
+  color: var(--text-secondary);
+  font: var(--type-body);
+  gap: var(--space-2);
+  align-items: flex-start;
+}
+
+.v-find__gate {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.v-find__round {
+  font: var(--type-section);
+  letter-spacing: var(--track-section);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* Four chips, zeros shown - a gate decision is being made here. */
+.v-find__chips {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.v-find__tolerance,
+.v-find__trend,
+.v-find__none {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  margin: 0;
+}
+
+/* The consequence, not just the counts. */
+.v-find__consequence {
+  font: var(--type-lead);
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.v-find__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.v-find__row {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.v-find__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.v-find__title {
+  font: var(--type-title);
+  letter-spacing: var(--track-title);
+  color: var(--text-primary);
+}
+
+.v-find__id {
+  margin-left: auto;
+  font: var(--type-mono-sm);
+  color: var(--text-tertiary);
+}
+
+.v-find__meta {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin-top: var(--space-2);
+}
+
+.v-find__history {
+  list-style: none;
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+/* ------------------------------------------------------------ output filters (1c) */
+
+.v-outwrap {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.v-output__filters {
+  display: flex;
+  gap: var(--space-1);
+  flex-wrap: wrap;
+  padding: var(--space-2) var(--space-5);
+  background: var(--surface-chrome);
+  border-bottom: 1px solid var(--rule-inner);
+}
+
+.v-output__filter {
+  font: var(--type-label);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  background: none;
+  border: 1px solid transparent;
+  padding: var(--space-1) var(--space-2);
+  cursor: pointer;
+}
+
+.v-output__filter:hover {
+  color: var(--text-primary);
+}
+
+.v-output__filter.is-on {
+  color: var(--accent-on-tint);
+  border-color: var(--accent-border);
+  background: var(--surface-accent-tint);
+}
+
+.v-output__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-5);
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  background: var(--surface-chrome);
+  border-bottom: 1px solid var(--rule-inner);
+}
+
+/* ------------------------------------------------------------ staleness (7c) */
+
+.v-stale {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-5);
+  font: var(--type-body-sm);
+  border-bottom: 1px solid var(--rule-inner);
+}
+
+/* Thinking is a fact, not a worry. It gets the chrome ground and no weight. */
+.v-stale--quiet {
+  background: var(--surface-chrome);
+  color: var(--text-secondary);
+}
+
+/* The one state that must not look normal, and the only one given width. */
+.v-stale--alarm {
+  background: var(--surface-alarm);
+  color: var(--text-primary);
+  border-bottom-color: var(--rule-strong);
+}
+
+/* ------------------------------------------------------------ done summary (4g) */
+
+.v-summary {
+  border: 1px solid var(--rule-card);
+  background: var(--surface-card);
+  padding: var(--space-4);
+  margin: var(--space-3) var(--space-4) 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.v-summary__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+}
+
+.v-summary__title {
+  font: var(--type-title);
+  letter-spacing: var(--track-title);
+  color: var(--text-primary);
+}
+
+.v-summary__facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-2) var(--space-4);
+  margin: 0;
+  font: var(--type-body-sm);
+}
+
+.v-summary__facts dt {
+  font: var(--type-label);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.v-summary__facts dd {
+  margin: 0;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.v-summary__facts code {
+  font: var(--type-mono-sm);
+  color: var(--text-primary);
+}
+
+/* A named absence, never a blank and never a zero. */
+.v-summary__absent {
+  color: var(--text-tertiary);
+}
+
+.v-summary__next {
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+  margin: 0;
+  border-top: 1px solid var(--rule-inner);
+  padding-top: var(--space-3);
+}
+
+/* ------------------------------------------------------------ spend pane (5e / 6e) */
+
+.v-spend {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--surface-page);
+  padding: var(--space-4) var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.v-spend__block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.v-spend__h {
+  font: var(--type-section);
+  letter-spacing: var(--track-section);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin: 0;
+}
+
+.v-spend__total {
+  font: var(--type-display);
+  letter-spacing: var(--track-display);
+  color: var(--text-display);
+  margin: 0;
+}
+
+.v-spend__note {
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+/* A named absence, never a blank and never a zero. */
+.v-spend__absent {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  margin: 0;
+}
+
+.v-spend__phases {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.v-spend__phases li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  padding: var(--space-1) 0;
+  border-bottom: 1px solid var(--rule-inner);
+}
+
+.v-spend__phase {
+  flex: 1;
+  font: var(--type-body-sm);
+  color: var(--text-primary);
+}
+
+.v-spend__figure {
+  font: var(--type-mono-sm);
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.v-spend__codex {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+
+/* ------------------------------------------------------------ rate limit (7e) */
+
+/* Waiting, not halted: it asks nobody anything, so it gets the quiet ground and
+   no weight. An alarm treatment here would train people to read alarms as noise. */
+.v-rate {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  padding: var(--space-2) var(--space-5);
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+  background: var(--surface-chrome);
+  border-bottom: 1px solid var(--rule-inner);
+}
+
+.v-rate--past {
+  color: var(--text-tertiary);
+}
+
+.v-rate__times {
+  font: var(--type-mono-sm);
+  color: var(--text-tertiary);
+}
+
+/* ------------------------------------------------------------ questions (1f) */
+
+.v-q {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--surface-page);
+  padding: var(--space-4) var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.v-q--empty {
+  color: var(--text-secondary);
+  font: var(--type-body);
+  gap: var(--space-2);
+  align-items: flex-start;
+}
+
+.v-q__summary {
+  font: var(--type-section);
+  letter-spacing: var(--track-section);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin: 0;
+}
+
+.v-q__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.v-q__question {
+  font: var(--type-lead);
+  color: var(--text-primary);
+  margin: var(--space-2) 0 0;
+}
+
+.v-q__answer {
+  margin-top: var(--space-3);
+  padding-left: var(--space-3);
+  border-left: 2px solid var(--accent-border);
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+/* A decline is an outcome, not a missing answer, and it is the one that ends
+   the run. It gets the severity rule rather than the accent one. */
+.v-q__answer--declined {
+  border-left-color: var(--severity-p0-rule);
+  border-left-width: var(--severity-p0-width);
+}
+
+.v-q__answer p {
+  margin: var(--space-1) 0 0;
+}
+
+.v-q__conf {
+  margin-bottom: var(--space-1);
+}
+
+.v-q__note {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  margin: var(--space-2) 0 0;
+}
+
+/* ------------------------------------------------------------ all workstreams (1b) */
+
+.v-ws {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--surface-page);
+  padding: var(--space-4) var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  align-items: flex-start;
+}
+
+.v-ws--empty {
+  color: var(--text-secondary);
+  font: var(--type-body);
+  gap: var(--space-2);
+}
+
+.v-ws__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+}
+
+.v-ws__head code,
+.v-ws code {
+  font: var(--type-mono-sm);
+  color: var(--text-secondary);
+}
+
+.v-ws__task {
+  display: inline-block;
+  max-width: 42ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A named absence, never a blank and never a zero. */
+.v-ws__absent {
+  color: var(--text-tertiary);
+  font: var(--type-body-sm);
+}
+
+.v-ws__again {
+  font: var(--type-label);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--accent-on-tint);
+  background: none;
+  border: 1px solid var(--accent-border);
+  padding: var(--space-1) var(--space-2);
+  cursor: pointer;
+}
+
+/* ------------------------------------------------------------ the switcher (5f) */
+
+.v-switch__scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  justify-content: center;
+  padding-top: 12vh;
+  background: var(--surface-tray);
+}
+
+.v-switch {
+  width: min(640px, 92vw);
+  max-height: 60vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-panel);
+  border: 1px solid var(--rule-strong);
+}
+
+.v-switch__q {
+  font: var(--type-lead);
+  color: var(--text-primary);
+  background: var(--surface-card);
+  border: 0;
+  border-bottom: 1px solid var(--rule-inner);
+  padding: var(--space-3) var(--space-4);
+  outline: none;
+}
+
+.v-switch__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+}
+
+.v-switch__row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-left: 2px solid transparent;
+  padding: var(--space-2) var(--space-4);
+  color: var(--text-secondary);
+  font: var(--type-body-sm);
+  cursor: pointer;
+}
+
+.v-switch__row.is-on {
+  background: var(--surface-active);
+  border-left-color: var(--accent-solid);
+  color: var(--text-primary);
+}
+
+.v-switch__row:disabled {
+  cursor: default;
+  opacity: 0.72;
+}
+
+.v-switch__id {
+  font: var(--type-mono-sm);
+  color: var(--text-tertiary);
+  flex: none;
+}
+
+.v-switch__task {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.v-switch__note,
+.v-switch__foot {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  margin: 0;
+  padding: var(--space-2) var(--space-4);
+}
+
+.v-switch__foot {
+  border-top: 1px solid var(--rule-inner);
+}
+
+/* ------------------------------------------------------------ settings (1h) */
+
+.v-set {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--surface-page);
+  padding: var(--space-4) var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.v-set--empty {
+  color: var(--text-secondary);
+  font: var(--type-body);
+  gap: var(--space-2);
+  align-items: flex-start;
+}
+
+.v-set__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+}
+
+.v-set code {
+  font: var(--type-mono-sm);
+  color: var(--text-secondary);
+}
+
+.v-set__block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.v-set__h {
+  font: var(--type-section);
+  letter-spacing: var(--track-section);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin: 0;
+}
+
+.v-set__matrix {
+  border-collapse: collapse;
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+.v-set__matrix th {
+  font: var(--type-label);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  text-align: left;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--rule-inner);
+}
+
+.v-set__matrix td {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--rule-inner);
+  vertical-align: top;
+}
+
+.v-set__radio {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  cursor: pointer;
+  max-width: 22ch;
+}
+
+/* A boundary that cannot hold is shown with its reason, not omitted. */
+.v-set__row--off code {
+  color: var(--text-tertiary);
+}
+
+.v-set__why {
+  color: var(--text-tertiary);
+  max-width: 68ch;
+}
+
+.v-set__refused {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface-alarm);
+  color: var(--text-primary);
+  font: var(--type-body-sm);
+}
+
+.v-set__note {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  margin: 0;
+  max-width: 78ch;
+}
+
+.v-set__raw {
+  font: var(--type-mono-sm);
+  color: var(--text-secondary);
+  background: var(--surface-panel);
+  border: 1px solid var(--rule-inner);
+  padding: var(--space-3);
+  margin: 0;
+  max-height: 30vh;
+  overflow: auto;
+}
+
+.v-set__again {
+  font: var(--type-label);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--accent-on-tint);
+  background: none;
+  border: 1px solid var(--accent-border);
+  padding: var(--space-1) var(--space-2);
+  cursor: pointer;
+}
+
+/* ------------------------------------------------------------ new workstream (4a) */
+
+.v-new {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.v-new__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+}
+
+.v-new__label {
+  font: var(--type-label);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.v-new__task,
+.v-new__dir,
+.v-new__num {
+  font: var(--type-body);
+  color: var(--text-primary);
+  background: var(--surface-card);
+  border: 1px solid var(--rule-control);
+  padding: var(--space-2) var(--space-3);
+}
+
+.v-new__task {
+  resize: vertical;
+}
+
+.v-new__num {
+  width: 16ch;
+  font: var(--type-mono-sm);
+}
+
+.v-new__row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.v-new__dir {
+  flex: 1;
+  font: var(--type-mono-sm);
+}
+
+/* The overrides block: only what differs, and the count says how much. */
+.v-new__over {
+  border: 1px solid var(--rule-inner);
+  padding: var(--space-3);
+}
+
+.v-new__over summary {
+  font: var(--type-label);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.v-new__gates {
+  border-collapse: collapse;
+  margin-top: var(--space-3);
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+.v-new__gates td {
+  padding: var(--space-1) var(--space-3) var(--space-1) 0;
+}
+
+.v-new__gates code {
+  font: var(--type-mono-sm);
+}
+
+/* Changed rows tinted and labelled, which is the design's own instruction. */
+.v-new__gates tr.is-changed {
+  background: var(--surface-accent-tint);
+}
+
+.v-new__gates tr.is-changed code {
+  color: var(--accent-on-tint);
+}
+
+.v-new__dim {
+  color: var(--text-tertiary);
+}
+
+.v-new__note {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  margin: 0;
+  max-width: 72ch;
+}
+
+.v-new__bad {
+  font: var(--type-body-sm);
+  color: var(--text-primary);
+  background: var(--surface-alarm);
+  padding: var(--space-2);
+  margin: 0;
+}
+
+.v-new__toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+/* The exact command, because it is the one thing definitely true about what
+   pressing the button will do. */
+.v-new__argv {
+  font: var(--type-mono-sm);
+  color: var(--text-secondary);
+  background: var(--surface-panel);
+  border: 1px solid var(--rule-inner);
+  padding: var(--space-2) var(--space-3);
+  margin: 0;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.v-new__foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  border-top: 1px solid var(--rule-inner);
+  padding-top: var(--space-3);
+}
+
+.v-new__reset,
+.v-launch__more {
+  font: var(--type-label);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--accent-on-tint);
+  background: none;
+  border: 1px solid var(--accent-border);
+  padding: var(--space-1) var(--space-2);
+  cursor: pointer;
+}
+
+.v-launch__more {
+  align-self: flex-start;
+  margin: 0 var(--space-4) var(--space-3);
+}
+
+/* ------------------------------------------------------------ diff pane (1d) */
+
+.v-dp {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: var(--surface-page);
+  padding: var(--space-4) var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.v-dp--empty {
+  color: var(--text-secondary);
+  font: var(--type-body);
+  gap: var(--space-2);
+  align-items: flex-start;
+}
+
+.v-dp__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+}
+
+.v-dp code {
+  font: var(--type-mono-sm);
+  color: var(--text-secondary);
+}
+
+.v-dp__section {
+  display: flex;
+  flex-direction: column;
+}
+
+/* The row is the design system's; the button is this pane's. */
+.v-dp__line {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+/* Propose only: the composer builds the block and nothing is sent. */
+.v-dp__composer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  border: 1px solid var(--accent-border);
+  background: var(--surface-card);
+  padding: var(--space-3);
+}
+
+.v-dp__field {
+  font: var(--type-body-sm);
+  color: var(--text-primary);
+  background: var(--surface-page);
+  border: 1px solid var(--rule-control);
+  padding: var(--space-2);
+  resize: vertical;
+}
+
+.v-dp__sevs {
+  display: flex;
+  gap: var(--space-3);
+}
+
+.v-dp__sev {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  font: var(--type-label);
+  letter-spacing: var(--track-label);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.v-dp__block {
+  font: var(--type-mono-sm);
+  color: var(--text-secondary);
+  background: var(--surface-panel);
+  border: 1px solid var(--rule-inner);
+  padding: var(--space-2) var(--space-3);
+  margin: 0;
+  max-height: 24vh;
+  overflow: auto;
+  white-space: pre-wrap;
+}
+
+.v-dp__foot {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+
+.v-dp__note {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  max-width: 62ch;
+}
+
+.v-dp__again {
+  font: var(--type-label);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--accent-on-tint);
+  background: none;
+  border: 1px solid var(--accent-border);
+  padding: var(--space-1) var(--space-2);
+  cursor: pointer;
+  flex: none;
+}

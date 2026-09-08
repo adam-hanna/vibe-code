@@ -59,6 +59,26 @@ export interface Beat {
   lastActivity: string | null;
   /** Absent until some turn under this model has reported one. */
   contextWindow: number | null;
+  /**
+   * How far apart the beats are, as the loop's own timer reports it (#223).
+   *
+   * **What makes the staleness threshold derived rather than picked.** The design
+   * leaves exactly one judgement open in `7c` - how stale is stale - and answers
+   * it itself: that is a question about vibe's heartbeat cadence, so the answer
+   * is a few missed ticks, and only the loop knows the cadence. Null on a core
+   * that predates the field, and the pane says it cannot tell rather than
+   * choosing a number here.
+   */
+  intervalMs: number | null;
+  /**
+   * How long since the CHILD last wrote a line, at the moment of this beat.
+   *
+   * The second of `7c`'s two clocks, and the one the first cannot substitute
+   * for: a beat fires on a timer whether or not the child said anything, so its
+   * arrival proves *vibe* is alive and proves nothing about the turn. Null when
+   * the child has written nothing at all, which is a different fact from zero.
+   */
+  sinceOutputMs: number | null;
   /** When this beat reached us. The liveness signal, on our clock. */
   at: number;
 }
@@ -153,6 +173,201 @@ export interface Preflight {
   at: number;
 }
 
+/**
+ * One gate, as the loop observed it (#223, `5d`).
+ *
+ * **A whole-gate verdict, and deliberately not a per-test table.** `vibe` reads
+ * exit codes and parses nobody's reporter, and #135 chose that on purpose: a
+ * per-test table means tracking TAP, JUnit XML and `node --test` output for
+ * ever, a standing maintenance liability bought for a column in a UI. So this
+ * carries what the loop actually measured and nothing more.
+ */
+export interface GateRun {
+  name: string;
+  /** `running` until a verdict frame settles it. Never inferred from silence. */
+  status: 'running' | 'passed' | 'failed' | 'unavailable' | 'disabled';
+  /** The exact command, or null when nothing ran. `5d` prints it. */
+  command: string | null;
+  /** How many attempts were made. Zero on the paths where nothing ran. */
+  runs: number;
+  /** How many of them failed. Null unless the gate failed. */
+  failed: number | null;
+  /**
+   * `verdictOf`'s answer, verbatim, or null.
+   *
+   * **`flaky` and `failing` are different findings about a suite and only one of
+   * them is about the code**, which is why this is carried rather than derived
+   * from the fraction: `runs: 1` that failed is `failing` and never `flaky`,
+   * because one sample says nothing about determinism, and a window computing
+   * `failed < runs` would call it flaky.
+   */
+  verdict: string | null;
+  /** Why an unavailable gate was unavailable. Null otherwise. */
+  reason: string | null;
+  /**
+   * What every attempt did, in order, or empty.
+   *
+   * **This is what makes `5d`'s run cards honest.** Without it the pane knew
+   * only "1 of 3 failed" and would have had to place that failure among three
+   * slots and guess at the other two - and which run failed is precisely the
+   * information that separates a broken suite from a noisy one. Empty for a
+   * gate that never ran, and for a core that predates the field.
+   */
+  attempts: readonly { run: number; ok: boolean; exitCode: number | null }[];
+  startedAt: number;
+  endedAt: number | null;
+}
+
+/** One pass of the verification gate, which is a list of gates in order. */
+export interface VerifyPass {
+  /** The archive's round, which is what the artifacts are keyed by. */
+  round: number | null;
+  gates: readonly GateRun[];
+  at: number;
+}
+
+/**
+ * One finding, at the density a frame carries it (#223, `1e`/`4c`).
+ *
+ * Deliberately not the whole `Finding`: the detail and the suggested fix stay in
+ * the round's artifact, because a frame carrying every finding in full would put
+ * a review's whole prose on the wire every round.
+ */
+export interface FindingRow {
+  id: string;
+  severity: string;
+  title: string;
+  /**
+   * Who raised it, or null (#141).
+   *
+   * **Absent is not "an agent".** Every finding in every archive written before
+   * that field existed has none, and `authorOf` narrows rather than guessing -
+   * so a renderer that cannot name the author names nobody.
+   */
+  raisedBy: string | null;
+  /**
+   * How many places the finding cites. Zero is what `4c` flags as **ungrounded**.
+   *
+   * A count rather than the entries, because what the pane needs to know is that
+   * there is nothing to open - not what would have been in it. The reviewer is
+   * held to the same standard as the implementer, and a claim pointing nowhere
+   * is the one the guards downgrade.
+   */
+  evidence: number;
+  /**
+   * A guard's downgrade, or null. **The guards' field, and theirs alone.**
+   *
+   * Never rewritten and never cleared, including by a person restoring the
+   * severity - overwriting it on a restore would erase the fact the guard fired,
+   * which is what #48 added it for.
+   */
+  downgraded: { from: string; reason: string; at?: string } | null;
+  /**
+   * What a person did to the severity, in order, or null (#142).
+   *
+   * The person's field, append-only, and beside `downgraded` rather than
+   * instead of it. Two questions with two answers - *did a guard fire, and why*
+   * and *how did this reach the severity it has* - rather than one field serving
+   * both and eventually disagreeing with itself.
+   */
+  severityChanges: readonly { from: string; to: string; by?: string; reason?: string }[] | null;
+}
+
+/** A round's findings, and what the gate made of them. */
+export interface Census {
+  phase: 'plan' | 'review';
+  /** All four, zeros included: where a gate decision is made, an absence is information. */
+  counts: Readonly<Record<string, number>>;
+  tolerance: number;
+  pass: boolean;
+  /** Why the loop stopped, or null when it may proceed. Null is an answer. */
+  reason: string | null;
+  /** P1s being carried into the next phase rather than fixed. */
+  tolerated: readonly string[];
+  findings: readonly FindingRow[];
+  at: number;
+}
+
+/** One turn's charge, as the seam that charged it reported (#223, `5e`). */
+export interface Charge {
+  label: string;
+  provider: string;
+  tokens: number;
+  /** The phase this turn was in, stamped the way an output line is. */
+  phase: string | null;
+  at: number;
+}
+
+/**
+ * What the run has spent (`5e`/`6e`, #223).
+ *
+ * **Both accounts are subscriptions, so tokens are the only unit**, and that is
+ * a settled decision rather than a gap: Codex returns no cost from any output
+ * mode or endpoint, so a dollar view could only ever show half the run. The one
+ * figure that exists is Claude-side and says so wherever it is drawn.
+ *
+ * The totals are read off the last charge rather than summed here. A pane adding
+ * up a stream of turns would eventually disagree with `state.json`, and the
+ * charge seam is holding the authoritative number at the moment it charges.
+ */
+export interface Spend {
+  /** The run total, covering both agents. Null before any charge. */
+  tokens: number | null;
+  /** Claude-side dollars only, and never a total. Null before any charge. */
+  costUsd: number | null;
+  /** Codex's share of the tokens, or null when nothing has said. */
+  codexTokens: number | null;
+  /** Every charge, oldest first, so a per-phase breakdown is possible. */
+  charges: readonly Charge[];
+}
+
+/**
+ * A rate-limit wait (`7e`, #223).
+ *
+ * **This is `waiting`, not `halted`, and the distinction is the whole screen.**
+ * It requires no decision from a person, so it must not look as though it does -
+ * and other workstreams on the other provider keep running. The design demotes
+ * *"run this phase on the other agent"* to a text link for the same reason it
+ * exists at all: swapping providers mid-run is a fresh session with no memory of
+ * the conversation so far, so it is a different run rather than a faster route
+ * to the same one.
+ */
+export interface RateLimit {
+  /** The turn that hit it. */
+  label: string;
+  /** Which account is out of headroom, so the other one's work is left alone. */
+  provider: string | null;
+  /** How long the loop said it would wait. */
+  waitMs: number | null;
+  /** When the window resets, as the provider stated it. Null when it did not. */
+  resetsAt: string | null;
+  /** When the wait began, on our clock. */
+  at: number;
+  /** Set once `rate_limit_resumed` said the wait was over. */
+  resumedAt: number | null;
+}
+
+/** One open question, and the answer that came back for it (`1f`). */
+export interface Question {
+  kind: string;
+  question: string;
+  blocking: boolean;
+  /** The adversary's draft, once one arrives. Null while the round is open. */
+  answer: string | null;
+  /** `high` / `medium` / `low`, as the answerer stated it. */
+  confidence: string | null;
+  rationale: string | null;
+  /**
+   * Set when the answerer refused to guess.
+   *
+   * A decline is not a missing answer: it is the adversary saying this is
+   * product intent and it will not invent one, which `escalateOnDefer` then acts
+   * on. Drawing it as "no answer yet" would hide the one outcome that ends the
+   * run.
+   */
+  declined: boolean;
+}
+
 /** A boundary the loop is holding at, waiting to be told what to do. */
 export interface Gate {
   /** The id to answer. Allocated by the host, not by us. */
@@ -183,12 +398,66 @@ export interface OutputLine {
   level: Level;
   message: string;
   id: string | null;
+  /**
+   * The phase the loop had announced when this line arrived, or null (#223, `1c`).
+   *
+   * **Stamped, not inferred.** `1c` asks for output filtered by phase rather
+   * than one endless stream, and the only honest way to say which phase a line
+   * belongs to is to record the last one the loop *said* it was in. Nothing here
+   * reads the sentence to work it out - that is the English-matching #133 exists
+   * to prevent, and it would file a line under whatever word it happened to
+   * contain.
+   *
+   * Null for every line before the first `phase_started`, which is a real state:
+   * preflight and the run announcement genuinely belong to no phase.
+   */
+  phase: string | null;
+  /** The role that was running, on the same terms. Null between turns. */
+  role: string | null;
 }
 
 export interface Run {
   cycles: readonly Cycle[];
   /** The question loop, nested inside cycle 1. Null until one opens. */
-  questions: { total: number; blocking: number } | null;
+  questions: { total: number; blocking: number; open: readonly Question[] } | null;
+  /**
+   * The rate-limit wait in flight, or the last one, or null (`7e`).
+   *
+   * Kept after it resolves rather than cleared: a run that waited forty minutes
+   * did so, and a screen that forgets it cannot explain where the time went.
+   */
+  rateLimit: RateLimit | null;
+  /**
+   * Every pass of the verification gate, oldest first (#223, `5d`).
+   *
+   * A list rather than the latest, because the pane's failed-runs trend is a
+   * comparison ACROSS passes and the round is what separates them. Empty until
+   * a gate runs; a run with verification off gets one pass whose gates are all
+   * `disabled`, which is a different fact from an empty list and must not be
+   * drawn as the same thing.
+   */
+  verify: readonly VerifyPass[];
+  /**
+   * Every round's census, oldest first (#223, `1e`).
+   *
+   * A list rather than the latest, because the design's open-findings block
+   * draws the **trend in words** - `blocking 2 → 0` - and a trend needs the
+   * rounds behind it. Empty until a round reports one.
+   */
+  censuses: readonly Census[];
+  /** What the run has spent, from the one seam every token goes through. */
+  spend: Spend;
+  /**
+   * The commit every diff in this run is taken against, or null (#223, `1d`).
+   *
+   * Told, on the `phase_started` that establishes it, and there is no other way
+   * to know it: `state.baseSha` is run state and this wire carries no run state
+   * by design. Null before the implement phase and null on a repository that had
+   * nothing to mark, and the pane says so rather than asking for a diff with no
+   * base - which is the request `diffSince` would answer by staging the user's
+   * whole working tree.
+   */
+  baseSha: string | null;
   /** The turn with no `endedAt`, if any. */
   running: Turn | null;
   gate: Gate | null;
@@ -255,6 +524,11 @@ export function emptyRun(): Run {
   return {
     cycles: [],
     questions: null,
+    rateLimit: null,
+    verify: [],
+    censuses: [],
+    spend: { tokens: null, costUsd: null, codexTokens: null, charges: [] },
+    baseSha: null,
     running: null,
     gate: null,
     output: [],
@@ -309,6 +583,166 @@ function strings(v: unknown): readonly string[] {
   return out;
 }
 
+/**
+ * The attempts a gate made, or none.
+ *
+ * Whole-list-or-nothing, exactly as `strings` is and for the same reason: a
+ * partly-readable list drawn as though it were the whole of what the frame
+ * carried is the absent-is-not-zero rule broken on a sequence - and here it
+ * would be worse than usual, because dropping one attempt from three is how a
+ * flaky suite comes to look like a clean one.
+ */
+function readAttempts(v: unknown): { run: number; ok: boolean; exitCode: number | null }[] {
+  if (!Array.isArray(v)) return [];
+  const out: { run: number; ok: boolean; exitCode: number | null }[] = [];
+  for (const item of v as unknown[]) {
+    if (typeof item !== 'object' || item === null) return [];
+    const row = item as Record<string, unknown>;
+    const run = num(row['run']);
+    if (run === null || typeof row['ok'] !== 'boolean') return [];
+    out.push({ run, ok: row['ok'], exitCode: num(row['exitCode']) });
+  }
+  return out;
+}
+
+/** The four severities, in the order the design's chips are drawn. */
+export const SEVERITIES: readonly string[] = ['P0', 'P1', 'P2', 'P3'];
+
+/**
+ * The four counts, or null.
+ *
+ * **All four or none.** The design's four-chip form shows zeros on purpose,
+ * because where a gate decision is being made an absence is information - so a
+ * record missing one severity is not a census this version understands, and
+ * filling the gap with a zero would be a count nobody took presented as one.
+ */
+function readCounts(v: unknown): Record<string, number> | null {
+  if (typeof v !== 'object' || v === null) return null;
+  const row = v as Record<string, unknown>;
+  const out: Record<string, number> = {};
+  for (const severity of SEVERITIES) {
+    const n = num(row[severity]);
+    if (n === null) return null;
+    out[severity] = n;
+  }
+  return out;
+}
+
+/** A guard's downgrade, or null. Both fields or neither. */
+function readDowngrade(v: unknown): FindingRow['downgraded'] {
+  if (typeof v !== 'object' || v === null) return null;
+  const row = v as Record<string, unknown>;
+  const from = str(row['from']);
+  const reason = str(row['reason']);
+  if (from === null || reason === null) return null;
+  const at = str(row['at']);
+  return at === null ? { from, reason } : { from, reason, at };
+}
+
+/**
+ * The severity moves a person made, or null.
+ *
+ * Null rather than `[]`: "nobody moved this" and "this build could not read the
+ * list" are different, and #142's whole point is that the record can say who
+ * made which claim. An unreadable entry drops the list rather than the finding.
+ */
+function readChanges(v: unknown): FindingRow['severityChanges'] {
+  if (!Array.isArray(v)) return null;
+  const out: { from: string; to: string; by?: string; reason?: string }[] = [];
+  for (const item of v as unknown[]) {
+    if (typeof item !== 'object' || item === null) return null;
+    const row = item as Record<string, unknown>;
+    const from = str(row['from']);
+    const to = str(row['to']);
+    if (from === null || to === null) return null;
+    const by = str(row['by']);
+    const reason = str(row['reason']);
+    out.push({ from, to, ...(by === null ? {} : { by }), ...(reason === null ? {} : { reason }) });
+  }
+  return out;
+}
+
+/**
+ * The findings a census listed.
+ *
+ * Per-entry rather than whole-list, unlike `readAttempts`: a finding missing its
+ * id or severity is one this version cannot place, and dropping the other
+ * fifteen with it would lose a person's view of a round over one bad row. The
+ * count of what was dropped is not reported, which is a real limit - but the
+ * gate's own four counts are carried separately and are the number that decides
+ * anything, so the pane can still tell you it is not showing everything.
+ */
+function readFindings(v: unknown): FindingRow[] {
+  if (!Array.isArray(v)) return [];
+  const out: FindingRow[] = [];
+  for (const item of v as unknown[]) {
+    if (typeof item !== 'object' || item === null) continue;
+    const row = item as Record<string, unknown>;
+    const id = str(row['id']);
+    const severity = str(row['severity']);
+    if (id === null || severity === null) continue;
+    out.push({
+      id,
+      severity,
+      title: str(row['title']) ?? id,
+      raisedBy: str(row['raisedBy']),
+      evidence: num(row['evidence']) ?? 0,
+      downgraded: readDowngrade(row['downgraded']),
+      severityChanges: readChanges(row['severityChanges']),
+    });
+  }
+  return out;
+}
+
+/** The questions a round opened, dropping any row this version cannot place. */
+function readQuestions(v: unknown): Question[] {
+  if (!Array.isArray(v)) return [];
+  const out: Question[] = [];
+  for (const item of v as unknown[]) {
+    if (typeof item !== 'object' || item === null) continue;
+    const row = item as Record<string, unknown>;
+    const question = str(row['question']);
+    if (question === null) continue;
+    out.push({
+      question,
+      kind: str(row['kind']) ?? 'unlabelled',
+      // `blocking` decides whether a decline ends the run, so it fails **closed**:
+      // anything but an explicit `false` is treated as blocking. An advisory
+      // question shown as blocking is a person looking at it sooner than they
+      // had to; the other way round is a run ending unexplained.
+      blocking: row['blocking'] !== false,
+      answer: null,
+      confidence: null,
+      rationale: null,
+      declined: false,
+    });
+  }
+  return out;
+}
+
+/** The answerer's replies, or its refusals - which are not the same outcome. */
+function readAnswers(
+  v: unknown,
+  declined: boolean,
+): { question: string; answer: string | null; confidence: string | null; rationale: string | null; declined: boolean }[] {
+  if (!Array.isArray(v)) return [];
+  const out: ReturnType<typeof readAnswers> = [];
+  for (const item of v as unknown[]) {
+    if (typeof item !== 'object' || item === null) continue;
+    const row = item as Record<string, unknown>;
+    const question = str(row['question']);
+    if (question === null) continue;
+    out.push({
+      question,
+      answer: str(row['answer']),
+      confidence: str(row['confidence']),
+      rationale: str(row['rationale']),
+      declined,
+    });
+  }
+  return out;
+}
+
 /** Read a heartbeat's record. Every absent field stays absent. */
 function readBeat(data: Record<string, unknown>, at: number): Beat | null {
   const elapsedMs = num(data['elapsedMs']);
@@ -326,6 +760,8 @@ function readBeat(data: Record<string, unknown>, at: number): Beat | null {
     // happened", and an unmeasured window is not a window of zero.
     lastActivity: str(data['lastActivity']),
     contextWindow: num(data['contextWindow']),
+    intervalMs: num(data['intervalMs']),
+    sinceOutputMs: num(data['sinceOutputMs']),
     at,
   };
 }
@@ -379,6 +815,98 @@ function mapLastPhase(cycles: readonly Cycle[], f: (p: PhaseGroup) => PhaseGroup
     ...cycle,
     phases: cycle.phases.map((p) => (p.id === newest ? f(p) : p)),
   }));
+}
+
+/**
+ * Start a gate, opening a pass for it when its round is a new one.
+ *
+ * **The round is what separates two passes**, and it is told rather than
+ * guessed: `state.gateOutcomes` is reset on every pass, so the stream alone
+ * cannot distinguish the second gate of one pass from the first gate of the
+ * next. A frame carrying no round joins the open pass, which is the honest
+ * reading of a core that predates the field - one pass with everything in it,
+ * rather than a pass invented per gate.
+ */
+function openGate(
+  passes: readonly VerifyPass[],
+  round: number | null,
+  name: string,
+  at: number,
+): VerifyPass[] {
+  const gate: GateRun = {
+    name,
+    status: 'running',
+    command: null,
+    runs: 0,
+    failed: null,
+    verdict: null,
+    reason: null,
+    attempts: [],
+    startedAt: at,
+    endedAt: null,
+  };
+  const last = passes[passes.length - 1];
+  const samePass = last !== undefined && last.round === round;
+  if (!samePass) return [...passes, { round, at, gates: [gate] }];
+  return passes.map((p) => (p === last ? { ...p, gates: [...p.gates, gate] } : p));
+}
+
+/**
+ * Settle the named gate in its pass.
+ *
+ * The **last unsettled** gate of that name, so a gate re-run in a later round is
+ * not confused with the earlier one - and nothing is created if no
+ * `verify_started` opened it, because a verdict with no gate under it cannot be
+ * attributed and a measurement that cannot be attributed is not recorded.
+ */
+function settleGate(
+  passes: readonly VerifyPass[],
+  round: number | null,
+  name: string,
+  at: number,
+  outcome: Omit<GateRun, 'name' | 'startedAt' | 'endedAt'>,
+): VerifyPass[] {
+  const pass = [...passes].reverse().find((p) => p.round === round && p.gates.some(unsettled(name)));
+  if (pass === undefined) return [...passes];
+  let done = false;
+  return passes.map((p) =>
+    p !== pass
+      ? p
+      : {
+          ...p,
+          gates: p.gates.map((g) => {
+            if (done || !unsettled(name)(g)) return g;
+            done = true;
+            return { ...g, ...outcome, endedAt: at };
+          }),
+        },
+  );
+}
+
+const unsettled =
+  (name: string) =>
+  (g: GateRun): boolean =>
+    g.name === name && g.status === 'running';
+
+/**
+ * The most recently opened phase's name, or null.
+ *
+ * By `id` rather than array position, exactly as `mapLastPhase` is and for the
+ * same reason: the review cycle re-opens verify, which lives in the code cycle,
+ * so the newest phase is not necessarily in the last cycle.
+ */
+function currentPhase(run: Run): string | null {
+  let newest = -1;
+  let name: string | null = null;
+  for (const cycle of run.cycles) {
+    for (const phase of cycle.phases) {
+      if (phase.id > newest) {
+        newest = phase.id;
+        name = phase.phase;
+      }
+    }
+  }
+  return name;
 }
 
 /** Close the running turn, if there is one. */
@@ -449,7 +977,21 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
   let seq = run.seq;
   const id = (): number => (seq += 1);
 
-  const line: OutputLine = { n: id(), level: frame.level, message: frame.message, id: frame.id };
+  // Stamped from what the loop last announced, and **before** this frame is
+  // folded. A `phase_started` line belongs to the phase it opens, so the stamp
+  // is corrected below for that one id rather than every line being one phase
+  // behind.
+  const line: OutputLine = {
+    n: id(),
+    level: frame.level,
+    message: frame.message,
+    id: frame.id,
+    phase:
+      frame.id === 'phase_started'
+        ? (str((frame.data ?? {})['phase']) ?? currentPhase(run))
+        : currentPhase(run),
+    role: run.running?.role ?? null,
+  };
   const output = [...run.output, line].slice(-OUTPUT_KEEP);
   const next: Run = { ...run, output };
   const data = frame.data ?? {};
@@ -470,6 +1012,10 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
         const closed = endRunning(next, at);
         return {
           ...closed,
+          // Kept when a later phase carries none, rather than cleared: the base
+          // is established once, by the implement phase, and every phase after
+          // it diffs against the same commit.
+          baseSha: str(data['baseSha']) ?? closed.baseSha,
           cycles: withPhase(closed.cycles, kind, {
             id: id(),
             phase,
@@ -603,14 +1149,196 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
         return {
           ...next,
           cycles: mapLastPhase(next.cycles, (p) => ({ ...p, gates: [...p.gates, gate] })),
+          verify: openGate(next.verify, num(data['round']), gate, at),
+        };
+      }
+
+      /**
+       * The three ways a gate settles, and the one way a pass never starts.
+       *
+       * All four land here because the pane's question is *what happened to this
+       * gate*, and "the command could not run" is an answer to it. Only
+       * `verify_disabled` opens a pass of its own: the other three always follow
+       * a `verify_started` that opened one.
+       */
+      case 'verify_passed':
+      case 'verify_failed':
+      case 'verify_unavailable': {
+        const gate = str(data['gate']);
+        if (gate === null) return next;
+        const status =
+          frame.id === 'verify_passed'
+            ? 'passed'
+            : frame.id === 'verify_failed'
+              ? 'failed'
+              : 'unavailable';
+        return {
+          ...next,
+          verify: settleGate(next.verify, num(data['round']), gate, at, {
+            status,
+            command: str(data['command']),
+            runs: num(data['runs']) ?? 0,
+            failed: num(data['failed']),
+            // Carried, never derived. `runs: 1` that failed is `failing` and not
+            // `flaky`, and a window computing `failed < runs` would disagree
+            // with the loop about which of the two this is.
+            verdict: str(data['verdict']),
+            reason: str(data['reason']),
+            attempts: readAttempts(data['attempts']),
+          }),
+        };
+      }
+
+      case 'verify_disabled': {
+        // A pass whose gates are all `disabled`. Different from an empty list -
+        // "verification is off" and "the gate has not come round yet" are two
+        // facts, and until #223 the run said neither.
+        const names = strings(data['gates']);
+        const round = num(data['round']);
+        return {
+          ...next,
+          verify: [
+            ...next.verify,
+            {
+              round,
+              at,
+              gates: names.map((name) => ({
+                name,
+                status: 'disabled' as const,
+                command: null,
+                runs: 0,
+                failed: null,
+                verdict: null,
+                reason: null,
+                attempts: [],
+                startedAt: at,
+                endedAt: at,
+              })),
+            },
+          ],
+        };
+      }
+
+      /**
+       * A turn's charge, under the event type that recorded it (#223, `5e`).
+       *
+       * Two ids because there are two providers and they are charged
+       * differently, not because they are two facts: `codex_turn` carries no
+       * cost at all, and that is a settled decision rather than a missing field.
+       */
+      case 'claude_turn':
+      case 'codex_turn': {
+        const label = str(data['label']);
+        const tokens = num(data['tokens']);
+        if (label === null || tokens === null) return next;
+        return {
+          ...next,
+          spend: {
+            // Read off the charge, never summed here. A pane adding up a stream
+            // of turns would eventually disagree with `state.json`, and this is
+            // the number that file holds.
+            tokens: num(data['runTokens']) ?? next.spend.tokens,
+            costUsd: num(data['runCostUsd']) ?? next.spend.costUsd,
+            codexTokens: num(data['codexTokens']) ?? next.spend.codexTokens,
+            charges: [
+              ...next.spend.charges,
+              {
+                label,
+                provider: str(data['provider']) ?? (frame.id === 'codex_turn' ? 'codex' : 'claude'),
+                tokens,
+                phase: line.phase,
+                at,
+              },
+            ],
+          },
+        };
+      }
+
+      case 'findings_reported': {
+        const phase = str(data['phase']);
+        // Only the two the loop reports, and an unrecognised one is dropped
+        // rather than filed under a guess: a critique census drawn as a review
+        // one would put the plan cycle's argument in the review cycle's block.
+        if (phase !== 'plan' && phase !== 'review') return next;
+        const counts = readCounts(data['counts']);
+        if (counts === null) return next;
+        return {
+          ...next,
+          censuses: [
+            ...next.censuses,
+            {
+              phase,
+              counts,
+              tolerance: num(data['tolerance']) ?? 0,
+              pass: data['pass'] === true,
+              reason: str(data['reason']),
+              tolerated: strings(data['tolerated']),
+              findings: readFindings(data['findings']),
+              at,
+            },
+          ],
         };
       }
 
       case 'questions_opened':
         return {
           ...next,
-          questions: { total: num(data['total']) ?? 0, blocking: num(data['blocking']) ?? 0 },
+          questions: {
+            total: num(data['total']) ?? 0,
+            blocking: num(data['blocking']) ?? 0,
+            open: readQuestions(data['questions']),
+          },
         };
+
+      /**
+       * The answers, matched back onto the questions by their text (#223, `1f`).
+       *
+       * **Matched, not appended.** The answerer is given the questions and
+       * returns answers keyed by the question string - which is exactly how the
+       * core pairs them, in `matches()` - so this is the same join rather than a
+       * second one. A question with no matching answer keeps its null, because
+       * an unanswered question and an answered one are the two states the pane
+       * exists to distinguish.
+       */
+      case 'questions_answered': {
+        const before = next.questions;
+        if (before === null) return next;
+        const answers = readAnswers(data['answers'], false);
+        const declined = readAnswers(data['declined'], true);
+        const found = [...answers, ...declined];
+        return {
+          ...next,
+          questions: {
+            ...before,
+            open: before.open.map((q) => {
+              const a = found.find((x) => x.question.trim() === q.question.trim());
+              return a === undefined ? q : { ...q, ...a };
+            }),
+          },
+        };
+      }
+
+      case 'rate_limited':
+        return {
+          ...next,
+          rateLimit: {
+            label: str(data['label']) ?? 'a turn',
+            provider: str(data['provider']),
+            waitMs: num(data['waitMs']),
+            resetsAt: str(data['resetsAt']),
+            at,
+            resumedAt: null,
+          },
+        };
+
+      case 'rate_limit_resumed': {
+        const before = next.rateLimit;
+        // Nothing is created here. A resume with no wait behind it cannot say
+        // when the wait began, and a card claiming a wait it never measured is
+        // worse than no card.
+        if (before === null) return next;
+        return { ...next, rateLimit: { ...before, resumedAt: at } };
+      }
 
       case 'gate_released':
         return { ...next, gate: null };
@@ -651,6 +1379,129 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
   })();
 
   return { ...folded, seq };
+}
+
+/**
+ * How old what is on screen is, and whether it is still live (`7c`, #223).
+ *
+ * **A comparison between two clocks, not a threshold on one.** That distinction
+ * is the whole of `7c`, and it replaced `5b` precisely because a single timer
+ * cannot tell the two cases apart:
+ *
+ * - A beat fires on the loop's own timer **whether or not the child said
+ *   anything**, so its arrival proves *vibe* is alive and proves nothing about
+ *   the turn.
+ * - `sinceOutputMs` is measured from the child's last line, so it proves the
+ *   opposite thing.
+ *
+ * One stale and one fresh is a turn **thinking**, and the design is emphatic
+ * that this is *"stated as a fact, not a worry"* - a turn emitting nothing for
+ * twelve minutes is a healthy turn, and an indicator that fires on healthy turns
+ * is one people stop reading. That is also why the middle state is named
+ * `thinking` rather than `quiet`: reporting a state, not reporting an absence.
+ *
+ * Both stale is `not-live`: everything on screen is however old it is, and vibe
+ * cannot confirm the phase is still running. **That one must not look normal.**
+ */
+export type Liveness = 'live' | 'thinking' | 'not-live' | 'unknown';
+
+export interface Staleness {
+  state: Liveness;
+  /** Since the child last wrote, or null when it never has. */
+  outputMs: number | null;
+  /** Since the loop's own tick, or null before the first beat. */
+  activityMs: number | null;
+  /** The instant of that tick, for a card that has stopped moving (hi-fi 17). */
+  lastBeatAt: number | null;
+  /** Why the state cannot be told, or null. Never a guess in its place. */
+  why: string | null;
+}
+
+/**
+ * How many missed ticks make a run not-live.
+ *
+ * **Three, and the number is a shape rather than a duration.** The design's one
+ * open judgement in `7c` is how stale is stale, and its own answer is that this
+ * is a question about vibe's heartbeat cadence - so the threshold is expressed
+ * in ticks and multiplied by the cadence the loop reported. At the default
+ * 30-second interval that is 90 seconds; a run configured slower moves with it,
+ * which a hardcoded 90_000 would not.
+ */
+export const MISSED_TICKS = 3;
+
+export function staleness(run: Run, now: number): Staleness {
+  const turn = run.running;
+  const beat = turn?.beat ?? null;
+
+  if (turn === null) {
+    return {
+      state: 'unknown',
+      outputMs: null,
+      activityMs: null,
+      lastBeatAt: null,
+      why: 'no turn is running, so there is nothing whose liveness to report',
+    };
+  }
+  if (beat === null) {
+    // A fresh turn never flickers through the middle state, which is
+    // `turnStartedAt`'s job in the design. Before the first beat there is
+    // nothing to compare, and saying so is better than calling a turn that
+    // started three seconds ago stale.
+    return {
+      state: 'unknown',
+      outputMs: null,
+      activityMs: null,
+      lastBeatAt: null,
+      why: 'the turn has not reported a heartbeat yet',
+    };
+  }
+  if (beat.intervalMs === null) {
+    // Fail closed: an unmeasurable threshold is reported as unmeasurable rather
+    // than replaced with a number picked here. That would be the invented
+    // denominator this repo refuses everywhere else.
+    return {
+      state: 'unknown',
+      outputMs: beat.sinceOutputMs,
+      activityMs: Math.max(0, now - beat.at),
+      lastBeatAt: beat.at,
+      why: 'this build was not told how often the loop beats, so it cannot say what is overdue',
+    };
+  }
+
+  const overdue = beat.intervalMs * MISSED_TICKS;
+  const activityMs = Math.max(0, now - beat.at);
+  // The child's gap, advanced by our own clock since the beat: the loop measured
+  // it at the instant it spoke, and it has been growing since.
+  const outputMs = beat.sinceOutputMs === null ? null : beat.sinceOutputMs + activityMs;
+
+  if (activityMs > overdue) {
+    return { state: 'not-live', outputMs, activityMs, lastBeatAt: beat.at, why: null };
+  }
+  // No output at all yet is not thinking and not live - the turn has produced
+  // nothing to be recent or stale. It reads as live because vibe is beating,
+  // which is the honest half of what is known.
+  if (outputMs === null || outputMs <= beat.intervalMs) {
+    return { state: 'live', outputMs, activityMs, lastBeatAt: beat.at, why: null };
+  }
+  return { state: 'thinking', outputMs, activityMs, lastBeatAt: beat.at, why: null };
+}
+
+/**
+ * How many findings are blocking in the most recent round, or zero.
+ *
+ * **In the model rather than in the tab bar**, which is the rule this file
+ * exists for: the components draw and this decides. It is a count over counts
+ * the loop sent - P0 plus P1 - and never a re-judgement of the gate, which
+ * already told us `pass`.
+ *
+ * The *latest* round rather than a total across all of them, because that is the
+ * number that decides whether the loop fixes again; a running total would move
+ * for reasons that change nothing.
+ */
+export function blocking(run: Run): number {
+  const latest = run.censuses[run.censuses.length - 1];
+  if (latest === undefined) return 0;
+  return (latest.counts['P0'] ?? 0) + (latest.counts['P1'] ?? 0);
 }
 
 /**

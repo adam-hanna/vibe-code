@@ -405,6 +405,32 @@ export async function diffSince(
   return out;
 }
 
+/**
+ * `diffSince`, plus whether it had to cut (#223, `1d`).
+ *
+ * **The flag rather than the marker**, and that is the whole reason this exists.
+ * The truncation notice is a sentence with a number in it, so a host asking *"was
+ * this cut"* would have to match English - the exact failure #133 was written to
+ * prevent, and it would break the next time somebody improved the wording.
+ *
+ * It matters more here than most places it would: the design's truncation band
+ * is a judgement about **what the reviewer actually read**, so a window that
+ * silently missed it would present a partial diff as a whole one at the moment
+ * somebody is deciding whether a review was thorough.
+ */
+export async function diffSinceWithLimit(
+  cwd: string,
+  baseSha: string | null,
+  options: { maxChars?: number } = {},
+): Promise<{ patch: string; truncated: boolean }> {
+  const maxChars = options.maxChars ?? DIFF_MAX_CHARS;
+  const patch = await diffSince(cwd, baseSha, options);
+  // Measured against the ceiling rather than read out of the text: the marker is
+  // appended after the slice, so a cut diff is always longer than the ceiling
+  // and an uncut one is never longer than it.
+  return { patch, truncated: patch.length > maxChars };
+}
+
 /** One reviewer turn's worth of the change: whole files, in git's order. */
 export interface DiffChunk {
   files: string[];

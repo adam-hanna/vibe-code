@@ -91,6 +91,7 @@ import {
 } from '@src/questions.js';
 import { hasFindingShape, isReportBasename } from '@src/stored.js';
 import {
+  authorOf,
   blockers as blockingFindings,
   gate,
   parseAnswers,
@@ -602,7 +603,15 @@ async function runPhases(
     // turn must not leave the reviewer pointed at an earlier round's report.
     beginReport(state);
 
-    log.heading('Implementing', { id: 'phase_started', data: { phase: 'implementing' } });
+    // The base travels with the phase that establishes it (#223, `1d`). It is
+    // the commit every diff in this run is taken against, and a window has no
+    // other way to learn it - `state.baseSha` is run state, and the wire carries
+    // no run state by design. Null when the repository had nothing to mark, which
+    // is a real state and not a missing field.
+    log.heading('Implementing', {
+      id: 'phase_started',
+      data: { phase: 'implementing', baseSha: state.baseSha },
+    });
     const impl = await writeTurn(
       state,
       cfg,
@@ -663,6 +672,77 @@ async function runPhases(
   advancePhase(state, 'complete');
   writeCheckpoint(state, 'complete', NO_COMMIT);
   return state;
+}
+
+/**
+ * Say what a round's findings were and what the gate made of them (#223).
+ *
+ * **Narration, and deliberately not an event.** `recordAndSay`'s durability rule
+ * is that narration never creates one, and every fact here is already durable
+ * somewhere better: the findings are in the round's own `code-review-N.json`,
+ * and the decision is in `plan_approved` / `review_approved` or in the
+ * escalation that follows. This is the same census at the density a window can
+ * draw, on the precedent `questions_opened` set - an id with data and no entry
+ * in `state.events`.
+ *
+ * It is what makes the gate decision legible rather than merely announced. `1e`
+ * asks for severity counters *against the tolerance*, because the question a
+ * person actually has at a review boundary is not "how many findings" but "why
+ * did the loop choose to fix again rather than finish", and that is a
+ * four-number comparison nothing on the wire could previously supply.
+ *
+ * **Zeros are sent.** The four-chip form in the design shows them on purpose -
+ * where a gate decision is being made, an absence is information - so a count of
+ * zero is a measurement here and is not omitted the way an unmeasured field is.
+ */
+function sayFindings(
+  phase: 'plan' | 'review',
+  findings: readonly Finding[],
+  decision: ReturnType<typeof gate>,
+  tolerance: number,
+): void {
+  const counts = { P0: 0, P1: 0, P2: 0, P3: 0 };
+  for (const f of findings) counts[f.severity] += 1;
+  log.info(
+    `${phase === 'plan' ? 'Critique' : 'Review'}: ` +
+      `${String(counts.P0)} P0 · ${String(counts.P1)} P1 · ` +
+      `${String(counts.P2)} P2 · ${String(counts.P3)} P3 ` +
+      `(tolerance ${String(tolerance)} P1)`,
+    {
+      id: 'findings_reported',
+      data: {
+        phase,
+        counts,
+        tolerance,
+        pass: decision.pass,
+        // Null rather than absent when the gate passed: "the loop may proceed"
+        // is the answer, not a missing one.
+        reason: decision.reason,
+        tolerated: decision.tolerated.map((f) => f.id),
+        // Enough to draw `1e` and open `4c`, and no more. The detail and the
+        // suggested fix are in the artifact, which is where a pane deep enough
+        // to want them should read them from - a frame carrying every finding in
+        // full would put a review's whole prose on the wire every round.
+        findings: findings.map((f) => ({
+          id: f.id,
+          severity: f.severity,
+          title: f.title,
+          // Absent stays absent (#141): a renderer that cannot name the author
+          // names nobody, and `authorOf` returns null rather than guessing.
+          raisedBy: authorOf(f),
+          // Whether the claim points anywhere, which is what `4c` flags as
+          // **ungrounded**. A count rather than the entries: the pane needs to
+          // know there is nothing to open, not what would have been in it.
+          evidence: f.evidence?.length ?? 0,
+          // Both severity histories, kept apart exactly as #142 keeps them: a
+          // guard's downgrade is not a person's restore, and one field serving
+          // both is how they come to disagree.
+          downgraded: f.downgraded ?? null,
+          severityChanges: f.severityChanges ?? null,
+        })),
+      },
+    },
+  );
 }
 
 /** Plan, resolve questions, and critique until the critic raises no P1s. */
@@ -885,19 +965,23 @@ async function planPhase(
 
     const decision = gate(critique.findings, cfg.loop.p1Tolerance);
     const stoppers = blockingFindings(critique.findings);
+    // Before the branch, so the census is the same shape whichever way the gate
+    // goes. A window drawing it only on a failure would have four counts while
+    // the news was bad and nothing while it was good.
+    sayFindings('plan', critique.findings, decision, cfg.loop.p1Tolerance);
     if (decision.pass) {
-      if (decision.tolerated.length > 0) {
-        // Carried, not forgiven. The implementation is told about these so the
-        // phase that can actually settle them does.
-        state.carried = decision.tolerated;
-        log.ok(
-          `Plan accepted with ${decision.tolerated.length} P1(s) carried into implementation - ` +
-            decision.tolerated.map((f) => f.id).join(', '),
-        );
-        for (const f of decision.tolerated) log.info(`  ~ ${f.title}`);
-      } else {
-        log.ok(`Plan approved - ${critique.findings.length} non-blocking finding(s)`);
-      }
+      // Carried, not forgiven. The implementation is told about these so the
+      // phase that can actually settle them does.
+      if (decision.tolerated.length > 0) state.carried = decision.tolerated;
+      // The sentence, chosen before it is said, because since #223 saying it and
+      // recording it are one call and the call sits below the two assignments
+      // its data reads. The two branches and their wording are unchanged, and so
+      // is the order they reach a terminal in: this line, then the `~` list.
+      const approved =
+        decision.tolerated.length > 0
+          ? `Plan accepted with ${decision.tolerated.length} P1(s) carried into implementation - ` +
+            decision.tolerated.map((f) => f.id).join(', ')
+          : `Plan approved - ${critique.findings.length} non-blocking finding(s)`;
       // The one round whose findings reach nobody otherwise: a revising round
       // hands its deferrals to the planner through `pendingFindings`, and this
       // one is about to clear them. Recorded, not acted on - `defer` decides
@@ -918,7 +1002,7 @@ async function planPhase(
       // reason `declined` is - an approving round must not leave an earlier
       // round's bar standing - and on the same state save.
       state.acceptanceCriteria = plan.acceptance_criteria?.map((c) => ({ ...c }));
-      recordEvent(state, 'plan_approved', {
+      recordAndSay(state, 'ok', 'plan_approved', approved, {
         findings: critique.findings.length,
         carried: decision.tolerated.map((f) => f.id),
         declined: state.declined.map((f) => f.id),
@@ -929,6 +1013,7 @@ async function planPhase(
           ? {}
           : { criteria: state.acceptanceCriteria.map((c) => c.id) }),
       });
+      for (const f of decision.tolerated) log.info(`  ~ ${f.title}`);
       // An approved plan has nothing outstanding: what the gate tolerated
       // travels on `state.carried` into implementation, and leaving these set
       // would have a resume revise a plan the critic just passed.
@@ -1108,6 +1193,7 @@ async function reviewPhase(
 
     const decision = gate(review.findings, cfg.loop.p1Tolerance);
     const stoppers = blockingFindings(review.findings);
+    sayFindings('review', review.findings, decision, cfg.loop.p1Tolerance);
     if (decision.pass) {
       if (decision.tolerated.length === 0) {
         recordAndSay(
@@ -1199,10 +1285,21 @@ async function reviewPhase(
       // lines below is `continue`, which takes the loop back to the top so the
       // verification gate proves this fix broke nothing; stopping in between is
       // the same decision with less information behind it. See `UNGATEABLE`.
-      recordEvent(state, 'review_approved', {
-        findings: review.findings.length,
-        carriedAndFixed: decision.tolerated.map((f) => f.id),
-      });
+      // Said as well as recorded (#223). The clean branch above has announced
+      // itself since #133 and this one never did, so the two ways a review can
+      // approve looked different to a window for no reason anybody chose: one
+      // arrived as `review_approved`, the other as silence.
+      recordAndSay(
+        state,
+        'ok',
+        'review_approved',
+        `Review approved with ${decision.tolerated.length} carried finding(s) fixed - ` +
+          decision.tolerated.map((f) => f.id).join(', '),
+        {
+          findings: review.findings.length,
+          carriedAndFixed: decision.tolerated.map((f) => f.id),
+        },
+      );
       // Back to the top once, so the gate proves the final fix broke nothing.
       continue;
     }
@@ -2128,19 +2225,35 @@ async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Findi
         required: gate.required,
       });
     }
-    recordEvent(state, 'verify_disabled', { gates: gates.map((g) => g.name) });
-    saveState(state);
+    // Said as well as recorded (#223). This is the one promoted site that adds a
+    // line a terminal did not print before, and it is the one that most needed
+    // it: a run with verification off looked exactly like a run whose gate had
+    // not come round yet, in the terminal and on the wire both.
+    recordAndSay(
+      state,
+      'info',
+      'verify_disabled',
+      `Verification is disabled - ${String(gates.length)} gate(s) will not run`,
+      { gates: gates.map((g) => g.name), round: state.reviewRound },
+    );
     return null;
   }
 
   for (const gate of gates) {
-    log.step(`Verifying: ${gate.name}`, { id: 'verify_started', data: { gate: gate.name } });
+    // The round travels with every verify frame (#223). `state.gateOutcomes` is
+    // reset on each pass, so a window watching the stream has no other way to
+    // tell the second gate of one pass from the first gate of the next - and
+    // `5d`'s failed-runs trend is a comparison ACROSS passes, which needs them
+    // separated. `reviewRound` rather than `verifyRound` because that is what
+    // the verify artifacts are keyed by, and a pane numbering them differently
+    // would not match the filenames.
+    log.step(`Verifying: ${gate.name}`, {
+      id: 'verify_started',
+      data: { gate: gate.name, round: state.reviewRound },
+    });
     const result = await runGateCommand(cwd, gate, cfg.toolchain);
 
     if (result.unavailable !== null) {
-      // Say so rather than letting silence read as a pass - and carry on to the
-      // next gate, which may well have a command.
-      log.warn(`Gate ${gate.name} unavailable: ${result.unavailable}`);
       // Pushed before the event, which persists: the outcome and the event that
       // explains it then land in one write rather than two.
       outcomes.push({
@@ -2150,11 +2263,16 @@ async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Findi
         runs: 0,
         required: gate.required,
       });
-      recordEvent(state, 'verify_unavailable', {
-        gate: gate.name,
-        reason: result.unavailable,
-        required: gate.required,
-      });
+      // Say so rather than letting silence read as a pass - and carry on to the
+      // next gate, which may well have a command. One call rather than two since
+      // #223: the same sentence at the same level, now carrying the id.
+      recordAndSay(
+        state,
+        'warn',
+        'verify_unavailable',
+        `Gate ${gate.name} unavailable: ${result.unavailable}`,
+        { gate: gate.name, reason: result.unavailable, required: gate.required, round: state.reviewRound },
+      );
       continue;
     }
 
@@ -2175,7 +2293,6 @@ async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Findi
     }
 
     if (result.ok) {
-      log.ok(`Gate ${gate.name} passed: ${result.command} (${result.runs}x)`);
       outcomes.push({
         name: gate.name,
         status: 'passed',
@@ -2183,11 +2300,19 @@ async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Findi
         runs: result.runs,
         required: gate.required,
       });
-      recordEvent(state, 'verify_passed', {
-        gate: gate.name,
-        command: result.command,
-        runs: result.runs,
-      });
+      recordAndSay(
+        state,
+        'ok',
+        'verify_passed',
+        `Gate ${gate.name} passed: ${result.command} (${result.runs}x)`,
+        {
+          gate: gate.name,
+          command: result.command,
+          runs: result.runs,
+          round: state.reviewRound,
+          attempts: result.attempts,
+        },
+      );
       continue;
     }
 
@@ -2196,10 +2321,6 @@ async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Findi
     // non-zero exit, so `runs` was the attempt that failed and the sentence said
     // "attempt 1 of 1" for every failure of a three-run gate.
     const flaky = verdictOf(result) === 'flaky';
-    log.warn(
-      `Gate ${gate.name} failed ${failedRuns(result)} of ${result.runs} run(s): ${result.command}` +
-        (flaky ? ' - it is not deterministic' : ''),
-    );
     const failed: GateOutcome = {
       name: gate.name,
       status: 'failed',
@@ -2209,18 +2330,37 @@ async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Findi
       required: gate.required,
     };
     outcomes.push(failed);
-    recordEvent(state, 'verify_failed', {
-      gate: gate.name,
-      command: result.command,
-      failedRun: result.failedRun,
-      exitCode: result.exitCode,
-      // The fraction, on the durable record: a reader of the archive asking
-      // "was this suite ever noisy" has no other way to find out, and the
-      // preserved output is one run's.
-      runs: result.runs,
-      failed: failedRuns(result),
-      verdict: verdictOf(result),
-    });
+    recordAndSay(
+      state,
+      'warn',
+      'verify_failed',
+      `Gate ${gate.name} failed ${failedRuns(result)} of ${result.runs} run(s): ${result.command}` +
+        (flaky ? ' - it is not deterministic' : ''),
+      {
+        gate: gate.name,
+        command: result.command,
+        failedRun: result.failedRun,
+        exitCode: result.exitCode,
+        // The fraction, on the durable record: a reader of the archive asking
+        // "was this suite ever noisy" has no other way to find out, and the
+        // preserved output is one run's.
+        runs: result.runs,
+        failed: failedRuns(result),
+        verdict: verdictOf(result),
+        round: state.reviewRound,
+        // What every attempt did, in order (#135's own field). `failedRun` says
+        // which one failed and this says what the others did, which is the whole
+        // difference between "this suite is broken" and "this suite is not
+        // deterministic" - and `5d` draws a card per attempt from it rather than
+        // placing one failure among N slots and guessing at the rest.
+        //
+        // On the durable record as well, which the fraction beside it already
+        // argued for: a reader of the archive asking "was this suite ever noisy"
+        // has no other way to find out, and three small objects on the gates
+        // that failed is not what #133 was protecting `state.events` from.
+        attempts: result.attempts,
+      },
+    );
     artifact(state, `verify-failure-${state.reviewRound}.txt`, result.output);
 
     // What the failing command PRODUCED, on the failing branch only (#62). Not
@@ -2965,8 +3105,27 @@ async function withRateLimitRetry<T>(
       }
 
       state.rateLimitWaits += 1;
-      recordEvent(state, 'rate_limited', { label, waitMs, resetsAt: err.resetsAt?.toISOString() ?? null });
-      log.warn(`Rate limited during "${label}". ${describeReset(err)} Waiting ${minutes} min.`);
+      // One call rather than two since #223, same sentence at the same level.
+      // `7e` is drawn on this and on `rate_limit_resumed` below, and the pair is
+      // why the design can call this **waiting** rather than halted: a window
+      // told when the wait began and when it ended needs no decision from a
+      // person in between, and must not look as though it does.
+      recordAndSay(
+        state,
+        'warn',
+        'rate_limited',
+        `Rate limited during "${label}". ${describeReset(err)} Waiting ${minutes} min.`,
+        {
+          label,
+          waitMs,
+          resetsAt: err.resetsAt?.toISOString() ?? null,
+          // The provider, so a window can say which account is out of headroom
+          // and leave the other one's work alone. Already in hand at this site
+          // and previously dropped, which made "run this phase on the other
+          // agent" un-offerable without the window guessing who "the other" was.
+          provider,
+        },
+      );
       await sleep(waitMs);
       log.step(`Resuming "${label}" after rate-limit wait`, {
         id: 'rate_limit_resumed',
@@ -3932,7 +4091,24 @@ async function resolveQuestions(
   const blockingCount = questions.filter((q) => q.blocking).length;
   log.heading(
     `${questions.length} open question(s) - ${blockingCount} blocking, ${questions.length - blockingCount} advisory`,
-    { id: 'questions_opened', data: { total: questions.length, blocking: blockingCount } },
+    {
+      id: 'questions_opened',
+      data: {
+        total: questions.length,
+        blocking: blockingCount,
+        // The questions themselves, carried on the frame that already announces
+        // them (#223). `1f` is an inbox and cannot be one over two counts - and
+        // the alternative was for a window to scrape the `- [kind] text` lines
+        // printed immediately below, which is the English-matching #133 exists
+        // to prevent. Nothing a terminal prints changes: this is data on a
+        // narration id, and narration ids carry no entry in `state.events`.
+        questions: questions.map((q) => ({
+          kind: q.kind,
+          question: q.question,
+          blocking: q.blocking,
+        })),
+      },
+    },
   );
   for (const q of questions) log.info(`- [${q.kind}${q.blocking ? ', blocking' : ''}] ${q.question}`);
 
@@ -4001,7 +4177,35 @@ async function resolveQuestions(
     );
   }
 
-  log.ok(`${answerer} answered ${usable.length} of ${questions.length} question(s)`);
+  log.ok(`${answerer} answered ${usable.length} of ${questions.length} question(s)`, {
+    // The other half of `1f` (#223). The pane is an inbox of open questions with
+    // **the adversary's draft and its confidence** beside each, and until now
+    // the questions reached the wire without the answers - so a window could
+    // show what was asked and never what came back.
+    //
+    // A narration id with no event, like `questions_opened`, and the same
+    // sentence at the same level: `answers-N.json` is where this is durable.
+    id: 'questions_answered',
+    data: {
+      answered: usable.length,
+      total: questions.length,
+      // Both, and labelled, because they are different outcomes rather than a
+      // count and a remainder: a declined answer is the answerer refusing to
+      // guess at product intent, which `escalateOnDefer` then acts on.
+      answers: usable.map((a) => ({
+        question: a.question,
+        answer: a.answer,
+        confidence: a.confidence,
+        rationale: a.rationale,
+      })),
+      declined: refused.map((a) => ({
+        question: a.question,
+        confidence: a.confidence,
+        rationale: a.rationale,
+        deferToHuman: a.defer_to_human,
+      })),
+    },
+  });
   return usable;
 }
 

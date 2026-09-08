@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import {
   DEFAULT_ROLE_PROVIDERS,
@@ -755,6 +755,91 @@ function artifactSegments(entry: string): string[] {
  * Lexical only. Links are a filesystem question, asked component by component in
  * `src/artifacts.ts` with #53's predicate.
  */
+/**
+ * The raw `vibe.config.json`, exactly as it is on disk (#223, `1h`).
+ *
+ * **Not the effective config.** `loadConfig` returns `DEFAULTS` merged with the
+ * file merged with flags, and a settings form editing *that* and writing it back
+ * would bake every current default into the project file - so the next release's
+ * improved default would never reach this repository, and nobody would be able
+ * to tell which values had been chosen and which had merely been observed.
+ *
+ * A form needs both: the effective config to render what is in force, and this
+ * to know which of those values the file actually claims.
+ *
+ * `{}` for a repository with no file, which is the honest reading - it claims
+ * nothing. An unreadable file **throws**, exactly as `loadConfig` does, because
+ * a form that treated one as empty would offer to overwrite it.
+ */
+export function readRawConfig(targetDir: string): Record<string, unknown> {
+  const configPath = path.join(targetDir, 'vibe.config.json');
+  if (!existsSync(configPath)) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(configPath, 'utf8')) as unknown;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`Invalid vibe.config.json: ${message}`);
+  }
+  if (!isRecord(parsed)) throw new Error('Invalid vibe.config.json: not a JSON object');
+  return parsed;
+}
+
+/**
+ * Merge a patch into `vibe.config.json` and write it, or refuse (#223, `1h`).
+ *
+ * **Refuse, never repair**, which is the host's rule and applies with more force
+ * here than anywhere: this writes a file the user's repository keeps and their
+ * next `vibe run` reads. A config that half-applied would be worse than one that
+ * did not apply at all, because the run after it would be configured by
+ * something nobody chose.
+ *
+ * So the order is: merge into the **raw** file, run the candidate through the
+ * same pipeline `loadConfig` runs - `mergeConfig` over `DEFAULTS`, then
+ * `validateRoles`, then `validate` - and write only if that returns. The error
+ * message is `validate`'s own, naming the field, which is what makes a settings
+ * form able to say *which* value it refused.
+ *
+ * The merge is **one level deep, per section**, matching `mergeSection`: a patch
+ * to `gates` replaces the gates it names and leaves the rest of the file alone.
+ * A deep merge would make it impossible to remove a key, and a shallow one would
+ * silently drop every sibling of the key being changed.
+ *
+ * Written through a temp file and renamed, so a crash mid-write cannot leave the
+ * repository holding half a config.
+ */
+export function writeConfigPatch(
+  targetDir: string,
+  patch: Record<string, unknown>,
+): { path: string } {
+  const raw = readRawConfig(targetDir);
+  const candidate: Record<string, unknown> = { ...raw };
+  for (const [key, value] of Object.entries(patch)) {
+    const existing = raw[key];
+    // A section merges into its counterpart; anything else replaces. `isRecord`
+    // on both sides rather than on the patch alone: a patch object landing on a
+    // scalar is the user changing the shape, and spreading a string is not it.
+    setOwn(
+      candidate,
+      key,
+      isRecord(value) && isRecord(existing) ? { ...existing, ...value } : value,
+    );
+  }
+
+  // The same pipeline `loadConfig` runs, in the same order and for the same
+  // reasons - `validateRoles` first, because `resolveRoleScopedAgents` reads the
+  // table and a bad role checked afterwards surfaces as a toolchain error.
+  const merged = mergeConfig(DEFAULTS, candidate);
+  validateRoles(merged.roles);
+  validate(resolveRoleScopedAgents(merged, [candidate]));
+
+  const configPath = path.join(targetDir, 'vibe.config.json');
+  const tmp = `${configPath}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify(candidate, null, 2)}\n`, 'utf8');
+  renameSync(tmp, configPath);
+  return { path: configPath };
+}
+
 export function refuseArtifactPath(entry: unknown): string | null {
   if (typeof entry !== 'string' || entry.trim() === '') {
     return 'must be a non-empty path string';

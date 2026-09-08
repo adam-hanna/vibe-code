@@ -83,7 +83,96 @@ export interface PilotReply {
   tokens: { input: number; output: number; cacheRead: number; cacheCreation: number; total: number };
 }
 
-export type Frame = Ready | Narration | Ask | Result | HostError | PilotDelta | PilotReply;
+/**
+ * One archive entry, as `listRuns` returned it (#223, `1b`).
+ *
+ * A transcription of the core's `RunSummary`, and every optional field here is
+ * optional there for a stated reason. **The ones that matter most say what could
+ * not be read**, and the core keeps three different failures apart rather than
+ * collapsing them:
+ *
+ * - `linked` — an entry vibe **refused to follow** because it is a symlink or a
+ *   junction (#53). It never looked inside.
+ * - `unverified` — an `lstat` that threw, so whether it is a link could not be
+ *   established at all. The fail-closed half of `linked`, and a separate field
+ *   because one is a measurement and the other is the absence of one.
+ * - `status: 'unreadable'` — a `state.json` that **was** opened and could not be
+ *   used. The entry itself was never in doubt.
+ *
+ * `costUsd: null` is a cost that is unknown rather than zero: `$0.00` would
+ * assert that an unreadable run cost nothing.
+ */
+export interface ArchiveRun {
+  id: string;
+  status: string;
+  task: string;
+  costUsd: number | null;
+  liveness?: string;
+  forkedFrom?: { runId: string; checkpoint: number };
+  linked?: true;
+  unverified?: true;
+}
+
+/** The archive, in reply to a request for it. */
+export interface Archive {
+  type: 'archive';
+  id: number;
+  dir: string;
+  runs: readonly ArchiveRun[];
+}
+
+/**
+ * The configuration in force, and what the file itself claims (#223, `1h`).
+ *
+ * **Both, and they are not the same thing.** `effective` is what a run will do;
+ * `raw` is what `vibe.config.json` says on its own. A form given only the first
+ * would bake every current default into the file the moment it saved.
+ *
+ * `gateable`, `modes` and `ungateable` come from `src/gates.ts` rather than
+ * being written here, so the matrix cannot offer a boundary the loop does not
+ * have or a mode it does not honour — and the two boundaries with **no** row
+ * arrive with their own reasons rather than being silently missing.
+ */
+export interface ConfigFrame {
+  type: 'config';
+  id: number;
+  dir: string;
+  effective: unknown;
+  raw: Record<string, unknown>;
+  path: string | null;
+  gateable: readonly string[];
+  modes: readonly string[];
+  ungateable: Readonly<Record<string, string>>;
+}
+
+/**
+ * The diff a run has produced (#223, `1d`).
+ *
+ * `truncated` is a **flag, not a marker in the text**. The design's truncation
+ * band is a judgement about what the reviewer actually read, and a window
+ * matching English to find out would break on the next wording change — which is
+ * the failure #133 exists to prevent, at the moment somebody is deciding whether
+ * a review was thorough.
+ */
+export interface DiffFrame {
+  type: 'diff';
+  id: number;
+  dir: string;
+  patch: string;
+  truncated: boolean;
+}
+
+export type Frame =
+  | Ready
+  | Narration
+  | Ask
+  | Result
+  | HostError
+  | PilotDelta
+  | PilotReply
+  | Archive
+  | ConfigFrame
+  | DiffFrame;
 
 /**
  * Whether a value is a frame this version recognises.
@@ -107,7 +196,12 @@ export function isFrame(v: unknown): v is Frame {
     // reads. Recognised here or they would be reported as unknown frames and
     // land in the diagnostics list instead of in the conversation (#193).
     type === 'pilot_delta' ||
-    type === 'pilot_reply'
+    type === 'pilot_reply' ||
+    // The archive, which the cockpit's reducer also ignores: it describes runs
+    // that are over, and `Run` is about the one in progress (#223).
+    type === 'archive' ||
+    type === 'config' ||
+    type === 'diff'
   );
 }
 
@@ -258,6 +352,132 @@ export async function onPilotFrame(
       handler(frame);
     }
   });
+}
+
+/**
+ * Ask for the archive, and resolve with what came back (#223, `1b`).
+ *
+ * **A request/response, unlike everything else on this wire**, and it is the one
+ * place that shape is right: the archive is not a thing that happens to a run,
+ * it is a question with an answer, and a screen that had to wait for a run to
+ * narrate before it could learn the history would be unusable on the exact
+ * screen it is for — triage after a night of unattended work, when nothing is
+ * happening.
+ *
+ * The listener is torn down whichever way it settles, including the timeout. A
+ * frame that never arrives has to fail rather than hang: an unanswered promise
+ * on this wire is a spinner nobody can clear, and `listRuns` has an unreadable
+ * archive to survive.
+ */
+const ASK_TIMEOUT_MS = 15_000;
+
+/**
+ * Send a request and resolve with the frame that answers it.
+ *
+ * Shared by both readers rather than written twice, and the shared part is the
+ * three things that are easy to get wrong once and impossible to get wrong twice
+ * the same way: **the listener goes up before the request goes out** (the host
+ * answers synchronously, so a request sent first can be answered before anything
+ * is listening); **the match is on the id**, because two asks in flight with a
+ * `dir` match would hand one of them the other's answer; and **it times out**,
+ * because an unanswered promise on this wire is a spinner nobody can clear.
+ */
+async function ask<T extends Frame>(
+  request: object,
+  id: number,
+  wanted: T['type'],
+  missing: string,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let stop: (() => void) | null = null;
+    const timer = setTimeout(() => {
+      stop?.();
+      reject(new Error(missing));
+    }, ASK_TIMEOUT_MS);
+    const done = (f: () => void): void => {
+      clearTimeout(timer);
+      stop?.();
+      f();
+    };
+    void listen<unknown>('host://frame', (event) => {
+      const frame: unknown = event.payload;
+      if (!isFrame(frame)) return;
+      // `Ready` carries no id, so the union has none in common. Narrowed on the
+      // wanted type first and read through a record after, rather than widening
+      // `Frame` to give every member an id it does not have.
+      const carried: unknown = (frame as { id?: unknown }).id;
+      if (frame.type === wanted && carried === id) done(() => resolve(frame as T));
+      else if (frame.type === 'error' && frame.id === id) {
+        done(() => reject(new Error(frame.message)));
+      }
+    })
+      .then((off) => {
+        stop = off;
+        return send(request);
+      })
+      .catch((err: unknown) =>
+        done(() => reject(err instanceof Error ? err : new Error(String(err)))),
+      );
+  });
+}
+
+export async function archive(dir: string): Promise<readonly ArchiveRun[]> {
+  const id = nextRequestId();
+  const frame = await ask<Archive>(
+    { type: 'archive', id, dir },
+    id,
+    'archive',
+    'the host did not answer with the archive',
+  );
+  return frame.runs;
+}
+
+/**
+ * Read the configuration, or write a patch into it (#223, `1h`).
+ *
+ * **One function for both, because a write answers with what resulted.** A form
+ * that saved and then assumed its own patch was in force would be the second
+ * definition of the configuration that `AGENTS.md` says must not exist — the
+ * form and the raw file are the same file the CLI reads, and this is how that
+ * stays true rather than being hoped for.
+ *
+ * A patch that does not validate comes back as a rejection carrying the core
+ * validator's own sentence, which names the field. Nothing was written.
+ */
+export async function config(
+  dir: string,
+  patch?: Record<string, unknown>,
+): Promise<ConfigFrame> {
+  const id = nextRequestId();
+  return ask<ConfigFrame>(
+    patch === undefined ? { type: 'config', id, dir } : { type: 'config', id, dir, patch },
+    id,
+    'config',
+    'the host did not answer with the configuration',
+  );
+}
+
+/**
+ * Read the diff a run has produced (#223, `1d`).
+ *
+ * `baseSha` is **required and comes from `phase_started`**, which carries it from
+ * the moment the implement phase marks it. Nothing here invents one: given no
+ * base, `diffSince` runs `git add -A` before it diffs and stages the user's whole
+ * working tree, so a read that could not name its base is refused at the decoder
+ * rather than falling into that path.
+ */
+export async function diff(
+  dir: string,
+  baseSha: string,
+): Promise<{ patch: string; truncated: boolean }> {
+  const id = nextRequestId();
+  const frame = await ask<DiffFrame>(
+    { type: 'diff', id, dir, baseSha },
+    id,
+    'diff',
+    'the host did not answer with the diff',
+  );
+  return { patch: frame.patch, truncated: frame.truncated };
 }
 
 /** What one subscription-backed pilot turn needs (#193). */

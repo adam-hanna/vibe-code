@@ -8,13 +8,25 @@ import type { KeyStatus } from '../pilot/keys';
 // differing only in case is a compile error on Windows and macOS both.
 import { PilotPane } from '../pilot/PilotPane';
 import { Diagnostics } from './Diagnostics';
+import { DiffPane } from './DiffPane';
+import { FindingsPane } from './FindingsPane';
 import { Footer } from './Footer';
 import { Launch } from './Launch';
 import { LoopColumn } from './LoopColumn';
+import { NewWorkstream } from './NewWorkstream';
 import { OutputPane } from './OutputPane';
+import { QuestionsPane } from './QuestionsPane';
+import { RateLimitStrip } from './RateLimit';
+import { Settings } from './Settings';
+import { SpendPane } from './SpendPane';
 import { StopConfirm } from './StopConfirm';
-import { emptyRun, nextRun, reduce } from './model';
-import { readLaunchArgv } from './argv';
+import { Summary } from './Summary';
+import { Switcher } from './Switcher';
+import { Workstreams } from './Workstreams';
+import { VerifyPane } from './VerifyPane';
+import { StalenessStrip } from './Staleness';
+import { blocking, emptyRun, nextRun, reduce, staleness } from './model';
+import { readLaunchArgv, resumeArgv } from './argv';
 import type { Launched } from './argv';
 import type { Effect } from '../pilot/tools';
 import type { Frame } from '../host';
@@ -35,6 +47,9 @@ import type { Run } from './model';
 
 /** How often the elapsed clock re-renders between heartbeats. */
 const TICK_MS = 1000;
+
+/** Where the last repository is remembered. See `repoDir` below. */
+const REPO_KEY = 'vibe.repo';
 
 interface Wire {
   connected: boolean;
@@ -76,6 +91,40 @@ export function Cockpit() {
   });
   /** Whether the diagnostics popover is open (#201, #204). ⌘⇧D toggles it. */
   const [diagnostics, setDiagnostics] = useState(false);
+  /** Whether the ⌘K switcher is open (`5f`, #223). */
+  const [switching, setSwitching] = useState(false);
+  /** Whether `4a`'s modal is open. The only modal in the product. */
+  const [composing, setComposing] = useState(false);
+  /**
+   * The repository this window is pointed at (#223).
+   *
+   * **App-side state, and it belongs nowhere else.** It is not run state - a run
+   * carries its own directory and always has - and it is not `vibe.config.json`,
+   * which is a project file meant to be committed and would be the wrong place
+   * for one machine's path. `localStorage` is where the pilot's spend ceiling
+   * lives for the same reason.
+   *
+   * It is persisted because `1b` and ⌘K are most useful **before** a launch, and
+   * a path the user has to retype every time the app starts is a path they stop
+   * using the screen rather than retype.
+   */
+  const [repoDir, setRepoDir] = useState(() => {
+    try {
+      return localStorage.getItem(REPO_KEY) ?? '';
+    } catch {
+      // Storage can be unavailable or full. A repository field that starts empty
+      // is a smaller failure than a window that will not render.
+      return '';
+    }
+  });
+  const rememberRepo = useCallback((dir: string) => {
+    setRepoDir(dir);
+    try {
+      localStorage.setItem(REPO_KEY, dir);
+    } catch {
+      // See above. Nothing here is worth failing a render over.
+    }
+  }, []);
   /**
    * A pause this window has asked for and not yet seen honoured (#210).
    *
@@ -100,7 +149,18 @@ export function Cockpit() {
    * which the prompt says out loud rather than papering over.
    */
   const [sentLaunch, setSentLaunch] = useState<Launched | null>(null);
-  const [tab, setTab] = useState<'output' | 'pilot' | 'keys'>('output');
+  const [tab, setTab] = useState<
+    | 'output'
+    | 'pilot'
+    | 'keys'
+    | 'verify'
+    | 'findings'
+    | 'spend'
+    | 'questions'
+    | 'runs'
+    | 'settings'
+    | 'diff'
+  >('output');
   /** Pilot proposals waiting on a person, so a hidden tab can say so (#144). */
   const [proposals, setProposals] = useState(0);
   /**
@@ -155,11 +215,20 @@ export function Cockpit() {
     const onKey = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') {
         setDiagnostics(false);
+        setSwitching(false);
+        setComposing(false);
         return;
       }
       if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.code === 'KeyD') {
         event.preventDefault();
         setDiagnostics((open) => !open);
+        return;
+      }
+      // ⌘K / Ctrl+K, and `code` rather than `key` for the reason ⌘⇧D uses it:
+      // it survives a keyboard layout where the K position is not "k".
+      if ((event.metaKey || event.ctrlKey) && !event.shiftKey && event.code === 'KeyK') {
+        event.preventDefault();
+        setSwitching((open) => !open);
       }
     };
     window.addEventListener('keydown', onKey);
@@ -268,6 +337,18 @@ export function Cockpit() {
       void send({ type: 'invoke', id: requests.current, argv });
     },
     [send],
+  );
+
+  /**
+   * Pick a halted run back up (`4d`).
+   *
+   * Through `launch`, not beside it: the request-id allocation, the column reset
+   * and the one-at-a-time rule keep exactly one definition each, which is the
+   * same reason the pilot's `start_run` proposal comes through there (#144).
+   */
+  const resume = useCallback(
+    (runId: string, dir: string) => launch(resumeArgv(runId, dir)),
+    [launch],
   );
 
   /**
@@ -382,6 +463,28 @@ export function Cockpit() {
         />
       )}
 
+      {composing && (
+        <NewWorkstream
+          dir={repoDir}
+          onDir={rememberRepo}
+          onLaunch={launch}
+          onClose={() => setComposing(false)}
+          busy={busy || !wire.connected}
+        />
+      )}
+
+      {/* `5f`. A switcher, not a screen: it answers "take me to
+          fix-ratelimit-wait" and nothing else, which is why it is an overlay
+          over the cockpit rather than a tab beside `1b`. The two are different
+          features, and the design resolved to build both. */}
+      {switching && (
+        <Switcher
+          dir={repoDir}
+          onPick={(runId) => resume(runId, repoDir)}
+          onClose={() => setSwitching(false)}
+        />
+      )}
+
       {diagnostics && (
         <Diagnostics
           status={wire.status}
@@ -390,6 +493,16 @@ export function Cockpit() {
           onClose={() => setDiagnostics(false)}
         />
       )}
+
+      {/* `7c`, above everything and below the titlebar. It is a statement about
+          the whole window - everything under it is as old as the strip says -
+          so it cannot sit inside one column. */}
+      <StalenessStrip state={staleness(run, now)} />
+
+      {/* `7e`, above the columns for the same reason: an agent with no headroom
+          is a statement about the whole run, not about one pane. Quiet, and
+          with no action, because a rate limit asks nobody anything. */}
+      <RateLimitStrip wait={run.rateLimit} now={now} />
 
       {wire.failure !== null && (
         <div className="v-cockpit__alarm">
@@ -410,15 +523,38 @@ export function Cockpit() {
               second invoke until the first settles, so a form shown any earlier
               would only produce a rejection. */}
           {(!launched || run.completed !== null) && !outside && (
-            <Launch busy={busy || !wire.connected} onLaunch={launch} />
+            <>
+              <Launch
+                busy={busy || !wire.connected}
+                onLaunch={launch}
+                dir={repoDir}
+                onDir={rememberRepo}
+              />
+              {/* `4a`, beside the plain form rather than replacing it. The
+                  design's own intent is that the honest path is type → create →
+                  keep talking; the modal is for the one moment somebody is
+                  deciding how THIS run should differ. */}
+              <button
+                className="v-launch__more"
+                onClick={() => setComposing(true)}
+                disabled={busy || !wire.connected}
+              >
+                or set this run&apos;s overrides…
+              </button>
+            </>
           )}
           <LoopColumn run={run} now={now} hostPid={wire.hostPid} />
+          {/* `4g`, and only on the ending that means the loop finished. Every
+              other exit is a halt, and a halt gets the footer's banner and its
+              one action rather than a summary of work that stopped early. */}
+          {run.completed?.exit === 0 && <Summary run={run} />}
           <Footer
             run={run}
             busy={busy}
             onDecide={answer}
             onPause={pause}
             onStop={() => setConfirmStop(true)}
+            onResume={resume}
             pausing={pausing}
           />
         </div>
@@ -440,6 +576,15 @@ export function Cockpit() {
             >
               Pilot{proposals > 0 ? ` · ${String(proposals)}` : ''}
             </button>
+            {/* `5d`. The count is verification passes, not gates: the pane's
+                subject is the decision in front of you and its trend, and a
+                gate count would move for a reason nobody cares about. */}
+            <button
+              className={`v-cockpit__tab ${tab === 'verify' ? 'v-cockpit__tab--on' : ''}`}
+              onClick={() => setTab('verify')}
+            >
+              Verify{run.verify.length > 0 ? ` · ${String(run.verify.length)}` : ''}
+            </button>
             {/* The pilot's credentials, until Settings exists to put them in. */}
             <button
               className={`v-cockpit__tab ${tab === 'keys' ? 'v-cockpit__tab--on' : ''}`}
@@ -447,20 +592,81 @@ export function Cockpit() {
             >
               Keys
             </button>
-            {/* Named rather than omitted, each with the issue that would fill
-                it. A tab bar that showed only what works reads as a finished
-                app with three tabs. */}
-            <span className="v-cockpit__tab v-cockpit__tab--off" title="#141, #113">
+            {/* `1e`. The count is blocking findings in the latest round, not
+                all of them: that is the number that decides whether the loop
+                fixes again, and a total would move for reasons that change
+                nothing. */}
+            <button
+              className={`v-cockpit__tab ${tab === 'findings' ? 'v-cockpit__tab--on' : ''}`}
+              onClick={() => setTab('findings')}
+            >
+              Findings{blocking(run) > 0 ? ` · ${String(blocking(run))}` : ''}
+            </button>
+            {/* `1b`. No count: the number of runs an archive holds is not
+                something to act on, and a badge that grew for ever would be
+                the tray-badge failure `4e` names - one that includes work
+                needing nobody trains you to ignore it. */}
+            <button
+              className={`v-cockpit__tab ${tab === 'runs' ? 'v-cockpit__tab--on' : ''}`}
+              onClick={() => setTab('runs')}
+            >
+              Runs
+            </button>
+            {/* `1f`. The count is blocking questions, not all of them: an
+                advisory question the answerer handled needs nobody, and a
+                badge that included it would train you to ignore the badge. */}
+            <button
+              className={`v-cockpit__tab ${tab === 'questions' ? 'v-cockpit__tab--on' : ''}`}
+              onClick={() => setTab('questions')}
+            >
+              Questions
+              {run.questions !== null && run.questions.blocking > 0
+                ? ` · ${String(run.questions.blocking)}`
+                : ''}
+            </button>
+            {/* `5e`. No count: a token total in a tab label is a number you
+                cannot act on, and the design puts consumption in the tab BAR
+                rather than on the tab - which is a different element this
+                slice does not have. */}
+            <button
+              className={`v-cockpit__tab ${tab === 'spend' ? 'v-cockpit__tab--on' : ''}`}
+              onClick={() => setTab('spend')}
+            >
+              Spend
+            </button>
+            {/* `1h`, and #140's payoff: the gate matrix has been configuration
+                since it landed and there has been no way to configure it. */}
+            <button
+              className={`v-cockpit__tab ${tab === 'settings' ? 'v-cockpit__tab--on' : ''}`}
+              onClick={() => setTab('settings')}
+            >
+              Settings
+            </button>
+            {/* `1d`. Enabled only once the run has a base to diff against: a
+                diff with no base is the request that stages the whole working
+                tree, so there is nothing to offer before then. */}
+            <button
+              className={`v-cockpit__tab ${tab === 'diff' ? 'v-cockpit__tab--on' : ''}`}
+              onClick={() => setTab('diff')}
+            >
               Diff
-            </span>
-            <span className="v-cockpit__tab v-cockpit__tab--off" title="#142">
-              Findings
-            </span>
-            <span className="v-cockpit__tab v-cockpit__tab--off" title="#137">
+            </button>
+            {/* Named rather than omitted, with the issue that would fill it. A
+                tab bar that showed only what works reads as a finished app. */}
+            <span className="v-cockpit__tab v-cockpit__tab--off" title="#137 — v1.5">
               Prompt
             </span>
           </div>
           {tab === 'output' && <OutputPane lines={run.output} />}
+          {tab === 'verify' && <VerifyPane passes={run.verify} />}
+          {tab === 'findings' && <FindingsPane censuses={run.censuses} />}
+          {tab === 'spend' && <SpendPane run={run} />}
+          {tab === 'questions' && <QuestionsPane questions={run.questions} />}
+          {tab === 'settings' && <Settings dir={repoDir} />}
+          {tab === 'diff' && <DiffPane dir={repoDir} baseSha={run.baseSha} />}
+          {tab === 'runs' && (
+            <Workstreams dir={repoDir} onResume={(runId) => resume(runId, repoDir)} />
+          )}
           {/* Mounted whatever tab is showing, and hidden rather than unmounted.
               A conversation is state nobody can get back, and a proposal waiting
               on a person would be destroyed by a glance at the output pane -

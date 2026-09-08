@@ -20,12 +20,25 @@ import { pickDirectory } from './pick';
 export function Launch({
   onLaunch,
   busy,
+  dir,
+  onDir,
 }: {
   onLaunch: (argv: readonly string[]) => void;
   busy: boolean;
+  /**
+   * The repository, owned by the cockpit rather than by this form (#223).
+   *
+   * Lifted because a second screen needs it: `1b` and ⌘K read the archive of a
+   * repository, and both are reachable **before** anything is launched — which
+   * is the moment they are most useful, since triage after a night of
+   * unattended work happens before you start the next thing. A path that lived
+   * in this component would exist only while the form was mounted, and the form
+   * unmounts the moment a run starts.
+   */
+  dir: string;
+  onDir: (dir: string) => void;
 }) {
   const [task, setTask] = useState('');
-  const [dir, setDir] = useState('');
   const [planOnly, setPlanOnly] = useState(true);
   const [pickFailed, setPickFailed] = useState<string | null>(null);
 
@@ -42,7 +55,7 @@ export function Launch({
     void pickDirectory()
       .then((chosen) => {
         setPickFailed(null);
-        if (chosen !== null) setDir(chosen);
+        if (chosen !== null) onDir(chosen);
       })
       .catch((err: unknown) => setPickFailed(err instanceof Error ? err.message : String(err)));
   };
@@ -83,7 +96,7 @@ export function Launch({
           className="v-launch__dir"
           value={dir}
           placeholder="an absolute path to a git worktree"
-          onChange={(e) => setDir(e.target.value)}
+          onChange={(e) => onDir(e.target.value)}
         />
         <Button type="button" onClick={choose} disabled={busy}>
           choose…

@@ -27,6 +27,33 @@
 >   Provenance`** sorts every frame into *real today* / *app-side* / *unbuilt*, and each
 >   issue that lands moves a name between them. Read it as a claim about the day it was
 >   written. The `proposed · #NNN` chips are the same index in the artwork.
+>
+>   **`7i` is now materially out of date, and #223 is why.** Every row it lists as *unbuilt*
+>   has moved except two, so the table below is what to read instead of that one — and it
+>   will rot in its turn.
+>
+>   | `7i` said | today |
+>   | --- | --- |
+>   | `1c` phase-filtered output (#133) | built — the filter is on the phase each line was stamped with |
+>   | `1f` live inbox + gate cards (#134) | built — `questions_opened` carries the questions, `questions_answered` the drafts |
+>   | `1b` fingerprint (#114) | `1b` is built; **the fingerprint column is not**, and is drawn as a named absence |
+>   | `5d` gate verdict (#135) | built — whole-gate verdict, per-attempt cards, flaky told from broken |
+>   | `4c` ungrounded flag (#113) | built — a finding citing nothing is flagged as such |
+>   | `7a`'s `question-round` row, `7d`'s checkpoint line (#139) | built — the row is in the matrix |
+>   | `4i` / `1g` / `6g` prompts (#137) | **still unbuilt**, and still v1.5 |
+>   | `7h` MCP surface (#138) | **still unbuilt**, and still v1.5 |
+>
+>   Three things `7i` did not anticipate are also absent, each because no frame carries them
+>   and none is a measurement this build is missing: `1b`'s rounds fingerprint, `4g`'s commit
+>   count, and `5e`'s provider headroom. Each is drawn as absent **with its reason** rather
+>   than omitted.
+>
+>   Two of the design's own controls are deliberately **not** built, and neither is an
+>   oversight. `4c`'s disposition column and `4d`'s `+2 rounds` / `implement anyway` / `swap
+>   the reviewer` all mutate run state, and `src/host.ts` requires a validator per `Decision`
+>   member before one is offered — buttons producing no frame would be the `proposed` chip
+>   shipped as behaviour. `4a`'s name/branch/worktree row and its setup preview have no flag
+>   and no worktree creation behind them (#208).
 > - **Not a build target.** The bundle is HTML for panning in a browser. Do not port its
 >   markup; `app/src/design/` is the implementation and the two are not the same thing.
 >

@@ -75,9 +75,14 @@ test('a clean pass is legible as a sequence of ids, with no sentence read', asyn
     [
       'phase_started', // planning
       'turn_started', //  the planner
+      'claude_turn', //   what that turn spent (#223)
       'phase_started', // critique
       'turn_started', //  the critic
-      'phase_started', // implementing
+      'codex_turn',
+      'findings_reported', // the four counts against the tolerance
+      'plan_approved', //    and what the gate made of them
+      'phase_started', //  implementing
+      'claude_turn',
       // What the implement turn left in the tree, once, as the turn ended
       // (#136). The sampler's own `work_progress` readings would appear here
       // too, and none do: they fire on a sixty-second timer and these turns are
@@ -86,11 +91,40 @@ test('a clean pass is legible as a sequence of ids, with no sentence read', asyn
       // enough to have no readings is one there was nothing to report about.
       'work_measured',
       'verify_started',
+      'verify_passed', // the verdict, which the run has always recorded (#223)
       'phase_started', // review
       'turn_started', //  the reviewer
+      'codex_turn',
+      'findings_reported',
       'review_approved',
     ],
   );
+});
+
+test('the sequence grew by facts the run already recorded, and by nothing else', async () => {
+  // The other half of #223's claim, and the reason the case above could be
+  // re-pinned rather than argued about. Everything added to that sequence is
+  // either a fact `state.events` already held - so `recordAndSay` collapsed two
+  // calls into one - or narration with no event at all. **Nothing new became
+  // durable**, which is the rule `durable-narration.test.ts` guards from the
+  // other side by pinning the event set itself.
+  const state = cleanRun('vibe-ident-added-');
+  const seen = await pass(state);
+  const said = new Set(seen.filter((n) => n.id !== null).map((n) => n.id));
+  const recorded = new Set(state.events.map((e) => e.type));
+
+  // Said and recorded: one call, one fact, one spelling.
+  for (const id of ['claude_turn', 'codex_turn', 'verify_passed', 'plan_approved']) {
+    assert.ok(said.has(id), `${id} was not said`);
+    assert.ok(recorded.has(id), `${id} was not recorded`);
+  }
+
+  // Said and deliberately NOT recorded. A census of a round is derivable from
+  // the round's own artifact and adds nothing a resume needs, so it stays out of
+  // the run's memory - which #133 says in as many words must not become a
+  // transcript.
+  assert.ok(said.has('findings_reported'));
+  assert.equal(recorded.has('findings_reported'), false);
 });
 
 test('turn_started names the role, so a host need not infer it from the label', async () => {

@@ -1,5 +1,6 @@
 import type { Level, Narration } from '@src/log.js';
 import type { GateContext } from '@src/host.js';
+import type { RunSummary } from '@src/types.js';
 
 /**
  * The wire between the loop and whatever is driving it (#153).
@@ -87,7 +88,59 @@ export type Outbound =
       text: string;
       sessionId: string;
       tokens: { input: number; output: number; cacheRead: number; cacheCreation: number; total: number };
-    };
+    }
+  /**
+   * The archive, in reply to an `archive` request (#223, `1b`).
+   *
+   * **A reply, and deliberately not narration.** Every other outbound frame
+   * describes a run in progress; this describes runs that are over, and it is
+   * asked for rather than pushed - a window that wanted the history would
+   * otherwise have to wait for something to happen before it could learn that
+   * nothing had.
+   *
+   * `runs` is `RunSummary[]` verbatim, because `listRuns` is **the** definition
+   * of what an archive entry is: a real directory, a symlink it refused to
+   * follow (#53), something `lstat` could not classify. A second classifier here
+   * would eventually disagree with `vibe list` about which runs exist, and the
+   * one that disagreed would be the one on screen.
+   */
+  | { type: 'archive'; id: number; dir: string; runs: RunSummary[] }
+  /**
+   * The configuration in force, and what the file itself claims (#223, `1h`).
+   *
+   * **Both, and they are not the same thing.** `effective` is `DEFAULTS` merged
+   * with the file, which is what a run will actually do; `raw` is what
+   * `vibe.config.json` says on its own. A form given only the first would bake
+   * every current default into the file the moment it saved, so the next
+   * release's improved default would never reach this repository - and nobody
+   * could tell which values were chosen from which were merely observed.
+   *
+   * `path` is null when there is no file, which is a different fact from an
+   * empty one and is what tells a form whether saving creates or edits.
+   */
+  | {
+      type: 'config';
+      id: number;
+      dir: string;
+      effective: unknown;
+      raw: Record<string, unknown>;
+      path: string | null;
+      /** The boundaries that can hold, and the modes they may take (#140). */
+      gateable: readonly string[];
+      modes: readonly string[];
+      /** The two boundaries with no row, each with its own reason. */
+      ungateable: Readonly<Record<string, string>>;
+    }
+  /**
+   * The diff a run has produced, in reply to a `diff` request (#223, `1d`).
+   *
+   * `patch` is `git diff` output verbatim, tail-trimmed by `diffSince` at its own
+   * ceiling - so `truncated` is what stops a window presenting a partial diff as
+   * a whole one. The band the design draws over a truncated diff is a judgement
+   * about what the reviewer *read*, and it cannot be drawn without knowing that
+   * this happened.
+   */
+  | { type: 'diff'; id: number; dir: string; patch: string; truncated: boolean };
 
 /** What the thing driving the loop says. */
 export type Inbound =
@@ -173,7 +226,52 @@ export type Inbound =
       /** The conversation to continue, or to create on the first turn. */
       sessionId: string;
       resume: boolean;
-    };
+    }
+  /**
+   * Ask what runs the archive holds (#223, `1b`).
+   *
+   * **A read, and the only inbound frame that changes nothing.** `listRuns` is
+   * documented as never throwing and never writing, which is what makes this
+   * safe to answer while a run is going - and it has to be answerable then,
+   * because *"triage after a night of unattended work"* is the moment the screen
+   * exists for.
+   *
+   * `dir` is the repository to look in, sent rather than assumed: the host's own
+   * cwd is where it was spawned, and a window that has been pointed at a
+   * different checkout would otherwise be shown the wrong archive with no way to
+   * tell.
+   */
+  | { type: 'archive'; id: number; dir: string }
+  /**
+   * Read the configuration, or write a patch into it (#223, `1h`).
+   *
+   * One frame with an optional `patch` rather than two, because they are the
+   * same question asked twice: **a write answers with the config that resulted**,
+   * so a form never has to assume its own save took effect. That is what keeps
+   * *"the form and the raw file are the same file the CLI reads"* true rather
+   * than hoped for.
+   *
+   * The patch is merged **one level deep, per section** into the raw file and
+   * refused as a whole if the result does not validate - `writeConfigPatch`'s
+   * rule, not this frame's, so there is one definition of a legal config and it
+   * is the CLI's.
+   */
+  | { type: 'config'; id: number; dir: string; patch?: Record<string, unknown> }
+  /**
+   * Read the diff a run has produced (#223, `1d`).
+   *
+   * **A read, and it must stay one.** `diffSince` has two paths and only one of
+   * them is safe here: given a base it runs `git diff <base>..HEAD`, and given
+   * none it runs `git add -A` first, which stages the user's whole working tree.
+   * So `baseSha` is **required** - a diff request that could not name its base
+   * would be refused rather than fall into the staging path, because a read frame
+   * that modified the index would be the worst kind of surprise.
+   *
+   * The base comes from `phase_started`, which carries it from the moment the
+   * implement phase marks it. A window that never saw that frame has no base and
+   * cannot ask, which is the honest state rather than a reason to guess one.
+   */
+  | { type: 'diff'; id: number; dir: string; baseSha: string };
 
 export function encode(msg: Outbound): string {
   return `${JSON.stringify(msg)}\n`;
@@ -279,6 +377,47 @@ export function decode(line: string): Decoded {
           resume,
         },
       };
+    }
+    case 'archive': {
+      // Required and checked, for the reason `pilot`'s fields are: there is no
+      // `parseArgs` below this to catch it. An empty `dir` would resolve to the
+      // host's cwd, which is a *different repository's* archive presented as
+      // this one's - the worst possible way for this to fail, because it
+      // succeeds and shows somebody else's runs.
+      const dir = parsed['dir'];
+      if (typeof dir !== 'string' || dir === '') {
+        return { ok: false, id, reason: 'archive carried no dir' };
+      }
+      return { ok: true, message: { type: 'archive', id, dir } };
+    }
+    case 'diff': {
+      const dir = parsed['dir'];
+      if (typeof dir !== 'string' || dir === '') {
+        return { ok: false, id, reason: 'diff carried no dir' };
+      }
+      // Required, and refused rather than defaulted to null. `diffSince(cwd,
+      // null)` runs `git add -A` before it diffs, which stages the user's whole
+      // working tree - a read frame must never reach that path.
+      const baseSha = parsed['baseSha'];
+      if (typeof baseSha !== 'string' || baseSha === '') {
+        return { ok: false, id, reason: 'diff carried no baseSha, and there is no safe default' };
+      }
+      return { ok: true, message: { type: 'diff', id, dir, baseSha } };
+    }
+    case 'config': {
+      const dir = parsed['dir'];
+      if (typeof dir !== 'string' || dir === '') {
+        return { ok: false, id, reason: 'config carried no dir' };
+      }
+      const patch = parsed['patch'];
+      // Absent is a read. Present-but-not-an-object is refused rather than
+      // treated as one: a `patch: null` that read as "no patch" would answer a
+      // save with the unchanged config and look like it had worked.
+      if (patch === undefined) return { ok: true, message: { type: 'config', id, dir } };
+      if (!isRecord(patch)) {
+        return { ok: false, id, reason: 'config carried a patch that was not an object' };
+      }
+      return { ok: true, message: { type: 'config', id, dir, patch } };
     }
     case 'cancel': {
       // Optional, and refused rather than coerced when present but unusable.

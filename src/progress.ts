@@ -318,6 +318,29 @@ export interface HeartbeatLine {
   /** Singular noun for what `activities` counts: 'tool use' or 'event'. */
   unit: string;
   contextWindow?: number | undefined;
+  /**
+   * How long the beats are apart, and how long since the child last wrote (#223).
+   *
+   * **The second clock, and `7c` cannot be drawn without it.** A beat fires on
+   * this timer whether or not the child said anything, so its arrival proves
+   * *vibe* is alive and proves nothing about the turn. `sinceOutputMs` is the
+   * other half: the gap since the child actually produced a line.
+   *
+   * Two stale clocks is a dead run; one stale clock and one fresh is a turn
+   * **thinking**, which the design insists is stated as a fact rather than as a
+   * worry - *"a turn emitting nothing for twelve minutes is a healthy turn"*.
+   *
+   * `intervalMs` travels so the threshold is **derived rather than picked**: the
+   * design's one open judgement is how stale is stale, and its own answer is
+   * that this is a question about vibe's heartbeat cadence, so a few missed
+   * ticks is the answer and only this end knows the cadence.
+   *
+   * A **delta**, never an instant: the loop's clock and the window's are two
+   * clocks, and an absolute timestamp compared against the wrong one is how a
+   * fresh turn reads as an hour old.
+   */
+  intervalMs?: number | undefined;
+  sinceOutputMs?: number | undefined;
 }
 
 /**
@@ -338,7 +361,7 @@ export interface HeartbeatLine {
  * count the same thing.
  */
 export function heartbeatData(args: HeartbeatLine): Record<string, unknown> {
-  const { label, elapsedMs, snapshot, unit, contextWindow } = args;
+  const { label, elapsedMs, snapshot, unit, contextWindow, intervalMs, sinceOutputMs } = args;
   const data: Record<string, unknown> = {
     label,
     elapsedMs,
@@ -349,6 +372,11 @@ export function heartbeatData(args: HeartbeatLine): Record<string, unknown> {
   };
   if (snapshot.lastActivity !== null) data['lastActivity'] = snapshot.lastActivity;
   if (contextWindow !== undefined && contextWindow > 0) data['contextWindow'] = contextWindow;
+  // The omission rule again, and the second one matters more than usual: a turn
+  // whose child has written nothing at all has no gap to report, and sending a
+  // zero would say the opposite of what is true.
+  if (intervalMs !== undefined && intervalMs > 0) data['intervalMs'] = intervalMs;
+  if (sinceOutputMs !== undefined) data['sinceOutputMs'] = sinceOutputMs;
   return data;
 }
 
@@ -630,6 +658,13 @@ export function createHeartbeat(
         snapshot,
         unit,
         contextWindow,
+        // The two clocks `7c` compares (#223). `intervalMs` is this timer's own
+        // cadence, so a host derives "a few missed ticks" instead of picking a
+        // number; `sinceOutputMs` is measured from the child's last line and is
+        // omitted entirely when there has not been one - a turn that has written
+        // nothing has no gap, and a zero would claim it had just written.
+        intervalMs,
+        ...(lastLineAt === null ? {} : { sinceOutputMs: Math.max(0, lastEmitAt - lastLineAt) }),
       };
       emit(formatHeartbeat(line), { id: 'heartbeat', data: heartbeatData(line) });
     } catch {

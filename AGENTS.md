@@ -181,6 +181,63 @@ line: an escalation narrates at `warn`, and a healthy run is full of warnings th
 ending. `run_failed` also prints a stack while carrying the sentence separately, because a
 terminal wants the frames and a footer wants the answer to "what now" (#162).
 
+**A fact the run records and never says is a screen that cannot be built** (#223). The loop
+has always known whether the verification gate passed, what a round's four severity counts
+were and how they compared to the tolerance — it wrote every one of them to `state.events`
+and said none of them, so a host could watch a run for ninety minutes and never learn the
+verdict. Half the design corpus was blocked on that and not on a missing measurement.
+
+The move is a **promotion, never an invention**, and `recordAndSay`'s own rule is what makes
+it safe: *"narration never creates an event."* The durable set is exactly what `recordEvent`
+records, so turning `recordEvent` + `log.*` into one `recordAndSay` adds nothing to
+`state.json` — and where the two calls already sat beside each other, the terminal does not
+change by a byte. `narration-identity.test.ts` pins the id sequence of a clean pass and
+`durable-narration.test.ts` pins the event set, so the two halves of that claim fail
+separately.
+
+Two things travel with it. **A census is narration with no event**: `findings_reported` and
+`questions_answered` carry a round's counts and the answerer's confidence, and neither is in
+`state.events`, because both are derivable from the round's own artifact and a resume needs
+neither — #133 measured what happens when that question is answered casually, and the answer
+is that the run's memory roughly quadruples on the shortest possible run. And **the id is the
+event type**, never a name of its own: `applyCharge` narrates under `claude_turn` /
+`codex_turn`, the same string it just recorded, so a host acting on the fact and an archive
+holding it agree about one fact rather than two spellings of it.
+
+**Three frames are reads, and a read runs beside a run** (#223). `archive`, `config` and
+`diff` answer a question rather than describing something that happened, which is a shape
+the wire did not have — every other outbound frame is pushed. They are exempt from
+`serve.ts`'s one-at-a-time rule for a stronger reason than the pilot is: that rule exists
+because two *runs* would interleave their narration, and `listRuns` is documented as never
+throwing and never writing. A second `invoke` is still refused, which is what keeps the
+exemption honest.
+
+Three things about them are load-bearing:
+
+- **A config *write* is refused during a run, and a read is not.** A run reads
+  `vibe.config.json` once, at the top of `main`, so saving mid-run cannot affect the run in
+  flight — but it would leave the settings screen and the running loop describing different
+  configurations with nothing on screen saying so.
+- **`diff` requires its base and there is no default.** `diffSince(cwd, null)` runs `git add
+  -A` before it diffs, staging the user's whole working tree; a read frame that modified the
+  index would be the worst kind of surprise, so the decoder refuses a request that cannot
+  name a base rather than letting it reach that path. The base comes from `phase_started`,
+  which carries it from the moment the implement phase marks it.
+- **`writeConfigPatch` merges into the *raw* file, never the effective config.** A form
+  editing what `loadConfig` returns and writing it back would bake every current default into
+  the project file, so the next release's improved default would never reach that repository
+  — and nobody could tell which values were chosen from which were merely observed. Both
+  travel on the frame for that reason. It runs the same pipeline `loadConfig` runs and writes
+  only if the whole candidate validates, so a refusal leaves the file exactly as it was.
+
+**A human finding still has no host frame, and the diff pane is what that looks like built.**
+`1d`'s composer fills in `src/raise.ts`'s block — the citation taken from the hunk, so the
+finding is grounded by construction — and hands it over to be pasted into `NEEDS-INPUT.md`.
+That is propose-only in the #144 sense, and the markers are duplicated in `app/src/cockpit/raise.ts`
+rather than imported, so a drift produces a block the resume **refuses with a reason** rather
+than one it misreads. A test reads `src/raise.ts` as source and fails on the commit that
+renames a marker.
+
 **That covers the endings vibe chooses. `run.lock` plus `ending.json` covers the ones it
 does not.** A dead pid holding a lock has always meant two opposite things at once — vibe
 decided to stop and never tidied up, or something killed it mid-turn — and #131 is what
