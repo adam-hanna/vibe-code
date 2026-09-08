@@ -2226,13 +2226,23 @@ async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Findi
       'info',
       'verify_disabled',
       `Verification is disabled - ${String(gates.length)} gate(s) will not run`,
-      { gates: gates.map((g) => g.name) },
+      { gates: gates.map((g) => g.name), round: state.reviewRound },
     );
     return null;
   }
 
   for (const gate of gates) {
-    log.step(`Verifying: ${gate.name}`, { id: 'verify_started', data: { gate: gate.name } });
+    // The round travels with every verify frame (#223). `state.gateOutcomes` is
+    // reset on each pass, so a window watching the stream has no other way to
+    // tell the second gate of one pass from the first gate of the next - and
+    // `5d`'s failed-runs trend is a comparison ACROSS passes, which needs them
+    // separated. `reviewRound` rather than `verifyRound` because that is what
+    // the verify artifacts are keyed by, and a pane numbering them differently
+    // would not match the filenames.
+    log.step(`Verifying: ${gate.name}`, {
+      id: 'verify_started',
+      data: { gate: gate.name, round: state.reviewRound },
+    });
     const result = await runGateCommand(cwd, gate, cfg.toolchain);
 
     if (result.unavailable !== null) {
@@ -2253,7 +2263,7 @@ async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Findi
         'warn',
         'verify_unavailable',
         `Gate ${gate.name} unavailable: ${result.unavailable}`,
-        { gate: gate.name, reason: result.unavailable, required: gate.required },
+        { gate: gate.name, reason: result.unavailable, required: gate.required, round: state.reviewRound },
       );
       continue;
     }
@@ -2287,7 +2297,13 @@ async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Findi
         'ok',
         'verify_passed',
         `Gate ${gate.name} passed: ${result.command} (${result.runs}x)`,
-        { gate: gate.name, command: result.command, runs: result.runs },
+        {
+          gate: gate.name,
+          command: result.command,
+          runs: result.runs,
+          round: state.reviewRound,
+          attempts: result.attempts,
+        },
       );
       continue;
     }
@@ -2323,6 +2339,18 @@ async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Findi
         runs: result.runs,
         failed: failedRuns(result),
         verdict: verdictOf(result),
+        round: state.reviewRound,
+        // What every attempt did, in order (#135's own field). `failedRun` says
+        // which one failed and this says what the others did, which is the whole
+        // difference between "this suite is broken" and "this suite is not
+        // deterministic" - and `5d` draws a card per attempt from it rather than
+        // placing one failure among N slots and guessing at the rest.
+        //
+        // On the durable record as well, which the fraction beside it already
+        // argued for: a reader of the archive asking "was this suite ever noisy"
+        // has no other way to find out, and three small objects on the gates
+        // that failed is not what #133 was protecting `state.events` from.
+        attempts: result.attempts,
       },
     );
     artifact(state, `verify-failure-${state.reviewRound}.txt`, result.output);

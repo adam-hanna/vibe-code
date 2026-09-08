@@ -13,6 +13,7 @@ import { Launch } from './Launch';
 import { LoopColumn } from './LoopColumn';
 import { OutputPane } from './OutputPane';
 import { StopConfirm } from './StopConfirm';
+import { VerifyPane } from './VerifyPane';
 import { emptyRun, nextRun, reduce } from './model';
 import { readLaunchArgv } from './argv';
 import type { Launched } from './argv';
@@ -100,7 +101,7 @@ export function Cockpit() {
    * which the prompt says out loud rather than papering over.
    */
   const [sentLaunch, setSentLaunch] = useState<Launched | null>(null);
-  const [tab, setTab] = useState<'output' | 'pilot' | 'keys'>('output');
+  const [tab, setTab] = useState<'output' | 'pilot' | 'keys' | 'verify'>('output');
   /** Pilot proposals waiting on a person, so a hidden tab can say so (#144). */
   const [proposals, setProposals] = useState(0);
   /**
@@ -440,6 +441,15 @@ export function Cockpit() {
             >
               Pilot{proposals > 0 ? ` · ${String(proposals)}` : ''}
             </button>
+            {/* `5d`. The count is verification passes, not gates: the pane's
+                subject is the decision in front of you and its trend, and a
+                gate count would move for a reason nobody cares about. */}
+            <button
+              className={`v-cockpit__tab ${tab === 'verify' ? 'v-cockpit__tab--on' : ''}`}
+              onClick={() => setTab('verify')}
+            >
+              Verify{run.verify.length > 0 ? ` · ${String(run.verify.length)}` : ''}
+            </button>
             {/* The pilot's credentials, until Settings exists to put them in. */}
             <button
               className={`v-cockpit__tab ${tab === 'keys' ? 'v-cockpit__tab--on' : ''}`}
@@ -461,6 +471,7 @@ export function Cockpit() {
             </span>
           </div>
           {tab === 'output' && <OutputPane lines={run.output} />}
+          {tab === 'verify' && <VerifyPane passes={run.verify} />}
           {/* Mounted whatever tab is showing, and hidden rather than unmounted.
               A conversation is state nobody can get back, and a proposal waiting
               on a person would be destroyed by a glance at the output pane -

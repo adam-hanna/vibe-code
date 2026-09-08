@@ -969,3 +969,144 @@
 .v-output__line--detail .v-output__msg {
   color: var(--text-tertiary);
 }
+
+/* ------------------------------------------------------------ verify pane (5d) */
+
+.v-verify {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--surface-page);
+  padding: var(--space-4) var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.v-verify--empty {
+  color: var(--text-secondary);
+  font: var(--type-body);
+  gap: var(--space-2);
+  align-items: flex-start;
+}
+
+.v-verify__pass {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.v-verify__round {
+  font: var(--type-section);
+  letter-spacing: var(--track-section);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.v-verify__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+/* The verdict, large and first. 4b's draft gave it a 64px right-aligned label
+   while its annotation called it primary; this is the correction. */
+.v-verify__verdict {
+  font: var(--type-display);
+  letter-spacing: var(--track-display);
+  color: var(--text-display);
+}
+
+.v-verify__took {
+  margin-left: auto;
+  font: var(--type-mono-sm);
+  color: var(--text-tertiary);
+}
+
+.v-verify__reading {
+  font: var(--type-lead);
+  color: var(--text-primary);
+  margin: var(--space-2) 0 0;
+}
+
+.v-verify__cmd {
+  font: var(--type-mono-sm);
+  color: var(--text-secondary);
+  background: var(--surface-panel);
+  border: 1px solid var(--rule-inner);
+  padding: var(--space-2) var(--space-3);
+  margin: var(--space-3) 0 0;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.v-verify__runs {
+  list-style: none;
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.v-verify__run {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  border: 1px solid var(--rule-control);
+  padding: var(--space-2) var(--space-3);
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+/* Weight, not hue - the same rule the severity chips follow. */
+.v-verify__run--bad {
+  border-color: var(--severity-p0-rule);
+  border-width: var(--severity-p0-width);
+  color: var(--text-primary);
+}
+
+.v-verify__run-n {
+  font: var(--type-mono-sm);
+  color: var(--text-tertiary);
+}
+
+.v-verify__run-v {
+  font: var(--type-label);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+}
+
+.v-verify__means {
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+  margin: var(--space-3) 0 0;
+}
+
+.v-verify__means-label {
+  display: block;
+  font: var(--type-label);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin-bottom: var(--space-1);
+}
+
+/* A named absence, never a blank and never a zero. */
+.v-verify__absent,
+.v-verify__later {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  margin: var(--space-3) 0 0;
+}
+
+.v-verify__trend {
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+  margin: 0;
+}

@@ -153,6 +153,59 @@ export interface Preflight {
   at: number;
 }
 
+/**
+ * One gate, as the loop observed it (#223, `5d`).
+ *
+ * **A whole-gate verdict, and deliberately not a per-test table.** `vibe` reads
+ * exit codes and parses nobody's reporter, and #135 chose that on purpose: a
+ * per-test table means tracking TAP, JUnit XML and `node --test` output for
+ * ever, a standing maintenance liability bought for a column in a UI. So this
+ * carries what the loop actually measured and nothing more.
+ */
+export interface GateRun {
+  name: string;
+  /** `running` until a verdict frame settles it. Never inferred from silence. */
+  status: 'running' | 'passed' | 'failed' | 'unavailable' | 'disabled';
+  /** The exact command, or null when nothing ran. `5d` prints it. */
+  command: string | null;
+  /** How many attempts were made. Zero on the paths where nothing ran. */
+  runs: number;
+  /** How many of them failed. Null unless the gate failed. */
+  failed: number | null;
+  /**
+   * `verdictOf`'s answer, verbatim, or null.
+   *
+   * **`flaky` and `failing` are different findings about a suite and only one of
+   * them is about the code**, which is why this is carried rather than derived
+   * from the fraction: `runs: 1` that failed is `failing` and never `flaky`,
+   * because one sample says nothing about determinism, and a window computing
+   * `failed < runs` would call it flaky.
+   */
+  verdict: string | null;
+  /** Why an unavailable gate was unavailable. Null otherwise. */
+  reason: string | null;
+  /**
+   * What every attempt did, in order, or empty.
+   *
+   * **This is what makes `5d`'s run cards honest.** Without it the pane knew
+   * only "1 of 3 failed" and would have had to place that failure among three
+   * slots and guess at the other two - and which run failed is precisely the
+   * information that separates a broken suite from a noisy one. Empty for a
+   * gate that never ran, and for a core that predates the field.
+   */
+  attempts: readonly { run: number; ok: boolean; exitCode: number | null }[];
+  startedAt: number;
+  endedAt: number | null;
+}
+
+/** One pass of the verification gate, which is a list of gates in order. */
+export interface VerifyPass {
+  /** The archive's round, which is what the artifacts are keyed by. */
+  round: number | null;
+  gates: readonly GateRun[];
+  at: number;
+}
+
 /** A boundary the loop is holding at, waiting to be told what to do. */
 export interface Gate {
   /** The id to answer. Allocated by the host, not by us. */
@@ -189,6 +242,16 @@ export interface Run {
   cycles: readonly Cycle[];
   /** The question loop, nested inside cycle 1. Null until one opens. */
   questions: { total: number; blocking: number } | null;
+  /**
+   * Every pass of the verification gate, oldest first (#223, `5d`).
+   *
+   * A list rather than the latest, because the pane's failed-runs trend is a
+   * comparison ACROSS passes and the round is what separates them. Empty until
+   * a gate runs; a run with verification off gets one pass whose gates are all
+   * `disabled`, which is a different fact from an empty list and must not be
+   * drawn as the same thing.
+   */
+  verify: readonly VerifyPass[];
   /** The turn with no `endedAt`, if any. */
   running: Turn | null;
   gate: Gate | null;
@@ -255,6 +318,7 @@ export function emptyRun(): Run {
   return {
     cycles: [],
     questions: null,
+    verify: [],
     running: null,
     gate: null,
     output: [],
@@ -305,6 +369,28 @@ function strings(v: unknown): readonly string[] {
     const s = str(item);
     if (s === null) return [];
     out.push(s);
+  }
+  return out;
+}
+
+/**
+ * The attempts a gate made, or none.
+ *
+ * Whole-list-or-nothing, exactly as `strings` is and for the same reason: a
+ * partly-readable list drawn as though it were the whole of what the frame
+ * carried is the absent-is-not-zero rule broken on a sequence - and here it
+ * would be worse than usual, because dropping one attempt from three is how a
+ * flaky suite comes to look like a clean one.
+ */
+function readAttempts(v: unknown): { run: number; ok: boolean; exitCode: number | null }[] {
+  if (!Array.isArray(v)) return [];
+  const out: { run: number; ok: boolean; exitCode: number | null }[] = [];
+  for (const item of v as unknown[]) {
+    if (typeof item !== 'object' || item === null) return [];
+    const row = item as Record<string, unknown>;
+    const run = num(row['run']);
+    if (run === null || typeof row['ok'] !== 'boolean') return [];
+    out.push({ run, ok: row['ok'], exitCode: num(row['exitCode']) });
   }
   return out;
 }
@@ -380,6 +466,77 @@ function mapLastPhase(cycles: readonly Cycle[], f: (p: PhaseGroup) => PhaseGroup
     phases: cycle.phases.map((p) => (p.id === newest ? f(p) : p)),
   }));
 }
+
+/**
+ * Start a gate, opening a pass for it when its round is a new one.
+ *
+ * **The round is what separates two passes**, and it is told rather than
+ * guessed: `state.gateOutcomes` is reset on every pass, so the stream alone
+ * cannot distinguish the second gate of one pass from the first gate of the
+ * next. A frame carrying no round joins the open pass, which is the honest
+ * reading of a core that predates the field - one pass with everything in it,
+ * rather than a pass invented per gate.
+ */
+function openGate(
+  passes: readonly VerifyPass[],
+  round: number | null,
+  name: string,
+  at: number,
+): VerifyPass[] {
+  const gate: GateRun = {
+    name,
+    status: 'running',
+    command: null,
+    runs: 0,
+    failed: null,
+    verdict: null,
+    reason: null,
+    attempts: [],
+    startedAt: at,
+    endedAt: null,
+  };
+  const last = passes[passes.length - 1];
+  const samePass = last !== undefined && last.round === round;
+  if (!samePass) return [...passes, { round, at, gates: [gate] }];
+  return passes.map((p) => (p === last ? { ...p, gates: [...p.gates, gate] } : p));
+}
+
+/**
+ * Settle the named gate in its pass.
+ *
+ * The **last unsettled** gate of that name, so a gate re-run in a later round is
+ * not confused with the earlier one - and nothing is created if no
+ * `verify_started` opened it, because a verdict with no gate under it cannot be
+ * attributed and a measurement that cannot be attributed is not recorded.
+ */
+function settleGate(
+  passes: readonly VerifyPass[],
+  round: number | null,
+  name: string,
+  at: number,
+  outcome: Omit<GateRun, 'name' | 'startedAt' | 'endedAt'>,
+): VerifyPass[] {
+  const pass = [...passes].reverse().find((p) => p.round === round && p.gates.some(unsettled(name)));
+  if (pass === undefined) return [...passes];
+  let done = false;
+  return passes.map((p) =>
+    p !== pass
+      ? p
+      : {
+          ...p,
+          gates: p.gates.map((g) => {
+            if (done || !unsettled(name)(g)) return g;
+            done = true;
+            return { ...g, ...outcome, endedAt: at };
+          }),
+        },
+  );
+}
+
+const unsettled =
+  (name: string) =>
+  (g: GateRun): boolean =>
+    g.name === name && g.status === 'running';
 
 /** Close the running turn, if there is one. */
 function endRunning(run: Run, at: number): Run {
@@ -603,6 +760,73 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
         return {
           ...next,
           cycles: mapLastPhase(next.cycles, (p) => ({ ...p, gates: [...p.gates, gate] })),
+          verify: openGate(next.verify, num(data['round']), gate, at),
+        };
+      }
+
+      /**
+       * The three ways a gate settles, and the one way a pass never starts.
+       *
+       * All four land here because the pane's question is *what happened to this
+       * gate*, and "the command could not run" is an answer to it. Only
+       * `verify_disabled` opens a pass of its own: the other three always follow
+       * a `verify_started` that opened one.
+       */
+      case 'verify_passed':
+      case 'verify_failed':
+      case 'verify_unavailable': {
+        const gate = str(data['gate']);
+        if (gate === null) return next;
+        const status =
+          frame.id === 'verify_passed'
+            ? 'passed'
+            : frame.id === 'verify_failed'
+              ? 'failed'
+              : 'unavailable';
+        return {
+          ...next,
+          verify: settleGate(next.verify, num(data['round']), gate, at, {
+            status,
+            command: str(data['command']),
+            runs: num(data['runs']) ?? 0,
+            failed: num(data['failed']),
+            // Carried, never derived. `runs: 1` that failed is `failing` and not
+            // `flaky`, and a window computing `failed < runs` would disagree
+            // with the loop about which of the two this is.
+            verdict: str(data['verdict']),
+            reason: str(data['reason']),
+            attempts: readAttempts(data['attempts']),
+          }),
+        };
+      }
+
+      case 'verify_disabled': {
+        // A pass whose gates are all `disabled`. Different from an empty list -
+        // "verification is off" and "the gate has not come round yet" are two
+        // facts, and until #223 the run said neither.
+        const names = strings(data['gates']);
+        const round = num(data['round']);
+        return {
+          ...next,
+          verify: [
+            ...next.verify,
+            {
+              round,
+              at,
+              gates: names.map((name) => ({
+                name,
+                status: 'disabled' as const,
+                command: null,
+                runs: 0,
+                failed: null,
+                verdict: null,
+                reason: null,
+                attempts: [],
+                startedAt: at,
+                endedAt: at,
+              })),
+            },
+          ],
         };
       }
 
