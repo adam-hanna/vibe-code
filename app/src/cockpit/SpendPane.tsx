@@ -1,5 +1,5 @@
 import { Bar, MetaChip, StateKicker } from '../design';
-import { tokens as fmtTokens } from './format';
+import { clock, tokens as fmtTokens } from './format';
 import type { Charge, Run } from './model';
 
 /**
@@ -118,8 +118,7 @@ export function SpendPane({ run }: { run: Run }) {
               {fmtTokens(beat.promptTokens)} of {fmtTokens(beat.contextWindow)}
             </p>
             <p className="v-spend__note">
-              Claude&apos;s conversation, as of the last heartbeat. Compaction is an event in the
-              output stream — the agent starting to forget cannot be silent.
+              Claude&apos;s conversation, as of the last heartbeat.
             </p>
           </>
         ) : (
@@ -139,6 +138,46 @@ export function SpendPane({ run }: { run: Run }) {
             something vibe can derive. Neither is a measurement this build is missing.
           </span>
         </div>
+      </section>
+
+      <section className="v-spend__block">
+        <h3 className="v-spend__h">compaction</h3>
+        {/* `5e` asks for these by name and gives the reason: it is the moment the
+            agent starts forgetting, so it cannot be silent. The wire has carried
+            `session_compacting` since #133 and nothing drew it until now — the
+            same failure as #198, where the mechanism landed and the two halves
+            were never connected. */}
+        {run.compactions.length === 0 ? (
+          <p className="v-spend__absent">
+            Nothing has been compacted. A rotation happens when Claude&apos;s conversation grows
+            past <code>context.compactAbove</code>, and it is Claude-only — Codex reports no
+            per-request usage, so there is no occupancy to rotate on.
+          </p>
+        ) : (
+          <ul className="v-spend__phases">
+            {run.compactions.map((c) => (
+              <li key={`${c.slot}-${String(c.at)}`}>
+                <span className="v-spend__phase">
+                  {c.slot}
+                  {c.model !== null && <span className="v-spend__note"> · {c.model}</span>}
+                </span>
+                <span className="v-spend__figure">
+                  {/* The ratio it fired at, or the reason there is none. Null on
+                      the baseline branch, and drawn as null rather than as a
+                      percentage nobody took. */}
+                  {c.measured === null ? '—' : `${(c.measured * 100).toFixed(0)}%`}
+                </span>
+                <span className="v-spend__note">{clock(c.at)}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+        {run.compactions.some((c) => c.measured === null) && (
+          <p className="v-spend__absent">
+            A dash means the occupancy was measured under a different model, so the ratio would
+            have been against the wrong window.
+          </p>
+        )}
       </section>
 
       <section className="v-spend__block">

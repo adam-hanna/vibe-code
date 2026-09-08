@@ -2090,3 +2090,115 @@
   cursor: pointer;
   flex: none;
 }
+
+/* ------------------------------------------------------------ the front door (#211) */
+
+.v-kick {
+  border-top: 1px solid var(--rule-inner);
+  background: var(--surface-chrome);
+  padding: var(--space-3) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.v-kick__repo {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.v-kick__label {
+  font: var(--type-label);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  flex: none;
+}
+
+.v-kick__dir {
+  flex: 1;
+  min-width: 0;
+  font: var(--type-mono-sm);
+  color: var(--text-primary);
+  background: var(--surface-card);
+  border: 1px solid var(--rule-control);
+  padding: var(--space-2);
+}
+
+.v-kick__brief {
+  font: var(--type-body);
+  color: var(--text-primary);
+  background: var(--surface-card);
+  border: 1px solid var(--rule-control);
+  padding: var(--space-2);
+  resize: vertical;
+  width: 100%;
+}
+
+.v-kick__start {
+  border: 1px solid var(--accent-border-dim);
+  padding: var(--space-2) var(--space-3);
+}
+
+.v-kick__start[open] {
+  border-color: var(--accent-border);
+}
+
+.v-kick__start summary {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  cursor: pointer;
+}
+
+.v-kick__start > * + * {
+  margin-top: var(--space-2);
+}
+
+.v-kick__summary,
+.v-kick__note {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  margin: 0;
+}
+
+.v-kick__toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+.v-kick__argv {
+  font: var(--type-mono-sm);
+  color: var(--text-secondary);
+  background: var(--surface-panel);
+  border: 1px solid var(--rule-inner);
+  padding: var(--space-2);
+  margin: 0;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.v-kick__foot {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+/* The loop column while nothing has run (4h). */
+.v-loop__waiting {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  align-items: flex-start;
+  padding: var(--space-4);
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+.v-loop__waiting p {
+  margin: 0;
+}

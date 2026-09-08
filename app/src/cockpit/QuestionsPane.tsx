@@ -17,18 +17,27 @@ import type { Question } from './model';
  * exactly this. Drawing it as "no answer yet" would hide the reason a run
  * stopped, on the screen built to explain it.
  *
- * **The countdown is not here.** `1f` puts the grace period before an auto-submit
- * in the loop-column footer and **only** there: *"two live timers for one event
- * can drift, and drifting timers are how people learn not to trust them"*. The
- * chat card is a record and carries no timer, and so does this.
+ * ## There is no countdown, and there is nothing to count down to
+ *
+ * This pane used to say the grace period before an auto-submit *"is shown in the
+ * footer and only there"*, quoting `1f`'s reasoning about two live timers
+ * drifting. **That sentence was false twice.** No countdown was built in the
+ * footer — and there is no auto-submit anywhere in the core to have one: nothing
+ * under `cfg.questions` fires on a timer, and `grep` finds no grace period in
+ * `src/`.
+ *
+ * `1f` describes a capability the loop does not have. The fix is not to build a
+ * timer — that would be inventing the feature *and* its number — it is to say
+ * what the loop actually does: the answerer takes its turn, and a declined
+ * blocking question escalates at once.
  *
  * ## What is not built
  *
- * The per-workstream **policy** controls - ask the adversary for a draft,
- * auto-submit non-blocking, escalate on low confidence, and the grace period
- * itself - are `cfg.questions`, which is configuration this build cannot read or
- * write. That is #140's shape of problem rather than this screen's, and a form
- * that changed nothing would be worse than its absence.
+ * The per-workstream **policy** controls — ask the adversary for a draft,
+ * auto-answer non-blocking, escalate on low confidence — are `cfg.questions`.
+ * Those four are real and readable through the `config` frame; a form for them
+ * belongs beside the gate matrix in `1h` rather than here, where it would be a
+ * second place to edit one file.
  */
 
 /** `high` is a claim, `low` is a warning, and they should not look alike. */
@@ -116,9 +125,12 @@ export function QuestionsPane({
           The count above is the loop&apos;s; this build could not read every question behind it.
         </p>
       )}
+      {/* What is actually true, replacing a sentence that was false twice over.
+          See the header. */}
       <p className="v-q__note">
-        The grace period before an auto-submit is shown in the footer and only there — two live
-        timers for one event drift, and a drifting timer is how people learn not to trust them.
+        Nothing here fires on a timer. The answerer takes its turn when the round opens, and a
+        question it declines escalates immediately — there is no auto-submit to wait out and no
+        grace period to interrupt.
       </p>
     </div>
   );

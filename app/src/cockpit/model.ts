@@ -368,6 +368,31 @@ export interface Question {
   declined: boolean;
 }
 
+/**
+ * A compaction, which is the moment the agent starts forgetting (`5e`).
+ *
+ * **It cannot be silent**, which is the design's own reason for putting it on
+ * this screen, and the wire has carried it since #133 — `session_compacting` is
+ * narrated by `context.ts`. Nothing drew it, which is the #198 failure exactly:
+ * the mechanism landed and nothing connected the two halves.
+ *
+ * Claude only, and that is not a gap. Codex reports no per-request usage, so
+ * there is nothing to measure an occupancy against and no rotation driven by one.
+ */
+export interface Compaction {
+  /** Which session slot rotated: `main`, `judge`, `review`. */
+  slot: string;
+  model: string | null;
+  /**
+   * The occupancy it fired at, or null.
+   *
+   * Null on the baseline branch and reported as null rather than as a ratio
+   * nobody took — the same rule `context.ts` applies to the sentence it prints.
+   */
+  measured: number | null;
+  at: number;
+}
+
 /** A boundary the loop is holding at, waiting to be told what to do. */
 export interface Gate {
   /** The id to answer. Allocated by the host, not by us. */
@@ -447,6 +472,8 @@ export interface Run {
   censuses: readonly Census[];
   /** What the run has spent, from the one seam every token goes through. */
   spend: Spend;
+  /** Every compaction, oldest first. Empty until one happens (`5e`). */
+  compactions: readonly Compaction[];
   /**
    * The commit every diff in this run is taken against, or null (#223, `1d`).
    *
@@ -528,6 +555,7 @@ export function emptyRun(): Run {
     verify: [],
     censuses: [],
     spend: { tokens: null, costUsd: null, codexTokens: null, charges: [] },
+    compactions: [],
     baseSha: null,
     running: null,
     gate: null,
@@ -1251,6 +1279,21 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
               },
             ],
           },
+        };
+      }
+
+      case 'session_compacting': {
+        const slot = str(data['slot']);
+        // A compaction that cannot say which session it compacted cannot be
+        // attributed, and a measurement that cannot be attributed is not
+        // recorded - the same rule the heartbeat follows.
+        if (slot === null) return next;
+        return {
+          ...next,
+          compactions: [
+            ...next.compactions,
+            { slot, model: str(data['model']), measured: num(data['measured']), at },
+          ],
         };
       }
 

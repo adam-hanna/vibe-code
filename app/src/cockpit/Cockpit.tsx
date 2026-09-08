@@ -11,7 +11,7 @@ import { Diagnostics } from './Diagnostics';
 import { DiffPane } from './DiffPane';
 import { FindingsPane } from './FindingsPane';
 import { Footer } from './Footer';
-import { Launch } from './Launch';
+import { Kickoff } from './Kickoff';
 import { LoopColumn } from './LoopColumn';
 import { NewWorkstream } from './NewWorkstream';
 import { OutputPane } from './OutputPane';
@@ -149,6 +149,14 @@ export function Cockpit() {
    * which the prompt says out loud rather than papering over.
    */
   const [sentLaunch, setSentLaunch] = useState<Launched | null>(null);
+  /**
+   * The first thing said to the pilot, so the launch bar can carry it (#211).
+   *
+   * Held here rather than in the pilot pane for the reason `repoDir` is: two
+   * components need it and one of them is not inside the other. The pane
+   * reports it once and owns the conversation itself.
+   */
+  const [opening, setOpening] = useState<string | null>(null);
   const [tab, setTab] = useState<
     | 'output'
     | 'pilot'
@@ -160,7 +168,12 @@ export function Cockpit() {
     | 'runs'
     | 'settings'
     | 'diff'
-  >('output');
+    // **The pilot, not the output pane** (#211). The complaint was exact: *"I
+    // thought my initial prompt would be given to the pilot and the pilot would
+    // take control"*, and the app answered it with a form and a tab beside the
+    // log. The composer is the front door, so this is where you land — and the
+    // output pane has nothing in it before a run anyway.
+  >('pilot');
   /** Pilot proposals waiting on a person, so a hidden tab can say so (#144). */
   const [proposals, setProposals] = useState(0);
   /**
@@ -518,22 +531,29 @@ export function Cockpit() {
 
       <div className="v-cockpit__body">
         <div className="v-cockpit__loop">
-          {/* Offered again once the command has RETURNED, not once the loop
+          {/* `4h`. While there is no run, this column is three not-started
+              cycles and a sentence saying what it is waiting for — and what it
+              is waiting for is a brief, which is composed next door.
+
+              The launch form used to live here (#211). It has moved into the
+              pilot pane, because two forms building the same argv is the third
+              spelling that issue warns against, and because the front door
+              being a form beside the conversation is the complaint itself.
+
+              Offered again once the command has RETURNED, not once the loop
               said it was done: `serve.ts` runs one at a time and refuses a
-              second invoke until the first settles, so a form shown any earlier
-              would only produce a rejection. */}
+              second invoke until the first settles. */}
           {(!launched || run.completed !== null) && !outside && (
             <>
-              <Launch
-                busy={busy || !wire.connected}
-                onLaunch={launch}
-                dir={repoDir}
-                onDir={rememberRepo}
-              />
-              {/* `4a`, beside the plain form rather than replacing it. The
-                  design's own intent is that the honest path is type → create →
-                  keep talking; the modal is for the one moment somebody is
-                  deciding how THIS run should differ. */}
+              <div className="v-loop__waiting">
+                <StateKicker tone="quiet">waiting for the brief</StateKicker>
+                <p>
+                  Say what you want in the conversation — that is the front door. When it is
+                  clear, <strong>start a run</strong> is under it.
+                </p>
+              </div>
+              {/* `4a`, for the one moment somebody is deciding how THIS run
+                  should differ from the project's defaults. */}
               <button
                 className="v-launch__more"
                 onClick={() => setComposing(true)}
@@ -679,6 +699,21 @@ export function Cockpit() {
               onEffect={onEffect}
               onPending={setProposals}
               statuses={keyStatuses}
+              onOpening={setOpening}
+              // Only while there is no run to watch. Once one is going, the
+              // pane is a conversation *about* it and a launch bar underneath
+              // would be offering to start a second one that `serve.ts` refuses.
+              kickoff={
+                (!launched || run.completed !== null) && !outside ? (
+                  <Kickoff
+                    dir={repoDir}
+                    onDir={rememberRepo}
+                    opening={opening}
+                    onLaunch={launch}
+                    busy={busy || !wire.connected}
+                  />
+                ) : undefined
+              }
             />
           </div>
           {tab === 'keys' && (

@@ -40,6 +40,7 @@ import {
   unanswered,
   unrecognised,
 } from './transcript';
+import type { ReactNode } from 'react';
 import type { KeyStatus } from './keys';
 import type { Effect, Settlement } from './tools';
 import type { Call, Conversation, Reply } from './transcript';
@@ -398,6 +399,23 @@ export interface PilotPaneProps {
    */
   statuses: readonly KeyStatus[] | null;
   /**
+   * The first thing a person said, reported upward once (#211).
+   *
+   * The composer is the front door, so the opening message is also the thing a
+   * launch bar should be prefilled with — and this pane is the only place that
+   * knows what it was. Reported rather than lifted: the conversation stays owned
+   * by the reducer here, which is the rule this file is written to.
+   */
+  onOpening?: (content: string) => void;
+  /**
+   * Rendered above the composer while no run exists (#211).
+   *
+   * A slot rather than the thing itself, so this pane keeps knowing nothing
+   * about runs, repositories or argv - `Cockpit` owns all three, and owns the
+   * one `host.send` for the same reason.
+   */
+  kickoff?: ReactNode;
+  /**
    * The launch this window sent, or null if it sent none (#191).
    *
    * The brief is the one thing about a run that no frame carries, so it cannot
@@ -408,7 +426,15 @@ export interface PilotPaneProps {
   launched: Launched | null;
 }
 
-export function PilotPane({ run, launched, onEffect, onPending, statuses }: PilotPaneProps) {
+export function PilotPane({
+  run,
+  launched,
+  onEffect,
+  onPending,
+  statuses,
+  onOpening,
+  kickoff,
+}: PilotPaneProps) {
   const [conversation, dispatch] = useReducer(apply, undefined, emptyConversation);
   /**
    * Where turns run (#193). **Subscription by default**, because it is the one
@@ -683,6 +709,10 @@ export function PilotPane({ run, launched, onEffect, onPending, statuses }: Pilo
     const content = entry.trim();
     if (content === '' || live !== null) return;
     setEntry('');
+    // The first thing said, once. `messages.length === 0` rather than a ref: the
+    // reducer already holds the fact, and a second source for it is how the two
+    // come to disagree about which message was first.
+    if (conversation.messages.length === 0) onOpening?.(content);
     // A person spoke, so the pilot's rope is new again. The ceiling exists to
     // stop it spending unattended, and it is not unattended now.
     chain.current = 0;
@@ -691,7 +721,7 @@ export function PilotPane({ run, launched, onEffect, onPending, statuses }: Pilo
     // this is the only place that knows both, and sent in full: neither vendor
     // remembers a previous request.
     start([...conversation.messages, { role: 'user' as const, content }], content);
-  }, [conversation.messages, entry, live, start]);
+  }, [conversation.messages, entry, live, start, onOpening]);
 
   const onDecide = useCallback(
     (id: string, accepted: boolean, note: string) => {
@@ -821,6 +851,12 @@ export function PilotPane({ run, launched, onEffect, onPending, statuses }: Pilo
           let it carry on — the ceiling is here so it cannot keep spending unattended.
         </div>
       )}
+
+      {/* `4h`: the repository and the launch bar sit between the conversation
+          and the composer while no run exists. Above the composer rather than
+          below it, because the composer is the front door and must stay the
+          thing your eye lands on last before typing. */}
+      {kickoff}
 
       <div className="v-pilot__composer">
         <textarea
