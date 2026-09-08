@@ -1336,12 +1336,25 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
       /**
        * The answers, matched back onto the questions by their text (#223, `1f`).
        *
-       * **Matched, not appended.** The answerer is given the questions and
-       * returns answers keyed by the question string - which is exactly how the
-       * core pairs them, in `matches()` - so this is the same join rather than a
-       * second one. A question with no matching answer keeps its null, because
-       * an unanswered question and an answered one are the two states the pane
-       * exists to distinguish.
+       * **Matched, not appended**, and the key is the question as the *planner*
+       * wrote it. That is now true by construction rather than by hope: the
+       * pairing happens in the core, in `pairAnswers`, and `questions_answered`
+       * carries the planner's wording on every row - so the string on this frame
+       * and the string on `questions_opened` are one string.
+       *
+       * **It was not, and the failure was silent** (#211). The answerer is asked
+       * to echo the question and echoed what it was shown, which the prompt
+       * rendered with the kind and blocking tag after it, so this exact match
+       * failed on every answer and the pane drew "No answer yet" over two
+       * answered questions. The window is the wrong place to fix that: it has no
+       * `similarity` and no threshold, and a second fuzzy matcher here would
+       * drift from the core's on the first wording either side did not expect.
+       *
+       * So this stays exact on purpose. A question with no matching answer keeps
+       * its null, because an unanswered question and an answered one are the two
+       * states the pane exists to distinguish - and an answer matching no
+       * question is dropped here rather than attached to the nearest one, having
+       * already been reported by the core that could not place it either.
        */
       case 'questions_answered': {
         const before = next.questions;

@@ -726,6 +726,8 @@ Questions are marked **blocking** or **advisory**. Answer both with the same car
 
 Answer every question in the list, including ones you decline - echo the question and set \`defer_to_human: true\`.
 
+**Copy the question verbatim into \`question\`** - only the numbered line itself, not the \`(kind, tag)\` line under it and not the fallback answer. That string is what pairs your answer back to the question that was asked; a paraphrase or an extra suffix and the pairing is guesswork.
+
 ## Questions
 
 ${questions.map(formatQuestion).join('\n\n')}
@@ -1425,10 +1427,24 @@ function formatAssumptions(assumptions: readonly Assumption[]): string {
     .join('\n');
 }
 
+/**
+ * One question, with nothing on the question's own line but the question.
+ *
+ * The decoration used to sit immediately after it - `**text** *(technical,
+ * advisory)*` - and the answerer, told to echo the question, echoed the line it
+ * was shown. `pairAnswers` handles that now, but a format that invites the
+ * mistake is a format that will find the next way to make it: the tag moves to
+ * its own line so the thing to copy is unambiguous, and the instruction below
+ * says which part to copy.
+ */
 function formatQuestion(q: OpenQuestion, i: number): string {
   const opts = q.options.length > 0 ? `\n   Options: ${q.options.join(' | ')}` : '';
   const tag = q.blocking ? 'blocking' : 'advisory';
-  return `${i + 1}. **${q.question}** *(${q.kind}, ${tag})*${opts}\n   Planner's fallback answer: ${q.recommended}`;
+  return (
+    `${i + 1}. ${q.question}\n` +
+    `   (${q.kind}, ${tag})${opts}\n` +
+    `   Planner's fallback answer: ${q.recommended}`
+  );
 }
 
 function formatAnswer(a: Answer): string {

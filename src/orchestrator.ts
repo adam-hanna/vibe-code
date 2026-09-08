@@ -86,6 +86,7 @@ import {
   findRephrase,
   isSameQuestion,
   normalize,
+  pairAnswers,
   reconcileQuestionRecords,
   recordSuppressed,
 } from '@src/questions.js';
@@ -4183,12 +4184,40 @@ async function resolveQuestions(
   const usable = answers.filter((a) => !declined(a));
   const refused = answers.filter(declined);
 
-  const matches = (q: OpenQuestion, a: Answer): boolean => a.question.trim() === q.question.trim();
-  const refusedBlocking = questions.filter((q) => q.blocking && refused.some((a) => matches(q, a)));
-  const refusedAdvisory = questions.filter((q) => !q.blocking && refused.some((a) => matches(q, a)));
+  // **The pairing, and it is no longer string equality** (#211). The answerer is
+  // asked to echo the question and echoes what it was shown, which
+  // `formatQuestion` renders with the kind and the blocking tag after it - so a
+  // real run produced `"...untested? *(technical, advisory)*"` against a question
+  // ending at the question mark, and every pair failed. That was not only a pane
+  // drawing "No answer yet" over answered questions: `refusedBlocking` came back
+  // empty, so a declined blocking question would have been counted as answered
+  // and `escalateOnDefer` could not fire.
+  //
+  // `pairAnswers` is the module that already owns "when are two wordings one
+  // question", using the same normalize and the same threshold as the re-ask
+  // guard rather than a second rule that would drift from it.
+  const pairing = pairAnswers(
+    questions,
+    refused,
+    (q) => q.question,
+    (a) => a.question,
+  );
+  const answerFor = (q: OpenQuestion): Answer | undefined =>
+    pairing.paired.find((p) => p.question === q)?.answer;
+  const refusedBlocking = questions.filter((q) => q.blocking && answerFor(q) !== undefined);
+  const refusedAdvisory = questions.filter((q) => !q.blocking && answerFor(q) !== undefined);
+
+  // A decline that paired with nothing. Named rather than dropped and never
+  // attached to the nearest question: this is the answerer refusing to guess,
+  // and losing it in silence is the failure this whole change is about. It does
+  // not escalate, because nothing here can say which question it was about, and
+  // stopping a run over a question nobody can name is worse than saying so.
+  for (const a of pairing.unpaired) {
+    log.warn(`${answerer} declined an answer that matches no question asked: ${a.question}`);
+  }
 
   for (const q of refusedAdvisory) {
-    const reason = refused.find((a) => matches(q, a))?.rationale ?? `${answerer} declined to answer.`;
+    const reason = answerFor(q)?.rationale ?? `${answerer} declined to answer.`;
     state.deferredQuestions.push({
       question: q.question,
       kind: q.kind,
@@ -4208,6 +4237,43 @@ async function resolveQuestions(
     );
   }
 
+  /**
+   * Answers as rows keyed by the question the *planner* wrote.
+   *
+   * The join happens here because this is the only side that has both the
+   * questions and `similarity`. An answer that paired with nothing keeps its own
+   * wording and travels anyway - dropping it would hide what the answerer said,
+   * and attaching it to the nearest question would state that it was about a
+   * question nobody has established it was about.
+   */
+  const asked = (
+    list: readonly Answer[],
+  ): {
+    question: string;
+    answer: string;
+    confidence: string;
+    rationale: string;
+    deferToHuman: boolean;
+  }[] => {
+    const pairs = pairAnswers(
+      questions,
+      list,
+      (q) => q.question,
+      (a) => a.question,
+    );
+    const row = (question: string, a: Answer) => ({
+      question,
+      answer: a.answer,
+      confidence: a.confidence,
+      rationale: a.rationale,
+      deferToHuman: a.defer_to_human,
+    });
+    return [
+      ...pairs.paired.map((p) => row(p.question.question, p.answer)),
+      ...pairs.unpaired.map((a) => row(a.question, a)),
+    ];
+  };
+
   log.ok(`${answerer} answered ${usable.length} of ${questions.length} question(s)`, {
     // The other half of `1f` (#223). The pane is an inbox of open questions with
     // **the adversary's draft and its confidence** beside each, and until now
@@ -4223,17 +4289,21 @@ async function resolveQuestions(
       // Both, and labelled, because they are different outcomes rather than a
       // count and a remainder: a declined answer is the answerer refusing to
       // guess at product intent, which `escalateOnDefer` then acts on.
-      answers: usable.map((a) => ({
-        question: a.question,
-        answer: a.answer,
-        confidence: a.confidence,
-        rationale: a.rationale,
-      })),
-      declined: refused.map((a) => ({
-        question: a.question,
-        confidence: a.confidence,
-        rationale: a.rationale,
-        deferToHuman: a.defer_to_human,
+      //
+      // **Keyed by the question as the PLANNER wrote it**, not as the answerer
+      // echoed it (#211). A window joins these back onto `questions_opened` and
+      // the only string that appears on both frames has to be one string - the
+      // echo is the rendered form, tag and all, and joining on it drew "No
+      // answer yet" over two answered questions. Doing the pairing here rather
+      // than in the window is also what keeps *one* definition of it: the
+      // window has no `similarity`, and a second matcher over there would drift
+      // from this one on the first wording either side did not expect.
+      answers: asked(usable),
+      declined: asked(refused).map((row) => ({
+        question: row.question,
+        confidence: row.confidence,
+        rationale: row.rationale,
+        deferToHuman: row.deferToHuman,
       })),
     },
   });

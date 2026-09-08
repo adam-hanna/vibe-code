@@ -102,6 +102,25 @@ function num(v: unknown): number {
  * without spawning a real agent, as `rotateSession` and `ClaudeProbeExecutor`
  * already are.
  */
+/**
+ * What a turn under `--permission-mode plan` has to be told about that flag.
+ *
+ * Exported so a test can assert it travels with the mode and with nothing else,
+ * and so the sentence lives beside the argv that carries it.
+ *
+ * It corrects, it does not add a task: every clause here is about work the CLI's
+ * own plan-mode prompt asks for that this product does not want and does not
+ * read. Nothing about *what* to plan belongs here - that is `prompts.ts`, and a
+ * second place saying what the turn is for is how the two come to disagree.
+ */
+export const PLAN_MODE_NOTE =
+  'You are running inside vibe as one step of an automated loop, and your answer is taken ' +
+  'from this turn as structured JSON. Ignore any instruction to write or save a plan ' +
+  'document to disk, including under ~/.claude/plans, and any instruction to delegate to ' +
+  'Explore, Plan or Task subagents: nothing here reads such a file, no subagent is ' +
+  'available, and the tokens are spent for nothing. Do the work in this turn and answer in ' +
+  'the schema you were given. Read-only tools are yours to use as much as you need.';
+
 export async function claudeTurn(
   options: ClaudeTurnOptions,
   exec: RunFn = run,
@@ -125,6 +144,27 @@ export async function claudeTurn(
     '--verbose',
     '--permission-mode', permissionMode,
   ];
+  // Plan mode brings its own instructions, and they describe a different job.
+  //
+  // `--permission-mode plan` is the sandbox a read-only seat runs under - it is
+  // why the planner cannot write - but the CLI also injects its own plan-mode
+  // system prompt underneath, telling the model to research, produce a plan
+  // *document*, save it under `~/.claude/plans`, and delegate to Explore, Plan
+  // and Task subagents. None of that is this turn's job: vibe takes the answer
+  // as structured JSON off the final message, and a file written outside the
+  // repository is read by nothing here.
+  //
+  // Observed rather than reasoned about. A planner turn in a manual pass spent
+  // its last two minutes - of ten - on `Write C:\Users\Adam\.claude\plans\...`,
+  // with context going 255k to 306k while it did, and the artifact landed
+  // somewhere no part of this product looks. The same leakage was found on the
+  // pilot first (#211) and fixed there in its own system prompt; this is the
+  // same defect on every Claude-seated read-only role, so it is fixed at the
+  // adapter that knows which flag causes it rather than in each prompt.
+  //
+  // `--append-system-prompt`, never `--system-prompt`: replacing it would drop
+  // whatever else the CLI relies on being told, to fix one paragraph.
+  if (permissionMode === 'plan') args.push('--append-system-prompt', PLAN_MODE_NOTE);
   // Fork, resume, or start fresh - one of exactly three. The fork names the
   // parent to `--resume` and the child to `--session-id`, which is the only
   // form that both carries the history and leaves the parent resumable.

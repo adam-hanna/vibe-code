@@ -84,8 +84,19 @@ function answering(over: { defer_to_human?: boolean } = {}) {
   return (label: string, options: unknown): unknown => {
     if (!label.startsWith('answers-')) return report([]);
     const prompt = (options as { prompt: string }).prompt;
-    // `formatQuestion`'s shape: "1. **the question** *(product, blocking)*".
-    const asked = [...prompt.matchAll(/^\d+\. \*\*(.*?)\*\* \*\(/gm)].map((m) => m[1] ?? '');
+    // `formatQuestion`'s shape: the question alone on its numbered line, with
+    // the `(kind, tag)` on the line under it.
+    //
+    // **This fixture was quietly better at echoing than the real answerer**, and
+    // that is why nothing here caught #211. The old shape was
+    // `1. **question** *(product, blocking)*`, and the regex captured only what
+    // was between the asterisks - so the harness always produced a clean echo
+    // while a real Codex turn echoed the whole rendered line, tag included, and
+    // the exact-equality join in the loop failed on it. A fixture that cannot
+    // reproduce the mistake cannot guard against it; the decorated echo is
+    // `question-pairing.test.ts`'s subject, deliberately, so this one stays the
+    // well-behaved case.
+    const asked = [...prompt.matchAll(/^\d+\. (.+)$/gm)].map((m) => m[1] ?? '');
     return answersReport(asked.map((question) => ({ question, ...over })));
   };
 }

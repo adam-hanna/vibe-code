@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { claudeTurn } from '@src/claude.js';
+import { claudeTurn, PLAN_MODE_NOTE } from '@src/claude.js';
 import type { ClaudeTurnOptions } from '@src/claude.js';
 import { codexTurn, parseOptionTokens, resetCodexForkProbe } from '@src/codex.js';
 import type { CodexTurnOptions } from '@src/codex.js';
@@ -414,6 +414,40 @@ test('claude: an ordinary turn sends no fork flag at all', async () => {
 
   await claudeTurn(claudeOptions(options), exec);
   assert.equal((args[0] ?? []).includes('--fork-session'), false);
+});
+
+test('claude: plan mode carries the note that plan mode needs, and only plan mode', async () => {
+  // `--permission-mode plan` is the sandbox a read-only seat runs under, and the
+  // CLI injects its own plan-mode system prompt underneath it - research,
+  // produce a plan *document*, save it under `~/.claude/plans`, delegate to
+  // Explore/Plan/Task. None of that is a vibe turn's job: the answer is taken as
+  // structured JSON off the final message and a file outside the repository is
+  // read by nothing here.
+  //
+  // Observed rather than argued: a planner turn in a manual pass spent its last
+  // two minutes of ten on `Write C:\Users\Adam\.claude\plans\...`, context going
+  // 255k to 306k, for an artifact nothing reads (#211).
+  const { options } = progressRecorder();
+
+  const planning = capture();
+  await claudeTurn({ ...claudeOptions(options), permissionMode: 'plan' }, planning.exec);
+  const argv = planning.args[0] ?? [];
+  const at = argv.indexOf('--append-system-prompt');
+  assert.ok(at >= 0, `the note is sent under plan mode: ${argv.join(' ')}`);
+  assert.equal(argv[at + 1], PLAN_MODE_NOTE, 'and it is the exported sentence, not a copy');
+  // Appended, never replacing: `--system-prompt` would drop whatever else the
+  // CLI relies on being told, to correct one paragraph.
+  assert.equal(argv.includes('--system-prompt'), false);
+
+  // A writing seat has no plan-mode prompt to correct, so it gets no note. The
+  // asymmetry is the point: this is a correction to a specific flag's own
+  // instructions and not a thing vibe wants said on every turn.
+  const writing = capture();
+  await claudeTurn(
+    { ...claudeOptions(options), permissionMode: 'acceptEdits' },
+    writing.exec,
+  );
+  assert.equal((writing.args[0] ?? []).includes('--append-system-prompt'), false);
 });
 
 test('claude: forking a conversation it is also resuming is a programming error', async () => {
