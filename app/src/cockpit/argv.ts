@@ -19,6 +19,25 @@ export function launchArgv(task: string, dir: string, planOnly: boolean): readon
   return [planOnly ? 'plan' : 'run', task.trim(), '-C', dir.trim()];
 }
 
+/**
+ * Pick a halted run back up (`4d`, #223).
+ *
+ * **The one action a halt banner can actually offer**, and it is what makes the
+ * design's rule — *"every halt names a next action, never just a reason"* —
+ * something this app does rather than something it prints. Every other choice
+ * `4d` draws (`+2 rounds`, `implement anyway`, `swap the reviewer`) would have
+ * to change the run's configuration on the way in, and `src/host.ts` is explicit
+ * that anything mutating run state needs its own validator before it is offered.
+ *
+ * Same four-slot shape as `launchArgv`, and here for the same reason: two places
+ * building a `vibe` invocation is how they come to disagree about one. The run
+ * id is the one #207 put on the wire, so this is the window repeating a fact it
+ * was told rather than reconstructing a path.
+ */
+export function resumeArgv(runId: string, dir: string): readonly string[] {
+  return ['resume', runId.trim(), '-C', dir.trim()];
+}
+
 /** What a launch asked for. Every field came out of the argv that was sent. */
 export interface Launched {
   task: string;

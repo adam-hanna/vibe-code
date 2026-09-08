@@ -288,6 +288,39 @@ export interface Census {
   at: number;
 }
 
+/** One turn's charge, as the seam that charged it reported (#223, `5e`). */
+export interface Charge {
+  label: string;
+  provider: string;
+  tokens: number;
+  /** The phase this turn was in, stamped the way an output line is. */
+  phase: string | null;
+  at: number;
+}
+
+/**
+ * What the run has spent (`5e`/`6e`, #223).
+ *
+ * **Both accounts are subscriptions, so tokens are the only unit**, and that is
+ * a settled decision rather than a gap: Codex returns no cost from any output
+ * mode or endpoint, so a dollar view could only ever show half the run. The one
+ * figure that exists is Claude-side and says so wherever it is drawn.
+ *
+ * The totals are read off the last charge rather than summed here. A pane adding
+ * up a stream of turns would eventually disagree with `state.json`, and the
+ * charge seam is holding the authoritative number at the moment it charges.
+ */
+export interface Spend {
+  /** The run total, covering both agents. Null before any charge. */
+  tokens: number | null;
+  /** Claude-side dollars only, and never a total. Null before any charge. */
+  costUsd: number | null;
+  /** Codex's share of the tokens, or null when nothing has said. */
+  codexTokens: number | null;
+  /** Every charge, oldest first, so a per-phase breakdown is possible. */
+  charges: readonly Charge[];
+}
+
 /** A boundary the loop is holding at, waiting to be told what to do. */
 export interface Gate {
   /** The id to answer. Allocated by the host, not by us. */
@@ -358,6 +391,8 @@ export interface Run {
    * rounds behind it. Empty until a round reports one.
    */
   censuses: readonly Census[];
+  /** What the run has spent, from the one seam every token goes through. */
+  spend: Spend;
   /** The turn with no `endedAt`, if any. */
   running: Turn | null;
   gate: Gate | null;
@@ -426,6 +461,7 @@ export function emptyRun(): Run {
     questions: null,
     verify: [],
     censuses: [],
+    spend: { tokens: null, costUsd: null, codexTokens: null, charges: [] },
     running: null,
     gate: null,
     output: [],
@@ -1060,6 +1096,41 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
               })),
             },
           ],
+        };
+      }
+
+      /**
+       * A turn's charge, under the event type that recorded it (#223, `5e`).
+       *
+       * Two ids because there are two providers and they are charged
+       * differently, not because they are two facts: `codex_turn` carries no
+       * cost at all, and that is a settled decision rather than a missing field.
+       */
+      case 'claude_turn':
+      case 'codex_turn': {
+        const label = str(data['label']);
+        const tokens = num(data['tokens']);
+        if (label === null || tokens === null) return next;
+        return {
+          ...next,
+          spend: {
+            // Read off the charge, never summed here. A pane adding up a stream
+            // of turns would eventually disagree with `state.json`, and this is
+            // the number that file holds.
+            tokens: num(data['runTokens']) ?? next.spend.tokens,
+            costUsd: num(data['runCostUsd']) ?? next.spend.costUsd,
+            codexTokens: num(data['codexTokens']) ?? next.spend.codexTokens,
+            charges: [
+              ...next.spend.charges,
+              {
+                label,
+                provider: str(data['provider']) ?? (frame.id === 'codex_turn' ? 'codex' : 'claude'),
+                tokens,
+                phase: line.phase,
+                at,
+              },
+            ],
+          },
         };
       }
 

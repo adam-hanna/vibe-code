@@ -26,12 +26,37 @@ export interface FooterProps {
   onPause: () => void;
   /** Kill the turn in flight and end the run, resumably (#209). Confirms first. */
   onStop: () => void;
+  /**
+   * Pick a halted run back up (`4d`, #223).
+   *
+   * The one choice a halt banner can genuinely offer. `4d` draws four per state
+   * - `+2 rounds`, `implement anyway`, `swap the reviewer` - and every one of
+   * those changes the run's configuration on the way in, which `src/host.ts`
+   * says needs its own validator before it is offered. Buttons that produced no
+   * frame would be the `proposed` chip shipped as behaviour.
+   */
+  onResume: (runId: string, dir: string) => void;
   /** Whether a pause is armed and waiting for the next boundary. */
   pausing: boolean;
   busy: boolean;
 }
 
-export function Footer({ run, onDecide, onPause, onStop, pausing, busy }: FooterProps) {
+/**
+ * Whether resuming this ending is a real thing to do.
+ *
+ * **Closed over exit codes, not over sentences.** Exit 0 finished and exit 6
+ * never started - a resume of either would be a button that either does nothing
+ * or repeats a run that is already done. Everything else stopped mid-loop with a
+ * checkpoint behind it, which is the whole promise `4d` makes: *"every halt is
+ * recoverable from a checkpoint, and nothing is lost must be literally true."*
+ *
+ * An exit code this build does not know is **not** offered a resume. Guessing
+ * that an unknown ending is resumable is a claim about what happened, made by a
+ * build that does not know what happened.
+ */
+const RESUMABLE: ReadonlySet<number> = new Set([1, 2, 3, 4, 5, 7]);
+
+export function Footer({ run, onDecide, onPause, onStop, onResume, pausing, busy }: FooterProps) {
   const [reason, setReason] = useState('');
 
   // A waiting gate outranks everything, including a run that has said it is
@@ -116,6 +141,40 @@ export function Footer({ run, onDecide, onPause, onStop, pausing, busy }: Footer
         {run.reason !== null && <div className="v-footer__why">{run.reason.message}</div>}
 
         {how !== null && how.next !== null && <div className="v-footer__note">{how.next}</div>}
+
+        {/*
+          `4d`'s rule made real: **every halt names a next action, and exactly
+          one is primary.** Somebody reading a halt banner is already frustrated,
+          and four equal-weight buttons make them read all four every time.
+
+          The action is offered only when the run said which run it is (#207) and
+          only for an ending a resume can actually pick up - so an unknown exit
+          code gets the sentence and no button, rather than a control that might
+          do nothing.
+        */}
+        {RESUMABLE.has(exit) && run.identity !== null && (
+          <div className="v-footer__actions">
+            <Button
+              level="primary"
+              disabled={busy}
+              onClick={() => {
+                if (run.identity !== null) onResume(run.identity.runId, run.identity.dir);
+              }}
+            >
+              ▶ resume this run
+            </Button>
+            <span className="v-footer__note">
+              It picks up from the last checkpoint on the same agent sessions. Nothing before the
+              halt is redone.
+            </span>
+          </div>
+        )}
+        {RESUMABLE.has(exit) && run.identity === null && (
+          <div className="v-footer__note">
+            This run is resumable, but the loop never said which run it is — so there is nothing to
+            point a resume at from here. `vibe list` has the id.
+          </div>
+        )}
       </div>
     );
   }

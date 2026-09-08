@@ -13,11 +13,13 @@ import { Footer } from './Footer';
 import { Launch } from './Launch';
 import { LoopColumn } from './LoopColumn';
 import { OutputPane } from './OutputPane';
+import { SpendPane } from './SpendPane';
 import { StopConfirm } from './StopConfirm';
+import { Summary } from './Summary';
 import { VerifyPane } from './VerifyPane';
 import { StalenessStrip } from './Staleness';
 import { blocking, emptyRun, nextRun, reduce, staleness } from './model';
-import { readLaunchArgv } from './argv';
+import { readLaunchArgv, resumeArgv } from './argv';
 import type { Launched } from './argv';
 import type { Effect } from '../pilot/tools';
 import type { Frame } from '../host';
@@ -103,7 +105,9 @@ export function Cockpit() {
    * which the prompt says out loud rather than papering over.
    */
   const [sentLaunch, setSentLaunch] = useState<Launched | null>(null);
-  const [tab, setTab] = useState<'output' | 'pilot' | 'keys' | 'verify' | 'findings'>('output');
+  const [tab, setTab] = useState<
+    'output' | 'pilot' | 'keys' | 'verify' | 'findings' | 'spend'
+  >('output');
   /** Pilot proposals waiting on a person, so a hidden tab can say so (#144). */
   const [proposals, setProposals] = useState(0);
   /**
@@ -274,6 +278,18 @@ export function Cockpit() {
   );
 
   /**
+   * Pick a halted run back up (`4d`).
+   *
+   * Through `launch`, not beside it: the request-id allocation, the column reset
+   * and the one-at-a-time rule keep exactly one definition each, which is the
+   * same reason the pilot's `start_run` proposal comes through there (#144).
+   */
+  const resume = useCallback(
+    (runId: string, dir: string) => launch(resumeArgv(runId, dir)),
+    [launch],
+  );
+
+  /**
    * Answer a waiting gate.
    *
    * The decision goes over the wire as the host gave us the id, and unnarrowed:
@@ -421,12 +437,17 @@ export function Cockpit() {
             <Launch busy={busy || !wire.connected} onLaunch={launch} />
           )}
           <LoopColumn run={run} now={now} hostPid={wire.hostPid} />
+          {/* `4g`, and only on the ending that means the loop finished. Every
+              other exit is a halt, and a halt gets the footer's banner and its
+              one action rather than a summary of work that stopped early. */}
+          {run.completed?.exit === 0 && <Summary run={run} />}
           <Footer
             run={run}
             busy={busy}
             onDecide={answer}
             onPause={pause}
             onStop={() => setConfirmStop(true)}
+            onResume={resume}
             pausing={pausing}
           />
         </div>
@@ -474,6 +495,16 @@ export function Cockpit() {
             >
               Findings{blocking(run) > 0 ? ` · ${String(blocking(run))}` : ''}
             </button>
+            {/* `5e`. No count: a token total in a tab label is a number you
+                cannot act on, and the design puts consumption in the tab BAR
+                rather than on the tab - which is a different element this
+                slice does not have. */}
+            <button
+              className={`v-cockpit__tab ${tab === 'spend' ? 'v-cockpit__tab--on' : ''}`}
+              onClick={() => setTab('spend')}
+            >
+              Spend
+            </button>
             {/* Named rather than omitted, each with the issue that would fill
                 it. A tab bar that showed only what works reads as a finished
                 app with three tabs. */}
@@ -487,6 +518,7 @@ export function Cockpit() {
           {tab === 'output' && <OutputPane lines={run.output} />}
           {tab === 'verify' && <VerifyPane passes={run.verify} />}
           {tab === 'findings' && <FindingsPane censuses={run.censuses} />}
+          {tab === 'spend' && <SpendPane run={run} />}
           {/* Mounted whatever tab is showing, and hidden rather than unmounted.
               A conversation is state nobody can get back, and a proposal waiting
               on a person would be destroyed by a glance at the output pane -

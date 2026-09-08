@@ -1298,3 +1298,149 @@
   color: var(--text-primary);
   border-bottom-color: var(--rule-strong);
 }
+
+/* ------------------------------------------------------------ done summary (4g) */
+
+.v-summary {
+  border: 1px solid var(--rule-card);
+  background: var(--surface-card);
+  padding: var(--space-4);
+  margin: var(--space-3) var(--space-4) 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.v-summary__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+}
+
+.v-summary__title {
+  font: var(--type-title);
+  letter-spacing: var(--track-title);
+  color: var(--text-primary);
+}
+
+.v-summary__facts {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-2) var(--space-4);
+  margin: 0;
+  font: var(--type-body-sm);
+}
+
+.v-summary__facts dt {
+  font: var(--type-label);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.v-summary__facts dd {
+  margin: 0;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.v-summary__facts code {
+  font: var(--type-mono-sm);
+  color: var(--text-primary);
+}
+
+/* A named absence, never a blank and never a zero. */
+.v-summary__absent {
+  color: var(--text-tertiary);
+}
+
+.v-summary__next {
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+  margin: 0;
+  border-top: 1px solid var(--rule-inner);
+  padding-top: var(--space-3);
+}
+
+/* ------------------------------------------------------------ spend pane (5e / 6e) */
+
+.v-spend {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--surface-page);
+  padding: var(--space-4) var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.v-spend__block {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.v-spend__h {
+  font: var(--type-section);
+  letter-spacing: var(--track-section);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin: 0;
+}
+
+.v-spend__total {
+  font: var(--type-display);
+  letter-spacing: var(--track-display);
+  color: var(--text-display);
+  margin: 0;
+}
+
+.v-spend__note {
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+/* A named absence, never a blank and never a zero. */
+.v-spend__absent {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  margin: 0;
+}
+
+.v-spend__phases {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.v-spend__phases li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  padding: var(--space-1) 0;
+  border-bottom: 1px solid var(--rule-inner);
+}
+
+.v-spend__phase {
+  flex: 1;
+  font: var(--type-body-sm);
+  color: var(--text-primary);
+}
+
+.v-spend__figure {
+  font: var(--type-mono-sm);
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.v-spend__codex {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
