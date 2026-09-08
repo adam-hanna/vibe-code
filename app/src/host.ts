@@ -496,6 +496,15 @@ export interface PilotTurn {
   prompt: string;
   system: string;
   model: string;
+  /**
+   * The repository the turn runs in, and the only one it can read.
+   *
+   * `--restricted` confines the pilot's file tools to the child's working
+   * directory, so this is the permission boundary and not an incidental cwd.
+   * The host refuses a frame without it rather than falling back to its own
+   * directory, which under the app is whatever Rust spawned it in.
+   */
+  dir: string;
   sessionId: string;
   resume: boolean;
 }

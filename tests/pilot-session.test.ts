@@ -28,6 +28,7 @@ const REQUEST = {
   system: 'you are the pilot',
   model: 'claude-opus-5',
   sessionId: 'abc',
+  dir: '/repo',
   resume: false,
 };
 
@@ -61,13 +62,29 @@ test('a pilot frame decodes, and every field is required', () => {
   // Not argv: an `invoke` hands its strings to `parseArgs`, which is the one
   // definition of a legal invocation. There is nothing below this to catch a
   // missing model or an empty prompt, so it is caught here.
-  for (const field of ['prompt', 'system', 'model', 'sessionId']) {
+  for (const field of ['prompt', 'system', 'model', 'sessionId', 'dir']) {
     const bad = decode(line({ ...REQUEST, [field]: '' }));
     assert.equal(bad.ok, false, `an empty ${field} was accepted`);
     assert.match(bad.ok === false ? bad.reason : '', new RegExp(field));
   }
   const noResume = decode(line({ ...REQUEST, resume: 'yes' }));
   assert.equal(noResume.ok, false);
+});
+
+test('the turn runs in the repository the frame named, not in this process', async () => {
+  // The defect this closes, and it is the reason `dir` is on the frame at all.
+  // `--restricted` confines Read, Glob and Grep to the child's cwd, so under
+  // the app - where Rust spawns the host and the host inherits that spawn's
+  // directory - the pilot was searching a home directory and timing out at 20s
+  // per search. A cwd this process picked is a cwd nobody chose.
+  let seen: string | null = null;
+  const { session } = withPilot((options) => {
+    seen = options.cwd;
+    return Promise.resolve({ text: 'ok', sessionId: 's', tokens: TOKENS });
+  });
+  session.receive(line({ ...REQUEST, dir: 'C:/some/worktree' }));
+  await settle();
+  assert.equal(seen, 'C:/some/worktree');
 });
 
 test('the reply carries the tokens and no money, because there is none to carry', async () => {

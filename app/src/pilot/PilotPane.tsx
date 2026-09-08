@@ -13,6 +13,7 @@ import {
 } from './backend';
 import type { Backend } from './backend';
 import { systemPrompt } from './brief';
+import { readEmitted, visible } from './emit';
 import { declare, execute } from './tools';
 import {
   costOf,
@@ -37,6 +38,7 @@ import {
   refuse,
   settle,
   spendParts,
+  trailingResults,
   unanswered,
   unrecognised,
 } from './transcript';
@@ -338,7 +340,13 @@ function ReplyCard({
         {outcome?.kind === 'failed' && <StateKicker tone="alarm">failed</StateKicker>}
       </div>
 
-      {reply.text !== '' && <div className="v-pilot__text">{reply.text}</div>}
+      {/* `visible`, not the raw text: a tool call the subscription backend made
+          arrives as a fenced block inside the prose, and the card two lines down
+          is a better rendering of it than the JSON that produced it. The raw
+          text stays in `Reply.text`, which is the record (#211). */}
+      {visible(reply.text) !== '' && (
+        <div className="v-pilot__text v-selectable">{visible(reply.text)}</div>
+      )}
       {outcome?.kind === 'failed' && <div className="v-pilot__why">{outcome.message}</div>}
 
       {reply.calls.map((call) => (
@@ -399,14 +407,16 @@ export interface PilotPaneProps {
    */
   statuses: readonly KeyStatus[] | null;
   /**
-   * The first thing a person said, reported upward once (#211).
+   * The repository this conversation is about (#211).
    *
-   * The composer is the front door, so the opening message is also the thing a
-   * launch bar should be prefilled with — and this pane is the only place that
-   * knows what it was. Reported rather than lifted: the conversation stays owned
-   * by the reducer here, which is the rule this file is written to.
+   * Not decoration and not a display field: the subscription backend spawns
+   * `claude -p` **in** this directory under `--restricted`, which confines its
+   * Read, Glob and Grep to it. So this is the pilot's permission boundary, and
+   * an empty one is refused rather than defaulted — a turn in a directory
+   * nobody chose is what produced a pilot searching a home directory and timing
+   * out on every glob.
    */
-  onOpening?: (content: string) => void;
+  dir: string;
   /**
    * Rendered above the composer while no run exists (#211).
    *
@@ -429,10 +439,10 @@ export interface PilotPaneProps {
 export function PilotPane({
   run,
   launched,
+  dir,
   onEffect,
   onPending,
   statuses,
-  onOpening,
   kickoff,
 }: PilotPaneProps) {
   const [conversation, dispatch] = useReducer(apply, undefined, emptyConversation);
@@ -569,6 +579,17 @@ export function PilotPane({
         }
         // The CLI's id wins over the one we proposed, always.
         session.current = frame.sessionId;
+        // The tool calls, lifted out of the reply and dispatched **before** the
+        // terminal event: `reduce` drops an event for a turn that is no longer
+        // live, and `ended` is what closes it. Read from `frame.text`, which is
+        // the whole reply, rather than from the deltas we accumulated - a block
+        // split across two deltas is still one block in the whole.
+        for (const call of readEmitted(frame.text, turn)) {
+          dispatch({
+            type: 'event',
+            event: { kind: 'tool_call', turn, id: call.id, name: call.name, arguments: call.arguments },
+          });
+        }
         dispatch({
           type: 'event',
           event: {
@@ -599,17 +620,23 @@ export function PilotPane({
       // spawns `claude -p` with the closed read-only allow-list `pilotchat.ts`
       // builds, so there is no key to have and nothing to bill.
       //
-      // It also declares **no tools**. Tool declaration is a vendor-API feature
-      // and the CLI takes no schemas from us, so `declare()` has nowhere to go -
-      // which means no proposals from this backend, said out loud under the
-      // selector rather than left to be discovered.
+      // It declares no tools **over the wire**, because the CLI takes no
+      // schemas from us — so `declare()` goes into the system prompt instead and
+      // the calls come back in a fenced block that `emit.ts` reads (#211). Same
+      // table, same executors, same proposal card; only the channel differs.
       if (!needsKey(provider)) {
         const id = session.current;
         void host
           .pilotTurn({
-            prompt: said ?? '',
-            system: systemPrompt(run, launched),
+            // A follow-up carries the tool results, because the CLI has no tool
+            // role to put them in and is resumed by session id — so everything
+            // else said is already there and the results are the only new
+            // thing. An empty prompt here used to be sent instead, which asked
+            // the model to answer nothing.
+            prompt: said ?? trailingResults(messages) ?? '',
+            system: systemPrompt(run, launched, 'emitted'),
             model,
+            dir,
             sessionId: id ?? crypto.randomUUID(),
             resume: id !== null,
           })
@@ -655,7 +682,7 @@ export function PilotPane({
           }),
         );
     },
-    [model, provider, run, launched],
+    [model, provider, run, launched, dir],
   );
 
   const owed = unanswered(conversation);
@@ -689,11 +716,27 @@ export function PilotPane({
     start(conversation.messages, null);
   }, [owesReply, conversation.messages, start, verdict.allowed]);
 
+  /**
+   * Why nothing can be sent, or null. Drawn in the composer, because a disabled
+   * field with no reason beside it is the same defect in every product.
+   *
+   * The **repository** case is the subscription backend's and only its: that
+   * turn is a child process that has to run somewhere, and `--restricted` makes
+   * where it runs the thing it is allowed to read. Refused rather than defaulted
+   * to this window's own directory (#211).
+   */
+  const blocked: string | null =
+    needsKey(provider) && (statuses === null || !keys.usable(statuses).includes(provider))
+      ? `no ${keys.PROVIDER_NAME[provider]} key — enter one under Keys`
+      : !needsKey(provider) && dir.trim() === ''
+        ? 'choose a repository first — this backend runs in one and can read only that one'
+        : null;
+
   const ready =
     // The subscription backend needs no key, which is the whole of #193: the
-    // pane does something useful with nothing configured. The key check is for
-    // the two that reach a vendor.
-    (!needsKey(provider) || (statuses !== null && keys.usable(statuses).includes(provider))) &&
+    // pane does something useful with nothing configured. What it does need is a
+    // directory to run in, which is the line above.
+    blocked === null &&
     owed.length === 0 &&
     // The pilot's own ceiling, which is off unless somebody set one. It gates
     // the tool loop as well as the composer: a chain of tool calls is exactly
@@ -709,10 +752,6 @@ export function PilotPane({
     const content = entry.trim();
     if (content === '' || live !== null) return;
     setEntry('');
-    // The first thing said, once. `messages.length === 0` rather than a ref: the
-    // reducer already holds the fact, and a second source for it is how the two
-    // come to disagree about which message was first.
-    if (conversation.messages.length === 0) onOpening?.(content);
     // A person spoke, so the pilot's rope is new again. The ceiling exists to
     // stop it spending unattended, and it is not unattended now.
     chain.current = 0;
@@ -721,7 +760,7 @@ export function PilotPane({
     // this is the only place that knows both, and sent in full: neither vendor
     // remembers a previous request.
     start([...conversation.messages, { role: 'user' as const, content }], content);
-  }, [conversation.messages, entry, live, start, onOpening]);
+  }, [conversation.messages, entry, live, start]);
 
   const onDecide = useCallback(
     (id: string, accepted: boolean, note: string) => {
@@ -775,15 +814,11 @@ export function PilotPane({
             ignored - it declares no tools, because tool declaration is a
             vendor-API feature the CLI takes no schemas for (#193). */}
         <span className="v-pilot__note">{BACKEND_NOTE[provider]}</span>
-        {/* Names the provider rather than "a key". One provider configured is a
-            supported state, so this is the message for having picked the other -
-            and the subscription backend never reaches it, which is the whole
-            point of the issue. */}
-        {needsKey(provider) && statuses !== null && !keys.usable(statuses).includes(provider) && (
-          <span className="v-pilot__note">
-            no {keys.PROVIDER_NAME[provider]} key — enter one under Keys
-          </span>
-        )}
+        {/* Names what is missing rather than "not ready". One provider
+            configured is a supported state, and so is a window that has not
+            been pointed at a repository yet - two different absences with two
+            different fixes. */}
+        {blocked !== null && <span className="v-pilot__note">{blocked}</span>}
         {proposals.length > 0 && (
           <span className="v-pilot__note">
             {proposals.length} proposal(s) waiting on you — nothing more can be sent until they are
@@ -813,7 +848,13 @@ export function PilotPane({
         </div>
       )}
 
-      <div className="v-pilot__log">
+      {/* `v-selectable`, because `base.css` turns selection off on `body` — a
+          drag across the cockpit chrome should not paint half the app blue, and
+          the rule restores it on "anything a user reads or copies". A
+          conversation is the most copied thing in the product and was missed:
+          the first bug report about it arrived as a screenshot of text nobody
+          could select. */}
+      <div className="v-pilot__log v-selectable">
         {conversation.replies.length === 0 && conversation.live === null && (
           <div className="v-pilot__note">
             Nothing yet. The pilot can read this run and propose a launch or a gate answer — it
@@ -862,7 +903,7 @@ export function PilotPane({
         <textarea
           className="v-pilot__entry"
           rows={2}
-          placeholder={ready ? 'say something to the pilot' : 'enter a key first'}
+          placeholder={blocked ?? 'say what you want built — the pilot proposes the run'}
           value={entry}
           disabled={!ready}
           onChange={(e) => setEntry(e.target.value)}

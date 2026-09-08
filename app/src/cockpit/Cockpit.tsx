@@ -171,14 +171,10 @@ export function Cockpit() {
    * which the prompt says out loud rather than papering over.
    */
   const [sentLaunch, setSentLaunch] = useState<Launched | null>(null);
-  /**
-   * The first thing said to the pilot, so the launch bar can carry it (#211).
-   *
-   * Held here rather than in the pilot pane for the reason `repoDir` is: two
-   * components need it and one of them is not inside the other. The pane
-   * reports it once and owns the conversation itself.
-   */
-  const [opening, setOpening] = useState<string | null>(null);
+  // There is deliberately no `opening` here any more (#211). It existed to
+  // prefill a launch bar with the first thing said to the pilot, and the launch
+  // bar is gone: the pilot proposes the run itself, so nothing in this window
+  // needs to remember the conversation on its behalf.
   /**
    * The round and token caps in force, or null (#223, `4d`).
    *
@@ -613,8 +609,9 @@ export function Cockpit() {
               <div className="v-loop__waiting">
                 <StateKicker tone="quiet">waiting for the brief</StateKicker>
                 <p>
-                  Say what you want in the conversation — that is the front door. When it is
-                  clear, <strong>start a run</strong> is under it.
+                  Say what you want in the conversation — that is the front door. There is no
+                  start button: when the pilot has enough, it <strong>proposes</strong> the exact
+                  command and you press that.
                 </p>
               </div>
               {/* `4a`, for the one moment somebody is deciding how THIS run
@@ -763,22 +760,18 @@ export function Cockpit() {
             <PilotPane
               run={run}
               launched={sentLaunch}
+              dir={repoDir}
               onEffect={onEffect}
               onPending={setProposals}
               statuses={keyStatuses}
-              onOpening={setOpening}
-              // Only while there is no run to watch. Once one is going, the
-              // pane is a conversation *about* it and a launch bar underneath
-              // would be offering to start a second one that `serve.ts` refuses.
+              // The repository, whenever there is no run to watch. Once one is
+              // going the pane is a conversation *about* it, and the field is
+              // settled — the run is already using that directory, and changing
+              // it underneath would point the pilot at a repository the run is
+              // not in.
               kickoff={
                 (!launched || run.completed !== null) && !outside ? (
-                  <Kickoff
-                    dir={repoDir}
-                    onDir={rememberRepo}
-                    opening={opening}
-                    onLaunch={launch}
-                    busy={busy || !wire.connected}
-                  />
+                  <Kickoff dir={repoDir} onDir={rememberRepo} busy={busy || !wire.connected} />
                 ) : undefined
               }
             />

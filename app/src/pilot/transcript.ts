@@ -392,6 +392,39 @@ export function decide(
   };
 }
 
+/**
+ * The tool results at the end of the conversation, as one message to send back
+ * on a backend that has no tool role (#211).
+ *
+ * The two wires carry a result differently and this is the difference, in one
+ * function. A vendor gets the whole `messages` array with `role: 'tool'` entries
+ * in it, because that is the shape its API defines. The subscription CLI is
+ * resumed by session id — it already holds everything said — so the only thing
+ * to send is what came back, and it goes as the next user turn because that is
+ * the only role `claude -p` has.
+ *
+ * The **trailing** run rather than all of them: everything earlier has already
+ * been sent on a previous turn, and re-sending it would have the model answer
+ * results it has already acted on.
+ *
+ * Null when the conversation does not end in results, which is the case where
+ * there is nothing to say and a turn should not be taken at all.
+ */
+export function trailingResults(messages: readonly Message[]): string | null {
+  let from = messages.length;
+  while (from > 0 && messages[from - 1]?.role === 'tool') from -= 1;
+  if (from === messages.length) return null;
+  const lines = messages.slice(from).map((message) => {
+    if (message.role !== 'tool') return '';
+    return `### ${message.name === '' ? message.id : message.name}\n${message.content}`;
+  });
+  return [
+    'Results of the tool calls you made. Nothing else has happened since.',
+    '',
+    ...lines,
+  ].join('\n');
+}
+
 /** Note an event this build did not recognise. Shown, never discarded. */
 export function unrecognised(conversation: Conversation): Conversation {
   return { ...conversation, unknown: conversation.unknown + 1 };

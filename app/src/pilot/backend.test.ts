@@ -27,16 +27,20 @@ test('the subscription backend is the one that works with nothing configured', (
   for (const provider of PROVIDERS) expect(needsKey(provider)).toBe(true);
 });
 
-test('every backend has a name and a note saying what it can and cannot do', () => {
-  // The note is not decoration. The subscription backend declares no tools, so
-  // it cannot propose a run, and somebody who was not told would discover it by
-  // asking the pilot to launch something and being ignored.
+test('every backend has a name and a note saying how it takes a tool call', () => {
+  // The note is not decoration: the two backends reach the same tools by
+  // different roads, and which road this one is on decides what a person sees
+  // come back — a card built from a vendor call, or one built from a fenced
+  // block. It used to say the subscription backend could not propose at all;
+  // #211 gave it the emitted channel, so that claim is no longer the contract.
+  // What is still true, and is what this pins, is that no backend fires one.
   for (const backend of BACKENDS) {
     expect(BACKEND_NAME[backend], `${backend} has no name`).toBeTruthy();
     expect(BACKEND_NOTE[backend], `${backend} has no note`).toBeTruthy();
   }
   expect(BACKEND_NOTE.subscription).toMatch(/no key/i);
-  expect(BACKEND_NOTE.subscription).toMatch(/cannot propose a run/i);
+  expect(BACKEND_NOTE.subscription).toMatch(/press the button/i);
+  for (const provider of PROVIDERS) expect(BACKEND_NOTE[provider]).toMatch(/propose/i);
 });
 
 test('the subscription models are their own list, not a row in the vendor map', () => {

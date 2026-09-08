@@ -430,7 +430,14 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
         model: msg.model,
         sessionId: msg.sessionId,
         resume: msg.resume,
-        cwd: process.cwd(),
+        // **The repository the window named, never this process's cwd.** Under
+        // the app the host is spawned by Rust and inherits whatever directory
+        // that spawn had - which in a manual pass was a home directory, so the
+        // pilot's `Glob` walked the whole of it and timed out at 20s on every
+        // search. `--restricted` confines the file tools to *this* path, so it
+        // is the permission boundary rather than an incidental working
+        // directory, and the frame is refused without it.
+        cwd: msg.dir,
         timeoutMs: PILOT_TIMEOUT_MS,
         onDelta: (text: string) => {
           send({ type: 'pilot_delta', id, text });

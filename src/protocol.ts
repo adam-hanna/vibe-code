@@ -234,6 +234,23 @@ export type Inbound =
       prompt: string;
       system: string;
       model: string;
+      /**
+       * The repository the turn runs in, and the only one it can read.
+       *
+       * **Required, and the reason is the whole of `--restricted`.** That flag
+       * confines `Read`, `Glob` and `Grep` to the child's working directory, so
+       * the cwd is not incidental here the way it is for a process that writes
+       * nothing - it *is* the permission boundary. Before this rode on the
+       * frame, `serve.ts` passed `process.cwd()`, which under the app is
+       * whatever Rust happened to spawn the host in: a manual pass got a pilot
+       * searching a home directory, timing out at 20s on every `Glob`, and
+       * reporting that it could not see the workspace.
+       *
+       * Refused rather than defaulted for the same reason `diff` refuses a
+       * missing base: a directory this process picked is a directory nobody
+       * chose, and pointing a filesystem tool at one is not a repair.
+       */
+      dir: string;
       /** The conversation to continue, or to create on the first turn. */
       sessionId: string;
       resume: boolean;
@@ -365,7 +382,7 @@ export function decode(line: string): Decoded {
       // argv: an `invoke` hands its strings to `parseArgs`, which is the single
       // definition of a legal invocation, and there is no equivalent below this
       // to catch a missing model or an empty prompt.
-      const fields = ['prompt', 'system', 'model', 'sessionId'] as const;
+      const fields = ['prompt', 'system', 'model', 'sessionId', 'dir'] as const;
       for (const field of fields) {
         const value = parsed[field];
         if (typeof value !== 'string' || value === '') {
@@ -385,6 +402,7 @@ export function decode(line: string): Decoded {
           system: parsed['system'] as string,
           model: parsed['model'] as string,
           sessionId: parsed['sessionId'] as string,
+          dir: parsed['dir'] as string,
           resume,
         },
       };

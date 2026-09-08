@@ -22,12 +22,18 @@ import type { Provider } from './keys';
  * read the repository - `--tools Read Glob Grep` under `--restricted`, which is
  * what makes it useful for *"what is this doing"*.
  *
- * In the other direction the subscription pilot has **no vibe tools**: no
- * `start_run`, no proposals, nothing from `tools.ts`. Tool declaration is a
- * vendor-API feature and `claude -p` takes no schemas from us, so there is
- * nothing to declare them through. That is a real limitation and the pane says
- * so rather than leaving somebody to discover it by asking the pilot to launch
- * something and being ignored.
+ * In the other direction the two reach the **same** tools by different roads,
+ * which is #211 and is a change from how this shipped. `claude -p` still takes
+ * no schemas from us, so a subscription turn is told `declare()` in its system
+ * prompt and answers in a fenced block that `emit.ts` reads back into the same
+ * `Call` a vendor would have streamed. One table, two channels, and `execute`
+ * below them both - so a tool cannot exist on one backend and not the other.
+ *
+ * What stays asymmetric is the wire, not the capability: a vendor call is
+ * validated by the vendor against a schema, and an emitted one is validated here
+ * on arrival. Both are propose-only, which is what makes the weaker channel
+ * acceptable - a block read wrong produces a card with a visibly wrong argv that
+ * nobody presses, never an action.
  */
 export type Backend = Provider | 'subscription';
 
@@ -71,8 +77,9 @@ export function modelsFor(backend: Backend, api: Readonly<Record<Provider, reado
 /** What this backend can and cannot do, said out loud in the pane. */
 export const BACKEND_NOTE: Readonly<Record<Backend, string>> = {
   subscription:
-    'runs on the subscription — no key needed. It can read the repository, and it cannot ' +
-    'propose a run: tool declaration is a vendor-API feature the CLI takes no schemas for.',
+    'runs on the subscription — no key needed. It can read the repository, and it proposes a ' +
+    'run in a fenced block rather than a tool call: the CLI takes no schemas, so the table is ' +
+    'in its prompt. You still press the button.',
   anthropic: 'over the API, billed to your key. It can propose a run and cannot read files.',
   openai: 'over the API, billed to your key. It can propose a run and cannot read files.',
 };

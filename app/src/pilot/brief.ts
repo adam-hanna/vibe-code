@@ -1,4 +1,5 @@
-import { describeRun } from './tools';
+import { FENCE } from './emit';
+import { declare, describeRun } from './tools';
 import type { Launched } from '../cockpit/argv';
 import type { Run } from '../cockpit/model';
 
@@ -114,13 +115,64 @@ function whatWasAsked(launched: Launched | null): string {
 }
 
 /**
+ * How to call a tool on a backend with no tool API (#211).
+ *
+ * The API-backed pilot is sent `declare()` as schemas and the vendor streams
+ * calls back. `claude -p` takes no schemas from us, so the same table is written
+ * into the prompt and the same calls come back in a fenced block that `emit.ts`
+ * reads. **One table, two channels** - `declare()` is the source for both, so a
+ * tool cannot exist on one backend and not the other, and a schema cannot drift
+ * from the description the model is given.
+ */
+function howToCall(): string {
+  return [
+    '## Calling a tool',
+    '',
+    'You have no tool API on this backend, so a call is a fenced block. Write it on',
+    'its own lines, exactly like this, and nothing else inside the fence:',
+    '',
+    '```' + FENCE,
+    '{ "tool": "read_run", "input": {} }',
+    '```',
+    '',
+    'One block per call. You may write several, and you may write prose around them -',
+    'say what you are about to do and why, because the person beside you reads that.',
+    'The block itself is not shown to them; what they see is the card it produces.',
+    '',
+    'A block that is not valid JSON, or that names a tool below, is reported back to',
+    'you as a failed call rather than guessed at. Do not put a block in a sentence',
+    'describing what you *would* call - it will be called.',
+    '',
+    'start_run and answer_gate are proposals: they put the exact command in front of',
+    'the person, who runs it or does not. Nothing you write starts a run by itself.',
+    '',
+    'The tools, with their schemas:',
+    '',
+    JSON.stringify(declare(), null, 2),
+    '',
+    'Separately from these, you have the CLI\'s own Read, Glob and Grep, confined to',
+    'the repository above. Use them to answer questions about the code; use the tools',
+    'above to say anything about the run.',
+  ].join('\n');
+}
+
+/**
  * The system prompt for one turn.
  *
  * Pure, and takes everything it needs as arguments for the same reason `reduce`
  * does: this is the file where a wrong answer would be invisible, because it goes
  * out over a wire and comes back as prose.
+ *
+ * `channel` says how this backend takes a tool call. `native` is a vendor that
+ * was sent `declare()` as schemas and needs no instructions; `emitted` is the
+ * subscription CLI, which is told the table in prose because there is nowhere
+ * else to put it.
  */
-export function systemPrompt(run: Run, launched: Launched | null): string {
+export function systemPrompt(
+  run: Run,
+  launched: Launched | null,
+  channel: 'native' | 'emitted' = 'native',
+): string {
   return [
     WHO,
     '',
@@ -131,5 +183,6 @@ export function systemPrompt(run: Run, launched: Launched | null): string {
     JSON.stringify(describeRun(run), null, 2),
     '',
     HOW_TO_READ,
+    ...(channel === 'emitted' ? ['', howToCall()] : []),
   ].join('\n');
 }

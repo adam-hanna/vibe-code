@@ -504,11 +504,46 @@ checked cannot then hand `'subscription'` to the keychain.
 
 **The two are asymmetric in both directions, and both are on purpose.** The
 API-backed pilot has no filesystem at all; the subscription one can read the
-repository. In the other direction the subscription pilot has **no vibe tools** —
-no `start_run`, no proposals — because tool declaration is a vendor-API feature
-and `claude -p` takes no schemas from us. That is a real limitation and
-`BACKEND_NOTE` says it under the selector, rather than leaving somebody to
-discover it by asking the pilot to launch a run and being ignored.
+repository. In the other direction the subscription pilot used to have **no vibe
+tools** — no `start_run`, no proposals — because tool declaration is a vendor-API
+feature and `claude -p` takes no schemas from us.
+
+**That limitation is closed, and closing it is what let the launch form go**
+(#211). The complaint was exact — *"I shouldn't have a button to start a run, the
+pilot should control that"* — and it could not be answered while the default
+backend, the one that needs no key, was the one that could not propose anything:
+deleting the bar would have shipped a front door that does not open.
+`app/src/pilot/emit.ts` is the channel. `declare()` goes into the system prompt
+instead of onto the wire, a call comes back in a ```` ```vibe-tool ```` block, and
+it is parsed into the same `Call` a vendor streams — so `execute`, the proposal
+card and the button underneath it are untouched. **One table, two channels**, and
+a tool cannot exist on one backend and not the other.
+
+Three things keep it honest, and the first is why it is not the English-matching
+#133 exists to prevent. **The block is authored for this reader**, described to
+the model in as many words, the same way a JSON schema is on the API path — where
+#133's failure was prose written for a human and read for a decision. **Reading it
+wrong decides nothing**: every tool that acts is propose-only, so a misparse is a
+card with a visibly wrong argv that nobody presses. And it **fails closed in the
+cheap direction** — a block that is not JSON becomes a call that says it cannot be
+run, and one that names no tool is refused by name with the real list, which is
+the only way the model corrects itself. `src/raise.ts` is the same shape already:
+declared markers, parsed on resume, refused rather than repaired.
+
+What is still asymmetric is the wire and not the capability: a vendor validates a
+call against a schema before it arrives, and an emitted one is validated here on
+arrival. `BACKEND_NOTE` says which road this backend is on, because what comes
+back looks the same and how it got there does not.
+
+**The pilot runs in the repository the window named, and that path is a
+permission boundary.** `--restricted` confines `Read`, `Glob` and `Grep` to the
+child's working directory, so `cwd` is not incidental the way it is for a process
+that writes nothing. `serve.ts` passed `process.cwd()` until #211 — under the app
+that is whatever directory Rust spawned the host in, and a manual pass got a pilot
+walking a home directory, timing out at 20s on every search and reporting that it
+could not see the workspace. `dir` is now required on the `pilot` frame and
+**refused rather than defaulted**, for the reason `diff` refuses a missing base: a
+directory this process picked is a directory nobody chose.
 
 **A subscription turn is counted in tokens and never in money**, and its `why` is
 deliberately not the unpriced-model sentence. Those are two different nulls: one
