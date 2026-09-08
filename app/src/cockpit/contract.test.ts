@@ -145,6 +145,37 @@ test('every boundary a run can hold at says what it is asking', () => {
   }
 });
 
+test('no gate card sends somebody to an artifact that does not exist yet', () => {
+  // Caught by opening a live run's directory at a `plan-round` gate and finding
+  // no PLAN.md in it. `planPhase` writes that file *after* the critique loop
+  // breaks on approval, so before then it does not exist - and the first draft
+  // of this map opened the plan-round card by telling somebody to read it.
+  //
+  // **The ordering itself is not checkable from here, and an earlier draft of
+  // this test pretended it was.** It compared the source offset of the write
+  // against the offset of the `plan-approved` gate and failed - correctly, and
+  // for a reason that had nothing to do with the bug: `planPhase` is *defined*
+  // below its own call site, so byte order in the file is not execution order.
+  // A guard that reads source position as sequence is a guard that will pass or
+  // fail on where somebody moved a function.
+  //
+  // So what is asserted is what can be: the write still exists, so the
+  // `plan-approved` card's reference to it has not rotted, and the two
+  // boundaries that precede it do not send anybody to open it. That the write
+  // happens after the critique loop breaks on approval was established by
+  // reading `planPhase`, and is recorded here rather than fabricated as a check.
+  expect(
+    orchestrator.indexOf("artifact(state, 'PLAN.md'"),
+    'PLAN.md is no longer written by the orchestrator, so the plan-approved card is stale',
+  ).toBeGreaterThan(0);
+
+  for (const boundary of ['plan-round', 'question-round']) {
+    expect(hold(boundary)?.inspect, `${boundary} points at a file that is not there yet`).not.toMatch(
+      /\bPLAN\.md is\b|\bopen PLAN\.md\b|\bread PLAN\.md\b/,
+    );
+  }
+});
+
 test('the six this build describes, and no phrase invented for a seventh', () => {
   expect(gateable()).toEqual([
     'plan-round',

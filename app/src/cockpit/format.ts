@@ -191,13 +191,19 @@ export interface Hold {
 const HOLDS: Readonly<Record<string, Hold>> = {
   'plan-round': {
     what: 'The planner has just rewritten the plan — because the critic objected, or because a question round came back with answers.',
+    // **Not PLAN.md.** `planPhase` writes that file only after the critique
+    // loop breaks on approval, so at this boundary it does not exist yet — a
+    // card sending somebody to open it would be sending them to a missing file
+    // on the screen built to tell them where to look. `plan-<round>.json` is
+    // this revision and `FOLLOW-UPS.md` is rewritten beside it every time.
     inspect:
-      'PLAN.md is the plan as it now stands, plan-<round>.json is this revision on its own, and FOLLOW-UPS.md is what it decided to leave out. All three are in the run directory below.',
-    cost: 'Continuing sends it to the critic, which is one Codex turn. The plan is not approved yet and this round counts against the plan-round cap.',
+      'plan-<round>.json is the plan as it now stands — the highest-numbered one — and plan-critique-<round>.json beside it is what the critic objected to, if this revision was answering one. FOLLOW-UPS.md is what the plan decided to leave out. There is no PLAN.md yet: that is written only once the plan is approved.',
+    cost: 'Continuing sends it to the critic, which is one Codex turn. The plan is not approved yet, and this round counts against the plan-round cap.',
   },
   'question-round': {
     what: 'The planner raised questions it could not settle from the brief, and the answerer has already taken its turn on them.',
-    inspect: 'The questions and what came back for each are listed below, and in the Questions tab.',
+    inspect:
+      "The questions and what came back for each are listed below, and in the Questions tab. answers-<round>.json in the run directory is the answerer's reply as it arrived.",
     cost: 'Continuing accepts those answers and spends a planner turn revising the plan with them.',
   },
   'plan-approved': {
