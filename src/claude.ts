@@ -164,6 +164,11 @@ export async function claudeTurn(
       input: prompt,
       cwd,
       timeoutMs,
+      // One of the two children a person may stop mid-flight (#209). Off by
+      // default everywhere else on purpose: `git`, the verification gate and
+      // the app-server client all come through the same `run()`, and none of
+      // them is something "stop the turn" gives permission to kill.
+      interruptible: true,
       ...(heartbeat === null ? {} : { onLine: heartbeat.onLine }),
     });
     ended.seen = { code, signal };

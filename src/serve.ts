@@ -1,3 +1,4 @@
+import { requestCancel } from '@src/cancel.js';
 import { main } from '@src/cli.js';
 import * as log from '@src/log.js';
 import { createLineReader, decode, encode, PROTOCOL_VERSION } from '@src/protocol.js';
@@ -241,6 +242,21 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       // for it.
       send({ type: 'result', id: msg.id, exit: 0 });
       settleIfDone();
+      return;
+    }
+
+    if (msg.type === 'cancel') {
+      // Acted on immediately rather than at a boundary, which is the whole
+      // difference from `pause`: the child is killed now and the run ends the
+      // way a round cap ends it, resumably. `requestCancel` latches, so no
+      // further agent turn can start even if the killed turn's error is
+      // swallowed on its way up.
+      const why = msg.reason ?? 'stopped from the window';
+      const killed = requestCancel(why);
+      // The count is on the wire because it is a different thing to tell
+      // somebody: zero means the cancel arrived between turns, so the run still
+      // ends but no work was discarded.
+      send({ type: 'result', id: msg.id, exit: killed });
       return;
     }
 

@@ -2,6 +2,10 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+// The one import, and it points the other way from everything else here:
+// `cancel.ts` is a leaf that imports only this module's types, so the kill
+// mechanism lives beside the spawn rather than being threaded down to it.
+import { Cancelled, CANCEL_ENDING, cancelRequested, registerInterruptible } from '@src/cancel.js';
 
 const isWin = process.platform === 'win32';
 
@@ -112,6 +116,18 @@ export interface RunOptions {
    * signal, and losing it must never cost the turn.
    */
   onLine?: ((line: string) => void) | undefined;
+  /**
+   * Whether a cancel may kill this child (#209).
+   *
+   * **Off by default, and the default is the safe one.** The two agent adapters
+   * set it and nothing else does: `git`, the verification gate and the
+   * app-server client all come through here, and none of them is something
+   * "stop the turn" gives permission to kill. A `git commit` killed mid-write
+   * leaves an index a later resume has to recover from, and the verification
+   * gate is the *user's own command* - a suite killed half-way is a `failing`
+   * verdict about a run nobody completed (#135).
+   */
+  interruptible?: boolean | undefined;
 }
 
 export interface RunResult {
@@ -228,9 +244,20 @@ export type RunFn = (
  * positional prompt argument.
  */
 export function run(bin: string, args: readonly string[], options: RunOptions = {}): Promise<RunResult> {
-  const { input, cwd, timeoutMs, onLine } = options;
+  const { input, cwd, timeoutMs, onLine, interruptible } = options;
 
   return new Promise<RunResult>((resolve, reject) => {
+    // Before the spawn, and the ordering is the fail-closed half of #209. A
+    // cancelled turn's error has to travel up through the retry logic and the
+    // loop's own handlers, any one of which could plausibly decide to have
+    // another go; refusing here means the next agent child does not start at
+    // all, rather than every layer in between having to remember not to.
+    const stopped = interruptible === true ? cancelRequested() : null;
+    if (stopped !== null) {
+      reject(new Cancelled(stopped));
+      return;
+    }
+
     const needsShell = isWin && /\.(cmd|bat)$/i.test(bin);
     const child = spawn(bin, [...args], {
       ...(cwd === undefined ? {} : { cwd }),
@@ -283,12 +310,34 @@ export function run(bin: string, args: readonly string[], options: RunOptions = 
       stderr += d;
     });
 
+    // Unregistered on every path out, in `settle`, so a child that ended on its
+    // own is never in the set when a later cancel walks it - a stale entry is a
+    // kill aimed at a pid the OS may have handed to somebody else by then.
+    let unregister: (() => void) | null = null;
+
     const settle = (fn: () => void): void => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      unregister?.();
       fn();
     };
+
+    if (interruptible === true) {
+      unregister = registerInterruptible(() => {
+        child.kill('SIGKILL');
+        // Rejected here rather than left to `close`, for the reason the timeout
+        // path settles itself: the caller has been given up on, and a `close`
+        // arriving afterwards would resolve a turn somebody stopped as though
+        // it had merely exited. `Cancelled` is a class rather than a message so
+        // the layers above can tell it from an ordinary failure without
+        // matching English - a turn that failed may be worth retrying, and a
+        // turn somebody stopped never is.
+        settle(() =>
+          reject(attachEnding(new Cancelled(cancelRequested() ?? 'asked to stop'), CANCEL_ENDING)),
+        );
+      });
+    }
 
     // The accumulated `stdout` dies with this closure, and that is deliberate.
     // A timed-out turn's usage is not a number worth charging: Codex reports

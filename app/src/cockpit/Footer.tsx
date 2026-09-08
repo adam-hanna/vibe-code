@@ -22,10 +22,16 @@ export interface FooterProps {
   run: Run;
   /** Answer the gate. The decision goes over the wire unnarrowed - `readDecision` judges it. */
   onDecide: (askId: number, decision: { kind: 'continue' } | { kind: 'stop'; reason: string }) => void;
+  /** Hold at the next boundary. Costs nothing (#210). */
+  onPause: () => void;
+  /** Kill the turn in flight and end the run, resumably (#209). Confirms first. */
+  onStop: () => void;
+  /** Whether a pause is armed and waiting for the next boundary. */
+  pausing: boolean;
   busy: boolean;
 }
 
-export function Footer({ run, onDecide, busy }: FooterProps) {
+export function Footer({ run, onDecide, onPause, onStop, pausing, busy }: FooterProps) {
   const [reason, setReason] = useState('');
 
   // A waiting gate outranks everything, including a run that has said it is
@@ -169,6 +175,32 @@ export function Footer({ run, onDecide, busy }: FooterProps) {
             (#140), so it holds at whatever `serve.ts` reaches - and naming a
             boundary it might not stop at would be a promise the app cannot keep. */}
         Every boundary holds. Which ones is configuration this build does not have yet (#140).
+      </div>
+
+      {/*
+        Hi-fi 18. Two controls, one above the other, **neither a primary**, and
+        the visual difference is deliberately small: two controls that look
+        wildly different stop reading as alternatives, and these are alternatives.
+        **The labels carry the distinction, not the colour** - they differ in
+        when it happens and what it acts on, and each carries its cost on a
+        second line.
+      */}
+      <div className="v-footer__controls">
+        <button className="v-control" disabled={busy || pausing} onClick={onPause}>
+          <span className="v-control__label">⏸ Pause at the next gate</span>
+          <span className="v-control__cost">
+            {pausing
+              ? 'armed — the loop holds at the next boundary it reaches'
+              : 'lets the turn finish, then holds. Costs nothing.'}
+          </span>
+        </button>
+        <button className="v-control v-control--grave" disabled={busy} onClick={onStop}>
+          <span className="v-control__label">
+            ⏹ Stop this turn now
+            <StateKicker tone="alarm">ends the run</StateKicker>
+          </span>
+          <span className="v-control__cost">kills the agent mid-turn. Confirms first.</span>
+        </button>
       </div>
     </div>
   );
