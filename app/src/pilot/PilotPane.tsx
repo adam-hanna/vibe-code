@@ -42,6 +42,7 @@ import {
   trailingResults,
   unanswered,
   unrecognised,
+  wake,
 } from './transcript';
 import type { ReactNode } from 'react';
 import type { KeyStatus } from './keys';
@@ -80,10 +81,63 @@ import type { Run } from '../cockpit/model';
 /** Turns the pilot may take on its own before a person has to speak again. */
 const MAX_CHAIN = 8;
 
+/** Where the gate watcher's switch is remembered. See `watching` below. */
+const WATCH_KEY = 'vibe.pilot.watchGates';
+
+/**
+ * Whether the pilot takes a turn when the loop stops at a gate (#211).
+ *
+ * **Off unless somebody turned it on**, and it is remembered because a setting
+ * that reset every launch is one nobody uses. `localStorage` for the reason the
+ * spend ceiling is there: it is this window's preference, not a project fact,
+ * and `vibe.config.json` is a file meant to be committed.
+ */
+function readWatch(): boolean {
+  try {
+    return localStorage.getItem(WATCH_KEY) === 'on';
+  } catch {
+    // Storage can be unavailable. Falling back to off is the fail-closed
+    // direction: the cost of a wrong default here is unattended spend.
+    return false;
+  }
+}
+
+/**
+ * What the pilot is told when the run wakes it, and what the reader is shown.
+ *
+ * One sentence for both, so the message the model answers and the kicker above
+ * its reply cannot disagree about why the turn happened. It says plainly that
+ * nobody typed it — a model that believed a person had just asked would answer
+ * a question nobody put.
+ */
+function wakeReason(gate: NonNullable<Run['gate']>): string {
+  const round =
+    gate.reviewRound ?? gate.planRound ?? gate.verifyRound ?? null;
+  return [
+    `[the app woke you — nobody typed this] The loop has stopped at the "${gate.boundary}" gate` +
+      (round === null ? '' : `, round ${String(round)}`) +
+      ' and is waiting for a decision.',
+    '',
+    'The run block above is current as of this message. Read the narration with',
+    'read_output before you say anything about what the loop just did.',
+    '',
+    'Say what you would do and why. If you want to propose the answer, call',
+    'answer_gate — it still has to be pressed by the person, and if the right move',
+    'is something other than continue or stop, say that instead of proposing.',
+  ].join('\n');
+}
+
 type Action =
   | { type: 'ask'; content: string; turn: number; provider: Backend }
+  | { type: 'wake'; reason: string; turn: number; provider: Backend }
   | { type: 'follow'; turn: number; provider: Backend }
-  | { type: 'refuse'; content: string | null; provider: Backend; message: string }
+  | {
+      type: 'refuse';
+      content: string | null;
+      provider: Backend;
+      message: string;
+      woke: string | null;
+    }
   | { type: 'event'; event: pilot.PilotEvent }
   | { type: 'retext'; turn: number; text: string }
   | { type: 'settle'; id: string; settlement: Settlement }
@@ -94,10 +148,12 @@ function apply(state: Conversation, action: Action): Conversation {
   switch (action.type) {
     case 'ask':
       return ask(state, action.content, action.turn, action.provider);
+    case 'wake':
+      return wake(state, action.reason, action.turn, action.provider);
     case 'follow':
       return follow(state, action.turn, action.provider);
     case 'refuse':
-      return refuse(state, action.content, action.provider, action.message);
+      return refuse(state, action.content, action.provider, action.message, action.woke);
     case 'event':
       return reduce(state, action.event);
     case 'retext':
@@ -357,6 +413,11 @@ function ReplyCard({
   return (
     <div className="v-pilot__reply">
       <div className="v-pilot__meta">
+        {/* The pane draws replies and not messages, so without this a woken
+            turn is the pilot speaking unprompted with nothing saying why. A
+            reader has to be able to tell what they asked for from what the run
+            caused (#211). */}
+        {reply.woke !== null && <StateKicker tone="quiet">woke at a gate</StateKicker>}
         <MetaChip>{BACKEND_NAME[reply.provider]}</MetaChip>
         {/* What ANSWERED, not what was asked for: an alias resolves to a dated
             version, and the resolved one is the fact worth showing. Absent until
@@ -651,7 +712,18 @@ export function PilotPane({
   }, []);
 
   const start = useCallback(
-    (messages: readonly pilot.Message[], said: string | null) => {
+    (
+      messages: readonly pilot.Message[],
+      said: string | null,
+      /**
+       * Why this turn is happening with nobody at the keyboard, or null.
+       *
+       * Threaded rather than inferred from `said`, because the two are
+       * independent: a woken turn has text to send (a vendor needs something to
+       * answer) and it was still not typed by anybody.
+       */
+      woke: string | null = null,
+    ) => {
       // The subscription path. It does not go through Rust at all: the host
       // spawns `claude -p` with the closed read-only allow-list `pilotchat.ts`
       // builds, so there is no key to have and nothing to bill.
@@ -680,6 +752,7 @@ export function PilotPane({
             hostTurn.current = turn;
             setLive(turn);
             if (said === null) dispatch({ type: 'follow', turn, provider });
+            else if (woke !== null) dispatch({ type: 'wake', reason: woke, turn, provider });
             else dispatch({ type: 'ask', content: said, turn, provider });
           })
           .catch((err: unknown) =>
@@ -688,6 +761,7 @@ export function PilotPane({
               content: said,
               provider,
               message: err instanceof Error ? err.message : String(err),
+              woke,
             }),
           );
         return;
@@ -707,6 +781,7 @@ export function PilotPane({
         .then((turn) => {
           setLive(turn);
           if (said === null) dispatch({ type: 'follow', turn, provider });
+          else if (woke !== null) dispatch({ type: 'wake', reason: woke, turn, provider });
           else dispatch({ type: 'ask', content: said, turn, provider });
         })
         .catch((err: unknown) =>
@@ -715,6 +790,7 @@ export function PilotPane({
             content: said,
             provider,
             message: err instanceof Error ? err.message : String(err),
+            woke,
           }),
         );
     },
@@ -783,6 +859,59 @@ export function PilotPane({
   useEffect(() => {
     onPending?.(proposals.length);
   }, [proposals.length, onPending]);
+
+  /**
+   * The gate watcher (#211).
+   *
+   * **The pilot has always had the run; what it did not have was a reason to
+   * look.** `run` is a prop that updates on every frame and `systemPrompt` is
+   * rebuilt from it on every turn, so the pilot's picture is current the moment
+   * it speaks — it just only ever spoke when somebody typed or when it owed
+   * itself a tool result. Reported from a manual pass as the obvious question:
+   * *"why do I have to tell it when a gate is finished?"*
+   *
+   * Four things about it:
+   *
+   * - **It fires on the transition, keyed by `askId`.** A gate that is still
+   *   open on the next render is not a new gate, and `askId` is the loop's own
+   *   identity for it rather than something derived here. Nothing fires when a
+   *   gate closes: the interesting moment is the one that is waiting.
+   * - **It is off by default**, and this is the first turn in the product that
+   *   nobody asked for. `MAX_CHAIN` and the daily ledger exist to bound
+   *   unattended spend, and a watcher on by default would spend against them
+   *   without anybody choosing to.
+   * - **It goes through `ready`**, so a missing key, a missing repository, an
+   *   outstanding proposal or a spent ceiling all stop it exactly as they stop
+   *   the composer. A wake that fired into a blocked pane would be a failed
+   *   reply nobody could explain.
+   * - **It proposes and never answers.** The turn it takes can call
+   *   `answer_gate`, which is propose-only like everything else — so the run
+   *   still holds until a person presses. This is a second opinion arriving on
+   *   time, not an autopilot.
+   */
+  const [watching, setWatching] = useState(readWatch);
+  /** The gate this pane has already woken for, so an open gate wakes it once. */
+  const seenGate = useRef<number | null>(null);
+  useEffect(() => {
+    const gate = run.gate;
+    if (gate === null) {
+      // Cleared on close, so the *next* gate wakes it even if the loop reuses
+      // an id. Tracking "the last id seen" rather than "every id ever" also
+      // means a conversation started mid-run does not wake for a gate that was
+      // already open when the pane mounted — that one is on screen already.
+      seenGate.current = null;
+      return;
+    }
+    if (!watching || seenGate.current === gate.askId) return;
+    // Recorded before the send, not after: a turn refused on its way out must
+    // not leave the watcher armed to try the same gate on the next render.
+    seenGate.current = gate.askId;
+    if (!ready || live !== null) return;
+    const reason = wakeReason(gate);
+    chain.current = 0;
+    setStalled(false);
+    start([...conversation.messages, { role: 'user' as const, content: reason }], reason, reason);
+  }, [run.gate, watching, ready, live, conversation.messages, start]);
 
   const submit = useCallback(() => {
     const content = entry.trim();
@@ -855,6 +984,24 @@ export function PilotPane({
             been pointed at a repository yet - two different absences with two
             different fixes. */}
         {blocked !== null && <span className="v-pilot__note">{blocked}</span>}
+        {/* The one switch that lets the pilot spend without anybody typing, so
+            it says what it costs rather than just naming itself. */}
+        <label className="v-pilot__limit">
+          <input
+            type="checkbox"
+            checked={watching}
+            onChange={(e) => {
+              setWatching(e.target.checked);
+              try {
+                localStorage.setItem(WATCH_KEY, e.target.checked ? 'on' : 'off');
+              } catch {
+                // The switch still works for this session. A preference that
+                // could not be saved is not worth an error in the pane.
+              }
+            }}
+          />
+          <span>speak up at a gate — one turn each, still proposes only</span>
+        </label>
         {proposals.length > 0 && (
           <span className="v-pilot__note">
             {proposals.length} proposal(s) waiting on you — nothing more can be sent until they are

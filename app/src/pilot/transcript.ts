@@ -75,6 +75,19 @@ export interface Reply {
   usage: Usage | null;
   /** Null while the turn is still streaming. */
   outcome: Outcome | null;
+  /**
+   * Why this turn happened when nobody typed anything, or null (#211).
+   *
+   * **The pane draws replies and not messages**, so a turn the app started would
+   * otherwise appear as the pilot speaking unprompted, with nothing on screen
+   * saying what set it off. That is the one thing an unattended turn must not
+   * look like: a reader has to be able to tell what they asked for from what the
+   * run caused.
+   *
+   * Null on every turn a person sent, which is all of them unless the gate
+   * watcher is switched on.
+   */
+  woke: string | null;
 }
 
 /**
@@ -158,11 +171,48 @@ export function follow(
   conversation: Conversation,
   turn: number,
   provider: Backend,
+  woke: string | null = null,
 ): Conversation {
   return {
     ...conversation,
-    live: { turn, provider, model: null, text: '', calls: [], usage: null, outcome: null },
+    live: {
+      turn,
+      provider,
+      model: null,
+      text: '',
+      calls: [],
+      usage: null,
+      outcome: null,
+      woke,
+    },
   };
+}
+
+/**
+ * A turn the run caused rather than a person (#211).
+ *
+ * The gate watcher's entry point, and it is deliberately **not** `ask`. A vendor
+ * needs something in `messages` to answer, so there is a user message either
+ * way — but a message nobody typed, rendered as one somebody did, is the app
+ * putting words in a person's mouth in the one record of what was asked. `woke`
+ * is what tells the two apart, and the pane draws it.
+ *
+ * `reason` is both: it goes to the model as the message and to the reader as the
+ * kicker, so there is one sentence rather than two that could disagree about why
+ * this turn happened.
+ */
+export function wake(
+  conversation: Conversation,
+  reason: string,
+  turn: number,
+  provider: Backend,
+): Conversation {
+  return follow(
+    { ...conversation, messages: [...conversation.messages, { role: 'user', content: reason }] },
+    turn,
+    provider,
+    reason,
+  );
 }
 
 /**
@@ -184,6 +234,8 @@ export function refuse(
   content: string | null,
   provider: Backend,
   message: string,
+  /** Set when the turn that was refused is one the run caused, not a person. */
+  woke: string | null = null,
 ): Conversation {
   const reply: Reply = {
     // Negative, so it can never collide with an id Rust handed out — those
@@ -196,6 +248,10 @@ export function refuse(
     calls: [],
     usage: null,
     outcome: { kind: 'failed', message },
+    // This records how the turn STARTED, not how it ended, so a wake refused
+    // before it left the window still says what set it off - otherwise it draws
+    // as the pilot failing spontaneously.
+    woke,
   };
   return {
     ...conversation,

@@ -11,6 +11,7 @@ import {
   spendParts,
   unanswered,
   unrecognised,
+  wake,
 } from './transcript';
 import type { Conversation } from './transcript';
 import type { PilotEvent, Usage } from './pilot';
@@ -39,6 +40,42 @@ function fold(events: readonly PilotEvent[], turn = 1): Conversation {
     ask(emptyConversation(), 'hello', turn, 'anthropic'),
   );
 }
+
+describe('a turn the run caused is not a turn somebody typed', () => {
+  test('the reason reaches the model as the message and the reader as the kicker', () => {
+    // One sentence for both, so the message being answered and the label above
+    // the answer cannot disagree about why the turn happened.
+    const reason = '[the app woke you] the loop stopped at "plan-approved"';
+    const woken = wake(emptyConversation(), reason, 1, 'anthropic');
+
+    // A vendor needs something in `messages` to answer, so there is a user
+    // message either way. `woke` is the only thing that tells the two apart.
+    expect(woken.messages).toEqual([{ role: 'user', content: reason }]);
+    expect(woken.live?.woke).toBe(reason);
+    expect(ask(emptyConversation(), 'hello', 1, 'anthropic').live?.woke).toBeNull();
+  });
+
+  test('it survives to the finished reply, which is where the pane reads it', () => {
+    const reason = 'woken';
+    const done = [
+      { kind: 'text', turn: 1, delta: 'here is what I would do' } as const,
+      { kind: 'ended', turn: 1, stop: 'end_turn' } as const,
+    ].reduce<Conversation>(
+      (state, event) => reduce(state, event),
+      wake(emptyConversation(), reason, 1, 'anthropic'),
+    );
+    expect(done.replies[0]?.woke).toBe(reason);
+  });
+
+  test('a wake refused on its way out still says what set it off', () => {
+    // It records how the turn STARTED, not how it ended. Without this a refused
+    // wake draws as the pilot failing spontaneously, which is the one thing an
+    // unattended turn must not look like.
+    const refused = refuse(emptyConversation(), 'woken', 'anthropic', 'no key', 'woken');
+    expect(refused.replies[0]?.woke).toBe('woken');
+    expect(refuse(emptyConversation(), 'hi', 'anthropic', 'no key').replies[0]?.woke).toBeNull();
+  });
+});
 
 describe('the final message wins over the deltas, where there are two answers', () => {
   test('the CLI-reported reply replaces the blocks that streamed on the way to it', () => {
@@ -419,6 +456,10 @@ describe('propose only, enforced by the data rather than by a component (#144)',
           calls: [],
           usage: null,
           outcome: { kind: 'ended', stop: 'end_turn' },
+          // A turn somebody typed, which is what this case is about: the
+          // proposal is still waiting while an ordinary conversation carries on
+          // around it.
+          woke: null,
         },
       ],
     };
