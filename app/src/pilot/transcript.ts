@@ -393,6 +393,34 @@ export function decide(
 }
 
 /**
+ * Replace the live turn's text with the reply the CLI says it made (#211).
+ *
+ * **Only the subscription backend has two answers to "what did it say", and this
+ * is which one wins.** A vendor streams one assistant message and the deltas are
+ * it. `claude -p` streams *every* assistant block in the turn — including the
+ * interstitials it writes between its own Read and Glob calls — and then reports
+ * the final message separately in the `result` envelope. Concatenating the
+ * deltas therefore produced the reply with all the thinking-out-loud still stuck
+ * to the front of it, run together with no separator, because a block boundary
+ * is not a `text_delta` and nothing was inserting one.
+ *
+ * A manual pass is what surfaced it: *"Let me look at the directory
+ * itself.Three prior attempts at this exact app are sitting in .vibe/runs"* —
+ * two blocks, one sentence, and one of them about a call the model then said
+ * out loud was redundant.
+ *
+ * The deltas keep their job, which is that the pane fills in as the reply
+ * arrives rather than sitting blank for a minute. They are a progress signal;
+ * this is the record. Applied only to the live turn, for the reason `reduce`
+ * drops an event that names another one.
+ */
+export function retext(conversation: Conversation, turn: number, text: string): Conversation {
+  const live = conversation.live;
+  if (live === null || live.turn !== turn) return conversation;
+  return { ...conversation, live: { ...live, text } };
+}
+
+/**
  * The tool results at the end of the conversation, as one message to send back
  * on a backend that has no tool role (#211).
  *

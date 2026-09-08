@@ -36,6 +36,7 @@ import {
   follow,
   reduce,
   refuse,
+  retext,
   settle,
   spendParts,
   trailingResults,
@@ -84,6 +85,7 @@ type Action =
   | { type: 'follow'; turn: number; provider: Backend }
   | { type: 'refuse'; content: string | null; provider: Backend; message: string }
   | { type: 'event'; event: pilot.PilotEvent }
+  | { type: 'retext'; turn: number; text: string }
   | { type: 'settle'; id: string; settlement: Settlement }
   | { type: 'decide'; id: string; accepted: boolean; note: string }
   | { type: 'unknown' };
@@ -98,6 +100,8 @@ function apply(state: Conversation, action: Action): Conversation {
       return refuse(state, action.content, action.provider, action.message);
     case 'event':
       return reduce(state, action.event);
+    case 'retext':
+      return retext(state, action.turn, action.text);
     case 'settle':
       return settle(state, action.id, action.settlement);
     case 'decide':
@@ -217,12 +221,39 @@ function CallCard({
       {settlement.kind === 'refused' ? (
         <span className="v-pilot__why">{settlement.content}</span>
       ) : (
-        // What was actually sent back, not a paraphrase. A read's result is JSON
-        // and can be long, so the pane shows that it happened and the answer is
-        // one line down rather than the whole payload inline.
-        <span className="v-pilot__note">{answer ?? 'read'}</span>
+        <Answer content={answer} />
       )}
     </div>
+  );
+}
+
+/**
+ * What a read sent back: that it happened, and the payload behind a disclosure.
+ *
+ * **The result is the model's, not the reader's**, and this pane was printing it
+ * whole. `read_run` returns the entire `describeRun` object and `read_output`
+ * returns up to 500 narration lines, so two ordinary calls put several hundred
+ * characters of JSON in the middle of a conversation — reported from a manual
+ * pass as simply *"what is all of this text?"*, which is the correct question.
+ *
+ * It is **not truncated**, because a result that has been cut is a result nobody
+ * can check against what the model was actually told, and that is the one thing
+ * this card exists to make checkable. It is folded, and the summary says how much
+ * is behind the fold so the size itself stays visible.
+ */
+function Answer({ content }: { content: string | null }) {
+  if (content === null) return <span className="v-pilot__note">read</span>;
+  // Short enough to read in place. A threshold rather than always folding: a
+  // one-line refusal or a small object behind a disclosure is a click for
+  // nothing, and most of what makes this unreadable is the big two.
+  if (content.length <= 160) return <span className="v-pilot__note">{content}</span>;
+  return (
+    <details className="v-pilot__answer">
+      <summary className="v-pilot__note">
+        answered with {content.length.toLocaleString()} characters — the model has all of it
+      </summary>
+      <pre className="v-pilot__payload v-selectable">{content}</pre>
+    </details>
   );
 }
 
@@ -579,6 +610,11 @@ export function PilotPane({
         }
         // The CLI's id wins over the one we proposed, always.
         session.current = frame.sessionId;
+        // The reply the CLI says it made, over the deltas we accumulated. The
+        // deltas are every assistant block in the turn, interstitials between
+        // its own Read and Glob calls included; this is the final message. Both
+        // came off the wire and this is the one that answers "what did it say".
+        dispatch({ type: 'retext', turn, text: frame.text });
         // The tool calls, lifted out of the reply and dispatched **before** the
         // terminal event: `reduce` drops an event for a turn that is no longer
         // live, and `ended` is what closes it. Read from `frame.text`, which is

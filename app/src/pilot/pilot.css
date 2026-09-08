@@ -215,6 +215,32 @@
 }
 
 /*
+ * A read's result, folded.
+ *
+ * `read_run` returns the whole run object and `read_output` up to 500 narration
+ * lines, so two calls used to put several hundred characters of JSON in the
+ * middle of the conversation. Folded rather than truncated: a result that has
+ * been cut cannot be checked against what the model was told, which is the only
+ * reason to draw it at all.
+ */
+.v-pilot__answer > summary {
+  cursor: pointer;
+}
+
+.v-pilot__payload {
+  font: var(--type-mono-sm);
+  color: var(--text-secondary);
+  background: var(--surface-panel);
+  border: 1px solid var(--rule-inner);
+  padding: var(--space-2) var(--space-3);
+  margin: var(--space-2) 0 0;
+  max-height: 14rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/*
  * A proposal: the one thing in this pane that is waiting on a person.
  *
  * Bordered and set apart, because it is not another line of chat - the run does

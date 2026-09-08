@@ -6,6 +6,7 @@ import {
   follow,
   reduce,
   refuse,
+  retext,
   settle,
   spendParts,
   unanswered,
@@ -38,6 +39,34 @@ function fold(events: readonly PilotEvent[], turn = 1): Conversation {
     ask(emptyConversation(), 'hello', turn, 'anthropic'),
   );
 }
+
+describe('the final message wins over the deltas, where there are two answers', () => {
+  test('the CLI-reported reply replaces the blocks that streamed on the way to it', () => {
+    // The subscription backend is the only one with two answers to "what did it
+    // say". `claude -p` streams every assistant block in the turn - including
+    // what it writes between its own Read and Glob calls - and reports the final
+    // message separately. Concatenating the deltas kept all of it, run together
+    // with no separator, because a block boundary is not a `text_delta`.
+    const streamed = fold([
+      { kind: 'text', turn: 1, delta: 'Let me look at the directory itself.' },
+      { kind: 'text', turn: 1, delta: 'Three prior attempts are sitting in .vibe/runs' },
+    ]);
+    expect(streamed.live?.text).toBe(
+      'Let me look at the directory itself.Three prior attempts are sitting in .vibe/runs',
+    );
+
+    const settled = retext(streamed, 1, 'Three prior attempts are sitting in .vibe/runs');
+    expect(settled.live?.text).toBe('Three prior attempts are sitting in .vibe/runs');
+  });
+
+  test('it names the turn, so a late reply cannot rewrite the one that followed it', () => {
+    // The rule `reduce` follows for an event about the wrong turn, for the same
+    // reason: a fact that cannot be attributed is not recorded.
+    const live = fold([{ kind: 'text', turn: 1, delta: 'mine' }]);
+    expect(retext(live, 2, 'somebody else’s').live?.text).toBe('mine');
+    expect(retext(emptyConversation(), 1, 'anything')).toEqual(emptyConversation());
+  });
+});
 
 describe('a reply is assembled from deltas and from nothing else', () => {
   test('the text is the deltas, in order, concatenated', () => {
