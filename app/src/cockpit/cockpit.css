@@ -1224,3 +1224,77 @@
   font: var(--type-body-sm);
   color: var(--text-secondary);
 }
+
+/* ------------------------------------------------------------ output filters (1c) */
+
+.v-outwrap {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.v-output__filters {
+  display: flex;
+  gap: var(--space-1);
+  flex-wrap: wrap;
+  padding: var(--space-2) var(--space-5);
+  background: var(--surface-chrome);
+  border-bottom: 1px solid var(--rule-inner);
+}
+
+.v-output__filter {
+  font: var(--type-label);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  background: none;
+  border: 1px solid transparent;
+  padding: var(--space-1) var(--space-2);
+  cursor: pointer;
+}
+
+.v-output__filter:hover {
+  color: var(--text-primary);
+}
+
+.v-output__filter.is-on {
+  color: var(--accent-on-tint);
+  border-color: var(--accent-border);
+  background: var(--surface-accent-tint);
+}
+
+.v-output__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-5);
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  background: var(--surface-chrome);
+  border-bottom: 1px solid var(--rule-inner);
+}
+
+/* ------------------------------------------------------------ staleness (7c) */
+
+.v-stale {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-5);
+  font: var(--type-body-sm);
+  border-bottom: 1px solid var(--rule-inner);
+}
+
+/* Thinking is a fact, not a worry. It gets the chrome ground and no weight. */
+.v-stale--quiet {
+  background: var(--surface-chrome);
+  color: var(--text-secondary);
+}
+
+/* The one state that must not look normal, and the only one given width. */
+.v-stale--alarm {
+  background: var(--surface-alarm);
+  color: var(--text-primary);
+  border-bottom-color: var(--rule-strong);
+}

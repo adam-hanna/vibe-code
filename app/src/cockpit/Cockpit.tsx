@@ -15,7 +15,8 @@ import { LoopColumn } from './LoopColumn';
 import { OutputPane } from './OutputPane';
 import { StopConfirm } from './StopConfirm';
 import { VerifyPane } from './VerifyPane';
-import { blocking, emptyRun, nextRun, reduce } from './model';
+import { StalenessStrip } from './Staleness';
+import { blocking, emptyRun, nextRun, reduce, staleness } from './model';
 import { readLaunchArgv } from './argv';
 import type { Launched } from './argv';
 import type { Effect } from '../pilot/tools';
@@ -392,6 +393,11 @@ export function Cockpit() {
           onClose={() => setDiagnostics(false)}
         />
       )}
+
+      {/* `7c`, above everything and below the titlebar. It is a statement about
+          the whole window - everything under it is as old as the strip says -
+          so it cannot sit inside one column. */}
+      <StalenessStrip state={staleness(run, now)} />
 
       {wire.failure !== null && (
         <div className="v-cockpit__alarm">

@@ -59,6 +59,26 @@ export interface Beat {
   lastActivity: string | null;
   /** Absent until some turn under this model has reported one. */
   contextWindow: number | null;
+  /**
+   * How far apart the beats are, as the loop's own timer reports it (#223).
+   *
+   * **What makes the staleness threshold derived rather than picked.** The design
+   * leaves exactly one judgement open in `7c` - how stale is stale - and answers
+   * it itself: that is a question about vibe's heartbeat cadence, so the answer
+   * is a few missed ticks, and only the loop knows the cadence. Null on a core
+   * that predates the field, and the pane says it cannot tell rather than
+   * choosing a number here.
+   */
+  intervalMs: number | null;
+  /**
+   * How long since the CHILD last wrote a line, at the moment of this beat.
+   *
+   * The second of `7c`'s two clocks, and the one the first cannot substitute
+   * for: a beat fires on a timer whether or not the child said anything, so its
+   * arrival proves *vibe* is alive and proves nothing about the turn. Null when
+   * the child has written nothing at all, which is a different fact from zero.
+   */
+  sinceOutputMs: number | null;
   /** When this beat reached us. The liveness signal, on our clock. */
   at: number;
 }
@@ -298,6 +318,22 @@ export interface OutputLine {
   level: Level;
   message: string;
   id: string | null;
+  /**
+   * The phase the loop had announced when this line arrived, or null (#223, `1c`).
+   *
+   * **Stamped, not inferred.** `1c` asks for output filtered by phase rather
+   * than one endless stream, and the only honest way to say which phase a line
+   * belongs to is to record the last one the loop *said* it was in. Nothing here
+   * reads the sentence to work it out - that is the English-matching #133 exists
+   * to prevent, and it would file a line under whatever word it happened to
+   * contain.
+   *
+   * Null for every line before the first `phase_started`, which is a real state:
+   * preflight and the run announcement genuinely belong to no phase.
+   */
+  phase: string | null;
+  /** The role that was running, on the same terms. Null between turns. */
+  role: string | null;
 }
 
 export interface Run {
@@ -572,6 +608,8 @@ function readBeat(data: Record<string, unknown>, at: number): Beat | null {
     // happened", and an unmeasured window is not a window of zero.
     lastActivity: str(data['lastActivity']),
     contextWindow: num(data['contextWindow']),
+    intervalMs: num(data['intervalMs']),
+    sinceOutputMs: num(data['sinceOutputMs']),
     at,
   };
 }
@@ -698,6 +736,27 @@ const unsettled =
   (g: GateRun): boolean =>
     g.name === name && g.status === 'running';
 
+/**
+ * The most recently opened phase's name, or null.
+ *
+ * By `id` rather than array position, exactly as `mapLastPhase` is and for the
+ * same reason: the review cycle re-opens verify, which lives in the code cycle,
+ * so the newest phase is not necessarily in the last cycle.
+ */
+function currentPhase(run: Run): string | null {
+  let newest = -1;
+  let name: string | null = null;
+  for (const cycle of run.cycles) {
+    for (const phase of cycle.phases) {
+      if (phase.id > newest) {
+        newest = phase.id;
+        name = phase.phase;
+      }
+    }
+  }
+  return name;
+}
+
 /** Close the running turn, if there is one. */
 function endRunning(run: Run, at: number): Run {
   if (run.running === null) return run;
@@ -766,7 +825,21 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
   let seq = run.seq;
   const id = (): number => (seq += 1);
 
-  const line: OutputLine = { n: id(), level: frame.level, message: frame.message, id: frame.id };
+  // Stamped from what the loop last announced, and **before** this frame is
+  // folded. A `phase_started` line belongs to the phase it opens, so the stamp
+  // is corrected below for that one id rather than every line being one phase
+  // behind.
+  const line: OutputLine = {
+    n: id(),
+    level: frame.level,
+    message: frame.message,
+    id: frame.id,
+    phase:
+      frame.id === 'phase_started'
+        ? (str((frame.data ?? {})['phase']) ?? currentPhase(run))
+        : currentPhase(run),
+    role: run.running?.role ?? null,
+  };
   const output = [...run.output, line].slice(-OUTPUT_KEEP);
   const next: Run = { ...run, output };
   const data = frame.data ?? {};
@@ -1061,6 +1134,111 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
   })();
 
   return { ...folded, seq };
+}
+
+/**
+ * How old what is on screen is, and whether it is still live (`7c`, #223).
+ *
+ * **A comparison between two clocks, not a threshold on one.** That distinction
+ * is the whole of `7c`, and it replaced `5b` precisely because a single timer
+ * cannot tell the two cases apart:
+ *
+ * - A beat fires on the loop's own timer **whether or not the child said
+ *   anything**, so its arrival proves *vibe* is alive and proves nothing about
+ *   the turn.
+ * - `sinceOutputMs` is measured from the child's last line, so it proves the
+ *   opposite thing.
+ *
+ * One stale and one fresh is a turn **thinking**, and the design is emphatic
+ * that this is *"stated as a fact, not a worry"* - a turn emitting nothing for
+ * twelve minutes is a healthy turn, and an indicator that fires on healthy turns
+ * is one people stop reading. That is also why the middle state is named
+ * `thinking` rather than `quiet`: reporting a state, not reporting an absence.
+ *
+ * Both stale is `not-live`: everything on screen is however old it is, and vibe
+ * cannot confirm the phase is still running. **That one must not look normal.**
+ */
+export type Liveness = 'live' | 'thinking' | 'not-live' | 'unknown';
+
+export interface Staleness {
+  state: Liveness;
+  /** Since the child last wrote, or null when it never has. */
+  outputMs: number | null;
+  /** Since the loop's own tick, or null before the first beat. */
+  activityMs: number | null;
+  /** The instant of that tick, for a card that has stopped moving (hi-fi 17). */
+  lastBeatAt: number | null;
+  /** Why the state cannot be told, or null. Never a guess in its place. */
+  why: string | null;
+}
+
+/**
+ * How many missed ticks make a run not-live.
+ *
+ * **Three, and the number is a shape rather than a duration.** The design's one
+ * open judgement in `7c` is how stale is stale, and its own answer is that this
+ * is a question about vibe's heartbeat cadence - so the threshold is expressed
+ * in ticks and multiplied by the cadence the loop reported. At the default
+ * 30-second interval that is 90 seconds; a run configured slower moves with it,
+ * which a hardcoded 90_000 would not.
+ */
+export const MISSED_TICKS = 3;
+
+export function staleness(run: Run, now: number): Staleness {
+  const turn = run.running;
+  const beat = turn?.beat ?? null;
+
+  if (turn === null) {
+    return {
+      state: 'unknown',
+      outputMs: null,
+      activityMs: null,
+      lastBeatAt: null,
+      why: 'no turn is running, so there is nothing whose liveness to report',
+    };
+  }
+  if (beat === null) {
+    // A fresh turn never flickers through the middle state, which is
+    // `turnStartedAt`'s job in the design. Before the first beat there is
+    // nothing to compare, and saying so is better than calling a turn that
+    // started three seconds ago stale.
+    return {
+      state: 'unknown',
+      outputMs: null,
+      activityMs: null,
+      lastBeatAt: null,
+      why: 'the turn has not reported a heartbeat yet',
+    };
+  }
+  if (beat.intervalMs === null) {
+    // Fail closed: an unmeasurable threshold is reported as unmeasurable rather
+    // than replaced with a number picked here. That would be the invented
+    // denominator this repo refuses everywhere else.
+    return {
+      state: 'unknown',
+      outputMs: beat.sinceOutputMs,
+      activityMs: Math.max(0, now - beat.at),
+      lastBeatAt: beat.at,
+      why: 'this build was not told how often the loop beats, so it cannot say what is overdue',
+    };
+  }
+
+  const overdue = beat.intervalMs * MISSED_TICKS;
+  const activityMs = Math.max(0, now - beat.at);
+  // The child's gap, advanced by our own clock since the beat: the loop measured
+  // it at the instant it spoke, and it has been growing since.
+  const outputMs = beat.sinceOutputMs === null ? null : beat.sinceOutputMs + activityMs;
+
+  if (activityMs > overdue) {
+    return { state: 'not-live', outputMs, activityMs, lastBeatAt: beat.at, why: null };
+  }
+  // No output at all yet is not thinking and not live - the turn has produced
+  // nothing to be recent or stale. It reads as live because vibe is beating,
+  // which is the honest half of what is known.
+  if (outputMs === null || outputMs <= beat.intervalMs) {
+    return { state: 'live', outputMs, activityMs, lastBeatAt: beat.at, why: null };
+  }
+  return { state: 'thinking', outputMs, activityMs, lastBeatAt: beat.at, why: null };
 }
 
 /**
