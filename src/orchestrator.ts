@@ -341,6 +341,23 @@ async function holdAt(
   cfg: Config,
   host: Host | undefined,
   boundary: CheckpointBoundary,
+  /**
+   * What a person would have to answer if they stopped here, or none.
+   *
+   * **Only `question-round` has any**, and it is the boundary where stopping is
+   * most obviously a decision to answer something yourself - so it was the one
+   * boundary where stopping produced a `NEEDS-INPUT.md` with no questions in it.
+   * `writeEscalation` renders a *Your answer:* block per question and the resume
+   * parses them back; with the list empty it wrote the section not at all, and
+   * the only thing a person could actually do was press continue.
+   *
+   * Not invented for this: `resolveQuestions` already throws
+   * `new Escalation(EXIT.NEEDS_HUMAN, ..., [...blockers])` when the answerer is
+   * off, and the defer path does the same. This carries the same list through
+   * the same field on the gate's own stop, so both ways of stopping at a
+   * question round hand back the same document.
+   */
+  questions: readonly OpenQuestion[] = [],
 ): Promise<void> {
   const mode = gateMode(cfg.gates, boundary);
 
@@ -370,7 +387,9 @@ async function holdAt(
       // absent origin here would read as an operator whose identity was lost.
       origin: 'gates',
     });
-    throw new Escalation(EXIT.NEEDS_HUMAN, `Stopped at the ${boundary} boundary. ${why}`);
+    throw new Escalation(EXIT.NEEDS_HUMAN, `Stopped at the ${boundary} boundary. ${why}`, [
+      ...questions,
+    ]);
   }
 
   // `step` holds and asks, and asking needs somebody who can answer. A terminal
@@ -448,7 +467,13 @@ async function holdAt(
   // `status: 'needs-input'` -> `vibe resume`. A CLI run has no host to ask, so
   // it never reaches here; an app that stops gets the same durable outcome its
   // user would get from the terminal.
-  throw new Escalation(EXIT.NEEDS_HUMAN, `Stopped at the ${boundary} boundary. ${why}`);
+  //
+  // The questions ride along for the reason the parameter documents: stopping at
+  // a question round is a person saying they will answer these, and the document
+  // they get has to contain them.
+  throw new Escalation(EXIT.NEEDS_HUMAN, `Stopped at the ${boundary} boundary. ${why}`, [
+    ...questions,
+  ]);
 }
 
 export async function orchestrate(
@@ -897,7 +922,13 @@ async function planPhase(
       // makes the decision answerable: this is the round of `maxQuestionRounds`
       // a planner is spending on questions it raised itself, and a run doing
       // that for a third time is the one an operator most wants to stop.
-      await holdAt(state, cfg, host, 'question-round');
+      // The round's own questions travel with the hold, so a stop here writes a
+      // `NEEDS-INPUT.md` a person can actually answer. `pending` rather than the
+      // ones the answerer declined: at this boundary the answerer has already
+      // taken its turn, and someone who stops is overriding what it produced -
+      // narrowing the list to the declines would decide for them which answers
+      // were worth revisiting.
+      await holdAt(state, cfg, host, 'question-round', pending);
       // The answerer may have declined every one; only revise if something came
       // back - and when nothing did, the plan and the turn that wrote it are
       // both still the ones already in hand.

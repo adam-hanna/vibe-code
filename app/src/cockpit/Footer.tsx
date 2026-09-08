@@ -222,13 +222,112 @@ export function Footer({
           </div>
         )}
 
+        {/*
+          `1f`'s inbox, at the boundary that is about it.
+
+          The questions have been on the wire since #223 and there is a whole
+          pane for them — but the footer said `holding at question round ·
+          waiting on you` and nothing else, so the only way to find out what was
+          being asked was to know the Questions tab existed. Reported from a
+          manual pass, and the sentence is the whole finding: *"I can't see any
+          questions to help with. I don't know why it's waiting on me. I just
+          always hit continue."*
+
+          Continuing here is not neutral — it accepts the answerer's answers and
+          buys a planner turn to revise the plan with them — so a person pressing
+          it without having read them is agreeing to something they were never
+          shown.
+        */}
+        {gate.boundary === 'question-round' && (
+          <div className="v-footer__verify">
+            {run.questions === null ? (
+              // A real state, not an error: `questions_opened` is what fills
+              // this, and a build that held here without seeing one says so
+              // rather than drawing an empty inbox as "no questions".
+              <div className="v-footer__note">
+                The loop is holding at a question round, and this window never saw the questions
+                open. They are in <code>.vibe/runs/{'<'}run-id{'>'}/answers-N.json</code>.
+              </div>
+            ) : (
+              <>
+                <div className="v-footer__note">
+                  The planner raised {run.questions.total} question
+                  {run.questions.total === 1 ? '' : 's'} it could not settle from the brief
+                  {run.questions.blocking > 0 && (
+                    <>
+                      , <strong>{run.questions.blocking} blocking</strong>
+                    </>
+                  )}
+                  . The answerer has already taken its turn — this is you checking what it said.
+                </div>
+                {/* Blocking first, then declines, then the rest: the order is
+                    what a person should read rather than the order they were
+                    asked in. A decline on a blocking question is the one that
+                    ends runs. */}
+                {[...run.questions.open]
+                  .sort(
+                    (a, b) =>
+                      Number(b.blocking) - Number(a.blocking) ||
+                      Number(b.declined) - Number(a.declined),
+                  )
+                  .map((q) => (
+                    <div className="v-footer__q" key={q.question}>
+                      <div className="v-footer__q-head">
+                        {q.blocking ? (
+                          <StateKicker tone="accent">blocking</StateKicker>
+                        ) : (
+                          <StateKicker tone="quiet">advisory</StateKicker>
+                        )}
+                        <span className="v-footer__q-ask">{q.question}</span>
+                      </div>
+                      {q.declined ? (
+                        <div className="v-footer__q-answer v-footer__q-answer--declined">
+                          declined — {q.rationale ?? 'no reason given'}
+                        </div>
+                      ) : q.answer === null ? (
+                        <div className="v-footer__q-answer">no answer came back for this one</div>
+                      ) : (
+                        <div className="v-footer__q-answer">
+                          <em>{q.confidence ?? 'confidence not stated'}</em> — {q.answer}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                {run.questions.open.length < run.questions.total && (
+                  <div className="v-footer__note">
+                    The count is the loop&apos;s; this build could not read every question behind
+                    it. The rest are in the run&apos;s <code>answers-N.json</code>.
+                  </div>
+                )}
+              </>
+            )}
+            {/* The two options, in what they cost rather than in what they are
+                called. This is the sentence whose absence made `continue` the
+                only thing anybody pressed. */}
+            <div className="v-footer__note">
+              <strong>Continue</strong> accepts those answers and spends a planner turn revising
+              the plan with them. <strong>Stop</strong> ends the run resumably and writes them
+              into <code>NEEDS-INPUT.md</code> with a blank under each — answer them there in your
+              own words and <code>vibe resume</code>, and yours are what the planner gets.
+            </div>
+          </div>
+        )}
+
         <div className="v-footer__note">
           Nothing further has run. The session is still warm, so continuing re-sends no context.
         </div>
 
         <div className="v-footer__actions">
           <Button level="primary" disabled={busy} onClick={() => onDecide(gate.askId, { kind: 'continue' })}>
-            {gate.boundary === 'verify-round' ? '⏭ let FIX run' : '⏭ continue'}
+            {/* The label says what pressing it does, at the two boundaries
+                where "continue" is not self-explanatory. Both spend a turn, and
+                naming which one is the difference between a decision and a
+                reflex. */}
+            {gate.boundary === 'verify-round'
+              ? '⏭ let FIX run'
+              : gate.boundary === 'question-round'
+                ? '⏭ accept these answers'
+                : '⏭ continue'}
           </Button>
           <input
             className="v-footer__reason"

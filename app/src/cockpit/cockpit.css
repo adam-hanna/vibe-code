@@ -2212,6 +2212,49 @@
   border-left: 2px solid var(--accent-border);
   padding-left: var(--space-3);
   margin-bottom: var(--space-2);
+  /* A question round can raise more than fits. Capped and scrolled so the two
+     buttons below it never leave the screen — a decision you have to scroll
+     past to reach is one people stop reading. */
+  max-height: 18rem;
+  overflow-y: auto;
+}
+
+/*
+ * One question at the question-round gate, with what came back for it.
+ *
+ * Scrolled rather than paged: a planner raising fifteen questions is a real
+ * round, and a footer that grew to fill the window would push the two buttons
+ * off the bottom - which is the one thing this card exists to get pressed
+ * deliberately.
+ */
+.v-footer__q {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--rule-inner);
+}
+
+.v-footer__q-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.v-footer__q-ask {
+  font: var(--type-body-sm);
+  color: var(--text-primary);
+}
+
+.v-footer__q-answer {
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+  padding-left: var(--space-3);
+}
+
+.v-footer__q-answer--declined {
+  color: var(--text-emphasis);
 }
 
 .v-footer__path {

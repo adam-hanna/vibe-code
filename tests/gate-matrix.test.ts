@@ -350,6 +350,49 @@ test('question-round is holdable, and the context says which round it is', async
   assert.equal(typeof host.asked[0]?.reviewRound, 'number');
 });
 
+test('stopping at a question round hands back the questions to answer', async () => {
+  // The gap this closes, and it is the one that made `continue` the only usable
+  // button. `writeEscalation` renders a *Your answer:* block per question and
+  // the resume parses them back - but the gate's own stop carried no questions,
+  // so `NEEDS-INPUT.md` omitted the section entirely at the one boundary whose
+  // whole subject is questions. Stopping to answer them yourself produced a
+  // document with nothing to answer.
+  //
+  // Not new machinery: `resolveQuestions` already throws with `[...blockers]`
+  // when the answerer is off. This is the same field on the same error, reached
+  // the other way.
+  const state = freshRun({ prefix: 'vibe-gates-question-stop-', task: 'gate matrix' });
+  const asked = questionFixture();
+
+  const err = await muted(() =>
+    orchestrate(
+      state,
+      config({}, { gates: matrix({ 'question-round': 'stop' }) }),
+      false,
+      agents(
+        {
+          claude: (label) =>
+            label === 'plan' ? planFixture({ open_questions: [asked] }) : planFixture(),
+          codex: (label) => (label === 'answers-0' ? answersReport([{}]) : report([])),
+        },
+        [],
+      ),
+    ).then(
+      () => null,
+      (e: unknown) => e,
+    ),
+  );
+
+  assert.ok(err instanceof Escalation, String(err));
+  assert.equal(err.code, EXIT.NEEDS_HUMAN);
+  assert.match(err.message, /Stopped at the question-round boundary/);
+  // The questions the round put, carried on the error that ends the run.
+  assert.deepEqual(
+    (err.questions ?? []).map((q) => q.question),
+    [asked.question],
+  );
+});
+
 // ---- with no host, which is every run from a terminal ------------------------
 
 test('stop halts a terminal run at the boundary, resumably', async () => {
