@@ -144,6 +144,36 @@
   gap: var(--space-4);
 }
 
+/*
+ * One exchange: what you said, and the answer under it (#211).
+ *
+ * The pane drew only the answers, so a conversation read as half of itself.
+ */
+.v-pilot__turn {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/*
+ * What you typed.
+ *
+ * **Deliberately not styled as a bubble on the other side.** The pilot's replies
+ * carry chips, prices and proposal cards, and a mirrored layout would put the
+ * one un-annotated thing in the conversation on its own axis for no reason.
+ * What it needs is to be distinguishable and readable, so it takes the accent
+ * rule the reply's rule answers, and keeps the same column.
+ */
+.v-pilot__asked {
+  font: var(--type-body);
+  color: var(--text-primary);
+  border-left: 2px solid var(--accent-border);
+  padding-left: var(--space-3);
+  /* Newlines are the reason shift+enter exists, so they have to survive. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .v-pilot__reply {
   display: flex;
   flex-direction: column;

@@ -411,8 +411,20 @@ function ReplyCard({
 }) {
   const outcome = reply.outcome;
   return (
-    <div className="v-pilot__reply">
-      <div className="v-pilot__meta">
+    <div className="v-pilot__turn">
+      {/* What you said, above the answer to it (#211). The pane drew replies
+          and never messages, so this was missing entirely: you pressed send,
+          the composer emptied, and the next thing on screen was an answer to a
+          question that was not there.
+
+          Read off the reply rather than interleaved from `messages`, so the
+          order cannot be got wrong - a message and the turn it opened are one
+          thing here. */}
+      {reply.asked !== null && (
+        <div className="v-pilot__asked v-selectable">{reply.asked}</div>
+      )}
+      <div className="v-pilot__reply">
+        <div className="v-pilot__meta">
         {/* The pane draws replies and not messages, so without this a woken
             turn is the pilot speaking unprompted with nothing saying why. A
             reader has to be able to tell what they asked for from what the run
@@ -465,6 +477,7 @@ function ReplyCard({
           no usage reported — this turn did not get far enough for the vendor to say
         </div>
       )}
+      </div>
     </div>
   );
 }

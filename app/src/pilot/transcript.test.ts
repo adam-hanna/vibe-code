@@ -41,6 +41,46 @@ function fold(events: readonly PilotEvent[], turn = 1): Conversation {
   );
 }
 
+describe('what you typed is on the turn it opened', () => {
+  test('a message reaches the reply as well as the wire', () => {
+    // The pane draws replies and never drew messages, so what a person typed
+    // was invisible: send, the composer empties, and the next thing on screen
+    // is an answer to a question that is not there. Carried on the reply rather
+    // than interleaved from `messages`, so the order cannot be got wrong.
+    const asked = ask(emptyConversation(), 'what is this run doing?', 1, 'anthropic');
+    expect(asked.live?.asked).toBe('what is this run doing?');
+    // And `messages` is untouched: it is what goes on the wire, and the wire
+    // has not changed.
+    expect(asked.messages).toEqual([{ role: 'user', content: 'what is this run doing?' }]);
+  });
+
+  test('it survives onto the finished reply, where the pane reads it', () => {
+    const done = fold([{ kind: 'ended', turn: 1, stop: 'end_turn' }]);
+    expect(done.replies[0]?.asked).toBe('hello');
+  });
+
+  test('a turn nobody typed has none', () => {
+    // A tool follow-up appends no message and opens no question: `follow` is
+    // the other half of a loop, and drawing an empty line above it would be a
+    // message nobody wrote.
+    expect(follow(emptyConversation(), 2, 'anthropic').live?.asked).toBeNull();
+    // A wake carries a message because a vendor needs something to answer, and
+    // it is deliberately NOT `asked` - drawing it as typed would be the app
+    // putting words in somebody's mouth.
+    const woken = wake(emptyConversation(), 'the loop stopped at a gate', 3, 'anthropic');
+    expect(woken.live?.asked).toBeNull();
+    expect(woken.live?.woke).toBe('the loop stopped at a gate');
+  });
+
+  test('a refused turn still shows what did not go', () => {
+    // It matters more here than anywhere: this is the card saying the request
+    // failed, so the thing that failed has to be on it.
+    const refused = refuse(emptyConversation(), 'do the thing', 'anthropic', 'no key');
+    expect(refused.replies[0]?.asked).toBe('do the thing');
+    expect(refuse(emptyConversation(), null, 'anthropic', 'x').replies[0]?.asked).toBeNull();
+  });
+});
+
 describe('a turn the run caused is not a turn somebody typed', () => {
   test('the reason reaches the model as the message and the reader as the kicker', () => {
     // One sentence for both, so the message being answered and the label above
@@ -459,6 +499,7 @@ describe('propose only, enforced by the data rather than by a component (#144)',
           // A turn somebody typed, which is what this case is about: the
           // proposal is still waiting while an ordinary conversation carries on
           // around it.
+          asked: 'and another thing',
           woke: null,
         },
       ],

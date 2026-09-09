@@ -76,6 +76,25 @@ export interface Reply {
   /** Null while the turn is still streaming. */
   outcome: Outcome | null;
   /**
+   * What the person typed to open this turn, or null (#211).
+   *
+   * **The pane draws replies and it never drew messages, so what you typed was
+   * invisible.** You pressed send, your text vanished from the composer, and the
+   * next thing on screen was an answer to a question that was not there.
+   * Reported in one sentence - *"when I type into the pilot, my text never
+   * appears in the chat window"* - and true since the pane was built.
+   *
+   * Carried on the reply rather than fixed by rendering `messages` beside it,
+   * because that is the version that cannot get the order wrong: a message and
+   * the turn it opened are one thing here, so there is no interleaving to
+   * compute and nothing to keep in step. `messages` stays exactly what it is -
+   * what goes on the wire - and this is what a reader sees.
+   *
+   * Null on a turn nobody typed: a tool follow-up, or a `wake`, which says what
+   * set it off in `woke` instead.
+   */
+  asked: string | null;
+  /**
    * Why this turn happened when nobody typed anything, or null (#211).
    *
    * **The pane draws replies and not messages**, so a turn the app started would
@@ -156,6 +175,9 @@ export function ask(
     { ...conversation, messages: [...conversation.messages, { role: 'user', content }] },
     turn,
     provider,
+    // On the reply as well as in `messages`, because the two are read by
+    // different things: the wire takes the message, and the pane takes this.
+    { asked: content },
   );
 }
 
@@ -171,7 +193,15 @@ export function follow(
   conversation: Conversation,
   turn: number,
   provider: Backend,
-  woke: string | null = null,
+  /**
+   * What opened this turn, when a person or the run did.
+   *
+   * An object rather than two more positional arguments: the pair is going to
+   * grow again - it already went from none to `woke` to `asked` in one issue -
+   * and a fourth boolean-shaped parameter is how a call site eventually passes
+   * one in the other's place.
+   */
+  opened: { asked?: string | null; woke?: string | null } = {},
 ): Conversation {
   return {
     ...conversation,
@@ -183,7 +213,8 @@ export function follow(
       calls: [],
       usage: null,
       outcome: null,
-      woke,
+      asked: opened.asked ?? null,
+      woke: opened.woke ?? null,
     },
   };
 }
@@ -211,7 +242,10 @@ export function wake(
     { ...conversation, messages: [...conversation.messages, { role: 'user', content: reason }] },
     turn,
     provider,
-    reason,
+    // `woke` and not `asked`: the message exists because a vendor needs
+    // something to answer, and drawing it as something the person typed is the
+    // one thing this function exists to avoid.
+    { woke: reason },
   );
 }
 
@@ -248,6 +282,10 @@ export function refuse(
     calls: [],
     usage: null,
     outcome: { kind: 'failed', message },
+    // A refused turn shows what was typed for the same reason a successful one
+    // does, and it matters more here: this is the card that says the request
+    // did not go, so the thing that did not go has to be on it.
+    asked: content,
     // This records how the turn STARTED, not how it ended, so a wake refused
     // before it left the window still says what set it off - otherwise it draws
     // as the pilot failing spontaneously.
