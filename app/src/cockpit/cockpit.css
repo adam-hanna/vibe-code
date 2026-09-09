@@ -1598,6 +1598,26 @@
   cursor: pointer;
 }
 
+/*
+ * The confirm that appears in the row when reopening has to take a lock (#211).
+ *
+ * In the cell rather than in a modal: what is being overruled is a fact about
+ * *this* run, and a dialog would separate the sentence from the row it is about.
+ * Wraps, because the reason is a sentence and not a label.
+ */
+.v-ws__force {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  max-width: 28rem;
+}
+
+.v-ws__why {
+  font: var(--type-body-sm);
+  color: var(--text-emphasis);
+}
+
 /* ------------------------------------------------------------ the switcher (5f) */
 
 .v-switch__scrim {

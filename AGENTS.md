@@ -238,6 +238,31 @@ rather than imported, so a drift produces a block the resume **refuses with a re
 than one it misreads. A test reads `src/raise.ts` as source and fails on the commit that
 renames a marker.
 
+**A ceiling that only fires between turns cannot stop the turn that is spending** (#211).
+`applyCharge` enforces `budget.maxTokens` when a turn returns and is charged — so a turn that
+never returns is invisible to it, and one was: a 27-minute implement turn reporting **8.8M
+tokens** against a 25M ceiling, whose host then died mid-turn. That spend is not in
+`state.json` at all, because the turn was never charged.
+
+The heartbeat is the only thing that watches a turn *while* it spends, so `ProgressOptions.onSpend`
+reports the running total each beat and `guardTurnSpend` calls `requestCancel` when the run's
+total plus this turn's crosses the ceiling. Three things keep it honest: it **cancels rather
+than throws**, so #209's latch kills the child and the loop turns it into the ending a round
+cap already takes; it inherits `cancel.ts`'s rule that **only interruptible children die**,
+never `git` and never the user's own verification gate; and the arithmetic is `applyCharge`'s
+own, so **no new number is introduced** — `maxTokens: 0` still means no limit.
+
+**A silent death now leaves a curve behind it.** That host died with no stack, no narration
+and nothing on stderr — `host exited with code -1`, and a lock with no `ending.json`, which is
+#131's signature for terminated-from-outside and says nothing about what did the terminating.
+The heartbeat carries `rssBytes` (this process, not the agent's — the child is its own
+process) and `outputBytes` from `RunOptions.onBytes`, because `run()` builds a child's stdout
+by concatenation and every reader splits it again, so a turn that talks for half an hour holds
+at least two copies of everything it said. **Both are measurements with no threshold
+attached**: nothing here decides a number is too big, because nothing has measured what too
+big is on this platform, and `budget.maxTokens` earned its 25M from a census this has no
+equivalent of.
+
 **That covers the endings vibe chooses. `run.lock` plus `ending.json` covers the ones it
 does not.** A dead pid holding a lock has always meant two opposite things at once — vibe
 decided to stop and never tidied up, or something killed it mid-turn — and #131 is what
@@ -264,6 +289,14 @@ Two things about it are load-bearing and neither is obvious:
   The raise is now attempted, its failure swallowed, and `EXIT_UNRAISED` taken — because a
   process told to terminate and still running is the state `reaper.rs` exists for, and on a
   platform where the raise works that line is unreachable.
+- **The window can take a lock back, and only from a holder that is gone** (#211). `--force`
+  had no control at all in the app, so a run whose host was killed could not be reopened from
+  the window that killed it — and that is exactly the state a hard kill leaves. `Workstreams`
+  offers it on `liveness: 'interrupted'` (dead pid, no stamp) and on `'unknown'` labelled as
+  the guess it is, and **never on `'running'`**, which says so rather than going quiet: two
+  writers on one `state.json` is what `src/lock.ts` exists to prevent. The verdict is
+  `livenessOf`'s, not one the window derives, and a test reads the `Liveness` union out of
+  `src/lock.ts` so a fifth verdict fails in the repo that adds it.
 - **On Windows a child killed from outside is not observable as killed.** There are no
   signals: Task Manager, `Stop-Process` and any `process.kill` against a process this one did
   not spawn all become `TerminateProcess`, and the child closes with an exit code and no

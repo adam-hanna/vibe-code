@@ -181,12 +181,17 @@ export async function claudeTurn(
 
   detail(`claude ${args.filter((a) => !a.startsWith('{')).join(' ')}`);
 
+  // How much of this turn's output the parent is holding (#211). Closed over
+  // rather than passed, because the heartbeat is built before the child starts
+  // and has to read the figure as it grows.
+  let outputBytes = 0;
   const heartbeat = options.progress
     ? createHeartbeat({
         ...options.progress,
         parse: parseClaudeLine,
         unit: 'tool use',
         provider: 'claude',
+        held: () => outputBytes,
       })
     : null;
   // How the child ended, in a holder rather than a closed-over `let`, so it can
@@ -209,6 +214,9 @@ export async function claudeTurn(
       // the app-server client all come through the same `run()`, and none of
       // them is something "stop the turn" gives permission to kill.
       interruptible: true,
+      onBytes: (bytes) => {
+        outputBytes = bytes;
+      },
       ...(heartbeat === null ? {} : { onLine: heartbeat.onLine }),
     });
     ended.seen = { code, signal };

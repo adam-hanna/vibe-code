@@ -548,12 +548,17 @@ export async function codexTurn(
   const verb = forkFrom ? (resumeAfterFork === null ? 'fork' : 'fork+resume') : sessionId ? 'resume' : 'exec';
   detail(`codex ${verb} -m ${model} (${effort}) -> ${schemaName}`);
 
+  // See the same holder in claude.ts (#211). Both adapters report it, because a
+  // measurement present on one provider and absent on the other is a gap that
+  // reads as a zero the first time somebody compares two turns.
+  let outputBytes = 0;
   const heartbeat = options.progress
     ? createHeartbeat({
         ...options.progress,
         parse: parseCodexLine,
         unit: 'event',
         provider: 'codex',
+        held: () => outputBytes,
       })
     : null;
   // See the note at the same point in claude.ts: one holder, read from the one
@@ -572,6 +577,9 @@ export async function codexTurn(
       // id and takes no model turn, so killing it buys nothing and could leave
       // a registered id with no conversation behind it (#74).
       interruptible: true,
+      onBytes: (bytes) => {
+        outputBytes = bytes;
+      },
       ...(heartbeat === null ? {} : { onLine: heartbeat.onLine }),
     });
     ended.seen = { code, signal };

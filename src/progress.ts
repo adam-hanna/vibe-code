@@ -1,3 +1,7 @@
+import { requestCancel } from '@src/cancel.js';
+// No `fmtTokens` import: this module already has one, and it is the one the
+// heartbeat line renders with - so the ceiling's sentence and the beat that
+// preceded it spell the same number the same way.
 import { detail } from '@src/log.js';
 import type { Meta } from '@src/log.js';
 import { markActivity, measuredWindow } from '@src/run.js';
@@ -17,7 +21,19 @@ import type { Config, InFlightTurn, RunState, TurnActivity } from '@src/types.js
  * Since #66 that last sentence has one exception, and it is deliberately narrow:
  * the per-turn *tally* gathered here (`items`, `toolItems`) is carried out
  * through `Heartbeat.activity` and does reach a decision - `downgradeInert` in
- * evidence.ts. Everything else remains display.
+ * evidence.ts.
+ *
+ * **#211 adds the second, and it is narrower still.** `onSpend` reports this
+ * turn's running token total after each beat, and `progressOptions` wires it to
+ * `guardTurnSpend`, which can cancel the turn. That is a decision about a run
+ * made from here, and it is here because this is the only thing that watches a
+ * turn *while* it spends: `applyCharge` enforces `budget.maxTokens` between
+ * turns, and an implement turn that ran to 8.8M tokens against a 25M ceiling
+ * never returned to be charged at all. The measurement stays in this module and
+ * the arithmetic stays in `guardTurnSpend` beside the config it reads, so the
+ * heartbeat itself still decides nothing.
+ *
+ * Everything else remains display.
  */
 
 export interface ProgressSnapshot {
@@ -341,6 +357,40 @@ export interface HeartbeatLine {
    */
   intervalMs?: number | undefined;
   sinceOutputMs?: number | undefined;
+  /**
+   * How much memory **this process** is holding, in bytes (#211).
+   *
+   * Not the agent's: the child is its own process and its footprint is its own
+   * business. This is the loop's, and it is here because a host died mid-turn
+   * with no stack, no narration and nothing on stderr - `host exited with code
+   * -1` and a lock with no `ending.json` beside it, which is #131's signature
+   * for terminated-from-outside and says nothing about what did the
+   * terminating.
+   *
+   * The turn it died in had run 27 minutes and reported **8.8M tokens**, and
+   * `proc.ts` accumulates a child's whole stdout into one string. That makes
+   * memory the first thing worth being able to look at, and there was no way to
+   * look at it: a run that dies leaves its last heartbeat, and the last
+   * heartbeat said nothing about this.
+   *
+   * **A measurement, with no threshold attached.** Nothing here decides that a
+   * number is too big, because nothing has measured what too big is on this
+   * platform - `budget.maxTokens` earned its 25M from a census and this has no
+   * equivalent. What it buys is that the next silent death has a curve behind
+   * it instead of a guess.
+   */
+  rssBytes?: number | undefined;
+  /**
+   * How much of the child's output the parent is holding, in bytes (#211).
+   *
+   * The specific suspect beside the general measurement. `run()` builds `stdout`
+   * by concatenation and every parse of it - `finalResult`, `parseClaudeLine`'s
+   * caller - splits it again, so a turn that talks for 27 minutes is holding at
+   * least two copies of everything it said. Reported separately from `rssBytes`
+   * because "the process is large" and "the process is large *because of this*"
+   * are different findings and only the second names a fix.
+   */
+  outputBytes?: number | undefined;
 }
 
 /**
@@ -362,6 +412,7 @@ export interface HeartbeatLine {
  */
 export function heartbeatData(args: HeartbeatLine): Record<string, unknown> {
   const { label, elapsedMs, snapshot, unit, contextWindow, intervalMs, sinceOutputMs } = args;
+  const { rssBytes, outputBytes } = args;
   const data: Record<string, unknown> = {
     label,
     elapsedMs,
@@ -377,6 +428,11 @@ export function heartbeatData(args: HeartbeatLine): Record<string, unknown> {
   // zero would say the opposite of what is true.
   if (intervalMs !== undefined && intervalMs > 0) data['intervalMs'] = intervalMs;
   if (sinceOutputMs !== undefined) data['sinceOutputMs'] = sinceOutputMs;
+  // Omitted rather than zeroed, as everything else here is: a build that did not
+  // measure and a process holding nothing are different facts, and only one of
+  // them is possible.
+  if (rssBytes !== undefined) data['rssBytes'] = rssBytes;
+  if (outputBytes !== undefined) data['outputBytes'] = outputBytes;
   return data;
 }
 
@@ -497,6 +553,37 @@ export interface ProgressOptions {
   scope?: object | undefined;
   /** Called once per observation. See the ownership rule in createHeartbeat. */
   onActivity?: ((observation: ActivityObservation) => void) | undefined;
+  /**
+   * This process's resident memory, in bytes, or absent (#211).
+   *
+   * Injected rather than read here for the reason `now` is: a module that calls
+   * `process.memoryUsage()` cannot be driven by a test, and this one is
+   * otherwise pure of the process it runs in. `progressOptions` supplies the
+   * real reader.
+   */
+  measure?: (() => number) | undefined;
+  /**
+   * How many bytes of the child's output the parent is holding, or absent.
+   *
+   * Supplied by the adapter, which is the only layer that has the buffer. See
+   * `HeartbeatLine.outputBytes` for why this is reported apart from `measure`.
+   */
+  held?: (() => number) | undefined;
+  /**
+   * Called with this turn's running token total after each beat (#211).
+   *
+   * **The seam that lets a ceiling reach a turn already in flight.** `applyCharge`
+   * enforces `budget.maxTokens` *between* turns, which cannot stop the turn that
+   * is spending: a single implement turn ran to 8.8M tokens against a 25M
+   * ceiling and the run never got the chance to notice. The heartbeat is the
+   * only thing that sees a turn's spend while it is happening.
+   *
+   * It returns nothing and decides nothing. What to do about a number is the
+   * loop's business - `orchestrator.ts` wires this to the budget and to
+   * `requestCancel`, so the module that owns money owns the decision and this
+   * one stays a measurement.
+   */
+  onSpend?: ((tokens: number) => void) | undefined;
   now?: (() => number) | undefined;
   /**
    * Where a heartbeat goes. Defaults to `log.detail`, which since #133 carries
@@ -614,6 +701,9 @@ export function createHeartbeat(
     intervalMs,
     contextWindow,
     onActivity,
+    measure,
+    held,
+    onSpend,
     parse,
     unit,
     provider,
@@ -665,10 +755,26 @@ export function createHeartbeat(
         // nothing has no gap, and a zero would claim it had just written.
         intervalMs,
         ...(lastLineAt === null ? {} : { sinceOutputMs: Math.max(0, lastEmitAt - lastLineAt) }),
+        // What this process is holding, and how much of it is the child's output
+        // (#211). Both omitted when the caller did not supply a way to measure
+        // them, which is every test and every embedder that does not care.
+        ...(measure === undefined ? {} : { rssBytes: measure() }),
+        ...(held === undefined ? {} : { outputBytes: held() }),
       };
       emit(formatHeartbeat(line), { id: 'heartbeat', data: heartbeatData(line) });
     } catch {
       // A broken sink must not take down a run.
+    }
+    // **After the emit and outside its try**, which is the ordering that matters
+    // (#211). A ceiling that fired but left no line behind would end a turn with
+    // nothing on screen to explain it, and a sink that threw must not be able to
+    // take the ceiling with it - those are the two ways this goes wrong and they
+    // want opposite placements.
+    try {
+      onSpend?.(snapshot.tokens);
+    } catch {
+      // Same rule as the sink: a guard that throws must not kill the turn it
+      // was watching. What it decided is the loop's to record, not this one's.
     }
     return true;
   };
@@ -898,5 +1004,56 @@ export function progressOptions(
     // Omitting the segment is always preferable to a number that cannot be
     // justified.
     ...(contextWindow === undefined ? {} : { contextWindow }),
+    // This process's own footprint (#211). Read here rather than in the module
+    // so the heartbeat itself stays free of the process it runs in, and so a
+    // test drives it without one.
+    measure: () => process.memoryUsage.rss(),
+    // The ceiling, reaching a turn that is already spending. `applyCharge`
+    // enforces `maxTokens` between turns and cannot stop the one in flight: an
+    // implement turn ran to 8.8M tokens under a 25M ceiling and the run never
+    // got to notice, because the turn never returned to be charged.
+    onSpend: (tokens) => guardTurnSpend(state, cfg, label, tokens),
   };
+}
+
+/**
+ * Stop a turn that has spent past what the run has left (#211).
+ *
+ * **The ceiling was always between turns, and that is where it stops working.**
+ * `applyCharge` raises `EXIT.BUDGET` when a turn's spend takes the run past
+ * `budget.maxTokens` - after the turn has returned and been paid for. A single
+ * turn that runs away is invisible to it, and one did: 27 minutes, 8.8M tokens,
+ * against a 25M ceiling, and the host died before the turn ever returned, so
+ * that spend is not in `state.json` at all.
+ *
+ * Three things about how it stops:
+ *
+ * - **It cancels, it does not throw.** `requestCancel` is #209's latch: the
+ *   child dies, the error travels up through the retry logic as a `Cancelled`,
+ *   and the loop turns it into the ending a round cap already takes. Throwing
+ *   from inside a timer callback would have no caller to catch it.
+ * - **Only what may be killed dies.** `cancel.ts` kills interruptible children
+ *   only - never `git`, never the verification gate, which is the user's own
+ *   command. That rule is already there and this inherits it.
+ * - **The projection is the run's own arithmetic, not a new one.** What the run
+ *   has already spent plus what this turn has spent so far, against the same
+ *   `maxTokens` `applyCharge` reads. No new number is introduced, which is why
+ *   there is no threshold to justify: the ceiling is the user's.
+ *
+ * Disabled with the ceiling: `maxTokens: 0` means no limit, and it means no
+ * limit here too.
+ */
+function guardTurnSpend(state: RunState, cfg: Config, label: string, tokens: number): void {
+  const ceiling = cfg.budget.maxTokens;
+  if (ceiling <= 0) return;
+  const spent = state.tokensUsed + tokens;
+  if (spent < ceiling) return;
+  // Named with both figures, because "over budget" without them is the sentence
+  // nobody can check. `requestCancel` is idempotent, so a second beat crossing
+  // the same line does not stack a second reason.
+  requestCancel(
+    `the ${label} turn took this run to ${fmtTokens(spent)} tokens, at or past the ceiling of ` +
+      `${fmtTokens(ceiling)} in budget.maxTokens. The turn was stopped mid-flight; its spend is ` +
+      'charged and the run can be resumed with a higher ceiling.',
+  );
 }

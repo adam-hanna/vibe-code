@@ -421,7 +421,11 @@ export function Cockpit() {
    * same reason the pilot's `start_run` proposal comes through there (#144).
    */
   const resume = useCallback(
-    (runId: string, dir: string, raise?: Raise) => launch(resumeArgv(runId, dir, raise ?? {})),
+    // `force` last and defaulting to false, so every existing caller sends the
+    // ordinary resume: taking a lock somebody may still hold is a decision, and
+    // the one screen that can see the lock's verdict is the one that offers it.
+    (runId: string, dir: string, raise?: Raise, force = false) =>
+      launch(resumeArgv(runId, dir, raise ?? {}, force)),
     [launch],
   );
 
@@ -749,7 +753,10 @@ export function Cockpit() {
           {tab === 'settings' && <Settings dir={repoDir} />}
           {tab === 'diff' && <DiffPane dir={repoDir} baseSha={run.baseSha} />}
           {tab === 'runs' && (
-            <Workstreams dir={repoDir} onResume={(runId) => resume(runId, repoDir)} />
+            <Workstreams
+              dir={repoDir}
+              onResume={(runId, force) => resume(runId, repoDir, undefined, force)}
+            />
           )}
           {/* Mounted whatever tab is showing, and hidden rather than unmounted.
               A conversation is state nobody can get back, and a proposal waiting

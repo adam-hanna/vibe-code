@@ -61,7 +61,113 @@ function openable(run: ArchiveRun): boolean {
   return run.linked !== true && run.unverified !== true && run.status !== 'unreadable';
 }
 
-export function Workstreams({ dir, onResume }: { dir: string; onResume: (runId: string) => void }) {
+/**
+ * Whether reopening this run has to take a lock somebody else is holding, and
+ * what that costs (#211).
+ *
+ * **`interrupted` is the one state where forcing overrules nothing.** It is
+ * `livenessOf`'s verdict for a dead pid with *no `ending.json` beside it* -
+ * #131's signature for a host that was terminated without running a line of its
+ * own code. That is precisely what a killed app leaves behind, and until now the
+ * window had no way to send `--force`, so the run it had just killed could not
+ * be reopened from it.
+ *
+ * The other three are refused their own way round:
+ *
+ * - **`running`** - a live process holds this run. Forcing makes two writers on
+ *   one `state.json`, which is the thing `src/lock.ts` exists to prevent. Never
+ *   offered, and the row says why rather than going quiet.
+ * - **`not-running`** - the lock is free, so there is nothing to force and the
+ *   ordinary reopen works.
+ * - **`unknown`** - the probe could not tell. Offered, because #77's probe
+ *   refuses to guess and a run nobody can classify would otherwise be
+ *   permanently unreopenable, but labelled as the guess it is.
+ */
+export function forcing(run: ArchiveRun): { needed: boolean; why: string } | null {
+  if (run.liveness === 'interrupted') {
+    return {
+      needed: true,
+      why: 'its lock is held by a process that is gone and left no ending beside it — the signature of a host that was killed. Forcing takes the lock back.',
+    };
+  }
+  if (run.liveness === 'unknown') {
+    return {
+      needed: true,
+      why: 'this build could not tell whether anything still holds its lock. Forcing takes it anyway, so check nothing else is running this repository first.',
+    };
+  }
+  if (run.liveness === 'running') {
+    return {
+      needed: false,
+      why: 'something is holding this run right now. Reopening it would put two writers on one state file, so it is not offered — stop the other process first.',
+    };
+  }
+  return null;
+}
+
+/**
+ * The reopen control, which is three different controls depending on the lock.
+ *
+ * The force case **confirms**, and states what it is overruling in the lock's
+ * own terms rather than as a warning glyph. It is the same shape `StopConfirm`
+ * takes for hi-fi 18's reason: the sentence people learn to click through is the
+ * generic one, and a specific fact is checkable.
+ */
+function Reopen({
+  run,
+  onResume,
+}: {
+  run: ArchiveRun;
+  onResume: (runId: string, force: boolean) => void;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const lock = forcing(run);
+
+  // A live holder. Named, never a disabled button with no explanation.
+  if (lock !== null && !lock.needed) {
+    return (
+      <span className="v-ws__absent" title={lock.why}>
+        held
+      </span>
+    );
+  }
+
+  if (lock === null) {
+    return (
+      <button className="v-ws__again" onClick={() => onResume(run.id, false)}>
+        reopen
+      </button>
+    );
+  }
+
+  if (!confirming) {
+    return (
+      <button className="v-ws__again" onClick={() => setConfirming(true)}>
+        reopen…
+      </button>
+    );
+  }
+
+  return (
+    <span className="v-ws__force">
+      <span className="v-ws__why">{lock.why}</span>
+      <button className="v-ws__again" onClick={() => onResume(run.id, true)}>
+        take the lock and reopen
+      </button>
+      <button className="v-ws__again" onClick={() => setConfirming(false)}>
+        cancel
+      </button>
+    </span>
+  );
+}
+
+export function Workstreams({
+  dir,
+  onResume,
+}: {
+  dir: string;
+  onResume: (runId: string, force: boolean) => void;
+}) {
   const [runs, setRuns] = useState<readonly ArchiveRun[] | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
 
@@ -158,9 +264,7 @@ export function Workstreams({ dir, onResume }: { dir: string; onResume: (runId: 
                 —
               </span>
             ) : (
-              <button key="act" className="v-ws__again" onClick={() => onResume(run.id)}>
-                reopen
-              </button>
+              <Reopen key="act" run={run} onResume={onResume} />
             ),
           ],
         }))}

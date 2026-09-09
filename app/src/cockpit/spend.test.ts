@@ -116,6 +116,23 @@ describe('a resume is the same four-slot argv the launch is', () => {
     expect(launchArgv('do a thing', 'C:/repo', false)).toHaveLength(4);
   });
 
+  test('force is opt-in, and it is not one of the raises', () => {
+    // #211. Before this the app could not send `--force` at all, so a run whose
+    // host was killed - a stale lock with no `ending.json` beside it, which is
+    // #131's signature for exactly that - could not be reopened from the window
+    // that killed it. The default stays off: two writers on one state file is
+    // what `src/lock.ts` exists to prevent, and a window that always forced
+    // would defeat it.
+    expect(resumeArgv('r', '/repo')).not.toContain('--force');
+    expect(resumeArgv('r', '/repo', {}, false)).not.toContain('--force');
+    expect(resumeArgv('r', '/repo', {}, true)).toEqual(['resume', 'r', '-C', '/repo', '--force']);
+
+    // Ahead of the raises, so the argv a person reads puts the thing deciding
+    // WHETHER this runs before the things deciding what it may spend.
+    const both = resumeArgv('r', '/repo', { 'max-tokens': 5 }, true);
+    expect(both.indexOf('--force')).toBeLessThan(both.indexOf('--max-tokens'));
+  });
+
   test('it trims, for the reason launchArgv does', () => {
     // A trailing newline in a path is a directory that does not exist, and the
     // error it produces says so in the least helpful possible way.

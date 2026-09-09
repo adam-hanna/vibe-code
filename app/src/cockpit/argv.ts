@@ -82,8 +82,27 @@ export function resumeArgv(
   runId: string,
   dir: string,
   raise: Raise = {},
+  /**
+   * Take the lock even though one is already held (#211).
+   *
+   * **Only for a lock whose holder is gone.** `--force` describes one
+   * invocation's willingness to take a lock and is deliberately not a config
+   * setting; here it is deliberately not a default either, because two writers
+   * on one run is the state `src/lock.ts` exists to prevent and a window that
+   * always forced would defeat it.
+   *
+   * The caller offers it on `liveness: 'interrupted'` - a dead pid with no
+   * `ending.json` beside it - which is exactly the state a killed host leaves
+   * and the only one where nothing is being overruled. Before this the app had
+   * no way to send it at all, so a run whose host was killed could not be
+   * reopened from the window that killed it.
+   */
+  force = false,
 ): readonly string[] {
   const argv = ['resume', runId.trim(), '-C', dir.trim()];
+  // Before the raises, so the argv a person reads groups the thing that changes
+  // *whether* this runs ahead of the things that change what it may spend.
+  if (force) argv.push('--force');
   // Sorted for the reason `launchArgv`'s overrides are: the same choice must
   // always build the same command, or the one in a bug report is not the one
   // that ran.
