@@ -1,5 +1,7 @@
 import { launchArgv } from '../cockpit/argv';
+import { line, outcome } from '../cockpit/commands';
 import { OUTPUT_KEEP } from '../cockpit/model';
+import type { Command, Commands } from '../cockpit/commands';
 import type { Tool } from './pilot';
 import type { Run } from '../cockpit/model';
 
@@ -63,6 +65,21 @@ export type Effect =
   /** Start or resume a run. `argv` is what `main()` takes and `parseArgs` defines. */
   | { kind: 'invoke'; argv: readonly string[] }
   /**
+   * Run a command in the repository (#211).
+   *
+   * **The third kind, and the first one that is not a frame the app already
+   * sent.** `keys.test.ts` pinned exactly two for #144's reason: every pilot
+   * capability should be a host request the window also makes, so that a pilot
+   * power the UI lacks is a missing control rather than a special ability. That
+   * property is kept - the window has its own command bar and sends the same
+   * frame - but the frame itself is new, and the rule it tested is genuinely
+   * wider than it was. Recorded here rather than quietly widened.
+   *
+   * `program` and `args` stay separate the whole way down. There is no shell,
+   * so there is no line for a `;` to be in.
+   */
+  | { kind: 'command'; dir: string; program: string; args: readonly string[] }
+  /**
    * Answer a waiting gate.
    *
    * `decision` is passed to the wire unnarrowed, exactly as the footer's is:
@@ -94,6 +111,10 @@ export type Settlement =
 /** What a read may see: the run as the window holds it, and nothing else. */
 export interface ToolContext {
   run: Run;
+  /** Commands this window started, so `read_command` has something to read. */
+  commands: Commands;
+  /** The repository, which is the only directory a command may run in. */
+  dir: string;
 }
 
 export interface ToolDef {
@@ -399,14 +420,163 @@ const ANSWER_GATE: ToolDef = {
   },
 };
 
+const READ_COMMAND: ToolDef = {
+  name: 'read_command',
+  description:
+    'What the commands you have run are doing: the command line, whether it is still running, ' +
+    'how it ended, and its output. Call this after a run_command proposal is accepted, and ' +
+    'again while a long-running one is up — a dev server keeps writing.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      id: {
+        type: 'string',
+        description:
+          'One command, by the id read_command reports. Omit for every command in this session.',
+      },
+    },
+    additionalProperties: false,
+  },
+  call: (input, ctx) => {
+    const wanted = isRecord(input) ? input['id'] : undefined;
+    const all = ctx.commands.all;
+    if (wanted !== undefined) {
+      if (typeof wanted !== 'string') {
+        return { kind: 'refused', content: '"id" has to be a string.' };
+      }
+      const one = all.find((c) => c.id === wanted);
+      // Refused by name with the list, exactly as an unknown tool is: a model
+      // that asked about a command that does not exist can only correct itself
+      // if it is told which ones do.
+      if (one === undefined) {
+        return {
+          kind: 'refused',
+          content:
+            `there is no command "${wanted}" in this session. ` +
+            (all.length === 0
+              ? 'Nothing has been run yet.'
+              : `Running and finished: ${all.map((c) => c.id).join(', ')}.`),
+        };
+      }
+      return { kind: 'ran', content: JSON.stringify(describeCommand(one)) };
+    }
+    return {
+      kind: 'ran',
+      content: JSON.stringify({
+        commands: all.map(describeCommand),
+        // Said rather than left to be inferred from an empty list, which a model
+        // would otherwise read as "the commands failed".
+        note:
+          all.length === 0
+            ? 'Nothing has been run in this session. Propose a run_command if you need to.'
+            : null,
+      }),
+    };
+  },
+};
+
+/** One command as a model reads it. Output last, because it is the long part. */
+function describeCommand(command: Command): Record<string, unknown> {
+  return {
+    id: command.id,
+    command: line(command),
+    resolved: command.resolved,
+    dir: command.dir,
+    // Absent while running rather than a zero: `outcome` is null until it ends,
+    // and a model reading `exit 0` on a live dev server would report it finished.
+    outcome: outcome(command),
+    running: command.endedAt === null,
+    truncated: command.truncated,
+    output: command.output,
+  };
+}
+
+const RUN_COMMAND: ToolDef = {
+  name: 'run_command',
+  description:
+    'Propose running a command in the repository. This does NOT run it: the exact program and ' +
+    'arguments are put in front of the user, who runs it or does not. Use it to check what a ' +
+    'run produced — install, build, test, start the app. There is no shell, so no pipes, no ' +
+    'redirection, no && and no globbing: name one program and its arguments. Long-running ' +
+    'commands are fine and keep running; read them back with read_command.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      program: {
+        type: 'string',
+        description:
+          'One program, e.g. "npm" or "node". Not a command line: no arguments in here.',
+      },
+      args: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Its arguments, one per entry, e.g. ["run", "dev"].',
+      },
+      why: {
+        type: 'string',
+        description: 'One line on what this is for. The user reads it beside the command.',
+      },
+    },
+    required: ['program', 'why'],
+    additionalProperties: false,
+  },
+  call: (input, ctx) => {
+    if (!isRecord(input)) return { kind: 'refused', content: 'this call sent no arguments.' };
+    const program = text(input, 'program');
+    if (bad(program)) return { kind: 'refused', content: program.why };
+    const why = text(input, 'why');
+    if (bad(why)) return { kind: 'refused', content: why.why };
+
+    const raw: unknown = input['args'] ?? [];
+    if (!Array.isArray(raw) || !raw.every((a): a is string => typeof a === 'string')) {
+      return {
+        kind: 'refused',
+        content: '"args" has to be an array of strings, one argument per entry.',
+      };
+    }
+    // The shell characters, refused **with the reason** rather than stripped.
+    // There is no shell here, so `npm test && npm run build` would be handed to
+    // a program called `npm` as literal arguments and fail confusingly - and a
+    // model told that gets to send two calls instead of guessing.
+    const shellish = [program, ...raw].find((part) => /[;&|><`$\n]/.test(part));
+    if (shellish !== undefined) {
+      return {
+        kind: 'refused',
+        content:
+          `"${shellish}" looks like shell syntax, and there is no shell here — the program and ` +
+          'its arguments are passed straight to the OS. Run one program per call, and use ' +
+          'read_command to see what it produced before deciding the next one.',
+      };
+    }
+    if (ctx.dir.trim() === '') {
+      return {
+        kind: 'refused',
+        content: 'no repository is set in this window, so there is nowhere to run a command.',
+      };
+    }
+    return {
+      kind: 'proposes',
+      summary: `${why.trim()} — ${[program, ...raw].join(' ')} in ${ctx.dir}`,
+      effect: { kind: 'command', dir: ctx.dir, program, args: raw },
+    };
+  },
+};
+
 /**
  * The table.
  *
- * Reads first, then the two that need a person, which is also the order they are
- * useful in: a model that proposes before it has looked is proposing about a run
- * it has not read.
+ * Reads first, then the three that need a person, which is also the order they
+ * are useful in: a model that proposes before it has looked is proposing about a
+ * run it has not read.
  */
-export const TOOLS: readonly ToolDef[] = [READ_RUN, READ_OUTPUT, START_RUN, ANSWER_GATE];
+export const TOOLS: readonly ToolDef[] = [
+  READ_RUN,
+  READ_OUTPUT,
+  READ_COMMAND,
+  START_RUN,
+  ANSWER_GATE,
+  RUN_COMMAND,
+];
 
 /** The table as the vendor is told it — the executors stripped off. */
 export function declare(): readonly Tool[] {

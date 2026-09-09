@@ -69,6 +69,44 @@ export type Outbound =
    * started".
    */
   | { type: 'error'; id: number | null; message: string }
+  /**
+   * A command started, or was refused (#211).
+   *
+   * `refused` and `command` are exclusive: a refusal never started anything, so
+   * there is no id to report output against, and a started command always has
+   * one. A window drawing a card from a refusal would be drawing a process that
+   * does not exist.
+   */
+  | {
+      type: 'command_started';
+      id: number;
+      command: {
+        id: string;
+        program: string;
+        args: readonly string[];
+        resolved: string;
+        dir: string;
+        startedAt: number;
+      } | null;
+      refused: string | null;
+    }
+  /** Output from a running command, in the order it arrived. */
+  | { type: 'command_output'; commandId: string; chunk: string }
+  /**
+   * A command ended.
+   *
+   * `stopped` is the fact the exit code cannot carry: on Windows a killed
+   * process closes with a code and no signal, so *"a person stopped this"* and
+   * *"it exited"* are indistinguishable from the outside (#131).
+   */
+  | {
+      type: 'command_ended';
+      commandId: string;
+      code: number | null;
+      signal: string | null;
+      stopped: boolean;
+      endedAt: number;
+    }
   /** A fragment of a pilot reply, in order (#193). */
   | { type: 'pilot_delta'; id: number; text: string }
   /**
@@ -228,6 +266,28 @@ export type Inbound =
    * buys is that **no key is needed** - it runs on the subscription the user
    * already pays for.
    */
+  /**
+   * Run a command a person pressed (#211).
+   *
+   * **`program` and `args` are separate and are never joined.** The one
+   * invariant of `src/commands.ts` is that what runs is what was displayed, and
+   * a single string would put a `;` and a backtick back in reach of text a
+   * model wrote. There is deliberately no `shell` field: there is no shell.
+   *
+   * Reversing part of a rule this file's own neighbours state, so the narrowness
+   * is worth restating: the model cannot send this. It proposes, the proposal is
+   * drawn with the exact program and arguments, and the window sends this only
+   * when somebody presses it - the same road `invoke` takes from `start_run`.
+   */
+  | {
+      type: 'command';
+      id: number;
+      dir: string;
+      program: string;
+      args: readonly string[];
+    }
+  /** Stop a running command. `commandId` is one this session started. */
+  | { type: 'command_stop'; id: number; commandId: string }
   | {
       type: 'pilot';
       id: number;
@@ -377,6 +437,33 @@ export function decode(line: string): Decoded {
       return { ok: true, message: { type: 'shutdown', id } };
     case 'pause':
       return { ok: true, message: { type: 'pause', id } };
+    case 'command': {
+      // Every field checked here, for `pilot`'s reason: there is no `parseArgs`
+      // below this to catch a missing one, and this frame spawns a process.
+      const dir = parsed['dir'];
+      const program = parsed['program'];
+      if (typeof dir !== 'string' || dir === '') {
+        return { ok: false, id, reason: 'command carried no dir' };
+      }
+      if (typeof program !== 'string' || program === '') {
+        return { ok: false, id, reason: 'command carried no program' };
+      }
+      const args: unknown = parsed['args'] ?? [];
+      // An array of strings or nothing. A number where a string was declared is
+      // the shape `tools.ts` documents a model actually sending, and coercing it
+      // would run an argument nobody wrote.
+      if (!Array.isArray(args) || !args.every((a): a is string => typeof a === 'string')) {
+        return { ok: false, id, reason: 'command args held something that was not a string' };
+      }
+      return { ok: true, message: { type: 'command', id, dir, program, args } };
+    }
+    case 'command_stop': {
+      const commandId = parsed['commandId'];
+      if (typeof commandId !== 'string' || commandId === '') {
+        return { ok: false, id, reason: 'command_stop named no command' };
+      }
+      return { ok: true, message: { type: 'command_stop', id, commandId } };
+    }
     case 'pilot': {
       // Every field required and every one checked, because this one is not
       // argv: an `invoke` hands its strings to `parseArgs`, which is the single

@@ -49,6 +49,7 @@ import type { KeyStatus } from './keys';
 import type { Effect, Settlement } from './tools';
 import type { Call, Conversation, Reply } from './transcript';
 import type { Launched } from '../cockpit/argv';
+import type { Commands } from '../cockpit/commands';
 import type { Run } from '../cockpit/model';
 
 /**
@@ -176,6 +177,19 @@ function EffectDetail({ effect }: { effect: Effect }) {
     return (
       <pre className="v-proposal__argv">
         {effect.argv.map((arg, i) => `${i === 0 ? '' : '  '}${arg}`).join('\n')}
+      </pre>
+    );
+  }
+  if (effect.kind === 'command') {
+    // The command as it will be spawned, and **where**. The directory is on the
+    // card because it is half of what the command does: `npm install` is a
+    // different act in two repositories, and this is the one thing a person
+    // cannot check from the command line alone (#211).
+    return (
+      <pre className="v-proposal__argv">
+        {[effect.program, ...effect.args].join(' ')}
+        {'\n'}
+        {`in ${effect.dir}`}
       </pre>
     );
   }
@@ -523,6 +537,14 @@ export interface PilotPaneProps {
    */
   dir: string;
   /**
+   * Commands this window has run, so `read_command` has something to read.
+   *
+   * A prop rather than this pane's own state, for the reason `statuses` is one:
+   * `Cockpit` owns the one sender, and two copies of what has been run would
+   * disagree about whether a dev server is still up.
+   */
+  commands: Commands;
+  /**
    * Rendered above the composer while no run exists (#211).
    *
    * A slot rather than the thing itself, so this pane keeps knowing nothing
@@ -545,6 +567,7 @@ export function PilotPane({
   run,
   launched,
   dir,
+  commands,
   onEffect,
   onPending,
   statuses,
@@ -619,11 +642,18 @@ export function PilotPane({
     for (const reply of conversation.replies) {
       for (const call of reply.calls) {
         if (call.settlement === null) {
-          dispatch({ type: 'settle', id: call.id, settlement: execute(call, { run }) });
+          dispatch({
+            type: 'settle',
+            id: call.id,
+            settlement: execute(call, { run, commands, dir }),
+          });
         }
       }
     }
-  }, [conversation.replies, run]);
+    // `commands` in the deps for the reason `run` is: `read_command` is
+    // answered from it, and a call settled against a stale copy would report a
+    // dev server as having produced nothing (#211).
+  }, [conversation.replies, run, commands, dir]);
 
   // Each finished turn into the pilot's books, once (#145).
   //

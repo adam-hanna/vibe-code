@@ -7,6 +7,8 @@ import type { KeyStatus } from '../pilot/keys';
 // `PilotPane`, not `Pilot`: `pilot.ts` beside it is the wire, and two files
 // differing only in case is a compile error on Windows and macOS both.
 import { PilotPane } from '../pilot/PilotPane';
+import { noCommands, reduceCommands, running } from './commands';
+import { CommandsPane } from './CommandsPane';
 import { Diagnostics } from './Diagnostics';
 import { DiffPane } from './DiffPane';
 import { FindingsPane } from './FindingsPane';
@@ -227,6 +229,7 @@ export function Cockpit() {
     | 'spend'
     | 'questions'
     | 'runs'
+    | 'commands'
     | 'settings'
     | 'diff'
     // **The pilot, not the output pane** (#211). The complaint was exact: *"I
@@ -479,6 +482,62 @@ export function Cockpit() {
   }, [run.gate]);
 
   /**
+   * Commands this window started (#211).
+   *
+   * **Held here rather than on `Run`, and the reason is lifetime.** A command is
+   * not part of a run: it is started when there is no run at all - *"does the
+   * thing you just built start"* is asked after one finishes - and a dev server
+   * left up outlives several. On `Run` it would be destroyed by `nextRun`, which
+   * would take the card of a process still listening on 5173 with it.
+   */
+  const [commands, setCommands] = useState(noCommands);
+  useEffect(() => {
+    let stop: (() => void) | null = null;
+    let cancelled = false;
+    void (async () => {
+      stop = await host.onCommandFrame((frame) => {
+        setCommands((prev) => reduceCommands(prev, frame));
+      });
+      if (cancelled) stop?.();
+    })();
+    return () => {
+      cancelled = true;
+      stop?.();
+    };
+  }, []);
+
+  /**
+   * Run one, in the repository this window is pointed at.
+   *
+   * The **one** sender, exactly as `launch` is: the pilot's accepted proposal
+   * and the command bar's own button both arrive here, so a pilot capability the
+   * window lacks would be a missing control rather than a special ability
+   * (#144). The directory is not a parameter - a command runs where the window
+   * is pointed, and letting a caller name one would be a second answer to which
+   * repository this is.
+   */
+  const runCommand = useCallback(
+    (program: string, args: readonly string[]) => {
+      if (repoDir.trim() === '') {
+        note('log', 'no repository is set, so there is nowhere to run a command');
+        return;
+      }
+      void host
+        .runCommand(repoDir, program, args)
+        .then((frame) => setCommands((prev) => reduceCommands(prev, frame)))
+        .catch((err: unknown) => note('log', String(err)));
+    },
+    [repoDir, note],
+  );
+
+  const stopCommand = useCallback(
+    (commandId: string) => {
+      void host.stopCommand(commandId).catch((err: unknown) => note('log', String(err)));
+    },
+    [note],
+  );
+
+  /**
    * Fire a proposal the user accepted.
    *
    * Nothing here decides anything: the effect was built by `tools.ts` from what
@@ -488,9 +547,10 @@ export function Cockpit() {
   const onEffect = useCallback(
     (effect: Effect) => {
       if (effect.kind === 'invoke') launch(effect.argv);
+      else if (effect.kind === 'command') runCommand(effect.program, effect.args);
       else answer(effect.askId, effect.decision);
     },
-    [launch, answer],
+    [launch, answer, runCommand],
   );
 
   const outside = !host.inShell();
@@ -700,6 +760,17 @@ export function Cockpit() {
             >
               Runs
             </button>
+            {/* The count is what is still RUNNING, not how many have been run
+                (#211). A dev server left up is the fact worth a badge - it is
+                holding a port and it will not stop by itself - and a total that
+                only grew would be the tray-badge failure `4e` names. */}
+            <button
+              className={`v-cockpit__tab ${tab === 'commands' ? 'v-cockpit__tab--on' : ''}`}
+              onClick={() => setTab('commands')}
+            >
+              Commands
+              {running(commands).length > 0 ? ` · ${String(running(commands).length)}` : ''}
+            </button>
             {/* `1f`. The count is blocking questions, not all of them: an
                 advisory question the answerer handled needs nobody, and a
                 badge that included it would train you to ignore the badge. */}
@@ -752,6 +823,14 @@ export function Cockpit() {
           {tab === 'questions' && <QuestionsPane questions={run.questions} />}
           {tab === 'settings' && <Settings dir={repoDir} />}
           {tab === 'diff' && <DiffPane dir={repoDir} baseSha={run.baseSha} />}
+          {tab === 'commands' && (
+            <CommandsPane
+              commands={commands}
+              dir={repoDir}
+              onRun={runCommand}
+              onStop={stopCommand}
+            />
+          )}
           {tab === 'runs' && (
             <Workstreams
               dir={repoDir}
@@ -768,6 +847,7 @@ export function Cockpit() {
               run={run}
               launched={sentLaunch}
               dir={repoDir}
+              commands={commands}
               onEffect={onEffect}
               onPending={setProposals}
               statuses={keyStatuses}

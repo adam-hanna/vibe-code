@@ -343,6 +343,7 @@ src/schemas.ts       the JSON schemas both CLIs are pinned to
 src/validate.ts      parser vocabulary for model output
 src/proc.ts          child-process plumbing, and how a child ended
 src/cancel.ts        stopping a turn that is already running - the latch, and what it may kill
+src/commands.ts      a command a person pressed - no shell, no shim, and where it runs
 src/ending.ts        how this process ended - the stamp beside the lock
 src/git.ts           branch and commit operations
 tests/               node:test, one file per concern
@@ -360,6 +361,7 @@ app/src/pilot/       credentials, the wire, and the pane - transcript.ts is the 
 app/src/pilot/tools.ts     what the pilot may touch: the table, its executors, and propose-only
 app/src/pilot/ledger.ts    the pilot's own books - the one place a dollar is a dollar
 app/src/cockpit/argv.ts    a form to an argv - the button and the pilot build the same one
+app/src/cockpit/commands.ts  commands this window ran - pure, and not part of any run
 app/src-tauri/src/host.rs    supervising the host process, and the \\?\ path fix
 app/src-tauri/src/reaper.rs  making a killed app take the host with it
 app/src-tauri/src/keys.rs    the OS keychain, and the read the window cannot reach
@@ -389,8 +391,50 @@ definitions of a legal run.**
 
 The webview is given **no shell permission at all**. The host is spawned from Rust with a
 path Rust resolved, and `host_send` writes one line to a process that is already running.
-There is deliberately no command that takes a program name — the pilot chat can drive the
-session, and "run this program" must never be in reach of it.
+No Tauri command takes a program name, and none ever should: a window that could spawn is a
+window whose renderer can spawn.
+
+**Running a command is a host request now, and the rule it reverses is worth stating** (#211).
+This file said *"there is deliberately no command that takes a program name — the pilot chat
+can drive the session, and 'run this program' must never be in reach of it"*, and
+`pilotchat.ts` explained why `Bash` is absent from the pilot where a *run's* read-only seats
+have it: *"That set is read-only in the sense a run's seats are — a shell under a sandbox, in
+work a person launched. This is a chat surface the model drives turn by turn."*
+
+That was written when the pilot was a tab beside a form. It is now the front door, and it
+could not check whether the thing it had just built starts — so it answered *"here is exactly
+what to type"* and handed the last mile back to a terminal. That is the evidence that
+reopened it, not a fresh opinion.
+
+**What is reversed is narrow.** The model still runs nothing: `run_command` is a *proposal*
+drawn with the exact program, arguments and directory, and a person presses it — the same
+shape `start_run` takes, and #144's decision 1 unchanged. What is new is where an accepted
+proposal goes: a `command` frame to the **host**, which is Node and already spawns children,
+on the road `invoke` and `diff` take. Rust is still transport, the webview still has no shell,
+and the window has its own command control — so this stays a host request the app makes rather
+than a pilot power.
+
+`src/commands.ts` has one invariant and every rule below serves it: **what runs is what was
+displayed.**
+
+- **No shell, ever.** `program` and `args` are separate from the schema to the spawn and are
+  never joined, so there is no line for a `;` or a backtick to be in. `run_command` refuses
+  shell metacharacters *with the reason*, because a model told why sends two calls rather than
+  guessing.
+- **A shim is refused, not shelled.** On Windows `npm` is `npm.cmd`, and running a `.cmd`
+  means `cmd.exe`, which means quoting rules that decide what the arguments were. So the
+  Node-family CLIs resolve to the JavaScript they are — `npm install` spawns as
+  `node …/npm-cli.js install` — and anything else resolving to a `.cmd`, `.bat` or `.ps1` is
+  refused by name. A command whose arguments could be re-read is not the command anybody
+  pressed.
+- **It runs where the window is pointed**, checked to exist first and never defaulted to
+  `process.cwd()` — the defaulting that put the pilot in a home directory.
+- **A dev server is the point, so it survives**, and `stopAllCommands()` runs on the host's way
+  out. The asymmetry with a run's agent children is deliberate: those are work a resume picks
+  up, and a server left listening on 5173 after its window has gone is a port with no owner.
+
+`Effect` has a third kind and `keys.test.ts` moved with it. The sentence it tested was never
+"there are two" — it was *every effect is a request the window also makes*, which still holds.
 
 **Every pilot capability is a host request the app already makes** (#144). The four tools in
 `app/src/pilot/tools.ts` produce an `invoke` or an `answer` — the two inbound frames in

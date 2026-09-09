@@ -1,5 +1,6 @@
 import { requestCancel } from '@src/cancel.js';
 import { main } from '@src/cli.js';
+import { refused as commandRefused, startCommand, stopAllCommands, stopCommand } from '@src/commands.js';
 import { pilotChat } from '@src/pilotchat.js';
 import * as log from '@src/log.js';
 import { createLineReader, decode, encode, PROTOCOL_VERSION } from '@src/protocol.js';
@@ -412,6 +413,62 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       return;
     }
 
+    if (msg.type === 'command') {
+      // **Outside the one-at-a-time rule, like the pilot and the three reads.**
+      // That rule is about *runs*: `src/lock.ts` expects one process per run and
+      // two runs would interleave their narration. A command takes no lock,
+      // writes no state and narrates nothing into the run - and checking whether
+      // the thing a run just built starts is most wanted the moment the run has
+      // finished, which is exactly when a `finished()` gate would refuse it.
+      //
+      // Deliberately not awaited. A dev server does not exit, and that is the
+      // point of it: `command_started` answers now, output arrives as it comes,
+      // and `command_ended` lands whenever it lands.
+      const started = startCommand({
+        program: msg.program,
+        args: msg.args,
+        dir: msg.dir,
+        onOutput: (commandId, chunk) => send({ type: 'command_output', commandId, chunk }),
+        onEnd: (record) =>
+          send({
+            type: 'command_ended',
+            commandId: record.id,
+            code: record.code,
+            signal: record.signal,
+            stopped: record.stopped,
+            endedAt: record.endedAt ?? Date.now(),
+          }),
+      });
+      send(
+        commandRefused(started)
+          ? { type: 'command_started', id: msg.id, command: null, refused: started.refused }
+          : {
+              type: 'command_started',
+              id: msg.id,
+              command: {
+                id: started.id,
+                program: started.program,
+                args: started.args,
+                resolved: started.resolved,
+                dir: started.dir,
+                startedAt: started.startedAt,
+              },
+              refused: null,
+            },
+      );
+      return;
+    }
+
+    if (msg.type === 'command_stop') {
+      // No reply beyond the ordinary `result`: the kill is observable as the
+      // `command_ended` the close event produces, and a second answer saying it
+      // was asked for would be a claim about a process rather than about the
+      // request.
+      stopCommand(msg.commandId);
+      send({ type: 'result', id: msg.id, exit: 0 });
+      return;
+    }
+
     if (msg.type === 'pilot') {
       // **Outside the one-at-a-time rule, and outside `finished()`.** That rule
       // is about *runs*: `src/lock.ts` expects one process per run and two runs
@@ -641,6 +698,14 @@ export async function serve(): Promise<void> {
   // Those children are not killed here. On Windows the job object in
   // `reaper.rs` takes them with the app; where it cannot, `Status.uncontained`
   // already says so rather than the app pretending otherwise.
+  //
+  // **Commands are killed here, and the asymmetry is deliberate** (#211). A run's
+  // agent children are work a person launched and a resume picks up; a dev
+  // server a person started from this window is not something anything picks
+  // up, and one left listening on 5173 after its window has gone is a port
+  // nobody can find the owner of. `process.exit` runs no `close` handler, so
+  // this is the last point at which anything can ask.
+  stopAllCommands();
   process.exitCode = HOST_EXIT_ABANDONED;
   process.exit(HOST_EXIT_ABANDONED);
 }

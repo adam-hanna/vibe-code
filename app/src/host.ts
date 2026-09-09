@@ -173,12 +173,54 @@ export interface DiffFrame {
   truncated: boolean;
 }
 
+/**
+ * A command started, or was refused (#211).
+ *
+ * `command` and `refused` are exclusive: a refusal started nothing, so there is
+ * no id to report output against, and drawing a card from one would be drawing
+ * a process that does not exist.
+ */
+export interface CommandStarted {
+  type: 'command_started';
+  id: number;
+  command: {
+    id: string;
+    program: string;
+    args: readonly string[];
+    /** What was actually spawned. `npm` resolves to `node .../npm-cli.js`. */
+    resolved: string;
+    dir: string;
+    startedAt: number;
+  } | null;
+  refused: string | null;
+}
+
+/** Output from a running command, in the order it arrived. */
+export interface CommandOutput {
+  type: 'command_output';
+  commandId: string;
+  chunk: string;
+}
+
+/** A command ended. `stopped` is what the exit code cannot carry on Windows. */
+export interface CommandEnded {
+  type: 'command_ended';
+  commandId: string;
+  code: number | null;
+  signal: string | null;
+  stopped: boolean;
+  endedAt: number;
+}
+
 export type Frame =
   | Ready
   | Narration
   | Ask
   | Result
   | HostError
+  | CommandStarted
+  | CommandOutput
+  | CommandEnded
   | PilotDelta
   | PilotReply
   | Archive
@@ -212,7 +254,13 @@ export function isFrame(v: unknown): v is Frame {
     // that are over, and `Run` is about the one in progress (#223).
     type === 'archive' ||
     type === 'config' ||
-    type === 'diff'
+    type === 'diff' ||
+    // The command runner's three (#211). Also ignored by the cockpit's reducer:
+    // a command is not part of a run - it outlives one, and it happens when
+    // there is none - so `Cockpit` folds them with `reduceCommands` instead.
+    type === 'command_started' ||
+    type === 'command_output' ||
+    type === 'command_ended'
   );
 }
 
@@ -489,6 +537,54 @@ export async function diff(
     'the host did not answer with the diff',
   );
   return { patch: frame.patch, truncated: frame.truncated };
+}
+
+/**
+ * Run a command, and answer with what started or why nothing did (#211).
+ *
+ * **`program` and `args` are separate all the way down** and are never joined
+ * into a line: the one invariant of `src/commands.ts` is that what runs is what
+ * was displayed, and a string would put a `;` back within reach of text a model
+ * wrote.
+ *
+ * The output does not come back from here. It arrives as `command_output` and
+ * `command_ended`, the way a run's narration does, because the interesting
+ * commands are the ones that have not finished.
+ */
+export async function runCommand(
+  dir: string,
+  program: string,
+  args: readonly string[],
+): Promise<CommandStarted> {
+  const id = nextRequestId();
+  return ask<CommandStarted>(
+    { type: 'command', id, dir, program, args },
+    id,
+    'command_started',
+    'the host did not say whether the command started',
+  );
+}
+
+/** Stop one this session started. */
+export async function stopCommand(commandId: string): Promise<void> {
+  await send({ type: 'command_stop', id: nextRequestId(), commandId });
+}
+
+/**
+ * Listen for the command runner's frames (#211).
+ *
+ * A third listener on the same event, beside `connect` and `onPilotFrame`, for
+ * the reason that one exists: the cockpit reads run frames, the pilot pane
+ * reads pilot frames, and neither has to know about commands.
+ */
+export async function onCommandFrame(
+  handler: (frame: CommandOutput | CommandEnded) => void,
+): Promise<() => void> {
+  return listen<unknown>('host://frame', (event) => {
+    const frame: unknown = event.payload;
+    if (!isFrame(frame)) return;
+    if (frame.type === 'command_output' || frame.type === 'command_ended') handler(frame);
+  });
 }
 
 /** What one subscription-backed pilot turn needs (#193). */

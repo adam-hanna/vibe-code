@@ -1598,6 +1598,131 @@
   cursor: pointer;
 }
 
+/* ------------------------------------------------------- commands (#211) */
+
+.v-cmds {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  overflow-y: auto;
+}
+
+.v-cmds__form {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.v-cmds__label {
+  font: var(--type-label);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.v-cmds__prog,
+.v-cmds__args {
+  font: var(--type-mono-sm);
+  color: var(--text-primary);
+  background: var(--surface-panel);
+  border: 1px solid var(--rule-inner);
+  padding: var(--space-2);
+}
+
+.v-cmds__prog {
+  width: 8rem;
+}
+
+.v-cmds__args {
+  flex: 1;
+  min-width: 12rem;
+}
+
+.v-cmds__note,
+.v-cmds__empty p {
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+.v-cmds__refused {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  font: var(--type-body-sm);
+  color: var(--text-emphasis);
+  background: var(--surface-alarm);
+  padding: var(--space-2) var(--space-3);
+}
+
+.v-cmds__empty {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/*
+ * One command. The live one takes the accent rule, which is the same signal a
+ * running turn takes in the loop column - a process holding a port is the thing
+ * on this screen most worth noticing.
+ */
+.v-cmd {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  border-left: 2px solid var(--rule-card);
+  padding-left: var(--space-3);
+}
+
+.v-cmd--live {
+  border-left-color: var(--accent-border);
+}
+
+.v-cmd__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.v-cmd__line {
+  font: var(--type-mono-sm);
+  color: var(--text-primary);
+}
+
+.v-cmd__meta {
+  display: flex;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+.v-cmd__resolved {
+  font: var(--type-mono-sm);
+}
+
+.v-cmd__quiet {
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+.v-cmd__output {
+  font: var(--type-mono-sm);
+  color: var(--text-secondary);
+  background: var(--surface-panel);
+  border: 1px solid var(--rule-inner);
+  padding: var(--space-2) var(--space-3);
+  margin: 0;
+  max-height: 22rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /*
  * What a resumed run did before this window was watching (#211).
  *

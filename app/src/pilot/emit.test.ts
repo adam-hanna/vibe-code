@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import { FENCE, UNNAMED, readEmitted, visible } from './emit';
+import { noCommands } from '../cockpit/commands';
 import { execute } from './tools';
 import { trailingResults } from './transcript';
 import type { Message } from './pilot';
@@ -70,7 +71,10 @@ describe('reading a call out of prose', () => {
     expect(calls[0]?.name).toBe(UNNAMED);
     const settlement = execute(
       { name: calls[0]?.name ?? '', input: {}, unreadable: null },
-      { run: {} as never },
+      // The refusal path returns before it reads any of this, which is the
+      // point: a tool name this build does not have is refused by name, and the
+      // run it was asked about never comes into it.
+      { run: {} as never, commands: noCommands(), dir: 'C:/repo' },
     );
     expect(settlement.kind).toBe('refused');
     expect(settlement.kind === 'refused' && settlement.content).toContain('start_run');
