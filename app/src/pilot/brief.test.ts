@@ -154,6 +154,12 @@ describe('the run in the prompt is the run read_run reports', () => {
       prompt.slice(prompt.indexOf('{', prompt.indexOf(marker)), prompt.lastIndexOf('}') + 1),
     );
     expect(Object.keys(json as object).sort()).toEqual([
+      // What earlier sessions of a resumed run did (#211). Null here, because
+      // `runningRun()` is not a resume - but present, because the field is not
+      // conditional: a key that appeared only sometimes would have the model
+      // reading its absence as "this is not a resume" on a build that simply
+      // had nothing to say.
+      'before',
       'completed',
       'cycles',
       'ended',

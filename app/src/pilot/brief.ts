@@ -108,6 +108,13 @@ const WHAT_YOU_CAN_READ = [
  * model that rounds that to zero reports a measurement that was never taken.
  */
 const HOW_TO_READ = [
+  'If `before` is present this run was RESUMED, and everything else in the block',
+  'describes only the part since it was picked up. `before` is what earlier',
+  'sessions already did - rounds, spend, findings still open.',
+  '',
+  'So on a resumed run an empty cycles list does not mean nothing has happened.',
+  'Read the two together and say which timeframe you are talking about.',
+  '',
   'The block above is rebuilt for every message you are sent, so it describes the',
   'run as of this message. It IS what read_run returns, so calling read_run before',
   'you have done anything else costs a whole round trip to be told what you were',

@@ -150,6 +150,21 @@ function bad(v: string | { why: string }): v is { why: string } {
 export function describeRun(run: Run): Record<string, unknown> {
   return {
     protocol: run.protocol,
+    /**
+     * What earlier sessions of this run did, when it is a resume (#211).
+     *
+     * **Without it the pilot describes a run that has done nothing**, because
+     * everything below is folded from narration and narration only covers the
+     * session the window is watching. A run picked up at review round 3 has
+     * `cycles: []` here, and a model reading that concluded - reasonably - that
+     * nothing had happened yet.
+     *
+     * Labelled `before this session` rather than merged into the fields below,
+     * for the reason the reducer keeps it separate: those describe what this
+     * window watched, and a total that silently included work it did not see
+     * would make `cycles` and `spend` disagree about the same run.
+     */
+    before: run.from,
     running:
       run.running === null
         ? null

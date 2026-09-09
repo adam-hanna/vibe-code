@@ -1,7 +1,15 @@
-import { LivenessDot, MetaChip } from '../design';
+import { LivenessDot, MetaChip, StateKicker } from '../design';
 import { clock, elapsed } from './format';
 import { RunningRow } from './RunningRow';
-import type { Cycle, CycleKind, PhaseGroup, Preflight, Run, Turn } from './model';
+import type {
+  Cycle,
+  CycleKind,
+  PhaseGroup,
+  Preflight,
+  ResumedFrom,
+  Run,
+  Turn,
+} from './model';
 
 /**
  * The centre column from `3a`, at the width the design fixes it at.
@@ -145,6 +153,73 @@ function Step({
 }
 
 /**
+ * What this run did before this window was watching (#211).
+ *
+ * **The column below draws narration, and narration starts when the window
+ * connects.** So a run resumed at review round 3 drew an empty column and a
+ * `starting` checklist, exactly as though it were beginning - which is what
+ * *"when I resume a past run, the pilot et al should be brought back to
+ * wherever we're resuming from"* is about.
+ *
+ * It sits above the cycles rather than among them, and it is a **summary**
+ * rather than reconstructed cards: the core reads it off `state.json`, and
+ * re-emitting phases and turns for work that already finished would fill the
+ * column at the price of drawing completed work as though it were running.
+ *
+ * Every figure is drawn only when it arrived. A round the frame did not carry
+ * is left out rather than shown as 0, which on a resumed run would say the
+ * opposite of what this row exists to say.
+ */
+function ResumedRow({ from }: { from: ResumedFrom }) {
+  const rounds: string[] = [];
+  if (from.planRound !== null) rounds.push(`plan ${String(from.planRound)}`);
+  if (from.questionRound !== null && from.questionRound > 0) {
+    rounds.push(`question ${String(from.questionRound)}`);
+  }
+  if (from.verifyRound !== null && from.verifyRound > 0) {
+    rounds.push(`verify ${String(from.verifyRound)}`);
+  }
+  if (from.reviewRound !== null) rounds.push(`review ${String(from.reviewRound)}`);
+
+  const open: string[] = [];
+  if (from.pendingFindings !== null && from.pendingFindings > 0) {
+    open.push(
+      `${String(from.pendingFindings)} finding(s) outstanding` +
+        (from.pendingFrom === null ? '' : ` from ${from.pendingFrom}`),
+    );
+  }
+  if (from.carried !== null && from.carried > 0) {
+    open.push(`${String(from.carried)} carried into implementation`);
+  }
+
+  return (
+    <div className="v-resumed">
+      <div className="v-resumed__head">
+        <StateKicker tone="quiet">picked up</StateKicker>
+        <span className="v-resumed__where">
+          {from.phase === null ? 'from an earlier session' : `in ${from.phase}`}
+          {from.status === null ? '' : `, which ended ${from.status}`}
+        </span>
+      </div>
+      {rounds.length > 0 && <div className="v-resumed__line">{rounds.join(' · ')}</div>}
+      {open.length > 0 && <div className="v-resumed__line">{open.join(' · ')}</div>}
+      {/* Said out loud, because it is the thing most likely to be misread: the
+          cards below are this session only, and the totals in the footer start
+          from zero again. */}
+      <div className="v-resumed__note">
+        Everything below is this session. Earlier sessions spent{' '}
+        {from.tokensUsed === null ? 'an unrecorded number of' : from.tokensUsed.toLocaleString()}{' '}
+        tokens
+        {from.codexTokens === null
+          ? ''
+          : ` (${from.codexTokens.toLocaleString()} of them Codex)`}
+        , and are not counted again here.
+      </div>
+    </div>
+  );
+}
+
+/**
  * What preflight is doing, before there is a phase to draw (#205, hi-fi 16).
  *
  * The seconds between pressing launch and the first phase used to have nothing
@@ -270,6 +345,7 @@ export function LoopColumn({
 
   return (
     <section className="v-loop" aria-label="loop">
+      {run.from !== null && <ResumedRow from={run.from} />}
       {run.preflight !== null && <PreflightRow preflight={run.preflight} now={now} />}
 
       {/* Everything before the first phase. The checklist goes once a run has

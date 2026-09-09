@@ -1086,12 +1086,28 @@ export function PilotPane({
         <textarea
           className="v-pilot__entry"
           rows={2}
-          placeholder={blocked ?? 'say what you want built — the pilot proposes the run'}
+          placeholder={
+            blocked ?? 'say what you want built — enter sends, shift+enter is a new line'
+          }
           value={entry}
           disabled={!ready}
           onChange={(e) => setEntry(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) submit();
+            if (e.key !== 'Enter') return;
+            // **Enter sends, Shift+Enter is a newline** — the convention every
+            // chat surface uses, and the one people arrive with.
+            //
+            // `isComposing` is the guard that makes this safe rather than
+            // merely conventional: an IME commits its candidate with Enter, so
+            // without it every Japanese or Chinese word would send the message
+            // half-written. The flag is on the native event, not React's.
+            if (e.nativeEvent.isComposing) return;
+            // Cmd/Ctrl+Enter kept as well. It was the only way to send until
+            // now, so it is muscle memory for anyone who used the old build,
+            // and it costs nothing to honour both.
+            if (e.shiftKey && !(e.metaKey || e.ctrlKey)) return;
+            e.preventDefault();
+            submit();
           }}
         />
         {live === null ? (

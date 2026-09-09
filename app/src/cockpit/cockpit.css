@@ -1599,6 +1599,44 @@
 }
 
 /*
+ * What a resumed run did before this window was watching (#211).
+ *
+ * Above the cycles and visibly not one of them: it is a summary read off
+ * `state.json`, not a card built from narration, and drawing it like a phase
+ * would claim finished work is running.
+ */
+.v-resumed {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--rule-inner);
+  background: var(--surface-panel);
+}
+
+.v-resumed__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.v-resumed__where {
+  font: var(--type-body-sm);
+  color: var(--text-primary);
+}
+
+.v-resumed__line {
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+.v-resumed__note {
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+/*
  * The confirm that appears in the row when reopening has to take a lock (#211).
  *
  * In the cell rather than in a modal: what is being overruled is a fact about

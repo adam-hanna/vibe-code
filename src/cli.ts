@@ -858,7 +858,7 @@ async function resumeRun(
       renameSync(answersFile, path.join(state.dir, `stalled-${state.planRound}.md`));
       log.heading(`Resuming ${state.id}`, {
         id: 'run_started',
-        data: { runId: state.id, dir: state.dir, resumed: true },
+        data: { runId: state.id, dir: state.dir, resumed: true, from: resumedFrom(state) },
       });
       return execute(state, cfg, true, flags.skipProbe === true, REAL_GATE, loop, handle);
     }
@@ -900,9 +900,62 @@ async function resumeRun(
   // one thing that differs (#207).
   log.heading(`Resuming ${state.id}`, {
     id: 'run_started',
-    data: { runId: state.id, dir: state.dir, resumed: true },
+    data: { runId: state.id, dir: state.dir, resumed: true, from: resumedFrom(state) },
   });
   return execute(state, cfg, true, flags.skipProbe === true, REAL_GATE, loop, handle);
+}
+
+/**
+ * Where a resume is picking the run up from (#211).
+ *
+ * **A window that resumes a run starts from an empty column**, because the
+ * narration it receives is only what happens from now on - the rounds, turns
+ * and spend of every earlier session were narrated to a process that has since
+ * exited. So a run resumed at review round 3 drew as though it were beginning,
+ * and the pilot, whose picture of the run is `describeRun`, described a run
+ * that had done nothing. Reported as *"when I resume a past run, the pilot et
+ * al should be brought back to wherever we're resuming from."*
+ *
+ * **Read from state, not replayed as narration.** The tempting fix is to
+ * re-emit `phase_started` and `turn_started` for the history so the column
+ * fills in - and it would be a lie in the exact shape this repo refuses: those
+ * turns are not starting, and a card drawn from them would report work as
+ * happening now. This is one frame that says what the earlier sessions left
+ * behind, and a window draws it as history because it is labelled as history.
+ *
+ * Every field is one the run already recorded. Nothing here is derived, and
+ * nothing is filled in: a run with no `phase` yet reports null rather than a
+ * guess, which is the same rule `GateContext` follows for the same field.
+ */
+function resumedFrom(state: RunState): Record<string, unknown> {
+  return {
+    // Where the loop is about to pick up. `status` is what the last session
+    // ended as - `needs-input`, `error` - and the phase is where in the loop
+    // that happened; a reader wants both, because "stopped for input" and
+    // "stopped for input during review" are different situations.
+    status: state.status,
+    phase: state.phase ?? null,
+    planRound: state.planRound,
+    questionRound: state.questionRound,
+    reviewRound: state.reviewRound,
+    verifyRound: state.verifyRound,
+    // What earlier sessions already spent. The window's own totals start at
+    // zero on every invoke, so without this a resumed run reports the cost of
+    // its last leg as the cost of the whole thing.
+    tokensUsed: state.tokensUsed,
+    costUsd: state.costUsd,
+    codexTokens: state.codexTokens,
+    // What is still open. A resume exists to deal with these, so a screen that
+    // does not show them is missing the reason the run is being resumed.
+    //
+    // The phase travels with the count because `PendingFindings` carries it and
+    // the two answer different questions: how many are outstanding, and which
+    // reviewer raised them. Null when there are none at all, rather than a
+    // phase with a zero beside it.
+    pendingFindings: state.pendingFindings?.findings.length ?? 0,
+    pendingFrom: state.pendingFindings?.phase ?? null,
+    carried: state.carried?.length ?? 0,
+  };
 }
 
 /**

@@ -533,6 +533,27 @@ export interface Run {
    * same question to the person asking, and the host is holding both.
    */
   identity: { runId: string; dir: string; resumed: boolean; at: number } | null;
+  /**
+   * What earlier sessions of this run already did, or null (#211).
+   *
+   * **A resumed run's column starts empty, and that is not a bug in the
+   * column.** Narration describes what is happening now; the rounds, turns and
+   * spend of every previous session were narrated to a process that has since
+   * exited. So a run picked up at review round 3 drew as though it were
+   * beginning, and the pilot - whose picture is `describeRun` - described a run
+   * that had done nothing.
+   *
+   * This is the one frame that says otherwise, read from `state.json` by the
+   * core and **labelled as history**. It is deliberately not a replay: re-
+   * emitting `phase_started` for turns that already happened would fill the
+   * column at the cost of reporting finished work as running, which is the
+   * fabrication this whole model is arranged against.
+   *
+   * Null on a fresh run and on a resume from a core too old to send it. Both
+   * mean the same thing to a reader - there is no history to show - so they
+   * collapse honestly.
+   */
+  from: ResumedFrom | null;
   /** The step before the first phase, while it is running and after it (#205). */
   preflight: Preflight | null;
   /**
@@ -565,6 +586,7 @@ export function emptyRun(): Run {
     completed: null,
     protocol: null,
     identity: null,
+    from: null,
     preflight: null,
     seq: 0,
   };
@@ -587,6 +609,59 @@ export const OUTPUT_KEEP = 500;
 
 function num(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+
+/**
+ * What earlier sessions of a resumed run left behind (#211).
+ *
+ * Every field nullable and every field read: this arrives from a core that may
+ * be older than the window, and a missing round drawn as `round 0` would say
+ * the run had done none - the opposite of what the frame exists to correct.
+ */
+export interface ResumedFrom {
+  status: string | null;
+  phase: string | null;
+  planRound: number | null;
+  questionRound: number | null;
+  reviewRound: number | null;
+  verifyRound: number | null;
+  tokensUsed: number | null;
+  costUsd: number | null;
+  codexTokens: number | null;
+  pendingFindings: number | null;
+  /** Which reviewer raised what is outstanding: `plan` or `review`. */
+  pendingFrom: string | null;
+  carried: number | null;
+}
+
+/**
+ * Read it, or null when the frame carried none.
+ *
+ * **Null when nothing usable is there, never a shell of nulls.** A card drawn
+ * from an object whose every field is absent says "resumed from nothing", and
+ * a run being resumed is by definition not nothing - so an unreadable payload
+ * is reported as no history rather than as an empty one.
+ */
+function readResumedFrom(v: unknown): ResumedFrom | null {
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) return null;
+  const d = v as Record<string, unknown>;
+  const from: ResumedFrom = {
+    status: str(d['status']),
+    phase: str(d['phase']),
+    planRound: num(d['planRound']),
+    questionRound: num(d['questionRound']),
+    reviewRound: num(d['reviewRound']),
+    verifyRound: num(d['verifyRound']),
+    tokensUsed: num(d['tokensUsed']),
+    costUsd: num(d['costUsd']),
+    codexTokens: num(d['codexTokens']),
+    pendingFindings: num(d['pendingFindings']),
+    pendingFrom: str(d['pendingFrom']),
+    carried: num(d['carried']),
+  };
+  // At least one thing has to have been legible for this to be history rather
+  // than a payload nobody could read.
+  return Object.values(from).some((x) => x !== null) ? from : null;
 }
 
 function str(v: unknown): string | null {
@@ -1168,7 +1243,15 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
         // `at` is when the core said this, which is the honest answer to *when
         // did the task reach the core* - the window's own send time would be
         // when it asked, not when anything happened (hi-fi 16).
-        return { ...next, identity: { runId, dir, resumed: data['resumed'] === true, at } };
+        return {
+          ...next,
+          identity: { runId, dir, resumed: data['resumed'] === true, at },
+          // What earlier sessions of this run already did (#211). Null on a
+          // fresh run, and null on a resume from a core too old to send it -
+          // both mean "there is no history to show", which is the only claim
+          // the column may make without it.
+          from: readResumedFrom(data['from']),
+        };
       }
 
       case 'verify_started': {
