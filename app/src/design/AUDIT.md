@@ -189,15 +189,41 @@ because the card does not exist.
 one. Both derivations are pure and tested, because a rule that only lives in a
 `.map` cannot be.
 
-Three things are narrower than the frame, each for a reason on the wire:
+Two things are narrower than the frame, each for a reason on the wire:
 
-- **A card is a phase group, not a lettered version.** `phase_started` is what
-  arrives, so `planning` and `critique` are two groups. Collapsing them into
-  `plan v.b` would mean deciding here which critique belongs to which draft, and
-  no frame says.
 - **No `claude/opus`.** A turn frame carries a role and a kind and no model.
 - **No `accepted after 1 critique`.** Nothing says which critique approved which
   draft.
+
+**A third caveat has been removed, and the removal is worth recording.** This
+section originally read *"a card is a phase group, not a lettered version —
+collapsing `planning` and `critique` into `plan v.b` would mean deciding here
+which critique belongs to which draft, and no frame says."* That was accurate
+about the wire and wrong about the domain, and a reader spotted it from the
+screen: the loop column drew `plan`, `code` and `review` with no visible critique,
+and asked where it lived.
+
+It lived in cycle 1 as a row. What was actually wrong was worse than that, and
+all three were the same mistake — grouping by **phase** where the domain groups
+by **round**:
+
+- A cycle counting its phase groups called two plan rounds **three rounds**.
+- `revisePlan` announced no phase, so the planner turn producing the *next*
+  version landed inside the **critique that caused it**.
+- `planning` carried no round at all, so the first row was unnumbered.
+
+The last two were core defects and are fixed there. With both halves of a round
+now carrying the round number, *"no frame says"* stopped being true — so
+`rounds()` groups by round, a card is the producer and the judge together, and
+the critique is a turn row on **every** round rather than a heading to hunt for.
+The loop column groups through the same function, so the two surfaces cannot
+describe one round differently.
+
+**Peer groups were considered and rejected** — `plan, plan critique, code, code
+review`. Four peers say the loop is a four-stage pipeline, which is what the
+three-cycle column exists to deny, and it does not generalise: cycle 2's judge is
+the verification gate and cycle 3's producer is the fix turn, so a peer group for
+the critique earns one for each and the answer is six boxes in a row.
 
 A census and a verification pass attach **by arrival**, because a census carries
 no round of its own and a pass carries the *verify* round — a different counting

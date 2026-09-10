@@ -223,11 +223,25 @@ they are waiting on. Four things in it are worth carrying:
   re-shapes what is already on `Run` and adds nothing; `log.ts` places the cards among the
   pilot's replies. **Replies keep their order and cards are placed among them**, never the
   other way round: `Reply.startedAt` is nullable by design, so sorting one mixed list by a key
-  half of it lacks would reorder somebody's conversation to make a card fit. A card is a
-  **phase group, not a lettered version** — the wire carries `phase_started`, so collapsing
-  `planning` and `critique` into `plan v.b` would mean deciding which critique belongs to
-  which draft, and no frame says. There is no `claude/opus` on it, because a turn frame
-  carries no model.
+  half of it lacks would reorder somebody's conversation to make a card fit. There is no
+  `claude/opus` on it, because a turn frame carries no model.
+- **A round is the producer and the judge, and grouping by phase instead was three bugs in
+  one.** `CYCLE_OF` has said since it was written that *"a plan round IS the pair: the planner
+  produces a version, the critic judges it"*, and nothing grouped that way — so a cycle
+  counting phase groups called two plan rounds **three**, `revisePlan` announced no phase and
+  filed the planner's next version inside **the critique that caused it**, and `planning`
+  carried no round at all. The first two were core defects; both are fixed there, and both
+  halves of a round now carry the round number, which is what makes the pairing a read rather
+  than a guess. `rounds()` is the one grouping and the loop column uses it too, so the column
+  and the pilot's log cannot describe one round differently.
+
+  **The critique is not a peer group beside `PLAN`, and this was asked directly.** It is the
+  second half of every plan round, on its own turn row, where it is visible on each round
+  rather than once at the top. Four peers — `plan, plan critique, code, code review` — say the
+  loop is a four-stage pipeline, which is exactly what the three-cycle column exists to deny;
+  and it does not generalise, because cycle 2's judge is the verification gate and cycle 3's
+  producer is the fix turn, so a peer group for the critique earns one for each of those and
+  the answer is six boxes in a row.
 - **A census and a verification pass attach to a round by arrival**, because a census carries
   no round of its own and a pass carries the *verify* round, which is a different counting
   from the one a phase group is keyed by. One that predates every phase — a real state on a

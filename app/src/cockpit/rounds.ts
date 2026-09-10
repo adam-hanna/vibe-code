@@ -1,4 +1,4 @@
-import type { Census, Cycle, CycleKind, PhaseGroup, Run, Turn, VerifyPass, Work } from './model';
+import type { Census, Cycle, CycleKind, Run, Turn, VerifyPass, Work } from './model';
 
 /**
  * A round, as one card (hi-fi 5, #223).
@@ -6,46 +6,61 @@ import type { Census, Cycle, CycleKind, PhaseGroup, Run, Turn, VerifyPass, Work 
  * **The object the design's log is made of, and the app did not have it.** Hi-fi
  * 5 is explicit about what the pilot pane is for: *"It has to be a usable log of
  * the run on its own — every round leaves a card, and a card carries what
- * happened, what it found and what you can do about it."* The pane drew the
- * conversation and nothing else, so a round left no trace in the one place a
- * person is looking, and every question about what the loop had just done had to
- * be answered from a different tab.
+ * happened, what it found and what you can do about it."*
+ *
+ * ## A round is the pair, and that is the whole of this module
+ *
+ * A convergence cycle iterates over versions of an artifact: **a producer makes
+ * one and a judge objects to it**, and one round is that pair. The plan cycle is
+ * planner-then-critic, the code cycle is implementer-then-verify-gate, the review
+ * cycle is reviewer-then-fix. `CYCLE_OF` has said so since it was written — *"a
+ * plan round IS the pair"* — but nothing grouped that way, so the column drew one
+ * row per **phase** and a plan round arrived as two of them.
+ *
+ * Three things were wrong with that and all three were the same mistake:
+ *
+ * - A cycle counting its phase groups called two plan rounds **three rounds**.
+ * - `revisePlan` announced no phase, so the planner turn that produces the *next*
+ *   version landed inside the **critique that caused it** — round 2's producer
+ *   under round 1's judge.
+ * - `planning` carried no round at all, so the first row was unnumbered beside
+ *   numbered siblings.
+ *
+ * The core now says the round on both halves, so pairing them is reading rather
+ * than guessing — which is what makes this a grouping and not a heuristic.
  *
  * ## It is a re-shaping, never a second source
  *
  * Everything here is already on `Run`, put there by `reduce` from a frame. This
  * groups it; it measures nothing, infers no phase from a sentence, and fills in
- * no field a frame did not carry. A card whose round nobody stated has `round:
- * null` and says so, exactly as the loop column's does.
- *
- * ## Why a card is a phase group and not a "version"
- *
- * The design draws `plan v.b` — one card per version of the artifact. What the
- * wire carries is `phase_started`, so `planning` and `critique` arrive as two
- * groups, and a card per group is the shape of what was actually announced.
- * Collapsing the pair into one lettered version would mean deciding here which
- * critique belongs to which draft, and the frames do not say — the same
- * derivation `LoopColumn` declines to make.
+ * no field a frame did not carry.
  */
 
-/** One turn inside a round, at the density a card shows it. */
-export interface RoundTurn {
-  id: number;
-  role: string;
-  kind: string;
-  /** How long it took, or null while it is still open. Never a guess. */
-  ms: number | null;
-}
-
 export interface RoundCard {
-  /** Stable across re-renders: the phase group's own identity. */
+  /** Stable across re-renders. See `keyOf` for what makes it stable. */
   key: string;
   cycle: CycleKind;
-  /** The phase the loop announced, verbatim. Never translated. */
-  phase: string;
   /** The archive's round — the number that names the artifact. Null when none came. */
   round: number | null;
-  turns: readonly RoundTurn[];
+  /**
+   * The phases this round is made of, in the order they were announced.
+   *
+   * Usually two — the producer and the judge — and sometimes one: a code round
+   * is a single `implementing` phase whose judge is the verification gate, which
+   * announces itself with `verify_started` rather than a phase of its own.
+   */
+  phases: readonly string[];
+  /**
+   * Every turn in the round, both halves, oldest first.
+   *
+   * The `Turn` off `Run`, not a reduced copy of one. The loop column hands a
+   * live turn straight to `RunningRow`, which needs the heartbeat and the work
+   * reading — and a second shape here would mean the two surfaces disagreed
+   * about a turn the moment either grew a field.
+   */
+  turns: readonly Turn[];
+  /** Verification gates opened during the round, by name, in order. */
+  gates: readonly string[];
   startedAt: number;
   /**
    * When the last turn of this round ended, or null.
@@ -70,6 +85,20 @@ export interface RoundCard {
   verify: VerifyPass | null;
   /** What the gate made of this round's findings, or null. `1e` has the detail. */
   census: Census | null;
+}
+
+/**
+ * What makes a card the same card between renders.
+ *
+ * The round where there is one, because that is the thing that persists: a plan
+ * round's two phases arrive as two frames and must not be two cards, and the
+ * round number is what says they are one. Where a phase carries no round — an
+ * `implementing` phase never has, and every phase on a core older than #223's
+ * plan-round fix — the group's **first phase id** stands in, which is unique per
+ * frame and therefore never merges two rounds that only look alike.
+ */
+function keyOf(cycle: CycleKind, round: number | null, firstPhaseId: number): string {
+  return round === null ? `${cycle}-p${String(firstPhaseId)}` : `${cycle}-r${String(round)}`;
 }
 
 /** The work reading a round ends on: the latest one any of its turns reported. */
@@ -104,10 +133,9 @@ function settledAt(turns: readonly Turn[]): number | null {
  *
  * **By arrival, and there is no other honest answer.** A census carries no round
  * number of its own and a verification pass carries the *verify* round, which is
- * not the plan or review round a phase group is keyed by — so matching on a
- * number would be matching two different countings. Both clocks here are this
- * window's own arrival clock, set by `reduce`, so comparing them compares like
- * with like.
+ * not the plan or review round a card is keyed by — so matching on a number would
+ * be matching two different countings. Both clocks here are this window's own
+ * arrival clock, set by `reduce`, so comparing them compares like with like.
  *
  * Returns the index of the last group that had started, or -1 when the thing
  * arrived before any of them — which is a real state on a resumed run and must
@@ -122,24 +150,52 @@ function during(starts: readonly number[], at: number): number {
   return found;
 }
 
-function cardOf(cycle: Cycle, phase: PhaseGroup): RoundCard {
-  return {
-    key: `${cycle.kind}-${String(phase.id)}`,
-    cycle: cycle.kind,
-    phase: phase.phase,
-    round: phase.round,
-    turns: phase.turns.map((t) => ({
-      id: t.id,
-      role: t.role,
-      kind: t.kind,
-      ms: t.endedAt === null ? null : t.endedAt - t.startedAt,
-    })),
-    startedAt: phase.startedAt,
-    endedAt: settledAt(phase.turns),
-    work: lastWork(phase.turns),
-    verify: null,
-    census: null,
-  };
+/** The phase groups of one cycle, gathered into rounds. */
+function cardsOf(cycle: Cycle): RoundCard[] {
+  const out: RoundCard[] = [];
+  const byRound = new Map<number, RoundCard>();
+
+  for (const phase of cycle.phases) {
+    const turns = phase.turns;
+    const existing = phase.round === null ? undefined : byRound.get(phase.round);
+
+    if (existing === undefined) {
+      const card: RoundCard = {
+        key: keyOf(cycle.kind, phase.round, phase.id),
+        cycle: cycle.kind,
+        round: phase.round,
+        phases: [phase.phase],
+        turns: [...turns],
+        gates: [...phase.gates],
+        startedAt: phase.startedAt,
+        endedAt: settledAt(phase.turns),
+        work: lastWork(phase.turns),
+        verify: null,
+        census: null,
+      };
+      out.push(card);
+      if (phase.round !== null) byRound.set(phase.round, card);
+      continue;
+    }
+
+    // The judge half of a round already open. Merged in place: `startedAt` stays
+    // the producer's, because that is when the round began, and `endedAt` is
+    // recomputed over both halves so a judge still running keeps the round open.
+    const merged: RoundCard = {
+      ...existing,
+      phases: [...existing.phases, phase.phase],
+      turns: [...existing.turns, ...turns],
+      gates: [...existing.gates, ...phase.gates],
+      endedAt: existing.endedAt === null ? null : settledAt(phase.turns),
+      // The later reading wins, on `lastWork`'s own rule: git already reports
+      // the tree cumulatively, so this is a replacement and never a sum.
+      work: lastWork(phase.turns) ?? existing.work,
+    };
+    out[out.indexOf(existing)] = merged;
+    byRound.set(phase.round as number, merged);
+  }
+
+  return out;
 }
 
 /**
@@ -152,9 +208,7 @@ function cardOf(cycle: Cycle, phase: PhaseGroup): RoundCard {
  */
 export function rounds(run: Run): readonly RoundCard[] {
   const cards: RoundCard[] = [];
-  for (const cycle of run.cycles) {
-    for (const phase of cycle.phases) cards.push(cardOf(cycle, phase));
-  }
+  for (const cycle of run.cycles) cards.push(...cardsOf(cycle));
   cards.sort((a, b) => a.startedAt - b.startedAt);
 
   // Attached after the sort, so `during` indexes the same order a reader sees.
@@ -191,4 +245,18 @@ const TITLES: Readonly<Record<string, string>> = {
 
 export function title(phase: string): string {
   return TITLES[phase] ?? phase;
+}
+
+/**
+ * What a whole round is called: its producer's name.
+ *
+ * The **first** phase, because a round is named for what it produced rather than
+ * for what judged it — `plan`, `code`, `review` — and the judge is visible as the
+ * second half of the card rather than in its heading. A round with no phase at
+ * all cannot happen (a card exists because a phase started) but is answered
+ * rather than thrown, because a renderer is the wrong place to find out.
+ */
+export function roundTitle(card: RoundCard): string {
+  const first = card.phases[0];
+  return first === undefined ? card.cycle : title(first);
 }

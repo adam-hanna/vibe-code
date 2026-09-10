@@ -1,7 +1,7 @@
 import { MetaChip, SeverityChip, StateKicker } from '../design';
 import { elapsed, work as describeWork } from '../cockpit/format';
 import { SEVERITIES } from '../cockpit/model';
-import { title } from '../cockpit/rounds';
+import { roundTitle } from '../cockpit/rounds';
 import type { Severity } from '../design';
 import type { RoundCard as Round } from '../cockpit/rounds';
 import type { GateRun } from '../cockpit/model';
@@ -65,7 +65,11 @@ export function RoundCard({
   return (
     <article className={`v-round v-round--${card.cycle}${open ? ' v-round--open' : ''}`}>
       <header className="v-round__head">
-        <span className="v-round__what">{title(card.phase)}</span>
+        {/* Named for what the round produced — `plan`, `code`, `review` — with
+            the judge visible as the second turn row rather than in the heading.
+            A round is the pair, so a heading naming only half of it would be
+            the grouping this module exists to fix, one level up. */}
+        <span className="v-round__what">{roundTitle(card)}</span>
         {/* The archive's round, which is the number that names the artifact
             behind it — the file is `plan-critique-0.json`, and a card has to
             agree with the file. */}
@@ -86,7 +90,12 @@ export function RoundCard({
               <span className="v-round__who">
                 {t.role} · {t.kind}
               </span>
-              {t.ms !== null && <span className="v-round__ms">{elapsed(t.ms)}</span>}
+              {/* Absent while the turn is open rather than measured to now: a
+                  duration on a turn that has not finished is a number that
+                  keeps changing about a fact that has not happened. */}
+              {t.endedAt !== null && (
+                <span className="v-round__ms">{elapsed(t.endedAt - t.startedAt)}</span>
+              )}
             </li>
           ))}
         </ul>

@@ -819,7 +819,15 @@ async function planPhase(
   if (state.plan) {
     plan = state.plan;
   } else {
-    log.heading('Planning', { id: 'phase_started', data: { phase: 'planning' } });
+    // The round travels, exactly as the critique heading below carries it, and
+    // for the same reason: this phase writes `plan-${state.planRound}.json`, so
+    // the number is what correlates a card with the file behind it. It was the
+    // one `phase_started` in the plan cycle that carried none, which left the
+    // first row of the loop column unnumbered beside numbered siblings.
+    log.heading('Planning', {
+      id: 'phase_started',
+      data: { phase: 'planning', round: state.planRound },
+    });
     ({ plan, activity: planActivity } = await runPlan(state, cfg, cwd, roles, turns));
   }
 
@@ -3362,6 +3370,29 @@ async function revisePlan(
 ): Promise<PlannedTurn> {
   state.planRound += 1;
   saveState(state);
+  /*
+   * A revision opens a new plan round, and until now it said so to nobody.
+   *
+   * `revisePlan` emitted a `turn_started` and no `phase_started`, so the turn
+   * that produces the *next* version of the plan landed inside whichever phase
+   * group was still open — the **critique that caused it**. The loop column drew
+   * a planner turn under a heading that says `critique`, which is the producer
+   * of round 2 filed under round 1's judge.
+   *
+   * `planning`, not a phase of its own, because it is the same phase: the
+   * planner producing a version of the plan. The round has already been
+   * incremented above, so this group and the critique that follows it carry the
+   * same number — which is what lets a reader (and `rounds()`) pair them.
+   *
+   * The heading is deliberately still `log.step` below rather than being folded
+   * into this: a `log.heading` here would change what the terminal prints for
+   * every revision, and this is a frame for a host, not a new section for a
+   * person. `phase_started` has never required a heading beside it.
+   */
+  log.info(`Plan round ${state.planRound}`, {
+    id: 'phase_started',
+    data: { phase: 'planning', round: state.planRound },
+  });
   log.step(`${holderLabel('planner', roles)} is revising the plan (round ${state.planRound})`, {
     id: 'turn_started',
     data: { role: 'planner', kind: 'revise', round: state.planRound },

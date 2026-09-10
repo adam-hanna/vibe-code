@@ -1,19 +1,11 @@
 import { LivenessDot, MetaChip, SeverityChip, StateKicker } from '../design';
 import { clock, elapsed } from './format';
 import { SEVERITIES } from './model';
-import { rounds } from './rounds';
+import { rounds, roundTitle } from './rounds';
 import { RunningRow } from './RunningRow';
 import type { Severity } from '../design';
-import type {
-  Census,
-  Cycle,
-  CycleKind,
-  PhaseGroup,
-  Preflight,
-  ResumedFrom,
-  Run,
-  Turn,
-} from './model';
+import type { RoundCard } from './rounds';
+import type { CycleKind, Preflight, ResumedFrom, Run, Turn } from './model';
 
 /**
  * The centre column from `3a`, at the width the design fixes it at.
@@ -25,6 +17,13 @@ import type {
  * pipeline the code does not have.
  *
  * Round lists grow unboundedly, which is why the column collapses by cycle.
+ *
+ * **A round, not a phase, is the unit inside a cycle.** The column used to draw
+ * one row per phase group, which made a plan round arrive as two rows, made the
+ * cycle header count two plan rounds as three, and filed the planner's next
+ * revision under the critique that caused it. `rounds()` is the grouping and it
+ * is shared with the pilot's log, so the two surfaces cannot disagree about what
+ * one round was.
  */
 
 const TITLE: Readonly<Record<CycleKind, string>> = {
@@ -40,11 +39,10 @@ const TITLE: Readonly<Record<CycleKind, string>> = {
  * this slice is not given them, so `2 rounds` is a fact and `2/5` would be two
  * thirds of one.
  */
-function status(cycle: Cycle): string {
-  const rounds = cycle.phases.length;
-  const noun = rounds === 1 ? 'round' : 'rounds';
-  if (cycle.kind === 'code') return `${rounds} ${noun} · re-runs on every fix`;
-  return `${rounds} ${noun}`;
+function status(kind: CycleKind, count: number): string {
+  const noun = count === 1 ? 'round' : 'rounds';
+  if (kind === 'code') return `${count} ${noun} · re-runs on every fix`;
+  return `${count} ${noun}`;
 }
 
 /**
@@ -90,29 +88,52 @@ function Version({ turn, draw, now }: { turn: Turn; draw: Draw; now: number }) {
  */
 const isAnswerer = (turn: Turn): boolean => turn.role === 'answerer';
 
-function Phase({
-  phase,
-  census,
+/**
+ * One round of a cycle: the producer, the judge, and what the gate made of it.
+ *
+ * **A round is the pair**, which is what `CYCLE_OF` has said since it was
+ * written — *"a plan round IS the pair: the planner produces a version, the
+ * critic judges it"* — and what nothing drew. The column grouped by **phase**,
+ * so a plan round arrived as two rows, the cycle header counted two plan rounds
+ * as three, and the planner turn that produces the next version sat under the
+ * critique that caused it.
+ *
+ * The critique is therefore not a peer group beside `PLAN`. It is the second
+ * half of every plan round, named on its own turn row, where it is visible on
+ * each round rather than once at the top. Making it a peer would say the loop is
+ * a four-stage pipeline, and this column exists to say it is not — it is three
+ * nested convergence cycles. It also would not generalise: cycle 2's judge is
+ * the verification gate and cycle 3's producer is the fix turn, so a peer group
+ * for the critique earns one for each of those and the answer is six boxes in a
+ * row.
+ *
+ * The grouping is `rounds()`, shared with the pilot's log, so the two surfaces
+ * cannot disagree about what one round was.
+ */
+function Round({
+  card,
+  answerers,
   runningId,
   settledId,
   now,
 }: {
-  phase: PhaseGroup;
-  /** What the gate made of this round, or null. Hi-fi 2 puts it on the card. */
-  census: Census | null;
+  card: RoundCard;
+  /** The answerer's turns, which belong in the nested question group instead. */
+  answerers: ReadonlySet<number>;
   runningId: number | null;
   settledId: number | null;
   now: number;
 }) {
-  const turns = phase.turns.filter((t) => !isAnswerer(t));
+  const turns = card.turns.filter((t) => !answerers.has(t.id));
+  const census = card.census;
   return (
     <div className="v-phase">
       <div className="v-phase__head">
-        <span className="v-phase__name">{phase.phase}</span>
+        <span className="v-phase__name">{roundTitle(card)}</span>
         {/* The archive's round, which is the number that names the artifact
             behind it. The heading in the terminal says "round 1"; the file is
             `plan-critique-0.json`, and a card has to agree with the file. */}
-        {phase.round !== null && <MetaChip kind="checkable">round {phase.round}</MetaChip>}
+        {card.round !== null && <MetaChip kind="checkable">round {card.round}</MetaChip>}
       </div>
       {/*
         Hi-fi 2 draws the four counts on the round card in the loop column, not
@@ -140,15 +161,18 @@ function Phase({
           })}
         </div>
       )}
-      {phase.gates.map((gate, i) => (
+      {card.gates.map((gate, i) => (
         <div className="v-phase__gate" key={`${gate}-${String(i)}`}>
           verify · {gate}
         </div>
       ))}
+      {/* Both halves of the round, in order: the producer, then the judge. The
+          critique is this second row — named on every round, where it is
+          legible as the thing that objected to the version above it. */}
       {turns.map((turn) => (
         <Version key={turn.id} turn={turn} draw={drawOf(turn, runningId, settledId)} now={now} />
       ))}
-      {turns.length === 0 && phase.gates.length === 0 && (
+      {turns.length === 0 && card.gates.length === 0 && (
         // The implementing phase is the one that reaches this: it has never had
         // a `log.step` of its own, so `phase_started` IS its announcement (#152).
         <div className="v-phase__silent">announced by the phase, with no turn line of its own</div>
@@ -424,11 +448,21 @@ export function LoopColumn({
   // Told, not worked out. `reduce` names the turn a gate opened after, so the
   // column does not have to decide that "the last one" is the right turn (#202).
   const settledId = run.gate?.turnId ?? null;
-  // Which census belongs to which round, through `rounds()` rather than a
-  // second matching rule here. That module is where "by arrival" is decided and
-  // tested; two answers to which round a census belongs to is how the column
-  // and the pilot's log come to disagree about one round.
-  const censusOf = new Map(rounds(run).map((c) => [c.key, c.census]));
+  // The one grouping, shared with the pilot's log. A second answer here to what
+  // a round is - or to which census belongs to which - is how the two surfaces
+  // come to describe the same round differently.
+  const cards = rounds(run);
+  const byCycle = new Map<CycleKind, RoundCard[]>();
+  for (const card of cards) {
+    const list = byCycle.get(card.cycle);
+    if (list === undefined) byCycle.set(card.cycle, [card]);
+    else list.push(card);
+  }
+  // The answerer's turns, by id, so a round can leave them to the question group
+  // below without re-deciding which they are.
+  const answerers = new Set(
+    run.cycles.flatMap((c) => c.phases).flatMap((p) => p.turns.filter(isAnswerer).map((t) => t.id)),
+  );
 
   return (
     <section className="v-loop" aria-label="loop">
@@ -454,13 +488,17 @@ export function LoopColumn({
         <div className="v-cycle" key={cycle.kind}>
           <div className="v-cycle__head">
             <span className="v-cycle__title">{TITLE[cycle.kind]}</span>
-            <span className="v-cycle__status">{status(cycle)}</span>
+            {/* Rounds, not phase groups. Counting the latter called two plan
+                rounds three, because a plan round is announced as two phases. */}
+            <span className="v-cycle__status">
+              {status(cycle.kind, (byCycle.get(cycle.kind) ?? []).length)}
+            </span>
           </div>
-          {cycle.phases.map((phase) => (
-            <Phase
-              key={phase.id}
-              phase={phase}
-              census={censusOf.get(`${cycle.kind}-${String(phase.id)}`) ?? null}
+          {(byCycle.get(cycle.kind) ?? []).map((card) => (
+            <Round
+              key={card.key}
+              card={card}
+              answerers={answerers}
               runningId={runningId}
               settledId={settledId}
               now={now}
