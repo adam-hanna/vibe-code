@@ -2497,3 +2497,69 @@
   cursor: default;
   opacity: 0.72;
 }
+
+/* ------------------------------------------------------- the window that threw
+ *
+ * `Boundary`'s fallback (#211). Not a designed screen and deliberately plain:
+ * it is reached only when the design system's own components may be what threw,
+ * so it leans on tokens and nothing else. Everything is selectable and every
+ * value is monospace, because these are strings destined for a bug report -
+ * the same reasoning as the diagnostics popover.
+ */
+.v-crash {
+  padding: var(--space-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  overflow-y: auto;
+  height: 100vh;
+  background: var(--surface-app);
+}
+.v-crash__head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.v-crash__kicker {
+  font: var(--type-kicker);
+  letter-spacing: var(--tracking-kicker);
+  text-transform: uppercase;
+  color: var(--text-alarm);
+}
+.v-crash__title {
+  font: var(--type-body);
+  color: var(--text-emphasis);
+  max-width: 76ch;
+}
+.v-crash__label {
+  font: var(--type-kicker);
+  letter-spacing: var(--tracking-kicker);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin-top: var(--space-3);
+}
+.v-crash__pre {
+  font: var(--type-mono-sm);
+  color: var(--text-primary);
+  background: var(--surface-inset);
+  border: 1px solid var(--rule-inner);
+  padding: var(--space-3);
+  white-space: pre-wrap;
+  overflow-x: auto;
+  margin: 0;
+}
+.v-crash__reload {
+  align-self: flex-start;
+  font: var(--type-control);
+  color: var(--text-emphasis);
+  background: var(--surface-control);
+  border: 1px solid var(--rule-control);
+  padding: var(--space-2) var(--space-4);
+  cursor: pointer;
+}
+.v-crash__note {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  max-width: 76ch;
+  margin: 0;
+}

@@ -54,10 +54,46 @@ export function Banner({
   );
 }
 
-/** Two instances in the whole product, so this carries the only shadow in it. */
-export function Modal({ children, width = 520 }: { children: ReactNode; width?: number }) {
+/**
+ * Two instances in the whole product, so this carries the only shadow in it.
+ *
+ * **Escape always leaves, and that is a safety property rather than a
+ * convenience** (#211). A scrim is `position: fixed; inset: 0` over the entire
+ * window, so a dialog whose every control is unreachable is not a stuck dialog —
+ * it is a stuck *application*, with the conversation, the tabs and the run all
+ * visible behind it and none of them clickable. That was reachable here: both
+ * callers disable their actions while a request is in flight, and one of them
+ * disabled its cancel too.
+ *
+ * `onDismiss` is required rather than optional, so a future third modal has to
+ * answer the question instead of inheriting the trap. A dialog with genuinely no
+ * safe cancel would pass the least destructive of its own actions.
+ */
+export function Modal({
+  children,
+  width = 520,
+  onDismiss,
+}: {
+  children: ReactNode;
+  width?: number;
+  /** What Escape does. Must be the option that acts on nothing. */
+  onDismiss: () => void;
+}) {
   return (
-    <div className="v-scrim">
+    <div
+      className="v-scrim"
+      // On the scrim rather than the dialog so a keystroke lands whatever has
+      // focus inside it, and `autoFocus`-free: taking focus on mount would move
+      // it away from whatever the user was typing in behind the modal.
+      tabIndex={-1}
+      ref={(el) => el?.focus()}
+      onKeyDown={(e) => {
+        if (e.key === 'Escape') onDismiss();
+      }}
+    >
+      {/* Deliberately not dismissed by clicking the scrim. Both dialogs here
+          guard something expensive - ending a run, launching one - and a stray
+          click outside is not an intention. Escape is. */}
       <div className="v-modal" style={{ width }} role="dialog" aria-modal="true">
         {children}
       </div>

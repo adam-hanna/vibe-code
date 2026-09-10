@@ -53,7 +53,7 @@ export function StopConfirm({ turn, busy, onStop, onPause, onKeep }: StopConfirm
   const beat = turn?.beat ?? null;
 
   return (
-    <Modal width={560}>
+    <Modal width={560} onDismiss={onKeep}>
       <div className="v-stop__head">
         <StateKicker tone="alarm">ends the run</StateKicker>
         <span className="v-stop__title">
@@ -115,7 +115,15 @@ export function StopConfirm({ turn, busy, onStop, onPause, onKeep }: StopConfirm
         <Button level="secondary" disabled={busy} onClick={onPause}>
           ⏸ Pause instead
         </Button>
-        <Button level="primary" disabled={busy} onClick={onKeep}>
+        {/* **Never disabled, and that is the fix rather than an inconsistency.**
+            The other two send a frame, so they wait their turn behind one that
+            is already in flight. This one sends nothing at all — it closes a
+            dialog nobody has acted on. Gating it on `busy` meant that while a
+            request was outstanding the modal had three dead buttons and a scrim
+            over the whole window, which is a window with no way out of it. A
+            confirmation's cancel must never depend on anything being reachable
+            (#211). */}
+        <Button level="primary" onClick={onKeep}>
           Keep running
         </Button>
       </div>

@@ -110,7 +110,7 @@ export function NewWorkstream({
   };
 
   return (
-    <Modal width={680}>
+    <Modal width={680} onDismiss={onClose}>
       <form
         className="v-new"
         onSubmit={(e) => {

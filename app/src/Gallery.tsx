@@ -294,7 +294,7 @@ export function Gallery() {
             </Button>
           </Row>
           {modal && (
-            <Modal>
+            <Modal onDismiss={() => setModal(false)}>
               <div className="v-title">Quit while a turn is running?</div>
               <p className="v-lead" style={{ marginTop: 'var(--space-4)' }}>
                 Quitting kills them. Their conversations survive — resuming continues each by session id — but

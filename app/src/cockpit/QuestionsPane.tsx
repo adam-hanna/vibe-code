@@ -2,7 +2,14 @@ import { Card, MetaChip, StateKicker } from '../design';
 import type { Question } from './model';
 
 /**
- * The open questions, with the adversary's draft beside each (`1f`, #223).
+ * The open questions, with the answerer's draft beside each (`1f`, #223).
+ *
+ * **The answerer, and on screen it is called that.** *Adversary* is the design
+ * corpus's word for the judging half of any round, and it stays in the comments
+ * here for that reason — but `roles.ts` names this seat the `answerer`, and a
+ * user reading a card has the role table's vocabulary and not the design's. The
+ * screen said *"The adversary would not guess at this"* about a role no
+ * configuration of this product contains.
  *
  * The design's inbox, and it is drawn from `questions_opened` plus
  * `questions_answered` rather than from the `- [kind] text` lines the loop
@@ -65,14 +72,23 @@ function One({ q }: { q: Question }) {
       {q.declined ? (
         <div className="v-q__answer v-q__answer--declined">
           <StateKicker tone="alarm">declined</StateKicker>
-          <p>
-            The adversary would not guess at this. {q.rationale ?? 'It gave no reason.'}
-          </p>
-          <p className="v-q__note">
-            {q.blocking
-              ? 'A blocking question it declined is what ends the run and writes NEEDS-INPUT.md — this is the one to answer.'
-              : 'Advisory, so the loop went ahead on the planner’s own default rather than stopping.'}
-          </p>
+          {/* **The answerer's own words, and nothing in front of them.** This
+              used to open every declined card with a fixed sentence — *"The
+              adversary would not guess at this."* — and then print the
+              rationale after it. Two defects in one line, and a manual pass
+              caught the symptom before either cause: three questions declined
+              for three different reasons read as three copies of one reason,
+              because the only part that was identical was the part vibe wrote.
+
+              It was also attributing that stance to a role that does not
+              exist. `roles.ts` has planner, implementer, critic, answerer and
+              reviewer; the adversary is the critic, and it is not who answers
+              questions. */}
+          {q.rationale === null ? (
+            <p className="v-q__note">It declined without giving a reason.</p>
+          ) : (
+            <p>{q.rationale}</p>
+          )}
         </div>
       ) : q.answer === null ? (
         <p className="v-q__note">No answer yet — the answerer has not taken its turn.</p>
@@ -108,6 +124,12 @@ export function QuestionsPane({
     );
   }
 
+  // Counted from the questions this build could read, which is why the line it
+  // feeds is drawn only when it is non-zero: `questions.total` is the loop's
+  // count and may be larger, and a "0 declined" over a list this pane admits is
+  // incomplete would be a claim it cannot make.
+  const declined = questions.open.filter((q) => q.declined).length;
+
   return (
     <div className="v-q">
       <p className="v-q__summary">
@@ -127,6 +149,19 @@ export function QuestionsPane({
       )}
       {/* What is actually true, replacing a sentence that was false twice over.
           See the header. */}
+      {/* **What a decline costs, said once.** This used to sit inside every
+          declined card, identical on each — and since it is a function of
+          `blocking` alone, which is already a chip at the top of the card, it
+          was a third copy of something the card said twice. Repeating a
+          consequence next to three different reasons is what made three
+          different reasons look like one. */}
+      {declined > 0 && (
+        <p className="v-q__note">
+          {declined} declined. A declined <strong>blocking</strong> question ends the run and
+          writes NEEDS-INPUT.md; a declined <strong>advisory</strong> one leaves the planner’s own
+          fallback in place and the loop carries on.
+        </p>
+      )}
       <p className="v-q__note">
         Nothing here fires on a timer. The answerer takes its turn when the round opens, and a
         question it declines escalates immediately — there is no auto-submit to wait out and no

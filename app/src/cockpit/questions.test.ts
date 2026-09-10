@@ -1,4 +1,8 @@
 import { describe, expect, test } from 'vitest';
+// `?raw`, the way `raise.test.ts` reads `src/raise.ts` — this app has no
+// `@types/node`, and Vite's own loader is the seam that already exists for
+// reading a source file as a string.
+import paneSource from './QuestionsPane.tsx?raw';
 import { emptyRun, reduce } from './model';
 import type { Run } from './model';
 import type { Frame } from '../host';
@@ -30,6 +34,47 @@ const opened = (...qs: readonly Record<string, unknown>[]): Frame =>
     blocking: qs.filter((q) => q['blocking'] === true).length,
     questions: qs,
   });
+
+describe('the pane reports a decline and never authors one (#211)', () => {
+  /**
+   * Read as source, the way `raise.test.ts` reads `src/raise.ts`, because there
+   * is no DOM in this suite and the claim is about what the file says rather
+   * than about what React does with it.
+   *
+   * The report: three questions declined for three different reasons were read
+   * as *"all declined with the same reason"*. They were not — but the only
+   * sentence identical across the three was the one the pane wrote itself and
+   * put in front of the model's own words, so it was the sentence being
+   * compared.
+   */
+  // Comments are where the history of this is explained, including the removed
+  // sentence quoted verbatim. What must not come back is the rendered text.
+  const rendered = paneSource.replace(/\/\*[\s\S]*?\*\//g, '');
+
+  test('no sentence is put in front of the answerer’s reason', () => {
+    expect(rendered).not.toMatch(/would not guess/);
+    // And not the role that does not exist. `roles.ts` names the seat
+    // `answerer`; `adversary` is the design corpus's word for the judging half
+    // of a round and belongs in comments, not on a card.
+    expect(rendered).not.toMatch(/adversary/i);
+  });
+
+  test('a decline with no reason says that, rather than being given one', () => {
+    // The absence rule, on prose. `It gave no reason.` was previously appended
+    // to an authored sentence, so a rationale-less decline and a rationale-full
+    // one opened identically.
+    expect(rendered).toMatch(/declined without giving a reason/);
+  });
+
+  test('the consequence of a decline is stated once, not once per card', () => {
+    // It is a function of `blocking` alone, and `blocking` is already a chip at
+    // the top of every card - so on a card it was a third copy of something the
+    // card said twice, and three copies of one consequence beside three
+    // different reasons is what made the reasons look identical.
+    const occurrences = rendered.match(/NEEDS-INPUT\.md/g) ?? [];
+    expect(occurrences).toHaveLength(1);
+  });
+});
 
 describe('the questions arrive with their answers', () => {
   test('an answer is matched onto its question by the text, as the loop matches it', () => {
