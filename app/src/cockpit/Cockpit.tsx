@@ -851,6 +851,10 @@ export function Cockpit() {
               onEffect={onEffect}
               onPending={setProposals}
               statuses={keyStatuses}
+              // Hi-fi 5's `open verify`. A round card is the round's summary
+              // and the pane beside it holds the detail, so the card links to
+              // it rather than growing a second copy of that screen.
+              onOpen={(next) => setTab(next as typeof tab)}
               // The repository, whenever there is no run to watch. Once one is
               // going the pane is a conversation *about* it, and the field is
               // settled — the run is already using that directory, and changing

@@ -423,3 +423,146 @@
   background: var(--surface-alarm);
   padding: var(--space-2) var(--space-4);
 }
+
+/*
+ * The round card (hi-fi 5, #223).
+ *
+ * The pilot pane is the run's log, so a round leaves a card in it. Visually it
+ * is a card and NOT a reply: the reply is a conversation and this is a record,
+ * so it takes the card ground and the card rule rather than the reply's
+ * indentation, and it is the same object the design draws in the same place.
+ *
+ * The cycle modifier is a left rule and nothing else. Three cycles reading as
+ * three colours would be hue carrying meaning, which this system does not do -
+ * severity reads by weight and everything else reads by position.
+ */
+.v-round {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  background: var(--surface-card);
+  border: 1px solid var(--rule-card);
+  border-left: 2px solid var(--rule-strong);
+  padding: var(--space-4);
+  margin-bottom: var(--space-5);
+}
+
+/* The one live treatment, and it is the same one a live turn takes: accent
+   border and the active ground. No pulse - `exactly one element on screen
+   pulses`, and while a round is running the turn card in the loop column is
+   already the thing that has it. */
+.v-round--open {
+  background: var(--surface-active);
+  border-left-color: var(--accent-border);
+}
+
+.v-round__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.v-round__what {
+  font: var(--type-kicker);
+  color: var(--text-display);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.v-round__took,
+.v-round__ms {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  color: var(--text-tertiary);
+}
+
+.v-round__took {
+  margin-left: auto;
+}
+
+.v-round__turns {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  list-style: none;
+}
+
+.v-round__turns li {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+}
+
+.v-round__who {
+  font: var(--type-body-sm);
+  color: var(--text-primary);
+}
+
+.v-round__ms {
+  margin-left: auto;
+}
+
+.v-round__work {
+  font: var(--type-body-sm);
+  color: var(--text-emphasis);
+}
+
+.v-round__verify,
+.v-round__findings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  border-top: 1px solid var(--rule-inner);
+  padding-top: var(--space-2);
+}
+
+.v-round__gate,
+.v-round__verdict,
+.v-round__more {
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+.v-round__verdict {
+  color: var(--text-primary);
+}
+
+.v-round__chips {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-wrap: wrap;
+}
+
+.v-round__finding {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.v-round__fid {
+  font: var(--type-mono-sm);
+  color: var(--text-tertiary);
+}
+
+.v-round__ftitle {
+  font: var(--type-body-sm);
+  color: var(--text-primary);
+}
+
+/* The design's `open verify` - a text link, because it goes somewhere rather
+   than doing something. A button styled as a button here would compete with the
+   proposal cards, which are the only controls in this scroll that spend. */
+.v-round__open {
+  align-self: flex-start;
+  font: var(--type-body-sm);
+  color: var(--accent-solid);
+  background: none;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.v-round__open:hover {
+  color: var(--accent-on-tint);
+}

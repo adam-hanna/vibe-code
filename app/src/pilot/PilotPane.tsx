@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { Button, MetaChip, StateKicker, ThinkingWave } from '../design';
 import { elapsed } from '../cockpit/format';
+import { logOf } from './log';
+import { RoundCard } from './RoundCard';
 import * as host from '../host';
 import * as keys from './keys';
 import * as pilot from './pilot';
@@ -612,6 +614,15 @@ export interface PilotPaneProps {
    * prompt says which rather than describing a task nobody gave it.
    */
   launched: Launched | null;
+  /**
+   * Take the reader to the tab that has a round's detail (hi-fi 5).
+   *
+   * The design's cards carry `open verify` and the findings themselves, and the
+   * card is a **summary** - the prose lives in the round's artifact and behind
+   * the pane built for it. Optional, and a card drawn without it simply omits
+   * the link rather than drawing a control that does nothing.
+   */
+  onOpen?: (tab: string) => void;
 }
 
 export function PilotPane({
@@ -623,6 +634,7 @@ export function PilotPane({
   onPending,
   statuses,
   kickoff,
+  onOpen,
 }: PilotPaneProps) {
   const [conversation, dispatch] = useReducer(apply, undefined, emptyConversation);
   /**
@@ -1079,6 +1091,18 @@ export function PilotPane({
     [conversation.replies, onEffect],
   );
 
+  /**
+   * The log: this run's rounds and this conversation, in one scroll (hi-fi 5).
+   *
+   * Memoised on the two things it reads, because `rounds` walks every phase of
+   * every cycle and the pane re-renders once a second while a turn is open —
+   * that is a clock ticking, not a run changing.
+   */
+  const entries = useMemo(
+    () => logOf(run, conversation.replies),
+    [run, conversation.replies],
+  );
+
   return (
     <div className="v-pilot">
       <div className="v-pilot__controls">
@@ -1175,22 +1199,31 @@ export function PilotPane({
           scroll up — see `follow.ts` for why that state belongs to the reader
           and not to the pane. */}
       <div className="v-pilot__log v-selectable" ref={log.ref} onScroll={log.onScroll}>
-        {conversation.replies.length === 0 && conversation.live === null && (
+        {entries.length === 0 && conversation.live === null && (
           <div className="v-pilot__note">
             Nothing yet. The pilot can read this run and propose a launch or a gate answer — it
             cannot fire either one, edit vibe.config.json, or read the run archive (#114).
           </div>
         )}
-        {conversation.replies.map((reply) => (
-          <ReplyCard
-            key={reply.turn}
-            reply={reply}
-            conversation={conversation}
-            busy={live !== null}
-            onDecide={onDecide}
-            now={now}
-          />
-        ))}
+        {/* Hi-fi 5: this is the run's log, not a chat beside one. Rounds and
+            conversation share the scroll, and `interleave` is where the order
+            is decided — a rule that only lived in a `.map` could not be
+            tested, and the one thing it must never do is reorder what somebody
+            said. */}
+        {entries.map((entry) =>
+          entry.kind === 'round' ? (
+            <RoundCard key={`round-${entry.card.key}`} card={entry.card} onOpen={onOpen} />
+          ) : (
+            <ReplyCard
+              key={`reply-${String(entry.reply.turn)}`}
+              reply={entry.reply}
+              conversation={conversation}
+              busy={live !== null}
+              onDecide={onDecide}
+              now={now}
+            />
+          ),
+        )}
         {conversation.live !== null && (
           <ReplyCard
             reply={conversation.live}
