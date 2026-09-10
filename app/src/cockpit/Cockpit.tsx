@@ -17,6 +17,7 @@ import { Kickoff } from './Kickoff';
 import { LoopColumn } from './LoopColumn';
 import { NewWorkstream } from './NewWorkstream';
 import { OutputPane } from './OutputPane';
+import { Rail } from './Rail';
 import { QuestionsPane } from './QuestionsPane';
 import { RateLimitStrip } from './RateLimit';
 import { Settings } from './Settings';
@@ -27,6 +28,7 @@ import { Switcher } from './Switcher';
 import { Workstreams } from './Workstreams';
 import { VerifyPane } from './VerifyPane';
 import { StalenessStrip } from './Staleness';
+import { tokens as fmtTokens } from './format';
 import { blocking, emptyRun, nextRun, reduce, staleness } from './model';
 import { readLaunchArgv, resumeArgv } from './argv';
 import type { Launched, Raise } from './argv';
@@ -38,31 +40,23 @@ import type { Run } from './model';
 /**
  * The cockpit, at the slice #159 scopes it to.
  *
- * Three of `3a`'s four regions - loop column, output pane, footer - plus the
+ * All four of `3a`'s regions — rail, loop column, output pane, footer — plus the
  * pilot, which since #211 is where you land and where a run is started from.
  *
- * ## The left rail is absent, and the reason has changed
+ * ## The left rail, and what changed about the argument against it
  *
- * It used to be *"projects and workstreams need the archive reader (#114)"*, and
- * that stopped being true when the `archive` frame landed: the rail's data is
- * readable now.
+ * It was absent for two stated reasons and only one of them survived. The first
+ * — *"projects and workstreams need the archive reader (#114)"* — stopped being
+ * true when the `archive` frame landed. The second was that **`serve.ts` runs
+ * one run at a time**, so there is never a second live workstream to switch
+ * between, and a rail over the *archive* is `1b` in a sidebar.
  *
- * The reason it is still absent is the second half of that sentence, which is
- * the load-bearing one. **`serve.ts` runs one run at a time**, so there is never
- * more than one live workstream to switch between - and a rail over the
- * *archive* is `1b` in a sidebar. There are already two switchers over that data
- * and the design insisted on both for stated reasons: `1b` is triage, a reading
- * task with sorting and history, and ⌘K answers *"take me to
- * fix-ratelimit-wait"*. A third would be the third spelling #211 warns about, in
- * the region with the least room for it.
- *
- * What the rail uniquely carries in `3a` is the **needs-you dot** and `4e`'s
- * rule that waiting workstreams sort to the top. With one run per process that
- * is a single boolean about the run in front of you, and the footer is where the
- * design already puts it.
- *
- * This becomes worth building the day a host drives more than one run. Nothing
- * here should be read as it being hard.
+ * That is still true, and it is why the rail's squares **navigate rather than
+ * reopen** (see `Rail.tsx`). What it does not justify is having no rail: the
+ * design puts `＋`, ⌘K and `⚙` on it in every frame, and with nowhere for them
+ * to live they were pushed into the tab bar — which is how that bar came to have
+ * twelve tabs against the design's seven. `design/AUDIT.md` §1.1 and §1.2 are
+ * one finding, and this is the half that fixes both.
  *
  * Everything on screen comes from a frame. There is no state here that was
  * inferred: `reduce` is the only thing that decides what the run looks like, and
@@ -655,6 +649,18 @@ export function Cockpit() {
       )}
 
       <div className="v-cockpit__body">
+        {/* Hi-fi 1's rail, in every frame that shows the whole window. It is
+            what `Settings`, `Runs` and the ⌘K switcher hang off, which is why
+            the tab bar below is nine tabs and a readout rather than twelve. */}
+        <Rail
+          dir={repoDir}
+          currentId={run.identity?.runId ?? null}
+          onNew={() => setComposing(true)}
+          onSwitch={() => setSwitching(true)}
+          onSettings={() => setTab('settings')}
+          onRuns={() => setTab('runs')}
+        />
+
         <div className="v-cockpit__loop">
           {/* `4h`. While there is no run, this column is three not-started
               cycles and a sentence saying what it is waiting for — and what it
@@ -708,37 +714,52 @@ export function Cockpit() {
         </div>
 
         <div className="v-cockpit__pane">
+          {/*
+            Hi-fi 1's bar, in the design's own order. It had twelve tabs against
+            the design's seven, and `design/AUDIT.md` traced most of that to the
+            missing rail rather than to a decision anybody made: `Settings` is
+            the rail's `⚙`, `Runs` is the rail plus ⌘K, and `Spend` is a
+            right-aligned readout in this bar rather than a tab of its own.
+
+            `Pilot` is first and is where the window lands, which hi-fi 5 says in
+            as many words. `Verify`, `Commands` and `Keys` follow the seven: they
+            postdate the artwork, so the design cannot be consulted about where
+            they go, and putting them after the frames it does name is the least
+            it can be wrong by.
+          */}
           <div className="v-cockpit__tabs">
+            {/* The pilot (#143, #144), and hi-fi 5's first tab. The count is
+                proposals waiting on a person, and it is here because a proposal
+                nobody sees blocks the conversation silently. */}
+            <button
+              className={`v-cockpit__tab ${tab === 'pilot' ? 'v-cockpit__tab--on' : ''}`}
+              onClick={() => setTab('pilot')}
+            >
+              Pilot chat{proposals > 0 ? ` · ${String(proposals)}` : ''}
+            </button>
             <button
               className={`v-cockpit__tab ${tab === 'output' ? 'v-cockpit__tab--on' : ''}`}
               onClick={() => setTab('output')}
             >
               Output
             </button>
-            {/* The pilot (#143, #144). It reads this run and proposes; the
-                count is proposals waiting on a person, and it is here because a
-                proposal nobody sees blocks the conversation silently. */}
+            {/* Hi-fi 3, named rather than omitted. A version history of an
+                artifact needs the artifacts, and this window has no filesystem:
+                #207 is explicit that reading one is its own decision with
+                #129's link refusal attached. Dashed and named, the way `Prompt`
+                is, because a bar that showed only what works reads as a
+                finished app. */}
+            <span className="v-cockpit__tab v-cockpit__tab--off" title="hi-fi 3 — needs #114">
+              Versions
+            </span>
+            {/* `1d`. Enabled only once the run has a base to diff against: a
+                diff with no base is the request that stages the whole working
+                tree, so there is nothing to offer before then. */}
             <button
-              className={`v-cockpit__tab ${tab === 'pilot' ? 'v-cockpit__tab--on' : ''}`}
-              onClick={() => setTab('pilot')}
+              className={`v-cockpit__tab ${tab === 'diff' ? 'v-cockpit__tab--on' : ''}`}
+              onClick={() => setTab('diff')}
             >
-              Pilot{proposals > 0 ? ` · ${String(proposals)}` : ''}
-            </button>
-            {/* `5d`. The count is verification passes, not gates: the pane's
-                subject is the decision in front of you and its trend, and a
-                gate count would move for a reason nobody cares about. */}
-            <button
-              className={`v-cockpit__tab ${tab === 'verify' ? 'v-cockpit__tab--on' : ''}`}
-              onClick={() => setTab('verify')}
-            >
-              Verify{run.verify.length > 0 ? ` · ${String(run.verify.length)}` : ''}
-            </button>
-            {/* The pilot's credentials, until Settings exists to put them in. */}
-            <button
-              className={`v-cockpit__tab ${tab === 'keys' ? 'v-cockpit__tab--on' : ''}`}
-              onClick={() => setTab('keys')}
-            >
-              Keys
+              Diff
             </button>
             {/* `1e`. The count is blocking findings in the latest round, not
                 all of them: that is the number that decides whether the loop
@@ -749,27 +770,6 @@ export function Cockpit() {
               onClick={() => setTab('findings')}
             >
               Findings{blocking(run) > 0 ? ` · ${String(blocking(run))}` : ''}
-            </button>
-            {/* `1b`. No count: the number of runs an archive holds is not
-                something to act on, and a badge that grew for ever would be
-                the tray-badge failure `4e` names - one that includes work
-                needing nobody trains you to ignore it. */}
-            <button
-              className={`v-cockpit__tab ${tab === 'runs' ? 'v-cockpit__tab--on' : ''}`}
-              onClick={() => setTab('runs')}
-            >
-              Runs
-            </button>
-            {/* The count is what is still RUNNING, not how many have been run
-                (#211). A dev server left up is the fact worth a badge - it is
-                holding a port and it will not stop by itself - and a total that
-                only grew would be the tray-badge failure `4e` names. */}
-            <button
-              className={`v-cockpit__tab ${tab === 'commands' ? 'v-cockpit__tab--on' : ''}`}
-              onClick={() => setTab('commands')}
-            >
-              Commands
-              {running(commands).length > 0 ? ` · ${String(running(commands).length)}` : ''}
             </button>
             {/* `1f`. The count is blocking questions, not all of them: an
                 advisory question the answerer handled needs nobody, and a
@@ -783,38 +783,62 @@ export function Cockpit() {
                 ? ` · ${String(run.questions.blocking)}`
                 : ''}
             </button>
-            {/* `5e`. No count: a token total in a tab label is a number you
-                cannot act on, and the design puts consumption in the tab BAR
-                rather than on the tab - which is a different element this
-                slice does not have. */}
+            {/* `5d`. The count is verification passes, not gates: the pane's
+                subject is the decision in front of you and its trend, and a
+                gate count would move for a reason nobody cares about. */}
             <button
-              className={`v-cockpit__tab ${tab === 'spend' ? 'v-cockpit__tab--on' : ''}`}
-              onClick={() => setTab('spend')}
+              className={`v-cockpit__tab ${tab === 'verify' ? 'v-cockpit__tab--on' : ''}`}
+              onClick={() => setTab('verify')}
             >
-              Spend
+              Verify{run.verify.length > 0 ? ` · ${String(run.verify.length)}` : ''}
             </button>
-            {/* `1h`, and #140's payoff: the gate matrix has been configuration
-                since it landed and there has been no way to configure it. */}
+            {/* The count is what is still RUNNING, not how many have been run
+                (#211). A dev server left up is the fact worth a badge - it is
+                holding a port and it will not stop by itself - and a total that
+                only grew would be the tray-badge failure `4e` names. */}
             <button
-              className={`v-cockpit__tab ${tab === 'settings' ? 'v-cockpit__tab--on' : ''}`}
-              onClick={() => setTab('settings')}
+              className={`v-cockpit__tab ${tab === 'commands' ? 'v-cockpit__tab--on' : ''}`}
+              onClick={() => setTab('commands')}
             >
-              Settings
+              Commands
+              {running(commands).length > 0 ? ` · ${String(running(commands).length)}` : ''}
             </button>
-            {/* `1d`. Enabled only once the run has a base to diff against: a
-                diff with no base is the request that stages the whole working
-                tree, so there is nothing to offer before then. */}
+            {/* The pilot's credentials. Postdates the artwork (#143), so it
+                takes a place after the frames the design names. */}
             <button
-              className={`v-cockpit__tab ${tab === 'diff' ? 'v-cockpit__tab--on' : ''}`}
-              onClick={() => setTab('diff')}
+              className={`v-cockpit__tab ${tab === 'keys' ? 'v-cockpit__tab--on' : ''}`}
+              onClick={() => setTab('keys')}
             >
-              Diff
+              Keys
             </button>
-            {/* Named rather than omitted, with the issue that would fill it. A
-                tab bar that showed only what works reads as a finished app. */}
+            {/* Named rather than omitted, with the issue that would fill it. */}
             <span className="v-cockpit__tab v-cockpit__tab--off" title="#137 — v1.5">
               Prompt
             </span>
+
+            {/*
+              `5e`, in the place hi-fi 1 puts it: right-aligned in this bar,
+              always visible, rather than costing a tab. It is the **readout**
+              the design draws and it is also the way in — the pane behind it is
+              the per-phase breakdown, and losing that to match a frame would be
+              deleting a screen to fix a bar.
+
+              Absent rather than `0 tok` before anything is charged. A run that
+              has spent nothing yet has not spent zero; it has not been measured.
+            */}
+            <button
+              className={`v-cockpit__readout ${tab === 'spend' ? 'v-cockpit__readout--on' : ''}`}
+              onClick={() => setTab('spend')}
+              title="what this run has spent"
+            >
+              {run.spend.tokens === null
+                ? 'spend · nothing charged yet'
+                : `${fmtTokens(run.spend.tokens)} tok${
+                    run.spend.codexTokens === null
+                      ? ''
+                      : ` · codex ${fmtTokens(run.spend.codexTokens)}`
+                  }`}
+            </button>
           </div>
           {tab === 'output' && <OutputPane lines={run.output} />}
           {tab === 'verify' && <VerifyPane passes={run.verify} />}

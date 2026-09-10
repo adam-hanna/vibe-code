@@ -2563,3 +2563,145 @@
   max-width: 76ch;
   margin: 0;
 }
+
+/*
+ * The left rail (hi-fi 1, hi-fi 5).
+ *
+ * 54px, which is `--dim-rail` - the token layer has held that value since the
+ * design system was transcribed, a year before anything drew a rail. It is the
+ * chrome surface, like the titlebar and the tab bar, because that is what it is:
+ * navigation around the window rather than content in it.
+ */
+.v-rail {
+  width: var(--dim-rail);
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) 0;
+  background: var(--surface-chrome);
+  border-right: 1px solid var(--rule-structure);
+  min-height: 0;
+}
+
+.v-rail__all {
+  font: var(--type-label);
+  letter-spacing: 0.08em;
+  color: var(--text-tertiary);
+  background: none;
+  cursor: pointer;
+}
+
+.v-rail__all:hover {
+  color: var(--text-primary);
+}
+
+/* Scrolls rather than truncating. An archive grows without limit and a rail
+   that dropped the oldest squares would be a list that silently stopped being
+   the whole list - the overclaim `scorecard.ts` exists to prevent, in a strip. */
+.v-rail__list {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  width: 100%;
+}
+
+.v-rail__square {
+  position: relative;
+  width: 34px;
+  height: 34px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-card);
+  border: 1px solid var(--rule-card);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.v-rail__square:hover {
+  border-color: var(--rule-control);
+  color: var(--text-primary);
+}
+
+/* The design's rail selection, and the one place `--accent-base` is used: the
+   token names it *"Industry's own steel, rail selection"*, so this is the value
+   it was chosen for. */
+.v-rail__square--on {
+  background: var(--surface-active);
+  border-color: var(--accent-base);
+  color: var(--text-emphasis);
+}
+
+.v-rail__mark {
+  font: var(--type-tab);
+  letter-spacing: 0.04em;
+}
+
+/* Top-right of the square, `4e`'s needs-you position. */
+.v-rail__dot {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+}
+
+.v-rail__none {
+  font: var(--type-tab);
+  color: var(--text-tertiary);
+}
+
+.v-rail__foot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+  border-top: 1px solid var(--rule-structure);
+  padding-top: var(--space-3);
+  width: 100%;
+}
+
+.v-rail__control {
+  font: var(--type-tab);
+  color: var(--text-tertiary);
+  background: none;
+  cursor: pointer;
+  padding: var(--space-1) var(--space-2);
+}
+
+.v-rail__control:hover {
+  color: var(--text-emphasis);
+}
+
+/*
+ * `5e` in the place hi-fi 1 draws it: right-aligned in the tab bar, always
+ * visible. `margin-left: auto` is what makes it right-aligned without the bar
+ * needing a second flex container.
+ *
+ * Not uppercase and not `--type-tab`: it is a measurement sitting among
+ * navigation, and it has to read as one. Tabular figures because it changes
+ * while you are looking at it.
+ */
+.v-cockpit__readout {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+  background: none;
+  cursor: pointer;
+}
+
+.v-cockpit__readout:hover {
+  color: var(--text-primary);
+}
+
+.v-cockpit__readout--on {
+  color: var(--text-emphasis);
+}
