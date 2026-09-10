@@ -183,7 +183,7 @@ export function SpendPane({ run }: { run: Run }) {
       <section className="v-spend__block">
         <h3 className="v-spend__h">not here</h3>
         <p className="v-spend__absent">
-          The pilot&apos;s tokens are its own books and are never summed into these (#145) — a
+          The pilot&apos;s tokens are its own books and are never summed into these — a
           conversation about the work is not the work. Provider headroom is the scarcity that
           actually matters on a subscription, and no frame carries it.
         </p>

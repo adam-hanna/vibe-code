@@ -225,10 +225,25 @@ they are waiting on. Four things in it are worth carrying:
   other way round: `Reply.startedAt` is nullable by design, so sorting one mixed list by a key
   half of it lacks would reorder somebody's conversation to make a card fit. There is no
   `claude/opus` on it, because a turn frame carries no model.
-- **The loop column draws four peer groups and the pilot's log draws three cycles, and the
-  split is on purpose.** `CycleKind` is four — `plan`, `critique`, `code`, `review` — and
-  `RoundFamily` in `rounds.ts` is three. Do not collapse them into one enum: they answer
-  different questions, and each has a test that fails if the other's answer leaks in.
+- **The column and the log draw the same four groups, and that is the second half of one
+  decision.** `CycleKind` is four — `plan`, `critique`, `code`, `review` — and `rounds()`
+  produces one card per phase group, so a critique is an entry in the pilot's log rather than
+  an in-place update to a card placed twenty minutes earlier.
+
+  **It was the pair, and the pair is what broke.** Hi-fi 5 draws the round card as
+  producer-and-judge in as many words — `plan v.b · claude/opus · 4m 40s · accepted after 1
+  critique` — and `rounds.ts` was built that way, with a three-valued `RoundFamily` beside the
+  column's four-valued `CycleKind`. A merged card is placed at the round's *start*, so the
+  moment the loop entered `PLAN CRITIQUE` the log did not move: *"it moved to Group 2 · Plan
+  Critique but that never updated the pilot chat like the plan rounds did."* A log that does
+  not move when the loop moves is not a log.
+
+  **The cost is stated rather than argued away.** Two cards cannot say *accepted after 1
+  critique* in one line. What carries the pairing instead is the **round chip**, on both halves,
+  which is only readable because the core now says the round on `planning` as well as on
+  `critique` — the same mechanism that pairs the two groups in the column. If the sentence is
+  ever wanted back it belongs in a summary above the cards, not in a card that hides half its
+  own arrival.
 
   **The judge got a heading at the owner's decision, and the cost is written down rather than
   argued away.** The convergence model says a round is the *pair* — the planner produces a
@@ -246,10 +261,33 @@ they are waiting on. Four things in it are worth carrying:
   decorative — with the halves in two groups it is the only thing saying which critique judged
   which draft, which is why the core now puts a round on `planning`.
 
-  **`rounds()` still pairs them, across the two groups**, because hi-fi 5's card is the pair in
-  as many words: `plan v.b · claude/opus · 4m 40s · accepted after 1 critique`. It gathers by
-  family and sorts by start rather than trusting cycle order, since a resume can open the
+  `rounds()` sorts by start rather than trusting cycle order, since a resume can open the
   critique group first.
+
+- **The question loop is drawn on the round that opened it, and it is a count rather than a
+  list.** `7a` nests it inside the plan cycle and it used to be drawn at the *foot* of the
+  whole group — so the moment a second plan round opened, round 1's questions appeared beneath
+  round 2's row. `questions_opened` now carries an arrival time and `questionsPhase()` places
+  it through the same `during()` a census goes through, so there is one definition of "by
+  arrival" and not two. The question **text** is the Questions pane's job: this column is 364px
+  wide, a question is a paragraph, and a list of them pushed every later round off the screen.
+
+- **A count is a control wherever it is drawn.** `Counts` is one component for the loop column,
+  the findings pane and the pilot's round card, and clicking it opens the findings — the four
+  chips are the largest thing on any of those surfaces and were inert while a text link three
+  lines below did the navigating. The same applies one level down: a finding row in the
+  findings pane was a `<button>` that set an `open` id nothing rendered, so the cursor promised
+  a disclosure that did not exist. What is behind that fold is the **provenance** — author,
+  citations, severity history, reproducer outcomes — and what stays out is the severity, the
+  title and the id, which are what make a list of findings scannable.
+
+- **No issue number reaches the screen, and `copy.test.ts` is the gate.** Seven components
+  carried one, each individually defensible: naming the issue that would supply a missing
+  figure is how this repo keeps a gap legible. That reasoning is right about the *source* and
+  wrong about the screen — `#114` is unactionable to anybody not holding this repository open.
+  The numbers stay in comments. The test **globs** `app/src/**/*.tsx` rather than naming files,
+  for the reason `audit:contrast`'s hex check walks `src/`: a named list is something somebody
+  has to remember to extend.
 
 - **Three defects were found underneath that question, and two were core bugs.** A cycle
   counting phase groups called two plan rounds **three**; `revisePlan` announced no phase, so
@@ -275,6 +313,32 @@ they are waiting on. Four things in it are worth carrying:
   *"Order is the loop's, not the alphabet's"* — and the position is the last boundary that
   actually **held**, not a phase mapped onto one. What it can still be wrong about is that the
   loop may pass a boundary without reaching it, so the wording is *can stop* and never *will*.
+
+**The planner never had a `ctx%`, and the fix borrows a denominator rather than inventing
+one.** `promptTokens` is measured live off Claude's stream on every heartbeat; the context
+**window** arrives only on a turn's *result* envelope. So the first Claude turn of a process
+has a numerator and nothing to divide it by — which is the planner, every time — and context
+occupancy only ever appeared from the second turn onwards. `seedContextWindows` in
+`src/context.ts` walks `.vibe/runs` newest-first and takes the window off the first run that
+recorded one.
+
+It is allowed under *"never invent a number"* because it is a **measurement**: a figure Claude
+reported on this machine, under this exact model name, written by vibe into `state.json` and
+read back. It is not guessed from a model name, not scaled from another model's window, and
+not read from a table. Three things keep it honest. It **stops at the first run that measured
+anything** — that run is evidence about how this checkout is configured now, and if it names a
+different model there is no evidence and none is taken. It **fills a gap and never
+overwrites**, so a figure this process measured is never replaced by an older one. And the
+first real turn overwrites it through `recordTurnContext`, so a window that moved between
+releases is wrong for at most one turn.
+
+**The scrollbar is global, and the class it replaced is why.** `.v-scroll` was an opt-in and
+almost nothing opted in — every pane sets `overflow-y: auto` itself — so the product scrolled
+with the platform's own light gutter down the side of a dark window. `--dim-scroll-track` is
+the design's 4px and is the width of the **thumb**; the gutter is twice that, with the
+difference clipped away by `background-clip: padding-box`, so the stated design and a usable
+hit target are not in conflict. The track is transparent: a permanently drawn one is a
+vertical rule down every pane, which reads as structure.
 
 **A fact the run records and never says is a screen that cannot be built** (#223). The loop
 has always known whether the verification gate passed, what a round's four severity counts
@@ -485,7 +549,8 @@ app/                 the desktop app - Vite + React, its own package.json and ga
 app/src/design/      tokens.css, base.css, components.css, and the sixteen primitives
 app/src/design/HANDOFF.md  the design corpus - every screen a source comment cites, by name
 app/src/design/AUDIT.md    the built app walked against all fourteen hi-fi frames, and closed
-app/src/cockpit/rounds.ts  a round as one card - the object hi-fi 5's log is made of
+app/src/cockpit/rounds.ts  a round as one card, and which round a thing arrived during
+app/src/cockpit/Counts.tsx the four severity counts, and the one place they are a control
 app/src/cockpit/squares.ts the rail's squares: two letters, and what gets one at all
 app/src/pilot/log.ts       rounds and conversation in one scroll, and who may reorder whom
 app/src/Gallery.tsx  every component in every state - the design system's acceptance test

@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Card, MetaChip, SeverityChip, StateKicker } from '../design';
+import { Counts } from './Counts';
 import { SEVERITIES, persistence } from './model';
 import type { Severity } from '../design';
 import type { Census, FindingRow } from './model';
@@ -42,16 +43,10 @@ function weight(severity: string): Severity | null {
  * rule and it is the opposite of hiding it: at a gate, *no P0s* is the most
  * important thing on the row.
  */
-function Counts({ counts }: { counts: Readonly<Record<string, number>> }) {
-  return (
-    <div className="v-find__chips">
-      {SEVERITIES.map((s) => {
-        const n = counts[s] ?? 0;
-        return <SeverityChip key={s} severity={n === 0 ? null : weight(s)} label={s} count={n} />;
-      })}
-    </div>
-  );
-}
+// The four counts are drawn identically here, in the loop column and on the
+// pilot's round card, so they are one component in `./Counts`. `compact` and no
+// `onOpen`: the tolerance is stated below in a sentence, and this pane IS the
+// findings, so there is nowhere for a chip to send anybody.
 
 /**
  * The consequence, in words, which is the line `5a` asks for by name.
@@ -160,15 +155,56 @@ function Reproducer({ outcomes }: { outcomes: FindingRow['reproducer'] }) {
   );
 }
 
-function Finding({ finding, rounds }: { finding: FindingRow; rounds: number }) {
+/**
+ * One finding, as a row that opens.
+ *
+ * **The row was already a `<button>` and the click did nothing.** It set an
+ * `open` id that nothing rendered, so every finding drew its provenance, its
+ * severity history and its reproducer outcomes at once and the cursor promised a
+ * disclosure that was not there — reported as *"items in the findings page have a
+ * hand pointing mouse but don't do anything when clicked"*.
+ *
+ * What is behind the fold is the **provenance**, which is the part a reader goes
+ * looking for rather than scans: who raised it, how many citations it carries,
+ * whether it survived a fix, and what the reviewer's own test observed. What
+ * stays out is the severity, the title and the id — the three things that make a
+ * list of findings scannable, and the ones `4c` puts first.
+ */
+function Finding({
+  finding,
+  rounds,
+  open,
+  onToggle,
+}: {
+  finding: FindingRow;
+  rounds: number;
+  open: boolean;
+  onToggle: () => void;
+}) {
   const w = weight(finding.severity);
   return (
     <Card severity={w ?? undefined}>
-      <div className="v-find__head">
+      <button
+        type="button"
+        className="v-find__head v-find__head--link"
+        onClick={onToggle}
+        aria-expanded={open}
+      >
+        <span className="v-disclose" aria-hidden="true">
+          {open ? '▾' : '▸'}
+        </span>
         <SeverityChip severity={w} label={finding.severity} />
         <span className="v-find__title">{finding.title}</span>
         <code className="v-find__id">{finding.id}</code>
-      </div>
+      </button>
+      {open && <FindingBody finding={finding} rounds={rounds} />}
+    </Card>
+  );
+}
+
+function FindingBody({ finding, rounds }: { finding: FindingRow; rounds: number }) {
+  return (
+    <>
       <div className="v-find__meta">
         {/* Absent means absent. A finding from before #141 has no author and
             this says so rather than naming the role that probably wrote it. */}
@@ -208,7 +244,7 @@ function Finding({ finding, rounds }: { finding: FindingRow; rounds: number }) {
       </div>
       <History finding={finding} />
       <Reproducer outcomes={finding.reproducer} />
-    </Card>
+    </>
   );
 }
 
@@ -250,7 +286,7 @@ export function FindingsPane({ censuses }: { censuses: readonly Census[] }) {
           {latest.phase === 'plan' ? 'critique' : 'review'}
           <MetaChip>{latest.pass ? 'gate passed' : 'gate blocked'}</MetaChip>
         </h3>
-        <Counts counts={latest.counts} />
+        <Counts counts={latest.counts} compact />
         {/* The tolerance, stated rather than left to be inferred from two
             numbers. It is the whole reason the counts are legible as a
             decision. */}
@@ -267,14 +303,13 @@ export function FindingsPane({ censuses }: { censuses: readonly Census[] }) {
           <p className="v-find__none">This round reported no findings at all.</p>
         ) : (
           latest.findings.map((f) => (
-            <button
+            <Finding
               key={f.id}
-              className="v-find__row"
-              onClick={() => setOpen((cur) => (cur === f.id ? null : f.id))}
-              aria-expanded={open === f.id}
-            >
-              <Finding finding={f} rounds={surviving.get(f.id) ?? 1} />
-            </button>
+              finding={f}
+              rounds={surviving.get(f.id) ?? 1}
+              open={open === f.id}
+              onToggle={() => { setOpen((cur) => (cur === f.id ? null : f.id)); }}
+            />
           ))
         )}
         {/* The gate's own counts are the authority. If the list is shorter than

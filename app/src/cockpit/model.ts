@@ -496,6 +496,17 @@ export interface Run {
     /** `loop.maxQuestionRounds`, so the group can say `2/3` rather than `2`. */
     cap: number | null;
     open: readonly Question[];
+    /**
+     * When the round opened, on this window's arrival clock.
+     *
+     * What attaches the group to the phase it belongs under. Without it the
+     * column drew the questions at the foot of the whole `PLAN` group, so round
+     * 1's questions appeared beneath round 2 the moment a second plan round
+     * started - reported as *"the questions from the first round appeared under
+     * THIS round, not the ROUND 1"*. The same clock `during()` compares, so the
+     * comparison is like with like.
+     */
+    at: number;
   } | null;
   /**
    * The rate-limit wait in flight, or the last one, or null (`7e`).
@@ -1559,6 +1570,7 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
             round: num(data['round']),
             cap: num(data['cap']),
             open: readQuestions(data['questions']),
+            at,
           },
         };
 
@@ -1933,6 +1945,6 @@ export function runningRow(turn: Turn, now: number): RunningRow {
     // no frame carries it here, which is a different sentence and the one a
     // reader of this row needs.
     comparable:
-      'no comparable turns — vibe scorecard reads the archive, but no frame carries it here (#114)',
+      'no comparable turns — vibe scorecard reads the archive, but no frame carries it here',
   };
 }

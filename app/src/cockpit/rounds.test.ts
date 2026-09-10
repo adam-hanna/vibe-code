@@ -1,23 +1,31 @@
 import { describe, expect, test } from 'vitest';
 import { emptyRun } from './model';
-import { censusByPhase, rounds, roundTitle, title } from './rounds';
+import { censusByPhase, questionsPhase, rounds, roundTitle, title } from './rounds';
 import type { Census, Cycle, PhaseGroup, Run, Turn, VerifyPass, Work } from './model';
 
 /**
  * The round card, which is the object hi-fi 5's log is made of (#223).
  *
- * **A round is the pair**, and that is what changed here. This file previously
- * asserted one card per *phase group*, which was true of what the code did and
- * false about the domain: `CYCLE_OF` has said since it was written that *"a plan
- * round IS the pair - the planner produces a version, the critic judges it"*, and
- * grouping by phase made two plan rounds count as three, filed the planner's
- * revision under the critique that caused it, and left the critique looking like
- * a stage rather than the second half of every round.
+ * **One card per phase group, at the owner's decision.** This file previously
+ * asserted the pair — a plan round's producer and its critique merged into one
+ * card — which is what hi-fi 5 draws and what `rounds()` used to build. It stops
+ * being the right shape once the *column* gives the critique a heading of its own:
+ * a merged card is placed at the round's start, so a critique beginning twenty
+ * minutes later silently updated a card already off the top of the scroll. The
+ * report was exact — *"it moved to Group 2 · Plan Critique but that never updated
+ * the pilot chat like the plan rounds did"* — and a log that does not move when
+ * the loop moves is not a log.
+ *
+ * So the pairing assertions below are replaced, and what replaces them is the
+ * round **chip**: both halves carry the same round, which is what a reader pairs
+ * them by, and which the core only makes possible because it now says the round
+ * on `planning` as well as on `critique`.
  *
  * Every assertion that was about a **re-shaping** rather than about the grouping
  * is kept unchanged: the card carries what a frame put on `Run` and nothing else,
  * an open turn has no duration, and a census that predates every phase attaches
- * to nothing.
+ * to nothing. So is the one about the revision, which the core fix made true and
+ * which holds under either grouping.
  */
 
 const turn = (over: Partial<Turn> = {}): Turn => ({
@@ -130,71 +138,81 @@ const planCycles = (...rs: { produced: PhaseGroup; judged: PhaseGroup }[]): Cycl
   cycle({ kind: 'critique', phases: rs.map((r) => r.judged) }),
 ];
 
-describe('a round is the producer and the judge, together', () => {
-  test('a plan round’s two phases are one card, across two column groups', () => {
-    // The whole point, and it is now a pairing **across** groups: the column
-    // draws `PLAN` and `PLAN CRITIQUE` as peers, and a round is still the pair,
-    // because hi-fi 5's card is `plan v.b · accepted after 1 critique`.
+describe('each half of a round is its own card, paired by the round chip', () => {
+  test('a plan round is two cards, and the second is the critique arriving', () => {
+    // The whole point of the change: the critique is an *entry* in the log, not
+    // an in-place update to one placed twenty minutes earlier. Both carry the
+    // same round, which is what pairs them.
     const cards = rounds(run({ cycles: planCycles(planRound(0, 1_000, [1, 2])) }));
-    expect(cards).toHaveLength(1);
-    expect(cards[0]?.phases).toEqual(['planning', 'critique']);
-    expect(cards[0]?.turns.map((t) => t.role)).toEqual(['planner', 'critic']);
-    // Three-valued: the card's cycle is the convergence cycle, not the column's
-    // four-valued group. A card in the `critique` group would be a fourth cycle.
-    expect(cards[0]?.cycle).toBe('plan');
+    expect(cards).toHaveLength(2);
+    expect(cards.map((c) => c.phase)).toEqual(['planning', 'critique']);
+    expect(cards.map((c) => c.round)).toEqual([0, 0]);
+    expect(cards.map((c) => c.cycle)).toEqual(['plan', 'critique']);
+    expect(cards.map((c) => c.turns[0]?.role)).toEqual(['planner', 'critic']);
   });
 
-  test('two plan rounds are two cards, not four', () => {
+  test('two plan rounds are four cards, two per round', () => {
     const cards = rounds(
       run({ cycles: planCycles(planRound(0, 1_000, [1, 2]), planRound(1, 10_000, [3, 4])) }),
     );
-    expect(cards).toHaveLength(2);
-    expect(cards.map((c) => c.round)).toEqual([0, 1]);
+    expect(cards).toHaveLength(4);
+    // The chip, in the order a reader sees it: round 0's pair, then round 1's.
+    expect(cards.map((c) => c.round)).toEqual([0, 0, 1, 1]);
+    expect(cards.map((c) => c.phase)).toEqual(['planning', 'critique', 'planning', 'critique']);
   });
 
   test('the revision that opens a round is in that round, not the previous critique', () => {
-    // `revisePlan` announces `planning` with the incremented round, so the turn
-    // that produces the next version pairs with the critique that judges IT -
-    // rather than landing inside the critique that asked for it.
+    // The core fix, and it holds under either grouping: `revisePlan` announces
+    // `planning` with the incremented round, so the turn producing the next
+    // version is a round 1 card rather than a row inside round 0's critique.
     const cards = rounds(
       run({ cycles: planCycles(planRound(0, 1_000, [1, 2]), planRound(1, 10_000, [3, 4])) }),
     );
-    expect(cards[0]?.turns.map((t) => t.kind)).toEqual(['plan', 'critique']);
-    expect(cards[1]?.turns.map((t) => t.kind)).toEqual(['revise', 'critique']);
+    const revise = cards.find((c) => c.turns.some((t) => t.kind === 'revise'));
+    expect(revise?.phase).toBe('planning');
+    expect(revise?.round).toBe(1);
+    // And round 0's critique holds only the critic's turn.
+    expect(cards[1]?.turns.map((t) => t.kind)).toEqual(['critique']);
   });
 
-  test('the round starts when its producer did, and ends when its judge did', () => {
+  test('a card starts and ends with the phase it is', () => {
     const cards = rounds(run({ cycles: planCycles(planRound(0, 1_000, [1, 2])) }));
     expect(cards[0]?.startedAt).toBe(1_000);
-    expect(cards[0]?.endedAt).toBe(4_000);
+    expect(cards[0]?.endedAt).toBe(2_000);
+    expect(cards[1]?.startedAt).toBe(3_000);
+    expect(cards[1]?.endedAt).toBe(4_000);
   });
 
-  test('a round whose judge is still running has not ended', () => {
+  test('a critique still running has not ended, and the plan before it has', () => {
+    // The plan card settles on its own turn rather than waiting for a judge, so
+    // a finished half reads as finished. That is the half of the old merged
+    // behaviour worth keeping and it is now free.
     const r = planRound(0, 1_000, [1, 2]);
     const cards = rounds(
       run({
         cycles: [
           cycle({ kind: 'plan', phases: [r.produced] }),
-          cycle({ kind: 'critique', phases: [{ ...r.judged, turns: [turn({ id: 2, endedAt: null })] }] }),
+          cycle({
+            kind: 'critique',
+            phases: [{ ...r.judged, turns: [turn({ id: 2, endedAt: null })] }],
+          }),
         ],
       }),
     );
-    expect(cards[0]?.endedAt).toBeNull();
+    expect(cards[0]?.endedAt).toBe(2_000);
+    expect(cards[1]?.endedAt).toBeNull();
   });
 
-  test('a card is named for what it produced, and the judge is a turn row', () => {
-    // Not `critique` at the top of the card. The column gives the critique its
-    // own heading; on the log's card it is the second half of the round, which
-    // is the sentence hi-fi 5 is built around.
+  test('a card is named for the phase it is', () => {
     const cards = rounds(run({ cycles: planCycles(planRound(0, 1_000, [1, 2])) }));
     expect(roundTitle(cards[0]!)).toBe('plan');
-    expect(cards[0]?.turns.some((t) => t.kind === 'critique')).toBe(true);
+    expect(roundTitle(cards[1]!)).toBe('critique');
   });
 
-  test('the halves pair however the two groups were opened', () => {
+  test('the halves land in start order however the two groups were opened', () => {
     // A resumed run can open the critique group before the plan one - it picks
     // up mid-cycle. `rounds()` sorts by start rather than trusting the order the
-    // cycles happen to sit in, so the producer is still merged into first.
+    // cycles happen to sit in, so the log still reads as a history.
     const r = planRound(0, 1_000, [1, 2]);
     const cards = rounds(
       run({
@@ -204,8 +222,7 @@ describe('a round is the producer and the judge, together', () => {
         ],
       }),
     );
-    expect(cards).toHaveLength(1);
-    expect(cards[0]?.phases).toEqual(['planning', 'critique']);
+    expect(cards.map((c) => c.phase)).toEqual(['planning', 'critique']);
     expect(cards[0]?.startedAt).toBe(1_000);
   });
 
@@ -253,7 +270,7 @@ describe('what arrived during a round', () => {
         ],
       }),
     );
-    expect(cards.map((c) => c.phases[0])).toEqual(['planning', 'implementing', 'review']);
+    expect(cards.map((c) => c.phase)).toEqual(['planning', 'implementing', 'review']);
   });
 
   test('the census is attached to the round it arrived during, by arrival', () => {
@@ -265,8 +282,10 @@ describe('what arrived during a round', () => {
         censuses: [census({ at: 11_000 })],
       }),
     );
-    expect(cards[0]?.census).toBeNull();
-    expect(cards[1]?.census?.counts['P1']).toBe(1);
+    // Round 0's pair started at 1_000 and 3_000; round 1's planning at 10_000.
+    // A census at 11_000 is during round 1's planning card and no other.
+    expect(cards.map((c) => c.census === null)).toEqual([true, true, false, true]);
+    expect(cards[2]?.census?.counts['P1']).toBe(1);
   });
 
   test('a census that predates every phase is attached to nothing', () => {
@@ -301,7 +320,10 @@ describe('what arrived during a round', () => {
     expect(cards[0]?.verify?.round).toBe(1);
   });
 
-  test('gates from both halves of a round are on the one card', () => {
+  test('a gate stays on the half that opened it', () => {
+    // Not summed across the round: a gate is a thing that happened during one
+    // phase, and a card that listed both halves' gates would say the planner
+    // ran a gate the critic ran.
     const r = planRound(0, 1_000, [1, 2]);
     const cards = rounds(
       run({
@@ -311,15 +333,14 @@ describe('what arrived during a round', () => {
         ],
       }),
     );
-    expect(cards[0]?.gates).toEqual(['typecheck', 'test']);
+    expect(cards[0]?.gates).toEqual(['typecheck']);
+    expect(cards[1]?.gates).toEqual(['test']);
   });
 });
 
-describe('the column groups by phase, and the log groups by round', () => {
-  // The split is deliberate and this is what pins it: four headings on the
-  // column so the critique has a name, three convergence cycles on the log so a
-  // card is still the pair. `censusByPhase` is what the column uses, and it
-  // shares `during()` with `rounds()` so "by arrival" has one definition.
+describe('the column and the log agree about which round a census is in', () => {
+  // `censusByPhase` is what the column uses and it is built from `rounds()`, so
+  // "by arrival" has exactly one definition rather than two that can disagree.
   test('a critique’s counts land on the critique row, where they were measured', () => {
     const r = planRound(0, 1_000, [1, 2]);
     const byPhase = censusByPhase(
@@ -402,6 +423,37 @@ describe('what a card refuses to say', () => {
 
   test('a run that has reached no phase has no cards', () => {
     expect(rounds(emptyRun())).toEqual([]);
+  });
+});
+
+describe('the question round belongs to the round it opened during', () => {
+  const asked = (at: number): NonNullable<Run['questions']> => ({
+    total: 2,
+    blocking: 1,
+    round: 1,
+    cap: 3,
+    open: [],
+    at,
+  });
+
+  test('questions opened in round 2 do not move under round 1, or the other way', () => {
+    // The defect this closes: the group was drawn at the foot of the whole PLAN
+    // cycle, so the moment a second plan round opened, round 1's questions were
+    // beneath round 2's row.
+    const cycles = planCycles(planRound(0, 1_000, [1, 2]), planRound(1, 10_000, [3, 4]));
+    expect(questionsPhase(run({ cycles, questions: asked(1_500) }))).toBe(1);
+    expect(questionsPhase(run({ cycles, questions: asked(10_500) }))).toBe(3);
+  });
+
+  test('a round that opened before any phase of this session attaches to nothing', () => {
+    // Real on a resume. Filing it under the first phase in view would credit an
+    // earlier session's questions to work that has not happened yet.
+    const cycles = planCycles(planRound(0, 9_000, [1, 2]));
+    expect(questionsPhase(run({ cycles, questions: asked(1_000) }))).toBeNull();
+  });
+
+  test('a run that has asked nothing has no phase for it', () => {
+    expect(questionsPhase(run({ cycles: [cycle()] }))).toBeNull();
   });
 });
 

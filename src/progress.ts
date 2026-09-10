@@ -958,6 +958,24 @@ export function rememberContextWindow(model: string, contextWindow: number): voi
   if (contextWindow > 0) windows.set(model, contextWindow);
 }
 
+/**
+ * A window this process has not measured, from somewhere that did.
+ *
+ * **Only where nothing is known**, which is the whole difference from
+ * `rememberContextWindow`: a figure a turn in this process measured describes the
+ * conversation now running, and must never be replaced by an older one from
+ * anywhere else. So this fills a gap and never overwrites.
+ *
+ * The gap it fills is real and was reported as a defect: the window arrives on a
+ * turn's *result* envelope, so the first Claude turn of a run has none - which is
+ * the planner, every time, on the first run in a process. `ctx%` therefore
+ * appeared from the second Claude turn onwards and the plan round it matters most
+ * on had nothing.
+ */
+export function seedContextWindow(model: string, contextWindow: number): void {
+  if (contextWindow > 0 && !windows.has(model)) windows.set(model, contextWindow);
+}
+
 export function progressOptions(
   state: RunState,
   cfg: Config,

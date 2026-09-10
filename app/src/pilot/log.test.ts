@@ -16,7 +16,8 @@ import type { Reply } from './transcript';
 const card = (startedAt: number, phase = 'planning'): RoundCard => ({
   key: `k${String(startedAt)}`,
   cycle: 'plan',
-  phases: [phase],
+  phase,
+  phaseId: startedAt,
   round: 0,
   turns: [],
   gates: [],

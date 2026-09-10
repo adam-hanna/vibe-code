@@ -1,9 +1,9 @@
-import { LivenessDot, MetaChip, SeverityChip, StateKicker } from '../design';
+import { useState } from 'react';
+import { LivenessDot, MetaChip, StateKicker } from '../design';
+import { Counts } from './Counts';
 import { clock, elapsed } from './format';
-import { SEVERITIES } from './model';
-import { censusByPhase, title } from './rounds';
+import { censusByPhase, questionsPhase, title } from './rounds';
 import { RunningRow } from './RunningRow';
-import type { Severity } from '../design';
 import type { Census, CycleKind, PhaseGroup, Preflight, ResumedFrom, Run, Turn } from './model';
 
 /**
@@ -83,9 +83,21 @@ type Draw = 'live' | 'settled' | 'done';
 const drawOf = (turn: Turn, runningId: number | null, settledId: number | null): Draw =>
   turn.id === runningId ? 'live' : turn.id === settledId ? 'settled' : 'done';
 
-/** A severity this build knows how to weight, or null for the zero variant. */
-const weight = (severity: string): Severity | null =>
-  (SEVERITIES as readonly string[]).includes(severity) ? (severity as Severity) : null;
+/**
+ * The disclosure control every collapsible thing in this column uses.
+ *
+ * One shape for a group and for a round, because they are the same gesture at two
+ * levels and two spellings of it would drift. The caret is `aria-hidden` and the
+ * button carries `aria-expanded`, so the state is announced once rather than
+ * twice.
+ */
+function Caret({ open }: { open: boolean }) {
+  return (
+    <span className="v-disclose" aria-hidden="true">
+      {open ? '▾' : '▸'}
+    </span>
+  );
+}
 
 function Version({ turn, draw, now }: { turn: Turn; draw: Draw; now: number }) {
   if (draw !== 'done') return <RunningRow turn={turn} now={now} live={draw === 'live'} />;
@@ -132,6 +144,10 @@ const isAnswerer = (turn: Turn): boolean => turn.role === 'answerer';
 function Round({
   phase,
   census,
+  questions,
+  open,
+  onToggle,
+  onOpen,
   runningId,
   settledId,
   now,
@@ -139,14 +155,26 @@ function Round({
   phase: PhaseGroup;
   /** What the gate made of this phase, or null. Hi-fi 2 puts it on the row. */
   census: Census | null;
+  /** The question round that opened during this phase, or null. See `Questions`. */
+  questions: Run['questions'];
+  /** Whether the body is showing. The head is always drawn. */
+  open: boolean;
+  onToggle: () => void;
+  /** Where a count sends the reader. Undefined leaves every count inert. */
+  onOpen?: ((tab: string) => void) | undefined;
   runningId: number | null;
   settledId: number | null;
   now: number;
 }) {
   const turns = phase.turns.filter((t) => !isAnswerer(t));
+  const answerers = phase.turns.filter(isAnswerer);
   return (
-    <div className="v-phase">
-      <div className="v-phase__head">
+    <div className={`v-phase${open ? '' : ' v-phase--closed'}`}>
+      {/* The whole head is the control, not a separate affordance beside it: a
+          round row is two lines tall and a hit target smaller than the thing it
+          opens is the reason nobody finds it. */}
+      <button type="button" className="v-phase__head" onClick={onToggle} aria-expanded={open}>
+        <Caret open={open} />
         <span className="v-phase__name">{title(phase.phase)}</span>
         {/* The archive's round, which is the number that names the artifact
             behind it. The heading in the terminal says "round 1"; the file is
@@ -154,47 +182,182 @@ function Round({
             since the groups became peers it is also what pairs this row with
             its other half one group up or down. */}
         {phase.round !== null && <MetaChip kind="checkable">round {phase.round}</MetaChip>}
-      </div>
-      {/*
-        Hi-fi 2 draws the four counts on the round card in the loop column, not
-        only in the findings pane — *"severity carries the screen"*, and the
-        point is the peripheral scan: a run in trouble should look different
-        from across the room, before any text is read.
+      </button>
 
-        Zeros included, because a gate decision is being made and an absence is
-        information. The tolerance is not repeated here: the pane and the pilot's
-        round card both state it, and a 364px column is where a third copy would
-        cost the counts their weight.
-      */}
-      {census !== null && (
-        <div className="v-phase__counts">
-          {SEVERITIES.map((s) => {
-            const n = census.counts[s] ?? 0;
-            return (
-              <SeverityChip
-                key={s}
-                severity={n === 0 ? null : weight(s)}
-                label={s}
-                count={n}
-              />
-            );
-          })}
-        </div>
+      {open && (
+        <>
+          {/*
+            Hi-fi 2 draws the four counts on the round card in the loop column,
+            not only in the findings pane — *"severity carries the screen"*, and
+            the point is the peripheral scan: a run in trouble should look
+            different from across the room, before any text is read.
+
+            `compact`, because the tolerance chip is a fifth item in a 364px
+            column and the pane and the pilot's round card both state it.
+          */}
+          {census !== null && (
+            <Counts
+              counts={census.counts}
+              compact
+              onOpen={onOpen === undefined ? undefined : () => { onOpen('findings'); }}
+            />
+          )}
+          {phase.gates.map((gate, i) => (
+            <div className="v-phase__gate" key={`${gate}-${String(i)}`}>
+              verify · {gate}
+            </div>
+          ))}
+          {turns.map((turn) => (
+            <Version
+              key={turn.id}
+              turn={turn}
+              draw={drawOf(turn, runningId, settledId)}
+              now={now}
+            />
+          ))}
+          {turns.length === 0 && phase.gates.length === 0 && questions === null && (
+            // The implementing phase is the one that reaches this: it has never
+            // had a `log.step` of its own, so `phase_started` IS its
+            // announcement (#152).
+            <div className="v-phase__silent">
+              announced by the phase, with no turn line of its own
+            </div>
+          )}
+          {questions !== null && (
+            <Questions
+              questions={questions}
+              turns={answerers}
+              onOpen={onOpen}
+              runningId={runningId}
+              settledId={settledId}
+              now={now}
+            />
+          )}
+        </>
       )}
-      {phase.gates.map((gate, i) => (
-        <div className="v-phase__gate" key={`${gate}-${String(i)}`}>
-          verify · {gate}
-        </div>
-      ))}
+    </div>
+  );
+}
+
+/**
+ * The question loop, nested inside the round that opened it.
+ *
+ * `7a` draws it **nested inside cycle 1**, indented with a left rule, because that
+ * is what it is: iterating a plan before anyone critiques it. A peer group would
+ * say it was something else.
+ *
+ * **Under the round it belongs to, and that took a timestamp to get right.** It
+ * used to sit at the foot of the whole `PLAN` group, so the moment a second plan
+ * round opened, round 1's questions were drawn beneath round 2's row — reported
+ * exactly that way. `questionsPhase()` places it by arrival, through the same
+ * `during()` a census goes through.
+ *
+ * **A count, not a list.** The questions themselves were drawn inline here and
+ * that is the Questions pane's job: this column is 364px wide, the question text
+ * is a paragraph, and a list of them pushed every subsequent round off the screen.
+ * So the row says how many and how many block, and clicking it opens the pane
+ * that has the wording, the answerer's draft and the composer.
+ */
+function Questions({
+  questions,
+  turns,
+  onOpen,
+  runningId,
+  settledId,
+  now,
+}: {
+  questions: NonNullable<Run['questions']>;
+  /** The answerer's turns from this phase, which belong here rather than above. */
+  turns: readonly Turn[];
+  onOpen?: ((tab: string) => void) | undefined;
+  runningId: number | null;
+  settledId: number | null;
+  now: number;
+}) {
+  const outstanding = questions.open.filter((q) => q.answer === null && !q.declined).length;
+  return (
+    <div className="v-questions">
+      <div className="v-questions__head">
+        QUESTIONS · answerer
+        {/* Hi-fi 14's own counter, nested inside the plan round's. Against the
+            cap where one arrived, because `round 3/3` is the state the
+            escalation is about and `round 3` is a number. Absent rather than
+            guessed on a core that sent neither. */}
+        {questions.round !== null && (
+          <MetaChip kind="checkable">
+            round {questions.round}
+            {questions.cap !== null && ` of ${questions.cap}`}
+          </MetaChip>
+        )}
+      </div>
+      {/* The count is the control, for the same reason the severity row is: it
+          is the thing a reader reaches for, and the pane behind it is where the
+          wording lives. */}
+      <QuestionCount
+        total={questions.total}
+        blocking={questions.blocking}
+        outstanding={outstanding}
+        onOpen={onOpen === undefined ? undefined : () => { onOpen('questions'); }}
+      />
+
       {turns.map((turn) => (
         <Version key={turn.id} turn={turn} draw={drawOf(turn, runningId, settledId)} now={now} />
       ))}
-      {turns.length === 0 && phase.gates.length === 0 && (
-        // The implementing phase is the one that reaches this: it has never had
-        // a `log.step` of its own, so `phase_started` IS its announcement (#152).
-        <div className="v-phase__silent">announced by the phase, with no turn line of its own</div>
+
+      {/* Hi-fi 14: *"waiting on you is not stalled, and the column says so."* The
+          failure mode it names is exact — a user seeing a motionless column and
+          assuming the run died. Drawn only while something is genuinely
+          outstanding, so it cannot become a permanent reassurance nobody reads. */}
+      {outstanding > 0 && (
+        <div className="v-questions__waiting">
+          <StateKicker tone="quiet">waiting on an answer</StateKicker>
+          <span>Answers already given are in the draft and are not lost.</span>
+        </div>
       )}
+      {/* The explicit panel `7a` asks for. Two full turns of legitimate work run
+          and the outer counter correctly does not move, which without saying so
+          is indistinguishable from a stall. */}
+      <div className="v-questions__note">
+        A question round produces no critique, so it cannot advance the plan round. This is where
+        that time is accounted for.
+      </div>
     </div>
+  );
+}
+
+function QuestionCount({
+  total,
+  blocking,
+  outstanding,
+  onOpen,
+}: {
+  total: number;
+  blocking: number;
+  outstanding: number;
+  onOpen?: (() => void) | undefined;
+}) {
+  const body = (
+    <>
+      <span className="v-questions__n">{total} raised</span>
+      <span className="v-questions__sub">{blocking} blocking</span>
+      {/* Counted from the rows themselves rather than from a field, because the
+          answers arrive on a second frame and nothing on the wire restates the
+          total. A round with every answer in says so instead of showing a zero. */}
+      <span className="v-questions__sub">
+        {outstanding === 0 ? 'all answered' : `${outstanding} unanswered`}
+      </span>
+    </>
+  );
+  if (onOpen === undefined) return <div className="v-questions__body">{body}</div>;
+  return (
+    <button
+      type="button"
+      className="v-questions__body v-questions__body--link"
+      onClick={onOpen}
+      title="Open the questions"
+    >
+      {body}
+    </button>
   );
 }
 
@@ -399,8 +562,11 @@ function Starting({
       <p className="v-starting__unknown">
         phase, round, elapsed total and spend — the first turn has not reported
       </p>
+      {/* The issue number this line used to carry has gone from the copy and
+          stayed in the source. An end user cannot act on `#114`; the sentence
+          they can act on is the one that says the figure does not exist. */}
       <p className="v-starting__unknown">
-        how long this usually takes — no frame carries a past run's timings (#114)
+        how long this usually takes — no frame carries a past run&apos;s timings
       </p>
     </div>
   );
@@ -430,7 +596,15 @@ function Identity({ run }: { run: Run }) {
   const branch = run.branch;
   return (
     <header className="v-ident">
-      <div className="v-ident__name">{identity.task ?? identity.runId}</div>
+      {/* Clamped, and the whole of it on the title.
+          `task` joined this frame with the identity header and a brief is not a
+          name: a run launched from a file - which is what AGENTS.md tells you to
+          do - put its entire prompt across the top of the column, which was
+          reported as the prompt being printed. Two lines and an ellipsis; the
+          full text is one hover away and is also in the run's own artifacts. */}
+      <div className="v-ident__name" title={identity.task ?? identity.runId}>
+        {identity.task ?? identity.runId}
+      </div>
       <div className="v-ident__line">
         {branch === null ? (
           <span className="v-ident__absent">branch — nothing has said</span>
@@ -455,12 +629,37 @@ export function LoopColumn({
   run,
   now,
   hostPid = null,
+  onOpen,
 }: {
   run: Run;
   now: number;
   /** A fact about this window's process, not about the run. Hi-fi 16 draws it. */
   hostPid?: number | null;
+  /**
+   * Where a count sends the reader, or undefined where there is nowhere to send
+   * them. The Gallery draws this column with no tabs behind it.
+   */
+  onOpen?: ((tab: string) => void) | undefined;
 }) {
+  /**
+   * Which groups and rounds are folded shut.
+   *
+   * **Closed is the exception, so the set holds what is closed.** Everything is
+   * open on arrival: a run in progress is what this column is for, and a column
+   * that remembered a fold across a reload would hide the round somebody is
+   * waiting on. Keyed by group kind and by phase id, both of which `reduce`
+   * guarantees are stable and never reused, so a fold cannot follow a re-render
+   * onto a different row.
+   */
+  const [shut, setShut] = useState<ReadonlySet<string>>(() => new Set<string>());
+  const toggle = (key: string) => {
+    setShut((cur) => {
+      const next = new Set(cur);
+      if (!next.delete(key)) next.add(key);
+      return next;
+    });
+  };
+
   const runningId = run.running?.id ?? null;
   // Told, not worked out. `reduce` names the turn a gate opened after, so the
   // column does not have to decide that "the last one" is the right turn (#202).
@@ -470,6 +669,10 @@ export function LoopColumn({
   // tested, and a second answer is how this column and the pilot's log come to
   // disagree about one round.
   const censusOf = censusByPhase(run);
+  // Which round the question loop opened during, through the same module for the
+  // same reason: a second answer here is how this column and the pilot's log come
+  // to disagree about one round.
+  const questionsAt = questionsPhase(run);
 
   return (
     <section className="v-loop" aria-label="loop">
@@ -491,105 +694,60 @@ export function LoopColumn({
         <div className="v-loop__empty">nothing has run yet</div>
       )}
 
-      {run.cycles.map((cycle) => (
-        <div className="v-cycle" key={cycle.kind}>
-          <div className="v-cycle__head">
-            <span className="v-cycle__title">{TITLE[cycle.kind]}</span>
-            {/* One phase per round now that the groups are peers, so counting
-                this group's phases counts its rounds - which is what the old
-                three-cycle header got wrong, calling two plan rounds three. */}
-            <span className="v-cycle__status">{status(cycle.kind, cycle.phases.length)}</span>
+      {run.cycles.map((cycle) => {
+        const open = !shut.has(cycle.kind);
+        return (
+          <div className={`v-cycle${open ? '' : ' v-cycle--closed'}`} key={cycle.kind}>
+            <button
+              type="button"
+              className="v-cycle__head"
+              onClick={() => { toggle(cycle.kind); }}
+              aria-expanded={open}
+            >
+              <Caret open={open} />
+              <span className="v-cycle__title">{TITLE[cycle.kind]}</span>
+              {/* One phase per round now that the groups are peers, so counting
+                  this group's phases counts its rounds - which is what the old
+                  three-cycle header got wrong, calling two plan rounds three.
+                  Drawn folded as well as open: the count is the reason to open
+                  a group, so hiding it behind the fold would hide the answer. */}
+              <span className="v-cycle__status">{status(cycle.kind, cycle.phases.length)}</span>
+            </button>
+            {open &&
+              cycle.phases.map((phase) => (
+                <Round
+                  key={phase.id}
+                  phase={phase}
+                  census={censusOf.get(phase.id) ?? null}
+                  // `7a`'s nested question loop, on the round it opened during
+                  // rather than at the foot of the group.
+                  questions={questionsAt === phase.id ? run.questions : null}
+                  open={!shut.has(`p${String(phase.id)}`)}
+                  onToggle={() => { toggle(`p${String(phase.id)}`); }}
+                  onOpen={onOpen}
+                  runningId={runningId}
+                  settledId={settledId}
+                  now={now}
+                />
+              ))}
           </div>
-          {cycle.phases.map((phase) => (
-            <Round
-              key={phase.id}
-              phase={phase}
-              census={censusOf.get(phase.id) ?? null}
-              runningId={runningId}
-              settledId={settledId}
-              now={now}
-            />
-          ))}
+        );
+      })}
 
-          {/* `7a` — the question loop is drawn NESTED inside cycle 1, indented
-              with a left rule, because that is what it is: iterating a plan
-              before anyone critiques it. A fourth peer group would say it was
-              something else. */}
-          {cycle.kind === 'plan' && run.questions !== null && (
-            <div className="v-questions">
-              <div className="v-questions__head">
-                QUESTIONS · answerer
-                {/* Hi-fi 14's own counter, nested inside the plan round's.
-                    Against the cap where one arrived, because `round 3/3` is
-                    the state the escalation is about and `round 3` is a number.
-                    Absent rather than guessed on a core that sent neither. */}
-                {run.questions.round !== null && (
-                  <MetaChip kind="checkable">
-                    round {run.questions.round}
-                    {run.questions.cap !== null && ` of ${run.questions.cap}`}
-                  </MetaChip>
-                )}
-              </div>
-              <div className="v-questions__body">
-                {run.questions.total} raised · {run.questions.blocking} blocking
-              </div>
-
-              {/* Hi-fi 14: *"the checkbox from the settings vocabulary is doing
-                  the answered/unanswered work"* — no new component, and the
-                  list is what makes a motionless column legible as waiting
-                  rather than stuck. Answered is the answerer having said
-                  something, and a decline counts: it is an answer that ends the
-                  run, not a question still open. */}
-              <ul className="v-questions__list">
-                {run.questions.open.map((q) => {
-                  const settled = q.answer !== null || q.declined;
-                  return (
-                    <li
-                      key={q.question}
-                      className={`v-questions__q${settled ? ' v-questions__q--done' : ''}`}
-                    >
-                      <span className="v-questions__mark" aria-hidden="true">
-                        {settled ? '✓' : '·'}
-                      </span>
-                      <span className="v-questions__text">{q.question}</span>
-                      {q.declined && <StateKicker tone="quiet">declined</StateKicker>}
-                    </li>
-                  );
-                })}
-              </ul>
-
-              {cycle.phases
-                .flatMap((p) => p.turns.filter(isAnswerer))
-                .map((turn) => (
-                  <Version
-                    key={turn.id}
-                    turn={turn}
-                    draw={drawOf(turn, runningId, settledId)}
-                    now={now}
-                  />
-                ))}
-              {/* Hi-fi 14: *"waiting on you is not stalled, and the column says
-                  so."* The failure mode it names is exact — a user seeing a
-                  motionless column and assuming the run died. Drawn only while
-                  something is genuinely outstanding, so it cannot become a
-                  permanent reassurance nobody reads. */}
-              {run.questions.open.some((q) => q.answer === null && !q.declined) && (
-                <div className="v-questions__waiting">
-                  <StateKicker tone="quiet">waiting on an answer · not stalled</StateKicker>
-                  <span>Answers already given are in the draft and are not lost.</span>
-                </div>
-              )}
-              {/* The explicit panel `7a` asks for. Two full turns of legitimate
-                  work run and the outer counter correctly does not move, which
-                  without saying so is indistinguishable from a stall. */}
-              <div className="v-questions__note">
-                A question round produces no critique, so it cannot advance the plan round. This is
-                where that time is accounted for.
-              </div>
-            </div>
-          )}
-        </div>
-      ))}
+      {/* A question round that opened before any phase of this session did. Real
+          on a resume, where the frames start mid-run: it is drawn here rather
+          than filed under this session's first round, which would credit an
+          earlier session's questions to work that has not happened yet. */}
+      {run.questions !== null && questionsAt === null && (
+        <Questions
+          questions={run.questions}
+          turns={[]}
+          onOpen={onOpen}
+          runningId={runningId}
+          settledId={settledId}
+          now={now}
+        />
+      )}
 
       {/* Four groups are always the shape of a run, so the ones that have not
           started are named rather than absent - at reduced weight, because a

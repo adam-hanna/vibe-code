@@ -1,4 +1,5 @@
 import { MetaChip, SeverityChip, StateKicker } from '../design';
+import { Counts } from '../cockpit/Counts';
 import { elapsed, work as describeWork } from '../cockpit/format';
 import { SEVERITIES } from '../cockpit/model';
 import { roundTitle } from '../cockpit/rounds';
@@ -65,10 +66,10 @@ export function RoundCard({
   return (
     <article className={`v-round v-round--${card.cycle}${open ? ' v-round--open' : ''}`}>
       <header className="v-round__head">
-        {/* Named for what the round produced — `plan`, `code`, `review` — with
-            the judge visible as the second turn row rather than in the heading.
-            A round is the pair, so a heading naming only half of it would be
-            the grouping this module exists to fix, one level up. */}
+        {/* The phase this card is, in the design's vocabulary — `plan`,
+            `critique`, `code`, `review`. The other half of the round is the card
+            above or below carrying the same round chip, which is what pairs them
+            now that each half arrives as its own entry in the log. */}
         <span className="v-round__what">{roundTitle(card)}</span>
         {/* The archive's round, which is the number that names the artifact
             behind it — the file is `plan-critique-0.json`, and a card has to
@@ -128,16 +129,17 @@ export function RoundCard({
         <div className="v-round__findings">
           {/* Four chips, zeros shown. Where a gate decision is being made an
               absence is information, and `no P0s` is the most important thing
-              on the row. */}
-          <div className="v-round__chips">
-            {SEVERITIES.map((s) => {
-              const n = counts[s] ?? 0;
-              return (
-                <SeverityChip key={s} severity={n === 0 ? null : weight(s)} label={s} count={n} />
-              );
-            })}
-            <MetaChip>tolerance P1≤{card.census.tolerance}</MetaChip>
-          </div>
+              on the row.
+
+              The row is the control. A count is the thing a reader reaches for
+              first, and it was inert while a text link three lines below it did
+              the navigating - so the chips take the click and the link stays for
+              anyone reading top to bottom. */}
+          <Counts
+            counts={counts}
+            tolerance={card.census.tolerance}
+            onOpen={onOpen === undefined ? undefined : () => { onOpen('findings'); }}
+          />
           {/* The loop's own sentence where it blocked, because `gate()` names
               the exact arithmetic that stopped the round. Never one composed
               here from the counts. */}

@@ -297,7 +297,7 @@ export function Settings({ dir }: { dir: string }) {
         <p className="v-set__note">
           The rest of <code>1i</code> is not here: <strong>accounts</strong> want each CLI&apos;s
           detected version and its rate-limit headroom, and no frame carries either;{' '}
-          <strong>MCP servers</strong> are #138 and v1.5.
+          <strong>MCP servers</strong> are not configurable here yet.
         </p>
       </section>
 
@@ -309,9 +309,9 @@ export function Settings({ dir }: { dir: string }) {
             second path to the same file with different validation on it. */}
         <pre className="v-set__raw">{JSON.stringify(frame.raw, null, 2)}</pre>
         <p className="v-set__note">
-          Shown rather than edited. Worktree scripts, MCP scoping and the prompt templates are
-          v1.5 (#137, #138) and have no form here; editing the file directly is the supported way
-          to reach them, and it is the same file this screen writes.
+          Shown rather than edited. Worktree scripts, MCP scoping and the prompt templates have no
+          form here yet; editing the file directly is the supported way to reach them, and it is
+          the same file this screen writes.
         </p>
       </section>
     </div>

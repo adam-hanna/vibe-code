@@ -212,10 +212,10 @@ by **round**:
   version landed inside the **critique that caused it**.
 - `planning` carried no round at all, so the first row was unnumbered.
 
-The last two were core defects and are fixed there. With both halves of a round
-now carrying the round number, *"no frame says"* stopped being true — so
-`rounds()` groups by round and a card is the producer and the judge together,
-which is what hi-fi 5 draws: `plan v.b · accepted after 1 critique`.
+The last two were core defects and are fixed there, and both are correct under
+any grouping. With both halves of a round now carrying the round number, *"no
+frame says"* stopped being true — which is what makes the round **chip** readable,
+and the chip is what pairs the halves now.
 
 ### The loop column draws four peer groups, and that is an owner's decision
 
@@ -240,10 +240,26 @@ Three things carry the weight the headings gave up, and none is decoration:
   the halves in two groups it is the only thing saying which critique judged
   which draft, which is why the core now puts a round on `planning`.
 
-And the pair survives where the design draws it: `rounds()` gathers across the
-two groups, so the log's card is still `plan v.b · accepted after 1 critique`.
-`CycleKind` is four-valued for the column and `RoundFamily` is three-valued for a
-round; both are tested, and collapsing them into one enum is the thing not to do.
+### The pair did not survive in the log, and the reason is measured
+
+The first cut kept hi-fi 5's card intact: `rounds()` gathered across the two
+column groups and produced one card per round, `plan v.b · accepted after 1
+critique`, with a three-valued `RoundFamily` beside the column's four-valued
+`CycleKind`.
+
+**It made the critique invisible in the log.** A merged card is placed at the
+round's *start*, so a critique beginning twenty minutes later updated a card that
+was already off the top of the scroll — and the next report was exact: *"it moved
+to Group 2 · Plan Critique but that never updated the pilot chat like the plan
+rounds did."* A log that does not move when the loop moves is not a log, which is
+this section's own complaint one level down.
+
+So `rounds()` produces one card per phase group and `RoundFamily` is gone. The
+cost is the sentence: two cards cannot say *accepted after 1 critique* in one
+line. The **round chip** carries the pairing on both halves instead, which is the
+same mechanism the column uses one column over. If the sentence is wanted back it
+belongs in a summary above the cards, not in a card that hides half its own
+arrival.
 
 A census and a verification pass attach **by arrival**, because a census carries
 no round of its own and a pass carries the *verify* round — a different counting
@@ -434,9 +450,19 @@ disagree about which round a census belongs to.
 own counter, its checkboxes and its *not stalled* sentence were not.
 `questions_opened` now carries the round and the cap — hi-fi 14's *"its own
 counter and its own cap"*, and `round 3/3` is the state the escalation is about.
-The per-question marks use the settings vocabulary's checkbox, which is the
-design's own instruction, and the waiting line is drawn only while something is
-genuinely outstanding so it cannot become a reassurance nobody reads.
+The waiting line is drawn only while something is genuinely outstanding so it
+cannot become a reassurance nobody reads.
+
+Two things about it changed after a manual pass, and both were reported. The
+group was drawn at the **foot of the whole `PLAN` group**, so the moment a second
+plan round opened, round 1's questions appeared beneath round 2's row; it is now
+placed on the round it opened during, through the same `during()` a census goes
+through. And the **per-question list is gone**: hi-fi 14's checkbox marks were
+built, and in a 364px column a list of paragraphs pushed every later round off the
+screen. The row is a count — `4 raised · 1 blocking · 2 unanswered` — and clicking
+it opens the Questions pane, which is where the wording, the answerer's draft and
+the composer already live. The *"· not stalled"* half of the kicker also went: the
+sentence under it says the same thing in words a person reads once.
 
 **Hi-fi 7 · project settings — three of eight sections, and a nav for three is
 navigation for nothing.** The frame's table of contents lists Repository, Verify,

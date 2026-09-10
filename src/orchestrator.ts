@@ -108,6 +108,7 @@ import {
   withConcurrentCompaction,
   recordTurnContext,
   rotateSession,
+  seedContextWindows,
   shouldRotate,
   turnOccupancy,
 } from '@src/context.js';
@@ -530,6 +531,12 @@ export async function orchestrate(
     // for ever. Here rather than in `createRun`/`loadRun` because that would put
     // `run.ts` in a cycle with this module's - `artifacts.ts` imports it (#111).
     sweepArtifacts(state);
+    // Before the first turn, because the turn it exists for is the first one:
+    // the context window arrives on a turn's result envelope, so the planner has
+    // never had one to report a `ctx%` against. This borrows the denominator
+    // from the newest archived run that measured it under the same model, and
+    // supplies nothing at all when no such run exists.
+    seedContextWindows(state);
     return await runPhases(state, cfg, resume, turns, host);
   } finally {
     // A `finally`, not a tail call: the phases below return early at the

@@ -109,7 +109,7 @@ export function Gallery() {
             <MetaChip>unknown</MetaChip>
             <MetaChip>likely the same</MetaChip>
             <MetaChip>app</MetaChip>
-            <MetaChip kind="proposed">proposed · #140</MetaChip>
+            <MetaChip kind="proposed">proposed · gate matrix</MetaChip>
             <MetaChip kind="checkable">code · src/auth.ts:41</MetaChip>
             <MetaChip kind="checkable">artifact · code-review-2.json</MetaChip>
             <MetaChip>external · no path</MetaChip>

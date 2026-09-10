@@ -199,7 +199,7 @@ export function VerifyPane({ passes }: { passes: readonly VerifyPass[] }) {
           what it has reads as a finished pane. */}
       <p className="v-verify__later">
         A per-test breakdown is not drawn, and will not be: it needs a reporter parser per
-        toolchain, which is a maintenance commitment this repo has not taken on (#135).
+        toolchain, which is a maintenance commitment this repo has not taken on.
       </p>
     </div>
   );

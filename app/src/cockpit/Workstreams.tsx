@@ -256,7 +256,7 @@ export function Workstreams({
             // The design's most-wanted column, named and empty. Deriving it
             // needs a read of each run's state.json, which is #114's request
             // rather than this one.
-            <span key="fp" className="v-ws__absent" title="#114">
+            <span key="fp" className="v-ws__absent" title="Needs a read of each run's state">
               not read
             </span>,
             !openable(run) ? (
@@ -272,7 +272,7 @@ export function Workstreams({
 
       <p className="v-ws__absent">
         The rounds fingerprint — <code>p2 v1 r2</code>, cheap to scan for runs that thrashed — is
-        the column this table most wants and it needs a read of each run&apos;s state (#114).
+        the column this table most wants and it needs a read of each run&apos;s state.
         Cost is Claude-side only, as everywhere.
       </p>
     </div>

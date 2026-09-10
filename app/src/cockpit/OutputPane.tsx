@@ -201,9 +201,9 @@ export function OutputPane({
           pane presented as all of it. */}
       <div className="v-output__unbuilt">
         These are the loop&apos;s own lines. What the agent <em>did</em> — each read, each edit
-        and its size — is not here: the core records tool items on a minority of turns (#66), and
+        and its size — is not here: the core records tool items on a minority of turns, and
         reconstructing a timeline by reading these sentences is the one thing this pane must
-        never do (#133).
+        never do.
       </div>
     </div>
   );

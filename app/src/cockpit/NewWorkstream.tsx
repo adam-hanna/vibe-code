@@ -256,8 +256,8 @@ export function NewWorkstream({
         <p className="v-new__note">
           No name, branch or worktree field: <code>vibe</code> names its own branch after the run
           id it allocates, and the CLI takes neither. No setup preview and no{' '}
-          <em>create the worktree but hold</em>, because vibe cannot create a worktree yet (#208)
-          — this runs in one you already have.
+          <em>create the worktree but hold</em>, because vibe cannot create a worktree yet — this
+          runs in one you already have.
         </p>
 
         <label className="v-new__toggle">

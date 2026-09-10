@@ -528,12 +528,8 @@
   color: var(--text-primary);
 }
 
-.v-round__chips {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  flex-wrap: wrap;
-}
+/* The counts are `.v-counts` now — one component for the loop column, the
+   findings pane and this card — so there is no rule of its own here. */
 
 .v-round__finding {
   display: flex;

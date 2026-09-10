@@ -705,7 +705,15 @@ export function Cockpit() {
               </button>
             </>
           )}
-          <LoopColumn run={run} now={now} hostPid={wire.hostPid} />
+          {/* The counts in the column are controls, and this is where they go.
+              The same setter the pilot's round cards use, so a severity chip
+              means one thing wherever it is drawn. */}
+          <LoopColumn
+            run={run}
+            now={now}
+            hostPid={wire.hostPid}
+            onOpen={(next) => { setTab(next as typeof tab); }}
+          />
           {/* `4g`, and only on the ending that means the loop finished. Every
               other exit is a halt, and a halt gets the footer's banner and its
               one action rather than a summary of work that stopped early. */}
@@ -760,7 +768,10 @@ export function Cockpit() {
                 #129's link refusal attached. Dashed and named, the way `Prompt`
                 is, because a bar that showed only what works reads as a
                 finished app. */}
-            <span className="v-cockpit__tab v-cockpit__tab--off" title="hi-fi 3 — needs #114">
+            <span
+              className="v-cockpit__tab v-cockpit__tab--off"
+              title="Not built: this window cannot read a run's artifacts"
+            >
               Versions
             </span>
             {/* `1d`. Enabled only once the run has a base to diff against: a
@@ -822,8 +833,10 @@ export function Cockpit() {
             >
               Keys
             </button>
-            {/* Named rather than omitted, with the issue that would fill it. */}
-            <span className="v-cockpit__tab v-cockpit__tab--off" title="#137 — v1.5">
+            {/* Named rather than omitted. The issue that would fill it is in the
+                source and not in the tooltip: an end user cannot act on a
+                number, and "not built yet" is the whole of what this says. */}
+            <span className="v-cockpit__tab v-cockpit__tab--off" title="Not built yet">
               Prompt
             </span>
 

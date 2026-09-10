@@ -415,7 +415,7 @@ describe('the running row reports absence as absence', () => {
     expect(row.activities).toEqual({ count: 47, unit: 'event' });
   });
 
-  test('the line with no source still names the issue that would supply it', () => {
+  test('the line with no source says what is missing, in words a user can act on', () => {
     // Drawn as absent with a reason rather than as a blank or a zero. `6a` has
     // failed three times by inventing a denominator; this says why it is missing
     // instead.
@@ -426,8 +426,14 @@ describe('the running row reports absence as absence', () => {
     // the row still says it does not would have been pinning the defect. The
     // part that still holds - a missing measurement is absent WITH A REASON - is
     // kept here and asserted of the diffstat's own absence below.
+    //
+    // **It used to assert the issue number was in the sentence, and that is the
+    // part that moved.** An end user cannot act on `#114`; the actionable half
+    // is the statement that no frame carries the figure. The number stays in the
+    // source comment, where the next reader of this module is.
     const row = runningRow(started.running!, 0);
-    expect(row.comparable).toMatch(/#114/);
+    expect(row.comparable).toMatch(/no frame carries it/);
+    expect(row.comparable).not.toMatch(/#\d/);
   });
 
   test('a turn with no reading says which turns get one, rather than looking late', () => {

@@ -1202,7 +1202,7 @@ export function PilotPane({
         {entries.length === 0 && conversation.live === null && (
           <div className="v-pilot__note">
             Nothing yet. The pilot can read this run and propose a launch or a gate answer — it
-            cannot fire either one, edit vibe.config.json, or read the run archive (#114).
+            cannot fire either one, edit vibe.config.json, or read the run archive.
           </div>
         )}
         {/* Hi-fi 5: this is the run's log, not a chat beside one. Rounds and

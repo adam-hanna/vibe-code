@@ -96,7 +96,7 @@ export function StopConfirm({ turn, busy, onStop, onPause, onKeep }: StopConfirm
       <Cost
         label="resumes from"
         value={null}
-        note="its last checkpoint — no frame carries which one, so it is not named here (#114)"
+        note="its last checkpoint — no frame carries which one, so it is not named here"
       />
 
       <div className="v-stop__middle">
