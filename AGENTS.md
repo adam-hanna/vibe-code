@@ -204,11 +204,67 @@ line: an escalation narrates at `warn`, and a healthy run is full of warnings th
 ending. `run_failed` also prints a stack while carrying the sentence separately, because a
 terminal wants the frames and a footer wants the answer to "what now" (#162).
 
+**The app was built from a transcription of the design and not from the design, and
+`app/src/design/AUDIT.md` is what that cost.** The artwork has never been in this repo — a
+decision this file states in its own words, *"the markdown is worth committing and the
+artwork is not"* — so every screen came from `HANDOFF.md`. That predicts exactly the
+divergence the audit found: **the rules `HANDOFF.md` states were implemented faithfully, and
+the things only visible by looking were not.** Every colour in the spec is in `tokens.css`;
+nothing in the audit is a colour, a font or a spacing value. What was missing was composition,
+which does not survive being written down.
+
+Read `AUDIT.md` before building from a frame. It is a walk of all fourteen hi-fi screens
+against what exists, with a `### Closed` note under each finding saying what was built, what
+was built **narrower** than the frame and why, and — for the two that are not built — what
+they are waiting on. Four things in it are worth carrying:
+
+- **The round card is the product's main object** (hi-fi 5). *"Every round leaves a card, and
+  a card carries what happened, what it found and what you can do about it."* `rounds.ts`
+  re-shapes what is already on `Run` and adds nothing; `log.ts` places the cards among the
+  pilot's replies. **Replies keep their order and cards are placed among them**, never the
+  other way round: `Reply.startedAt` is nullable by design, so sorting one mixed list by a key
+  half of it lacks would reorder somebody's conversation to make a card fit. A card is a
+  **phase group, not a lettered version** — the wire carries `phase_started`, so collapsing
+  `planning` and `critique` into `plan v.b` would mean deciding which critique belongs to
+  which draft, and no frame says. There is no `claude/opus` on it, because a turn frame
+  carries no model.
+- **A census and a verification pass attach to a round by arrival**, because a census carries
+  no round of its own and a pass carries the *verify* round, which is a different counting
+  from the one a phase group is keyed by. One that predates every phase — a real state on a
+  resume — attaches to nothing. `rounds()` is the single answer, and the loop column takes its
+  census through it rather than matching one itself, so the column and the pilot's log cannot
+  disagree about one round.
+- **A square on the rail navigates; it does not reopen.** The rail is built (hi-fi 1, every
+  frame that shows the window) and its `＋ ⌘K ⚙` is what let the tab bar go from twelve tabs
+  to nine and a readout. But `serve.ts` runs one run at a time, so there is never a second
+  live workstream to switch *to*, and a square that silently reopened would be a second
+  definition of what reopening costs — `1b` states the lock's verdict and confirms a force.
+  That argument was always right about the squares and never about the rail.
+- **The footer names the next place a run *can* stop, and the objection it overrules is
+  answered rather than waved away.** The old comment refused a next stop because it *"would
+  need a phase-to-boundary ordering written here"*. Both halves are still true and neither
+  applies: the order arrives on the `config` frame as `GATEABLE` — whose own comment reads
+  *"Order is the loop's, not the alphabet's"* — and the position is the last boundary that
+  actually **held**, not a phase mapped onto one. What it can still be wrong about is that the
+  loop may pass a boundary without reaching it, so the wording is *can stop* and never *will*.
+
 **A fact the run records and never says is a screen that cannot be built** (#223). The loop
 has always known whether the verification gate passed, what a round's four severity counts
 were and how they compared to the tolerance — it wrote every one of them to `state.events`
 and said none of them, so a host could watch a run for ninety minutes and never learn the
 verdict. Half the design corpus was blocked on that and not on a missing measurement.
+
+Three more of those were found by the audit and promoted the same way, all narration with no
+event because each is already durable in `state.json` or in a round's own artifact:
+**`run_branch`**, said at each of the seven places `prepareGit` settles the question — not
+derived as `vibe/<run-id>`, because that is a convention `git.branchPrefix` can change and
+`--no-branch` can remove, and a run with no branch says *which kind* of none it is;
+**`repo` and `task` on `run_started`**, because `dir` is the run's directory and was never the
+repository; and **`round`/`cap` on `questions_opened`**, which is hi-fi 14's nested counter
+and the state its escalation is about. A fourth is `reproducer` on `findings_reported`:
+`reproducerOutcomes` has been durable since #113 and was never narrated, so the findings pane
+could not tell *a claim nobody could check* from *a claim nobody tried to check* — hi-fi 9's
+third case, and the only one of its five that was genuinely missing.
 
 The move is a **promotion, never an invention**, and `recordAndSay`'s own rule is what makes
 it safe: *"narration never creates an event."* The durable set is exactly what `recordEvent`
@@ -400,6 +456,10 @@ tests/               node:test, one file per concern
 app/                 the desktop app - Vite + React, its own package.json and gate
 app/src/design/      tokens.css, base.css, components.css, and the sixteen primitives
 app/src/design/HANDOFF.md  the design corpus - every screen a source comment cites, by name
+app/src/design/AUDIT.md    the built app walked against all fourteen hi-fi frames, and closed
+app/src/cockpit/rounds.ts  a round as one card - the object hi-fi 5's log is made of
+app/src/cockpit/squares.ts the rail's squares: two letters, and what gets one at all
+app/src/pilot/log.ts       rounds and conversation in one scroll, and who may reorder whom
 app/src/Gallery.tsx  every component in every state - the design system's acceptance test
 app/src/host.ts      the webview's end of the wire: typed frames, and nothing re-derived
 app/src/cockpit/model.ts   frames in, a run out - the ONLY logic in the app, and it is pure
