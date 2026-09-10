@@ -20,7 +20,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::reaper::Reaper;
 
-/// `CREATE_NO_WINDOW` — the host gets no console, and so cannot be sent a
+/// `DETACHED_PROCESS` — the host gets no console, and so cannot be sent a
 /// console control event.
 ///
 /// **This is a lifetime fix, not a cosmetic one.** `node.exe` is a
@@ -33,16 +33,33 @@ use crate::reaper::Reaper;
 ///
 /// That is not hypothetical. A run was killed four minutes into a plan turn,
 /// mid-phase, with `ending.json` reading `"how": "signal", "signal": "SIGHUP"`
-/// and the window reporting `host exited with code 1` — and a `node` spawned
-/// with exactly the options below (all three streams piped, no flags) was
-/// confirmed to have a console attached. Redirecting stdio does not prevent the
-/// allocation; only this flag does.
+/// and the window reporting `host exited with code 1`. Redirecting all three
+/// streams does not prevent the allocation.
 ///
-/// The core already got this right one layer down: `src/proc.ts` passes
-/// `windowsHide: true` when it spawns `claude` and `codex`, which is the same
-/// flag under Node's name for it. The supervisor was the layer that did not.
+/// **`CREATE_NO_WINDOW` is the wrong flag and was tried first.** It suppresses
+/// the console *window*; the process still holds a console and can still be sent
+/// a control event. Measured with `AttachConsole` against four children spawned
+/// exactly as below, all stdio piped:
+///
+/// | creation flags                | console? |
+/// |------------------------------|----------|
+/// | none                         | yes      |
+/// | `CREATE_NO_WINDOW` (0x0800_0000) | yes  |
+/// | `DETACHED_PROCESS` (0x0000_0008) | **no** |
+/// | both                         | no       |
+///
+/// The two are documented as mutually exclusive — `CREATE_NO_WINDOW` is ignored
+/// beside `DETACHED_PROCESS` — so this is the one flag rather than both, and
+/// there is no window to hide on a process with no console to put one on.
+///
+/// Note what this does *not* say about `src/proc.ts`. That file passes
+/// `windowsHide: true` for `claude` and `codex`, which is Node's name for
+/// `CREATE_NO_WINDOW` — so those children do hold a console. That is fine and
+/// is not the same bug: with the host detached each gets its own fresh,
+/// window-less console rather than sharing one whose teardown would take the
+/// whole run with it.
 #[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const DETACHED_PROCESS: u32 = 0x0000_0008;
 
 /// A line the host process wrote to stdout, on its way to the webview.
 pub const FRAME_EVENT: &str = "host://frame";
@@ -276,7 +293,7 @@ impl HostProcess {
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
-            command.creation_flags(CREATE_NO_WINDOW);
+            command.creation_flags(DETACHED_PROCESS);
         }
         let mut child = command
             .spawn()

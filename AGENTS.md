@@ -321,9 +321,17 @@ Two things about it are load-bearing and neither is obvious:
   into a plan turn at 314k tokens for exactly this: `ending.json` reading `"how": "signal",
   "signal": "SIGHUP"`, the window reporting `host exited with code 1`, and nothing on stderr —
   and a `node` spawned with the same options was then confirmed to have a console attached.
-  `CREATE_NO_WINDOW` in `host.rs` is the fix. **The core already got this right one layer
-  down**: `src/proc.ts` passes `windowsHide: true` when it spawns `claude` and `codex`, which
-  is the same flag under Node's name for it — the supervisor was the layer that had not.
+  `DETACHED_PROCESS` in `host.rs` is the fix.
+
+  **`CREATE_NO_WINDOW` is the wrong flag, and it is the obvious one.** It suppresses the
+  console *window*; the process still holds a console and can still be sent a control event.
+  It was tried first, shipped, and disproved by measurement — `AttachConsole` against four
+  children spawned with all stdio piped: no flags **has** a console, `CREATE_NO_WINDOW`
+  **has** one, `DETACHED_PROCESS` does not. Note the consequence for `src/proc.ts`, which
+  passes `windowsHide: true` for `claude` and `codex` — that is Node's name for
+  `CREATE_NO_WINDOW`, so those children *do* hold a console. That is fine and is a different
+  situation: with the host detached, each gets its own fresh window-less console rather than
+  sharing one whose teardown would take the run with it.
 
   Two things this episode is worth remembering for beyond the flag. **The stamp did its job**:
   a lock plus `ending.json` naming a signal took this from #87's unexplained stop to a named
