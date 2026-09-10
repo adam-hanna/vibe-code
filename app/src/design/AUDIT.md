@@ -86,6 +86,29 @@ Entries the archive refused — a symlink (#53), something `lstat` could not
 classify — get no square at all, because a square is an invitation to open
 something.
 
+### Diverged on purpose — the window is four columns, and the loop is on the right (#223)
+
+Every frame that shows the whole window draws `rail · loop · pane`. The built
+window is now `rail · runs · pane · groups`, and this is an **owner's decision
+about this product**, not a correction to the artwork — recorded here so the next
+person building from a frame knows the frame is not current on this point.
+
+Two moves, and the second follows from the first. `1b` was a *tab*, which made
+the archive something you leave the run to look at, when it is the thing you
+triage from after a night of unattended work — so it became a standing column,
+next to the rail it is drawn from and whose `RUNS` button now opens it. That
+leaves the loop column with a side to go to, and the right is the correct one:
+the loop names the rounds the pane beside it draws — Plans, Plan critique, Code,
+Code review — so a card and its artifact are adjacent, which is the shortest path
+in the product.
+
+**Collapsed is a state, not an absence**, which is the part worth copying.
+`SidePanel` is one component for both edges, and a shut panel keeps its strip,
+its mark and its name — the way back is where the panel was, and what changes is
+the main pane's width rather than the window's structure. Neither is persisted:
+a collapse is a gesture for the next few minutes, and a window that opened three
+days later still folded would be answering a question nobody asked twice.
+
 ### 1.2 · The tab bar has twelve tabs where the design has seven
 
 | hi-fi 1 · in order | built app · in order |
@@ -180,6 +203,23 @@ own and is the order the column beside the bar draws its groups in. Keeping
 would be a coincidence somebody has to remember; making the bar agree with the
 column is a rule. `squares.test.ts` pins it, and pins that neither `Findings` nor
 a `Diff` tab comes back — two answers to one question is how twelve tabs happened.
+
+**Ten and a readout, since `Runs` became a column.** And the two report tabs lost
+their counts: `Plan critique · 2` meant two blocking findings and was read as two
+critiques, which is the reasonable reading, because every other count in the bar
+is how many things are behind the tab. A tab's badge is a quantity of items or it
+is nothing; the severities are drawn on the round they belong to, beside the
+tolerance that decided them, which is the only place they mean anything specific.
+
+**And they are live now.** Every one of the four artifact panes was a snapshot
+taken when the tab was mounted — a critique round finishing while you watched the
+critique tab changed nothing, and the only way to see it was to navigate away and
+back. `artifact_written` is the signal and `Run.artifacts.length` is what the
+panes take as their revision. A pane **follows the run until the reader touches
+it**: the newest section opens as rounds land, and the first manual toggle stops
+that, because a pane that always jumped to the newest would move the document out
+from under somebody reading round 0. A navigation from another surface still
+wins — that is somebody asking for a particular round, which is the same act.
 
 ### 1.3 · The pilot pane is a chat; the design's is the run's log
 

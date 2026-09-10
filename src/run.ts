@@ -1412,6 +1412,18 @@ export function artifact(state: RunState, name: string, content: string | object
   const file = path.join(state.dir, name);
   const body = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
   writeAtomic(state.dir, name, body);
+  // Said **after** the write, so anything acting on it finds the bytes there
+  // (#223). A host reading a run's own directory has no other way to learn that
+  // it changed: the alternative is a window inferring that `findings_reported`
+  // implies `code-review-2.json` now exists, which is the loop's naming
+  // convention copied into a process that cannot be kept in step with it - and
+  // it fails silently, as a pane that stays on the previous round.
+  //
+  // Narration with no event, under `recordAndSay`'s rule: the file IS the
+  // durable record, so recording that it was written would store the same fact
+  // twice. `detail` because a person watching a terminal is watching the run,
+  // not its directory.
+  log.detail(`Wrote ${name}`, { id: 'artifact_written', data: { name } });
   return file;
 }
 

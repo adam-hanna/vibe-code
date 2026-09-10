@@ -59,6 +59,22 @@ test('the body that was actually stored is recognised, however it is dressed', (
   }
 });
 
+test('two pointers joined by punctuation are still a pointer', () => {
+  // Measured, not imagined: a run on 2026-09-10 came back with `n/a — see
+  // below` as the whole of `plan_md`. Both halves were already in the list and
+  // the line matched neither, because the match is whole-line - so the plan
+  // reached the critic, and the critic is not the thing that catches this.
+  for (const body of [
+    'n/a — see below',
+    'n/a - see below',
+    'N/A – see the plan below',
+    '# Plan\n\nTBD; see attached\n',
+    'todo, tbd',
+  ]) {
+    assert.equal(isPlaceholderPlan(body), true, `should be refused: ${JSON.stringify(body)}`);
+  }
+});
+
 test('a plan that says real work is not refused, however short', () => {
   for (const body of [
     planFixture().plan_md,
@@ -71,6 +87,12 @@ test('a plan that says real work is not refused, however short', () => {
     '# Plan\n\nRewrite `gate` as described below, then see above for the rollback.\n',
     // A terse plan for a one-line change. A length threshold would refuse it.
     'Set `loop.p1Tolerance` to 0.',
+    // Punctuation is where the clauses divide, so these are the lines the
+    // splitting rule has to leave alone. A hyphen inside a word is not a
+    // divider at all, and a clause that is not a pointer saves the whole line.
+    'Make the plan pane read-only.',
+    'Delete the todo, then add the timeout.',
+    'n/a — but rewrite `gate` first.',
   ]) {
     assert.equal(isPlaceholderPlan(body), false, `should be allowed: ${JSON.stringify(body)}`);
   }

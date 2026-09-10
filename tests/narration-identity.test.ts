@@ -82,11 +82,27 @@ test('a clean pass is legible as a sequence of ids, with no sentence read', asyn
       'phase_started', // planning
       'turn_started', //  the planner
       'claude_turn', //   what that turn spent (#223)
-      'phase_started', // critique
-      'turn_started', //  the critic
+      // Each file, as `artifact()` finishes writing it. **The only way a window
+      // reading a run's own directory can learn that it changed** - the pane
+      // was otherwise a snapshot taken when the tab was opened, and a critique
+      // round finishing while you watched the critique tab changed nothing on
+      // screen. Narration with no event, and the strongest case of it in this
+      // list: the file IS the durable record, so recording that it was written
+      // would store the same fact twice.
+      //
+      // It appears five times in a clean pass, which is the whole of what a
+      // clean pass writes: the plan, the critique, PLAN.md at approval, the
+      // implementation report, and the review. The files the *implementer*
+      // writes are not among them and must not be - those go into the repository
+      // and are the run's output, where these are the run's record of itself.
+      'artifact_written', // plan-0.json
+      'phase_started', //   critique
+      'turn_started', //    the critic
       'codex_turn',
+      'artifact_written', // plan-critique-0.json
       'findings_reported', // the four counts against the tolerance
       'plan_approved', //    and what the gate made of them
+      'artifact_written', // PLAN.md, written once the plan is approved
       'phase_started', //  implementing
       'claude_turn',
       // What the implement turn left in the tree, once, as the turn ended
@@ -96,6 +112,7 @@ test('a clean pass is legible as a sequence of ids, with no sentence read', asyn
       // cadence being real rather than the case being lucky - a write turn short
       // enough to have no readings is one there was nothing to report about.
       'work_measured',
+      'artifact_written', // implementation-report.md
       // What the round put in the history, and the range it spans (#223). The
       // commit has always happened here and `maybeCommit` has always printed
       // `Committed abc1234`; what it had no id for was the pair of shas, so
@@ -109,6 +126,7 @@ test('a clean pass is legible as a sequence of ids, with no sentence read', asyn
       'phase_started', // review
       'turn_started', //  the reviewer
       'codex_turn',
+      'artifact_written', // code-review-0.json
       'findings_reported',
       'review_approved',
     ],
@@ -139,6 +157,23 @@ test('the sequence grew by facts the run already recorded, and by nothing else',
   // transcript.
   assert.ok(said.has('findings_reported'));
   assert.equal(recorded.has('findings_reported'), false);
+
+  // The same, and the clearest case of the rule: the artifact IS the durable
+  // record, so an event saying it was written would store one fact twice. It
+  // also carries the name, because a listing is what a reader re-reads and the
+  // name is what says whether the listing is worth taking.
+  assert.ok(said.has('artifact_written'));
+  assert.equal(recorded.has('artifact_written'), false);
+  assert.deepEqual(
+    seen.filter((n) => n.id === 'artifact_written').map((n) => n.data?.['name']),
+    [
+      'plan-0.json',
+      'plan-critique-0.json',
+      'PLAN.md',
+      'implementation-report.md',
+      'code-review-0.json',
+    ],
+  );
 });
 
 test('turn_started names the role, so a host need not infer it from the label', async () => {

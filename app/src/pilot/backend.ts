@@ -74,12 +74,23 @@ export function modelsFor(backend: Backend, api: Readonly<Record<Provider, reado
   return needsKey(backend) ? api[backend] : SUBSCRIPTION_MODELS;
 }
 
-/** What this backend can and cannot do, said out loud in the pane. */
+/**
+ * What this backend costs, said out loud in the pane. Empty when there is
+ * nothing to say.
+ *
+ * **The subscription row is deliberately empty**, and what was there is worth
+ * recording as a lesson rather than as a loss. It described the *mechanism* -
+ * no key needed, a fenced block rather than a tool call, the CLI takes no
+ * schemas - which is true, is the reason `emit.ts` exists, and is of no use
+ * whatever to somebody deciding what to type. `Claude (subscription)` in the
+ * selector beside it is the whole of what a reader needs; the mechanism belongs
+ * in `emit.ts`'s header, where it is.
+ *
+ * The two API rows stay, because *billed to your key* is a fact about money that
+ * the selector does not carry and a person would want before sending.
+ */
 export const BACKEND_NOTE: Readonly<Record<Backend, string>> = {
-  subscription:
-    'runs on the subscription — no key needed. It can read the repository, and it proposes a ' +
-    'run in a fenced block rather than a tool call: the CLI takes no schemas, so the table is ' +
-    'in its prompt. You still press the button.',
+  subscription: '',
   anthropic: 'over the API, billed to your key. It can propose a run and cannot read files.',
   openai: 'over the API, billed to your key. It can propose a run and cannot read files.',
 };

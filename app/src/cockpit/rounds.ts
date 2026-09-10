@@ -119,6 +119,21 @@ export interface RoundCard {
    * rather than choosing between three reasons it was not told.
    */
   commit: Commit | null;
+  /**
+   * The question round that opened during this one, or null (#223).
+   *
+   * **What stops a merged card looking like a round that stalled.** The loop
+   * re-enters `planning` to revise against its own answers, and since those two
+   * turns are now one card the questions are the only thing on screen that
+   * explains why a plan round has two planner turns in it. Without this the card
+   * says *"the planner ran twice"* and nothing says why.
+   *
+   * By arrival, through the same `during()` a census goes through, because
+   * `questions_opened` carries the *question* round and a card is keyed by the
+   * plan round — two different countings, so matching on the number would match
+   * the wrong thing.
+   */
+  questions: Run['questions'];
 }
 
 /** The work reading a round ends on: the latest one any of its turns reported. */
@@ -206,6 +221,7 @@ export function rounds(run: Run): readonly RoundCard[] {
     verify: null,
     census: null,
     commit: null,
+    questions: null,
   }));
 
   // Attached after the cards exist, so `during` indexes the same order a reader
@@ -232,6 +248,11 @@ export function rounds(run: Run): readonly RoundCard[] {
     // way a verification pass is, so a second commit in a round would behave
     // like a second pass rather than silently making the first one the answer.
     if (card !== undefined) cards[i] = { ...card, commit };
+  }
+  if (run.questions !== null) {
+    const i = during(starts, run.questions.at);
+    const card = cards[i];
+    if (card !== undefined) cards[i] = { ...card, questions: run.questions };
   }
   return cards;
 }

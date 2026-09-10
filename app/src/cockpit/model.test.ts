@@ -776,3 +776,92 @@ describe('reduce is pure', () => {
     expect(JSON.stringify(before)).toBe(snapshot);
   });
 });
+
+describe('a round that re-enters its phase is one group, not two (#223)', () => {
+  // The report: *"There are now TWO boxes for Plan Round 1. It looks like
+  // questions were answered, but rather than continuing with the existing box,
+  // it created a new box after answering the questions."* The loop announces
+  // `planning` again when it revises against its own answers, which is correct -
+  // a phase did start - and drawing it as a second round is not.
+  const questionRound: readonly Frame[] = [
+    say('phase_started', { phase: 'planning', round: 1 }),
+    say('turn_started', { role: 'planner', kind: 'revise' }),
+    say('questions_opened', { total: 3, blocking: 2, round: 1, cap: 3 }),
+    say('turn_started', { role: 'answerer', kind: 'answers' }),
+    // The revision against the answers. Same phase, same round: this is the
+    // frame that used to open a second group.
+    say('phase_started', { phase: 'planning', round: 1 }),
+    say('turn_started', { role: 'planner', kind: 'revise' }),
+  ];
+
+  test('one group, and every turn of the round is in it', () => {
+    const run = fold(questionRound);
+    const plan = run.cycles.find((c) => c.kind === 'plan');
+    expect(plan?.phases).toHaveLength(1);
+    // All three turns - the draft, the answerer and the revision - which is the
+    // shape the loop actually has and the reason the merge is right rather than
+    // merely tidier.
+    expect(plan?.phases[0]?.turns.map((t) => t.role)).toEqual([
+      'planner',
+      'answerer',
+      'planner',
+    ]);
+  });
+
+  test('the group keeps the time the round began', () => {
+    // A card is dated from when the round started, not from its second turn. Had
+    // the merge taken the later `startedAt`, a plan round that spent ten minutes
+    // on questions would report the two minutes after them.
+    const run = fold(questionRound, 500_000);
+    expect(run.cycles[0]?.phases[0]?.startedAt).toBe(500_000);
+  });
+
+  test('a different round is a new group, and so is a re-entry with a gap', () => {
+    const advanced = fold([
+      say('phase_started', { phase: 'planning', round: 0 }),
+      say('phase_started', { phase: 'planning', round: 1 }),
+    ]);
+    expect(advanced.cycles[0]?.phases).toHaveLength(2);
+
+    // The fix round: `implementing` re-opens at the same review round, and the
+    // review that asked for it is in between. Merging here would fold a fix into
+    // the round it was fixing, so the rule is the *most recently opened* group
+    // and never any group with a matching number.
+    const fix = fold([
+      say('phase_started', { phase: 'implementing', round: 0 }),
+      say('phase_started', { phase: 'review', round: 0 }),
+      say('phase_started', { phase: 'implementing', round: 0 }),
+    ]);
+    expect(fix.cycles.find((c) => c.kind === 'code')?.phases).toHaveLength(2);
+  });
+
+  test('two unnumbered phases stay two, because nothing said they were one round', () => {
+    // A null round is the loop declining to number the phase, not evidence that
+    // two groups are one. Requiring the number is what leaves a core older than
+    // `round`-on-`planning` drawing exactly what it drew before.
+    const run = fold([
+      say('phase_started', { phase: 'planning', round: null }),
+      say('phase_started', { phase: 'planning', round: null }),
+    ]);
+    expect(run.cycles[0]?.phases).toHaveLength(2);
+  });
+});
+
+describe('an artifact the run wrote is what makes a pane live (#223)', () => {
+  test('every write is appended, rewrites of one name included', () => {
+    // Appended rather than de-duplicated: a plan round that answers its own
+    // questions replaces `plan-1.json` under the name it already had, and that
+    // second write is exactly the event a pane holding the first needs.
+    const run = fold([
+      say('artifact_written', { name: 'plan-1.json' }),
+      say('artifact_written', { name: 'answers-1.json' }),
+      say('artifact_written', { name: 'plan-1.json' }),
+    ]);
+    expect(run.artifacts).toEqual(['plan-1.json', 'answers-1.json', 'plan-1.json']);
+  });
+
+  test('a frame with no name is dropped, and an old core simply has none', () => {
+    expect(fold([say('artifact_written', {})]).artifacts).toEqual([]);
+    expect(fold(CLEAN).artifacts).toEqual([]);
+  });
+});

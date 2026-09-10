@@ -19,6 +19,7 @@ import { LoopColumn } from './LoopColumn';
 import { NewWorkstream } from './NewWorkstream';
 import { OutputPane } from './OutputPane';
 import { Rail } from './Rail';
+import { SidePanel } from './SidePanel';
 import { QuestionsPane } from './QuestionsPane';
 import { RateLimitStrip } from './RateLimit';
 import { Settings } from './Settings';
@@ -30,7 +31,7 @@ import { Workstreams } from './Workstreams';
 import { VerifyPane } from './VerifyPane';
 import { StalenessStrip } from './Staleness';
 import { tokens as fmtTokens } from './format';
-import { blockingIn, emptyRun, nextRun, reduce, staleness } from './model';
+import { emptyRun, nextRun, reduce, staleness } from './model';
 import { rounds } from './rounds';
 import { readLaunchArgv, resumeArgv } from './argv';
 import type { Launched, Raise } from './argv';
@@ -111,6 +112,17 @@ export function Cockpit() {
   });
   /** Whether the diagnostics popover is open (#201, #204). ⌘⇧D toggles it. */
   const [diagnostics, setDiagnostics] = useState(false);
+  /**
+   * Whether each side column is open (#223).
+   *
+   * **Both start open, and neither is persisted.** A collapse is a gesture — put
+   * the runs away to read a diff — not a decision, and a window that opened three
+   * days later still folded would be answering a question nobody asked twice.
+   * `localStorage` holds the repository and the pilot's spend ceiling because
+   * those are decisions.
+   */
+  const [showRuns, setShowRuns] = useState(true);
+  const [showLoop, setShowLoop] = useState(true);
   /** Whether the ⌘K switcher is open (`5f`, #223). */
   const [switching, setSwitching] = useState(false);
   /** Whether `4a`'s modal is open. The only modal in the product. */
@@ -249,7 +261,9 @@ export function Cockpit() {
     | 'verify'
     | 'spend'
     | 'questions'
-    | 'runs'
+    // There is no `runs` here since #223. `1b` is a standing column on the left
+    // rather than a tab: it is what you triage from, and a tab made it a place
+    // you had to leave the run to visit.
     | 'commands'
     | 'settings'
     // **The pilot, not the output pane** (#211). The complaint was exact: *"I
@@ -707,64 +721,31 @@ export function Cockpit() {
           onNew={() => setComposing(true)}
           onSwitch={() => setSwitching(true)}
           onSettings={() => setTab('settings')}
-          onRuns={() => setTab('runs')}
+          // The rail's `RUNS` used to switch to a tab; the archive is a standing
+          // column now, so it opens that instead. A square does the same, which
+          // keeps `Rail.tsx`'s rule intact — a square navigates, it does not
+          // reopen — while making where it navigates *to* somewhere you can see
+          // the rail from.
+          onRuns={() => setShowRuns(true)}
         />
 
-        <div className="v-cockpit__loop">
-          {/* `4h`. While there is no run, this column is three not-started
-              cycles and a sentence saying what it is waiting for — and what it
-              is waiting for is a brief, which is composed next door.
-
-              The launch form used to live here (#211). It has moved into the
-              pilot pane, because two forms building the same argv is the third
-              spelling that issue warns against, and because the front door
-              being a form beside the conversation is the complaint itself.
-
-              Offered again once the command has RETURNED, not once the loop
-              said it was done: `serve.ts` runs one at a time and refuses a
-              second invoke until the first settles. */}
-          {(!launched || run.completed !== null) && !outside && (
-            <>
-              <div className="v-loop__waiting">
-                <StateKicker tone="quiet">waiting for the brief</StateKicker>
-                <p>
-                  Say what you want in the conversation — that is the front door. There is no
-                  start button: when the pilot has enough, it <strong>proposes</strong> the exact
-                  command and you press that.
-                </p>
-              </div>
-              {/* `4a`, for the one moment somebody is deciding how THIS run
-                  should differ from the project's defaults. */}
-              <button
-                className="v-launch__more"
-                onClick={() => setComposing(true)}
-                disabled={busy || !wire.connected}
-              >
-                or set this run&apos;s overrides…
-              </button>
-            </>
-          )}
-          {/* The counts in the column are controls, and this is where they go.
-              The same setter the pilot's round cards use, so a severity chip
-              means one thing wherever it is drawn. */}
-          <LoopColumn run={run} now={now} hostPid={wire.hostPid} onOpen={open} />
-          {/* `4g`, and only on the ending that means the loop finished. Every
-              other exit is a halt, and a halt gets the footer's banner and its
-              one action rather than a summary of work that stopped early. */}
-          {run.completed?.exit === 0 && <Summary run={run} />}
-          <Footer
-            run={run}
-            busy={busy}
-            onDecide={answer}
-            onPause={pause}
-            onStop={() => setConfirmStop(true)}
-            onResume={resume}
-            caps={caps}
-            gates={gates}
-            order={order}
-            pausing={pausing}
+        {/* `1b`, on the left and permanent (#223). It was a tab, which made the
+            archive something you left the run to look at; the report was that
+            the two columns were the wrong way round — the runs belong beside the
+            rail they are drawn from, and the loop belongs beside the pane whose
+            rounds it names. */}
+        <SidePanel
+          side="left"
+          title="Runs"
+          mark="↺"
+          open={showRuns}
+          onToggle={() => setShowRuns((on) => !on)}
+        >
+          <Workstreams
+            dir={repoDir}
+            onResume={(runId, force) => resume(runId, repoDir, undefined, force)}
           />
-        </div>
+        </SidePanel>
 
         <div className="v-cockpit__pane">
           {/*
@@ -816,16 +797,22 @@ export function Cockpit() {
                 the same order as the column is a rule, where "keep Diff where
                 the artwork put it" would be a coincidence to maintain.
 
-                The count on `Code review` is blocking findings in the LATEST
-                round, not all of them: that is the number that decides whether
-                the loop fixes again, and a total would move for reasons that
-                change nothing. */}
+                Where a tab carries a count, that count is **how many things are
+                behind it** - rounds, commands, passes. Nothing here badges a
+                property of those things, which is the rule the two report tabs
+                broke. */}
+            {/* **No count on either report tab**, and the reason is what the
+                number turned out to say. `Plan critique · 2` was two blocking
+                findings, and it was read as two critiques — reasonably, since
+                every other count in this bar is how many things are behind the
+                tab. A badge whose unit has to be explained is not a badge; the
+                counts are inside, on the round they belong to, where `Counts`
+                draws all four beside the tolerance that decided them. */}
             <button
               className={`v-cockpit__tab ${tab === 'critique' ? 'v-cockpit__tab--on' : ''}`}
               onClick={() => open('critique')}
             >
               Plan critique
-              {blockingIn(run, 'plan') > 0 ? ` · ${String(blockingIn(run, 'plan'))}` : ''}
             </button>
             {/* `1d`, per round. The whole-run diff is this pane's first section
                 and is still what it opens on before any round has committed. */}
@@ -840,7 +827,6 @@ export function Cockpit() {
               onClick={() => open('review')}
             >
               Code review
-              {blockingIn(run, 'review') > 0 ? ` · ${String(blockingIn(run, 'review'))}` : ''}
             </button>
             {/* `1f`. The count is blocking questions, not all of them: an
                 advisory question the answerer handled needs nobody, and a
@@ -923,6 +909,7 @@ export function Cockpit() {
               questions={run.questions}
               dir={repoDir}
               runId={run.identity?.runId ?? null}
+              revision={run.artifacts.length}
             />
           )}
           {tab === 'settings' && <Settings dir={repoDir} />}
@@ -930,8 +917,17 @@ export function Cockpit() {
               directory, so all four take the run id the core stated on
               `run_started` - there is no way to derive one, and a pane with no
               run says so rather than showing an empty list. */}
+          {/* `run.artifacts.length` is what makes an open pane live (#223). It
+              counts what the run SAID it wrote, so a re-read happens because a
+              file appeared and never on a timer - and `artifact()` says it after
+              the bytes are on disk, so the re-read cannot beat the write. */}
           {tab === 'plans' && (
-            <PlansPane dir={repoDir} runId={run.identity?.runId ?? null} openAt={openAt} />
+            <PlansPane
+              dir={repoDir}
+              runId={run.identity?.runId ?? null}
+              openAt={openAt}
+              revision={run.artifacts.length}
+            />
           )}
           {tab === 'critique' && (
             <ReportPane
@@ -940,6 +936,7 @@ export function Cockpit() {
               kind="critique"
               rounds={cards}
               openAt={openAt}
+              revision={run.artifacts.length}
             />
           )}
           {tab === 'review' && (
@@ -949,6 +946,7 @@ export function Cockpit() {
               kind="review"
               rounds={cards}
               openAt={openAt}
+              revision={run.artifacts.length}
             />
           )}
           {tab === 'code' && <CodePane run={run} dir={repoDir} openAt={openAt} />}
@@ -958,12 +956,6 @@ export function Cockpit() {
               dir={repoDir}
               onRun={runCommand}
               onStop={stopCommand}
-            />
-          )}
-          {tab === 'runs' && (
-            <Workstreams
-              dir={repoDir}
-              onResume={(runId, force) => resume(runId, repoDir, undefined, force)}
             />
           )}
           {/* Mounted whatever tab is showing, and hidden rather than unmounted.
@@ -1007,6 +999,76 @@ export function Cockpit() {
             </div>
           )}
         </div>
+
+        {/* `4h`, on the RIGHT since #223. The design puts it on the left and the
+            owner moved it, which is a decision about this window rather than a
+            correction to the frame: the loop names the rounds the pane beside it
+            draws — Plans, Plan critique, Code, Code review — and reading a card
+            and then its artifact is the shortest path in the product. The runs
+            take the left, next to the rail they are drawn from. */}
+        <SidePanel
+          side="right"
+          title="Groups"
+          mark="⋮⋮"
+          open={showLoop}
+          onToggle={() => setShowLoop((on) => !on)}
+        >
+          <div className="v-cockpit__loop">
+            {/* While there is no run, this column is four not-started groups and
+                a sentence saying what it is waiting for — and what it is waiting
+                for is a brief, which is composed next door.
+
+                The launch form used to live here (#211). It has moved into the
+                pilot pane, because two forms building the same argv is the third
+                spelling that issue warns against, and because the front door
+                being a form beside the conversation is the complaint itself.
+
+                Offered again once the command has RETURNED, not once the loop
+                said it was done: `serve.ts` runs one at a time and refuses a
+                second invoke until the first settles. */}
+            {(!launched || run.completed !== null) && !outside && (
+              <>
+                <div className="v-loop__waiting">
+                  <StateKicker tone="quiet">waiting for the brief</StateKicker>
+                  <p>
+                    Say what you want in the conversation — that is the front door. There is no
+                    start button: when the pilot has enough, it <strong>proposes</strong> the exact
+                    command and you press that.
+                  </p>
+                </div>
+                {/* `4a`, for the one moment somebody is deciding how THIS run
+                    should differ from the project's defaults. */}
+                <button
+                  className="v-launch__more"
+                  onClick={() => setComposing(true)}
+                  disabled={busy || !wire.connected}
+                >
+                  or set this run&apos;s overrides…
+                </button>
+              </>
+            )}
+            {/* The counts in the column are controls, and this is where they go.
+                The same setter the pilot's round cards use, so a severity chip
+                means one thing wherever it is drawn. */}
+            <LoopColumn run={run} now={now} hostPid={wire.hostPid} onOpen={open} />
+            {/* `4g`, and only on the ending that means the loop finished. Every
+                other exit is a halt, and a halt gets the footer's banner and its
+                one action rather than a summary of work that stopped early. */}
+            {run.completed?.exit === 0 && <Summary run={run} />}
+            <Footer
+              run={run}
+              busy={busy}
+              onDecide={answer}
+              onPause={pause}
+              onStop={() => setConfirmStop(true)}
+              onResume={resume}
+              caps={caps}
+              gates={gates}
+              order={order}
+              pausing={pausing}
+            />
+          </div>
+        </SidePanel>
       </div>
     </div>
   );

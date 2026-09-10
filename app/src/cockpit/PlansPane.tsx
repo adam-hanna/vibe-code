@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { MetaChip, StateKicker } from '../design';
 import { Section } from './Disclosure';
 import { ofKind, planText } from './artifacts';
@@ -42,12 +42,14 @@ function PlanBody({
   dir,
   runId,
   name,
+  revision,
 }: {
   dir: string;
   runId: string;
   name: string;
+  revision: number;
 }) {
-  const { read, failure, loading } = useArtifact(dir, runId, name);
+  const { read, failure, loading } = useArtifact(dir, runId, name, revision);
   const missing = noText(read, failure);
 
   if (loading && read === null && missing === null) {
@@ -83,9 +85,17 @@ export function PlansPane({
   dir,
   runId,
   openAt,
+  revision = 0,
 }: {
   dir: string;
   runId: string | null;
+  /**
+   * How many artifacts the run has said it wrote (#223).
+   *
+   * What makes an open pane live. Everything here is read from disk, and the
+   * only thing that knows the disk changed is the run.
+   */
+  revision?: number;
   /**
    * A round to open, sent by whatever navigated here (#223).
    *
@@ -95,9 +105,20 @@ export function PlansPane({
    */
   openAt?: number | null;
 }) {
-  const { entries, failure, loading, reload } = useArtifacts(dir, runId);
+  const { entries, failure, loading, reload } = useArtifacts(dir, runId, revision);
   const plans = ofKind(entries, 'plan');
   const [open, setOpen] = useState<string | null>(null);
+  /**
+   * Whether the reader has opened or shut anything themselves.
+   *
+   * **The pane follows the run until you touch it, and then it stops.** A live
+   * run writes a new plan version every round, and a pane that always jumped to
+   * the newest would move the document out from under somebody reading round 0.
+   * A pane that never moved would be the stale one this revision exists to fix.
+   * A navigation from another surface still wins: that is somebody asking for a
+   * particular round, which is the same act as clicking a section here.
+   */
+  const touched = useRef(false);
 
   // The newest version, or the one somebody navigated to. Re-run when the
   // listing or the request changes, and deliberately not a `useState`
@@ -109,6 +130,7 @@ export function PlansPane({
       openAt === null || openAt === undefined
         ? null
         : (plans.find((p) => p.round === openAt)?.name ?? null);
+    if (wanted === null && touched.current) return;
     setOpen(wanted ?? newest(plans));
     // `plans` is rebuilt on every render, so the effect keys on what it is made
     // of. `entries` is the fetched array and is stable between reads.
@@ -169,7 +191,10 @@ export function PlansPane({
           // default would yank the view every time somebody opened the tab.
           reveal={openAt !== null && openAt !== undefined && plan.round === openAt}
           open={open === plan.name}
-          onToggle={() => { setOpen((cur) => (cur === plan.name ? null : plan.name)); }}
+          onToggle={() => {
+            touched.current = true;
+            setOpen((cur) => (cur === plan.name ? null : plan.name));
+          }}
           title={
             plan.round === null ? 'the approved plan' : `plan · round ${String(plan.round)}`
           }
@@ -184,7 +209,7 @@ export function PlansPane({
         >
           {/* Mounted only while open, which is what makes the fetch lazy: the
               body's hook does not exist until the section does. */}
-          <PlanBody dir={dir} runId={runId} name={plan.name} />
+          <PlanBody dir={dir} runId={runId} name={plan.name} revision={revision} />
         </Section>
       ))}
     </div>

@@ -27,20 +27,24 @@ test('the subscription backend is the one that works with nothing configured', (
   for (const provider of PROVIDERS) expect(needsKey(provider)).toBe(true);
 });
 
-test('every backend has a name and a note saying how it takes a tool call', () => {
-  // The note is not decoration: the two backends reach the same tools by
-  // different roads, and which road this one is on decides what a person sees
-  // come back — a card built from a vendor call, or one built from a fenced
-  // block. It used to say the subscription backend could not propose at all;
-  // #211 gave it the emitted channel, so that claim is no longer the contract.
-  // What is still true, and is what this pins, is that no backend fires one.
+test('every backend has a name, and a note only where there is a cost to state', () => {
+  // The note used to describe the *mechanism* — no key needed, a fenced block
+  // rather than a tool call — and this pinned that wording. It is no longer the
+  // contract: the owner removed it, on the grounds that a person choosing a
+  // backend cannot act on any of it and `Claude (subscription)` beside it says
+  // the whole of what they need. The mechanism is still documented, in the file
+  // that implements it.
+  //
+  // What still holds and is still pinned: every backend is nameable, and the two
+  // that spend money say so — which is the fact the selector cannot carry.
   for (const backend of BACKENDS) {
     expect(BACKEND_NAME[backend], `${backend} has no name`).toBeTruthy();
-    expect(BACKEND_NOTE[backend], `${backend} has no note`).toBeTruthy();
   }
-  expect(BACKEND_NOTE.subscription).toMatch(/no key/i);
-  expect(BACKEND_NOTE.subscription).toMatch(/press the button/i);
-  for (const provider of PROVIDERS) expect(BACKEND_NOTE[provider]).toMatch(/propose/i);
+  expect(BACKEND_NOTE.subscription, 'a subscription bills nothing, so it says nothing').toBe('');
+  for (const provider of PROVIDERS) {
+    expect(BACKEND_NOTE[provider]).toMatch(/billed to your key/i);
+    expect(BACKEND_NOTE[provider]).toMatch(/propose/i);
+  }
 });
 
 test('the subscription models are their own list, not a row in the vendor map', () => {

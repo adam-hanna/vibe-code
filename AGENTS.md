@@ -313,6 +313,33 @@ they are waiting on. Four things in it are worth carrying:
   *"Order is the loop's, not the alphabet's"* — and the position is the last boundary that
   actually **held**, not a phase mapped onto one. What it can still be wrong about is that the
   loop may pass a boundary without reaching it, so the wording is *can stop* and never *will*.
+- **The runs are a column and the loop is on the right, and both put away rather than
+  vanish.** The window is `rail · runs · pane · groups`, at the owner's decision (#223). `1b`
+  was a *tab*, which made the archive something you left the run to look at, and the loop
+  column was on the left where the design draws it — the report was that the two were the
+  wrong way round: the runs belong beside the rail they are drawn from, and the loop belongs
+  beside the pane whose rounds it names. `SidePanel` is one component for both edges, because
+  two implementations of *standing context you glance at* drift in the way nobody notices —
+  you are never looking at both edges at once. **Collapsed is a state, not an absence**: a
+  shut panel keeps its strip, its mark and its name, so the way back is where the panel was.
+  Neither is persisted, and that is deliberate — a collapse is a gesture for the next few
+  minutes, where `localStorage` holds the repository and the spend ceiling because those are
+  decisions.
+- **A tab's count is how many things are behind it, and never a property of them.**
+  `Plan critique · 2` was two blocking findings and was read as two critiques, which is the
+  reasonable reading, since every other count in that bar — Code, Questions, Verify, Commands
+  — is a number of items. `blockingIn` went with it rather than being kept for a better badge:
+  the four counts and the tolerance that decided them are already drawn on the round they
+  belong to, which is the only place they mean anything specific.
+- **`overflow: hidden` on a flex item is what stopped the artifact panes scrolling.** Every one
+  of them sets `flex: 1; min-height: 0; overflow-y: auto` on itself and none of it did
+  anything, because a section inside them is a flex item whose automatic minimum size the spec
+  resolves to **zero** when `overflow` is not `visible` — so a section holding a nine-page plan
+  shrank to the space left and clipped the rest, the pane never overflowed, and the pane
+  therefore never scrolled. `flex: none` on `.v-sect` is the fix and the `overflow: hidden`
+  stays, because it is what clips the head's hover ground to the border. Worth remembering as a
+  shape rather than as a rule about one class: **a scrolling column's children must not be
+  allowed to shrink**, and one with `overflow` set will shrink to nothing without saying so.
 
 **The planner never had a `ctx%`, and the fix borrows a denominator rather than inventing
 one.** `promptTokens` is measured live off Claude's stream on every heartbeat; the context
@@ -366,6 +393,21 @@ alternative a host is otherwise left with is pairing consecutive commits in narr
 which is a derivation that goes silently wrong the first time a run is resumed and the earlier
 commits were narrated to a process that has exited. Null `since` is a first commit in a
 repository that had none, which is a real range and not a missing field.
+
+A sixth is **`artifact_written`** (#223), and it is the clearest case of the rule: the file
+*is* the durable record, so recording that it was written would store one fact twice.
+`artifact()` says it after the bytes are on disk, at `detail`, carrying the name. Without it
+every pane that reads a run's own directory is a **snapshot taken when the tab was opened** —
+a critique round finishing while you watched the critique tab changed nothing on screen, and
+the only way to see it was to navigate away and back. The alternative a window is otherwise
+left with is deciding that `findings_reported` implies `code-review-2.json` now exists, which
+is the loop's naming convention copied into the one process that cannot be kept in step with
+it, and which fails *silently* — as a pane that stays on the previous round. It is said after
+the write for the same reason `round_committed` reads HEAD before the commit: a signal that
+can beat the thing it signals is not a signal. `Run.artifacts` holds the names rather than a
+counter, and a name written twice is appended twice, because a plan round that answers its own
+questions rewrites `plan-<n>.json` under the name it already had and that second write is
+exactly the event a pane holding the first one needs.
 
 The move is a **promotion, never an invention**, and `recordAndSay`'s own rule is what makes
 it safe: *"narration never creates an event."* The durable set is exactly what `recordEvent`
@@ -610,6 +652,7 @@ app/src/cockpit/squares.ts the rail's squares: two letters, and what gets one at
 app/src/cockpit/artifacts.ts what a run wrote: classifying a listing, and reading a report
 app/src/cockpit/useArtifacts.ts asking the host for a listing, and for one file when it opens
 app/src/cockpit/Disclosure.tsx the one section-that-opens, at every level it appears
+app/src/cockpit/SidePanel.tsx  a column that can be put away without being lost
 app/src/cockpit/PlansPane.tsx  every version of the plan, one section per round
 app/src/cockpit/ReportPane.tsx a judge's own report - the critique and the review, one screen
 app/src/cockpit/CodePane.tsx   what each round changed, from the range its commit carries
@@ -844,6 +887,23 @@ answering **answers** is not, because nothing judged anything. Three things trav
   questions attached, and the one path that reaches it without a hold in front of it is the
   resume consuming `NEEDS-INPUT.md`, where halting again before running anything is a resume
   that did not resume.
+
+**And it is one card, because the loop re-enters the phase it is already in.** Fixing the
+*number* left the *shape* wrong in the other direction: `revisePlan` announces `planning`
+again when it revises against its own answers — correctly, a phase did start — and `reduce`
+opened a second group for it, so the column and the pilot's log each drew two boxes for one
+plan round. `reEntered` in `app/src/cockpit/model.ts` is the rule, and both of its clauses are
+load-bearing. It tests **the most recently opened group**, never any group with a matching
+round: a fix round re-opens `implementing` at the same review round and the review that asked
+for it is in between, so nothing merges there. And it requires **both rounds stated**, because
+a null round is the loop declining to number a phase rather than evidence that two groups are
+one — which leaves an older core drawing exactly what it drew before.
+
+What the merged card gains is the whole question round in one place: the draft, the answerer's
+turn and the revision. What it costs is that the card now holds two planner turns with nothing
+saying why, so `RoundCard.questions` is attached by arrival through the same `during()` a
+census goes through. It is a count and a link rather than the text — the column is 364px and a
+question is a paragraph — and the Questions tab is where the text is, one section per round.
 
 **`vibe plan` is deliberately not a row.** #140 asked for `planOnly` to resolve to
 `gates['plan-approved'] = 'stop'`; it does not, because they are two different things rather
@@ -1133,6 +1193,17 @@ the only place that knows which role produced the report. `refusePlaceholderPlan
 from the critic's own P1 about the same defect. **Absent still means absent**: every finding
 in every existing archive has none, so `authorOf` narrows and returns null rather than
 guessing, and a renderer that cannot name the author names nobody.
+
+**A pointer can be two pointers joined by a dash, and `isPlaceholderPlan` now splits before it
+matches.** A run on 2026-09-10 returned `n/a — see below` as the whole of `plan_md`. Both
+halves were already in `POINTER_BODIES` and the line matched neither, because the match is
+whole-line — so the stub reached the critic, and the critic is not the thing that catches
+this. The widening is to test **every clause** of a line rather than the line, and what makes
+splitting safe is that *all* the clauses have to be pointers: `well-defined approach` divides
+into two of which neither is one, so a real line is never refused for containing punctuation.
+A dash counts as a divider only when surrounded by spaces, which is what keeps `n/a` and
+`read-only` whole. It stays exact equality per clause for the reason the list gives in its own
+comment: a real plan may say "see below" in a sentence, and a substring rule would refuse it.
 
 That field is what makes a human finding possible without corrupting the record. `src/raise.ts`
 holds the whole surface: a block appended to every `NEEDS-INPUT.md`, parsed on the same resume

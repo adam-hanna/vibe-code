@@ -1136,19 +1136,28 @@ export function PilotPane({
             </option>
           ))}
         </select>
-        {/* What this backend can and cannot do. Said here rather than left to be
-            discovered by asking the subscription pilot to launch a run and being
-            ignored - it declares no tools, because tool declaration is a
-            vendor-API feature the CLI takes no schemas for (#193). */}
-        <span className="v-pilot__note">{BACKEND_NOTE[provider]}</span>
+        {/* What this backend costs, when that is not obvious from its name.
+            Empty for the subscription, which is why this is conditional rather
+            than a span that renders a blank. */}
+        {BACKEND_NOTE[provider] !== '' && (
+          <span className="v-pilot__note">{BACKEND_NOTE[provider]}</span>
+        )}
         {/* Names what is missing rather than "not ready". One provider
             configured is a supported state, and so is a window that has not
             been pointed at a repository yet - two different absences with two
             different fixes. */}
         {blocked !== null && <span className="v-pilot__note">{blocked}</span>}
-        {/* The one switch that lets the pilot spend without anybody typing, so
-            it says what it costs rather than just naming itself. */}
-        <label className="v-pilot__limit">
+        {/* The one switch that lets the pilot spend without anybody typing.
+            It said *"speak up at a gate — one turn each, still proposes only"*,
+            which is three clauses in the product's own vocabulary and answers
+            none of *what happens, when, and what will it cost me*: `gate` is a
+            word from `src/gates.ts`, and *proposes only* is true of every tool
+            the pilot has. The label is now the behaviour and the tooltip is the
+            cost, which is the split the rest of this bar uses. */}
+        <label
+          className="v-pilot__limit"
+          title="One turn each time, and it can only propose — you still press the button."
+        >
           <input
             type="checkbox"
             checked={watching}
@@ -1162,7 +1171,7 @@ export function PilotPane({
               }
             }}
           />
-          <span>speak up at a gate — one turn each, still proposes only</span>
+          <span>Have the pilot weigh in whenever the run stops for you</span>
         </label>
         {proposals.length > 0 && (
           <span className="v-pilot__note">

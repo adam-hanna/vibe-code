@@ -137,6 +137,33 @@ export function RoundCard({
         </ul>
       )}
 
+      {/* **Why this round has two planner turns in it.** A plan round that
+          answers its own questions is one round and is now one card, so the
+          questions are the only thing that explains the second turn — without
+          them the card reads as a planner that ran twice for no reason.
+
+          A count and a link, not the questions themselves: this card is 364px
+          of a log and a question is a paragraph. The Questions tab is where the
+          text is, one section per round. */}
+      {card.questions !== null && (
+        <div className="v-round__questions">
+          <MetaChip>
+            {card.questions.round === null
+              ? 'questions'
+              : `question round ${String(card.questions.round)}`}
+          </MetaChip>
+          <MetaChip>{card.questions.total} raised</MetaChip>
+          {card.questions.blocking > 0 && (
+            <MetaChip kind="alarm">{card.questions.blocking} blocking</MetaChip>
+          )}
+          {onOpen !== undefined && (
+            <button className="v-round__open" onClick={() => onOpen('questions')}>
+              open questions
+            </button>
+          )}
+        </div>
+      )}
+
       {/* `11 files · +604 −71`, in `src/work.ts`'s own words rather than
           re-composed here. Absent when no reading arrived, and a real zero gets
           the sentence the loop uses for it. */}

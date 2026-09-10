@@ -24,8 +24,17 @@ export interface Listing {
   reload: () => void;
 }
 
-/** A run's directory listing, re-read when the run changes. */
-export function useArtifacts(dir: string, runId: string | null): Listing {
+/**
+ * A run's directory listing, re-read when the run changes.
+ *
+ * `revision` is how a live run reaches a pane that is already open. Before it,
+ * every one of these panes was a snapshot taken when the tab was mounted — a
+ * critique round finishing while you watched the critique tab changed nothing on
+ * screen, and the only way to see it was to navigate away and back. It is a
+ * count of what the run *said* it wrote, so a re-read happens because a file
+ * appeared and never on a timer.
+ */
+export function useArtifacts(dir: string, runId: string | null, revision = 0): Listing {
   const [entries, setEntries] = useState<readonly ArtifactEntry[]>([]);
   const [failure, setFailure] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -70,7 +79,7 @@ export function useArtifacts(dir: string, runId: string | null): Listing {
     return () => {
       cancelled = true;
     };
-  }, [dir, runId, attempt]);
+  }, [dir, runId, attempt, revision]);
 
   return { entries, failure, loading, reload };
 }
@@ -96,6 +105,13 @@ export function useArtifact(
   dir: string,
   runId: string | null,
   name: string | null,
+  /**
+   * Re-read on, for the reason `useArtifacts` takes one — and here it is the
+   * *rewrite* that matters. A plan round that answers its own questions replaces
+   * `plan-<n>.json` under the name it already had, so a section that fetched
+   * once would go on showing the draft that raised the questions.
+   */
+  revision = 0,
 ): Loaded {
   const [read, setRead] = useState<ArtifactRead | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
@@ -133,7 +149,7 @@ export function useArtifact(
     return () => {
       cancelled = true;
     };
-  }, [dir, runId, name]);
+  }, [dir, runId, name, revision]);
 
   return { read, failure, loading };
 }

@@ -580,6 +580,21 @@ export interface Run {
    * emptiness, and the pane says the honest common part rather than picking one.
    */
   commits: readonly Commit[];
+  /**
+   * Every artifact the run has said it wrote, in order (#223).
+   *
+   * **The signal that a pane reading the run's directory has gone stale**, and
+   * the only honest one there is. A pane that re-read on `findings_reported`
+   * would be deciding that a narration id implies a filename, which is the
+   * loop's naming convention living in the one process that cannot be kept in
+   * step with it. `artifact()` says this after the bytes are on disk, so a
+   * re-read triggered by it cannot beat the write.
+   *
+   * The names rather than a counter, because a re-read is a listing and this is
+   * what says whether the listing is worth taking. Empty on a core that predates
+   * the id, which is a pane that behaves exactly as it did before.
+   */
+  artifacts: readonly string[];
   /** The turn with no `endedAt`, if any. */
   running: Turn | null;
   gate: Gate | null;
@@ -708,6 +723,7 @@ export function emptyRun(): Run {
     compactions: [],
     baseSha: null,
     commits: [],
+    artifacts: [],
     running: null,
     gate: null,
     lastGate: null,
@@ -1062,6 +1078,44 @@ function withPhase(cycles: readonly Cycle[], kind: CycleKind, phase: PhaseGroup)
 }
 
 /**
+ * Is this `phase_started` the same round re-entering the phase it is already in?
+ *
+ * **A plan round that answers its own questions is one round and must be one
+ * card** (#223). The loop announces `planning` again when it revises against the
+ * answers, so the column and the pilot's log each drew a second `plan · round 1`
+ * — and the report was exact: *"there are now TWO boxes for Plan Round 1 …
+ * rather than continuing with the existing box, it created a new box after
+ * answering the questions."* Splitting a round in half is the mirror of the bug
+ * the merged card had, where a round's two halves hid inside one entry.
+ *
+ * The test is deliberately narrow, and every clause is load-bearing:
+ *
+ * - **The most recently opened group**, not any group with a matching round. A
+ *   fix round re-enters `implementing` at the same review round, and between the
+ *   two there is a `review` group — so the newest is `review` and nothing merges.
+ *   Two groups of one phase with anything at all between them stay two.
+ * - **Both rounds stated.** A null round is the loop declining to number the
+ *   phase, and two unnumbered groups are not evidence of one round. Requiring
+ *   the number is the direction that leaves an older core drawing exactly what
+ *   it drew before.
+ *
+ * What the merged card gains is the whole question round: the answerer's turn,
+ * the revision it produced and the original draft all sit in one group, which is
+ * the shape the loop actually has.
+ */
+function reEntered(cycles: readonly Cycle[], phase: string, round: number | null): PhaseGroup | null {
+  if (round === null) return null;
+  let newest: PhaseGroup | null = null;
+  for (const cycle of cycles) {
+    for (const group of cycle.phases) {
+      if (newest === null || group.id > newest.id) newest = group;
+    }
+  }
+  if (newest === null) return null;
+  return newest.phase === phase && newest.round === round ? newest : null;
+}
+
+/**
  * Apply `f` to the most recently opened phase, wherever it sits.
  *
  * By `id` rather than by array position: cycles are stored in the order they
@@ -1279,16 +1333,25 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
         // narrate a turn ending, so the next thing starting is the signal - and
         // it is a true one, because turns within a run never overlap.
         const closed = endRunning(next, at);
+        const round = num(data['round']);
+        // Kept when a later phase carries none, rather than cleared: the base is
+        // established once, by the implement phase, and every phase after it
+        // diffs against the same commit.
+        const baseSha = str(data['baseSha']) ?? closed.baseSha;
+        // The same round re-entering the phase it is already in - a plan round
+        // revising against its own answers. One round, one group, and the
+        // group's `startedAt` stays where it was: a card is dated from when the
+        // round began, not from its second turn.
+        if (reEntered(closed.cycles, phase, round) !== null) {
+          return { ...closed, baseSha };
+        }
         return {
           ...closed,
-          // Kept when a later phase carries none, rather than cleared: the base
-          // is established once, by the implement phase, and every phase after
-          // it diffs against the same commit.
-          baseSha: str(data['baseSha']) ?? closed.baseSha,
+          baseSha,
           cycles: withPhase(closed.cycles, kind, {
             id: id(),
             phase,
-            round: num(data['round']),
+            round,
             startedAt: at,
             turns: [],
             gates: [],
@@ -1456,6 +1519,19 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
             { sha, since: str(data['since']), message: str(data['message']), at },
           ],
         };
+      }
+
+      /**
+       * A file the run just wrote (#223).
+       *
+       * Appended rather than de-duplicated: a plan round that answers its own
+       * questions rewrites `plan-<n>.json` in place, and the second write is
+       * exactly the event a pane holding the first one needs to hear about.
+       */
+      case 'artifact_written': {
+        const name = str(data['name']);
+        if (name === null) return next;
+        return { ...next, artifacts: [...next.artifacts, name] };
       }
 
       case 'verify_started': {
@@ -1896,24 +1972,14 @@ export function blocking(run: Run): number {
   return (latest.counts['P0'] ?? 0) + (latest.counts['P1'] ?? 0);
 }
 
-/**
- * The same count, for one judge (#223).
- *
- * **A badge has to name the tab it is on.** `blocking` answers *the latest round,
- * whichever judge produced it*, which was exactly right while there was one
- * Findings tab showing whichever judge spoke last. With the critique and the
- * review as separate panes it is wrong half the time: a critique's two P1s would
- * badge `Code review`, and the reader would open the pane and find nothing.
- *
- * `census.phase` is the loop's own label for which judge produced it - `plan`
- * from the critic, `review` from the reviewer - so this filters rather than
- * inferring anything from where the census landed.
+/*
+ * There was a `blockingIn(run, phase)` here and it is gone with the badge it was
+ * written for. `Plan critique · 2` meant two blocking findings and was read as
+ * two critiques - reasonably, because every other count in that bar is how many
+ * things are behind the tab. The fix is not a better badge: the four counts and
+ * the tolerance that decided them are already drawn on the round they belong to,
+ * which is the only place they mean anything specific.
  */
-export function blockingIn(run: Run, phase: Census['phase']): number {
-  const latest = [...run.censuses].reverse().find((c) => c.phase === phase);
-  if (latest === undefined) return 0;
-  return (latest.counts['P0'] ?? 0) + (latest.counts['P1'] ?? 0);
-}
 
 /**
  * What the running row can say, and what it cannot.

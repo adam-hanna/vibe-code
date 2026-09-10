@@ -161,8 +161,18 @@ const recorded = (a: RecordedAnswer): Parameters<typeof One>[0]['q'] => ({
 });
 
 /** An earlier round, read from its own file when its section opens. */
-function RecordedRound({ dir, runId, name }: { dir: string; runId: string; name: string }) {
-  const { read, failure, loading } = useArtifact(dir, runId, name);
+function RecordedRound({
+  dir,
+  runId,
+  name,
+  revision,
+}: {
+  dir: string;
+  runId: string;
+  name: string;
+  revision: number;
+}) {
+  const { read, failure, loading } = useArtifact(dir, runId, name, revision);
   const missing = noText(read, failure);
 
   if (loading && read === null && missing === null) {
@@ -207,12 +217,15 @@ export function QuestionsPane({
   questions,
   dir,
   runId,
+  revision = 0,
 }: {
   questions: Run['questions'];
   dir: string;
   runId: string | null;
+  /** How many artifacts the run has written, so a settled round appears (#223). */
+  revision?: number;
 }) {
-  const { entries } = useArtifacts(dir, runId);
+  const { entries } = useArtifacts(dir, runId, revision);
   // Every settled round, minus the one the wire is still describing: the loop
   // writes `answers-<n>.json` the moment the answerer's turn ends, so the live
   // round appears here too and drawing both would be one round twice.
@@ -261,7 +274,7 @@ export function QuestionsPane({
           title={round.round === null ? 'a question round' : `round ${String(round.round)}`}
           meta={<code className="v-doc__file">{round.name}</code>}
         >
-          <RecordedRound dir={dir} runId={runId ?? ''} name={round.name} />
+          <RecordedRound dir={dir} runId={runId ?? ''} name={round.name} revision={revision} />
         </Section>
       ))}
 

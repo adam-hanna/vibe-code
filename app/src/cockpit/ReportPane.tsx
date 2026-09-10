@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { MetaChip, SeverityChip, StateKicker } from '../design';
 import { Counts } from './Counts';
 import { Caret, Section } from './Disclosure';
@@ -263,14 +263,16 @@ function ReportBody({
   runId,
   name,
   census,
+  revision,
 }: {
   dir: string;
   runId: string;
   name: string;
   /** What the gate made of this round, or null when nothing narrated one. */
   census: Census | null;
+  revision: number;
 }) {
-  const { read, failure, loading } = useArtifact(dir, runId, name);
+  const { read, failure, loading } = useArtifact(dir, runId, name, revision);
   const missing = noText(read, failure);
 
   if (loading && read === null && missing === null) {
@@ -379,6 +381,7 @@ export function ReportPane({
   kind,
   rounds,
   openAt,
+  revision = 0,
 }: {
   dir: string;
   runId: string | null;
@@ -393,10 +396,21 @@ export function ReportPane({
    */
   rounds: readonly RoundCard[];
   openAt?: number | null;
+  /**
+   * How many artifacts the run has said it wrote (#223).
+   *
+   * The complaint this answers was exact: *"when plan critique round 1 finished
+   * I was already on the plan critique tab and it didn't automatically update"*.
+   * Every section here is read from disk, so the pane cannot know a round landed
+   * unless the run says so.
+   */
+  revision?: number;
 }) {
-  const { entries, failure, loading, reload } = useArtifacts(dir, runId);
+  const { entries, failure, loading, reload } = useArtifacts(dir, runId, revision);
   const reports = ofKind(entries, kind);
   const [open, setOpen] = useState<string | null>(null);
+  /** See `PlansPane`: the pane follows the run until the reader touches it. */
+  const touched = useRef(false);
   const words = WORDS[kind];
 
   // The census for a round, from the card that carries it. Matched on the
@@ -415,6 +429,7 @@ export function ReportPane({
       openAt === null || openAt === undefined
         ? null
         : (reports.find((r) => r.round === openAt)?.name ?? null);
+    if (wanted === null && touched.current) return;
     setOpen(wanted ?? latest(reports));
   }, [entries, openAt]);
 
@@ -466,7 +481,10 @@ export function ReportPane({
           id={report.round === null ? undefined : `${kind}-round-${String(report.round)}`}
           reveal={openAt !== null && openAt !== undefined && report.round === openAt}
           open={open === report.name}
-          onToggle={() => { setOpen((cur) => (cur === report.name ? null : report.name)); }}
+          onToggle={() => {
+            touched.current = true;
+            setOpen((cur) => (cur === report.name ? null : report.name));
+          }}
           title={
             report.round === null
               ? words.title
@@ -479,6 +497,7 @@ export function ReportPane({
             runId={runId}
             name={report.name}
             census={censusFor(report.round)}
+            revision={revision}
           />
         </Section>
       ))}

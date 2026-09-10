@@ -94,6 +94,7 @@ export function DiffPane({
   dir,
   baseSha,
   headSha,
+  revision = 0,
 }: {
   dir: string;
   baseSha: string | null;
@@ -109,6 +110,15 @@ export function DiffPane({
    * Undefined is `1d`'s original question: everything since the base.
    */
   headSha?: string | undefined;
+  /**
+   * Something changed at the far end, so ask again (#223).
+   *
+   * **Only the open-ended diff needs it.** A range with both ends named can
+   * never change - those two commits are in the history and stay what they were
+   * - but *everything since the base* grows every time a round commits, and
+   * without this it stayed whatever it was when the tab was opened.
+   */
+  revision?: number;
 }) {
   const [patch, setPatch] = useState<string | null>(null);
   const [truncated, setTruncated] = useState(false);
@@ -136,7 +146,7 @@ export function DiffPane({
         setFailure(null);
       })
       .catch((err: unknown) => setFailure(err instanceof Error ? err.message : String(err)));
-  }, [dir, baseSha, headSha]);
+  }, [dir, baseSha, headSha, revision]);
 
   useEffect(load, [load]);
 

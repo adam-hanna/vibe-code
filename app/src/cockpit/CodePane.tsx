@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { MetaChip, StateKicker } from '../design';
 import { DiffPane } from './DiffPane';
 import { Section } from './Disclosure';
@@ -53,6 +53,8 @@ export function CodePane({
   // tab during a fix round wants that round, and the newest section is it.
   const WHOLE = 'whole';
   const [open, setOpen] = useState<string>(WHOLE);
+  /** See `PlansPane`: the pane follows the run until the reader touches it. */
+  const touched = useRef(false);
 
   useEffect(() => {
     if (rounds.length === 0) return;
@@ -60,6 +62,7 @@ export function CodePane({
       openAt === null || openAt === undefined
         ? null
         : rounds.find((r) => r.round === openAt);
+    if (wanted === undefined && touched.current) return;
     const last = rounds[rounds.length - 1];
     setOpen((wanted ?? last)?.commit.sha ?? WHOLE);
     // Keyed on the commits rather than on `rounds`, which is rebuilt every
@@ -80,7 +83,10 @@ export function CodePane({
     <div className="v-doc">
       <Section
         open={open === WHOLE}
-        onToggle={() => { setOpen((cur) => (cur === WHOLE ? '' : WHOLE)); }}
+        onToggle={() => {
+          touched.current = true;
+          setOpen((cur) => (cur === WHOLE ? '' : WHOLE));
+        }}
         title="everything since the base"
         meta={
           run.baseSha === null ? (
@@ -90,7 +96,8 @@ export function CodePane({
           )
         }
       >
-        <DiffPane dir={dir} baseSha={run.baseSha} />
+        {/* The one diff in this pane that grows: every commit adds to it. */}
+        <DiffPane dir={dir} baseSha={run.baseSha} revision={run.commits.length} />
       </Section>
 
       {rounds.length === 0 && (
@@ -109,6 +116,7 @@ export function CodePane({
           reveal={openAt !== null && openAt !== undefined && card.round === openAt}
           open={open === card.commit.sha}
           onToggle={() => {
+            touched.current = true;
             setOpen((cur) => (cur === card.commit.sha ? '' : card.commit.sha));
           }}
           title={

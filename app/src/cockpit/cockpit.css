@@ -48,20 +48,136 @@
   min-height: 0;
 }
 
-/* 364px, fixed. The loop column earns its width; nothing else here does. */
+/*
+ * The loop column, now inside a `SidePanel` on the RIGHT (#223).
+ *
+ * The width is still 364px and it is still the one column that earns one; what
+ * moved is the edge and the ownership. `.v-side` holds the width, the ground and
+ * the rule now, because the runs pane on the left needs exactly the same three
+ * and two columns disagreeing about the width of a column is the kind of thing
+ * that is only visible with both open.
+ */
 .v-cockpit__loop {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/*
+ * `min-height: 0` is the whole of why the artifact panes would not scroll.
+ *
+ * Every one of them sets `flex: 1; min-height: 0; overflow-y: auto` on itself
+ * and none of it did anything, because a flex item's default `min-height` is
+ * `auto` — so this column grew to fit a nine-page plan instead of holding its
+ * height and letting the child scroll inside it. The column beside it had the
+ * line from the day it was written, which is why one side scrolled and the other
+ * did not.
+ */
+.v-cockpit__pane {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ---- the two side panels --------------------------------------------------- */
+
+/*
+ * One component, both edges (`SidePanel.tsx`). The runs pane and the loop column
+ * are standing context rather than work surfaces, and they share a width, a
+ * ground and a rule so that the window reads as three columns rather than as two
+ * different ideas either side of one.
+ */
+.v-side {
   width: 364px;
   flex: none;
   display: flex;
   flex-direction: column;
-  background: var(--surface-column);
-  border-right: 1px solid var(--rule-structure);
   min-height: 0;
+  background: var(--surface-column);
 }
 
-.v-cockpit__pane {
+.v-side--left {
+  border-right: 1px solid var(--rule-structure);
+}
+
+.v-side--right {
+  border-left: 1px solid var(--rule-structure);
+}
+
+/* Shut: a strip, never a gap. The way back is where the panel was. */
+.v-side--shut {
+  width: var(--dim-rail);
+}
+
+.v-side__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--rule-structure);
+  flex: none;
+}
+
+.v-side__title {
+  font: var(--type-label);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.v-side__toggle,
+.v-side__grip {
+  font: var(--type-label);
+  color: var(--text-tertiary);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: var(--space-1);
+}
+
+.v-side__toggle:hover,
+.v-side__grip:hover {
+  color: var(--text-emphasis);
+}
+
+.v-side__toggle:focus-visible,
+.v-side__grip:focus-visible {
+  outline: 2px solid var(--accent-solid);
+  outline-offset: 2px;
+}
+
+/* The whole strip is the control, so there is no small target to find. */
+.v-side__grip {
   flex: 1;
-  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) 0;
+}
+
+.v-side__mark {
+  font: var(--type-mono-sm);
+  color: var(--text-secondary);
+}
+
+/* Read down the strip rather than one letter per line: a rotated name is still
+   the name, and a stack of letters is a puzzle. */
+.v-side__vertical {
+  writing-mode: vertical-rl;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.v-side__body {
+  flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
 }
@@ -1304,7 +1420,24 @@
 
 /* ---- a section that opens -------------------------------------------------- */
 
+/*
+ * `flex: none` is what makes an opened section scrollable, and the reason is
+ * `overflow: hidden` two lines below it.
+ *
+ * A section is a flex item in `.v-doc`'s column. A flex item's automatic minimum
+ * size is normally its content, which is what stops it being squashed - but the
+ * spec resolves that minimum to **zero** when `overflow` is anything other than
+ * `visible`. So a section holding a nine-page plan shrank to whatever height was
+ * left and clipped the rest, and the pane never overflowed, so the pane never
+ * scrolled. Reported exactly that way: *"Plan Round 1 worked, however, it's not
+ * scrollable"*, and the same for critiques and code reviews, because all three
+ * are this component.
+ *
+ * The `overflow: hidden` stays - it is what clips the head's hover ground to the
+ * border - and this says the section keeps its content height regardless.
+ */
 .v-sect {
+  flex: none;
   border: 1px solid var(--rule-card);
   background: var(--surface-card);
   overflow: hidden;

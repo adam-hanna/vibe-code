@@ -455,6 +455,23 @@ describe('the question round belongs to the round it opened during', () => {
   test('a run that has asked nothing has no phase for it', () => {
     expect(questionsPhase(run({ cycles: [cycle()] }))).toBeNull();
   });
+
+  test('the card carries them too, so a merged round explains its second turn', () => {
+    // A plan round that answers its own questions is one card now, which means
+    // the card holds two planner turns and nothing else on it says why. The
+    // questions are that why, attached by the same `during()` a census uses -
+    // `questions_opened` carries the QUESTION round, which counts separately
+    // from the plan round a card is keyed by.
+    const cycles = planCycles(planRound(0, 1_000, [1, 2]), planRound(1, 10_000, [3, 4]));
+    const cards = rounds(run({ cycles, questions: asked(10_500) }));
+    const carrying = cards.filter((c) => c.questions !== null);
+    expect(carrying).toHaveLength(1);
+    expect(carrying[0]?.phaseId).toBe(3);
+    // And a round that opened before any phase attaches to no card at all,
+    // rather than to the first one it can find.
+    const early = rounds(run({ cycles, questions: asked(10) }));
+    expect(early.every((c) => c.questions === null)).toBe(true);
+  });
 });
 
 test('a phase this build does not know renders as itself', () => {

@@ -534,6 +534,18 @@
   padding-top: var(--space-2);
 }
 
+/* The question round, on the plan card it opened during. A row rather than a
+   column: it is chips and one link, and stacking three chips would give the
+   questions more vertical weight than the findings above them. */
+.v-round__questions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  border-top: 1px solid var(--rule-inner);
+  padding-top: var(--space-2);
+}
+
 .v-round__gate,
 .v-round__verdict,
 .v-round__more {
