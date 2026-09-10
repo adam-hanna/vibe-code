@@ -44,6 +44,35 @@ export function LivenessDot({ state }: { state: Liveness }) {
 }
 
 /**
+ * Three dots taking the pulse in turn, for a wait with nothing else to show.
+ *
+ * The gap the pilot had: between pressing send and the first token there is a
+ * card with no text, no model and no usage, and a two-word kicker was the whole
+ * of it - repeatedly read as a stall. Motion is what says the wait is being
+ * waited on.
+ *
+ * **It is a claim about this window, not about the turn.** All it proves is that
+ * the pane is still rendering; a vendor that has silently stopped answering
+ * waves exactly as busily as one that is composing. That is why every caller
+ * puts a measured elapsed beside it - the dots say *something is open*, the
+ * elapsed is the part a person can judge - and why nothing here counts, guesses
+ * a duration, or draws a proportion of anything.
+ *
+ * `aria-label` rather than the dots: three bullets are not a word, and a screen
+ * reader landing on them should hear what they mean. `role="status"` so it is
+ * announced when it appears and not focus-stealing.
+ */
+export function ThinkingWave({ label = 'working' }: { label?: string }) {
+  return (
+    <span className="v-wave" role="status" aria-label={label}>
+      <span className="v-wave__dot" />
+      <span className="v-wave__dot" />
+      <span className="v-wave__dot" />
+    </span>
+  );
+}
+
+/**
  * A proportion, never a severity.
  *
  * Never renders a bar at 0%: a zero-width fill and "we cannot measure this" look

@@ -107,6 +107,19 @@ export interface Reply {
    * watcher is switched on.
    */
   woke: string | null;
+  /**
+   * When this turn was opened, or null if nobody said (#211).
+   *
+   * Passed in rather than read here, because this module is pure and a clock is
+   * the one thing that would stop it being testable without a fake. The caller
+   * has a real `Date.now()` and this has the field.
+   *
+   * **Null is the honest answer, not a zero.** A reply reconstructed by a build
+   * older than this field has no start time, and the pane draws no elapsed
+   * rather than counting from the epoch - which would render as an eight-week
+   * wait on a turn that took four seconds.
+   */
+  startedAt: number | null;
 }
 
 /**
@@ -170,6 +183,7 @@ export function ask(
   content: string,
   turn: number,
   provider: Backend,
+  startedAt: number | null = null,
 ): Conversation {
   return follow(
     { ...conversation, messages: [...conversation.messages, { role: 'user', content }] },
@@ -177,7 +191,7 @@ export function ask(
     provider,
     // On the reply as well as in `messages`, because the two are read by
     // different things: the wire takes the message, and the pane takes this.
-    { asked: content },
+    { asked: content, startedAt },
   );
 }
 
@@ -201,7 +215,7 @@ export function follow(
    * and a fourth boolean-shaped parameter is how a call site eventually passes
    * one in the other's place.
    */
-  opened: { asked?: string | null; woke?: string | null } = {},
+  opened: { asked?: string | null; woke?: string | null; startedAt?: number | null } = {},
 ): Conversation {
   return {
     ...conversation,
@@ -215,6 +229,7 @@ export function follow(
       outcome: null,
       asked: opened.asked ?? null,
       woke: opened.woke ?? null,
+      startedAt: opened.startedAt ?? null,
     },
   };
 }
@@ -237,6 +252,7 @@ export function wake(
   reason: string,
   turn: number,
   provider: Backend,
+  startedAt: number | null = null,
 ): Conversation {
   return follow(
     { ...conversation, messages: [...conversation.messages, { role: 'user', content: reason }] },
@@ -245,7 +261,7 @@ export function wake(
     // `woke` and not `asked`: the message exists because a vendor needs
     // something to answer, and drawing it as something the person typed is the
     // one thing this function exists to avoid.
-    { woke: reason },
+    { woke: reason, startedAt },
   );
 }
 
@@ -290,6 +306,9 @@ export function refuse(
     // before it left the window still says what set it off - otherwise it draws
     // as the pilot failing spontaneously.
     woke,
+    // A turn that never started has no start. Null rather than the instant of
+    // the refusal, which would be a duration for a wait nobody had.
+    startedAt: null,
   };
   return {
     ...conversation,

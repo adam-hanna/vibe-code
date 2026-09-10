@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
-import { Button, MetaChip, StateKicker } from '../design';
+import { Button, MetaChip, StateKicker, ThinkingWave } from '../design';
+import { elapsed } from '../cockpit/format';
 import * as host from '../host';
 import * as keys from './keys';
 import * as pilot from './pilot';
@@ -130,9 +131,12 @@ function wakeReason(gate: NonNullable<Run['gate']>): string {
 }
 
 type Action =
-  | { type: 'ask'; content: string; turn: number; provider: Backend }
-  | { type: 'wake'; reason: string; turn: number; provider: Backend }
-  | { type: 'follow'; turn: number; provider: Backend }
+  // `openedAt` on all three, because all three open a turn and a turn's wait is
+  // the same wait however it was started. Carried on the action rather than read
+  // in `apply`, so the reducer stays a pure function of what it was handed.
+  | { type: 'ask'; content: string; turn: number; provider: Backend; openedAt: number }
+  | { type: 'wake'; reason: string; turn: number; provider: Backend; openedAt: number }
+  | { type: 'follow'; turn: number; provider: Backend; openedAt: number }
   | {
       type: 'refuse';
       content: string | null;
@@ -149,11 +153,11 @@ type Action =
 function apply(state: Conversation, action: Action): Conversation {
   switch (action.type) {
     case 'ask':
-      return ask(state, action.content, action.turn, action.provider);
+      return ask(state, action.content, action.turn, action.provider, action.openedAt);
     case 'wake':
-      return wake(state, action.reason, action.turn, action.provider);
+      return wake(state, action.reason, action.turn, action.provider, action.openedAt);
     case 'follow':
-      return follow(state, action.turn, action.provider);
+      return follow(state, action.turn, action.provider, { startedAt: action.openedAt });
     case 'refuse':
       return refuse(state, action.content, action.provider, action.message, action.woke);
     case 'event':
@@ -357,6 +361,28 @@ function TurnPrice({ reply }: { reply: Reply }) {
 }
 
 /**
+ * How long this turn has been open, on a card that has not settled (#211).
+ *
+ * **The part of the thinking indicator a person can actually judge.** The wave
+ * beside it says only that this window is still rendering — it would wave just
+ * as busily at a vendor that had silently stopped answering — so on its own it
+ * replaces one wrong impression with another. `4s` and `3m20s` are different
+ * situations, and the number is what tells them apart.
+ *
+ * Relative rather than absolute, which is the opposite of hi-fi 17's rule for a
+ * *settled* card, and for the reason that rule gives: a relative time is a claim
+ * that has to keep being true, and this one is re-rendered every second for
+ * exactly as long as it is. When the turn ends the whole element goes, so it
+ * never ages into a lie the way `last activity 5h39m ago` did.
+ *
+ * Absent, never zero, when the reply carries no start.
+ */
+function TurnElapsed({ startedAt, now }: { startedAt: number | null; now: number }) {
+  if (startedAt === null) return null;
+  return <span className="v-pilot__elapsed">{elapsed(Math.max(0, now - startedAt))}</span>;
+}
+
+/**
  * The pilot's own ceiling, set here and nowhere else (#145).
  *
  * **Two fields, both blank by default, and blank means no ceiling.** A hard
@@ -418,11 +444,21 @@ function ReplyCard({
   conversation,
   onDecide,
   busy,
+  now,
 }: {
   reply: Reply;
   conversation: Conversation;
   onDecide: (id: string, accepted: boolean, note: string) => void;
   busy: boolean;
+  /**
+   * The clock, passed in rather than read here.
+   *
+   * One ticking value for the whole pane: a card reading `Date.now()` itself
+   * would only re-render when something else made it, so the elapsed would
+   * freeze at whatever second the last token arrived - which is precisely the
+   * moment it starts mattering.
+   */
+  now: number;
 }) {
   const outcome = reply.outcome;
   return (
@@ -450,7 +486,21 @@ function ReplyCard({
             version, and the resolved one is the fact worth showing. Absent until
             the vendor says so, rather than filled in from the request. */}
         {reply.model !== null && <MetaChip kind="checkable">{reply.model}</MetaChip>}
-        {outcome === null && <StateKicker tone="accent">streaming</StateKicker>}
+        {/* **Three states, not one.** `streaming` was drawn from the instant the
+            turn opened, including for the whole wait before a single byte came
+            back — when nothing was streaming — and it is a two-word label with
+            no motion, which is what was being read as a stall.
+
+            `thinking` is the honest word for *sent, nothing back yet*; once
+            text is arriving the text itself is the evidence and the label says
+            so. The wave is on both, because both are open turns. */}
+        {outcome === null && (
+          <>
+            <ThinkingWave label={reply.text === '' ? 'thinking' : 'streaming'} />
+            <StateKicker tone="accent">{reply.text === '' ? 'thinking' : 'streaming'}</StateKicker>
+            <TurnElapsed startedAt={reply.startedAt} now={now} />
+          </>
+        )}
         {/* The vendor's own word — `end_turn`, `stop`, `max_tokens`, `length`.
             Not translated into a shared spelling, because a shared spelling
             would claim a shared meaning nobody has established. */}
@@ -617,6 +667,25 @@ export function PilotPane({
    * looking*, and only the reader can move that.
    */
   const log = useFollow<HTMLDivElement>();
+  /**
+   * The clock behind the elapsed on an open turn (#211).
+   *
+   * **It ticks only while one is open.** A conversation sitting idle re-renders
+   * for nothing otherwise, and there is nothing on a settled card that a second
+   * passing changes — every measurement on one is fixed at the moment it ended.
+   * `conversation.live` is the condition for the same reason it is the condition
+   * for drawing the wave: they are the same claim.
+   */
+  const [now, setNow] = useState(() => Date.now());
+  const open = conversation.live !== null;
+  useEffect(() => {
+    if (!open) return;
+    setNow(Date.now());
+    const tick = setInterval(() => setNow(Date.now()), 1000);
+    return () => {
+      clearInterval(tick);
+    };
+  }, [open]);
 
   // Two refs rather than state, because neither is drawn and both must survive
   // StrictMode's double-invoked effects without causing a render.
@@ -776,6 +845,18 @@ export function PilotPane({
        */
       woke: string | null = null,
     ) => {
+      /**
+       * When the wait started, taken **here** rather than when the request
+       * resolves (#211).
+       *
+       * The turn does not get an id until `pilotTurn`/`send` comes back, and on
+       * the subscription path that is a `claude` child being spawned - seconds
+       * that are part of the wait a person is sitting through. Stamping the
+       * card at the resolution would restart the count from zero after the
+       * slowest bit, which is the opposite of what the number is for.
+       */
+      const openedAt = Date.now();
+
       // The subscription path. It does not go through Rust at all: the host
       // spawns `claude -p` with the closed read-only allow-list `pilotchat.ts`
       // builds, so there is no key to have and nothing to bill.
@@ -803,9 +884,10 @@ export function PilotPane({
           .then((turn) => {
             hostTurn.current = turn;
             setLive(turn);
-            if (said === null) dispatch({ type: 'follow', turn, provider });
-            else if (woke !== null) dispatch({ type: 'wake', reason: woke, turn, provider });
-            else dispatch({ type: 'ask', content: said, turn, provider });
+            if (said === null) dispatch({ type: 'follow', turn, provider, openedAt });
+            else if (woke !== null)
+              dispatch({ type: 'wake', reason: woke, turn, provider, openedAt });
+            else dispatch({ type: 'ask', content: said, turn, provider, openedAt });
           })
           .catch((err: unknown) =>
             dispatch({
@@ -832,9 +914,9 @@ export function PilotPane({
         .send({ provider, model, messages, tools: declare(), system: systemPrompt(run, launched) })
         .then((turn) => {
           setLive(turn);
-          if (said === null) dispatch({ type: 'follow', turn, provider });
-          else if (woke !== null) dispatch({ type: 'wake', reason: woke, turn, provider });
-          else dispatch({ type: 'ask', content: said, turn, provider });
+          if (said === null) dispatch({ type: 'follow', turn, provider, openedAt });
+          else if (woke !== null) dispatch({ type: 'wake', reason: woke, turn, provider, openedAt });
+          else dispatch({ type: 'ask', content: said, turn, provider, openedAt });
         })
         .catch((err: unknown) =>
           dispatch({
@@ -1106,6 +1188,7 @@ export function PilotPane({
             conversation={conversation}
             busy={live !== null}
             onDecide={onDecide}
+            now={now}
           />
         ))}
         {conversation.live !== null && (
@@ -1114,6 +1197,7 @@ export function PilotPane({
             conversation={conversation}
             busy
             onDecide={onDecide}
+            now={now}
           />
         )}
       </div>

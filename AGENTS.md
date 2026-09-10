@@ -166,6 +166,29 @@ Two rules the cockpit inherits from the design and must not quietly drop:
   read `5h39m ago` about a turn that took a minute. `clock()` beside `elapsed()` is the pair,
   and `runningRow` carries `lastBeatAt` and `endedAt` **beside** `quietMs` rather than instead
   of it, because a live card wants the relative form and a settled one cannot have it.
+- **The pilot's open turn waves, and it is still one animation.** *"Exactly one element on
+  screen pulses"* is the rule above, and the corpus lists the pilot chat's live round card
+  among the screens allowed to — but between pressing send and the first token that card has
+  no text, no model and no usage, so all it drew was a two-word kicker, and a manual pass
+  reported it as a stall more than once. `ThinkingWave` is three dots taking **`v-pulse`** —
+  the one keyframe this system has — at three offsets, so the count of animations does not
+  change and reduced motion is inherited rather than re-handled: at `--wave-duration: 0s` the
+  dots simply stand still, and the indicator is drawn only while a turn is open, so its
+  presence was always the claim and the motion only ever the emphasis. It needs a second
+  duration because 2.4s is chosen for a dot glanced at every few minutes, and at that period a
+  wave reads as three dots fading independently rather than one thing moving.
+
+  Two things travel with it, and the first is the one that matters. **The wave is a claim
+  about the window, not about the turn** — a vendor that had silently stopped answering waves
+  exactly as busily as one composing — so it never appears without a measured elapsed beside
+  it, which is the half a person can judge. That elapsed is stamped **when the request is
+  made**, not when it resolves: a turn has no id until `pilotTurn` comes back, and on the
+  subscription path that is a `claude` child being spawned, so stamping at the resolution
+  would restart the count from zero after the slowest part of the wait. `Reply.startedAt` is
+  `number | null` and `transcript.ts` stays pure — the clock is passed in — so a reply from a
+  build older than the field draws no elapsed rather than counting from the epoch. And
+  `streaming` was being drawn from the instant the turn opened, including for the whole wait
+  when nothing was streaming; empty text is now `thinking`, which is the honest word for it.
 - **Every way a run can end has a phrase, and they are not eight flavours of failure.** The
   footer maps each of the eight exit codes to one sentence, and a code this build does not
   know renders as the number rather than as a phrase invented for it. Two of them must never

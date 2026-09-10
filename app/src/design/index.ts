@@ -9,5 +9,13 @@ export { SeverityChip, StateKicker, MetaChip } from './Chips';
 export type { Severity } from './Chips';
 export { Button, Field, Stepper, Radio, Checkbox, Segmented } from './Controls';
 export { Card, Banner, Modal, Table } from './Surfaces';
-export { Tabs, LivenessDot, Bar, DiffRow, HunkHeader, TruncationBand } from './Indicators';
+export {
+  Tabs,
+  LivenessDot,
+  ThinkingWave,
+  Bar,
+  DiffRow,
+  HunkHeader,
+  TruncationBand,
+} from './Indicators';
 export type { Liveness } from './Indicators';

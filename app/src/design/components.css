@@ -497,6 +497,41 @@
   border: 1px dashed var(--rule-strong);
 }
 
+/* ================================================================ 12b · thinking wave
+ * Three dots taking the same `v-pulse` in turn (#211).
+ *
+ * **The one animation, at three offsets** - not a second keyframe. That is what
+ * keeps `base.css`'s "the one animation" heading true, and it is also why the
+ * wave inherits reduced-motion for free: at `--wave-duration: 0s` the three dots
+ * simply stand still and the indicator still says what it says.
+ *
+ * Sized off `--dim-liveness-dot` rather than a number of its own, because these
+ * are the same dot doing a different job and two sizes would have to be kept in
+ * step by somebody remembering to.
+ */
+.v-wave {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: none;
+}
+.v-wave__dot {
+  width: var(--dim-liveness-dot);
+  height: var(--dim-liveness-dot);
+  border-radius: 50%;
+  background: var(--accent-solid);
+  animation: v-pulse var(--wave-duration) ease-in-out infinite;
+}
+/* A third of the period each, so the trough travels along the row once per
+ * cycle - the stadium wave. Even spacing is the whole effect: any other offset
+ * reads as three dots blinking at each other. */
+.v-wave__dot:nth-child(2) {
+  animation-delay: calc(var(--wave-duration) / 3);
+}
+.v-wave__dot:nth-child(3) {
+  animation-delay: calc(var(--wave-duration) / 3 * 2);
+}
+
 /* ================================================================ 13 · diff row */
 .v-diff {
   font: var(--type-mono);

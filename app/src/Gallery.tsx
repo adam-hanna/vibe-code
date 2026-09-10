@@ -18,6 +18,7 @@ import {
   Stepper,
   Table,
   Tabs,
+  ThinkingWave,
   TruncationBand,
 } from './design';
 
@@ -193,6 +194,18 @@ export function Gallery() {
             <span className="v-body-sm">waiting on you · not stalled</span>
             <LivenessDot state="absent" />
             <span className="v-body-sm">pid 48213 · cannot tell</span>
+          </Row>
+          <Row>
+            <ThinkingWave label="thinking" />
+            <span className="v-body-sm">
+              thinking · the same pulse at three offsets, so this is still one animation
+            </span>
+          </Row>
+          <Row>
+            <span className="v-body-sm v-quiet">
+              It claims only that this window is rendering — a vendor that had stopped answering
+              would wave just as busily — so every caller puts a measured elapsed beside it.
+            </span>
           </Row>
         </Section>
 

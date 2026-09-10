@@ -247,6 +247,22 @@
    * between phases, no sliding panels, no skeleton shimmer.
    */
   --pulse-duration: 2.4s;
+  /*
+   * A second duration, and deliberately not a second animation (#211).
+   *
+   * The pilot's thinking indicator is three dots taking `v-pulse` in turn - the
+   * one keyframe this system has, run at three offsets, which is why "one pulse"
+   * still describes the whole of it. What it cannot share is the period: 2.4s is
+   * chosen for a dot that says *a run is still alive* and is read at a glance
+   * every few minutes, and at that speed a wave reads as three dots fading
+   * independently rather than as one thing moving.
+   *
+   * The reason it exists at all is a report, not a preference: a turn between
+   * pressing send and the first token drew a two-word kicker and nothing else,
+   * and was repeatedly read as stalled. Motion is what says the wait is being
+   * waited on; the elapsed beside it is what says how long for.
+   */
+  --wave-duration: 1.2s;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -254,5 +270,9 @@
     /* The pulse becomes a static filled dot, which loses nothing - the label
      * beside it already says `live - updated 2s ago`. */
     --pulse-duration: 0s;
+    /* And the wave becomes three solid dots. Also nothing lost: the indicator
+     * is drawn only while a turn is open, so its presence is the claim and the
+     * motion was only ever the emphasis. The elapsed still counts. */
+    --wave-duration: 0s;
   }
 }

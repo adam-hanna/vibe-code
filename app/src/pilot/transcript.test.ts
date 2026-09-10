@@ -81,6 +81,68 @@ describe('what you typed is on the turn it opened', () => {
   });
 });
 
+describe('an open turn says it is open, and for how long (#211)', () => {
+  /**
+   * The report this answers: between pressing send and the first token there
+   * was a two-word kicker and nothing else, and it was repeatedly read as a
+   * stall. The fix is a wave plus an elapsed - and the elapsed is the half that
+   * can be wrong, so it is the half with cases.
+   */
+
+  test('every way a turn opens carries when it opened', () => {
+    // All three, because a wait is the same wait however it started - and the
+    // subscription path's `follow` is the one that opens with no text at all,
+    // which is exactly the card with nothing else on it to look at.
+    const at = 1_700_000_000_000;
+    expect(ask(emptyConversation(), 'hello', 1, 'anthropic', at).live?.startedAt).toBe(at);
+    expect(wake(emptyConversation(), 'a gate', 2, 'anthropic', at).live?.startedAt).toBe(at);
+    expect(follow(emptyConversation(), 3, 'anthropic', { startedAt: at }).live?.startedAt).toBe(at);
+  });
+
+  test('a caller that does not say gets null, never a zero', () => {
+    // The absence rule on a duration. Zero would render as an elapsed counted
+    // from 1970 - an eight-week wait on a turn that took four seconds - and it
+    // is also what every reply made by a build older than this field has.
+    expect(ask(emptyConversation(), 'hello', 1, 'anthropic').live?.startedAt).toBeNull();
+    expect(follow(emptyConversation(), 2, 'anthropic').live?.startedAt).toBeNull();
+  });
+
+  test('a turn that never started has no start', () => {
+    // `refuse` is the one outcome that never reaches the wire. Stamping it with
+    // the instant of the refusal would put a duration on a wait nobody had.
+    const at = 1_700_000_000_000;
+    const refused = refuse(emptyConversation(), 'do the thing', 'anthropic', 'no key');
+    expect(refused.replies[0]?.startedAt).toBeNull();
+    expect(refused.replies[0]?.startedAt).not.toBe(at);
+  });
+
+  test('the start survives every delta, and the settled reply keeps it', () => {
+    // The elapsed ticks for as long as the turn is open, so the field has to
+    // survive `reduce` - a spread that dropped it would show the counter
+    // vanishing the moment the first token landed, which is the worst possible
+    // second for it to go.
+    const at = 1_700_000_000_000;
+    let conversation = ask(emptyConversation(), 'hello', 1, 'anthropic', at);
+    conversation = reduce(conversation, { kind: 'text', turn: 1, delta: 'hi' });
+    expect(conversation.live?.startedAt).toBe(at);
+    conversation = reduce(conversation, { kind: 'ended', turn: 1, stop: 'end_turn' });
+    expect(conversation.replies[0]?.startedAt).toBe(at);
+  });
+
+  test('what the pane calls it depends on whether anything has come back', () => {
+    // `streaming` was drawn from the instant the turn opened, including for the
+    // whole wait before a single byte - when nothing was streaming. The text
+    // being empty is the whole of the distinction, and it is asserted here
+    // rather than in a component because it is the claim, not the markup.
+    const opened = ask(emptyConversation(), 'hello', 1, 'anthropic', 1);
+    expect(opened.live?.text).toBe('');
+    expect(opened.live?.outcome).toBeNull();
+    const streaming = reduce(opened, { kind: 'text', turn: 1, delta: 'once' });
+    expect(streaming.live?.text).not.toBe('');
+    expect(streaming.live?.outcome).toBeNull();
+  });
+});
+
 describe('a turn the run caused is not a turn somebody typed', () => {
   test('the reason reaches the model as the message and the reader as the kicker', () => {
     // One sentence for both, so the message being answered and the label above
@@ -501,6 +563,11 @@ describe('propose only, enforced by the data rather than by a component (#144)',
           // around it.
           asked: 'and another thing',
           woke: null,
+          // Null rather than a time: this fixture is a turn that has already
+          // ended, and nothing here is about how long it took. It also stands
+          // for the replies every build before #211 produced, none of which
+          // carry one.
+          startedAt: null,
         },
       ],
     };

@@ -396,6 +396,16 @@
 /* The per-turn estimate, beside the counts it was computed from and never
    instead of them: the tokens are what the vendor said and the dollars are what
    this build worked out, so a reader can check one against the other. */
+/* How long an open turn has been open (#211). Monospace and tabular, because it
+   re-renders every second and proportional digits make the whole meta row jump
+   sideways on each tick - motion that means nothing, on the one card where the
+   motion is supposed to mean something. */
+.v-pilot__elapsed {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+
 .v-pilot__price {
   color: var(--text-secondary);
 }
