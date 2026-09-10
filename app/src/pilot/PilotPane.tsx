@@ -621,8 +621,12 @@ export interface PilotPaneProps {
    * card is a **summary** - the prose lives in the round's artifact and behind
    * the pane built for it. Optional, and a card drawn without it simply omits
    * the link rather than drawing a control that does nothing.
+   *
+   * The **round** travels with the tab (#223): a card summarises one round, so a
+   * link that opened the pane at whichever round was newest would be the wrong
+   * one every time but the last.
    */
-  onOpen?: (tab: string) => void;
+  onOpen?: (tab: string, round?: number | null) => void;
 }
 
 export function PilotPane({

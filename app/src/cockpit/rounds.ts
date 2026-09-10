@@ -1,4 +1,13 @@
-import type { Census, CycleKind, PhaseGroup, Run, Turn, VerifyPass, Work } from './model';
+import type {
+  Census,
+  Commit,
+  CycleKind,
+  PhaseGroup,
+  Run,
+  Turn,
+  VerifyPass,
+  Work,
+} from './model';
 
 /**
  * A round, as one card (hi-fi 5, #223).
@@ -96,6 +105,20 @@ export interface RoundCard {
   verify: VerifyPass | null;
   /** What the gate made of this round's findings, or null. `1e` has the detail. */
   census: Census | null;
+  /**
+   * What this round committed, or null (#223).
+   *
+   * By arrival, exactly as a census is, and for a sharper version of the same
+   * reason: a commit carries no round at all. What it carries is the pair of
+   * shas that bound it, which is the whole of what a per-round diff needs — so
+   * the round is supplied by *when it landed* and the range by the commit
+   * itself, and neither is inferred from the other.
+   *
+   * Null on a round that changed nothing, on a run with commits switched off,
+   * and on a directory that is not a repository. The pane says the common part
+   * rather than choosing between three reasons it was not told.
+   */
+  commit: Commit | null;
 }
 
 /** The work reading a round ends on: the latest one any of its turns reported. */
@@ -182,6 +205,7 @@ export function rounds(run: Run): readonly RoundCard[] {
     work: lastWork(phase.turns),
     verify: null,
     census: null,
+    commit: null,
   }));
 
   // Attached after the cards exist, so `during` indexes the same order a reader
@@ -200,7 +224,34 @@ export function rounds(run: Run): readonly RoundCard[] {
     const card = cards[i];
     if (card !== undefined) cards[i] = { ...card, census };
   }
+  for (const commit of run.commits) {
+    const i = during(starts, commit.at);
+    const card = cards[i];
+    // The latest wins a round that committed twice, which no path in the loop
+    // does today - `maybeCommit` runs once per round boundary. Written the same
+    // way a verification pass is, so a second commit in a round would behave
+    // like a second pass rather than silently making the first one the answer.
+    if (card !== undefined) cards[i] = { ...card, commit };
+  }
   return cards;
+}
+
+/**
+ * Every round that committed, oldest first — the Code tab's list.
+ *
+ * **Keyed off the commit rather than off the phase**, which is what keeps it
+ * honest about the two ways a code round can leave nothing behind. A round that
+ * ran and changed nothing has a card and no commit; a run with commits switched
+ * off has cards and no commits at all. Neither is a round the Code tab can show
+ * a diff for, and this returns what it can rather than a list of rounds half of
+ * which produce an empty pane when clicked.
+ */
+export function committed(run: Run): readonly (RoundCard & { commit: Commit })[] {
+  const out: (RoundCard & { commit: Commit })[] = [];
+  for (const card of rounds(run)) {
+    if (card.commit !== null) out.push({ ...card, commit: card.commit });
+  }
+  return out;
 }
 
 /**

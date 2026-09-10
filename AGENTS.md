@@ -358,6 +358,15 @@ and the state its escalation is about. A fourth is `reproducer` on `findings_rep
 could not tell *a claim nobody could check* from *a claim nobody tried to check* — hi-fi 9's
 third case, and the only one of its five that was genuinely missing.
 
+A fifth is **`round_committed`** (#223). `maybeCommit` has always printed `Committed abc1234`
+and the sha has always reached the checkpoint's own meta; what had no id was the **pair** of
+shas, so nothing watching a run could show what one round changed while the run was going. It
+carries `since` as well as `sha`, and `since` is read from HEAD *before* the commit — the
+alternative a host is otherwise left with is pairing consecutive commits in narration order,
+which is a derivation that goes silently wrong the first time a run is resumed and the earlier
+commits were narrated to a process that has exited. Null `since` is a first commit in a
+repository that had none, which is a real range and not a missing field.
+
 The move is a **promotion, never an invention**, and `recordAndSay`'s own rule is what makes
 it safe: *"narration never creates an event."* The durable set is exactly what `recordEvent`
 records, so turning `recordEvent` + `log.*` into one `recordAndSay` adds nothing to
@@ -375,15 +384,15 @@ event type**, never a name of its own: `applyCharge` narrates under `claude_turn
 `codex_turn`, the same string it just recorded, so a host acting on the fact and an archive
 holding it agree about one fact rather than two spellings of it.
 
-**Three frames are reads, and a read runs beside a run** (#223). `archive`, `config` and
-`diff` answer a question rather than describing something that happened, which is a shape
-the wire did not have — every other outbound frame is pushed. They are exempt from
-`serve.ts`'s one-at-a-time rule for a stronger reason than the pilot is: that rule exists
+**Five frames are reads, and a read runs beside a run** (#223). `archive`, `config`, `diff`,
+`artifacts` and `artifact` answer a question rather than describing something that happened,
+which is a shape the wire did not have — every other outbound frame is pushed. They are exempt
+from `serve.ts`'s one-at-a-time rule for a stronger reason than the pilot is: that rule exists
 because two *runs* would interleave their narration, and `listRuns` is documented as never
 throwing and never writing. A second `invoke` is still refused, which is what keeps the
 exemption honest.
 
-Three things about them are load-bearing:
+Five things about them are load-bearing:
 
 - **A config *write* is refused during a run, and a read is not.** A run reads
   `vibe.config.json` once, at the top of `main`, so saving mid-run cannot affect the run in
@@ -400,6 +409,52 @@ Three things about them are load-bearing:
   — and nobody could tell which values were chosen from which were merely observed. Both
   travel on the frame for that reason. It runs the same pipeline `loadConfig` runs and writes
   only if the whole candidate validates, so a refusal leaves the file exactly as it was.
+- **A `diff` that names both ends is one round; one that names only its base is the whole
+  change.** `headSha` is optional and the two are different questions, so the frame says which
+  is being asked rather than defaulting into either. It takes `diffRange`, which runs exactly
+  one command and answers an empty round emptily — `diffSince`'s fallbacks are written to hand
+  the *reviewer* something, and a round that changed nothing answered with the working tree
+  would show a person their own edits under a round's label.
+- **`artifact` names a run and then a file inside it, so it has a containment story the other
+  three do not need.** `assertUsableRunId` closes the first and `isArtifactBasename` the
+  second, both refusing rather than repairing, and the refusal reaches the sender as an
+  `error` frame naming what it refused — an empty read would be indistinguishable from a file
+  that is not there, and those need opposite responses. `linkedArtifactReason` runs before
+  anything reads through the path, which is #53's rule, and the three-answer `ArtifactRead`
+  travels whole so a pane can say *this was never written* rather than *this could not be
+  read*.
+
+**The window predicts no filename, and `artifacts` is why that was possible** (#223). Four
+tabs — Plans, Plan critique, Code review and Code — draw a run's own artifacts, and the
+dangerous shape they could have taken is composing `plan-${round}.json` from a round number
+the column already has. That is a copy of the loop's naming convention living in a process
+that cannot be kept in step with it, and it fails *silently*: a renamed artifact does not
+throw, it shows an empty tab, which is the failure nobody reports because it looks like a run
+that has not got there yet.
+
+So the listing is asked for and `app/src/cockpit/artifacts.ts` only **classifies what came
+back**. The patterns are still a duplicate of the core's naming and are still not shared — the
+app and the core are two packages, exactly as with `app/src/cockpit/raise.ts` — and what makes
+that safe is the same thing: `artifacts.test.ts` reads `src/orchestrator.ts` as source and
+fails on the commit that renames one. A name it does not recognise is `other` and is still
+listed, because the loop is free to write an artifact this build has never heard of and the
+honest drawing of one is its own name.
+
+**Two tabs went, and each showed strictly less than what replaced it.** `Findings` was one
+round of whichever judge spoke last, drawn from the four counts and a title the wire carries —
+so a reader asking *why did the loop fix again* got half the evidence and no way to reach the
+rest, because the detail and the suggested fix are in the artifact and a frame carrying every
+finding in full would put a review's whole report on the wire every round. `Diff` showed one
+cumulative diff, which is the right answer to *what has this changed* and cannot answer *what
+did the fix round do*. Both questions still have a home: the second is `Code`'s first section,
+still first and still what it opens on before any round has committed.
+
+What the two panes must keep between them is the split over **where a fact lives**. A round's
+`code-review-<n>.json` is deliberately not rewritten when a severity moves (#142), so the file
+has the prose and the census has what happened to the finding afterwards — the reproducer
+outcomes and the severity history. `ReportPane` reads both and matches them on the finding id;
+a pane reading only one of them would be missing half, and which half depends on which round
+you opened.
 
 **A human finding still has no host frame, and the diff pane is what that looks like built.**
 `1d`'s composer fills in `src/raise.ts`'s block — the citation taken from the hunk, so the
@@ -552,6 +607,12 @@ app/src/design/AUDIT.md    the built app walked against all fourteen hi-fi frame
 app/src/cockpit/rounds.ts  a round as one card, and which round a thing arrived during
 app/src/cockpit/Counts.tsx the four severity counts, and the one place they are a control
 app/src/cockpit/squares.ts the rail's squares: two letters, and what gets one at all
+app/src/cockpit/artifacts.ts what a run wrote: classifying a listing, and reading a report
+app/src/cockpit/useArtifacts.ts asking the host for a listing, and for one file when it opens
+app/src/cockpit/Disclosure.tsx the one section-that-opens, at every level it appears
+app/src/cockpit/PlansPane.tsx  every version of the plan, one section per round
+app/src/cockpit/ReportPane.tsx a judge's own report - the critique and the review, one screen
+app/src/cockpit/CodePane.tsx   what each round changed, from the range its commit carries
 app/src/pilot/log.ts       rounds and conversation in one scroll, and who may reorder whom
 app/src/Gallery.tsx  every component in every state - the design system's acceptance test
 app/src/host.ts      the webview's end of the wire: typed frames, and nothing re-derived
@@ -744,6 +805,45 @@ Four things about it are load-bearing:
   the sentence people learn to click through; a token figure is checkable. A **Codex** turn
   killed mid-flight reports no usage at all, so that row says the spend is unknown and why
   rather than showing `0 tok`.
+
+**A question round is not a plan round, and the loop column said so before the core did**
+(#223). `revisePlan` advanced `state.planRound` on every revision, so a plan revised because
+it answered the planner's *own* questions was counted as a round of the convergence loop — and
+the report was exact: *"plan round 0 has a critique, then plan round 1 asked questions, and
+when those questions were answered it moved to plan round 2."* The column's own question panel
+has read *"a question round produces no critique, so it cannot advance the plan round"* since
+it was drawn; the core disagreed with its own screen.
+
+It was never only a renumbering. `guardProgress` measures `planRound` against
+`loop.maxPlanRounds`, so **every question round spent one of the rounds the run had for
+disagreeing with the critic** — a run allowed five plan rounds and asking three rounds of
+questions had two critiques left, and nothing said so. `loop.maxQuestionRounds` already caps
+that loop and is the cap that should.
+
+`advancesRound` is the one-line rule: a revision answering **findings** is the producer's side
+of the next round, because something judged version N and this is version N+1; a revision
+answering **answers** is not, because nothing judged anything. Three things travel with it:
+
+- **The answerer's turn is keyed by the question round now.** `answers-<planRound>.json` could
+  only ever be unique because every question round advanced the plan round, so fixing the one
+  broke the other: two question rounds under one plan round both wrote `answers-0.json` and
+  the second silently replaced the first. The question round is monotonic for the whole run
+  and is the counting the turn actually belongs to, so the first is `answers-1`. A
+  non-advancing revision is labelled `revise-q<n>` for the same reason.
+- **`plan-<n>.json` is the plan of record for round n**, which is the version the critic
+  judges — so a non-advancing revision replaces it and `refusePlaceholderPlan` goes on citing a
+  file whose contents are the ones it read. What that costs is the draft that raised the
+  questions, stated rather than hidden: the questions and the answers that changed it are both
+  durable in `answers-<question-round>.json`, which is the half a reader is actually asking
+  about.
+- **The checkpoint is named for the boundary it crossed**, so a question round leaves two
+  `question-round` snapshots rather than a `question-round` and a `plan-round`. Two in a row is
+  the honest shape — both are inside one question round, and the second is the only snapshot
+  carrying the revised plan, which is what stops a fork buying that planner turn twice. It
+  does not hold: the caller held at `question-round` a moment earlier with this round's
+  questions attached, and the one path that reaches it without a hold in front of it is the
+  resume consuming `NEEDS-INPUT.md`, where halting again before running anything is a resume
+  that did not resume.
 
 **`vibe plan` is deliberately not a row.** #140 asked for `planOnly` to resolve to
 `gates['plan-approved'] = 'stop'`; it does not, because they are two different things rather
@@ -1296,6 +1396,23 @@ than the module (`convergence.test.ts`, `failure-accounting.test.ts`,
   `commit` is deliberately outside it — and a retry that fires **says so on stderr**, because
   a suite that went green because of one has to admit it. Note the direction this points:
   `commitAll` already tolerates a git failure, so the harness was stricter than the product.
+- **A test that starts a process which never exits must stop it in a hook, not at the end of
+  the body.** `command-runner.test.ts` slept a fixed 120ms and then asserted its child had
+  ticked. Under the full suite — which spawns around a hundred children — that is not enough
+  for `node -e` to boot, so the assertion failed; and because the `stopCommand` was the last
+  line of the body, a failure skipped it. The live child then kept that file's event loop
+  alive, so **an ordinary assertion failure arrived as a hang with the real failure buffered
+  behind it**, and the whole suite sat there. It cost three cycles before anybody read the
+  process tree, and both times before that it was written off as a teardown race.
+
+  Two rules come out of it and they are the same two the bullets above already state. The wait
+  is a **poll with a deadline** that says which way it failed — *ended before it wrote* and
+  *wrote nothing within* are different findings — because a fixed sleep is a guess about the
+  machine, made while ninety-nine other children are starting. And the cleanup is `t.after`,
+  which runs whatever happened, including a throw from the spawn itself. Diagnosing it is
+  `Get-CimInstance Win32_Process -Filter "ParentProcessId=<runner>"`: a runner with one live
+  child that has a live grandchild is this shape, and killing the grandchild releases the
+  buffered failure immediately, which is how it was confirmed rather than guessed.
 
 The phase loop **is** drivable from a test: `tests/helpers/loop-harness.ts` runs `orchestrate`
 end to end with injected agents that record every turn's label in order, a run state in a

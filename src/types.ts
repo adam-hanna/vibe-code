@@ -1852,6 +1852,42 @@ export interface RunState {
   extraContext: string | null;
 }
 
+/**
+ * What is at an artifact's name: its text, nothing usable, or a link.
+ *
+ * Three answers rather than two, and the third exists for the distinction #53
+ * drew and #102 kept: `absent` says a file was opened and could not be used,
+ * `linked` says vibe never looked inside it. A caller that narrates must be able
+ * to tell a reader which of those happened, and a reader must never be told a
+ * file was unreadable when it was never read.
+ *
+ * Here rather than in `run.ts` beside `readArtifact`, because `protocol.ts`
+ * carries one on a frame and that file is a leaf on purpose: the vocabulary two
+ * processes agree on should not have to import the loop to be read.
+ */
+export type ArtifactRead =
+  | { kind: 'text'; text: string }
+  | { kind: 'absent' }
+  | { kind: 'linked'; reason: string };
+
+/**
+ * One entry in a run directory, as `lstat` classified it.
+ *
+ * `kind` rather than a filter, because a run directory legitimately holds things
+ * that are not files - `gate-artifacts-<n>/` is a directory #111 writes - and an
+ * entry silently missing from a listing reads as an artifact that was never
+ * produced. A link is reported as one for the same reason `readArtifact` refuses
+ * rather than following: vibe never creates one, so its presence is the finding.
+ *
+ * `bytes` is null for anything but a plain file. A size for a thing that has no
+ * meaningful size is a number nobody measured.
+ */
+export interface RunArtifact {
+  name: string;
+  kind: 'file' | 'directory' | 'link' | 'unknown';
+  bytes: number | null;
+}
+
 export interface RunSummary {
   id: string;
   status: string;

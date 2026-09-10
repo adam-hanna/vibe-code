@@ -174,6 +174,55 @@ export interface DiffFrame {
 }
 
 /**
+ * What is at an artifact's name (#223).
+ *
+ * **Three answers, kept whole.** `absent` says a file was opened and could not
+ * be used; `linked` says vibe never looked inside it, because it is a symlink or
+ * a junction and vibe writes neither. Collapsing them into a nullable string
+ * would tell a reader a file was unreadable when it was never read, which is the
+ * distinction #53 drew and #129 kept.
+ */
+export type ArtifactRead =
+  | { kind: 'text'; text: string }
+  | { kind: 'absent' }
+  | { kind: 'linked'; reason: string };
+
+/** One entry in a run's directory, as `lstat` classified it. */
+export interface ArtifactEntry {
+  name: string;
+  kind: 'file' | 'directory' | 'link' | 'unknown';
+  /** Null for anything but a plain file: a size nobody measured is not a zero. */
+  bytes: number | null;
+}
+
+/**
+ * What a run's directory holds (#223).
+ *
+ * **This is what stops the window predicting filenames.** Drawing a plan round's
+ * plan means naming a file, and the alternative to being told is composing
+ * `plan-${round}.json` here — a copy of the loop's naming convention, living in
+ * a process that cannot be kept in step with it, going stale on the release that
+ * renames one. `listRunArtifacts` reads the directory instead.
+ */
+export interface ArtifactsFrame {
+  type: 'artifacts';
+  id: number;
+  dir: string;
+  runId: string;
+  entries: readonly ArtifactEntry[];
+}
+
+/** One artifact's contents, in reply to an `artifact` request (#223). */
+export interface ArtifactFrame {
+  type: 'artifact';
+  id: number;
+  dir: string;
+  runId: string;
+  name: string;
+  read: ArtifactRead;
+}
+
+/**
  * A command started, or was refused (#211).
  *
  * `command` and `refused` are exclusive: a refusal started nothing, so there is
@@ -225,7 +274,9 @@ export type Frame =
   | PilotReply
   | Archive
   | ConfigFrame
-  | DiffFrame;
+  | DiffFrame
+  | ArtifactsFrame
+  | ArtifactFrame;
 
 /**
  * Whether a value is a frame this version recognises.
@@ -255,6 +306,11 @@ export function isFrame(v: unknown): v is Frame {
     type === 'archive' ||
     type === 'config' ||
     type === 'diff' ||
+    // The two artifact reads (#223), ignored by the cockpit's reducer for the
+    // archive's reason: they describe what a run WROTE, which is on disk, and
+    // `Run` is assembled from what a run is doing.
+    type === 'artifacts' ||
+    type === 'artifact' ||
     // The command runner's three (#211). Also ignored by the cockpit's reducer:
     // a command is not part of a run - it outlives one, and it happens when
     // there is none - so `Cockpit` folds them with `reduceCommands` instead.
@@ -528,15 +584,66 @@ export async function config(
 export async function diff(
   dir: string,
   baseSha: string,
+  headSha?: string,
 ): Promise<{ patch: string; truncated: boolean }> {
   const id = nextRequestId();
   const frame = await ask<DiffFrame>(
-    { type: 'diff', id, dir, baseSha },
+    // `headSha` closes the range, which is what makes a diff ONE ROUND rather
+    // than the whole change (#223). Both shas come from `round_committed`, which
+    // reads HEAD before it commits — so a round's `from` is measured rather than
+    // paired off the previous commit, which is a derivation that silently goes
+    // wrong the first time a run is resumed.
+    headSha === undefined
+      ? { type: 'diff', id, dir, baseSha }
+      : { type: 'diff', id, dir, baseSha, headSha },
     id,
     'diff',
     'the host did not answer with the diff',
   );
   return { patch: frame.patch, truncated: frame.truncated };
+}
+
+/**
+ * What a run's directory holds (#223).
+ *
+ * The listing rather than a guess, for the reason on `ArtifactsFrame`: a window
+ * that composed `plan-${round}.json` would be holding a second copy of the
+ * loop's naming convention with no way to keep it in step.
+ */
+export async function artifacts(dir: string, runId: string): Promise<readonly ArtifactEntry[]> {
+  const id = nextRequestId();
+  const frame = await ask<ArtifactsFrame>(
+    { type: 'artifacts', id, dir, runId },
+    id,
+    'artifacts',
+    "the host did not answer with the run's artifacts",
+  );
+  return frame.entries;
+}
+
+/**
+ * One artifact's contents (#223).
+ *
+ * The three-answer read is returned whole rather than reduced to `string |
+ * null`: a pane has to be able to tell a reader *this was never written*, *this
+ * could not be read* and *vibe refused to look inside this*, and those need
+ * different sentences. A run id or a name the core will not join onto a path
+ * comes back as a rejection carrying its refusal, which is not the same event as
+ * a file that is not there.
+ */
+export async function artifact(
+  dir: string,
+  runId: string,
+  name: string,
+): Promise<ArtifactRead> {
+  const id = nextRequestId();
+  const frame = await ask<ArtifactFrame>(
+    { type: 'artifact', id, dir, runId, name },
+    id,
+    'artifact',
+    'the host did not answer with the artifact',
+  );
+  return frame.read;
 }
 
 /**

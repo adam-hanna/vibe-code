@@ -150,6 +150,37 @@ where the window lands, which is hi-fi 5 in as many words.
 the bar, or moves `Pilot chat` off the front — each one drifting back is how
 twelve tabs happened the first time.
 
+### Reopened, and closed differently — the bar names four artifact panes (#223)
+
+The count above is now eleven and a readout, and three of the design's own seven
+labels are gone. That is not drift; it is the dashed `Versions` tab being built,
+and it turned one position into four:
+
+`Pilot chat · Output · Plans · Plan critique · Code · Code review · Questions ·
+Verify · Commands · Keys · Prompt`.
+
+- **`Versions` is `Plans`.** The reason it was dashed — *"this window has no
+  filesystem"* — stopped being true when the `artifacts` read frame landed, and
+  #207's condition was met rather than waived: reading an artifact is its own
+  decision, taken on the core side, with #129's link refusal attached to it and
+  `assertUsableRunId` in front of that.
+- **`Findings` is `Plan critique` and `Code review`.** It was always one round of
+  one of the two, drawn from the four counts and a title the wire carries, so a
+  reader asking *why did the loop fix again* got half the evidence and could not
+  reach the rest. The panes read the judge's own report, so a finding opens onto
+  what is wrong, what would fix it and every place it cites.
+- **`Diff` is `Code`.** The cumulative diff is that pane's first section,
+  unchanged and still what it opens on before any round has committed; what is
+  new is a section per round, from the range `round_committed` carries.
+
+**Four positions became six, so something had to decide the interleaving.** The
+rule is `CycleKind`'s order — plan, critique, code, review — which is the loop's
+own and is the order the column beside the bar draws its groups in. Keeping
+`Diff` between the plan and the findings because that is where the artwork put it
+would be a coincidence somebody has to remember; making the bar agree with the
+column is a rule. `squares.test.ts` pins it, and pins that neither `Findings` nor
+a `Diff` tab comes back — two answers to one question is how twelve tabs happened.
+
 ### 1.3 · The pilot pane is a chat; the design's is the run's log
 
 **The most consequential finding, and the one that explains the reports.**
@@ -268,6 +299,22 @@ real state on a resume, attaches to nothing.
 
 The interleave never reorders the conversation: `Reply.startedAt` is nullable by
 design, so replies keep their order and cards are placed among them.
+
+**And a card's heading is now the way into its own round** (#223). Hi-fi 5's card
+is a *summary* — the prose lives in the round's artifact — so the shortest path
+between the two is the name of the round, and it was not a link: only the counts
+navigated, and only to a Findings tab that showed the latest round of whichever
+judge spoke last. Reported as *"clicking on any of the plan, critique etc boxes
+should take me to that tab and that relevant section expanded on that tab."*
+
+Two things make that a link rather than a jump. `PANE` is a **closed map keyed by
+`CycleKind`**, so a fifth group fails to compile here rather than producing a card
+whose heading goes nowhere — the rule `format.ts` already follows for boundaries
+and exit codes. And the **round travels with the tab**: a card summarises one
+round, so a link that opened the pane at whichever round happened to be newest
+would be the wrong one every time except the last. It is the round number rather
+than a filename, because both ends already hold the round and a filename would
+put the loop's naming convention in a third place.
 
 ### 1.4 · The output pane is narration; the design's is a tool timeline
 
@@ -410,6 +457,30 @@ A finding with no reproducer says so in words. #113 is explicit that it behaves
 exactly as every finding did before reproducers existed, so the absence is drawn
 as provenance and never as a mark against the claim.
 
+### And the claim itself, which the pane could not reach (#223)
+
+Everything above is *provenance* — who said it, what it rests on, whether that
+checked out. What none of it could show is the **claim**: what is actually wrong
+and what would fix it. `Finding.detail` and `Finding.suggested_fix` were never on
+the wire, deliberately, because a frame carrying every finding in full would put
+a review's whole report on the wire every round — so the pane had a severity, a
+title and an id, and the argument was in a file it could not open. Reported as
+*"can we provide any more additional information beyond just the title and some
+meta data?"*, which is the same gap read from the other side.
+
+`ReportPane` reads the round's own artifact, so a finding opens onto the detail,
+the suggested fix and **every citation with its excerpt** — the places it says to
+look, in the form a person can go and check. The judge's `summary` comes with it,
+which is the paragraph a reader wants before any individual finding and which no
+frame has ever carried.
+
+**Two sources, one screen, and the split is not incidental.** The round's own
+`code-review-<n>.json` is deliberately not rewritten when a severity moves
+(#142) — it is the record of what the reviewer produced — so the file holds the
+prose and the census holds what happened to the finding afterwards. The pane
+reads both and matches them on the finding id. A pane reading only one would be
+missing half, and which half would depend on which round you opened.
+
 ### 1.8 · The nine remaining frames, walked
 
 These were listed unwalked in the first pass and are walked here. Four were
@@ -463,6 +534,24 @@ screen. The row is a count — `4 raised · 1 blocking · 2 unanswered` — and 
 it opens the Questions pane, which is where the wording, the answerer's draft and
 the composer already live. The *"· not stalled"* half of the kicker also went: the
 sentence under it says the same thing in words a person reads once.
+
+Two more came out of the next manual pass (#223). **The whole box is the control
+now, not the count inside it** — *"clicking anywhere on the Questions box should
+lead to the questions tab, not just the N raised text"* — which is the finding the
+severity chips one level up had already earned: the largest thing on the surface
+was inert while something smaller beside it did the navigating. It is a
+`role="button"` on the container rather than a `<button>` around it, because the
+box holds the answerer's turn rows and a control inside a control is one a
+keyboard cannot reach; Enter and Space are handled where the role promises them.
+
+And **the pane behind it is one section per round**. It drew the round in flight
+and nothing else, so every earlier round was gone — including on a resume, where
+*every* round is an earlier one and the pane opened empty on a run that had asked
+nine questions. `answers-<n>.json` was on disk the whole time. The live round is
+drawn from the wire and the settled ones from their files, through **one** card
+component: a round read from disk must not be drawable in a way a live one is
+not, or the two drift and the drift is invisible on whichever half nobody is
+looking at.
 
 **Hi-fi 7 · project settings — three of eight sections, and a nav for three is
 navigation for nothing.** The frame's table of contents lists Repository, Verify,

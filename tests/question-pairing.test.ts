@@ -149,7 +149,7 @@ test('a declined blocking question escalates even when the echo carried the tag'
         {
           claude: (label) => (label === 'plan' ? planFixture({ open_questions: [q] }) : planFixture()),
           codex: (label) =>
-            label === 'answers-0'
+            label.startsWith('answers-')
               ? answersReport([
                   { question: q.question + TAG, defer_to_human: true, rationale: 'product intent' },
                 ])
@@ -193,7 +193,7 @@ test('the wire carries the question as the planner wrote it, not as it was echoe
             claude: (label) =>
               label === 'plan' ? planFixture({ open_questions: [q] }) : planFixture(),
             codex: (label) =>
-              label === 'answers-0'
+              label.startsWith('answers-')
                 ? answersReport([{ question: q.question + TAG, answer: 'Lazy.' }])
                 : report([]),
           },

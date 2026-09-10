@@ -951,13 +951,15 @@ async function planPhase(
       // loop that left none - so a fork of that run had to go back to the plan
       // round before it and buy the answerer turn again.
       //
-      // And it is `question-round`, not `plan-round`. `revisePlan` writes its own
-      // checkpoint a moment later on the revising branch, and that one is a plan
-      // round in every mechanical sense - it burns a planner turn, advances
-      // `planRound` and writes `plan-<n>.json`. What was missing is the record of
-      // WHY it happened: a plan revised because the critic objected and a plan
-      // revised because it answered its own questions are different diagnoses,
-      // and they used to share a name.
+      // And it is `question-round`, not `plan-round`, because that is what this
+      // is: a plan revised because the critic objected and a plan revised
+      // because it answered its own questions are different diagnoses, and they
+      // used to share a name.
+      //
+      // They no longer share a counter either. `revisePlan` writes a second
+      // `question-round` checkpoint a moment later on the revising branch and
+      // advances nothing, so this whole round leaves `state.planRound` where it
+      // found it - see `advancesRound`.
       writeCheckpoint(state, 'question-round', NO_COMMIT);
       // Gateable since #140, which is when `GateContext` gained the counter that
       // makes the decision answerable: this is the round of `maxQuestionRounds`
@@ -2299,6 +2301,18 @@ async function maybeCommit(
 ): Promise<{ sha: string | null; note: CheckpointCommitNote }> {
   if (!cfg.git.commitEachRound) return { sha: null, note: 'commits-disabled' };
   if (!(await git.isRepo(cwd))) return { sha: null, note: 'not-a-repo' };
+  // **Read before the commit, because that is the only moment it is knowable.**
+  // A round's diff is `what HEAD was`..`what HEAD became`, and once the commit
+  // has landed the first half is gone unless something wrote it down. The
+  // alternative a host would be left with is pairing consecutive commits in
+  // narration order - which is a derivation, and one that silently produces a
+  // cumulative diff labelled as a single round the first time a run is resumed
+  // and the earlier commits were narrated to a process that has exited.
+  //
+  // `markBase` rather than a second `rev-parse` spelled out here: it already
+  // answers null in a repository with no commits yet, which is the greenfield
+  // first round and a real state rather than a failure.
+  const since = await git.markBase(cwd);
   const result = await git.commitAll(cwd, message);
   if (result.sha === null) {
     return { sha: null, note: result.why === 'failed' ? 'commit-failed' : 'nothing-to-commit' };
@@ -2309,7 +2323,25 @@ async function maybeCommit(
     log.warn(`git named the new commit "${result.sha}", which is not an object id - not recorded`);
     return { sha: null, note: 'sha-unusable' };
   }
-  log.ok(`Committed ${result.sha.slice(0, 7)}`);
+  /*
+   * What this round put in the history, and the range that is (#223).
+   *
+   * **Narration with no event, on the `recordAndSay` rule**: it is already
+   * durable, twice over - the commit is in git, and the checkpoint this becomes
+   * records the sha in its own meta. What was missing was any way for something
+   * watching the run to learn it *while the run was going*, which is what the
+   * Code tab is: a run can be committing every round for ninety minutes and a
+   * host could not show one of them.
+   *
+   * `since` travels with it because a range with one end is not a range. Null is
+   * a real answer here - a first commit in a repository that had none - and the
+   * honest reading of it is "everything up to this commit", which is exactly
+   * what `git diff` does with an empty tree on the left.
+   */
+  log.ok(`Committed ${result.sha.slice(0, 7)}`, {
+    id: 'round_committed',
+    data: { sha: result.sha, since, message },
+  });
   return { sha: result.sha, note: 'committed' };
 }
 
@@ -3366,6 +3398,35 @@ interface ReviseArgs {
   answers?: readonly Answer[] | undefined;
 }
 
+/**
+ * Whether this revision is a new plan round, or the same one revised.
+ *
+ * **A plan round is the pair — the planner produces a version, the critic judges
+ * it — and only one of the two things that reach here is half of that pair.**
+ * A revision answering the critic's findings is the producer's side of the next
+ * round: something judged version N and this is version N+1, which is exactly
+ * what `maxPlanRounds` counts and what `plan-<n>.json` is numbered by.
+ *
+ * A revision answering the planner's *own* questions is not. Nothing judged
+ * anything: the planner asked, the answerer replied, and the plan was rewritten
+ * before it was ever shown to the critic. The loop column has said so in as many
+ * words since the question group was drawn — *"a question round produces no
+ * critique, so it cannot advance the plan round"* — and the core disagreed with
+ * its own screen, which is how a run came to read *"plan round 0 has a critique,
+ * then plan round 1 asked questions, and when those questions were answered it
+ * moved to plan round 2"*.
+ *
+ * It was not only a renumbering. `guardProgress` measures `state.planRound`
+ * against `loop.maxPlanRounds`, so every question round spent one of the rounds
+ * the run had for *disagreeing with the critic* — a run allowed five plan rounds
+ * and asking three rounds of questions had two critiques left, and nothing said
+ * so. `loop.maxQuestionRounds` already caps the question loop, and it is the cap
+ * that should.
+ */
+function advancesRound(args: ReviseArgs): boolean {
+  return args.findings !== undefined;
+}
+
 async function revisePlan(
   state: RunState,
   cfg: Config,
@@ -3375,7 +3436,8 @@ async function revisePlan(
   turns: AgentTurns,
   host?: Host,
 ): Promise<PlannedTurn> {
-  state.planRound += 1;
+  const advancing = advancesRound(args);
+  if (advancing) state.planRound += 1;
   saveState(state);
   /*
    * A revision opens a new plan round, and until now it said so to nobody.
@@ -3387,23 +3449,43 @@ async function revisePlan(
    * of round 2 filed under round 1's judge.
    *
    * `planning`, not a phase of its own, because it is the same phase: the
-   * planner producing a version of the plan. The round has already been
-   * incremented above, so this group and the critique that follows it carry the
-   * same number — which is what lets a reader (and `rounds()`) pair them.
+   * planner producing a version of the plan. On the advancing path the round has
+   * just been incremented, so this group and the critique that follows it carry
+   * the same number — which is what lets a reader (and `rounds()`) pair them. On
+   * the non-advancing path it carries the round it is still in, which is the
+   * whole point: the answered revision is drawn under the round that raised the
+   * questions rather than opening one beside it.
    *
    * The heading is deliberately still `log.step` below rather than being folded
    * into this: a `log.heading` here would change what the terminal prints for
    * every revision, and this is a frame for a host, not a new section for a
    * person. `phase_started` has never required a heading beside it.
    */
-  log.info(`Plan round ${state.planRound}`, {
-    id: 'phase_started',
-    data: { phase: 'planning', round: state.planRound },
-  });
-  log.step(`${holderLabel('planner', roles)} is revising the plan (round ${state.planRound})`, {
-    id: 'turn_started',
-    data: { role: 'planner', kind: 'revise', round: state.planRound },
-  });
+  log.info(
+    advancing
+      ? `Plan round ${state.planRound}`
+      : `Revising plan ${state.planRound} against the answers`,
+    {
+      id: 'phase_started',
+      data: { phase: 'planning', round: state.planRound },
+    },
+  );
+  // The label names the round the turn belongs to, and for a non-advancing
+  // revision that is the QUESTION round: `planRound` no longer moves, so two
+  // question rounds under one plan round would otherwise charge two turns under
+  // one label and the archive could not tell them apart.
+  const label = advancing
+    ? `revise-${state.planRound}`
+    : `revise-q${state.questionRound}`;
+  log.step(
+    advancing
+      ? `${holderLabel('planner', roles)} is revising the plan (round ${state.planRound})`
+      : `${holderLabel('planner', roles)} is revising the plan against the answers`,
+    {
+      id: 'turn_started',
+      data: { role: 'planner', kind: 'revise', round: state.planRound },
+    },
+  );
 
   const outcome = await runTurn(
     state,
@@ -3423,7 +3505,7 @@ async function revisePlan(
         round: state.planRound,
       }),
       cwd,
-      label: `revise-${state.planRound}`,
+      label,
     },
     turns,
     roles,
@@ -3442,6 +3524,14 @@ async function revisePlan(
   // rides on this `saveState` and not a later one.
   if (args.findings !== undefined) state.pendingFindings = null;
   saveState(state);
+  // **`plan-<n>.json` is the plan of record for round n, which is the version
+  // the critic will judge** - so a non-advancing revision replaces it rather
+  // than writing beside it, and `refusePlaceholderPlan` goes on citing a file
+  // whose contents are the ones it read. What that costs is the draft that
+  // raised the questions, and the cost is accepted rather than hidden: the
+  // questions and the answers that changed it are both durable, in
+  // `answers-<question-round>.json`, which is the half a reader is actually
+  // asking about when a plan changed between two critiques.
   artifact(state, `plan-${state.planRound}.json`, plan);
   // With the new plan persisted, the follow-ups artifact is reconciled against
   // it immediately - including deleting it when this revision dropped the last
@@ -3450,8 +3540,28 @@ async function revisePlan(
   // After the artifact and its save, so the snapshot describes a round whose
   // record is complete. No commit here: the planning phase does not touch the
   // tree, and the note says that rather than implying a failure.
-  writeCheckpoint(state, 'plan-round', NO_COMMIT);
-  await holdAt(state, cfg, host, 'plan-round');
+  //
+  // **The boundary is the one this revision actually crossed.** A findings-driven
+  // revision closes a plan round and takes `plan-round`, exactly as it always
+  // has. An answers-driven one closes nothing of the sort, and writing a
+  // `plan-round` checkpoint for it would put a plan round in the record that
+  // `state.planRound` says did not happen — the two halves of #139's own
+  // complaint, which is that a plan revised because the critic objected and a
+  // plan revised because it answered its own questions are different diagnoses
+  // that used to share a name.
+  //
+  // It does not hold. The caller inside the question loop has already held at
+  // `question-round` a moment ago, with this round's questions attached, so a
+  // second hold here would stop the same round twice for one decision. The one
+  // caller that reaches this without a hold in front of it is the resume
+  // consuming `NEEDS-INPUT.md`, and a resume that halts again before running
+  // anything is a resume that did not resume.
+  if (advancing) {
+    writeCheckpoint(state, 'plan-round', NO_COMMIT);
+    await holdAt(state, cfg, host, 'plan-round');
+  } else {
+    writeCheckpoint(state, 'question-round', NO_COMMIT);
+  }
   return { plan, ...(outcome.activity === undefined ? {} : { activity: outcome.activity }) };
 }
 
@@ -4290,14 +4400,22 @@ async function resolveQuestions(
       role: 'answerer',
       prompt: P.answerPrompt(questions, plan.plan_md),
       cwd,
-      label: `answers-${state.planRound}`,
+      // **The question round, not the plan round.** These were keyed by
+      // `planRound` and could be because every question round used to advance it
+      // - which is the defect above, and this is the collision that fell out of
+      // fixing it: two question rounds under one plan round both wrote
+      // `answers-0.json`, and the second silently replaced the first. The
+      // question round is the counting this turn actually belongs to, it is
+      // monotonic for the whole run, and `state.questionRound` was incremented
+      // by the caller before this was reached - so the first is `answers-1`.
+      label: `answers-${state.questionRound}`,
     },
     turns,
     roles,
   );
 
   const { answers } = parseAnswers(readStructured(outcome));
-  artifact(state, `answers-${state.planRound}.json`, answers);
+  artifact(state, `answers-${state.questionRound}.json`, answers);
 
   // Every question asked is marked answered regardless of outcome, so a
   // rephrased repeat in the next revision cannot re-enter this branch.

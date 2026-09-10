@@ -469,6 +469,23 @@
   letter-spacing: 0.04em;
 }
 
+/* The heading is the way into the round's own pane (#223). A button reset rather
+   than a link, because it navigates within the window - and only the `--link`
+   variant takes a cursor, since a heading that looks clickable on a card drawn
+   with nowhere to send anybody is the defect this pattern keeps fixing. */
+.v-round__what--link {
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+.v-round__what--link:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
 .v-round__took,
 .v-round__ms {
   font-family: var(--font-mono);

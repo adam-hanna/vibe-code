@@ -9,10 +9,11 @@ import type { KeyStatus } from '../pilot/keys';
 import { PilotPane } from '../pilot/PilotPane';
 import { noCommands, reduceCommands, running } from './commands';
 import { CommandsPane } from './CommandsPane';
+import { CodePane } from './CodePane';
 import { Diagnostics } from './Diagnostics';
-import { DiffPane } from './DiffPane';
-import { FindingsPane } from './FindingsPane';
 import { Footer } from './Footer';
+import { PlansPane } from './PlansPane';
+import { ReportPane } from './ReportPane';
 import { Kickoff } from './Kickoff';
 import { LoopColumn } from './LoopColumn';
 import { NewWorkstream } from './NewWorkstream';
@@ -29,7 +30,8 @@ import { Workstreams } from './Workstreams';
 import { VerifyPane } from './VerifyPane';
 import { StalenessStrip } from './Staleness';
 import { tokens as fmtTokens } from './format';
-import { blocking, emptyRun, nextRun, reduce, staleness } from './model';
+import { blockingIn, emptyRun, nextRun, reduce, staleness } from './model';
+import { rounds } from './rounds';
 import { readLaunchArgv, resumeArgv } from './argv';
 import type { Launched, Raise } from './argv';
 import type { Caps } from './Footer';
@@ -228,20 +230,52 @@ export function Cockpit() {
     | 'output'
     | 'pilot'
     | 'keys'
+    // The four artifact panes (#223). `plans`, `critique` and `review` are what
+    // the dashed `Versions` tab was standing in for, and `code` is what `diff`
+    // became once a round's own range was on the wire.
+    //
+    // **`findings` and `diff` are gone rather than kept beside them.** The
+    // Findings tab showed the latest round of whichever judge spoke last, from
+    // the four counts and a title the wire carries - so a reader asking *why did
+    // the loop fix again* got half the evidence and no way to reach the rest. It
+    // is one round of `critique` or `review`, both of which now read the report
+    // itself. The Diff tab is `code`'s first section, unchanged and still first,
+    // because *what has this changed altogether* is a real question - it was
+    // just the wrong answer to *what did this round do*.
+    | 'plans'
+    | 'critique'
+    | 'review'
+    | 'code'
     | 'verify'
-    | 'findings'
     | 'spend'
     | 'questions'
     | 'runs'
     | 'commands'
     | 'settings'
-    | 'diff'
     // **The pilot, not the output pane** (#211). The complaint was exact: *"I
     // thought my initial prompt would be given to the pilot and the pilot would
     // take control"*, and the app answered it with a form and a tab beside the
     // log. The composer is the front door, so this is where you land — and the
     // output pane has nothing in it before a run anyway.
   >('pilot');
+  /**
+   * The round a navigation asked for, or null (#223).
+   *
+   * **Beside the tab rather than folded into it**, because they answer two
+   * different questions and one of them is allowed to be absent: pressing the
+   * `Plans` tab is *show me the plans* and the pane's own answer to which one is
+   * right — the newest. Clicking a round card is *show me round 2*, and the pane
+   * has to be told which.
+   *
+   * A round number rather than a filename, for the reason on `OpenAt`: both ends
+   * already hold the round, and a filename would be a third copy of the loop's
+   * naming convention in the one process that cannot be kept in step with it.
+   */
+  const [openAt, setOpenAt] = useState<number | null>(null);
+  const open = useCallback((next: string, round?: number | null) => {
+    setTab(next as typeof tab);
+    setOpenAt(round ?? null);
+  }, []);
   /** Pilot proposals waiting on a person, so a hidden tab can say so (#144). */
   const [proposals, setProposals] = useState(0);
   /**
@@ -558,6 +592,11 @@ export function Cockpit() {
   );
 
   const outside = !host.inShell();
+  // The round cards, built once here and handed to the surfaces that draw them.
+  // `rounds()` is a re-shaping of what is already on `Run` - it measures nothing
+  // and infers nothing - and one call is what keeps the pilot's log, the report
+  // panes and the Code tab from disagreeing about which round a thing arrived in.
+  const cards = rounds(run);
 
   return (
     <div className="v-cockpit">
@@ -708,12 +747,7 @@ export function Cockpit() {
           {/* The counts in the column are controls, and this is where they go.
               The same setter the pilot's round cards use, so a severity chip
               means one thing wherever it is drawn. */}
-          <LoopColumn
-            run={run}
-            now={now}
-            hostPid={wire.hostPid}
-            onOpen={(next) => { setTab(next as typeof tab); }}
-          />
+          <LoopColumn run={run} now={now} hostPid={wire.hostPid} onOpen={open} />
           {/* `4g`, and only on the ending that means the loop finished. Every
               other exit is a halt, and a halt gets the footer's banner and its
               one action rather than a summary of work that stopped early. */}
@@ -762,43 +796,58 @@ export function Cockpit() {
             >
               Output
             </button>
-            {/* Hi-fi 3, named rather than omitted. A version history of an
-                artifact needs the artifacts, and this window has no filesystem:
-                #207 is explicit that reading one is its own decision with
-                #129's link refusal attached. Dashed and named, the way `Prompt`
-                is, because a bar that showed only what works reads as a
-                finished app. */}
-            <span
-              className="v-cockpit__tab v-cockpit__tab--off"
-              title="Not built: this window cannot read a run's artifacts"
-            >
-              Versions
-            </span>
-            {/* `1d`. Enabled only once the run has a base to diff against: a
-                diff with no base is the request that stages the whole working
-                tree, so there is nothing to offer before then. */}
+            {/* Hi-fi 3, and it is built now (#223). The tooltip on the tab it
+                replaces said *"this window cannot read a run's artifacts"*,
+                which was true until the `artifacts` frame landed - a version
+                history of an artifact needs the artifacts, and #207 was right
+                that reading one is its own decision with #129's link refusal
+                attached to it. Both are now on the core side, where they belong. */}
             <button
-              className={`v-cockpit__tab ${tab === 'diff' ? 'v-cockpit__tab--on' : ''}`}
-              onClick={() => setTab('diff')}
+              className={`v-cockpit__tab ${tab === 'plans' ? 'v-cockpit__tab--on' : ''}`}
+              onClick={() => open('plans')}
             >
-              Diff
+              Plans
             </button>
-            {/* `1e`. The count is blocking findings in the latest round, not
-                all of them: that is the number that decides whether the loop
-                fixes again, and a total would move for reasons that change
-                nothing. */}
+            {/* The four artifact tabs are in `CycleKind`'s order — plan,
+                critique, code, review — which is the loop's own and is the
+                order the column beside them draws. Hi-fi 1 names four positions
+                here (`Versions · Diff · Findings`) and this build has six, so
+                something had to decide the interleaving; making the bar read in
+                the same order as the column is a rule, where "keep Diff where
+                the artwork put it" would be a coincidence to maintain.
+
+                The count on `Code review` is blocking findings in the LATEST
+                round, not all of them: that is the number that decides whether
+                the loop fixes again, and a total would move for reasons that
+                change nothing. */}
             <button
-              className={`v-cockpit__tab ${tab === 'findings' ? 'v-cockpit__tab--on' : ''}`}
-              onClick={() => setTab('findings')}
+              className={`v-cockpit__tab ${tab === 'critique' ? 'v-cockpit__tab--on' : ''}`}
+              onClick={() => open('critique')}
             >
-              Findings{blocking(run) > 0 ? ` · ${String(blocking(run))}` : ''}
+              Plan critique
+              {blockingIn(run, 'plan') > 0 ? ` · ${String(blockingIn(run, 'plan'))}` : ''}
+            </button>
+            {/* `1d`, per round. The whole-run diff is this pane's first section
+                and is still what it opens on before any round has committed. */}
+            <button
+              className={`v-cockpit__tab ${tab === 'code' ? 'v-cockpit__tab--on' : ''}`}
+              onClick={() => open('code')}
+            >
+              Code{run.commits.length > 0 ? ` · ${String(run.commits.length)}` : ''}
+            </button>
+            <button
+              className={`v-cockpit__tab ${tab === 'review' ? 'v-cockpit__tab--on' : ''}`}
+              onClick={() => open('review')}
+            >
+              Code review
+              {blockingIn(run, 'review') > 0 ? ` · ${String(blockingIn(run, 'review'))}` : ''}
             </button>
             {/* `1f`. The count is blocking questions, not all of them: an
                 advisory question the answerer handled needs nobody, and a
                 badge that included it would train you to ignore the badge. */}
             <button
               className={`v-cockpit__tab ${tab === 'questions' ? 'v-cockpit__tab--on' : ''}`}
-              onClick={() => setTab('questions')}
+              onClick={() => open('questions')}
             >
               Questions
               {run.questions !== null && run.questions.blocking > 0
@@ -868,11 +917,41 @@ export function Cockpit() {
             <OutputPane lines={run.output} turn={run.running} staleness={staleness(run, now)} />
           )}
           {tab === 'verify' && <VerifyPane passes={run.verify} />}
-          {tab === 'findings' && <FindingsPane censuses={run.censuses} />}
           {tab === 'spend' && <SpendPane run={run} />}
-          {tab === 'questions' && <QuestionsPane questions={run.questions} />}
+          {tab === 'questions' && (
+            <QuestionsPane
+              questions={run.questions}
+              dir={repoDir}
+              runId={run.identity?.runId ?? null}
+            />
+          )}
           {tab === 'settings' && <Settings dir={repoDir} />}
-          {tab === 'diff' && <DiffPane dir={repoDir} baseSha={run.baseSha} />}
+          {/* The four artifact panes. Every one of them reads the run's own
+              directory, so all four take the run id the core stated on
+              `run_started` - there is no way to derive one, and a pane with no
+              run says so rather than showing an empty list. */}
+          {tab === 'plans' && (
+            <PlansPane dir={repoDir} runId={run.identity?.runId ?? null} openAt={openAt} />
+          )}
+          {tab === 'critique' && (
+            <ReportPane
+              dir={repoDir}
+              runId={run.identity?.runId ?? null}
+              kind="critique"
+              rounds={cards}
+              openAt={openAt}
+            />
+          )}
+          {tab === 'review' && (
+            <ReportPane
+              dir={repoDir}
+              runId={run.identity?.runId ?? null}
+              kind="review"
+              rounds={cards}
+              openAt={openAt}
+            />
+          )}
+          {tab === 'code' && <CodePane run={run} dir={repoDir} openAt={openAt} />}
           {tab === 'commands' && (
             <CommandsPane
               commands={commands}
@@ -903,8 +982,10 @@ export function Cockpit() {
               statuses={keyStatuses}
               // Hi-fi 5's `open verify`. A round card is the round's summary
               // and the pane beside it holds the detail, so the card links to
-              // it rather than growing a second copy of that screen.
-              onOpen={(next) => setTab(next as typeof tab)}
+              // it rather than growing a second copy of that screen - and it
+              // names its own round, so the pane opens at the card you clicked
+              // rather than at whichever round happens to be newest (#223).
+              onOpen={open}
               // The repository, whenever there is no run to watch. Once one is
               // going the pane is a conversation *about* it, and the field is
               // settled — the run is already using that directory, and changing

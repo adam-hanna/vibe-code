@@ -1,10 +1,23 @@
 import { useState } from 'react';
 import { LivenessDot, MetaChip, StateKicker } from '../design';
 import { Counts } from './Counts';
+import { Caret } from './Disclosure';
 import { clock, elapsed } from './format';
 import { censusByPhase, questionsPhase, title } from './rounds';
 import { RunningRow } from './RunningRow';
+import type { KeyboardEvent } from 'react';
 import type { Census, CycleKind, PhaseGroup, Preflight, ResumedFrom, Run, Turn } from './model';
+
+/**
+ * Where a count or a box sends the reader (#223).
+ *
+ * The tab, and the **round** within it. A round number rather than a filename:
+ * both ends of that link already hold the round - the card carries it and the
+ * pane's sections are keyed by it - and a filename would put the loop's naming
+ * convention in a third place, in the one process that cannot be kept in step
+ * with it.
+ */
+export type OpenAt = (tab: string, round?: number | null) => void;
 
 /**
  * The centre column from `3a`, at the width the design fixes it at.
@@ -83,22 +96,6 @@ type Draw = 'live' | 'settled' | 'done';
 const drawOf = (turn: Turn, runningId: number | null, settledId: number | null): Draw =>
   turn.id === runningId ? 'live' : turn.id === settledId ? 'settled' : 'done';
 
-/**
- * The disclosure control every collapsible thing in this column uses.
- *
- * One shape for a group and for a round, because they are the same gesture at two
- * levels and two spellings of it would drift. The caret is `aria-hidden` and the
- * button carries `aria-expanded`, so the state is announced once rather than
- * twice.
- */
-function Caret({ open }: { open: boolean }) {
-  return (
-    <span className="v-disclose" aria-hidden="true">
-      {open ? '▾' : '▸'}
-    </span>
-  );
-}
-
 function Version({ turn, draw, now }: { turn: Turn; draw: Draw; now: number }) {
   if (draw !== 'done') return <RunningRow turn={turn} now={now} live={draw === 'live'} />;
   return (
@@ -161,7 +158,7 @@ function Round({
   open: boolean;
   onToggle: () => void;
   /** Where a count sends the reader. Undefined leaves every count inert. */
-  onOpen?: ((tab: string) => void) | undefined;
+  onOpen?: OpenAt | undefined;
   runningId: number | null;
   settledId: number | null;
   now: number;
@@ -195,11 +192,20 @@ function Round({
             `compact`, because the tolerance chip is a fifth item in a 364px
             column and the pane and the pilot's round card both state it.
           */}
+          {/* The counts open the round they belong to, in the pane that has the
+              judge's own words for it. `census.phase` is the loop's label for
+              which judge produced it - `plan` from the critic, `review` from the
+              reviewer - so the tab is told rather than worked out from where the
+              row happens to be drawn. */}
           {census !== null && (
             <Counts
               counts={census.counts}
               compact
-              onOpen={onOpen === undefined ? undefined : () => { onOpen('findings'); }}
+              onOpen={
+                onOpen === undefined
+                  ? undefined
+                  : () => { onOpen(census.phase === 'plan' ? 'critique' : 'review', phase.round); }
+              }
             />
           )}
           {phase.gates.map((gate, i) => (
@@ -257,6 +263,17 @@ function Round({
  * is a paragraph, and a list of them pushed every subsequent round off the screen.
  * So the row says how many and how many block, and clicking it opens the pane
  * that has the wording, the answerer's draft and the composer.
+ *
+ * **The whole box is the control, not the count inside it.** Only the count
+ * navigated, reported exactly that way — *"clicking anywhere on the Questions box
+ * should lead to the questions tab, not just the N raised text"* — and it is the
+ * same finding as the severity chips one level up: the largest thing on the
+ * surface was inert while a smaller thing beside it did the navigating.
+ *
+ * It is a `role="button"` on the container rather than a `<button>` around it,
+ * because the box holds the answerer's turn rows and a button inside a button is
+ * a control a keyboard cannot reach. The keyboard path is handled here instead —
+ * Enter and Space, which is what the role promises.
  */
 function Questions({
   questions,
@@ -269,14 +286,30 @@ function Questions({
   questions: NonNullable<Run['questions']>;
   /** The answerer's turns from this phase, which belong here rather than above. */
   turns: readonly Turn[];
-  onOpen?: ((tab: string) => void) | undefined;
+  onOpen?: OpenAt | undefined;
   runningId: number | null;
   settledId: number | null;
   now: number;
 }) {
   const outstanding = questions.open.filter((q) => q.answer === null && !q.declined).length;
+  const go = onOpen === undefined ? null : () => { onOpen('questions', questions.round); };
   return (
-    <div className="v-questions">
+    <div
+      className={`v-questions${go === null ? '' : ' v-questions--link'}`}
+      {...(go === null
+        ? {}
+        : {
+            role: 'button',
+            tabIndex: 0,
+            title: 'Open the questions',
+            onClick: go,
+            onKeyDown: (e: KeyboardEvent) => {
+              if (e.key !== 'Enter' && e.key !== ' ') return;
+              e.preventDefault();
+              go();
+            },
+          })}
+    >
       <div className="v-questions__head">
         QUESTIONS · answerer
         {/* Hi-fi 14's own counter, nested inside the plan round's. Against the
@@ -290,14 +323,12 @@ function Questions({
           </MetaChip>
         )}
       </div>
-      {/* The count is the control, for the same reason the severity row is: it
-          is the thing a reader reaches for, and the pane behind it is where the
-          wording lives. */}
+      {/* Not a control of its own any more: the box is the control, and a nested
+          button would be the thing that made only this part clickable. */}
       <QuestionCount
         total={questions.total}
         blocking={questions.blocking}
         outstanding={outstanding}
-        onOpen={onOpen === undefined ? undefined : () => { onOpen('questions'); }}
       />
 
       {turns.map((turn) => (
@@ -329,15 +360,13 @@ function QuestionCount({
   total,
   blocking,
   outstanding,
-  onOpen,
 }: {
   total: number;
   blocking: number;
   outstanding: number;
-  onOpen?: (() => void) | undefined;
 }) {
-  const body = (
-    <>
+  return (
+    <div className="v-questions__body">
       <span className="v-questions__n">{total} raised</span>
       <span className="v-questions__sub">{blocking} blocking</span>
       {/* Counted from the rows themselves rather than from a field, because the
@@ -346,18 +375,7 @@ function QuestionCount({
       <span className="v-questions__sub">
         {outstanding === 0 ? 'all answered' : `${outstanding} unanswered`}
       </span>
-    </>
-  );
-  if (onOpen === undefined) return <div className="v-questions__body">{body}</div>;
-  return (
-    <button
-      type="button"
-      className="v-questions__body v-questions__body--link"
-      onClick={onOpen}
-      title="Open the questions"
-    >
-      {body}
-    </button>
+    </div>
   );
 }
 
@@ -639,7 +657,7 @@ export function LoopColumn({
    * Where a count sends the reader, or undefined where there is nowhere to send
    * them. The Gallery draws this column with no tabs behind it.
    */
-  onOpen?: ((tab: string) => void) | undefined;
+  onOpen?: OpenAt | undefined;
 }) {
   /**
    * Which groups and rounds are folded shut.

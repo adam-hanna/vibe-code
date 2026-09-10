@@ -30,6 +30,7 @@ import {
   validateStoredState,
 } from '@src/stored.js';
 import type {
+  ArtifactRead,
   CheckpointBoundary,
   CheckpointCommitNote,
   Finding,
@@ -39,6 +40,7 @@ import type {
   RoundClaim,
   RoundRecord,
   RunCheckpointMeta,
+  RunArtifact,
   RunPhase,
   RunState,
   RunSummary,
@@ -1486,10 +1488,7 @@ export function linkedArtifactReason(dir: string, name: string): string | null {
  * three, which is the fail-closed direction: a future caller that never heard of
  * this reads no link by default.
  */
-export type ArtifactRead =
-  | { kind: 'text'; text: string }
-  | { kind: 'absent' }
-  | { kind: 'linked'; reason: string };
+export type { ArtifactRead, RunArtifact } from '@src/types.js';
 
 export function readArtifact(state: RunState, name: string): ArtifactRead {
   // Before the read, and before anything that would `stat` through it. #53's
@@ -1521,6 +1520,137 @@ export function readArtifact(state: RunState, name: string): ArtifactRead {
 export function artifactText(state: RunState, name: string): string | null {
   const read = readArtifact(state, name);
   return read.kind === 'text' ? read.text : null;
+}
+
+/**
+ * A name this process will look for inside a run directory.
+ *
+ * **A character whitelist, for the reason `RUN_ID` is one**: `/`, `\`, drive
+ * prefixes and control characters are all excluded at once rather than
+ * blacklisted one separator at a time, with `basename` on both path flavours as
+ * the second belt and the trailing-dot-and-space refusal as the third —
+ * `"foo. "` IS `foo` on Win32, which is the hole `assertUsableRunId` and
+ * `isReportBasename` already close one field along.
+ *
+ * It is deliberately **not** an allow-list of the artifact shapes a run writes.
+ * That list is `plan-<n>.json`, `plan-critique-<n>.json`, `code-review-<n>.json`,
+ * `answers-<n>.json`, `PLAN.md`, `FOLLOW-UPS.md`, `NEEDS-INPUT.md`,
+ * `checkpoint-<n>.json` and half a dozen more, it grows whenever the loop grows,
+ * and a reader holding a copy of it would go stale the release after this one.
+ * The safety this needs is *containment* — nothing outside the run directory —
+ * and a name is contained or it is not regardless of what the loop calls it.
+ * What a caller may usefully ask for is answered by `listRunArtifacts`, which
+ * reads the directory rather than predicting it.
+ */
+const ARTIFACT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+export function isArtifactBasename(v: unknown): v is string {
+  return (
+    typeof v === 'string' &&
+    v !== '' &&
+    v !== '.' &&
+    v !== '..' &&
+    !/[. ]$/.test(v) &&
+    ARTIFACT_NAME.test(v) &&
+    path.basename(v) === v &&
+    path.win32.basename(v) === v
+  );
+}
+
+/**
+ * Where a run's artifacts are, with the run id checked before it is joined.
+ *
+ * `assertUsableRunId` throws, which is what a caller crossing a process boundary
+ * wants: an id that does not name a directory under `.vibe/runs` is a request
+ * this process will not act on, and the sentence it throws is the one to report
+ * back. `linkedRunReason` is asked **before** anything reads through the path,
+ * which is #53's rule and the reason the two are in this order.
+ */
+function runDirFor(targetDir: string, runId: string): string {
+  const root = path.join(targetDir, RUNS_DIR);
+  assertUsableRunId(runId, root);
+  const linked = linkedRunReason(root, runId);
+  if (linked !== null) throw new StoredStateError(linked);
+  return path.join(root, runId);
+}
+
+/**
+ * What is in a run's directory (#223).
+ *
+ * **The listing is what makes reading an artifact safe to offer**, and it is the
+ * half a caller outside this process could not otherwise have: the alternative
+ * is a reader that predicts `plan-3.json` from a round number it saw on a
+ * narration frame, which is a copy of the loop's naming convention living
+ * somewhere it cannot be kept in step. This reads the directory instead.
+ *
+ * Sorted by name so two calls agree, and every entry classified rather than
+ * filtered - see `RunArtifact`. Never throws for an unreadable directory: an
+ * archive that cannot be read is an empty one, exactly as `listRuns` decides for
+ * the runs root above it. It **does** throw for an unusable run id or a linked
+ * run, because those are refusals with a sentence rather than absences.
+ */
+export function listRunArtifacts(targetDir: string, runId: string): RunArtifact[] {
+  const dir = runDirFor(targetDir, runId);
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const out: RunArtifact[] = [];
+  for (const name of names.sort()) {
+    // Anything this process would refuse to read is left out of the list it
+    // offers: a row a caller cannot act on is a row that only produces a
+    // refusal one click later.
+    if (!isArtifactBasename(name)) continue;
+    const full = path.join(dir, name);
+    const linkage = linkageOf(full);
+    if (linkage === 'link' || linkage === 'unknown') {
+      out.push({ name, kind: linkage === 'link' ? 'link' : 'unknown', bytes: null });
+      continue;
+    }
+    try {
+      const stat = statSync(full);
+      out.push(
+        stat.isDirectory()
+          ? { name, kind: 'directory', bytes: null }
+          : { name, kind: 'file', bytes: stat.size },
+      );
+    } catch {
+      out.push({ name, kind: 'unknown', bytes: null });
+    }
+  }
+  return out;
+}
+
+/**
+ * One artifact's text, by run id and name (#223).
+ *
+ * `readArtifact` with the two checks a caller inside this process had already
+ * done for it: the run id names a directory under `.vibe/runs`, and the name is
+ * a basename. Both refuse rather than repair - a request naming a path this
+ * process will not join is not a request to be interpreted.
+ *
+ * The three-answer `ArtifactRead` is kept whole, because the caller has to be
+ * able to tell a reader which of the three happened: `absent` says a file was
+ * opened and could not be used, `linked` says vibe never looked inside it, and
+ * those are not the same notice (#129).
+ */
+export function readRunArtifact(targetDir: string, runId: string, name: string): ArtifactRead {
+  const dir = runDirFor(targetDir, runId);
+  if (!isArtifactBasename(name)) {
+    throw new StoredStateError(
+      `"${name}" is not an artifact name. An artifact is a single file inside a run's ` +
+        'directory - letters, digits, dots, dashes and underscores. Nothing was read.',
+    );
+  }
+  const reason = linkedArtifactReason(dir, name);
+  if (reason !== null) return { kind: 'linked', reason };
+  try {
+    return { kind: 'text', text: readFileSync(path.join(dir, name), 'utf8') };
+  } catch {
+    return { kind: 'absent' };
+  }
 }
 
 /**

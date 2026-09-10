@@ -5,13 +5,13 @@ import { pilotChat } from '@src/pilotchat.js';
 import * as log from '@src/log.js';
 import { createLineReader, decode, encode, PROTOCOL_VERSION } from '@src/protocol.js';
 import { orchestrate } from '@src/orchestrator.js';
-import { listRuns } from '@src/run.js';
+import { listRunArtifacts, listRuns, readRunArtifact } from '@src/run.js';
 import { loadConfig, readRawConfig, writeConfigPatch } from '@src/config.js';
 import { GATEABLE, GATE_MODES, UNGATEABLE } from '@src/gates.js';
-import { diffSinceWithLimit } from '@src/git.js';
+import { diffRange, diffSinceWithLimit } from '@src/git.js';
 import { PROVIDERS, ROLE_NAMES } from '@src/roles.js';
 import { EFFORTS } from '@src/types.js';
-import type { LoadedConfig } from '@src/types.js';
+import type { ArtifactRead, LoadedConfig, RunArtifact } from '@src/types.js';
 import type { RunLoop } from '@src/cli.js';
 import type { GateContext, Host } from '@src/host.js';
 import type { Narration } from '@src/log.js';
@@ -192,7 +192,22 @@ export interface SessionDeps {
    */
   writeConfig?: (dir: string, patch: Record<string, unknown>) => { path: string };
   /** What reads a diff. Defaults to `diffSince` (#223), which shells out to git. */
-  diff?: (dir: string, baseSha: string) => Promise<{ patch: string; truncated: boolean }>;
+  diff?: (
+    dir: string,
+    baseSha: string,
+    headSha?: string,
+  ) => Promise<{ patch: string; truncated: boolean }>;
+  /**
+   * What lists a run's artifacts. Defaults to `listRunArtifacts` (#223).
+   *
+   * A seam for `archive`'s reason and it is the same point one level down: that
+   * function is where "what is in a run directory" is decided, including which
+   * entries it refuses to offer at all, so a test substituting it substitutes
+   * the definition rather than a fixture around one.
+   */
+  artifacts?: (dir: string, runId: string) => RunArtifact[];
+  /** What reads one artifact. Defaults to `readRunArtifact` (#223). */
+  artifact?: (dir: string, runId: string, name: string) => ArtifactRead;
 }
 
 export function createSession(send: Send, deps: SessionDeps = {}): Session {
@@ -201,8 +216,21 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
   const archive = deps.archive ?? ((dir: string) => listRuns(dir));
   const readConfig = deps.config ?? ((dir: string) => loadConfig(dir));
   const writeConfig = deps.writeConfig ?? writeConfigPatch;
+  // `head` is what makes this one round rather than the whole change. Undefined
+  // takes `diffSince`, which is `1d`'s original question - everything since the
+  // base - and a named head takes `diffRange`, which runs one command and
+  // answers an empty round emptily rather than falling back to the working tree.
   const readDiff =
-    deps.diff ?? ((dir: string, baseSha: string) => diffSinceWithLimit(dir, baseSha));
+    deps.diff ??
+    ((dir: string, baseSha: string, head?: string) =>
+      head === undefined
+        ? diffSinceWithLimit(dir, baseSha)
+        : diffRange(dir, baseSha, head));
+  const listArtifacts =
+    deps.artifacts ?? ((dir: string, runId: string) => listRunArtifacts(dir, runId));
+  const readOneArtifact =
+    deps.artifact ??
+    ((dir: string, runId: string, name: string) => readRunArtifact(dir, runId, name));
 
   /**
    * Gates awaiting an answer, by the id this process allocated for them.
@@ -340,12 +368,56 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       return;
     }
 
+    if (msg.type === 'artifacts' || msg.type === 'artifact') {
+      // Reads, beside a run, exactly as the archive is - both open files under
+      // `.vibe/runs` and write nothing - and beside a run is where they are
+      // wanted: the plan somebody asks to read is usually the plan the run in
+      // flight is working from.
+      //
+      // Synchronous for `archive`'s reason: both read a directory and parse what
+      // they find, and wrapping a sync call in a promise to look asynchronous
+      // adds a tick between the request and the answer for no gain.
+      //
+      // **The throw is the refusal, not a failure.** `readRunArtifact` throws a
+      // `StoredStateError` for a run id or a name this process will not join
+      // onto a path, and that sentence is the whole answer - so it reaches the
+      // sender as an `error` frame naming what was refused, rather than as an
+      // empty read that would look like a missing file.
+      try {
+        if (msg.type === 'artifacts') {
+          send({
+            type: 'artifacts',
+            id: msg.id,
+            dir: msg.dir,
+            runId: msg.runId,
+            entries: listArtifacts(msg.dir, msg.runId),
+          });
+        } else {
+          send({
+            type: 'artifact',
+            id: msg.id,
+            dir: msg.dir,
+            runId: msg.runId,
+            name: msg.name,
+            read: readOneArtifact(msg.dir, msg.runId, msg.name),
+          });
+        }
+      } catch (err: unknown) {
+        send({
+          type: 'error',
+          id: msg.id,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+      return;
+    }
+
     if (msg.type === 'diff') {
       // A read, beside a run, like the archive - `git diff <base>..HEAD` writes
       // nothing. The `git add -A` path in `diffSince` is unreachable from here
       // because `decode` refuses a request with no base.
       const id = msg.id;
-      void readDiff(msg.dir, msg.baseSha)
+      void readDiff(msg.dir, msg.baseSha, msg.headSha)
         .then(({ patch, truncated }) => {
           // `truncated` as a flag rather than a marker in the text: the design's
           // truncation band is a judgement about what the reviewer READ, and a

@@ -52,28 +52,63 @@ function gateLine(gate: GateRun): string {
   return parts.join(' · ');
 }
 
+/**
+ * Which pane holds this round's own detail (#223).
+ *
+ * **A closed map keyed by the group, which is the one thing a card always
+ * knows.** `CycleKind` is four and so is this, so a fifth group fails to compile
+ * here rather than producing a card whose heading is a link to nowhere — the same
+ * reason `format.ts` holds the boundary and exit-code maps and `contract.test.ts`
+ * fails on the commit that adds a ninth code.
+ *
+ * The round travels with it. A card is a summary of *one* round, so a link that
+ * opened the pane at whichever round happened to be newest would be the wrong
+ * one every time except the last — which is the complaint the counts one level
+ * up already earned: the largest thing on the surface was inert while something
+ * smaller beside it did the navigating.
+ */
+const PANE: Readonly<Record<Round['cycle'], string>> = {
+  plan: 'plans',
+  critique: 'critique',
+  code: 'code',
+  review: 'review',
+};
+
 export function RoundCard({
   card,
   onOpen,
 }: {
   card: Round;
   /** Undefined where there is nowhere to send the reader. The link is omitted. */
-  onOpen?: ((tab: string) => void) | undefined;
+  onOpen?: ((tab: string, round?: number | null) => void) | undefined;
 }) {
   const open = card.endedAt === null;
   const counts = card.census?.counts ?? null;
+  const go = onOpen === undefined ? null : () => { onOpen(PANE[card.cycle], card.round); };
 
   return (
     <article className={`v-round v-round--${card.cycle}${open ? ' v-round--open' : ''}`}>
+      {/* The heading is the control. A card is the round's summary and the pane
+          behind it is the round's detail, so the name of the round is the
+          shortest path between the two - and a card whose title was not a link
+          taught you to go looking for one at the bottom. */}
       <header className="v-round__head">
-        {/* The phase this card is, in the design's vocabulary — `plan`,
-            `critique`, `code`, `review`. The other half of the round is the card
-            above or below carrying the same round chip, which is what pairs them
-            now that each half arrives as its own entry in the log. */}
-        <span className="v-round__what">{roundTitle(card)}</span>
+        {go === null ? (
+          <span className="v-round__what">{roundTitle(card)}</span>
+        ) : (
+          <button
+            type="button"
+            className="v-round__what v-round__what--link"
+            onClick={go}
+            title={`Open this ${roundTitle(card)} round`}
+          >
+            {roundTitle(card)}
+          </button>
+        )}
         {/* The archive's round, which is the number that names the artifact
             behind it — the file is `plan-critique-0.json`, and a card has to
-            agree with the file. */}
+            agree with the file. It is also what the link above carries, so the
+            pane opens at this round rather than at the newest one. */}
         {card.round !== null && <MetaChip kind="checkable">round {card.round}</MetaChip>}
         {card.endedAt !== null && (
           <span className="v-round__took">{elapsed(card.endedAt - card.startedAt)}</span>
@@ -138,7 +173,7 @@ export function RoundCard({
           <Counts
             counts={counts}
             tolerance={card.census.tolerance}
-            onOpen={onOpen === undefined ? undefined : () => { onOpen('findings'); }}
+            onOpen={go ?? undefined}
           />
           {/* The loop's own sentence where it blocked, because `gate()` names
               the exact arithmetic that stopped the round. Never one composed
@@ -160,9 +195,9 @@ export function RoundCard({
               {card.census.findings.length - 3} more in this round
             </div>
           )}
-          {onOpen !== undefined && (
-            <button className="v-round__open" onClick={() => onOpen('findings')}>
-              open findings
+          {go !== null && (
+            <button className="v-round__open" onClick={go}>
+              open this {roundTitle(card)}
             </button>
           )}
         </div>

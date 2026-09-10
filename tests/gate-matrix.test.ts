@@ -363,7 +363,7 @@ test('question-round is holdable, and the context says which round it is', async
         {
           claude: (label) =>
             label === 'plan' ? planFixture({ open_questions: [questionFixture()] }) : planFixture(),
-          codex: (label) => (label === 'answers-0' ? answersReport([{}]) : report([])),
+          codex: (label) => (label.startsWith('answers-') ? answersReport([{}]) : report([])),
         },
         [],
       ),
@@ -401,7 +401,7 @@ test('stopping at a question round hands back the questions to answer', async ()
         {
           claude: (label) =>
             label === 'plan' ? planFixture({ open_questions: [asked] }) : planFixture(),
-          codex: (label) => (label === 'answers-0' ? answersReport([{}]) : report([])),
+          codex: (label) => (label.startsWith('answers-') ? answersReport([{}]) : report([])),
         },
         [],
       ),

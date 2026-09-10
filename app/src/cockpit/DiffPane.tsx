@@ -90,7 +90,26 @@ function parseDiff(patch: string): Hunk[] {
 
 const SEVERITIES: readonly Severity[] = ['P0', 'P1', 'P2', 'P3'];
 
-export function DiffPane({ dir, baseSha }: { dir: string; baseSha: string | null }) {
+export function DiffPane({
+  dir,
+  baseSha,
+  headSha,
+}: {
+  dir: string;
+  baseSha: string | null;
+  /**
+   * The far end of the range, which makes this **one round** rather than the
+   * whole change (#223).
+   *
+   * Both shas come from `round_committed`, which reads HEAD before it commits -
+   * so a round's range is measured rather than paired off the commit list, which
+   * goes silently wrong on a resumed run whose earlier commits were narrated to
+   * a process that has exited.
+   *
+   * Undefined is `1d`'s original question: everything since the base.
+   */
+  headSha?: string | undefined;
+}) {
   const [patch, setPatch] = useState<string | null>(null);
   const [truncated, setTruncated] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
@@ -110,14 +129,14 @@ export function DiffPane({ dir, baseSha }: { dir: string; baseSha: string | null
       return;
     }
     void host
-      .diff(dir, baseSha)
+      .diff(dir, baseSha, headSha)
       .then((got) => {
         setPatch(got.patch);
         setTruncated(got.truncated);
         setFailure(null);
       })
       .catch((err: unknown) => setFailure(err instanceof Error ? err.message : String(err)));
-  }, [dir, baseSha]);
+  }, [dir, baseSha, headSha]);
 
   useEffect(load, [load]);
 

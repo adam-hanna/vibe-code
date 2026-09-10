@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { blocking, emptyRun, persistence, reduce } from './model';
+import { blocking, blockingIn, emptyRun, persistence, reduce } from './model';
 import type { Run } from './model';
 import type { Frame } from '../host';
 
@@ -165,6 +165,30 @@ describe('the blocking count is the latest round’s, and it is decided here', (
 
   test('no rounds is zero, and that is a real zero', () => {
     expect(blocking(emptyRun())).toBe(0);
+  });
+
+  test('a badge on a per-judge tab counts that judge’s round (#223)', () => {
+    // `blocking` answers *the latest round, whichever judge produced it*, which
+    // was exactly right while there was one Findings tab showing whichever spoke
+    // last. With the critique and the review as separate panes it is wrong half
+    // the time: a critique's P1s would badge `Code review`, and the reader would
+    // open the pane and find nothing.
+    const run = fold([
+      census({ phase: 'plan', counts: { P0: 0, P1: 2, P2: 0, P3: 0 } }),
+      census({ phase: 'review', counts: { P0: 1, P1: 0, P2: 0, P3: 0 } }),
+    ]);
+    expect(blockingIn(run, 'plan')).toBe(2);
+    expect(blockingIn(run, 'review')).toBe(1);
+    // And the latest of that judge's rounds, not a total across them - the same
+    // rule `blocking` follows, applied one filter along.
+    const twice = fold([
+      census({ phase: 'plan', counts: { P0: 1, P1: 3, P2: 0, P3: 0 } }),
+      census({ phase: 'plan', counts: { P0: 0, P1: 1, P2: 0, P3: 0 } }),
+    ]);
+    expect(blockingIn(twice, 'plan')).toBe(1);
+    // A judge that has not reported is zero, and it is a real zero: the tab
+    // shows no badge rather than borrowing the other judge's count.
+    expect(blockingIn(twice, 'review')).toBe(0);
   });
 });
 

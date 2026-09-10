@@ -62,7 +62,11 @@ export function Counts({
       type="button"
       className="v-counts v-counts--link"
       onClick={onOpen}
-      title="Open the findings"
+      // Not "open the findings" any more: there is no Findings tab, and where
+      // this row sends you depends on which judge produced the census. The
+      // caller knows that and this does not, so the label says the thing that is
+      // true from here.
+      title="Open this round"
     >
       {chips}
     </button>

@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import { emptyRun } from './model';
-import { censusByPhase, questionsPhase, rounds, roundTitle, title } from './rounds';
-import type { Census, Cycle, PhaseGroup, Run, Turn, VerifyPass, Work } from './model';
+import { censusByPhase, committed, questionsPhase, rounds, roundTitle, title } from './rounds';
+import type { Census, Commit, Cycle, PhaseGroup, Run, Turn, VerifyPass, Work } from './model';
 
 /**
  * The round card, which is the object hi-fi 5's log is made of (#223).
@@ -462,4 +462,72 @@ test('a phase this build does not know renders as itself', () => {
   // a phase a newer core announced would be worse than its own name.
   expect(title('implementing')).toBe('code');
   expect(title('reconciling')).toBe('reconciling');
+});
+
+describe('what a round put in the history (#223)', () => {
+  const commit = (over: Partial<Commit> = {}): Commit => ({
+    sha: 'a'.repeat(40),
+    since: 'b'.repeat(40),
+    message: 'vibe: implement approved plan',
+    at: 4_000,
+    ...over,
+  });
+
+  /** Two code rounds, one after the other, as a fix round produces. */
+  const codeCycles = (): Cycle[] => [
+    cycle({
+      kind: 'code',
+      phases: [
+        phase({ id: 1, phase: 'implementing', round: 0, startedAt: 1_000 }),
+        phase({ id: 2, phase: 'implementing', round: 1, startedAt: 10_000 }),
+      ],
+    }),
+  ];
+
+  test('a commit attaches to the round it landed during', () => {
+    // By arrival, exactly as a census is, and for a sharper version of the same
+    // reason: a commit carries no round at all. What it carries is the pair of
+    // shas that bound it.
+    const cards = rounds(
+      run({ cycles: codeCycles(), commits: [commit({ at: 2_000 }), commit({ at: 11_000 })] }),
+    );
+    expect(cards[0]?.commit?.at).toBe(2_000);
+    expect(cards[1]?.commit?.at).toBe(11_000);
+  });
+
+  test('a commit that predates every phase attaches to nothing', () => {
+    // Real on a resume, where this session's frames start mid-run. Filing it
+    // under the first phase in view would credit an earlier session's work to a
+    // round that has not happened yet.
+    const cards = rounds(run({ cycles: codeCycles(), commits: [commit({ at: 10 })] }));
+    expect(cards.every((c) => c.commit === null)).toBe(true);
+  });
+
+  test('a round that changed nothing has a card and no commit', () => {
+    // Three things produce no commit - a round that changed nothing, a run with
+    // `git.commitEachRound` off, and a directory that is not a repository - and
+    // none of them is a failure. The card exists either way.
+    const cards = rounds(run({ cycles: codeCycles() }));
+    expect(cards).toHaveLength(2);
+    expect(cards.every((c) => c.commit === null)).toBe(true);
+  });
+
+  test('the Code tab’s list is keyed off the commit, not off the phase', () => {
+    // A round with no commit has no diff to show, so a list of rounds half of
+    // which produce an empty pane when clicked is worse than a shorter list.
+    const one = committed(run({ cycles: codeCycles(), commits: [commit({ at: 11_000 })] }));
+    expect(one).toHaveLength(1);
+    expect(one[0]?.round).toBe(1);
+    expect(committed(run({ cycles: codeCycles() }))).toEqual([]);
+  });
+
+  test('a first commit in an empty repository has no left-hand end', () => {
+    // `markBase` answers null in a repository with no commits yet, and that is a
+    // real range rather than a missing field: the pane says so instead of
+    // showing the whole history under this round's label.
+    const cards = rounds(
+      run({ cycles: codeCycles(), commits: [commit({ at: 2_000, since: null })] }),
+    );
+    expect(cards[0]?.commit?.since).toBeNull();
+  });
 });

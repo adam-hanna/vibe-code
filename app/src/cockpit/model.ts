@@ -437,6 +437,28 @@ export interface Compaction {
   at: number;
 }
 
+/**
+ * What one round put in the history, and the range that is (#223).
+ *
+ * **Both ends, measured, and neither derived.** `round_committed` reads HEAD
+ * *before* it commits, so `since` is what the tree actually was rather than the
+ * previous commit paired off this list — and that difference is not theoretical:
+ * a resumed run's earlier commits were narrated to a process that has exited, so
+ * a window pairing consecutive arrivals would show round 3's card a cumulative
+ * diff and label it as one round.
+ *
+ * `since` is null for a first commit in a repository that had none, which is a
+ * real state and reads as *everything up to here*.
+ */
+export interface Commit {
+  sha: string;
+  since: string | null;
+  /** The commit message, which names what the round was. */
+  message: string | null;
+  /** When it reached us, so a round can be found by arrival. */
+  at: number;
+}
+
 /** A boundary the loop is holding at, waiting to be told what to do. */
 export interface Gate {
   /** The id to answer. Allocated by the host, not by us. */
@@ -548,6 +570,16 @@ export interface Run {
    * whole working tree.
    */
   baseSha: string | null;
+  /**
+   * Every commit this run made, oldest first (#223).
+   *
+   * A list rather than the latest, because the Code tab's subject is *what each
+   * round changed* and that is one entry per round. Empty on a run with
+   * `git.commitEachRound` off, on a directory that is not a repository, and on
+   * every round that changed nothing — three different reasons for the same
+   * emptiness, and the pane says the honest common part rather than picking one.
+   */
+  commits: readonly Commit[];
   /** The turn with no `endedAt`, if any. */
   running: Turn | null;
   gate: Gate | null;
@@ -675,6 +707,7 @@ export function emptyRun(): Run {
     spend: { tokens: null, costUsd: null, codexTokens: null, charges: [] },
     compactions: [],
     baseSha: null,
+    commits: [],
     running: null,
     gate: null,
     lastGate: null,
@@ -1405,6 +1438,26 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
       case 'run_branch':
         return { ...next, branch: { name: str(data['branch']), why: str(data['why']) } };
 
+      /**
+       * What a round put in the history (#223).
+       *
+       * `sha` is required and `since` is not: a first commit in a repository
+       * that had none has no left-hand end, and that is a real range rather than
+       * a missing field. A frame with no `sha` is dropped — a commit with no id
+       * is not a commit anybody can diff.
+       */
+      case 'round_committed': {
+        const sha = str(data['sha']);
+        if (sha === null) return next;
+        return {
+          ...next,
+          commits: [
+            ...next.commits,
+            { sha, since: str(data['since']), message: str(data['message']), at },
+          ],
+        };
+      }
+
       case 'verify_started': {
         const gate = str(data['gate']);
         if (gate === null) return next;
@@ -1839,6 +1892,25 @@ export function persistence(censuses: readonly Census[]): ReadonlyMap<string, nu
  */
 export function blocking(run: Run): number {
   const latest = run.censuses[run.censuses.length - 1];
+  if (latest === undefined) return 0;
+  return (latest.counts['P0'] ?? 0) + (latest.counts['P1'] ?? 0);
+}
+
+/**
+ * The same count, for one judge (#223).
+ *
+ * **A badge has to name the tab it is on.** `blocking` answers *the latest round,
+ * whichever judge produced it*, which was exactly right while there was one
+ * Findings tab showing whichever judge spoke last. With the critique and the
+ * review as separate panes it is wrong half the time: a critique's two P1s would
+ * badge `Code review`, and the reader would open the pane and find nothing.
+ *
+ * `census.phase` is the loop's own label for which judge produced it - `plan`
+ * from the critic, `review` from the reviewer - so this filters rather than
+ * inferring anything from where the census landed.
+ */
+export function blockingIn(run: Run, phase: Census['phase']): number {
+  const latest = [...run.censuses].reverse().find((c) => c.phase === phase);
   if (latest === undefined) return 0;
   return (latest.counts['P0'] ?? 0) + (latest.counts['P1'] ?? 0);
 }

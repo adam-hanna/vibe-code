@@ -94,7 +94,7 @@ describe('the tab bar the rail emptied', () => {
 
   test('the bar was found and is the bar', () => {
     expect(bar).toMatch(/v-cockpit__tab/);
-    expect(bar).toMatch(/Findings/);
+    expect(bar).toMatch(/Questions/);
   });
 
   test('Settings and Runs are on the rail, not on the bar', () => {
@@ -121,15 +121,50 @@ describe('the tab bar the rail emptied', () => {
     // Hi-fi 1: Pilot chat · Output · Versions · Diff · Findings · Questions ·
     // Prompt. `Pilot chat` first is hi-fi 5 in as many words, and it is where
     // the window lands.
+    //
+    // **Three of those seven labels are gone and the positions are not.** The
+    // artwork's `Versions` is a version history of an artifact, which is what
+    // `Plans` is; `Diff` is `Code`; and `Findings` was one round of one judge,
+    // which is `Plan critique` and `Code review`. What the design names four
+    // positions for, this build has six of - so something had to decide the
+    // interleaving, and the rule is below.
     expect(at('Pilot chat')).toBeLessThan(at('Output'));
-    expect(at('Output')).toBeLessThan(at('Versions'));
-    expect(at('Versions')).toBeLessThan(at('Diff'));
-    expect(at('Diff')).toBeLessThan(at('Findings'));
-    expect(at('Findings')).toBeLessThan(at('Questions'));
-    // The three that postdate the artwork come after the seven it names, and
+    expect(at('Output')).toBeLessThan(at('Plans'));
+    // The three that postdate the artwork come after the ones it names, and
     // the readout is last because it is right-aligned.
     expect(at('Questions')).toBeLessThan(at('Verify'));
     expect(at('Prompt')).toBeLessThan(at('v-cockpit__readout'));
+  });
+
+  test('the four artifact tabs read in the loop’s own order', () => {
+    // `CycleKind` is plan · critique · code · review, it is the order the loop
+    // reaches them in, and it is the order the column beside this bar draws its
+    // groups. Making the bar agree with the column is a rule; keeping `Diff`
+    // between the plan and the findings because that is where the artwork put
+    // it would be a coincidence somebody has to remember.
+    //
+    // Read off the click handlers rather than the labels: `Code` is a substring
+    // of `Code review` and of the comment above the buttons explaining the
+    // substitutions, so a label search finds the wrong one. There is exactly one
+    // `open('code')` in the bar.
+    const opens = (name: string): number => at(`open('${name}')`);
+    expect(opens('plans')).toBeLessThan(opens('critique'));
+    expect(opens('critique')).toBeLessThan(opens('code'));
+    expect(opens('code')).toBeLessThan(opens('review'));
+    expect(opens('review')).toBeLessThan(opens('questions'));
+  });
+
+  test('the two panes those four replaced are gone, and stay gone', () => {
+    // Each is a tab that showed strictly less than the one that replaced it:
+    // `Findings` had the four counts and a title, from the wire, for the latest
+    // round of whichever judge spoke last; `Diff` had one cumulative diff and
+    // could not answer what a single round changed. A tab for either coming
+    // back is two answers to one question, which is how twelve tabs happened.
+    expect(bar).not.toMatch(/>\s*Findings\b/);
+    expect(bar).not.toMatch(/v-cockpit__tab[^>]*>\s*Diff\b/);
+    // And `Versions` is no longer a dashed placeholder saying the window cannot
+    // read a run's artifacts, because it can.
+    expect(bar).not.toMatch(/v-cockpit__tab--off[^>]*>\s*Versions/);
   });
 
   test('the window lands on the pilot', () => {

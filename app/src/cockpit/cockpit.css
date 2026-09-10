@@ -891,13 +891,29 @@
   text-align: left;
 }
 
-.v-questions__body--link {
+/* The whole box is the control, not the count inside it. Only the count
+   navigated, which is the same finding the severity chips one level up already
+   earned: the largest thing on the surface was inert while something smaller
+   beside it did the navigating. */
+.v-questions--link {
   cursor: pointer;
 }
 
-.v-questions__body--link:hover .v-questions__n {
+.v-questions--link:hover {
+  background: var(--surface-active-hdr);
+}
+
+.v-questions--link:hover .v-questions__n {
   color: var(--accent-solid);
   text-decoration: underline;
+}
+
+/* `role="button"` carries no focus ring of its own, and the box holds the
+   answerer's turn rows - so it cannot be a real `<button>` without putting a
+   control inside a control. This is the ring it would have had. */
+.v-questions--link:focus-visible {
+  outline: 1px solid var(--accent-solid);
+  outline-offset: 1px;
 }
 
 .v-questions__n {
@@ -1201,7 +1217,19 @@
 
 /* ------------------------------------------------------------ findings pane (1e / 4c) */
 
-.v-find {
+/* ------------------------------------------------ the four artifact panes (#223)
+
+   Plans, Plan critique, Code review and Code are one layout with four subjects:
+   a list of sections, one per round, each of which opens onto what the run
+   actually wrote. `.v-doc` is the shell they share, `.v-sect` is the section, and
+   `.v-rep` is the one thing only the two report panes need - a finding that
+   opens.
+
+   These replace `.v-find__*`, which styled a pane that could show one round of
+   one judge from the four counts the wire carries. Every rule that survived the
+   move is here; nothing was dropped for being inconvenient. */
+
+.v-doc {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
@@ -1209,102 +1237,241 @@
   padding: var(--space-4) var(--space-5);
   display: flex;
   flex-direction: column;
-  gap: var(--space-5);
+  gap: var(--space-3);
 }
 
-.v-find--empty {
+.v-doc--empty {
   color: var(--text-secondary);
   font: var(--type-body);
   gap: var(--space-2);
   align-items: flex-start;
 }
 
-.v-find__gate {
+.v-doc__head {
   display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-
-.v-find__round {
-  font: var(--type-section);
-  letter-spacing: var(--track-section);
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  font: var(--type-label);
+  letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--text-tertiary);
-  margin: 0;
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
 }
 
-/* Four chips, zeros shown - a gate decision is being made here. */
-.v-find__tolerance,
-.v-find__trend,
-.v-find__none {
+.v-doc__again {
+  font: var(--type-label);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  background: none;
+  border: 1px solid var(--rule-control);
+  padding: var(--space-1) var(--space-2);
+  cursor: pointer;
+}
+
+.v-doc__again:hover {
+  color: var(--text-emphasis);
+  border-color: var(--rule-strong);
+}
+
+.v-doc__note {
   font: var(--type-body-sm);
   color: var(--text-tertiary);
   margin: 0;
 }
 
-/* The consequence, not just the counts. */
-.v-find__consequence {
-  font: var(--type-lead);
-  color: var(--text-primary);
-  margin: 0;
+/* The file's own name, which is what makes a section and the artifact behind it
+   checkable against each other. Monospace because it is a string somebody may
+   go and type. */
+.v-doc__file {
+  font: var(--type-mono-sm);
+  color: var(--text-tertiary);
 }
 
-.v-find__list {
+/* A document, as it is on disk. `pre` because a plan IS markdown and rendering
+   it would mean shipping a parser to make prose prettier - the thing a person
+   reads a plan version for is the exact words the critic was shown. */
+.v-doc__text {
+  font: var(--type-mono-sm);
+  color: var(--text-secondary);
+  background: var(--surface-card);
+  border: 1px solid var(--rule-card);
+  margin: 0;
+  padding: var(--space-4);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ---- a section that opens -------------------------------------------------- */
+
+.v-sect {
+  border: 1px solid var(--rule-card);
+  background: var(--surface-card);
+  overflow: hidden;
+}
+
+/* The whole head is the control, never a caret with a title beside it: a hit
+   target smaller than the thing it opens is the reason nobody finds it. */
+.v-sect__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-3) var(--space-4);
+  border: none;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.v-sect__head:hover {
+  background: var(--surface-active-hdr);
+}
+
+.v-sect--open .v-sect__head {
+  border-bottom: 1px solid var(--rule-inner);
+}
+
+.v-sect__title {
+  font: var(--type-kicker);
+  color: var(--text-emphasis);
+}
+
+/* `auto` rather than `space-between` on the parent: the row is three children
+   and spreading them would push the caret away from the title it opens. */
+.v-sect__meta {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.v-sect__body {
+  padding: var(--space-4);
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
 }
 
-/* The head is the disclosure now, so the card is no longer wrapped in a button
-   that did nothing. `--link` is the only variant that takes a cursor: a row that
-   looks clickable and is not is the defect this replaced. */
-.v-find__head {
+/* ---- one finding, opened ---------------------------------------------------- */
+
+.v-rep__finding {
+  border: 1px solid var(--rule-inner);
+  background: var(--surface-panel);
+}
+
+.v-rep__head {
   display: flex;
   align-items: baseline;
   gap: var(--space-3);
   flex-wrap: wrap;
   width: 100%;
-  padding: 0;
+  padding: var(--space-3);
   border: 0;
   background: none;
   color: inherit;
   font: inherit;
   text-align: left;
-}
-
-.v-find__head--link {
   cursor: pointer;
 }
 
-.v-find__head--link:hover .v-find__title {
+.v-rep__head:hover .v-rep__title {
   color: var(--text-display);
 }
 
-.v-find__title {
+.v-rep__title {
   font: var(--type-title);
   letter-spacing: var(--track-title);
   color: var(--text-primary);
 }
 
-.v-find__id {
+.v-rep__id {
   margin-left: auto;
   font: var(--type-mono-sm);
   color: var(--text-tertiary);
 }
 
-.v-find__meta {
+.v-rep__body {
+  padding: 0 var(--space-3) var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.v-rep__meta {
   display: flex;
   gap: var(--space-2);
   flex-wrap: wrap;
-  margin-top: var(--space-2);
 }
 
-.v-find__history {
+/* The three headings behind the fold. Label weight, because they are captions
+   over prose rather than titles of their own. */
+.v-rep__label {
+  font: var(--type-label);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin: var(--space-2) 0 0;
+}
+
+.v-rep__prose {
+  font: var(--type-body);
+  color: var(--text-secondary);
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+/* A field the report did not carry. Named as absent rather than left blank: an
+   empty block under a heading reads as a rendering bug. */
+.v-rep__absent {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  margin: 0;
+}
+
+.v-rep__cites {
   list-style: none;
-  margin: var(--space-3) 0 0;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+.v-rep__excerpt {
+  font: var(--type-mono-sm);
+  color: var(--text-tertiary);
+  background: var(--surface-card);
+  border-left: 2px solid var(--rule-inner);
+  margin: var(--space-1) 0 0;
+  padding: var(--space-2) var(--space-3);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* The loop's own sentence where it blocked, never one composed from the counts. */
+.v-rep__verdict {
+  font: var(--type-lead);
+  color: var(--text-primary);
+  margin: 0;
+}
+
+/* The judge's account of the round, which no frame has ever carried. */
+.v-rep__summary {
+  font: var(--type-body);
+  color: var(--text-secondary);
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.v-rep__history {
+  list-style: none;
+  margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;

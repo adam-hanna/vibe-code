@@ -96,6 +96,14 @@ test('a clean pass is legible as a sequence of ids, with no sentence read', asyn
       // cadence being real rather than the case being lucky - a write turn short
       // enough to have no readings is one there was nothing to report about.
       'work_measured',
+      // What the round put in the history, and the range it spans (#223). The
+      // commit has always happened here and `maybeCommit` has always printed
+      // `Committed abc1234`; what it had no id for was the pair of shas, so
+      // nothing watching a run could show one round's diff while the run was
+      // going. Narration with no event, on the same precedent as `run_branch`
+      // above: the sha is durable twice already, in git and in the checkpoint
+      // meta this line is immediately followed by.
+      'round_committed',
       'verify_started',
       'verify_passed', // the verdict, which the run has always recorded (#223)
       'phase_started', // review

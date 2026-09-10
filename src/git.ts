@@ -431,6 +431,42 @@ export async function diffSinceWithLimit(
   return { patch, truncated: patch.length > maxChars };
 }
 
+/**
+ * One round's diff: what the tree became, against what it was (#223).
+ *
+ * **A separate function rather than a third parameter on `diffSince`**, and the
+ * reason is that they answer different questions with different failure modes.
+ * `diffSince` is *the change so far* and is written to be useful when it is
+ * given nothing - no base means stage the working tree, an empty range means
+ * fall back to `git diff HEAD` - because the reviewer must be handed something.
+ * Neither of those fallbacks is wanted here: a round that changed nothing is a
+ * measurement, and answering it with the working tree would show a person the
+ * edits they made themselves and call them a round's output.
+ *
+ * So both ends are required, it runs exactly one command, and an empty result
+ * comes back empty.
+ *
+ * `from` may be null, which is the first commit in a repository that had none.
+ * `git diff <empty-tree>..<sha>` is the whole of that commit, which is the true
+ * answer rather than a special case: `EMPTY_TREE` is git's own constant for it
+ * and is the same in every repository.
+ */
+const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+
+export async function diffRange(
+  cwd: string,
+  from: string | null,
+  to: string,
+  options: { maxChars?: number } = {},
+): Promise<{ patch: string; truncated: boolean }> {
+  const maxChars = options.maxChars ?? DIFF_MAX_CHARS;
+  const { stdout } = await git(cwd, ['diff', `${from ?? EMPTY_TREE}..${to}`]);
+  if (stdout.length > maxChars) {
+    return { patch: stdout.slice(0, maxChars) + truncationMarker(maxChars), truncated: true };
+  }
+  return { patch: stdout, truncated: false };
+}
+
 /** One reviewer turn's worth of the change: whole files, in git's order. */
 export interface DiffChunk {
   files: string[];

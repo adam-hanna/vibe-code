@@ -1,6 +1,6 @@
 import type { Level, Narration } from '@src/log.js';
 import type { GateContext } from '@src/host.js';
-import type { RunSummary } from '@src/types.js';
+import type { ArtifactRead, RunArtifact, RunSummary } from '@src/types.js';
 
 /**
  * The wire between the loop and whatever is driving it (#153).
@@ -189,7 +189,36 @@ export type Outbound =
    * about what the reviewer *read*, and it cannot be drawn without knowing that
    * this happened.
    */
-  | { type: 'diff'; id: number; dir: string; patch: string; truncated: boolean };
+  | { type: 'diff'; id: number; dir: string; patch: string; truncated: boolean }
+  /**
+   * What is in a run's directory, in reply to an `artifacts` request.
+   *
+   * **The listing is the half that keeps the reader from guessing.** A window
+   * showing a plan round's plan has to name a file, and the alternative to being
+   * told is `plan-${round}.json` composed on the far side of this wire - a copy
+   * of the loop's naming convention, in a process that cannot be kept in step
+   * with it, going stale on the release that renames one. `listRunArtifacts`
+   * reads the directory instead, and every entry says what `lstat` made of it
+   * rather than being filtered down to the ones that are files.
+   */
+  | { type: 'artifacts'; id: number; dir: string; runId: string; entries: RunArtifact[] }
+  /**
+   * One artifact's contents, in reply to an `artifact` request.
+   *
+   * `read` is `ArtifactRead` verbatim, for the reason `archive` carries
+   * `RunSummary[]` verbatim: those three answers are the whole of what this
+   * repo has decided an artifact read can be, and collapsing `absent` and
+   * `linked` into one nullable string here would tell a reader a file was
+   * unreadable when vibe never looked inside it (#129).
+   */
+  | {
+      type: 'artifact';
+      id: number;
+      dir: string;
+      runId: string;
+      name: string;
+      read: ArtifactRead;
+    };
 
 /** What the thing driving the loop says. */
 export type Inbound =
@@ -358,8 +387,40 @@ export type Inbound =
    * The base comes from `phase_started`, which carries it from the moment the
    * implement phase marks it. A window that never saw that frame has no base and
    * cannot ask, which is the honest state rather than a reason to guess one.
+   *
+   * `headSha` closes the range, and only a request that names both ends gets a
+   * per-round answer (#223). With it this is one round's diff, from
+   * `round_committed`'s own two shas; without it, it is everything since the
+   * base, which is what `1d` has always shown. They are different questions and
+   * the frame says which one is being asked rather than defaulting into either.
    */
-  | { type: 'diff'; id: number; dir: string; baseSha: string };
+  | { type: 'diff'; id: number; dir: string; baseSha: string; headSha?: string }
+  /**
+   * Ask what a run's directory holds (#223).
+   *
+   * **A read, beside `archive`, `config` and `diff`, and the same rule applies:**
+   * `listRunArtifacts` reads a directory and writes nothing, so it is answerable
+   * while a run is going - and it has to be, because the run whose plan somebody
+   * wants to read is usually the one that is running.
+   *
+   * `runId` is separate from `dir` and both are required. `dir` is the
+   * repository and `runId` names a directory under its `.vibe/runs`, which is
+   * the pair `assertUsableRunId` is written to check; a single path would be a
+   * caller handing this process somewhere to read, which is the thing the split
+   * exists to prevent.
+   */
+  | { type: 'artifacts'; id: number; dir: string; runId: string }
+  /**
+   * Read one of that run's artifacts.
+   *
+   * **A separate type rather than an optional `name` on the frame above.** A
+   * `name` that could be absent would make "list everything" and "read this
+   * file" one request with two meanings, and a decoder cannot refuse a missing
+   * field it is also allowed to do without - which is how `config` earns its
+   * optional `patch` and why this does not have one: there, absence is a *read*
+   * and the refusal is on the shape of what is present.
+   */
+  | { type: 'artifact'; id: number; dir: string; runId: string; name: string };
 
 export function encode(msg: Outbound): string {
   return `${JSON.stringify(msg)}\n`;
@@ -506,6 +567,33 @@ export function decode(line: string): Decoded {
       }
       return { ok: true, message: { type: 'archive', id, dir } };
     }
+    case 'artifacts':
+    case 'artifact': {
+      // Both fields required and both checked here, for `archive`'s reason:
+      // there is no `parseArgs` below this to catch a missing one, and an empty
+      // `dir` would resolve to the host's cwd - a *different repository's*
+      // archive answered as though it were this one, which is the worst way for
+      // a read to fail because it succeeds.
+      const dir = parsed['dir'];
+      const runId = parsed['runId'];
+      if (typeof dir !== 'string' || dir === '') {
+        return { ok: false, id, reason: `${type} carried no dir` };
+      }
+      if (typeof runId !== 'string' || runId === '') {
+        return { ok: false, id, reason: `${type} carried no runId` };
+      }
+      if (type === 'artifacts') {
+        return { ok: true, message: { type: 'artifacts', id, dir, runId } };
+      }
+      // Refused rather than defaulted to a listing. The two requests are
+      // different types precisely so that a `name` nobody sent is a refusal
+      // with a sentence and never a silently different answer.
+      const name = parsed['name'];
+      if (typeof name !== 'string' || name === '') {
+        return { ok: false, id, reason: 'artifact named no artifact' };
+      }
+      return { ok: true, message: { type: 'artifact', id, dir, runId, name } };
+    }
     case 'diff': {
       const dir = parsed['dir'];
       if (typeof dir !== 'string' || dir === '') {
@@ -518,7 +606,22 @@ export function decode(line: string): Decoded {
       if (typeof baseSha !== 'string' || baseSha === '') {
         return { ok: false, id, reason: 'diff carried no baseSha, and there is no safe default' };
       }
-      return { ok: true, message: { type: 'diff', id, dir, baseSha } };
+      // Optional, and refused rather than ignored when present but unusable. A
+      // `headSha: 0` silently dropped would answer a request for one round with
+      // the whole run's diff - the same shape as the truncation flag it sits
+      // beside, where presenting a partial answer as a complete one is the
+      // failure the field exists to prevent.
+      const headSha = parsed['headSha'];
+      if (headSha !== undefined && (typeof headSha !== 'string' || headSha === '')) {
+        return { ok: false, id, reason: 'diff carried a headSha that was not a commit' };
+      }
+      return {
+        ok: true,
+        message:
+          headSha === undefined
+            ? { type: 'diff', id, dir, baseSha }
+            : { type: 'diff', id, dir, baseSha, headSha },
+      };
     }
     case 'config': {
       const dir = parsed['dir'];

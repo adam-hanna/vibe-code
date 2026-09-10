@@ -259,6 +259,33 @@ describe('which run this is', () => {
     ).toEqual({ name: null, why: 'branch isolation is off' });
   });
 
+  test('a commit carries both ends of its range, and neither is derived (#223)', () => {
+    // The Code tab shows one round's diff, which needs `from` and `to`.
+    // `round_committed` reads HEAD before it commits, so both are measured - the
+    // alternative is pairing consecutive commits here, which is correct until a
+    // run is resumed and the earlier commits were narrated to a process that has
+    // exited, at which point round 3 silently shows a cumulative diff.
+    const run = fold([
+      say('round_committed', { sha: 'aaa', since: 'bbb', message: 'vibe: implement' }),
+      say('round_committed', { sha: 'ccc', since: 'aaa', message: 'vibe: fix round 1' }),
+    ]);
+    expect(run.commits.map((c) => [c.since, c.sha])).toEqual([
+      ['bbb', 'aaa'],
+      ['aaa', 'ccc'],
+    ]);
+    expect(run.commits[1]?.message).toBe('vibe: fix round 1');
+  });
+
+  test('a first commit in an empty repository has no parent, and says so', () => {
+    // `markBase` answers null in a repository with no commits yet. Null is a
+    // real answer - "everything up to here" - and not a missing field.
+    expect(fold([say('round_committed', { sha: 'aaa' })]).commits[0]?.since).toBeNull();
+  });
+
+  test('a commit with no sha is dropped: it is not a commit anybody can diff', () => {
+    expect(fold([say('round_committed', { since: 'bbb' })]).commits).toEqual([]);
+  });
+
   test('a resume is the same id, saying so', () => {
     const run = fold([say('run_started', { runId: 'r', dir: '/d', resumed: true })]);
     expect(run.identity?.resumed).toBe(true);

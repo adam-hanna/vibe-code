@@ -11,6 +11,7 @@ import {
   refused,
   resolveCommand,
   startCommand,
+  stopAllCommands,
   stopCommand,
 } from '@src/commands.js';
 
@@ -36,6 +37,37 @@ async function ended(id: string, within = 20_000): Promise<void> {
   for (;;) {
     if (readCommand(id)?.endedAt !== null) return;
     if (Date.now() > deadline) throw new Error(`${id} did not end within ${String(within)}ms`);
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
+
+/**
+ * Wait until a command has written something matching `re`, or throw.
+ *
+ * **A poll, not a sleep, and that is what this file cost to learn.** The
+ * long-running case used a fixed 120ms wait before asserting that the child had
+ * ticked - which is not a measurement of anything, and on a loaded machine it is
+ * not enough for `node -e` to boot. The full suite spawns around a hundred
+ * children, so "loaded" is the ordinary case rather than the unlucky one, and
+ * AGENTS.md already says it: **no wall-clock fixtures**.
+ *
+ * The consequence was worse than a flake. A failure here leaves the child
+ * running, the child keeps the file's event loop alive, and the runner waits for
+ * a process that will never exit - so an ordinary assertion failure arrives as a
+ * **hang** with the failure buffered behind it. That cost three full test cycles
+ * before anybody looked at the process tree. `startKillHelper`'s rule applies
+ * here too: a wait on a child must be able to say which way it failed.
+ */
+async function wrote(id: string, re: RegExp, within = 20_000): Promise<void> {
+  const deadline = Date.now() + within;
+  for (;;) {
+    if (re.test(readCommand(id)?.output ?? '')) return;
+    if (readCommand(id)?.endedAt !== null) {
+      throw new Error(`${id} ended before it wrote ${String(re)}`);
+    }
+    if (Date.now() > deadline) {
+      throw new Error(`${id} wrote nothing matching ${String(re)} within ${String(within)}ms`);
+    }
     await new Promise((r) => setTimeout(r, 20));
   }
 }
@@ -93,11 +125,19 @@ test('stdout and stderr are interleaved, because that is what a terminal shows',
   assert.match(output, /ERR/, 'stderr was dropped, so a failure would be unreadable');
 });
 
-test('a command that will not exit keeps running, and stopping it says a person did', async () => {
+test('a command that will not exit keeps running, and stopping it says a person did', async (t) => {
   // The case the whole feature is for: `npm run dev` does not exit, and being
   // able to start it and read it is the difference between checking an app
   // works and telling somebody else how to.
   clearCommands();
+  // **Whatever happens below, nothing is left running.** This is the only case
+  // in the file that starts a process which never exits on its own, so it is the
+  // only one where a failed assertion can outlive the test - and it did: an
+  // early throw skipped the `stopCommand` at the bottom, the child kept this
+  // file's event loop alive, and the runner hung with the real failure buffered
+  // behind it. A hook rather than a `finally`, because it also covers a throw
+  // from `startCommand` itself.
+  t.after(() => void stopAllCommands());
   const started = startCommand({
     program: process.execPath,
     args: ['-e', 'setInterval(() => process.stdout.write("tick\\n"), 10)'],
@@ -105,9 +145,11 @@ test('a command that will not exit keeps running, and stopping it says a person 
   });
   if (refused(started)) throw new Error(started.refused);
 
-  await new Promise((r) => setTimeout(r, 120));
+  // Polled rather than slept for. A fixed wait is a guess about how long node
+  // takes to boot on whatever machine this is, made while ninety-nine other
+  // children are starting.
+  await wrote(started.id, /tick/);
   assert.equal(readCommand(started.id)?.endedAt, null, 'it should still be running');
-  assert.match(readCommand(started.id)?.output ?? '', /tick/);
 
   assert.equal(stopCommand(started.id), true);
   await ended(started.id);

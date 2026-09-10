@@ -26,6 +26,7 @@ const card = (startedAt: number, phase = 'planning'): RoundCard => ({
   work: null,
   verify: null,
   census: null,
+  commit: null,
 });
 
 const reply = (turn: number, startedAt: number | null): Reply => ({
