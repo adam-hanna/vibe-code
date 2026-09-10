@@ -14,6 +14,7 @@ import {
 import type { Backend } from './backend';
 import { systemPrompt } from './brief';
 import { readEmitted, visible } from './emit';
+import { useFollow } from './follow';
 import { declare, execute } from './tools';
 import {
   costOf,
@@ -608,6 +609,14 @@ export function PilotPane({
   const counted = useRef<Set<number>>(new Set());
   /** The chain ran out and the pilot is holding for a person. */
   const [stalled, setStalled] = useState(false);
+  /**
+   * The conversation follows its own bottom until you scroll away from it.
+   *
+   * Deliberately not driven by anything this component knows - not `live`, not
+   * the reply count - because the question it answers is *where is the reader
+   * looking*, and only the reader can move that.
+   */
+  const log = useFollow<HTMLDivElement>();
 
   // Two refs rather than state, because neither is drawn and both must survive
   // StrictMode's double-invoked effects without causing a render.
@@ -1080,7 +1089,10 @@ export function PilotPane({
           conversation is the most copied thing in the product and was missed:
           the first bug report about it arrived as a screenshot of text nobody
           could select. */}
-      <div className="v-pilot__log v-selectable">
+      {/* Follows the bottom while you leave it there, and stops the instant you
+          scroll up — see `follow.ts` for why that state belongs to the reader
+          and not to the pane. */}
+      <div className="v-pilot__log v-selectable" ref={log.ref} onScroll={log.onScroll}>
         {conversation.replies.length === 0 && conversation.live === null && (
           <div className="v-pilot__note">
             Nothing yet. The pilot can read this run and propose a launch or a gate answer — it
