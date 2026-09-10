@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Button, StateKicker } from '../design';
-import { boundary, ending, hold } from './format';
+import { boundary, ending, hold, nextHold } from './format';
 import type { Raise } from './argv';
 import type { Run } from './model';
 
@@ -47,6 +47,14 @@ export interface FooterProps {
    * than describing a matrix it does not have.
    */
   gates: Readonly<Record<string, string>> | null;
+  /**
+   * The boundaries in the loop's own order, from `src/gates.ts` (#223).
+   *
+   * Empty until the config frame arrives, and empty is what makes the *next
+   * hold* line absent rather than wrong: with no order there is no "next", and
+   * the row falls back to listing which boundaries hold.
+   */
+  order: readonly string[];
   /** Whether a pause is armed and waiting for the next boundary. */
   pausing: boolean;
   busy: boolean;
@@ -135,6 +143,7 @@ export function Footer({
   onResume,
   caps,
   gates,
+  order,
   pausing,
   busy,
 }: FooterProps) {
@@ -147,6 +156,10 @@ export function Footer({
   const stopping = Object.entries(gates ?? {})
     .filter(([, mode]) => mode === 'stop')
     .map(([b]) => b);
+  // The earliest boundary ahead that holds. Null with no matrix and no order,
+  // which is the state before the config frame arrives - and the row says which
+  // boundaries hold rather than nothing at all.
+  const next = gates === null ? null : nextHold(order, gates, run.lastGate);
 
   // A waiting gate outranks everything, including a run that has said it is
   // done. `review_approved` fires while the loop is still going - verification,
@@ -547,10 +560,14 @@ export function Footer({
         would be a second form over one file, which is how two answers to "where
         does this run hold" come to exist.
 
-        It lists **which boundaries hold** rather than naming a next stop. The
-        matrix is a fact the loop stated; *which one comes next* would need a
-        phase-to-boundary ordering written here, and a wrong one is a promise the
-        app cannot keep — the same reason this line used to say nothing at all.
+        It says **which boundary comes next** as well as which ones hold. This
+        line used to refuse the first half, on the grounds that it *"would need a
+        phase-to-boundary ordering written here"* — and that objection is
+        answered rather than overruled: the order arrives on the `config` frame
+        as `src/gates.ts` declares it, and the position is the last boundary that
+        actually held. Nothing about either is decided on this side. See
+        `nextHold` for the one thing it can still be wrong about, and why the
+        wording is *can stop* rather than *will*.
       */}
       <div className="v-footer__note">
         {gates === null ? (
@@ -562,6 +579,16 @@ export function Footer({
           </>
         ) : (
           <>
+            {next !== null && (
+              <>
+                {/* The design's `next stop: verify gate`, worded for what it
+                    is: the earliest boundary ahead that holds. The loop can
+                    pass it without reaching it — a plan the critic clears
+                    first time never has a second plan round — so this says
+                    where it *can* stop, never where it will. */}
+                Next place it can stop: <strong>{boundary(next)}</strong>.{' '}
+              </>
+            )}
             Holds at {holding.map((b) => boundary(b)).join(', ')}.{' '}
             {stopping.length > 0 && (
               <>

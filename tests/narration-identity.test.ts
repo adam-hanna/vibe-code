@@ -73,6 +73,12 @@ test('a clean pass is legible as a sequence of ids, with no sentence read', asyn
   assert.deepEqual(
     seen.filter((n) => n.id !== null).map((n) => n.id),
     [
+      // Which branch the commits land on, before any phase (#223). `prepareGit`
+      // has always known this and never said it, so the window could not put a
+      // branch in hi-fi 1's identity header. `state.branch` is already durable,
+      // so nothing new was recorded - this is narration with no event, on the
+      // `findings_reported` precedent.
+      'run_branch',
       'phase_started', // planning
       'turn_started', //  the planner
       'claude_turn', //   what that turn spent (#223)

@@ -182,6 +182,15 @@ export function Cockpit() {
   const [caps, setCaps] = useState<Caps | null>(null);
   /** The gate matrix in force, so `3a`'s footer can say where the run holds. */
   const [gates, setGates] = useState<Readonly<Record<string, string>> | null>(null);
+  /**
+   * The boundaries in the loop's own order, as `src/gates.ts` declares them.
+   *
+   * Carried rather than written here, and that is what makes the footer's *next
+   * hold* a fact rather than a guess: `GATEABLE`'s comment says *"Order is the
+   * loop's, not the alphabet's"*, so a copy on this side would be a second
+   * sequence that could disagree with the one the run actually walks.
+   */
+  const [order, setOrder] = useState<readonly string[]>([]);
   useEffect(() => {
     if (repoDir.trim() === '' || !host.inShell()) return;
     let cancelled = false;
@@ -194,6 +203,7 @@ export function Cockpit() {
         };
         if (cancelled) return;
         if (effective.gates !== undefined) setGates(effective.gates);
+        setOrder(frame.gateable);
         const loop = effective.loop;
         if (loop === undefined) return;
         const { maxPlanRounds, maxReviewRounds, maxTokens } = loop;
@@ -629,7 +639,7 @@ export function Cockpit() {
       {/* `7c`, above everything and below the titlebar. It is a statement about
           the whole window - everything under it is as old as the strip says -
           so it cannot sit inside one column. */}
-      <StalenessStrip state={staleness(run, now)} />
+      <StalenessStrip state={staleness(run, now)} hostPid={wire.hostPid} />
 
       {/* `7e`, above the columns for the same reason: an agent with no headroom
           is a statement about the whole run, not about one pane. Quiet, and
@@ -709,6 +719,7 @@ export function Cockpit() {
             onResume={resume}
             caps={caps}
             gates={gates}
+            order={order}
             pausing={pausing}
           />
         </div>
@@ -840,7 +851,9 @@ export function Cockpit() {
                   }`}
             </button>
           </div>
-          {tab === 'output' && <OutputPane lines={run.output} />}
+          {tab === 'output' && (
+            <OutputPane lines={run.output} turn={run.running} staleness={staleness(run, now)} />
+          )}
           {tab === 'verify' && <VerifyPane passes={run.verify} />}
           {tab === 'findings' && <FindingsPane censuses={run.censuses} />}
           {tab === 'spend' && <SpendPane run={run} />}

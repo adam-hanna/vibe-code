@@ -2705,3 +2705,168 @@
 .v-cockpit__readout--on {
   color: var(--text-emphasis);
 }
+
+/*
+ * The loop column's identity header (hi-fi 1).
+ *
+ * Three lines above the cycles: the workstream, the branch, the repository. The
+ * name takes the title tier and the two below take the label tier and the mono
+ * face, because a branch and a path are strings you copy rather than prose you
+ * read - the same reason the diagnostics panel is monospace throughout.
+ *
+ * `overflow-wrap: anywhere` on the paths: a worktree path is longer than 364px
+ * and a header that pushed the column wider would move the whole cockpit.
+ */
+.v-ident {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-4) var(--space-5) var(--space-3);
+  border-bottom: 1px solid var(--rule-structure);
+  flex: none;
+}
+
+.v-ident__name {
+  font: var(--type-section);
+  color: var(--text-display);
+}
+
+.v-ident__line {
+  font: var(--type-mono-sm);
+  color: var(--text-tertiary);
+  overflow-wrap: anywhere;
+}
+
+/* A fact nobody sent, drawn as absent WITH its reason rather than as a blank.
+   Dashed for the same reason an unavailable tab is: dimming reads as "disabled
+   for you", dashed reads as "nothing has filled this in". */
+.v-ident__absent {
+  border-bottom: 1px dashed var(--rule-control-dim);
+  color: var(--text-tertiary);
+}
+
+/*
+ * Hi-fi 1's turn strip, above the output pane.
+ *
+ * The sub-bar tier - `--dim-sub-bar` is 34px and this is what that token was
+ * transcribed for. Column surface rather than chrome, because it describes the
+ * content below it rather than navigating around it.
+ */
+.v-turnstrip {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: var(--dim-sub-bar);
+  padding: 0 var(--space-5);
+  background: var(--surface-column);
+  border-bottom: 1px solid var(--rule-structure);
+  flex: none;
+  flex-wrap: wrap;
+}
+
+.v-turnstrip__who {
+  font: var(--type-body-sm);
+  color: var(--text-emphasis);
+}
+
+/* Pushed right, and tabular because it re-renders every second. */
+.v-turnstrip__live {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+}
+
+/* What this pane is not showing, and why. A footnote tier: it is a statement
+   about the pane rather than anything in it, so it takes the floor colour and
+   sits under the scroll rather than in it. */
+.v-output__unbuilt {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  border-top: 1px solid var(--rule-inner);
+  padding: var(--space-2) var(--space-5);
+  flex: none;
+}
+
+/*
+ * Hi-fi 2's severity row, on the round card in the loop column.
+ *
+ * The counts are drawn twice on purpose — here and in the findings pane — and
+ * the design says why: this row is for the peripheral scan, where a run in
+ * trouble should look different from across the room before any text is read.
+ */
+.v-phase__counts {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-wrap: wrap;
+  margin: var(--space-1) 0;
+}
+
+/*
+ * Hi-fi 14's answered/unanswered list, inside the question group.
+ *
+ * The mark is the settings vocabulary's checkbox rather than a new component,
+ * which is the design's own instruction. A settled row recedes to the floor:
+ * the unanswered ones are the reason this list is on screen.
+ */
+.v-questions__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  list-style: none;
+  margin: var(--space-2) 0;
+}
+
+.v-questions__q {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  font: var(--type-body-sm);
+  color: var(--text-primary);
+}
+
+.v-questions__q--done {
+  color: var(--text-tertiary);
+}
+
+.v-questions__mark {
+  font-family: var(--font-mono);
+  color: var(--accent-solid);
+  flex: none;
+}
+
+.v-questions__q--done .v-questions__mark {
+  color: var(--text-tertiary);
+}
+
+.v-questions__text {
+  overflow-wrap: anywhere;
+}
+
+/* "Waiting on you is not stalled, and the column says so." Quiet by design -
+   it is a reassurance, and a reassurance drawn loudly is an alarm. */
+.v-questions__waiting {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+  margin: var(--space-2) 0;
+}
+
+/* Hi-fi 13's two clocks, on the stale strip as well as the quiet one. Mono and
+   tabular because they are the two numbers the code branched on, and a reader
+   is checking the app's arithmetic against them. */
+.v-stale__clocks {
+  display: flex;
+  gap: var(--space-4);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+}

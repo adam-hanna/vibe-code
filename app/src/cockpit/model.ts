@@ -271,6 +271,33 @@ export interface FindingRow {
    * both and eventually disagreeing with itself.
    */
   severityChanges: readonly { from: string; to: string; by?: string; reason?: string }[] | null;
+  /**
+   * What the reviewer's own test observed, or null (#113, #223).
+   *
+   * Hi-fi 9's third case — *grounded but uncheckable* — is what this makes
+   * drawable, and it is a genuinely different state from the other four: the
+   * claim names a real place, the reviewer wrote a test to make it fail, and
+   * nothing could be concluded from running it. Before this the pane had no way
+   * to tell that apart from a finding nobody tried to prove.
+   *
+   * **Null means no reproducer, which is not a failure.** Requiring one would
+   * mean a reviewer that cannot write a failing test loses its finding, and
+   * #113 is explicit that a finding with none behaves exactly as every finding
+   * did before the field existed.
+   *
+   * The whole list, because the same test is run at `review` and again after the
+   * final fix and they answer two different questions.
+   */
+  reproducer: readonly { verdict: string; at: string; reason: string | null }[] | null;
+  /**
+   * The reviewer declining to have it fixed in this change.
+   *
+   * Real, worth doing, separate work. A deferred finding is non-blocking by
+   * definition — `parseFindings` refuses a deferred P0 or P1 — so this is never
+   * the reason a gate blocked, and the pane draws it as disposition rather than
+   * as severity.
+   */
+  deferred: boolean;
 }
 
 /** A round's findings, and what the gate made of them. */
@@ -444,7 +471,15 @@ export interface OutputLine {
 export interface Run {
   cycles: readonly Cycle[];
   /** The question loop, nested inside cycle 1. Null until one opens. */
-  questions: { total: number; blocking: number; open: readonly Question[] } | null;
+  questions: {
+    total: number;
+    blocking: number;
+    /** Which question round this is, or null on a core that did not say (#223). */
+    round: number | null;
+    /** `loop.maxQuestionRounds`, so the group can say `2/3` rather than `2`. */
+    cap: number | null;
+    open: readonly Question[];
+  } | null;
   /**
    * The rate-limit wait in flight, or the last one, or null (`7e`).
    *
@@ -488,6 +523,15 @@ export interface Run {
   /** The turn with no `endedAt`, if any. */
   running: Turn | null;
   gate: Gate | null;
+  /**
+   * The last boundary that held, or null before any has (#223).
+   *
+   * Kept after the gate is released, which `gate` is not — so the footer can say
+   * which hold is next without asking the loop where it is. It is a boundary
+   * rather than a phase on purpose: the ordering the answer needs is
+   * `GATEABLE`'s, and a phase would have to be mapped onto it here.
+   */
+  lastGate: string | null;
   output: readonly OutputLine[];
   /** Set when the run ended, with how. Null while it is going. */
   ended: { how: 'approved' | 'stopped'; detail: string } | null;
@@ -531,8 +575,33 @@ export interface Run {
    * reading an artifact is a separate decision with `#129`'s link refusal
    * attached to it. It is here because "which run" and "where is it" are the
    * same question to the person asking, and the host is holding both.
+   *
+   * `repo` and `task` are the other two thirds of hi-fi 1's identity header
+   * (#223) and are separately nullable: they were added to `run_started` after
+   * the frame existed, so a run narrated by an older core has neither and the
+   * header names what it was not told rather than going missing.
    */
-  identity: { runId: string; dir: string; resumed: boolean; at: number } | null;
+  identity: {
+    runId: string;
+    dir: string;
+    /** The repository, which is NOT `dir` — that is `.vibe/runs/<id>`. */
+    repo: string | null;
+    /** The brief, as the run recorded it. The workstream's name. */
+    task: string | null;
+    resumed: boolean;
+    at: number;
+  } | null;
+  /**
+   * The branch this run's commits land on, or null with the reason (#223).
+   *
+   * **Null is a real answer.** Branch isolation off, `--no-branch`, a directory
+   * that is not a repository, or a recorded branch that has since been deleted
+   * all mean one thing to a reader — commits go to whatever is checked out —
+   * and `why` says which of them it was. `null` for the whole field is the
+   * different fact that nothing has said yet, which is every run narrated by a
+   * core older than `run_branch`.
+   */
+  branch: { name: string | null; why: string | null } | null;
   /**
    * What earlier sessions of this run already did, or null (#211).
    *
@@ -580,12 +649,14 @@ export function emptyRun(): Run {
     baseSha: null,
     running: null,
     gate: null,
+    lastGate: null,
     output: [],
     ended: null,
     reason: null,
     completed: null,
     protocol: null,
     identity: null,
+    branch: null,
     from: null,
     preflight: null,
     seq: 0,
@@ -766,6 +837,29 @@ function readChanges(v: unknown): FindingRow['severityChanges'] {
 }
 
 /**
+ * What running a reproducer observed (#113).
+ *
+ * Whole-list, like `readAttempts` and unlike `readFindings`: these are two
+ * observations of one test at two moments, and half of that pair is a claim
+ * nobody made. An entry missing its verdict makes the whole list null, which
+ * the pane draws as *no reproducer* — the same thing a finding without one gets,
+ * because to a reader they are the same fact.
+ */
+function readReproducer(v: unknown): FindingRow['reproducer'] {
+  if (!Array.isArray(v)) return null;
+  const out: { verdict: string; at: string; reason: string | null }[] = [];
+  for (const item of v as unknown[]) {
+    if (typeof item !== 'object' || item === null) return null;
+    const row = item as Record<string, unknown>;
+    const verdict = str(row['verdict']);
+    const at = str(row['at']);
+    if (verdict === null || at === null) return null;
+    out.push({ verdict, at, reason: str(row['reason']) });
+  }
+  return out.length === 0 ? null : out;
+}
+
+/**
  * The findings a census listed.
  *
  * Per-entry rather than whole-list, unlike `readAttempts`: a finding missing its
@@ -792,6 +886,11 @@ function readFindings(v: unknown): FindingRow[] {
       evidence: num(row['evidence']) ?? 0,
       downgraded: readDowngrade(row['downgraded']),
       severityChanges: readChanges(row['severityChanges']),
+      reproducer: readReproducer(row['reproducer']),
+      // `=== true`, so a core that does not send the field is not read as
+      // having said no. It happens to mean the same thing here, and the
+      // coercion is still the one that cannot be wrong later.
+      deferred: row['deferred'] === true,
     });
   }
   return out;
@@ -1062,6 +1161,12 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
         verifyRound: frame.context.verifyRound,
         turnId: settled === null ? null : settled.id,
       },
+      // Where the run has got to, for the footer's *next hold* (#223, hi-fi 1).
+      // The last boundary that actually held is the only position signal on this
+      // wire that is a boundary: a phase name would need a phase-to-boundary map
+      // written in the window, which is the derivation the footer has always
+      // declined to make.
+      lastGate: frame.context.boundary,
     };
   }
 
@@ -1245,7 +1350,18 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
         // when it asked, not when anything happened (hi-fi 16).
         return {
           ...next,
-          identity: { runId, dir, resumed: data['resumed'] === true, at },
+          identity: {
+            runId,
+            dir,
+            // Independently nullable, and not gated on each other the way
+            // `runId` and `dir` are: these arrived later than the frame did
+            // (#223), so a run narrated by an older core has an identity with
+            // neither and a header that says so rather than one that is absent.
+            repo: str(data['repo']),
+            task: str(data['task']),
+            resumed: data['resumed'] === true,
+            at,
+          },
           // What earlier sessions of this run already did (#211). Null on a
           // fresh run, and null on a resume from a core too old to send it -
           // both mean "there is no history to show", which is the only claim
@@ -1253,6 +1369,13 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
           from: readResumedFrom(data['from']),
         };
       }
+
+      // Which branch the commits land on (#223, hi-fi 1). `prepareGit` says this
+      // at each of the seven places it settles the question, so the window is
+      // told rather than deriving `vibe/<run-id>` from the run id - which is a
+      // convention `git.branchPrefix` can change and `--no-branch` can remove.
+      case 'run_branch':
+        return { ...next, branch: { name: str(data['branch']), why: str(data['why']) } };
 
       case 'verify_started': {
         const gate = str(data['gate']);
@@ -1412,6 +1535,12 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
           questions: {
             total: num(data['total']) ?? 0,
             blocking: num(data['blocking']) ?? 0,
+            // Hi-fi 14's nested counter, or null on a core that predates it
+            // (#223). Both or neither would be wrong here: a round with no cap
+            // is still a position worth drawing, and the group says `round 2`
+            // rather than `round 2/3` rather than saying nothing.
+            round: num(data['round']),
+            cap: num(data['cap']),
             open: readQuestions(data['questions']),
           },
         };

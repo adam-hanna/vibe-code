@@ -216,3 +216,93 @@ describe('a finding that survived a fix round is the loop arguing with itself', 
     expect(persistence([]).size).toBe(0);
   });
 });
+
+/**
+ * A finding is a claim with provenance, and #113's verdict is part of it (#223).
+ *
+ * Hi-fi 9 is explicit: *"Every other screen shows findings as facts. This one
+ * shows them as claims with provenance — who said it, what it rests on, whether
+ * that checked out, and which of two very different guards demoted it."* Four of
+ * its five cases were already on the wire. The third — **grounded but
+ * uncheckable** — was not: `reproducerOutcomes` has been durable since #113 and
+ * was never narrated, so the pane could not tell a claim nobody could check from
+ * a claim nobody tried to check.
+ */
+describe('what a finding says about itself', () => {
+  const withFinding = (over: Record<string, unknown>): Frame =>
+    census({ findings: [{ id: 'F-07', severity: 'P1', title: 'Token write is not atomic', ...over }] });
+
+  test('a reproducer that ran is carried with its moment and its verdict', () => {
+    const run = fold([
+      withFinding({
+        reproducer: [
+          { verdict: 'reproduced', at: 'review', reason: null },
+          { verdict: 'did-not-reproduce', at: 'final-fix', reason: null },
+        ],
+      }),
+    ]);
+    // Both, not the latest. They answer different questions - *does this
+    // happen* and *is it gone* - and only the pair can close a carried finding.
+    expect(run.censuses[0]?.findings[0]?.reproducer).toEqual([
+      { verdict: 'reproduced', at: 'review', reason: null },
+      { verdict: 'did-not-reproduce', at: 'final-fix', reason: null },
+    ]);
+  });
+
+  test('unproven keeps its reason, which is the whole value of unproven', () => {
+    // "The file could not be placed", "no gate could be resolved" and "it failed
+    // with no observed baseline" need different responses from a reader.
+    const run = fold([
+      withFinding({
+        reproducer: [{ verdict: 'unproven', at: 'review', reason: 'no gate could be resolved' }],
+      }),
+    ]);
+    expect(run.censuses[0]?.findings[0]?.reproducer?.[0]?.reason).toBe(
+      'no gate could be resolved',
+    );
+  });
+
+  test('no reproducer is null, and that is not a strike against the finding', () => {
+    // #113 is explicit that a finding without one behaves exactly as every
+    // finding did before reproducers existed. The pane says so in words.
+    expect(fold([withFinding({})]).censuses[0]?.findings[0]?.reproducer).toBeNull();
+    expect(fold([withFinding({ reproducer: [] })]).censuses[0]?.findings[0]?.reproducer).toBeNull();
+  });
+
+  test('half a reproducer pair is none of it', () => {
+    // Whole-list, unlike the findings themselves: these are two observations of
+    // one test, and half of that pair is a claim nobody made.
+    const run = fold([
+      withFinding({
+        reproducer: [{ verdict: 'reproduced', at: 'review' }, { at: 'final-fix' }],
+      }),
+    ]);
+    expect(run.censuses[0]?.findings[0]?.reproducer).toBeNull();
+  });
+
+  test('deferred is a disposition and defaults to no', () => {
+    // Hi-fi 9's fifth case. A core that never sends the field is not read as
+    // having said no - it happens to mean the same thing, and `=== true` is the
+    // coercion that cannot become wrong later.
+    expect(fold([withFinding({})]).censuses[0]?.findings[0]?.deferred).toBe(false);
+    expect(fold([withFinding({ deferred: true })]).censuses[0]?.findings[0]?.deferred).toBe(true);
+  });
+
+  test('the other four cases still arrive intact', () => {
+    // Grounded-and-blocking, ungrounded, a guard's downgrade and a person's
+    // restore. Nothing about #113 was allowed to disturb them.
+    const run = fold([
+      withFinding({
+        raisedBy: 'human',
+        evidence: 0,
+        downgraded: { from: 'P0', reason: 'cites nothing that resolves' },
+        severityChanges: [{ from: 'P2', to: 'P0', by: 'human', reason: 'the citation is real' }],
+      }),
+    ]);
+    const f = run.censuses[0]?.findings[0];
+    expect(f?.raisedBy).toBe('human');
+    expect(f?.evidence).toBe(0);
+    expect(f?.downgraded?.from).toBe('P0');
+    expect(f?.severityChanges?.[0]?.to).toBe('P0');
+  });
+});

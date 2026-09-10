@@ -236,6 +236,53 @@ export function hold(name: string): Hold | null {
 }
 
 /**
+ * The next boundary that can hold this run (#223, hi-fi 1).
+ *
+ * `3a`'s footer is a **mode readout** — `mode · auto ● · step · next stop:
+ * verify gate` — and the app's said only where the loop had *already* stopped.
+ * Those are different claims and the design's is the one that is useful while
+ * nothing is holding, which is most of the time.
+ *
+ * ## Why this is not the derivation the footer refused to make
+ *
+ * The old comment said naming a next stop *"would need a phase-to-boundary
+ * ordering written here, and a wrong one is a promise the app cannot keep"*.
+ * Both halves are still true and neither applies:
+ *
+ * - **The ordering is told.** `order` is `GATEABLE` off the `config` frame, and
+ *   `src/gates.ts` says of it in as many words: *"Order is the loop's, not the
+ *   alphabet's."* Nothing about the sequence is written on this side.
+ * - **The position is told.** `since` is the last boundary that actually held,
+ *   recorded from an `ask`. No phase is mapped onto anything.
+ *
+ * ## What it can still be wrong about, and how the wording covers it
+ *
+ * The loop can pass a boundary without reaching it: a plan the critic clears on
+ * the first read never has a second `plan-round`. So the answer is *the earliest
+ * boundary ahead that holds* — the first one it **can** stop at — and the caller
+ * words it that way. It is never a prediction that the run will stop there.
+ *
+ * Wrapping is correct rather than a fallback: cycle 2 re-opens on every review
+ * fix, so from `review-round` the next hold really is `implemented` again. A run
+ * whose every row is `auto` returns null, which the footer already has a
+ * sentence for.
+ */
+export function nextHold(
+  order: readonly string[],
+  gates: Readonly<Record<string, string>>,
+  since: string | null,
+): string | null {
+  const holding = order.filter((b) => (gates[b] ?? 'auto') !== 'auto');
+  if (holding.length === 0) return null;
+  const at = since === null ? -1 : order.indexOf(since);
+  // Before any gate has held, and for a boundary this build's order does not
+  // contain, the answer is simply the first one that holds.
+  if (at < 0) return holding[0] ?? null;
+  const ahead = holding.find((b) => order.indexOf(b) > at);
+  return ahead ?? holding[0] ?? null;
+}
+
+/**
  * How a run ended, in the footer's words.
  *
  * `tone` follows the design's own reading of the three kickers: `alarm` for a

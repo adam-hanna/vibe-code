@@ -1,4 +1,4 @@
-import { readFileSync, existsSync, renameSync } from 'node:fs';
+﻿import { readFileSync, existsSync, renameSync } from 'node:fs';
 import path from 'node:path';
 import {
   applyOverrides,
@@ -624,8 +624,18 @@ async function startRun(
 
   log.attachTranscript(path.join(state.dir, 'transcript.log'));
   log.heading(`Run ${state.id}`, {
+    // `repo` and `task` are the other two thirds of hi-fi 1's identity header
+    // (#223), and both were already certain here. `dir` is the *run's*
+    // directory - where `PLAN.md` and the artifacts live - and it is not the
+    // repository, which is what somebody asking "which project am I looking at"
+    // means. Two facts, two fields, rather than one that has to be guessed from
+    // the other by trimming `.vibe/runs/<id>` off the end.
+    //
+    // The comment sits above the pair rather than between them: `contract.test.ts`
+    // reads this site as source, and its regex walks from the id straight to the
+    // data.
     id: 'run_started',
-    data: { runId: state.id, dir: state.dir, resumed: false },
+    data: { runId: state.id, dir: state.dir, repo: targetDir, task, resumed: false },
   });
   log.info(`Repo:    ${targetDir}`);
   log.info(`Claude:  ${cfg.claude.model} / ${cfg.claude.effort}`);
@@ -858,7 +868,14 @@ async function resumeRun(
       renameSync(answersFile, path.join(state.dir, `stalled-${state.planRound}.md`));
       log.heading(`Resuming ${state.id}`, {
         id: 'run_started',
-        data: { runId: state.id, dir: state.dir, resumed: true, from: resumedFrom(state) },
+        data: {
+          runId: state.id,
+          dir: state.dir,
+          repo: targetDir,
+          task: state.task,
+          resumed: true,
+          from: resumedFrom(state),
+        },
       });
       return execute(state, cfg, true, flags.skipProbe === true, REAL_GATE, loop, handle);
     }
@@ -900,7 +917,14 @@ async function resumeRun(
   // one thing that differs (#207).
   log.heading(`Resuming ${state.id}`, {
     id: 'run_started',
-    data: { runId: state.id, dir: state.dir, resumed: true, from: resumedFrom(state) },
+    data: {
+      runId: state.id,
+      dir: state.dir,
+      repo: targetDir,
+      task: state.task,
+      resumed: true,
+      from: resumedFrom(state),
+    },
   });
   return execute(state, cfg, true, flags.skipProbe === true, REAL_GATE, loop, handle);
 }

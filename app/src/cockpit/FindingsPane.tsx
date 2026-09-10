@@ -111,6 +111,55 @@ function History({ finding }: { finding: FindingRow }) {
   );
 }
 
+/**
+ * What the reviewer's own test observed (#113, hi-fi 9's third case).
+ *
+ * **The three verdicts are not three shades of the same thing**, which is why
+ * they get three chips rather than one with a value in it:
+ *
+ * - `reproduced` — the gate passed on this tree without the file and failed
+ *   with it. The finding points at something that actually happens, and this is
+ *   the strongest evidence any finding in this product can carry.
+ * - `did-not-reproduce` — the test the reviewer wrote to make its own finding
+ *   fail did not fail. `toP2` demotes on this, so the demotion is in
+ *   `downgraded` beside it and this is the evidence for it.
+ * - `unproven` — nothing was observed. Grounded and still uncheckable, which is
+ *   the state the pane could not draw at all before this landed, and it is
+ *   **not** a strike against the finding: the reason is what a reader acts on.
+ *
+ * `at` travels with each, because the same test run after the final fix answers
+ * a different question from the same test run at review — *does this happen* and
+ * *is it gone*. One line each, never merged into a latest verdict.
+ */
+function Reproducer({ outcomes }: { outcomes: FindingRow['reproducer'] }) {
+  if (outcomes === null) return null;
+  return (
+    <ul className="v-find__history">
+      {outcomes.map((o, i) => (
+        // eslint-disable-next-line react/no-array-index-key
+        <li key={`${o.at}-${o.verdict}-${String(i)}`}>
+          <MetaChip
+            kind={
+              o.verdict === 'reproduced'
+                ? 'alarm'
+                : o.verdict === 'did-not-reproduce'
+                  ? 'checkable'
+                  : 'default'
+            }
+          >
+            {o.verdict}
+          </MetaChip>{' '}
+          {o.at === 'review' ? 'before the fix' : 'after the final fix'}
+          {/* The reason is the whole value of `unproven`: the file could not be
+              placed, no gate could be resolved, or it failed with no baseline
+              to attribute the failure to. Those need different responses. */}
+          {o.reason !== null && ` — ${o.reason}`}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 function Finding({ finding, rounds }: { finding: FindingRow; rounds: number }) {
   const w = weight(finding.severity);
   return (
@@ -145,8 +194,20 @@ function Finding({ finding, rounds }: { finding: FindingRow; rounds: number }) {
         {rounds > 1 && (
           <MetaChip kind="alarm">seen in the last {rounds} rounds — it survived a fix</MetaChip>
         )}
+        {/* Hi-fi 9's fifth case: the reviewer declining to have it fixed here.
+            Real, worth doing, separate work — a disposition rather than a
+            severity, and `parseFindings` refuses a deferred P0 or P1, so this
+            is never the reason a gate blocked. */}
+        {finding.deferred && <MetaChip>deferred — real, and for separate work</MetaChip>}
+        {/* Said out loud rather than left as an empty row. `4c` shows a finding
+            as a claim with provenance, and *nobody tried to prove this* is part
+            of the provenance - it is not a mark against the finding, and #113
+            is explicit that a finding without one behaves exactly as every
+            finding did before reproducers existed. */}
+        {finding.reproducer === null && <MetaChip>no reproducer was written</MetaChip>}
       </div>
       <History finding={finding} />
+      <Reproducer outcomes={finding.reproducer} />
     </Card>
   );
 }

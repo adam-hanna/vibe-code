@@ -201,12 +201,48 @@ describe('which run this is', () => {
     expect(run.identity).toEqual({
       runId: '20260907-031221-a-task',
       dir: '/repo/.vibe/runs/20260907-031221-a-task',
+      // The frame above is what a core older than #223 sends, and both of the
+      // header's other two lines come back null rather than being filled in
+      // from what is here - the repository is NOT `dir` with `.vibe/runs/<id>`
+      // trimmed off, and the task is not the run id with its stamp removed.
+      repo: null,
+      task: null,
       resumed: false,
       // When the CORE said this, which is the honest answer to "when did the
       // task reach the core". The window's own send time would be when it
       // asked, not when anything happened (hi-fi 16).
       at: 1_000_000,
     });
+  });
+
+  test('the repository and the task are carried when the core sends them (#223)', () => {
+    // Hi-fi 1's identity header: workstream, branch, repository. Two of the
+    // three ride here; the third is `run_branch`.
+    const run = fold([
+      say('run_started', {
+        runId: 'r',
+        dir: '/repo/.vibe/runs/r',
+        repo: '/repo',
+        task: 'build a todo app',
+        resumed: false,
+      }),
+    ]);
+    expect(run.identity?.repo).toBe('/repo');
+    expect(run.identity?.task).toBe('build a todo app');
+  });
+
+  test('the branch is told, and a run with none says which kind of none', () => {
+    // Null for the whole field is "nothing has said" - an older core. A named
+    // branch of null with a reason is a run that HAS no branch, which is a
+    // different fact and the header words it differently.
+    expect(emptyRun().branch).toBeNull();
+    expect(fold([say('run_branch', { branch: 'vibe/r', why: null })]).branch).toEqual({
+      name: 'vibe/r',
+      why: null,
+    });
+    expect(
+      fold([say('run_branch', { branch: null, why: 'branch isolation is off' })]).branch,
+    ).toEqual({ name: null, why: 'branch isolation is off' });
   });
 
   test('a resume is the same id, saying so', () => {

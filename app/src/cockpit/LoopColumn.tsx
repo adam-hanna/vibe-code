@@ -1,7 +1,11 @@
-import { LivenessDot, MetaChip, StateKicker } from '../design';
+import { LivenessDot, MetaChip, SeverityChip, StateKicker } from '../design';
 import { clock, elapsed } from './format';
+import { SEVERITIES } from './model';
+import { rounds } from './rounds';
 import { RunningRow } from './RunningRow';
+import type { Severity } from '../design';
 import type {
+  Census,
   Cycle,
   CycleKind,
   PhaseGroup,
@@ -57,6 +61,10 @@ type Draw = 'live' | 'settled' | 'done';
 const drawOf = (turn: Turn, runningId: number | null, settledId: number | null): Draw =>
   turn.id === runningId ? 'live' : turn.id === settledId ? 'settled' : 'done';
 
+/** A severity this build knows how to weight, or null for the zero variant. */
+const weight = (severity: string): Severity | null =>
+  (SEVERITIES as readonly string[]).includes(severity) ? (severity as Severity) : null;
+
 function Version({ turn, draw, now }: { turn: Turn; draw: Draw; now: number }) {
   if (draw !== 'done') return <RunningRow turn={turn} now={now} live={draw === 'live'} />;
   return (
@@ -84,11 +92,14 @@ const isAnswerer = (turn: Turn): boolean => turn.role === 'answerer';
 
 function Phase({
   phase,
+  census,
   runningId,
   settledId,
   now,
 }: {
   phase: PhaseGroup;
+  /** What the gate made of this round, or null. Hi-fi 2 puts it on the card. */
+  census: Census | null;
   runningId: number | null;
   settledId: number | null;
   now: number;
@@ -103,6 +114,32 @@ function Phase({
             `plan-critique-0.json`, and a card has to agree with the file. */}
         {phase.round !== null && <MetaChip kind="checkable">round {phase.round}</MetaChip>}
       </div>
+      {/*
+        Hi-fi 2 draws the four counts on the round card in the loop column, not
+        only in the findings pane — *"severity carries the screen"*, and the
+        point is the peripheral scan: a run in trouble should look different
+        from across the room, before any text is read.
+
+        Zeros included, because a gate decision is being made and an absence is
+        information. The tolerance is not repeated here: the pane and the pilot's
+        round card both state it, and a 364px column is where a third copy would
+        cost the counts their weight.
+      */}
+      {census !== null && (
+        <div className="v-phase__counts">
+          {SEVERITIES.map((s) => {
+            const n = census.counts[s] ?? 0;
+            return (
+              <SeverityChip
+                key={s}
+                severity={n === 0 ? null : weight(s)}
+                label={s}
+                count={n}
+              />
+            );
+          })}
+        </div>
+      )}
       {phase.gates.map((gate, i) => (
         <div className="v-phase__gate" key={`${gate}-${String(i)}`}>
           verify · {gate}
@@ -328,6 +365,51 @@ function Starting({
   );
 }
 
+/**
+ * Who this column is about (hi-fi 1, §1.5 of `design/AUDIT.md`).
+ *
+ * Three lines above the cycles: the workstream, the branch, the repository. The
+ * column started at the cycles, so once the titlebar had scrolled past there was
+ * nothing on screen naming which repository you were looking at — and a window
+ * that can be pointed at any checkout on the machine has to say.
+ *
+ * **Every line is one the core stated.** The task and the repository ride on
+ * `run_started` and the branch on `run_branch`; none of the three is derived
+ * from the run id, which would mean re-deriving `vibe/<run-id>` from a prefix
+ * `git.branchPrefix` can change and `--no-branch` can remove.
+ *
+ * A field a frame did not carry is drawn as absent with its reason rather than
+ * omitted, because a header with a line missing reads as a header that forgot
+ * one — and the two cases here are genuinely different: *nothing said* is an
+ * older core, and *no branch* is a run that has one for a stated reason.
+ */
+function Identity({ run }: { run: Run }) {
+  const identity = run.identity;
+  if (identity === null) return null;
+  const branch = run.branch;
+  return (
+    <header className="v-ident">
+      <div className="v-ident__name">{identity.task ?? identity.runId}</div>
+      <div className="v-ident__line">
+        {branch === null ? (
+          <span className="v-ident__absent">branch — nothing has said</span>
+        ) : branch.name === null ? (
+          <span className="v-ident__absent">no branch — {branch.why ?? 'no reason given'}</span>
+        ) : (
+          branch.name
+        )}
+      </div>
+      <div className="v-ident__line">
+        {identity.repo === null ? (
+          <span className="v-ident__absent">repository — this core did not say which</span>
+        ) : (
+          identity.repo
+        )}
+      </div>
+    </header>
+  );
+}
+
 export function LoopColumn({
   run,
   now,
@@ -342,9 +424,15 @@ export function LoopColumn({
   // Told, not worked out. `reduce` names the turn a gate opened after, so the
   // column does not have to decide that "the last one" is the right turn (#202).
   const settledId = run.gate?.turnId ?? null;
+  // Which census belongs to which round, through `rounds()` rather than a
+  // second matching rule here. That module is where "by arrival" is decided and
+  // tested; two answers to which round a census belongs to is how the column
+  // and the pilot's log come to disagree about one round.
+  const censusOf = new Map(rounds(run).map((c) => [c.key, c.census]));
 
   return (
     <section className="v-loop" aria-label="loop">
+      <Identity run={run} />
       {run.from !== null && <ResumedRow from={run.from} />}
       {run.preflight !== null && <PreflightRow preflight={run.preflight} now={now} />}
 
@@ -372,6 +460,7 @@ export function LoopColumn({
             <Phase
               key={phase.id}
               phase={phase}
+              census={censusOf.get(`${cycle.kind}-${String(phase.id)}`) ?? null}
               runningId={runningId}
               settledId={settledId}
               now={now}
@@ -384,10 +473,47 @@ export function LoopColumn({
               something else. */}
           {cycle.kind === 'plan' && run.questions !== null && (
             <div className="v-questions">
-              <div className="v-questions__head">QUESTIONS · answerer</div>
+              <div className="v-questions__head">
+                QUESTIONS · answerer
+                {/* Hi-fi 14's own counter, nested inside the plan round's.
+                    Against the cap where one arrived, because `round 3/3` is
+                    the state the escalation is about and `round 3` is a number.
+                    Absent rather than guessed on a core that sent neither. */}
+                {run.questions.round !== null && (
+                  <MetaChip kind="checkable">
+                    round {run.questions.round}
+                    {run.questions.cap !== null && ` of ${run.questions.cap}`}
+                  </MetaChip>
+                )}
+              </div>
               <div className="v-questions__body">
                 {run.questions.total} raised · {run.questions.blocking} blocking
               </div>
+
+              {/* Hi-fi 14: *"the checkbox from the settings vocabulary is doing
+                  the answered/unanswered work"* — no new component, and the
+                  list is what makes a motionless column legible as waiting
+                  rather than stuck. Answered is the answerer having said
+                  something, and a decline counts: it is an answer that ends the
+                  run, not a question still open. */}
+              <ul className="v-questions__list">
+                {run.questions.open.map((q) => {
+                  const settled = q.answer !== null || q.declined;
+                  return (
+                    <li
+                      key={q.question}
+                      className={`v-questions__q${settled ? ' v-questions__q--done' : ''}`}
+                    >
+                      <span className="v-questions__mark" aria-hidden="true">
+                        {settled ? '✓' : '·'}
+                      </span>
+                      <span className="v-questions__text">{q.question}</span>
+                      {q.declined && <StateKicker tone="quiet">declined</StateKicker>}
+                    </li>
+                  );
+                })}
+              </ul>
+
               {cycle.phases
                 .flatMap((p) => p.turns.filter(isAnswerer))
                 .map((turn) => (
@@ -398,6 +524,17 @@ export function LoopColumn({
                     now={now}
                   />
                 ))}
+              {/* Hi-fi 14: *"waiting on you is not stalled, and the column says
+                  so."* The failure mode it names is exact — a user seeing a
+                  motionless column and assuming the run died. Drawn only while
+                  something is genuinely outstanding, so it cannot become a
+                  permanent reassurance nobody reads. */}
+              {run.questions.open.some((q) => q.answer === null && !q.declined) && (
+                <div className="v-questions__waiting">
+                  <StateKicker tone="quiet">waiting on an answer · not stalled</StateKicker>
+                  <span>Answers already given are in the draft and are not lost.</span>
+                </div>
+              )}
               {/* The explicit panel `7a` asks for. Two full turns of legitimate
                   work run and the outer counter correctly does not move, which
                   without saying so is indistinguishable from a stall. */}

@@ -26,7 +26,40 @@ import type { Staleness } from './model';
  * does not report its heartbeat cadence, and picking a number here instead would
  * be the invented denominator this repo refuses everywhere.
  */
-export function StalenessStrip({ state }: { state: Staleness }) {
+/**
+ * Both clocks, side by side (hi-fi 13).
+ *
+ * *"Two mono figures side by side are the cheapest possible explanation of why
+ * the app reached a different conclusion in each case, and they are the same two
+ * numbers the code branches on."* The `thinking` strip already showed them; the
+ * `not-live` one did not, which is the state where a reader most wants to check
+ * the app's arithmetic — and the design draws them on **both**.
+ *
+ * `pid · alive` beside them is the third figure the frame carries, and it is
+ * three-valued rather than two: `alive` is a fact and *cannot tell* is the state
+ * the design calls the worst the app can report. This window is told the host's
+ * pid and is not told anything about the agent child, so what it can honestly
+ * show is the host's — labelled as the host's, because a pid presented without
+ * saying whose is a number a reader will attribute to the turn.
+ */
+function Clocks({ state, hostPid }: { state: Staleness; hostPid: number | null }) {
+  return (
+    <span className="v-stale__clocks">
+      <span>output {state.outputMs === null ? 'never' : elapsed(state.outputMs)}</span>
+      <span>activity {state.activityMs === null ? 'never' : elapsed(state.activityMs)}</span>
+      {hostPid !== null && <span>host pid {hostPid}</span>}
+    </span>
+  );
+}
+
+export function StalenessStrip({
+  state,
+  hostPid = null,
+}: {
+  state: Staleness;
+  /** This window's own host process, not the agent's. Null before it connects. */
+  hostPid?: number | null;
+}) {
   if (state.state === 'live') return null;
 
   if (state.state === 'unknown') {
@@ -70,6 +103,11 @@ export function StalenessStrip({ state }: { state: Staleness }) {
         Everything below is at least that old, and vibe cannot confirm the phase is still
         running.
       </span>
+      {/* Hi-fi 13 draws both clocks on this state as well as on `thinking`,
+          and says why: they are the same two numbers the code branched on, so
+          they are the cheapest possible explanation of why it reached this
+          conclusion rather than the quiet one. */}
+      <Clocks state={state} hostPid={hostPid} />
     </div>
   );
 }

@@ -765,6 +765,31 @@ function sayFindings(
           // both is how they come to disagree.
           downgraded: f.downgraded ?? null,
           severityChanges: f.severityChanges ?? null,
+          // What the reviewer's own test observed, if it wrote one (#113,
+          // #223). Hi-fi 9's third case is the one this supplies: a finding that
+          // is grounded and still **uncheckable**, which is a different state
+          // from grounded-and-proved and from ungrounded, and the pane could not
+          // draw it because the verdict never left the archive.
+          //
+          // The whole list, not the latest: the same reproducer is run at
+          // `review` and again after the final fix, and they answer two
+          // different questions - does the defect happen at all, and is it gone.
+          // Collapsing them would throw away the second, which is the only
+          // evidence OUTSTANDING.md has ever had for closing a carried finding.
+          reproducer:
+            f.reproducerOutcomes?.map((o) => ({
+              verdict: o.verdict,
+              at: o.at,
+              // Why it could not tell, which is most of the value of `unproven`.
+              // Null on the two verdicts that observed a run.
+              reason: o.reason,
+            })) ?? null,
+          // The reviewer declining to have it fixed *here*: real, worth doing,
+          // separate work. This is the one field where absent and false say the
+          // same thing to a reader - a report from before the field existed had
+          // no third option to take - so they collapse rather than becoming a
+          // named absence nobody could act on.
+          deferred: f.defer === true,
         })),
       },
     },
@@ -2044,6 +2069,37 @@ async function noticeStrandedWork(state: RunState, cwd: string): Promise<void> {
   });
 }
 
+/**
+ * Which branch this run's commits will land on, said out loud (#223, hi-fi 1).
+ *
+ * **A promotion, not an invention.** `state.branch` has been durable since the
+ * field existed and `prepareGit` has always known which of its six outcomes it
+ * took; what it never did was say so on a channel a host can read, so the window
+ * could not put the branch in the loop column's identity header the way every
+ * frame of the design draws it.
+ *
+ * Narration with no event, on the `findings_reported` precedent: `state.branch`
+ * is already in `state.json`, a resume re-reads it from there, and recording it
+ * again would be a second copy of one fact.
+ *
+ * **`null` is a real answer and is not "unknown".** Branch isolation off,
+ * `--no-branch`, or a directory that is not a repository all mean the same
+ * thing to a reader — commits land on whatever is checked out — so they collapse
+ * honestly, and `why` carries which of them it was.
+ *
+ * The four sites that already printed keep their level and their wording, so
+ * the terminal does not change on any path that was already saying something.
+ * The three that said nothing take `detail`: a run whose branch isolation is
+ * off does not want a fresh sentence about it every pass, and dim is how this
+ * codebase says *restating what you already know*.
+ */
+function sayBranch(
+  branch: string | null,
+  why: string | null,
+): { id: string; data: Record<string, unknown> } {
+  return { id: 'run_branch', data: { branch, why } };
+}
+
 async function prepareGit(
   state: RunState,
   cfg: Config,
@@ -2096,6 +2152,15 @@ async function prepareGit(
         error === null
           ? 'Not a git repository - running without branch isolation or commits.'
           : `git could not be run (${error}) - running without branch isolation or commits.`,
+        sayBranch(null, error === null ? 'not a git repository' : `git could not be run: ${error}`),
+      );
+    } else {
+      // A resume said this once already and repeating it would be new output for
+      // an unchanged situation - but a window that connected on this pass has
+      // never been told, so the fact travels at `detail`.
+      log.detail(
+        'Running without branch isolation or commits.',
+        sayBranch(null, error === null ? 'not a git repository' : `git could not be run: ${error}`),
       );
     }
     return;
@@ -2113,7 +2178,13 @@ async function prepareGit(
 
   // With branch isolation off nothing below runs, which is also what makes
   // `vibe resume <id> --no-branch` the documented escape from the refusal.
-  if (!cfg.git.useBranch) return;
+  if (!cfg.git.useBranch) {
+    log.detail(
+      'Branch isolation is off; commits land on whatever is checked out.',
+      sayBranch(null, 'branch isolation is off'),
+    );
+    return;
+  }
 
   if (state.branch === null) {
     // A run that has no branch is one that never got one - it was started with
@@ -2121,12 +2192,18 @@ async function prepareGit(
     // Creating one now would move HEAD on a run that has already done work
     // somewhere else, which is a bigger change than the wrong-branch refusal
     // this function exists to make. Branch creation stays a fresh-run act.
-    if (resume) return;
+    if (resume) {
+      log.detail(
+        'This run never had a branch of its own; commits land on whatever is checked out.',
+        sayBranch(null, 'this run never had a branch'),
+      );
+      return;
+    }
     const branch = `${cfg.git.branchPrefix}${state.id}`;
     await git.createBranch(cwd, branch);
     state.branch = branch;
     saveState(state);
-    log.ok(`Isolated on branch ${branch}`);
+    log.ok(`Isolated on branch ${branch}`, sayBranch(branch, null));
     return;
   }
 
@@ -2146,7 +2223,10 @@ async function prepareGit(
           'checked out.',
       );
     }
-    log.warn(`The branch this run recorded ("${branch}") no longer exists - continuing on HEAD.`);
+    log.warn(
+      `The branch this run recorded ("${branch}") no longer exists - continuing on HEAD.`,
+      sayBranch(null, `the recorded branch "${branch}" no longer exists`),
+    );
     return;
   }
 
@@ -2157,6 +2237,7 @@ async function prepareGit(
       delete state.branchPending;
       saveState(state);
     }
+    log.detail(`On branch ${branch}`, sayBranch(branch, null));
     return;
   }
 
@@ -2172,7 +2253,7 @@ async function prepareGit(
     }
     delete state.branchPending;
     saveState(state);
-    log.ok(`On branch ${branch}`);
+    log.ok(`On branch ${branch}`, sayBranch(branch, null));
     return;
   }
 
@@ -4128,6 +4209,14 @@ async function resolveQuestions(
       data: {
         total: questions.length,
         blocking: blockingCount,
+        // Hi-fi 14 draws the question loop as a nested group with **its own
+        // counter and its own cap** - `round 2/3` sitting inside `round 1/5` -
+        // and the frame carried neither, so the group could not say where in
+        // its own loop it was. Both, because a position with no cap is a number
+        // and a position in something is a fact somebody can act on: `at the
+        // cap` is the state the frame's whole escalation is about.
+        round: state.questionRound,
+        cap: cfg.loop.maxQuestionRounds,
         // The questions themselves, carried on the frame that already announces
         // them (#223). `1f` is an inbox and cannot be one over two counts - and
         // the alternative was for a window to scrape the `- [kind] text` lines
