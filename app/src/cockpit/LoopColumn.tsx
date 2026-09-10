@@ -1,11 +1,10 @@
 import { LivenessDot, MetaChip, SeverityChip, StateKicker } from '../design';
 import { clock, elapsed } from './format';
 import { SEVERITIES } from './model';
-import { rounds, roundTitle } from './rounds';
+import { censusByPhase, title } from './rounds';
 import { RunningRow } from './RunningRow';
 import type { Severity } from '../design';
-import type { RoundCard } from './rounds';
-import type { CycleKind, Preflight, ResumedFrom, Run, Turn } from './model';
+import type { Census, CycleKind, PhaseGroup, Preflight, ResumedFrom, Run, Turn } from './model';
 
 /**
  * The centre column from `3a`, at the width the design fixes it at.
@@ -26,10 +25,24 @@ import type { CycleKind, Preflight, ResumedFrom, Run, Turn } from './model';
  * one round was.
  */
 
+/**
+ * The four groups, in the order the loop reaches them.
+ *
+ * **The judge has a heading of its own**, which is the whole of the change: the
+ * column read `PLAN · CODE · REVIEW`, and the critique — half the plan cycle's
+ * work, and every one of its Codex turns — had no heading anywhere on screen.
+ *
+ * `GROUP`, not `CYCLE`, in the labels. Four peer groups read as four stages and
+ * the loop is not a pipeline: cycle 2 re-opens on every review fix, and cycle 1
+ * alternates between its two groups for as many rounds as the critic objects.
+ * The word is the cheapest place to stop the numbering claiming a sequence, and
+ * `status()` says `re-runs on every fix` under the two that re-open.
+ */
 const TITLE: Readonly<Record<CycleKind, string>> = {
-  plan: 'CYCLE 1 · PLAN',
-  code: 'CYCLE 2 · CODE',
-  review: 'CYCLE 3 · REVIEW',
+  plan: 'GROUP 1 · PLAN',
+  critique: 'GROUP 2 · PLAN CRITIQUE',
+  code: 'GROUP 3 · CODE',
+  review: 'GROUP 4 · CODE REVIEW',
 };
 
 /**
@@ -39,9 +52,20 @@ const TITLE: Readonly<Record<CycleKind, string>> = {
  * this slice is not given them, so `2 rounds` is a fact and `2/5` would be two
  * thirds of one.
  */
+/**
+ * What a group header says about itself.
+ *
+ * Counted from what arrived, never from a cap: the caps are configurable and
+ * this column is not given them, so `2 rounds` is a fact and `2/5` would be two
+ * thirds of one.
+ *
+ * `re-runs on every fix` is on the two groups that genuinely re-open, and it is
+ * carrying more weight since the groups became four: a numbered row of peers
+ * reads as a pipeline, and this line is what says the run comes back here.
+ */
 function status(kind: CycleKind, count: number): string {
   const noun = count === 1 ? 'round' : 'rounds';
-  if (kind === 'code') return `${count} ${noun} · re-runs on every fix`;
+  if (kind === 'code' || kind === 'critique') return `${count} ${noun} · re-runs on every fix`;
   return `${count} ${noun}`;
 }
 
@@ -89,51 +113,47 @@ function Version({ turn, draw, now }: { turn: Turn; draw: Draw; now: number }) {
 const isAnswerer = (turn: Turn): boolean => turn.role === 'answerer';
 
 /**
- * One round of a cycle: the producer, the judge, and what the gate made of it.
+ * One round of one group: its turns, and what the gate made of them.
  *
- * **A round is the pair**, which is what `CYCLE_OF` has said since it was
- * written — *"a plan round IS the pair: the planner produces a version, the
- * critic judges it"* — and what nothing drew. The column grouped by **phase**,
- * so a plan round arrived as two rows, the cycle header counted two plan rounds
- * as three, and the planner turn that produces the next version sat under the
- * critique that caused it.
+ * **One row per phase, because the groups are peers now.** `planning` and
+ * `critique` are separate headings, so a plan round is a row under each — the
+ * planner's version under `PLAN` and the critique of it under `PLAN CRITIQUE`,
+ * both carrying the same round number, which is what lets a reader pair them by
+ * eye.
  *
- * The critique is therefore not a peer group beside `PLAN`. It is the second
- * half of every plan round, named on its own turn row, where it is visible on
- * each round rather than once at the top. Making it a peer would say the loop is
- * a four-stage pipeline, and this column exists to say it is not — it is three
- * nested convergence cycles. It also would not generalise: cycle 2's judge is
- * the verification gate and cycle 3's producer is the fix turn, so a peer group
- * for the critique earns one for each of those and the answer is six boxes in a
- * row.
+ * The round chip is what does that pairing and it is not decoration: without it
+ * two peer groups are two lists with no stated relationship. It is also why the
+ * core now puts a round on `planning` — that phase carried none, so the producer
+ * side of the pairing had nothing to match on.
  *
- * The grouping is `rounds()`, shared with the pilot's log, so the two surfaces
- * cannot disagree about what one round was.
+ * The pair still exists as one object in `rounds()`, which is what the pilot's
+ * log draws, because hi-fi 5's round card is the pair in as many words.
  */
 function Round({
-  card,
-  answerers,
+  phase,
+  census,
   runningId,
   settledId,
   now,
 }: {
-  card: RoundCard;
-  /** The answerer's turns, which belong in the nested question group instead. */
-  answerers: ReadonlySet<number>;
+  phase: PhaseGroup;
+  /** What the gate made of this phase, or null. Hi-fi 2 puts it on the row. */
+  census: Census | null;
   runningId: number | null;
   settledId: number | null;
   now: number;
 }) {
-  const turns = card.turns.filter((t) => !answerers.has(t.id));
-  const census = card.census;
+  const turns = phase.turns.filter((t) => !isAnswerer(t));
   return (
     <div className="v-phase">
       <div className="v-phase__head">
-        <span className="v-phase__name">{roundTitle(card)}</span>
+        <span className="v-phase__name">{title(phase.phase)}</span>
         {/* The archive's round, which is the number that names the artifact
             behind it. The heading in the terminal says "round 1"; the file is
-            `plan-critique-0.json`, and a card has to agree with the file. */}
-        {card.round !== null && <MetaChip kind="checkable">round {card.round}</MetaChip>}
+            `plan-critique-0.json`, and a row has to agree with the file — and
+            since the groups became peers it is also what pairs this row with
+            its other half one group up or down. */}
+        {phase.round !== null && <MetaChip kind="checkable">round {phase.round}</MetaChip>}
       </div>
       {/*
         Hi-fi 2 draws the four counts on the round card in the loop column, not
@@ -161,18 +181,15 @@ function Round({
           })}
         </div>
       )}
-      {card.gates.map((gate, i) => (
+      {phase.gates.map((gate, i) => (
         <div className="v-phase__gate" key={`${gate}-${String(i)}`}>
           verify · {gate}
         </div>
       ))}
-      {/* Both halves of the round, in order: the producer, then the judge. The
-          critique is this second row — named on every round, where it is
-          legible as the thing that objected to the version above it. */}
       {turns.map((turn) => (
         <Version key={turn.id} turn={turn} draw={drawOf(turn, runningId, settledId)} now={now} />
       ))}
-      {turns.length === 0 && card.gates.length === 0 && (
+      {turns.length === 0 && phase.gates.length === 0 && (
         // The implementing phase is the one that reaches this: it has never had
         // a `log.step` of its own, so `phase_started` IS its announcement (#152).
         <div className="v-phase__silent">announced by the phase, with no turn line of its own</div>
@@ -448,21 +465,11 @@ export function LoopColumn({
   // Told, not worked out. `reduce` names the turn a gate opened after, so the
   // column does not have to decide that "the last one" is the right turn (#202).
   const settledId = run.gate?.turnId ?? null;
-  // The one grouping, shared with the pilot's log. A second answer here to what
-  // a round is - or to which census belongs to which - is how the two surfaces
-  // come to describe the same round differently.
-  const cards = rounds(run);
-  const byCycle = new Map<CycleKind, RoundCard[]>();
-  for (const card of cards) {
-    const list = byCycle.get(card.cycle);
-    if (list === undefined) byCycle.set(card.cycle, [card]);
-    else list.push(card);
-  }
-  // The answerer's turns, by id, so a round can leave them to the question group
-  // below without re-deciding which they are.
-  const answerers = new Set(
-    run.cycles.flatMap((c) => c.phases).flatMap((p) => p.turns.filter(isAnswerer).map((t) => t.id)),
-  );
+  // Which census belongs to which phase, through `rounds.ts` rather than a
+  // second matching rule here: that module is where "by arrival" is decided and
+  // tested, and a second answer is how this column and the pilot's log come to
+  // disagree about one round.
+  const censusOf = censusByPhase(run);
 
   return (
     <section className="v-loop" aria-label="loop">
@@ -488,17 +495,16 @@ export function LoopColumn({
         <div className="v-cycle" key={cycle.kind}>
           <div className="v-cycle__head">
             <span className="v-cycle__title">{TITLE[cycle.kind]}</span>
-            {/* Rounds, not phase groups. Counting the latter called two plan
-                rounds three, because a plan round is announced as two phases. */}
-            <span className="v-cycle__status">
-              {status(cycle.kind, (byCycle.get(cycle.kind) ?? []).length)}
-            </span>
+            {/* One phase per round now that the groups are peers, so counting
+                this group's phases counts its rounds - which is what the old
+                three-cycle header got wrong, calling two plan rounds three. */}
+            <span className="v-cycle__status">{status(cycle.kind, cycle.phases.length)}</span>
           </div>
-          {(byCycle.get(cycle.kind) ?? []).map((card) => (
+          {cycle.phases.map((phase) => (
             <Round
-              key={card.key}
-              card={card}
-              answerers={answerers}
+              key={phase.id}
+              phase={phase}
+              census={censusOf.get(phase.id) ?? null}
               runningId={runningId}
               settledId={settledId}
               now={now}
@@ -585,10 +591,10 @@ export function LoopColumn({
         </div>
       ))}
 
-      {/* Three cycles are always the shape of a run, so the ones that have not
+      {/* Four groups are always the shape of a run, so the ones that have not
           started are named rather than absent - at reduced weight, because a
-          missing group reads as a loop with fewer stages than it has. */}
-      {(['plan', 'code', 'review'] as const)
+          missing group reads as a loop with fewer parts than it has. */}
+      {(['plan', 'critique', 'code', 'review'] as const)
         .filter((kind) => !run.cycles.some((c) => c.kind === kind))
         .map((kind) => (
           <div className="v-cycle v-cycle--idle" key={kind}>

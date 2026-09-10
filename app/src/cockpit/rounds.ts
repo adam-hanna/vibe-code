@@ -1,4 +1,4 @@
-import type { Census, Cycle, CycleKind, Run, Turn, VerifyPass, Work } from './model';
+import type { Census, CycleKind, PhaseGroup, Run, Turn, VerifyPass, Work } from './model';
 
 /**
  * A round, as one card (hi-fi 5, #223).
@@ -8,16 +8,23 @@ import type { Census, Cycle, CycleKind, Run, Turn, VerifyPass, Work } from './mo
  * the run on its own — every round leaves a card, and a card carries what
  * happened, what it found and what you can do about it."*
  *
- * ## A round is the pair, and that is the whole of this module
+ * ## A round is the pair, and this module is where that survives
  *
  * A convergence cycle iterates over versions of an artifact: **a producer makes
- * one and a judge objects to it**, and one round is that pair. The plan cycle is
- * planner-then-critic, the code cycle is implementer-then-verify-gate, the review
- * cycle is reviewer-then-fix. `CYCLE_OF` has said so since it was written — *"a
- * plan round IS the pair"* — but nothing grouped that way, so the column drew one
- * row per **phase** and a plan round arrived as two of them.
+ * one and a judge objects to it**, and one round is that pair. The plan round is
+ * planner-then-critic, the code round is implementer-then-verify-gate, the review
+ * round is reviewer-then-fix.
  *
- * Three things were wrong with that and all three were the same mistake:
+ * **The loop column no longer groups that way and this still does**, which is a
+ * deliberate split rather than a drift. `CycleKind` is what the *column* draws —
+ * four peer groups, so the critique has a heading of its own — and `FAMILY` below
+ * is what a *round* is. Hi-fi 5 draws the round card as the pair, in as many
+ * words: `plan v.b · claude/opus · 4m 40s · accepted after 1 critique`. A card per
+ * phase would put the planner's version and the critique of it in two cards and
+ * lose the sentence the design is built around.
+ *
+ * Three things used to be wrong here and all three were the same mistake —
+ * grouping by phase where the loop converges by round:
  *
  * - A cycle counting its phase groups called two plan rounds **three rounds**.
  * - `revisePlan` announced no phase, so the planner turn that produces the *next*
@@ -27,7 +34,8 @@ import type { Census, Cycle, CycleKind, Run, Turn, VerifyPass, Work } from './mo
  *   numbered siblings.
  *
  * The core now says the round on both halves, so pairing them is reading rather
- * than guessing — which is what makes this a grouping and not a heuristic.
+ * than guessing — which is what makes this a grouping and not a heuristic, and
+ * what keeps it true after the column stopped pairing.
  *
  * ## It is a re-shaping, never a second source
  *
@@ -36,10 +44,28 @@ import type { Census, Cycle, CycleKind, Run, Turn, VerifyPass, Work } from './mo
  * no field a frame did not carry.
  */
 
+/**
+ * Which convergence cycle a column group belongs to.
+ *
+ * Three, where `CycleKind` is four: the column gives the judge its own heading
+ * and a *round* is still the pair, so `plan` and `critique` are one family here.
+ * A closed map rather than a prefix rule — a fifth group would be a decision
+ * about which cycle it converges in, not a name to pattern-match.
+ */
+export type RoundFamily = 'plan' | 'code' | 'review';
+
+const FAMILY: Readonly<Record<CycleKind, RoundFamily>> = {
+  plan: 'plan',
+  critique: 'plan',
+  code: 'code',
+  review: 'review',
+};
+
 export interface RoundCard {
   /** Stable across re-renders. See `keyOf` for what makes it stable. */
   key: string;
-  cycle: CycleKind;
+  /** The convergence cycle, which is three-valued. Not the column's group. */
+  cycle: RoundFamily;
   /** The archive's round — the number that names the artifact. Null when none came. */
   round: number | null;
   /**
@@ -97,8 +123,8 @@ export interface RoundCard {
  * plan-round fix — the group's **first phase id** stands in, which is unique per
  * frame and therefore never merges two rounds that only look alike.
  */
-function keyOf(cycle: CycleKind, round: number | null, firstPhaseId: number): string {
-  return round === null ? `${cycle}-p${String(firstPhaseId)}` : `${cycle}-r${String(round)}`;
+function keyOf(family: RoundFamily, round: number | null, firstPhaseId: number): string {
+  return round === null ? `${family}-p${String(firstPhaseId)}` : `${family}-r${String(round)}`;
 }
 
 /** The work reading a round ends on: the latest one any of its turns reported. */
@@ -150,19 +176,26 @@ function during(starts: readonly number[], at: number): number {
   return found;
 }
 
-/** The phase groups of one cycle, gathered into rounds. */
-function cardsOf(cycle: Cycle): RoundCard[] {
+/**
+ * The phase groups of one convergence cycle, gathered into rounds.
+ *
+ * **Across column groups, not within one.** Since the critique took a heading of
+ * its own, a plan round's producer and judge sit in two different `Cycle`s — so
+ * this walks the phases of a *family*, in the order they were announced, and
+ * pairs them on the round they both carry.
+ */
+function cardsOf(family: RoundFamily, phases: readonly PhaseGroup[]): RoundCard[] {
   const out: RoundCard[] = [];
   const byRound = new Map<number, RoundCard>();
 
-  for (const phase of cycle.phases) {
+  for (const phase of phases) {
     const turns = phase.turns;
     const existing = phase.round === null ? undefined : byRound.get(phase.round);
 
     if (existing === undefined) {
       const card: RoundCard = {
-        key: keyOf(cycle.kind, phase.round, phase.id),
-        cycle: cycle.kind,
+        key: keyOf(family, phase.round, phase.id),
+        cycle: family,
         round: phase.round,
         phases: [phase.phase],
         turns: [...turns],
@@ -207,8 +240,24 @@ function cardsOf(cycle: Cycle): RoundCard[] {
  * review that asked for it.
  */
 export function rounds(run: Run): readonly RoundCard[] {
+  // Gathered per family first, because a plan round's two halves now live in two
+  // column groups and `Cycle` is no longer the thing a round is made of.
+  const families = new Map<RoundFamily, PhaseGroup[]>();
+  for (const cycle of run.cycles) {
+    const family = FAMILY[cycle.kind];
+    const list = families.get(family);
+    if (list === undefined) families.set(family, [...cycle.phases]);
+    else list.push(...cycle.phases);
+  }
+
   const cards: RoundCard[] = [];
-  for (const cycle of run.cycles) cards.push(...cardsOf(cycle));
+  for (const [family, phases] of families) {
+    // In announcement order, so the producer is seen before the judge that
+    // merges into it. `Cycle`s are stored in the order they first appeared, and
+    // `critique` appears after `plan` - but a resumed run can open them in
+    // either order, so this sorts rather than relying on that.
+    cards.push(...cardsOf(family, [...phases].sort((a, b) => a.startedAt - b.startedAt)));
+  }
   cards.sort((a, b) => a.startedAt - b.startedAt);
 
   // Attached after the sort, so `during` indexes the same order a reader sees.
@@ -227,6 +276,34 @@ export function rounds(run: Run): readonly RoundCard[] {
     if (card !== undefined) cards[i] = { ...card, census };
   }
   return cards;
+}
+
+/**
+ * Which census belongs to which **phase**, for the loop column.
+ *
+ * The column draws four peer groups and therefore one row per phase, so it needs
+ * the census on the phase that produced it — the critique's counts belong on the
+ * critique row, which is where they were measured. `rounds()` answers the same
+ * question for a *round*, and both go through `during()` so there is one
+ * definition of "by arrival" rather than two that can disagree.
+ *
+ * Keyed by phase id, which `reduce` allocates and never reuses.
+ */
+export function censusByPhase(run: Run): ReadonlyMap<number, Census> {
+  const phases = run.cycles
+    .flatMap((c) => c.phases)
+    .sort((a, b) => a.startedAt - b.startedAt);
+  const starts = phases.map((p) => p.startedAt);
+  const out = new Map<number, Census>();
+  for (const census of run.censuses) {
+    const i = during(starts, census.at);
+    const phase = phases[i];
+    // A census that predates every phase attaches to nothing, exactly as it does
+    // on a round: a resumed run's history can land before this session's first
+    // phase, and filing it under one would credit the wrong session's work.
+    if (phase !== undefined) out.set(phase.id, census);
+  }
+  return out;
 }
 
 /**

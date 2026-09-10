@@ -225,23 +225,37 @@ they are waiting on. Four things in it are worth carrying:
   other way round: `Reply.startedAt` is nullable by design, so sorting one mixed list by a key
   half of it lacks would reorder somebody's conversation to make a card fit. There is no
   `claude/opus` on it, because a turn frame carries no model.
-- **A round is the producer and the judge, and grouping by phase instead was three bugs in
-  one.** `CYCLE_OF` has said since it was written that *"a plan round IS the pair: the planner
-  produces a version, the critic judges it"*, and nothing grouped that way — so a cycle
-  counting phase groups called two plan rounds **three**, `revisePlan` announced no phase and
-  filed the planner's next version inside **the critique that caused it**, and `planning`
-  carried no round at all. The first two were core defects; both are fixed there, and both
-  halves of a round now carry the round number, which is what makes the pairing a read rather
-  than a guess. `rounds()` is the one grouping and the loop column uses it too, so the column
-  and the pilot's log cannot describe one round differently.
+- **The loop column draws four peer groups and the pilot's log draws three cycles, and the
+  split is on purpose.** `CycleKind` is four — `plan`, `critique`, `code`, `review` — and
+  `RoundFamily` in `rounds.ts` is three. Do not collapse them into one enum: they answer
+  different questions, and each has a test that fails if the other's answer leaks in.
 
-  **The critique is not a peer group beside `PLAN`, and this was asked directly.** It is the
-  second half of every plan round, on its own turn row, where it is visible on each round
-  rather than once at the top. Four peers — `plan, plan critique, code, code review` — say the
-  loop is a four-stage pipeline, which is exactly what the three-cycle column exists to deny;
-  and it does not generalise, because cycle 2's judge is the verification gate and cycle 3's
-  producer is the fix turn, so a peer group for the critique earns one for each of those and
-  the answer is six boxes in a row.
+  **The judge got a heading at the owner's decision, and the cost is written down rather than
+  argued away.** The convergence model says a round is the *pair* — the planner produces a
+  version, the critic judges it — and `CYCLE_OF` folded `critique` into the plan cycle for
+  exactly that reason. What the folding cost was legibility: the column read
+  `PLAN · CODE · REVIEW`, and the critique — half the plan cycle's work and every one of its
+  Codex turns — had no heading anywhere on screen. Asked directly *"where does plan critique
+  live?"*, and the only honest answer was *"inside cycle 1, as a row"*, which is not an answer
+  anybody should need to be given.
+
+  The objection stands and is not resolved: **four peers read as four stages, and the loop is
+  not a pipeline.** Three things carry that weight instead. The labels say `GROUP`, not
+  `CYCLE`, so the numbering does not claim a sequence. `status()` prints `re-runs on every fix`
+  under both groups that genuinely re-open. And the **round chip** is load-bearing rather than
+  decorative — with the halves in two groups it is the only thing saying which critique judged
+  which draft, which is why the core now puts a round on `planning`.
+
+  **`rounds()` still pairs them, across the two groups**, because hi-fi 5's card is the pair in
+  as many words: `plan v.b · claude/opus · 4m 40s · accepted after 1 critique`. It gathers by
+  family and sorts by start rather than trusting cycle order, since a resume can open the
+  critique group first.
+
+- **Three defects were found underneath that question, and two were core bugs.** A cycle
+  counting phase groups called two plan rounds **three**; `revisePlan` announced no phase, so
+  the planner turn producing the *next* version landed inside **the critique that caused it**;
+  and `planning` carried no round at all. The first two are fixed in the core and are correct
+  under either grouping. The third fixes itself once each group holds one phase per round.
 - **A census and a verification pass attach to a round by arrival**, because a census carries
   no round of its own and a pass carries the *verify* round, which is a different counting
   from the one a phase group is keyed by. One that predates every phase — a real state on a

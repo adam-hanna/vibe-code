@@ -28,20 +28,37 @@ import type { Frame, Level } from '../host';
  * authoritative one always wins.
  */
 
-/** The three convergence cycles. Not three stages - see the domain model. */
-export type CycleKind = 'plan' | 'code' | 'review';
-
 /**
- * Which cycle a phase belongs to.
+ * The four groups the loop column draws.
  *
- * `critique` is in the plan cycle rather than beside it because a plan round IS
- * the pair: the planner produces a version, the critic judges it. `verify` has
- * no `phase_started` of its own - it announces itself with `verify_started` -
- * and belongs to the code cycle.
+ * **Producer and judge are separate groups, and that is a decision rather than a
+ * derivation.** The convergence model says a round is the *pair* - the planner
+ * produces a version, the critic judges it - and this file said so for a year,
+ * with `critique` folded into the plan cycle for exactly that reason. What the
+ * folding cost was legibility: the column read `PLAN · CODE · REVIEW`, and the
+ * critique - which is half the plan cycle's work and every one of its Codex
+ * turns - had no heading anywhere on screen. Asked directly where plan critique
+ * lived, and the honest answer was *"inside cycle 1, as a row"*, which is not an
+ * answer somebody should have to be given.
+ *
+ * So the judge gets a group of its own, at the owner's decision, and the cost is
+ * written down rather than argued away: **four peer groups read as four stages**,
+ * and the loop is not a pipeline. Two things carry that weight instead -
+ * `v-cycle__status` says `re-runs on every fix` where a group re-opens, and the
+ * pilot's round card still draws the pair, because hi-fi 5 draws it that way
+ * (`plan v.b · accepted after 1 critique`). `rounds.ts` is where the pair
+ * survives; this is where the column's headings live.
+ *
+ * `verify` has no `phase_started` of its own - it announces itself with
+ * `verify_started` - so it stays inside the code group rather than becoming a
+ * fifth, which would be a heading with no frame behind it.
  */
+export type CycleKind = 'plan' | 'critique' | 'code' | 'review';
+
+/** Which group a phase belongs to. One phase, one group, no inference. */
 export const CYCLE_OF: Readonly<Record<string, CycleKind>> = {
   planning: 'plan',
-  critique: 'plan',
+  critique: 'critique',
   implementing: 'code',
   review: 'review',
 };

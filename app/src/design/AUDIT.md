@@ -204,7 +204,7 @@ screen: the loop column drew `plan`, `code` and `review` with no visible critiqu
 and asked where it lived.
 
 It lived in cycle 1 as a row. What was actually wrong was worse than that, and
-all three were the same mistake — grouping by **phase** where the domain groups
+all three were the same mistake — grouping by **phase** where the loop converges
 by **round**:
 
 - A cycle counting its phase groups called two plan rounds **three rounds**.
@@ -214,16 +214,36 @@ by **round**:
 
 The last two were core defects and are fixed there. With both halves of a round
 now carrying the round number, *"no frame says"* stopped being true — so
-`rounds()` groups by round, a card is the producer and the judge together, and
-the critique is a turn row on **every** round rather than a heading to hunt for.
-The loop column groups through the same function, so the two surfaces cannot
-describe one round differently.
+`rounds()` groups by round and a card is the producer and the judge together,
+which is what hi-fi 5 draws: `plan v.b · accepted after 1 critique`.
 
-**Peer groups were considered and rejected** — `plan, plan critique, code, code
-review`. Four peers say the loop is a four-stage pipeline, which is what the
-three-cycle column exists to deny, and it does not generalise: cycle 2's judge is
-the verification gate and cycle 3's producer is the fix turn, so a peer group for
-the critique earns one for each and the answer is six boxes in a row.
+### The loop column draws four peer groups, and that is an owner's decision
+
+The frame in this section is the pilot's log and it is unchanged. The **loop
+column** now draws `PLAN · PLAN CRITIQUE · CODE · CODE REVIEW`, which is not in
+the hi-fi and is not derived from it. It was asked for directly, after the
+alternative was built and looked at.
+
+**The objection was raised, and it stands rather than having been answered.**
+Four peers read as four stages, and the loop is not a pipeline — it is three
+nested convergence cycles, which is the claim the three-group column existed to
+make. What the three-group column cost was legibility: the critique is half the
+plan cycle's work and every one of its Codex turns, and it had no heading
+anywhere on screen. *"Where does plan critique live?"* had no good answer.
+
+Three things carry the weight the headings gave up, and none is decoration:
+
+- The labels say **`GROUP`**, not `CYCLE`, so the numbering does not claim a
+  sequence.
+- **`re-runs on every fix`** prints under both groups that genuinely re-open.
+- The **round chip** is what pairs a row with its other half one group away. With
+  the halves in two groups it is the only thing saying which critique judged
+  which draft, which is why the core now puts a round on `planning`.
+
+And the pair survives where the design draws it: `rounds()` gathers across the
+two groups, so the log's card is still `plan v.b · accepted after 1 critique`.
+`CycleKind` is four-valued for the column and `RoundFamily` is three-valued for a
+round; both are tested, and collapsing them into one enum is the thing not to do.
 
 A census and a verification pass attach **by arrival**, because a census carries
 no round of its own and a pass carries the *verify* round — a different counting

@@ -38,7 +38,9 @@ function fold(frames: readonly Frame[], t0 = 1_000_000): Run {
 
 /** The nine-id clean pass the core pins, in order. */
 const CLEAN: readonly Frame[] = [
-  say('phase_started', { phase: 'planning' }),
+  // `round` on `planning` since #223: it was the one phase in the plan cycle
+  // that carried none, which the fixture faithfully reproduced.
+  say('phase_started', { phase: 'planning', round: 0 }),
   say('turn_started', { role: 'planner', kind: 'plan' }),
   say('phase_started', { phase: 'critique', round: 0 }),
   say('turn_started', { role: 'critic', kind: 'critique', round: 0 }),
@@ -50,14 +52,22 @@ const CLEAN: readonly Frame[] = [
 ];
 
 describe('the loop column is built from ids and never from sentences', () => {
-  test('a clean pass fills three cycles in the order the phases arrived', () => {
+  // Found by kind rather than by position, so a change to the order these
+  // groups first appear in does not fail four tests about something else.
+  const group = (run: Run, kind: string) => run.cycles.find((c) => c.kind === kind);
+
+  test('a clean pass fills four groups in the order the phases arrived', () => {
     const run = fold(CLEAN);
-    expect(run.cycles.map((c) => c.kind)).toEqual(['plan', 'code', 'review']);
-    // Planning and critique are the SAME cycle - a plan round is the pair, the
-    // planner producing a version and the critic judging it.
-    expect(run.cycles[0]?.phases.map((p) => p.phase)).toEqual(['planning', 'critique']);
-    expect(run.cycles[1]?.phases.map((p) => p.phase)).toEqual(['implementing']);
-    expect(run.cycles[2]?.phases.map((p) => p.phase)).toEqual(['review']);
+    expect(run.cycles.map((c) => c.kind)).toEqual(['plan', 'critique', 'code', 'review']);
+    // **The judge has a group of its own.** A round is still the pair - the
+    // planner produces a version and the critic judges it - and `rounds()` is
+    // where that survives, because hi-fi 5's card draws the pair. What the
+    // column draws is four peer headings, so the critique has a name on screen
+    // instead of being a row inside cycle 1 that nobody could find.
+    expect(group(run, 'plan')?.phases.map((p) => p.phase)).toEqual(['planning']);
+    expect(group(run, 'critique')?.phases.map((p) => p.phase)).toEqual(['critique']);
+    expect(group(run, 'code')?.phases.map((p) => p.phase)).toEqual(['implementing']);
+    expect(group(run, 'review')?.phases.map((p) => p.phase)).toEqual(['review']);
   });
 
   test('a turn lands in the phase that was open when it started', () => {
@@ -67,20 +77,24 @@ describe('the loop column is built from ids and never from sentences', () => {
     // The implementing phase is the empty one, and deliberately: it has never
     // had a `log.step`, so `phase_started` IS its turn's announcement. #152
     // pinned that in the core as a decision rather than a gap.
-    expect(run.cycles[1]?.phases[0]?.turns).toEqual([]);
+    expect(group(run, 'code')?.phases[0]?.turns).toEqual([]);
   });
 
   test('the round a phase carries is the archive number, not the display one', () => {
     // The heading says "round 1" because humans count from one; the artifact is
     // `plan-critique-0.json`. The column has to carry the one that names a file.
-    const run = fold(CLEAN);
-    const critique = run.cycles[0]?.phases[1];
-    expect(critique?.round).toBe(0);
+    expect(group(fold(CLEAN), 'critique')?.phases[0]?.round).toBe(0);
+  });
+
+  test('the producer half carries the round too, so the two groups pair by eye', () => {
+    // `planning` carried no round at all until #223, which was invisible while
+    // it sat in the same group as its critique and is not once they are peers:
+    // the chip is the only thing saying which critique judged which draft.
+    expect(group(fold(CLEAN), 'plan')?.phases[0]?.round).toBe(0);
   });
 
   test('a verify gate attaches to the phase that opened it', () => {
-    const run = fold(CLEAN);
-    expect(run.cycles[1]?.phases[0]?.gates).toEqual(['verification']);
+    expect(group(fold(CLEAN), 'code')?.phases[0]?.gates).toEqual(['verification']);
   });
 
   test('an id from a newer core reaches the output pane and moves nothing', () => {
