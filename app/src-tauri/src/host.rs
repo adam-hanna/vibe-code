@@ -20,6 +20,30 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::reaper::Reaper;
 
+/// `CREATE_NO_WINDOW` — the host gets no console, and so cannot be sent a
+/// console control event.
+///
+/// **This is a lifetime fix, not a cosmetic one.** `node.exe` is a
+/// console-subsystem binary, so spawning it with no creation flags attaches it
+/// to a console: the parent's if there is one, a freshly allocated one if not.
+/// Whichever it lands in, tearing that console down sends `CTRL_CLOSE_EVENT` to
+/// every process attached to it, and libuv delivers that to Node as **SIGHUP** —
+/// which `src/ending.ts` stamps and exits `EXIT_UNRAISED` on, correctly and
+/// fatally.
+///
+/// That is not hypothetical. A run was killed four minutes into a plan turn,
+/// mid-phase, with `ending.json` reading `"how": "signal", "signal": "SIGHUP"`
+/// and the window reporting `host exited with code 1` — and a `node` spawned
+/// with exactly the options below (all three streams piped, no flags) was
+/// confirmed to have a console attached. Redirecting stdio does not prevent the
+/// allocation; only this flag does.
+///
+/// The core already got this right one layer down: `src/proc.ts` passes
+/// `windowsHide: true` when it spawns `claude` and `codex`, which is the same
+/// flag under Node's name for it. The supervisor was the layer that did not.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 /// A line the host process wrote to stdout, on its way to the webview.
 pub const FRAME_EVENT: &str = "host://frame";
 /// A line the host process wrote to stderr, or a line of stdout that was not a
@@ -240,12 +264,21 @@ impl HostProcess {
             .home_dir()
             .unwrap_or_else(|_| PathBuf::from("."));
 
-        let mut child = Command::new(&node)
+        let mut command = Command::new(&node);
+        command
             .arg(&entry)
             .current_dir(&cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        // No console, so no console control event can reach it. See the constant
+        // for the run this cost.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(CREATE_NO_WINDOW);
+        }
+        let mut child = command
             .spawn()
             .map_err(|e| format!("could not start {}: {e}", node.display()))?;
 

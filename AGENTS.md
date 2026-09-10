@@ -312,6 +312,24 @@ Two things about it are load-bearing and neither is obvious:
   The raise is now attempted, its failure swallowed, and `EXIT_UNRAISED` taken — because a
   process told to terminate and still running is the state `reaper.rs` exists for, and on a
   platform where the raise works that line is unreachable.
+- **The host is spawned with no console, and that is what stops a stray SIGHUP killing a
+  run.** `node.exe` is a console-subsystem binary, so `Command::spawn` with no creation flags
+  attaches it to a console — the parent's if there is one, a freshly allocated one if not —
+  and redirecting all three streams does not prevent that. Tearing down that console sends
+  `CTRL_CLOSE_EVENT` to everything attached to it, and libuv delivers that to Node as
+  **SIGHUP**, which the stamp above handles correctly and fatally. A run died four minutes
+  into a plan turn at 314k tokens for exactly this: `ending.json` reading `"how": "signal",
+  "signal": "SIGHUP"`, the window reporting `host exited with code 1`, and nothing on stderr —
+  and a `node` spawned with the same options was then confirmed to have a console attached.
+  `CREATE_NO_WINDOW` in `host.rs` is the fix. **The core already got this right one layer
+  down**: `src/proc.ts` passes `windowsHide: true` when it spawns `claude` and `codex`, which
+  is the same flag under Node's name for it — the supervisor was the layer that had not.
+
+  Two things this episode is worth remembering for beyond the flag. **The stamp did its job**:
+  a lock plus `ending.json` naming a signal took this from #87's unexplained stop to a named
+  cause in one read, which is precisely the class-elimination #131 was built to do. And **the
+  exit code was the diagnosis** — 1 is `EXIT_UNRAISED`, outside `EXIT`'s 0–7, so it could only
+  have come from the signal handler's failed re-raise, and nothing else in `src/` produces it.
 - **The window can take a lock back, and only from a holder that is gone** (#211). `--force`
   had no control at all in the app, so a run whose host was killed could not be reopened from
   the window that killed it — and that is exactly the state a hard kill leaves. `Workstreams`
