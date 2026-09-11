@@ -182,6 +182,236 @@
   flex-direction: column;
 }
 
+/* A shut strip that carries controls gives them the room: the grip stops
+   filling the column and becomes just the expand affordance at the top. */
+.v-side--tools .v-side__grip {
+  flex: none;
+}
+
+.v-side__stub {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+}
+
+.v-side__tool {
+  font: var(--type-label);
+  color: var(--text-tertiary);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: var(--space-1) var(--space-2);
+}
+
+.v-side__tool:hover {
+  color: var(--text-emphasis);
+}
+
+.v-side__tool:focus-visible {
+  outline: 2px solid var(--accent-solid);
+  outline-offset: 2px;
+}
+
+/* ---- the navigator: projects, their runs, and pins -------------------------- */
+
+.v-nav {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-2);
+}
+
+.v-nav__actions {
+  display: flex;
+  flex-direction: column;
+}
+
+.v-nav__action {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  font: var(--type-body);
+  color: var(--text-primary);
+  background: none;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  padding: var(--space-2);
+}
+
+.v-nav__action:hover {
+  background: var(--surface-active-hdr);
+  color: var(--text-emphasis);
+}
+
+/* Fixed width so the labels line up down the column, which is what makes the
+   glyphs read as a set rather than as three unrelated marks. */
+.v-nav__glyph {
+  width: var(--dim-nav-glyph);
+  flex: none;
+  color: var(--text-tertiary);
+  font: var(--type-label);
+}
+
+.v-nav__section {
+  display: flex;
+  flex-direction: column;
+}
+
+.v-nav__heading {
+  font: var(--type-label);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin: 0;
+  padding: var(--space-1) var(--space-2);
+}
+
+/* A row is a navigation control and a pin, side by side. The pin appears on
+   hover and whenever it is set, so an unpinned list is not a column of marks. */
+.v-nav__row {
+  display: flex;
+  align-items: center;
+}
+
+.v-nav__row:hover {
+  background: var(--surface-active-hdr);
+}
+
+.v-nav__row--on {
+  background: var(--surface-active);
+}
+
+.v-nav__open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font: var(--type-body);
+  color: var(--text-secondary);
+  background: none;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  padding: var(--space-2);
+}
+
+.v-nav__open:hover:not(:disabled) {
+  color: var(--text-emphasis);
+}
+
+/* A run held by a live process. Not a control, and it says why on hover. */
+.v-nav__open:disabled {
+  cursor: default;
+  color: var(--text-tertiary);
+}
+
+.v-nav__open:focus-visible,
+.v-nav__pin:focus-visible,
+.v-nav__more:focus-visible {
+  outline: 2px solid var(--accent-solid);
+  outline-offset: -2px;
+}
+
+.v-nav__title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.v-nav__title--on {
+  color: var(--text-emphasis);
+}
+
+.v-nav__row--project .v-nav__open {
+  color: var(--text-primary);
+}
+
+.v-nav__folder,
+.v-nav__bullet {
+  width: var(--dim-nav-glyph);
+  flex: none;
+  color: var(--text-tertiary);
+  font: var(--type-label);
+}
+
+.v-nav__pin {
+  font: var(--type-label);
+  color: var(--text-tertiary);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: var(--space-1) var(--space-2);
+  opacity: 0;
+}
+
+.v-nav__row:hover .v-nav__pin,
+.v-nav__pin:focus-visible,
+.v-nav__pin--on {
+  opacity: 1;
+}
+
+.v-nav__pin--on {
+  color: var(--accent-solid);
+}
+
+.v-nav__pin:hover {
+  color: var(--text-emphasis);
+}
+
+/* Indented under the project it belongs to, which is the only thing saying the
+   nesting is real rather than two lists that happen to be adjacent. */
+.v-nav__runs {
+  display: flex;
+  flex-direction: column;
+  padding-left: var(--space-4);
+}
+
+.v-nav__more {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  background: none;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  padding: var(--space-2);
+}
+
+.v-nav__more:hover {
+  color: var(--text-emphasis);
+}
+
+.v-nav__note {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  padding: var(--space-2);
+}
+
+.v-nav__add {
+  padding: var(--space-1) var(--space-2);
+}
+
+.v-nav__field {
+  width: 100%;
+  font: var(--type-mono-sm);
+  color: var(--text-primary);
+  background: var(--surface-card);
+  border: 1px solid var(--rule-control);
+  padding: var(--space-2);
+}
+
+.v-nav__field:focus-visible {
+  outline: 2px solid var(--accent-solid);
+  outline-offset: 1px;
+}
+
 .v-cockpit__tabs {
   display: flex;
   gap: var(--space-4);

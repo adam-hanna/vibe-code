@@ -18,7 +18,8 @@ import { Kickoff } from './Kickoff';
 import { LoopColumn } from './LoopColumn';
 import { NewWorkstream } from './NewWorkstream';
 import { OutputPane } from './OutputPane';
-import { Rail } from './Rail';
+import { Sidebar } from './Sidebar';
+import { initials } from './squares';
 import { SidePanel } from './SidePanel';
 import { QuestionsPane } from './QuestionsPane';
 import { RateLimitStrip } from './RateLimit';
@@ -261,9 +262,13 @@ export function Cockpit() {
     | 'verify'
     | 'spend'
     | 'questions'
-    // There is no `runs` here since #223. `1b` is a standing column on the left
-    // rather than a tab: it is what you triage from, and a tab made it a place
-    // you had to leave the run to visit.
+    // `runs` is `1b`, and it has **no button in the bar** — the same arrangement
+    // `settings` has had since the rail landed. It is reached from a project in
+    // the sidebar, because what it is *for* is the decision a sidebar row must
+    // not make: it states a lock's verdict and confirms a force. Navigation is
+    // the sidebar's job and overruling a lock is this screen's, and the reason
+    // they are apart is that two places able to force is one too many.
+    | 'runs'
     | 'commands'
     | 'settings'
     // **The pilot, not the output pane** (#211). The complaint was exact: *"I
@@ -712,38 +717,61 @@ export function Cockpit() {
       )}
 
       <div className="v-cockpit__body">
-        {/* Hi-fi 1's rail, in every frame that shows the whole window. It is
-            what `Settings`, `Runs` and the ⌘K switcher hang off, which is why
-            the tab bar below is nine tabs and a readout rather than twelve. */}
-        <Rail
-          dir={repoDir}
-          currentId={run.identity?.runId ?? null}
-          onNew={() => setComposing(true)}
-          onSwitch={() => setSwitching(true)}
-          onSettings={() => setTab('settings')}
-          // The rail's `RUNS` used to switch to a tab; the archive is a standing
-          // column now, so it opens that instead. A square does the same, which
-          // keeps `Rail.tsx`'s rule intact — a square navigates, it does not
-          // reopen — while making where it navigates *to* somewhere you can see
-          // the rail from.
-          onRuns={() => setShowRuns(true)}
-        />
-
-        {/* `1b`, on the left and permanent (#223). It was a tab, which made the
-            archive something you left the run to look at; the report was that
-            the two columns were the wrong way round — the runs belong beside the
-            rail they are drawn from, and the loop belongs beside the pane whose
-            rounds it names. */}
+        {/* The navigator (#223). **One sidebar, not a rail beside a panel** —
+            the two were the same archive twice, reported as *"there are two Runs
+            bars on the left now"*, and the rail is now this panel's collapsed
+            state. Its `＋ ⌘K ⚙` stay on screen at every width, which is the
+            whole of what `design/AUDIT.md` §1.1 asked for. */}
         <SidePanel
           side="left"
-          title="Runs"
-          mark="↺"
+          title="Projects"
+          // The run you are in, in the two letters a 54px strip has room for —
+          // the rail's own idea, in the one place it is still the best available
+          // answer. No run, or a task with nothing legible in it, gets `··` from
+          // `initials` itself: the no-value mark the loop column uses, rather
+          // than a letter picked out of an id.
+          mark={initials(run.identity?.task ?? '')}
           open={showRuns}
           onToggle={() => setShowRuns((on) => !on)}
+          shut={
+            <>
+              <button className="v-side__tool" onClick={() => setComposing(true)} title="New run">
+                ＋
+              </button>
+              <button
+                className="v-side__tool"
+                onClick={() => setSwitching(true)}
+                title="Switch run (Ctrl+K)"
+              >
+                ⌘K
+              </button>
+              <button
+                className="v-side__tool"
+                onClick={() => setTab('settings')}
+                title="Project settings"
+              >
+                ⚙
+              </button>
+            </>
+          }
         >
-          <Workstreams
+          <Sidebar
             dir={repoDir}
-            onResume={(runId, force) => resume(runId, repoDir, undefined, force)}
+            currentId={run.identity?.runId ?? null}
+            onNew={() => setComposing(true)}
+            onSwitch={() => setSwitching(true)}
+            onSettings={() => setTab('settings')}
+            // `1b` in the main pane, which is where a lock can be overruled with
+            // a confirmation. A sidebar row must not be a second way to force.
+            onRuns={(next) => {
+              rememberRepo(next);
+              setTab('runs');
+            }}
+            onResume={(next, runId) => {
+              rememberRepo(next);
+              resume(runId, next);
+            }}
+            onProject={rememberRepo}
           />
         </SidePanel>
 
@@ -913,6 +941,15 @@ export function Cockpit() {
             />
           )}
           {tab === 'settings' && <Settings dir={repoDir} />}
+          {/* `1b`, opened from a project in the sidebar. The columns the sidebar
+              has no room for — status, cost, liveness — and the one control that
+              may overrule a lock, which confirms and says what it is overruling. */}
+          {tab === 'runs' && (
+            <Workstreams
+              dir={repoDir}
+              onResume={(runId, force) => resume(runId, repoDir, undefined, force)}
+            />
+          )}
           {/* The four artifact panes. Every one of them reads the run's own
               directory, so all four take the run id the core stated on
               `run_started` - there is no way to derive one, and a pane with no

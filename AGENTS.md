@@ -300,12 +300,37 @@ they are waiting on. Four things in it are worth carrying:
   resume — attaches to nothing. `rounds()` is the single answer, and the loop column takes its
   census through it rather than matching one itself, so the column and the pilot's log cannot
   disagree about one round.
-- **A square on the rail navigates; it does not reopen.** The rail is built (hi-fi 1, every
-  frame that shows the window) and its `＋ ⌘K ⚙` is what let the tab bar go from twelve tabs
-  to nine and a readout. But `serve.ts` runs one run at a time, so there is never a second
-  live workstream to switch *to*, and a square that silently reopened would be a second
-  definition of what reopening costs — `1b` states the lock's verdict and confirms a force.
-  That argument was always right about the squares and never about the rail.
+- **There is one sidebar, and the rail is its collapsed state.** A 54px rail headed `RUNS`
+  beside a panel headed `Runs`, both drawing the same archive — reported in one line, *"there
+  are two Runs bars on the left now"*, and it was not a rendering accident: two surfaces had
+  been given one job, once by hi-fi 1 and once by moving the loop column. `Sidebar.tsx` is the
+  merge. **What must survive it is `＋ ⌘K ⚙`**: `design/AUDIT.md` §1.1's finding was never
+  *"there should be a strip"*, it was that those three had nowhere to live and ended up in the
+  tab bar, so a panel that shut them away would put the finding straight back. They are the
+  shut strip, which is why `SidePanel` takes a `shut` slot at all.
+- **A row navigates and resumes; it never forces.** The rail's one deliberate narrowing,
+  unchanged by the rewrite. `serve.ts` runs one run at a time, so there is never a second live
+  workstream to switch *to*; a run whose lock is held by a live process is drawn with the dot
+  and is not clickable, and a run needing `--force` is reached through `1b`, which states the
+  lock's verdict and confirms. **Two places able to overrule a lock is one too many**, which is
+  why `1b` came back as a view with no tab of its own — the arrangement `settings` has had
+  since the rail landed, reachable from the sidebar and absent from the bar.
+- **A project is a repository and a session is a run**, and that is the whole of the mapping.
+  The sidebar's shape is borrowed — actions, **Pinned**, **Projects** with their runs nested
+  and a `Show more` — but nothing the core owns is renamed: `archive` still answers per
+  directory, `listRuns` still decides what a run is, and `rail()` in `squares.ts` is still the
+  one place deciding which entries may be drawn at all. `app/src/cockpit/projects.ts` holds
+  only what the *window* remembers, and it is allowed to because **which repositories you have
+  open is not a fact about any run** — no run knows about a sibling project, and
+  `vibe.config.json` is a file meant to be committed, so one machine's paths are the wrong
+  thing to put in it. One repository typed three ways is one project: `dirKey` normalises case,
+  separators and a trailing slash **for comparison only**, because what is stored is what gets
+  sent to the host and the host has to open it.
+- **A pin carries its title, and that is not a cached measurement.** A pinned run is drawn
+  whether or not its project is expanded, so storing the task with the pin is what avoids
+  reading every archive at launch to render four rows. It is safe for one reason and it is
+  worth stating: **a run's task never changes** — it is what the run was started with, written
+  once. Nothing is computed from it and it is not a number.
 - **The footer names the next place a run *can* stop, and the objection it overrules is
   answered rather than waved away.** The old comment refused a next stop because it *"would
   need a phase-to-boundary ordering written here"*. Both halves are still true and neither
@@ -648,7 +673,9 @@ app/src/design/HANDOFF.md  the design corpus - every screen a source comment cit
 app/src/design/AUDIT.md    the built app walked against all fourteen hi-fi frames, and closed
 app/src/cockpit/rounds.ts  a round as one card, and which round a thing arrived during
 app/src/cockpit/Counts.tsx the four severity counts, and the one place they are a control
-app/src/cockpit/squares.ts the rail's squares: two letters, and what gets one at all
+app/src/cockpit/squares.ts what the navigator may draw, and the two letters standing for a run
+app/src/cockpit/Sidebar.tsx  projects, their runs, and the pins - the rail merged into one
+app/src/cockpit/projects.ts  which repositories are open and which runs are pinned
 app/src/cockpit/artifacts.ts what a run wrote: classifying a listing, and reading a report
 app/src/cockpit/useArtifacts.ts asking the host for a listing, and for one file when it opens
 app/src/cockpit/Disclosure.tsx the one section-that-opens, at every level it appears

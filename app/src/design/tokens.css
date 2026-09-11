@@ -223,6 +223,11 @@
    * a 32px field to 36 or a 34px row to 32 costs alignment for nothing.
    */
   --dim-rail: 54px;
+  /* The leading glyph column in the navigator. Fixed so `＋ ⌘K ⚙`, the folder
+     carets and the run bullets all start their labels at one place — three
+     glyphs of different widths left-aligning their own text is what makes a
+     sidebar read as three lists instead of one. */
+  --dim-nav-glyph: 20px;
   --dim-loop-column: 372px;
   --dim-titlebar: 38px;
   --dim-tab-bar: 40px;

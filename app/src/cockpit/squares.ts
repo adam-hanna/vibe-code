@@ -1,15 +1,25 @@
 import type { ArchiveRun } from '../host';
 
 /**
- * The left rail's squares (hi-fi 1, hi-fi 5, #223).
+ * What the navigator may draw, and the two letters that stand for a run
+ * (hi-fi 1, hi-fi 5, #223).
  *
  * The pure half, here rather than in the component for the reason `model.ts` is
  * pure: a label derived from a string is the kind of thing that is wrong in one
  * unusual case and invisible in every other, and a component cannot be tested.
  *
- * **`squares.ts` and not `rail.ts`**, beside `Rail.tsx`. Two files differing
- * only in case is a compile error on Windows and macOS both, which is the same
- * reason the pilot's pane is `PilotPane.tsx` beside `pilot.ts`.
+ * **The rail it was written for is gone and this is not.** `Rail.tsx` and the
+ * runs panel beside it were the same archive drawn twice — *"there are two Runs
+ * bars on the left now"* — so they became one `Sidebar`, and the rail survives
+ * as its collapsed strip. What that rewrite must not lose is the *filtering*:
+ * `rail()` is still the one place deciding which archive entries may be drawn at
+ * all, and it is now the sidebar that asks it.
+ *
+ * `initials` moved with it rather than being kept for a rainy day: a sidebar row
+ * has room for the whole task, and the **collapsed** strip has room for two
+ * letters, so it is the mark on the shut panel. That is the rail's own idea in
+ * the one place it is still needed — the strip says which run you are in, which
+ * is the one fact a 54px column can carry.
  */
 
 /**

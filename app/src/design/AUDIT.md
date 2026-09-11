@@ -109,6 +109,32 @@ the main pane's width rather than the window's structure. Neither is persisted:
 a collapse is a gesture for the next few minutes, and a window that opened three
 days later still folded would be answering a question nobody asked twice.
 
+### And the first cut shipped the rail twice, which is the finding underneath it
+
+A 54px rail headed `RUNS` next to a panel headed `Runs`, both drawing the same
+archive. Reported in one line — *"there are two Runs bars on the left now"* —
+and the useful thing about it is that it was not a rendering accident: **two
+surfaces had been given one job**, once by this section closing §1.1 with a rail
+and once by the column move giving the archive a panel. Nothing reconciled them,
+because nothing was looking at both at once.
+
+`Sidebar.tsx` is the merge, and the rail becomes its collapsed state. The test
+that matters is not that the strip survived — it is that **`＋ ⌘K ⚙` did**.
+§1.1's finding was never *"there should be a strip"*; it was that those three
+had nowhere to live and ended up in the tab bar, which is how that bar reached
+twelve. A panel that shut them away would have put the finding straight back, so
+`SidePanel` grew a `shut` slot and they are on screen at every width.
+`projects.test.ts` reads `Cockpit.tsx` and fails on the commit that drops one.
+
+What the expanded panel gains is the structure the owner asked for: **Pinned**,
+then **Projects** with their runs nested and a `Show more`. A project is a
+repository and a session is a run — the mapping is nothing but a naming, and
+`archive`, `listRuns` and `rail()` all keep their jobs. The narrowing `Rail.tsx`
+made is the one thing carried over word for word: a row navigates and resumes,
+and it never forces. `1b` is where a lock is overruled, it confirms, and it is
+reached from a project rather than from a tab — the arrangement `settings` has
+had since the rail landed. Two places able to force is one too many.
+
 ### 1.2 · The tab bar has twelve tabs where the design has seven
 
 | hi-fi 1 · in order | built app · in order |

@@ -36,6 +36,7 @@ export function SidePanel({
   mark,
   open,
   onToggle,
+  shut,
   children,
 }: {
   /** Which edge it is pinned to. Decides which way the chevrons point. */
@@ -46,6 +47,16 @@ export function SidePanel({
   mark: string;
   open: boolean;
   onToggle: () => void;
+  /**
+   * What the shut strip carries below the expand control, if anything.
+   *
+   * **This is how the rail survived being merged into the sidebar.**
+   * `design/AUDIT.md` §1.1's finding was never *"there should be a strip"* — it
+   * was that `＋ ⌘K ⚙` had nowhere to live and ended up in the tab bar. A panel
+   * that shut them away would put the finding back, so the left sidebar passes
+   * them here and they stay on screen at every width.
+   */
+  shut?: ReactNode;
   children: ReactNode;
 }) {
   // Toward the edge it is pinned to when open — the direction it will go — and
@@ -56,7 +67,9 @@ export function SidePanel({
 
   if (!open) {
     return (
-      <aside className={`v-side v-side--${side} v-side--shut`}>
+      <aside
+        className={`v-side v-side--${side} v-side--shut${shut === undefined ? '' : ' v-side--tools'}`}
+      >
         <button
           className="v-side__grip"
           onClick={onToggle}
@@ -66,9 +79,12 @@ export function SidePanel({
           <span className="v-side__chev">{back}</span>
           <span className="v-side__mark">{mark}</span>
           {/* Rotated rather than one letter per line: a name read down the strip
-              is still the name, where a stack of letters is a puzzle. */}
-          <span className="v-side__vertical">{title}</span>
+              is still the name, where a stack of letters is a puzzle. Dropped
+              when the strip carries controls, which need the room and say what
+              the panel is by being the panel's own controls. */}
+          {shut === undefined && <span className="v-side__vertical">{title}</span>}
         </button>
+        {shut !== undefined && <div className="v-side__stub">{shut}</div>}
       </aside>
     );
   }
