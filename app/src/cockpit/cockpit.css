@@ -42,6 +42,34 @@
   flex: none;
 }
 
+/* Which run the panes are about, whenever it is not the live one. Quiet ground
+   rather than the alarm's: reading a finished run is a normal thing to be doing,
+   and the strip is here to answer "which run is this" rather than to warn. */
+.v-cockpit__viewing {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+  background: var(--surface-chrome);
+  border-bottom: 1px solid var(--rule-inner);
+  padding: var(--space-2) var(--space-5);
+  flex: none;
+}
+
+.v-cockpit__viewingwhat {
+  color: var(--text-emphasis);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 40%;
+}
+
+.v-cockpit__viewingnote {
+  color: var(--text-tertiary);
+}
+
 .v-cockpit__body {
   display: flex;
   flex: 1;
@@ -392,6 +420,27 @@
   font: var(--type-body-sm);
   color: var(--text-tertiary);
   padding: var(--space-2);
+}
+
+/* A duplicate project, or a chooser that would not open. Said rather than
+   absorbed: a button that adds no row has ignored the person who pressed it. */
+.v-nav__note--alarm {
+  color: var(--text-primary);
+  background: var(--surface-alarm);
+}
+
+.v-nav__dismiss {
+  font: var(--type-label);
+  color: var(--text-tertiary);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0 var(--space-1);
+  text-decoration: underline;
+}
+
+.v-nav__dismiss:hover {
+  color: var(--text-emphasis);
 }
 
 .v-nav__add {
@@ -1372,12 +1421,79 @@
   overflow-y: auto;
   background: var(--surface-page);
   padding: var(--space-3) var(--space-5);
+  display: flex;
+  flex-direction: column;
 }
 
 .v-output__lines {
   list-style: none;
   margin: 0;
   padding: 0;
+}
+
+/* ---- output, cut into the rounds the loop announced ------------------------ */
+
+/* `flex: none` for the reason `.v-sect` has it: this is a flex item inside a
+   scrolling column, and its `overflow: hidden` would otherwise resolve its
+   automatic minimum size to zero and let it clip instead of the pane scrolling. */
+.v-og {
+  flex: none;
+  border-bottom: 1px solid var(--rule-inner);
+  overflow: hidden;
+}
+
+.v-og__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-2) 0;
+  border: none;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.v-og__head:hover {
+  background: var(--surface-active-hdr);
+}
+
+.v-og__head:focus-visible {
+  outline: 2px solid var(--accent-solid);
+  outline-offset: -2px;
+}
+
+.v-og__caret {
+  width: var(--dim-nav-glyph);
+  flex: none;
+  color: var(--text-tertiary);
+  font: var(--type-label);
+}
+
+.v-og__title {
+  font: var(--type-kicker);
+  color: var(--text-emphasis);
+}
+
+.v-og__count {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  margin-left: auto;
+}
+
+/* The agent's own prose (#223). A rule down the left and the paragraph shape
+   kept, because this is the one thing in the pane that is a quotation: the loop
+   reports on itself in single lines, and the model writes paragraphs. Drawn
+   from the narration id, never from the sentence. */
+.v-output__line--said {
+  border-left: 2px solid var(--rule-inner);
+  padding-left: var(--space-3);
+  margin: var(--space-2) 0;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  display: block;
 }
 
 .v-output__line {
@@ -2903,28 +3019,12 @@
   gap: var(--space-2);
 }
 
-.v-kick__repo {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-}
-
-.v-kick__label {
-  font: var(--type-label);
-  letter-spacing: var(--track-label);
-  text-transform: uppercase;
-  color: var(--text-tertiary);
-  flex: none;
-}
-
-.v-kick__dir {
-  flex: 1;
-  min-width: 0;
+/* The repository the pilot is confined to. Monospace because it is a path, and
+   a path is a string somebody checks character by character. The field and the
+   chooser that were here went to the sidebar, where the list of projects is. */
+.v-kick__where {
   font: var(--type-mono-sm);
-  color: var(--text-primary);
-  background: var(--surface-card);
-  border: 1px solid var(--rule-control);
-  padding: var(--space-2);
+  color: var(--text-secondary);
 }
 
 .v-kick__brief {

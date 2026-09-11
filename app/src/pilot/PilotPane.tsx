@@ -19,6 +19,7 @@ import { systemPrompt } from './brief';
 import { readEmitted, visible } from './emit';
 import { useFollow } from './follow';
 import { declare, execute } from './tools';
+import { chatKey, readChat, worthSaving, writable } from './saved';
 import {
   costOf,
   describeDay,
@@ -150,7 +151,9 @@ type Action =
   | { type: 'retext'; turn: number; text: string }
   | { type: 'settle'; id: string; settlement: Settlement }
   | { type: 'decide'; id: string; accepted: boolean; note: string }
-  | { type: 'unknown' };
+  | { type: 'unknown' }
+  /** A conversation read back from storage, replacing whatever is here (#223). */
+  | { type: 'restore'; conversation: Conversation };
 
 function apply(state: Conversation, action: Action): Conversation {
   switch (action.type) {
@@ -172,6 +175,10 @@ function apply(state: Conversation, action: Action): Conversation {
       return decide(state, action.id, action.accepted, action.note);
     case 'unknown':
       return unrecognised(state);
+    // Replaces rather than merges. Two conversations interleaved by arrival
+    // would be a transcript of a discussion that never happened.
+    case 'restore':
+      return action.conversation;
   }
 }
 
@@ -590,6 +597,18 @@ export interface PilotPaneProps {
    */
   dir: string;
   /**
+   * Which run this conversation is about, or null before one exists (#223).
+   *
+   * **What lets a conversation come back.** Every other pane repopulates from a
+   * file the run wrote; a chat *about* a run is the one thing nothing writes
+   * down, so opening a finished run drew an empty pane beside six full ones.
+   * Keyed with the project, because a run id is unique only inside one archive.
+   *
+   * Null is the conversation that has not launched anything yet — the one that
+   * will propose the run — and it is adopted by the run when one starts.
+   */
+  runId: string | null;
+  /**
    * Commands this window has run, so `read_command` has something to read.
    *
    * A prop rather than this pane's own state, for the reason `statuses` is one:
@@ -633,6 +652,7 @@ export function PilotPane({
   run,
   launched,
   dir,
+  runId,
   commands,
   onEffect,
   onPending,
@@ -641,6 +661,78 @@ export function PilotPane({
   onOpen,
 }: PilotPaneProps) {
   const [conversation, dispatch] = useReducer(apply, undefined, emptyConversation);
+  /**
+   * Which conversation is on screen, so a save cannot land in the wrong one.
+   *
+   * The key is read back **at save time** rather than closed over by the effect
+   * that writes, because the two move independently: a run starting changes the
+   * key while the conversation is unchanged, and a reply arriving changes the
+   * conversation while the key is not. Holding it in a ref means the writer
+   * always uses the key the loader last settled on, so the two cannot cross.
+   */
+  const chat = useRef<string | null>(null);
+  /**
+   * What is on screen, for the loader to read without depending on it.
+   *
+   * The loader must fire on the **key** alone — a conversation in its deps would
+   * re-run it on every reply, and a loader that runs mid-conversation is a
+   * conversation that gets replaced by itself-from-disk. It still needs to see
+   * the current one for the adoption case below, so it reads it through here.
+   */
+  const held = useRef(conversation);
+  held.current = conversation;
+
+  // Load when the window is pointed at a different run, and only then.
+  useEffect(() => {
+    const key = chatKey(dir, runId);
+    const before = chat.current;
+    if (before === key) return;
+    chat.current = key;
+
+    // **Adoption.** A run is *proposed* by a conversation, so when one starts,
+    // the exchange that decided what to build is the one already on screen —
+    // under the project's own key, because there was no run id to use. Restoring
+    // this run's (empty) conversation here would throw that away at the exact
+    // moment it succeeded, which is the worst possible time.
+    //
+    // Narrow on purpose: only the un-launched bucket is ever adopted, and only
+    // into a run. Switching between two runs restores, which is what it should.
+    if (runId !== null && before === chatKey(dir, null) && worthSaving(held.current)) {
+      try {
+        localStorage.setItem(key, writable(held.current));
+        // Cleared, so the next run in this project starts from nothing rather
+        // than inheriting the conversation that launched the previous one.
+        localStorage.removeItem(before);
+      } catch {
+        // The conversation is still on screen and still correct. What is lost is
+        // its return next time.
+      }
+      return;
+    }
+
+    try {
+      dispatch({ type: 'restore', conversation: readChat(localStorage.getItem(key)) });
+    } catch {
+      // Storage can be unavailable. An empty pane is a smaller failure than a
+      // window that will not render.
+      dispatch({ type: 'restore', conversation: emptyConversation() });
+    }
+  }, [dir, runId]);
+
+  // Save on every settled change. `live` is dropped by `writable`, so a turn in
+  // flight is not stored half-streamed and a window killed mid-turn leaves a
+  // conversation that ends at the last complete reply.
+  useEffect(() => {
+    const key = chat.current;
+    if (key === null || !worthSaving(conversation)) return;
+    try {
+      localStorage.setItem(key, writable(conversation));
+    } catch {
+      // Quota, or storage switched off. The conversation still works for this
+      // session; what is lost is its return next time, which is not worth an
+      // error in the middle of one.
+    }
+  }, [conversation]);
   /**
    * Where turns run (#193). **Subscription by default**, because it is the one
    * that works with nothing configured - the whole point of the issue is that an

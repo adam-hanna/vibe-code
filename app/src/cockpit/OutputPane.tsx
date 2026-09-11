@@ -1,7 +1,29 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { LivenessDot, MetaChip } from '../design';
 import { elapsed } from './format';
+import { groups, readTranscript } from './outgroups';
+import { noText, useArtifact } from './useArtifacts';
+import type { OutGroup } from './outgroups';
 import type { OutputLine, Staleness, Turn } from './model';
+
+/**
+ * The file a finished run's narration is in.
+ *
+ * Named here rather than composed from the run id: it is a fixed name in the
+ * run's own directory, written by `log.record`, and `isArtifactBasename` lets it
+ * through like any other file the run wrote.
+ */
+const TRANSCRIPT = 'transcript.log';
+
+/**
+ * The id the core puts on the agent's own prose (#223).
+ *
+ * Matched on the **id** and never on the text, which is the whole seam: a line
+ * the model wrote and a line the loop wrote are different kinds of claim, and
+ * the only thing that can tell them apart without reading English is what the
+ * narration called itself.
+ */
+const SAID = 'model_said';
 
 /**
  * The narration, filtered by phase (`1c`, #223).
@@ -47,9 +69,6 @@ import type { OutputLine, Staleness, Turn } from './model';
  * launching row does for its ETA.
  */
 
-/** Lines that belong to no phase at all - preflight, the run announcement. */
-const NO_PHASE = 'before the first phase';
-
 /**
  * Hi-fi 1's turn strip, above the pane.
  *
@@ -91,43 +110,111 @@ function TurnStrip({ turn, staleness }: { turn: Turn; staleness: Staleness }) {
   );
 }
 
+/** One round's lines, under a heading that opens and shuts. */
+function Group({
+  group,
+  open,
+  onToggle,
+  last,
+}: {
+  group: OutGroup;
+  open: boolean;
+  onToggle: () => void;
+  /** The newest group, which is the one a live run is writing into. */
+  last: boolean;
+}) {
+  return (
+    <section className={`v-og${open ? ' v-og--open' : ''}`}>
+      <button className="v-og__head" onClick={onToggle} aria-expanded={open}>
+        <span className="v-og__caret">{open ? '▾' : '▸'}</span>
+        <span className="v-og__title">{group.title}</span>
+        <span className="v-og__count">
+          {group.lines.length} line{group.lines.length === 1 ? '' : 's'}
+        </span>
+        {/* A shut group that holds a warning says so, because the reason to
+            collapse a run is to find the part that went wrong in it. */}
+        {group.alarming && !open && <MetaChip kind="alarm">warnings</MetaChip>}
+        {last && <MetaChip>latest</MetaChip>}
+      </button>
+      {open && (
+        <ol className="v-output__lines">
+          {group.lines.map((line) => (
+            <li
+              key={line.n}
+              className={`v-output__line v-output__line--${line.level}${
+                line.id === SAID ? ' v-output__line--said' : ''
+              }`}
+            >
+              {/* **The model's own words are drawn as the model's.** A line the
+                  agent wrote and a line the loop wrote are two different kinds
+                  of claim, and running them together at one weight is how a
+                  reader comes to believe vibe said something the model did. The
+                  id is what separates them — never the sentence. The rule is
+                  set on `id`, so it is the same seam every other decision in
+                  this window is made on. */}
+              {line.id !== null && line.id !== SAID && (
+                <span className="v-output__id">{line.id}</span>
+              )}
+              <span className="v-output__msg">{line.message}</span>
+            </li>
+          ))}
+        </ol>
+      )}
+    </section>
+  );
+}
+
 export function OutputPane({
   lines,
   turn,
   staleness,
+  transcript,
 }: {
   lines: readonly OutputLine[];
   /** The turn that is open, or null between turns. Never inferred from a line. */
   turn: Turn | null;
   /** `7c`'s two clocks, already computed once for the whole window. */
   staleness: Staleness;
+  /**
+   * A past run to read from disk instead, or null for the live one (#223).
+   *
+   * **A run this window did not narrate has no lines on the wire**, and the
+   * frames that would have produced them were sent to a process that has since
+   * exited. Its narration is in `transcript.log` in its own directory, which is
+   * a file like any other — so opening a finished run shows what it said rather
+   * than an empty pane, which is what *"EVERYTHING should repopulate"* asked for.
+   */
+  transcript?: { dir: string; runId: string } | null;
 }) {
   const end = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
-  const [only, setOnly] = useState<string | null>(null);
+  /** Groups the reader has shut. Open is the default, so a new one is visible. */
+  const [closed, setClosed] = useState<ReadonlySet<number>>(() => new Set());
 
-  // The phases seen, in the order they arrived. Not a fixed list: a phase this
-  // build has no name for still gets a filter, because the lines are there.
-  const phases = useMemo(() => {
-    const seen: string[] = [];
-    for (const line of lines) {
-      const key = line.phase ?? NO_PHASE;
-      if (!seen.includes(key)) seen.push(key);
-    }
-    return seen;
-  }, [lines]);
+  const past = transcript ?? null;
+  const { read, failure, loading } = useArtifact(
+    past?.dir ?? '',
+    past?.runId ?? null,
+    past === null ? null : TRANSCRIPT,
+  );
+  const missing = past === null ? null : noText(read, failure);
 
-  const shown = only === null ? lines : lines.filter((l) => (l.phase ?? NO_PHASE) === only);
+  const source = useMemo(
+    () => (past === null ? lines : read?.kind === 'text' ? readTranscript(read.text) : []),
+    [past, lines, read],
+  );
+  const shown = useMemo(() => groups(source), [source]);
 
   useEffect(() => {
     // Only when the reader is already at the bottom. Yanking the view down while
     // somebody is reading back through a run is the reason log panes get muted.
     if (pinned.current) end.current?.scrollIntoView({ block: 'end' });
-  }, [shown.length]);
+  }, [source.length]);
 
   // Who is running, from the last line that carried a role. Told rather than
   // inferred, and absent rather than guessed between turns.
-  const role = [...shown].reverse().find((l) => l.role !== null)?.role ?? null;
+  const role = [...source].reverse().find((l) => l.role !== null)?.role ?? null;
+  const newest = shown[shown.length - 1]?.key ?? null;
 
   return (
     <div className="v-outwrap">
@@ -136,40 +223,24 @@ export function OutputPane({
           *never inferred*. */}
       {turn !== null && <TurnStrip turn={turn} staleness={staleness} />}
 
-      {phases.length > 1 && (
-        <div className="v-output__filters">
-          <button
-            className={`v-output__filter ${only === null ? 'is-on' : ''}`}
-            onClick={() => setOnly(null)}
-          >
-            everything
-          </button>
-          {phases.map((p) => (
-            <button
-              key={p}
-              className={`v-output__filter ${only === p ? 'is-on' : ''}`}
-              onClick={() => setOnly((cur) => (cur === p ? null : p))}
-            >
-              {p}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {only !== null && (
-        <div className="v-output__head">
-          <span>
-            {shown.length} of {lines.length} lines
-          </span>
-          {/* Never inferred. A phase with no turn open says so rather than
-              naming the role that most recently ran under a different one. */}
-          {role === null ? (
-            <MetaChip>no turn open</MetaChip>
-          ) : (
-            <MetaChip>{role} was running</MetaChip>
-          )}
-        </div>
-      )}
+      <div className="v-output__head">
+        <span>
+          {source.length} line{source.length === 1 ? '' : 's'} in {shown.length} group
+          {shown.length === 1 ? '' : 's'}
+        </span>
+        {/* Never inferred. A stretch with no turn open says so rather than
+            naming the role that most recently ran under a different one. */}
+        {role !== null && <MetaChip>{role} was running</MetaChip>}
+        <button className="v-output__filter" onClick={() => setClosed(new Set())}>
+          open all
+        </button>
+        <button
+          className="v-output__filter"
+          onClick={() => setClosed(new Set(shown.map((g) => g.key)))}
+        >
+          collapse all
+        </button>
+      </div>
 
       <div
         className="v-output"
@@ -178,19 +249,31 @@ export function OutputPane({
           pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
         }}
       >
-        <ol className="v-output__lines">
-          {shown.map((line) => (
-            <li key={line.n} className={`v-output__line v-output__line--${line.level}`}>
-              {line.id !== null && <span className="v-output__id">{line.id}</span>}
-              <span className="v-output__msg">{line.message}</span>
-            </li>
-          ))}
-        </ol>
-        {lines.length === 0 && (
-          <div className="v-output__empty">the run has not said anything yet</div>
-        )}
-        {lines.length > 0 && shown.length === 0 && (
-          <div className="v-output__empty">nothing was said during {only}</div>
+        {shown.map((group) => (
+          <Group
+            key={group.key}
+            group={group}
+            open={!closed.has(group.key)}
+            last={group.key === newest}
+            onToggle={() =>
+              setClosed((cur) => {
+                const next = new Set(cur);
+                if (!next.delete(group.key)) next.add(group.key);
+                return next;
+              })
+            }
+          />
+        ))}
+        {source.length === 0 && (
+          <div className="v-output__empty">
+            {past === null
+              ? 'the run has not said anything yet'
+              : missing !== null
+                ? missing
+                : loading
+                  ? 'reading this run’s transcript…'
+                  : 'this run’s transcript is empty'}
+          </div>
         )}
         <div ref={end} />
       </div>

@@ -124,6 +124,28 @@ export function Cockpit() {
    */
   const [showRuns, setShowRuns] = useState(true);
   const [showLoop, setShowLoop] = useState(true);
+  /**
+   * A past run this window is reading, or null for the live one (#223).
+   *
+   * **Opening a run is not starting one, and that separation is the whole
+   * feature.** A row in the sidebar used to resume: probe both CLIs, take the
+   * lock, run a turn. Reported at once — *"clicking on a run automatically kicks
+   * off the pre-flight. I don't want that."* — and it is the sharper form of the
+   * rule the rail already had: a click must not silently **spend**. Browsing an
+   * archive has to be free.
+   *
+   * So this is where the window is *pointed*, and every pane that reads a run's
+   * own directory follows it: the plans, the two reports, the questions, the
+   * code and the transcript are all files on disk, and reading them takes no
+   * lock and starts nothing.
+   *
+   * **It is deliberately not a `Run`.** `reduce` builds one from frames, and a
+   * finished run's frames were narrated to a process that has exited — synthesising
+   * them would report finished work as running, which is the fabrication this
+   * whole model is arranged against. The loop column and the spend readout stay
+   * with the live run and say which run they are about.
+   */
+  const [viewing, setViewing] = useState<{ dir: string; runId: string; task: string } | null>(null);
   /** Whether the ⌘K switcher is open (`5f`, #223). */
   const [switching, setSwitching] = useState(false);
   /** Whether `4a`'s modal is open. The only modal in the product. */
@@ -611,6 +633,18 @@ export function Cockpit() {
   );
 
   const outside = !host.inShell();
+  /**
+   * The run every disk-reading pane is about.
+   *
+   * One expression, used by all six, so they cannot disagree about which run is
+   * on screen. The live run is the default and an opened one overrides it —
+   * and when the live run *is* the opened one, `viewing` is simply redundant
+   * rather than wrong.
+   */
+  const shownRunId = viewing?.runId ?? run.identity?.runId ?? null;
+  const shownDir = viewing?.dir ?? repoDir;
+  /** Whether what is on screen is a run this window did not narrate. */
+  const past = viewing !== null && viewing.runId !== run.identity?.runId;
   // The round cards, built once here and handed to the surfaces that draw them.
   // `rounds()` is a re-shaping of what is already on `Run` - it measures nothing
   // and infers nothing - and one call is what keeps the pilot's log, the report
@@ -767,11 +801,19 @@ export function Cockpit() {
               rememberRepo(next);
               setTab('runs');
             }}
-            onResume={(next, runId) => {
+            // Reads only. Points the window at the run and leaves the loop
+            // alone — no probe, no lock, no turn.
+            onShow={(next, runId, task) => {
               rememberRepo(next);
-              resume(runId, next);
+              setViewing({ dir: next, runId, task });
+              setOpenAt(null);
             }}
-            onProject={rememberRepo}
+            onProject={(next) => {
+              rememberRepo(next);
+              // A run in the old project is not a run in this one, and the panes
+              // key off the run id alone. Cleared rather than carried.
+              setViewing(null);
+            }}
           />
         </SidePanel>
 
@@ -927,16 +969,46 @@ export function Cockpit() {
                   }`}
             </button>
           </div>
+          {/* **Which run the panes are about, whenever it is not the live one.**
+              Opening a past run changes what six panes read and nothing else on
+              screen — the loop column, the spend readout and the footer all stay
+              with the run this window is narrating — so without this the window
+              would be showing two runs at once and saying so nowhere. It carries
+              the way back and the way forward: stop reading, or go to `1b`,
+              which is the only place a run is started. */}
+          {past && viewing !== null && (
+            <div className="v-cockpit__viewing">
+              <StateKicker tone="quiet">reading</StateKicker>
+              <span className="v-cockpit__viewingwhat">{viewing.task}</span>
+              <span className="v-cockpit__viewingnote">
+                from disk. The column and the spend beside it are the run this window is
+                narrating, not this one.
+              </span>
+              <button className="v-doc__again" onClick={() => setTab('runs')}>
+                resume it…
+              </button>
+              <button className="v-doc__again" onClick={() => setViewing(null)}>
+                back to the live run
+              </button>
+            </div>
+          )}
           {tab === 'output' && (
-            <OutputPane lines={run.output} turn={run.running} staleness={staleness(run, now)} />
+            <OutputPane
+              lines={run.output}
+              turn={past ? null : run.running}
+              staleness={staleness(run, now)}
+              // A past run's narration is on disk, in its own transcript. The
+              // live run's is on the wire and has never been read from a file.
+              transcript={past && viewing !== null ? viewing : null}
+            />
           )}
           {tab === 'verify' && <VerifyPane passes={run.verify} />}
           {tab === 'spend' && <SpendPane run={run} />}
           {tab === 'questions' && (
             <QuestionsPane
-              questions={run.questions}
-              dir={repoDir}
-              runId={run.identity?.runId ?? null}
+              questions={past ? null : run.questions}
+              dir={shownDir}
+              runId={shownRunId}
               revision={run.artifacts.length}
             />
           )}
@@ -960,28 +1032,28 @@ export function Cockpit() {
               the bytes are on disk, so the re-read cannot beat the write. */}
           {tab === 'plans' && (
             <PlansPane
-              dir={repoDir}
-              runId={run.identity?.runId ?? null}
+              dir={shownDir}
+              runId={shownRunId}
               openAt={openAt}
               revision={run.artifacts.length}
             />
           )}
           {tab === 'critique' && (
             <ReportPane
-              dir={repoDir}
-              runId={run.identity?.runId ?? null}
+              dir={shownDir}
+              runId={shownRunId}
               kind="critique"
-              rounds={cards}
+              rounds={past ? [] : cards}
               openAt={openAt}
               revision={run.artifacts.length}
             />
           )}
           {tab === 'review' && (
             <ReportPane
-              dir={repoDir}
-              runId={run.identity?.runId ?? null}
+              dir={shownDir}
+              runId={shownRunId}
               kind="review"
-              rounds={cards}
+              rounds={past ? [] : cards}
               openAt={openAt}
               revision={run.artifacts.length}
             />
@@ -1005,6 +1077,11 @@ export function Cockpit() {
               run={run}
               launched={sentLaunch}
               dir={repoDir}
+              // Which conversation to show. It follows the run the panes are
+              // reading, so opening a finished run brings back the chat about
+              // it — and null, before any run, is the conversation that will
+              // propose one.
+              runId={shownRunId}
               commands={commands}
               onEffect={onEffect}
               onPending={setProposals}
@@ -1022,7 +1099,7 @@ export function Cockpit() {
               // not in.
               kickoff={
                 (!launched || run.completed !== null) && !outside ? (
-                  <Kickoff dir={repoDir} onDir={rememberRepo} busy={busy || !wire.connected} />
+                  <Kickoff dir={repoDir} />
                 ) : undefined
               }
             />

@@ -79,15 +79,32 @@ export function dirKey(dir: string): string {
   return dir.trim().replace(/[\\/]+$/, '').replace(/\\/g, '/').toLowerCase();
 }
 
+/**
+ * The spelling this list already holds for a directory, or null.
+ *
+ * **Separate from `addProject` because adding and being told are two different
+ * needs.** Seeding the current repository on every render must be silent — it
+ * happens whether or not anybody did anything — while a person pressing *Add a
+ * project* and getting nothing has been ignored by the window. The caller that
+ * wants to say so asks first; the caller that does not, does not.
+ *
+ * It returns the **existing** spelling rather than `true`, because that is what
+ * makes the message worth reading: somebody who typed `c:/users/me/repo` needs
+ * to be shown `C:\Users\me\repo` to recognise which row is already theirs.
+ */
+export function findProject(list: readonly string[], dir: string): string | null {
+  const key = dirKey(dir);
+  return list.find((d) => dirKey(d) === key) ?? null;
+}
+
 /** Add a project, keeping the list unique and the newest first. */
 export function addProject(list: readonly string[], dir: string): readonly string[] {
   const trimmed = dir.trim();
   if (trimmed === '') return list;
-  const key = dirKey(trimmed);
   // The existing spelling wins on a re-add: the list is not reordered and the
   // path is not rewritten, so a project does not jump around the sidebar
   // because somebody typed it again with a trailing slash.
-  if (list.some((d) => dirKey(d) === key)) return list;
+  if (findProject(list, trimmed) !== null) return list;
   return [...list, trimmed];
 }
 

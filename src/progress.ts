@@ -88,6 +88,28 @@ export interface ProgressSnapshot {
    * tokens are in", one for "it is in the tally" (#66).
    */
   itemisedMessages: Set<string>;
+  /**
+   * What the model has said since the last line was drained (#223).
+   *
+   * **The agent's own prose, which nothing on this stream carried before.**
+   * `lastActivity` is a tool name — `Read src/gates.ts` — so the output pane
+   * could say what vibe was doing and what tools were used, and never what the
+   * model was actually reasoning about. Reported exactly: *"Output needs to be
+   * more verbose about the model and what it's thinking. Right now it's more
+   * like what vibe is doing. I want to see the actual model output."*
+   *
+   * **A buffer rather than a call**, because `LineParser` is a mutator that
+   * tests drive directly and `onLine` is documented as the only site that
+   * emits — a parser that narrated would put a side effect in the one function
+   * in this file that is safe to call in a loop.
+   *
+   * **Uncapped, at the owner's decision.** A block is passed through whole: a
+   * model that writes four thousand words puts four thousand words in the pane
+   * and the transcript. The alternative needed a character limit, which is a
+   * number with nothing behind it, and a truncated thought is the half that is
+   * not worth reading.
+   */
+  said: string[];
 }
 
 export function emptySnapshot(): ProgressSnapshot {
@@ -100,6 +122,7 @@ export function emptySnapshot(): ProgressSnapshot {
     promptTokens: 0,
     countedMessages: new Set(),
     itemisedMessages: new Set(),
+    said: [],
   };
 }
 
@@ -188,7 +211,24 @@ export const parseClaudeLine: LineParser = (snapshot, line) => {
   const content = message['content'];
   if (Array.isArray(content)) {
     for (const block of content) {
-      if (!isRecord(block) || block['type'] !== 'tool_use') continue;
+      if (!isRecord(block)) continue;
+      // The model's own prose (#223). Collected on the same walk the tools are
+      // tallied on, and under the same assumption this loop has always made -
+      // one content block per `assistant` event, which is the module header's
+      // own account of the stream. If that ever stopped being true the tool
+      // tallies would double first, so the two fail together and visibly.
+      if (block['type'] === 'text') {
+        const text = block['text'];
+        // Whitespace-only is not something the model said. Trimmed for the test
+        // and passed through **whole**, because the shape of a paragraph is part
+        // of what makes it readable.
+        if (typeof text === 'string' && text.trim() !== '') {
+          snapshot.said.push(text);
+          recognised = true;
+        }
+        continue;
+      }
+      if (block['type'] !== 'tool_use') continue;
       const name = typeof block['name'] === 'string' ? block['name'] : 'tool';
       const target = toolTarget(block['input']);
       snapshot.activities += 1;
@@ -296,6 +336,19 @@ export const parseCodexLine: LineParser = (snapshot, line) => {
     // has no reason to double it the way the liveness counter must (#66).
     if (type === 'item.completed' && typeof itemType === 'string' && itemType !== '') {
       tally(snapshot, itemType, !NON_TOOL_CODEX_ITEMS.has(itemType));
+      // Codex's half of #223. `agent_message` is the model talking - it is in
+      // `NON_TOOL_CODEX_ITEMS` for exactly that reason - and `item.completed` is
+      // where the whole text has arrived. Reading it on `item.started` would
+      // collect a partial message and then the same message again.
+      //
+      // **Only `agent_message`.** `reasoning` is the other non-tool kind and is
+      // deliberately left alone: it has never been seen carrying text on this
+      // stream, and a field read from an item this repo has not observed is a
+      // guess at a shape rather than a reading of one.
+      if (itemType === 'agent_message' && isRecord(item)) {
+        const text = item['text'];
+        if (typeof text === 'string' && text.trim() !== '') snapshot.said.push(text);
+      }
     }
     return true;
   }
@@ -837,6 +890,25 @@ export function createHeartbeat(
       parse(snapshot, line);
     } catch {
       // A malformed line is not a run-ending event.
+    }
+    // What the model said on this line, straight through (#223). Drained here
+    // because `onLine` is documented as the only site that emits, and drained
+    // **completely** so a block can never be said twice.
+    //
+    // `detail` is the level: it is the agent's own prose rather than the loop
+    // reporting on itself, so it reads dimmed beside the loop's steps and a
+    // terminal can tell the two apart at a glance. It is narration with no
+    // event - the agent's words are already in the session the provider holds,
+    // and `state.events` is not a transcript (#133).
+    if (snapshot.said.length > 0) {
+      const said = snapshot.said.splice(0, snapshot.said.length);
+      for (const text of said) {
+        try {
+          detail(text, { id: 'model_said', data: { label, text } });
+        } catch {
+          // Same rule as the parse above: narration must never end a turn.
+        }
+      }
     }
     // The first line that puts a figure on this turn is written immediately,
     // once. Everything after it rides the ordinary throttle: writing per usage

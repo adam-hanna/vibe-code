@@ -503,6 +503,16 @@ export interface OutputLine {
    * preflight and the run announcement genuinely belong to no phase.
    */
   phase: string | null;
+  /**
+   * The round the loop had announced for that phase, or null (#223).
+   *
+   * Stamped from the last `phase_started`, exactly as `phase` is, and for the
+   * same reason: it is what makes `Plan 0` and `Plan 1` two headings rather than
+   * one. Grouping on the phase alone would put every plan round of a long run
+   * under one collapsed section, which is the endless stream `1c` objects to
+   * wearing a heading.
+   */
+  round: number | null;
   /** The role that was running, on the same terms. Null between turns. */
   role: string | null;
 }
@@ -1213,17 +1223,22 @@ const unsettled =
  * so the newest phase is not necessarily in the last cycle.
  */
 function currentPhase(run: Run): string | null {
-  let newest = -1;
-  let name: string | null = null;
+  return newestPhase(run)?.phase ?? null;
+}
+
+/** The round of that same phase, so a line can be filed under `Plan 1`. */
+function currentRound(run: Run): number | null {
+  return newestPhase(run)?.round ?? null;
+}
+
+function newestPhase(run: Run): PhaseGroup | null {
+  let newest: PhaseGroup | null = null;
   for (const cycle of run.cycles) {
     for (const phase of cycle.phases) {
-      if (phase.id > newest) {
-        newest = phase.id;
-        name = phase.phase;
-      }
+      if (newest === null || phase.id > newest.id) newest = phase;
     }
   }
-  return name;
+  return newest;
 }
 
 /** Close the running turn, if there is one. */
@@ -1313,6 +1328,12 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
       frame.id === 'phase_started'
         ? (str((frame.data ?? {})['phase']) ?? currentPhase(run))
         : currentPhase(run),
+    // The same correction, on the same id, for the same reason: the line that
+    // opens a round belongs to that round rather than to the one before it.
+    round:
+      frame.id === 'phase_started'
+        ? (num((frame.data ?? {})['round']) ?? currentRound(run))
+        : currentRound(run),
     role: run.running?.role ?? null,
   };
   const output = [...run.output, line].slice(-OUTPUT_KEEP);

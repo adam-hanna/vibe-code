@@ -1,9 +1,11 @@
 import { describe, expect, test } from 'vitest';
 import cockpit from './Cockpit.tsx?raw';
+import sidebar from './Sidebar.tsx?raw';
 import {
   SHOWN,
   addProject,
   dirKey,
+  findProject,
   isPinned,
   projectName,
   readPins,
@@ -68,6 +70,17 @@ describe('one repository is one project, however it was typed', () => {
   test('the key normalises for comparison only', () => {
     expect(dirKey('C:\\Me\\Repo\\')).toBe(dirKey('c:/me/repo'));
     expect(dirKey('a/one')).not.toBe(dirKey('a/two'));
+  });
+
+  test('a duplicate can be reported, and it names the spelling already listed', () => {
+    // `addProject` dedupes in silence, which is right for the seeding that runs
+    // on every render and wrong for a person who pressed a button: a chooser
+    // that closes and adds no row has ignored them. The existing spelling is
+    // what makes the message actionable — somebody who chose `c:/users/me/repo`
+    // needs to see `C:\Users\me\repo` to recognise which row is already theirs.
+    expect(findProject(['C:\\Users\\me\\repo'], 'c:/users/me/repo/')).toBe('C:\\Users\\me\\repo');
+    expect(findProject(['a/one'], 'a/two')).toBeNull();
+    expect(findProject([], 'anything')).toBeNull();
   });
 });
 
@@ -165,6 +178,26 @@ describe('the sidebar is the navigator, and 1b is where a lock is overruled', ()
     expect(strip).toMatch(/＋/);
     expect(strip).toMatch(/⌘K/);
     expect(strip).toMatch(/⚙/);
+  });
+
+  test('a row shows a run; it does not start one', () => {
+    // The report: *"clicking on a run within a project on the left bar
+    // automatically kicks off the pre-flight. I don't want that."* A resume
+    // probes both CLIs, takes the lock and runs a turn, so putting it behind a
+    // row makes browsing the archive cost money — which is the one thing
+    // browsing must not do. The sidebar reads; `1b` is where a run is started.
+    expect(sidebar).toMatch(/onShow/);
+    expect(sidebar).not.toMatch(/onResume/);
+    expect(cockpit).toMatch(/onShow=\{\(next, runId, task\)/);
+  });
+
+  test('Add a project opens the native chooser', () => {
+    // A repository path is absolute and platform-shaped, and a typo in a typed
+    // one does not fail at the field — it fails at preflight, minutes later, in
+    // a run that had to start to find out (#189). The field stays as the
+    // fallback for a shell where the chooser will not open.
+    expect(sidebar).toMatch(/pickDirectory\(\)/);
+    expect(sidebar).toMatch(/v-nav__field/);
   });
 
   test('1b is still reachable, and still has no tab of its own', () => {

@@ -2,10 +2,12 @@ import { useCallback, useEffect, useState } from 'react';
 import { LivenessDot, StateKicker } from '../design';
 import * as host from '../host';
 import { rail } from './squares';
+import { pickDirectory } from './pick';
 import {
   PINNED_KEY,
   PROJECTS_KEY,
   addProject,
+  findProject,
   isPinned,
   projectName,
   readPins,
@@ -48,13 +50,21 @@ import type { ArchiveRun } from '../host';
  * The same rule the artifact panes follow, for the same reason: nothing else
  * writes to these directories while this window is the one running.
  *
- * ## A row navigates and resumes; it never forces
+ * ## A row OPENS a run. It does not start one.
  *
- * `Rail.tsx` made this its one deliberate narrowing and it survives the rewrite
- * intact. A run whose lock is held by a live process is drawn with the dot and
- * cannot be clicked into, and a run needing `--force` is not force-resumed from
- * here — `all runs` opens `1b`, which states the lock's verdict and confirms.
- * Two places that can overrule a lock is one too many.
+ * The first cut resumed on click, and the report was immediate: *"clicking on a
+ * run within a project on the left bar automatically kicks off the pre-flight. I
+ * don't want that."* It is the sharper version of the narrowing `Rail.tsx`
+ * already made — that one said a square must not silently *force* a lock, and
+ * this says a click must not silently **spend**. A resume probes both CLIs,
+ * takes the lock and starts a turn; putting that behind a row in a list makes
+ * browsing the archive cost money, which is the one thing browsing must not do.
+ *
+ * So a row reads: it points the window at that run and every pane that reads a
+ * run's own directory follows it. Starting the loop again is a separate,
+ * labelled act, and it lives where a lock can be overruled — `1b`, reached from
+ * `all runs`, which states the lock's verdict and confirms a force. **Two places
+ * able to start a run is the same mistake as two able to force one.**
  */
 
 /** One project's archive, fetched when it opens. */
@@ -136,18 +146,13 @@ function RunRow({
   live: boolean;
   current: boolean;
   pinned: boolean;
-  /** Null when there is nowhere to go — a run already running is one. */
-  onOpen: (() => void) | null;
+  /** Show this run. Reading takes no lock, so there is no state that refuses. */
+  onOpen: () => void;
   onPin: () => void;
 }) {
   return (
     <div className={`v-nav__row${current ? ' v-nav__row--on' : ''}`}>
-      <button
-        className="v-nav__open"
-        onClick={onOpen ?? undefined}
-        disabled={onOpen === null}
-        title={onOpen === null ? `${title} — already running` : title}
-      >
+      <button className="v-nav__open" onClick={onOpen} title={title}>
         {/* The archive's verdict, never one derived here. A run this window is
             showing gets the dot too, because it is the running one. */}
         {live ? <LivenessDot state="live" /> : <span className="v-nav__bullet">·</span>}
@@ -163,7 +168,7 @@ function Project({
   current,
   currentId,
   pins,
-  onResume,
+  onShow,
   onPin,
   onAll,
   onForget,
@@ -173,7 +178,7 @@ function Project({
   current: boolean;
   currentId: string | null;
   pins: readonly Pin[];
-  onResume: (dir: string, runId: string) => void;
+  onShow: (dir: string, runId: string, task: string) => void;
   onPin: (pin: Pin) => void;
   onAll: (dir: string) => void;
   onForget: (dir: string) => void;
@@ -220,9 +225,11 @@ function Project({
               live={r.live}
               current={r.current}
               pinned={isPinned(pins, { dir, runId: r.id, task: r.task })}
-              // A run held by a live process is not something to reopen from a
-              // sidebar. `1b` is where a lock is overruled, with a confirmation.
-              onOpen={r.live ? null : () => onResume(dir, r.id)}
+              // Every run opens, the live one included — reading a run's own
+              // directory takes no lock and starts nothing, so there is no
+              // reason to refuse the one that is going. Starting a run is `1b`'s
+              // job, and that is where a held lock is a question.
+              onOpen={() => onShow(dir, r.id, r.task)}
               onPin={() => onPin({ dir, runId: r.id, task: r.task })}
             />
           ))}
@@ -249,7 +256,7 @@ export function Sidebar({
   onSwitch,
   onSettings,
   onRuns,
-  onResume,
+  onShow,
   onProject,
 }: {
   /** The repository the window is pointed at. Always one of the projects. */
@@ -260,7 +267,7 @@ export function Sidebar({
   onSettings: () => void;
   /** Open `1b` for a project, which is where a lock can be overruled. */
   onRuns: (dir: string) => void;
-  onResume: (dir: string, runId: string) => void;
+  onShow: (dir: string, runId: string, task: string) => void;
   /** Point the window at a project. */
   onProject: (dir: string) => void;
 }) {
@@ -268,6 +275,18 @@ export function Sidebar({
   const [pins, setPins] = useState<readonly Pin[]>([]);
   const [adding, setAdding] = useState(false);
   const [typed, setTyped] = useState('');
+  /**
+   * What went wrong adding a project, or null.
+   *
+   * **A duplicate is said out loud rather than absorbed.** `addProject` dedupes
+   * silently, which is right for the seeding that happens on every render and
+   * wrong for a person who pressed a button: a chooser that closes and adds no
+   * row has ignored them, and the reasonable next thing to try is pressing it
+   * again. It names the spelling already in the list, because that is what makes
+   * the message actionable — somebody who chose `c:/users/me/repo` needs to be
+   * shown `C:\Users\me\repo` to recognise which row is already theirs.
+   */
+  const [problem, setProblem] = useState<string | null>(null);
 
   // Read once. Both lists are this window's own memory, so there is nothing to
   // re-read them for — every write below goes through the setters.
@@ -299,6 +318,66 @@ export function Sidebar({
     },
     [save],
   );
+
+  /**
+   * Add a project a person asked for, and say so when it is already there.
+   *
+   * The loud half of `add`. It resolves against the list through the setter
+   * rather than closing over `projects`, so two adds in quick succession cannot
+   * both decide the list was empty.
+   */
+  const addAndSay = useCallback(
+    (next: string) => {
+      const trimmed = next.trim();
+      if (trimmed === '') return;
+      setProjects((list) => {
+        const already = findProject(list, trimmed);
+        if (already !== null) {
+          setProblem(
+            already === trimmed
+              ? `${projectName(already)} is already a project.`
+              : `That is already a project, listed as ${already}.`,
+          );
+          return list;
+        }
+        const grown = addProject(list, trimmed);
+        save(PROJECTS_KEY, grown);
+        setProblem(null);
+        // Pointed at straight away: adding a project is how you switch to one,
+        // and a row that appeared in a list you then had to click would be two
+        // actions for one intention.
+        onProject(trimmed);
+        return grown;
+      });
+      setTyped('');
+      setAdding(false);
+    },
+    [save, onProject],
+  );
+
+  /**
+   * The native chooser, which is what *Add a project* should have opened.
+   *
+   * `pickDirectory` is the one place this window asks the OS for anything, and a
+   * repository is exactly what #189 added it for: an absolute, platform-shaped
+   * path typed by hand fails at preflight rather than at the field. The typed
+   * field stays as the **fallback** when the chooser will not open — a headless
+   * or misconfigured shell must not leave the only way in unreachable.
+   */
+  const choose = useCallback(() => {
+    void pickDirectory()
+      .then((chosen) => {
+        // A cancel changes nothing. Not the list, not the message, not the
+        // field — every caller of this has to be able to tell it from a choice.
+        if (chosen !== null) addAndSay(chosen);
+      })
+      .catch((err: unknown) => {
+        setProblem(
+          `the chooser did not open: ${err instanceof Error ? err.message : String(err)} — type a path instead`,
+        );
+        setAdding(true);
+      });
+  }, [addAndSay]);
 
   // The repository the window is already pointed at is a project whether or not
   // anybody added it — it is where the next run will go. Seeded rather than
@@ -356,7 +435,7 @@ export function Sidebar({
               live={false}
               current={p.runId === currentId}
               pinned
-              onOpen={() => onResume(p.dir, p.runId)}
+              onOpen={() => onShow(p.dir, p.runId, p.task)}
               onPin={() => pin(p)}
             />
           ))}
@@ -377,27 +456,26 @@ export function Sidebar({
             current={p === dir}
             currentId={currentId}
             pins={pins}
-            onResume={onResume}
+            onShow={onShow}
             onPin={pin}
             onAll={onRuns}
             onForget={forget}
           />
         ))}
 
-        {adding ? (
+        {/* The chooser first, the field as the fallback. A path is absolute and
+            platform-shaped, and a typo in one does not fail at the field — it
+            fails at preflight, minutes later, in a run that had to start to find
+            out (#189). */}
+        <button className="v-nav__more" onClick={choose}>
+          ＋ Add a project
+        </button>
+        {adding && (
           <form
             className="v-nav__add"
             onSubmit={(e) => {
               e.preventDefault();
-              const next = typed.trim();
-              if (next === '') return;
-              add(next);
-              // Pointed at straight away: adding a project is how you switch to
-              // one, and an entry that appeared in a list you then had to click
-              // would be two actions for one intention.
-              onProject(next);
-              setTyped('');
-              setAdding(false);
+              addAndSay(typed);
             }}
           >
             <input
@@ -409,10 +487,14 @@ export function Sidebar({
               autoFocus
             />
           </form>
-        ) : (
-          <button className="v-nav__more" onClick={() => setAdding(true)}>
-            ＋ Add a project
-          </button>
+        )}
+        {problem !== null && (
+          <span className="v-nav__note v-nav__note--alarm" role="alert">
+            {problem}{' '}
+            <button className="v-nav__dismiss" onClick={() => setProblem(null)}>
+              dismiss
+            </button>
+          </span>
         )}
       </section>
 

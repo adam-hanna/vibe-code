@@ -308,13 +308,25 @@ they are waiting on. Four things in it are worth carrying:
   *"there should be a strip"*, it was that those three had nowhere to live and ended up in the
   tab bar, so a panel that shut them away would put the finding straight back. They are the
   shut strip, which is why `SidePanel` takes a `shut` slot at all.
-- **A row navigates and resumes; it never forces.** The rail's one deliberate narrowing,
-  unchanged by the rewrite. `serve.ts` runs one run at a time, so there is never a second live
-  workstream to switch *to*; a run whose lock is held by a live process is drawn with the dot
-  and is not clickable, and a run needing `--force` is reached through `1b`, which states the
-  lock's verdict and confirms. **Two places able to overrule a lock is one too many**, which is
-  why `1b` came back as a view with no tab of its own — the arrangement `settings` has had
-  since the rail landed, reachable from the sidebar and absent from the bar.
+- **A row OPENS a run. It does not start one.** The first cut resumed on click and the report
+  was immediate: *"clicking on a run automatically kicks off the pre-flight. I don't want
+  that."* It is the sharper form of the narrowing the rail already made — that one said a
+  square must not silently *force* a lock, and this says a click must not silently **spend**. A
+  resume probes both CLIs, takes the lock and starts a turn, so putting it behind a row in a
+  list makes browsing the archive cost money, which is the one thing browsing must not do. So
+  `Cockpit.viewing` is where the window is *pointed*, every pane that reads a run's own
+  directory follows it, and starting the loop is a separate labelled act in `1b` — which is
+  also where a lock is overruled, with a confirmation. **Two places able to start a run is the
+  same mistake as two able to force one**, which is why `1b` is a view with no tab of its own,
+  the arrangement `settings` has had since the rail landed.
+- **Opening a run is reading files, and `viewing` is deliberately not a `Run`.** `reduce`
+  builds one from frames, and a finished run's frames were narrated to a process that has
+  exited — synthesising them would report finished work as running, which is the fabrication
+  the whole model is arranged against. So the loop column, the spend readout and the footer
+  stay with the live run, six panes follow the opened one, and a strip says which is which
+  rather than leaving the window showing two runs and saying so nowhere. What repopulates:
+  the plans, both reports, the questions and the code from the run's own artifacts; the output
+  from its `transcript.log`; and the conversation from `localStorage`.
 - **A project is a repository and a session is a run**, and that is the whole of the mapping.
   The sidebar's shape is borrowed — actions, **Pinned**, **Projects** with their runs nested
   and a `Show more` — but nothing the core owns is renamed: `archive` still answers per
@@ -326,6 +338,33 @@ they are waiting on. Four things in it are worth carrying:
   thing to put in it. One repository typed three ways is one project: `dirKey` normalises case,
   separators and a trailing slash **for comparison only**, because what is stored is what gets
   sent to the host and the host has to open it.
+- **The output is cut into rounds, and every boundary is told.** `1c` asks for output filtered
+  by phase, and a *filter* is not a *structure*: it shows one phase by hiding the rest, so
+  reading a run end to end meant clicking through every phase and holding the order in your
+  head. `outgroups.ts` cuts on `phase` **or** `round` changing, both stamped on the line by
+  `reduce` from `phase_started` — never read out of a sentence, which is the English-matching
+  #133 exists to prevent and which would cut a group wherever the word *plan* appeared. Groups
+  are **consecutive**, so re-entering `implementing` after a review gives two code groups in
+  the order they happened; gathering them under one heading is the merged-card mistake in a
+  log. `OutputLine.round` is new and exists for exactly this: grouping on the phase alone puts
+  every plan round of a long run under one heading.
+- **A finished run's narration is prose, and is read as prose.** `transcript.log` carries no
+  ids, no phases and no rounds, so it is one group and says so. What *is* parsed is the level
+  and the timestamp, because `log.record` writes both and this repo controls that format —
+  reading it back is not pattern-matching on English. A line matching neither is a
+  continuation, a stack frame under an error, and is kept whole: dropping it would silently
+  shorten the one record of a run nobody is narrating any more.
+- **A conversation is kept between launches, and it is not run state.** `app/src/pilot/saved.ts`
+  keys it by `(project, run)` — a run id is unique only inside one archive, the same reason a
+  pin carries both. The conversation that exists *before* a run is the one that will **propose**
+  it, so it lives under the project alone and is **adopted** when a run starts; restoring the
+  new run's empty conversation at that moment would throw away the exchange that decided what
+  to build, at the exact moment it succeeded. A turn that was streaming is never written and
+  never restored: it has no vendor behind it, and drawing a pulsing card for a request nobody
+  is waiting on is the stall the thinking indicator exists to avoid claiming. It is
+  `localStorage` and never the run's directory — `src/charge.ts`, `src/types.ts` and
+  `src/orchestrator.ts` contain no `pilot`, and a run's `state.json` is byte-identical whether
+  the pane was open or shut (#145).
 - **A pin carries its title, and that is not a cached measurement.** A pinned run is drawn
   whether or not its project is expanded, so storing the task with the pin is what avoids
   reading every archive at launch to render four rows. It is safe for one reason and it is
@@ -433,6 +472,31 @@ can beat the thing it signals is not a signal. `Run.artifacts` holds the names r
 counter, and a name written twice is appended twice, because a plan round that answers its own
 questions rewrites `plan-<n>.json` under the name it already had and that second write is
 exactly the event a pane holding the first one needs.
+
+**`model_said` is the seventh, and it is the one that is not a promotion** (#223). Everything
+above was a fact the run already held and did not say; this is a fact that was on the stream
+and thrown away. `lastActivity` is a *tool name* — `Read src/gates.ts` — so the output pane
+could say what vibe was doing and which tools ran, and never what the model was reasoning
+about: *"Output needs to be more verbose about the model and what it's thinking. Right now
+it's more like what vibe is doing."*
+
+`parseClaudeLine` collects `text` blocks on the same walk that tallies `tool_use`, and
+`parseCodexLine` takes `agent_message` on `item.completed` — **only** that item, because
+`reasoning` has never been seen carrying text here and reading a field off an item nobody has
+observed is guessing at a shape. The parsers **collect into `snapshot.said` and never narrate**,
+because `onLine` is documented as the only site in `progress.ts` that emits and a parser with a
+side effect is one that cannot be driven in a loop by a test.
+
+Three decisions travel with it, all the owner's. It goes **everywhere** — pane, terminal and
+`transcript.log` — rather than only to the host sink, because a transcript that disagreed with
+what the app showed would break *"one channel, two renderers"* in the one place it matters.
+It is **on by default**, with no config key, so there is no second way for two installs to
+disagree about what a run said. And a block is **uncapped**: a model that writes four thousand
+words puts four thousand words in the pane, since the alternative needs a character limit,
+which is a number with nothing behind it, and a truncated thought is the half not worth
+reading. `detail` is the level, so the agent's prose reads dimmed beside the loop's own steps,
+and the pane draws it as a quotation **off the id** — never off the sentence, because a line
+the model wrote and a line the loop wrote are different kinds of claim.
 
 The move is a **promotion, never an invention**, and `recordAndSay`'s own rule is what makes
 it safe: *"narration never creates an event."* The durable set is exactly what `recordEvent`
@@ -676,6 +740,8 @@ app/src/cockpit/Counts.tsx the four severity counts, and the one place they are 
 app/src/cockpit/squares.ts what the navigator may draw, and the two letters standing for a run
 app/src/cockpit/Sidebar.tsx  projects, their runs, and the pins - the rail merged into one
 app/src/cockpit/projects.ts  which repositories are open and which runs are pinned
+app/src/cockpit/outgroups.ts the output cut into rounds, and a finished run's transcript
+app/src/pilot/saved.ts       a conversation kept between launches, and which run it is about
 app/src/cockpit/artifacts.ts what a run wrote: classifying a listing, and reading a report
 app/src/cockpit/useArtifacts.ts asking the host for a listing, and for one file when it opens
 app/src/cockpit/Disclosure.tsx the one section-that-opens, at every level it appears

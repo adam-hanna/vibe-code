@@ -147,5 +147,6 @@ function emptyish(): ProgressSnapshot {
     promptTokens: 0,
     countedMessages: new Set(),
     itemisedMessages: new Set(),
+    said: [],
   };
 }
