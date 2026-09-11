@@ -218,7 +218,23 @@ export type Outbound =
       runId: string;
       name: string;
       read: ArtifactRead;
-    };
+    }
+  /**
+   * A run that is gone, in reply to a `delete_run` request (#223).
+   *
+   * **The only frame in this union that reports a destruction**, and it carries
+   * the directory that was removed rather than a byte count or a file list.
+   * Those would be measurements taken so they could be shown once, and what a
+   * caller actually needs to say is *what is gone* - a path is checkable and a
+   * size is not.
+   *
+   * A refusal is an `error` frame, as it is for every read: `deleteRun` throws
+   * a `StoredStateError` naming which of the three guards stopped it, and that
+   * sentence is the whole answer. There is deliberately no "deleted: false"
+   * shape - a window that had to read a boolean to find out whether its own
+   * request happened is one that will eventually forget to.
+   */
+  | { type: 'run_deleted'; id: number; dir: string; runId: string; removed: string };
 
 /** What the thing driving the loop says. */
 export type Inbound =
@@ -420,7 +436,31 @@ export type Inbound =
    * optional `patch` and why this does not have one: there, absence is a *read*
    * and the refusal is on the shape of what is present.
    */
-  | { type: 'artifact'; id: number; dir: string; runId: string; name: string };
+  | { type: 'artifact'; id: number; dir: string; runId: string; name: string }
+  /**
+   * Delete a run from the archive (#223).
+   *
+   * **The one inbound frame that destroys something a run wrote**, and it is
+   * deliberately not a `Decision`: a decision answers an `ask` that a gate is
+   * holding open, about the run in flight. This is about a run that is over,
+   * asked when nothing is holding, and `src/host.ts`'s rule is the reason the
+   * distinction is kept - every `Decision` member that mutates run state needs
+   * its own validator, and this mutates no run state at all. It removes a
+   * directory.
+   *
+   * It is **not** exempt from anything on the strength of being small. What
+   * makes it answerable beside a run is the same thing that makes a delete safe
+   * at all: `deleteRun` refuses a run whose lock names a live process, and
+   * refuses one whose lock it cannot read. So the run in flight is the one run
+   * this frame can never reach, and every other run in the archive is inert.
+   *
+   * `dir` and `runId` are separate and both required, exactly as they are for
+   * `artifacts` - `dir` is the repository and `runId` names one entry under its
+   * `.vibe/runs`, which is the pair `assertUsableRunId` is written to check. A
+   * single joined path would be a caller handing this process somewhere to
+   * delete, which is the thing the split exists to prevent.
+   */
+  | { type: 'delete_run'; id: number; dir: string; runId: string };
 
 export function encode(msg: Outbound): string {
   return `${JSON.stringify(msg)}\n`;
@@ -568,7 +608,8 @@ export function decode(line: string): Decoded {
       return { ok: true, message: { type: 'archive', id, dir } };
     }
     case 'artifacts':
-    case 'artifact': {
+    case 'artifact':
+    case 'delete_run': {
       // Both fields required and both checked here, for `archive`'s reason:
       // there is no `parseArgs` below this to catch a missing one, and an empty
       // `dir` would resolve to the host's cwd - a *different repository's*
@@ -584,6 +625,13 @@ export function decode(line: string): Decoded {
       }
       if (type === 'artifacts') {
         return { ok: true, message: { type: 'artifacts', id, dir, runId } };
+      }
+      // Here rather than in a case of its own: the two fields it needs are the
+      // two checked above, and the checks are the point. A separate case would
+      // be a second copy of "an empty dir resolves to the host's cwd" - which
+      // for a delete would be the wrong repository's run, removed successfully.
+      if (type === 'delete_run') {
+        return { ok: true, message: { type: 'delete_run', id, dir, runId } };
       }
       // Refused rather than defaulted to a listing. The two requests are
       // different types precisely so that a `name` nobody sent is a refusal

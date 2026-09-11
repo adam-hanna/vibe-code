@@ -1665,6 +1665,71 @@ export function readRunArtifact(targetDir: string, runId: string, name: string):
   }
 }
 
+/** What was removed. The directory rather than a byte count — see `deleteRun`. */
+export interface RunRemoval {
+  runId: string;
+  /** The directory that is gone, so a caller can say what it removed. */
+  dir: string;
+}
+
+/**
+ * Take a run out of the archive, or refuse and say why (#223).
+ *
+ * **The first thing in this file that destroys a run, and the only one.** Every
+ * other write here adds to a run or replaces one of its own files; this removes
+ * the whole record — the plans, both reports, the answers, the checkpoints and
+ * the transcript. It is not recoverable and there is no `vibe undelete`, so the
+ * whole of this function is the two questions that have to be answered before
+ * the `rmSync`, and it refuses on either.
+ *
+ * `runDirFor` is the first and is shared rather than repeated: an id that does
+ * not name a single entry under `.vibe/runs` is refused lexically, and a run
+ * directory that is a symlink or a junction is refused before anything reads or
+ * writes through it (#53). That second one matters more here than anywhere else
+ * in the file — following a link to delete recursively is the worst thing this
+ * process could be talked into doing, and it is the same predicate that already
+ * refuses to *read* through one.
+ *
+ * **A live run is refused, and so is one this process cannot rule out.**
+ * `livenessOf` is the verdict, not a re-derivation: `running` is a lock whose
+ * pid answered, and deleting the directory out from under it would leave a
+ * process writing checkpoints into nothing. `unknown` refuses as well, which is
+ * `src/lock.ts`'s own rule applied to a stronger act — a lock it could not read
+ * *cannot rule out* a live process, and that reasoning licenses a refusal to
+ * delete at least as much as it licenses a refusal to write. `interrupted` is
+ * allowed through deliberately: a dead pid holding a lock is exactly the wreck
+ * somebody is trying to clear out.
+ *
+ * **The recursion never follows a link.** `rmSync(recursive)` unlinks a symlink
+ * rather than descending into it, so an entry inside the run directory that
+ * points elsewhere costs the link and not its target.
+ *
+ * What this does **not** touch is said out loud because a caller has to tell
+ * somebody: the run's branch and every commit on it are in git, not here, and
+ * they survive this untouched.
+ */
+export function deleteRun(targetDir: string, runId: string): RunRemoval {
+  const dir = runDirFor(targetDir, runId);
+  const { liveness } = livenessOf(dir);
+  if (liveness === 'running') {
+    throw new StoredStateError(
+      `Run "${runId}" is running: a lock in its directory names a process that is still ` +
+        'alive. Stop it first. Nothing was deleted.',
+    );
+  }
+  if (liveness === 'unknown') {
+    throw new StoredStateError(
+      `Run "${runId}" holds a lock this process cannot make sense of - it is unreadable, or it ` +
+        'was written by another machine - so vibe cannot tell whether anything is still working ' +
+        'on it. A run it cannot rule out as live is not one it will delete. Nothing was deleted.',
+    );
+  }
+  // `force` so a directory that has already gone is not an error: the caller
+  // asked for it to be absent, and it is. Recursive never follows a link.
+  rmSync(dir, { recursive: true, force: true });
+  return { runId, dir };
+}
+
 /**
  * Gates that were enabled and could not run, in list order.
  *

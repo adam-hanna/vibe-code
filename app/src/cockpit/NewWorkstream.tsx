@@ -51,12 +51,28 @@ export function NewWorkstream({
   onLaunch,
   onClose,
   busy,
+  locked = false,
 }: {
   dir: string;
   onDir: (dir: string) => void;
   onLaunch: (argv: readonly string[]) => void;
   onClose: () => void;
   busy: boolean;
+  /**
+   * Whether the repository is already settled, because a project chose it (#223).
+   *
+   * **Opened from a project's `＋`, there is nothing left to ask.** Reported in
+   * as many words — *"In this window, I shouldn't have to select the project
+   * folder, it's already known"* — and it is the same rule that took the
+   * repository field out of the pilot last commit: a project **is** a
+   * repository, so a second control setting `repoDir` is the third spelling
+   * #211 warns about, and the one to keep is the one with a list beside it.
+   *
+   * The path is still **shown**, because which repository a run will write to is
+   * the one fact about it that cannot be taken back later. It is stated rather
+   * than offered.
+   */
+  locked?: boolean;
 }) {
   const [task, setTask] = useState('');
   const [planOnly, setPlanOnly] = useState(true);
@@ -136,23 +152,34 @@ export function NewWorkstream({
           onChange={(e) => setTask(e.target.value)}
         />
 
-        <label className="v-new__label" htmlFor="newdir">
+        <label className="v-new__label" htmlFor={locked ? undefined : 'newdir'}>
           repository
         </label>
-        <div className="v-new__row">
-          <input
-            id="newdir"
-            className="v-new__dir"
-            value={dir}
-            placeholder="an absolute path to a git worktree"
-            onChange={(e) => onDir(e.target.value)}
-          />
-          <Button type="button" onClick={choose} disabled={busy}>
-            choose…
-          </Button>
-        </div>
-        {pickFailed !== null && (
-          <p className="v-new__note">the chooser did not open: {pickFailed} — type or paste</p>
+        {locked ? (
+          // Stated, not offered. The project answered this, and a field here
+          // would be a second way to answer it. See `locked` above.
+          <div className="v-new__row">
+            <code className="v-new__fixed">{dir}</code>
+            <MetaChip>from the project</MetaChip>
+          </div>
+        ) : (
+          <>
+            <div className="v-new__row">
+              <input
+                id="newdir"
+                className="v-new__dir"
+                value={dir}
+                placeholder="an absolute path to a git worktree"
+                onChange={(e) => onDir(e.target.value)}
+              />
+              <Button type="button" onClick={choose} disabled={busy}>
+                choose…
+              </Button>
+            </div>
+            {pickFailed !== null && (
+              <p className="v-new__note">the chooser did not open: {pickFailed} — type or paste</p>
+            )}
+          </>
         )}
 
         <details className="v-new__over" open={differing.length > 0}>

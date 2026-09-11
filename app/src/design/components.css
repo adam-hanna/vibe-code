@@ -642,6 +642,14 @@
 .v-scrim {
   position: fixed;
   inset: 0;
+  /* Declared rather than inherited from where it happens to be mounted. A modal
+     is the one surface in this product whose whole job is to block, and with no
+     z-index at all where it lands depended on its position in the tree - it sat
+     BELOW the switcher's own scrim (z-index 40), and a confirmation raised from
+     inside the sidebar rather than from the top of the cockpit would have been
+     painted under the pane it was covering. Above 40, because the switcher is a
+     navigation overlay and a confirmation is a question. */
+  z-index: 50;
   background: rgb(0 0 0 / 62%);
   display: flex;
   align-items: center;

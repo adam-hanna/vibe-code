@@ -212,6 +212,22 @@ export interface ArtifactsFrame {
   entries: readonly ArtifactEntry[];
 }
 
+/**
+ * A run that is gone, in reply to a `delete_run` request (#223).
+ *
+ * `removed` is the directory the core actually deleted, which is the one thing
+ * worth carrying back: it is checkable, where a file count or a size would be a
+ * measurement taken so it could be shown once. A refusal never arrives here — it
+ * is an `error` frame carrying the core's own sentence.
+ */
+export interface RunDeleted {
+  type: 'run_deleted';
+  id: number;
+  dir: string;
+  runId: string;
+  removed: string;
+}
+
 /** One artifact's contents, in reply to an `artifact` request (#223). */
 export interface ArtifactFrame {
   type: 'artifact';
@@ -276,7 +292,8 @@ export type Frame =
   | ConfigFrame
   | DiffFrame
   | ArtifactsFrame
-  | ArtifactFrame;
+  | ArtifactFrame
+  | RunDeleted;
 
 /**
  * Whether a value is a frame this version recognises.
@@ -311,6 +328,11 @@ export function isFrame(v: unknown): v is Frame {
     // `Run` is assembled from what a run is doing.
     type === 'artifacts' ||
     type === 'artifact' ||
+    // A run that was deleted, ignored by the cockpit's reducer for the same
+    // reason: it is a fact about the archive, and the run it names is by
+    // construction not the one being narrated — the core refuses to delete a
+    // run whose lock is live.
+    type === 'run_deleted' ||
     // The command runner's three (#211). Also ignored by the cockpit's reducer:
     // a command is not part of a run - it outlives one, and it happens when
     // there is none - so `Cockpit` folds them with `reduceCommands` instead.
@@ -644,6 +666,33 @@ export async function artifact(
     'the host did not answer with the artifact',
   );
   return frame.read;
+}
+
+/**
+ * Delete a run from the archive (#223).
+ *
+ * **The only function in this file that destroys anything**, and the only
+ * protection the window offers is the confirmation in front of it — every guard
+ * that matters is the core's, because the core is the process holding the
+ * filesystem. It refuses a run whose lock names a live process, refuses one
+ * whose lock it cannot read, refuses an id that is not a single entry under
+ * `.vibe/runs`, and refuses a run directory that is a link (#53).
+ *
+ * All four arrive here as a rejection carrying the core's own sentence, and the
+ * caller shows it rather than paraphrasing it: *"it is running, stop it first"*
+ * and *"vibe will not follow a link to delete"* are things a person acts on
+ * differently, and a window that collapsed them into *"could not delete"* would
+ * be answering neither.
+ */
+export async function deleteRun(dir: string, runId: string): Promise<string> {
+  const id = nextRequestId();
+  const frame = await ask<RunDeleted>(
+    { type: 'delete_run', id, dir, runId },
+    id,
+    'run_deleted',
+    'the host did not say whether the run was deleted',
+  );
+  return frame.removed;
 }
 
 /**

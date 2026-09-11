@@ -342,7 +342,7 @@
 }
 
 .v-nav__open:focus-visible,
-.v-nav__pin:focus-visible,
+.v-nav__act:focus-visible,
 .v-nav__more:focus-visible {
   outline: 2px solid var(--accent-solid);
   outline-offset: -2px;
@@ -370,28 +370,60 @@
   font: var(--type-label);
 }
 
-.v-nav__pin {
+/* The row's controls: pin, rename, delete on a run; new-run and remove on a
+   project. Quiet until the row is under the pointer, because a list of twenty
+   runs with sixty glyphs down its right edge is a list nobody can scan. */
+.v-nav__act {
   font: var(--type-label);
   color: var(--text-tertiary);
   background: none;
   border: none;
   cursor: pointer;
   padding: var(--space-1) var(--space-2);
+  flex: none;
   opacity: 0;
 }
 
-.v-nav__row:hover .v-nav__pin,
-.v-nav__pin:focus-visible,
-.v-nav__pin--on {
+.v-nav__row:hover .v-nav__act,
+.v-nav__row:focus-within .v-nav__act,
+.v-nav__act:focus-visible,
+.v-nav__act--on {
   opacity: 1;
 }
 
-.v-nav__pin--on {
+/* A project's are always drawn. There are few of them, and `＋` is the one
+   control somebody is looking for rather than discovering. */
+.v-nav__row--project .v-nav__act {
+  opacity: 1;
+}
+
+.v-nav__act--on {
   color: var(--accent-solid);
 }
 
-.v-nav__pin:hover {
+.v-nav__act:hover {
   color: var(--text-emphasis);
+}
+
+/* No red anywhere in this palette — `--text-emphasis` is what it reserves for
+   alarm, so a destructive control is emphasised rather than coloured. */
+.v-nav__act--danger:hover {
+  color: var(--text-emphasis);
+}
+
+/* The rename box takes the row it replaces, so nothing below it moves. */
+.v-nav__row--rename {
+  gap: var(--space-1);
+  padding: var(--space-1) 0;
+}
+
+.v-nav__row--rename .v-nav__field {
+  flex: 1;
+  min-width: 0;
+}
+
+.v-nav__row--rename .v-nav__act {
+  opacity: 1;
 }
 
 /* Indented under the project it belongs to, which is the only thing saying the
@@ -732,6 +764,80 @@
 /* The primary sits last, so the destructive action is not what the eye or the
    pointer lands on first. */
 .v-stop__actions .v-btn:last-child {
+  margin-left: auto;
+}
+
+/* ------------------------------------------------------------------- confirm
+ * The dialog in front of anything that cannot be undone (#223). It borrows
+ * `StopConfirm`'s shape deliberately — same head, same fact rows, same
+ * primary-is-the-safe-one footer — because the two are one kind of moment and a
+ * second visual language for it would make the rarer one look like a different
+ * product.
+ */
+.v-confirm__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.v-confirm__title {
+  font: var(--type-title);
+  color: var(--text-display);
+}
+
+.v-confirm__lead {
+  font: var(--type-lead);
+  color: var(--text-primary);
+  margin: 0 0 var(--space-4);
+}
+
+/* One fact per row: what goes, where from, and what survives. A path and an id
+   are strings to recognise rather than read, which is what the mono is for. */
+.v-confirm__fact {
+  display: grid;
+  grid-template-columns: 9rem 1fr;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--rule-inner);
+}
+
+.v-confirm__label {
+  font: var(--type-label);
+  letter-spacing: 0.08em;
+  color: var(--text-tertiary);
+}
+
+.v-confirm__value {
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+.v-confirm__value--mono {
+  font: var(--type-mono-sm);
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+/* The core's own refusal, on the dialog rather than instead of it: a window that
+   closed on "it is still running" would look exactly like one that succeeded. */
+.v-confirm__problem {
+  font: var(--type-body-sm);
+  color: var(--text-primary);
+  background: var(--surface-alarm);
+  padding: var(--space-3);
+  margin: var(--space-4) 0 0;
+}
+
+.v-confirm__actions {
+  display: flex;
+  gap: var(--space-3);
+  margin-top: var(--space-5);
+}
+
+/* The primary sits last, so the destructive action is not what the eye or the
+   pointer lands on first. */
+.v-confirm__actions .v-btn:last-child {
   margin-left: auto;
 }
 
@@ -2779,6 +2885,16 @@
 .v-new__dir {
   flex: 1;
   font: var(--type-mono-sm);
+}
+
+/* The repository when a project already answered it: stated, not offered. Same
+   monospace as the field it replaces, so the path reads the same either way. */
+.v-new__fixed {
+  flex: 1;
+  font: var(--type-mono-sm);
+  color: var(--text-primary);
+  padding: var(--space-2) 0;
+  overflow-wrap: anywhere;
 }
 
 /* The overrides block: only what differs, and the count says how much. */

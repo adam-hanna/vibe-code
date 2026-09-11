@@ -148,8 +148,17 @@ export function Cockpit() {
   const [viewing, setViewing] = useState<{ dir: string; runId: string; task: string } | null>(null);
   /** Whether the ⌘K switcher is open (`5f`, #223). */
   const [switching, setSwitching] = useState(false);
-  /** Whether `4a`'s modal is open. The only modal in the product. */
-  const [composing, setComposing] = useState(false);
+  /**
+   * The composer, and which repository it is composing for (#223).
+   *
+   * **A directory rather than a boolean**, because `4a` is now reachable two
+   * ways and they answer the repository question differently. Opened from the
+   * sidebar's `＋ New run` it is about wherever the window is pointed, and the
+   * field is live. Opened from a **project's** `＋` the answer is the project —
+   * *"In this window, I shouldn't have to select the project folder, it's
+   * already known"* — so the path is stated and there is nothing to pick.
+   */
+  const [composing, setComposing] = useState<{ dir: string; locked: boolean } | null>(null);
   /**
    * The repository this window is pointed at (#223).
    *
@@ -372,7 +381,7 @@ export function Cockpit() {
       if (event.key === 'Escape') {
         setDiagnostics(false);
         setSwitching(false);
-        setComposing(false);
+        setComposing(null);
         return;
       }
       if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.code === 'KeyD') {
@@ -487,6 +496,18 @@ export function Cockpit() {
       // A new run is a new column. Appending to the previous one's cycles would
       // draw a single loop out of two runs.
       dispatch({ type: 'reset' });
+      // **Point the window at the run it is starting** (#223). `viewing` is
+      // where the panes are aimed, and starting a run used to leave it aimed
+      // wherever it already was — so a person who had opened a past run from the
+      // sidebar and then started a new one got six panes reading the old run
+      // while the column narrated the new one. That is exactly what was
+      // reported: *"the planner is currently running plan 0, but I see nothing
+      // in the output tab… there is nothing under the plan and critiques tabs!
+      // No questions either, even though it says three raised."* The Questions
+      // **tab** counts the live run and the **pane** was forced to null by
+      // `past`, which is why the badge and the pane disagreed.
+      setViewing(null);
+      setOpenAt(null);
       setLaunched(true);
       setSentLaunch(readLaunchArgv(argv));
       requests.current += 1;
@@ -642,7 +663,29 @@ export function Cockpit() {
    * rather than wrong.
    */
   const shownRunId = viewing?.runId ?? run.identity?.runId ?? null;
-  const shownDir = viewing?.dir ?? repoDir;
+  /**
+   * Which repository those panes read in.
+   *
+   * **The run's own repository, and `repoDir` only as the last answer.**
+   * `run_started` carries `repo` (#223) and it is the authoritative one: it is
+   * where the run actually is. `repoDir` is where the *window* is pointed, and
+   * the sidebar moves it — opening a run in another project, or adding one,
+   * repoints it — so a live run's artifacts were being looked for under
+   * whichever project had most recently been clicked. Reading `.vibe/runs/<live
+   * id>` under the wrong repository finds nothing, and the pane that finds
+   * nothing says *no plans yet*, which is indistinguishable from a planner that
+   * has not finished.
+   */
+  const shownDir = viewing?.dir ?? run.identity?.repo ?? repoDir;
+  /**
+   * The live run's repository, for the one pane that is always about it.
+   *
+   * `CodePane` diffs the shas on `Run`, so it has to run those commands in the
+   * repository **those shas are in** — `shownDir` would point it at an opened
+   * run's repository while it asked about the live run's commits, which is a
+   * `git diff` against two objects that are not there.
+   */
+  const liveRepo = run.identity?.repo ?? repoDir;
   /** Whether what is on screen is a run this window did not narrate. */
   const past = viewing !== null && viewing.runId !== run.identity?.runId;
   // The round cards, built once here and handed to the surfaces that draw them.
@@ -697,12 +740,19 @@ export function Cockpit() {
         />
       )}
 
-      {composing && (
+      {composing !== null && (
         <NewWorkstream
-          dir={repoDir}
-          onDir={rememberRepo}
+          dir={composing.dir}
+          // A project's `＋` has already settled this, so the composer states it
+          // rather than offering a field. Only the unlocked one can move the
+          // window's own repository.
+          onDir={(next) => {
+            rememberRepo(next);
+            setComposing((at) => (at === null ? at : { ...at, dir: next }));
+          }}
+          locked={composing.locked}
           onLaunch={launch}
-          onClose={() => setComposing(false)}
+          onClose={() => setComposing(null)}
           busy={busy || !wire.connected}
         />
       )}
@@ -769,7 +819,11 @@ export function Cockpit() {
           onToggle={() => setShowRuns((on) => !on)}
           shut={
             <>
-              <button className="v-side__tool" onClick={() => setComposing(true)} title="New run">
+              <button
+                className="v-side__tool"
+                onClick={() => setComposing({ dir: repoDir, locked: false })}
+                title="New run"
+              >
                 ＋
               </button>
               <button
@@ -792,7 +846,14 @@ export function Cockpit() {
           <Sidebar
             dir={repoDir}
             currentId={run.identity?.runId ?? null}
-            onNew={() => setComposing(true)}
+            onNew={() => setComposing({ dir: repoDir, locked: false })}
+            // A run in THIS project, with the repository already answered. It
+            // also points the window there, because the run about to start is
+            // the one the panes should be reading.
+            onNewIn={(next) => {
+              rememberRepo(next);
+              setComposing({ dir: next, locked: true });
+            }}
             onSwitch={() => setSwitching(true)}
             onSettings={() => setTab('settings')}
             // `1b` in the main pane, which is where a lock can be overruled with
@@ -813,6 +874,15 @@ export function Cockpit() {
               // A run in the old project is not a run in this one, and the panes
               // key off the run id alone. Cleared rather than carried.
               setViewing(null);
+            }}
+            // A deleted run is one the panes must stop reading. Only when it is
+            // the one on screen: the sidebar can delete any run in any project,
+            // and clearing `viewing` for one nobody was looking at would throw
+            // away a reader's place for no reason.
+            onDeleted={(deletedDir, deletedRunId) => {
+              setViewing((at) =>
+                at !== null && at.runId === deletedRunId && at.dir === deletedDir ? null : at,
+              );
             }}
           />
         </SidePanel>
@@ -1058,7 +1128,7 @@ export function Cockpit() {
               revision={run.artifacts.length}
             />
           )}
-          {tab === 'code' && <CodePane run={run} dir={repoDir} openAt={openAt} />}
+          {tab === 'code' && <CodePane run={run} dir={liveRepo} openAt={openAt} />}
           {tab === 'commands' && (
             <CommandsPane
               commands={commands}
@@ -1154,7 +1224,7 @@ export function Cockpit() {
                     should differ from the project's defaults. */}
                 <button
                   className="v-launch__more"
-                  onClick={() => setComposing(true)}
+                  onClick={() => setComposing({ dir: repoDir, locked: false })}
                   disabled={busy || !wire.connected}
                 >
                   or set this run&apos;s overrides…

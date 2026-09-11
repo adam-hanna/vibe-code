@@ -5,7 +5,7 @@ import { pilotChat } from '@src/pilotchat.js';
 import * as log from '@src/log.js';
 import { createLineReader, decode, encode, PROTOCOL_VERSION } from '@src/protocol.js';
 import { orchestrate } from '@src/orchestrator.js';
-import { listRunArtifacts, listRuns, readRunArtifact } from '@src/run.js';
+import { deleteRun, listRunArtifacts, listRuns, readRunArtifact } from '@src/run.js';
 import { loadConfig, readRawConfig, writeConfigPatch } from '@src/config.js';
 import { GATEABLE, GATE_MODES, UNGATEABLE } from '@src/gates.js';
 import { diffRange, diffSinceWithLimit } from '@src/git.js';
@@ -208,6 +208,17 @@ export interface SessionDeps {
   artifacts?: (dir: string, runId: string) => RunArtifact[];
   /** What reads one artifact. Defaults to `readRunArtifact` (#223). */
   artifact?: (dir: string, runId: string, name: string) => ArtifactRead;
+  /**
+   * What deletes a run. Defaults to `deleteRun` (#223).
+   *
+   * A seam for a stronger reason than the reads above have one: the default
+   * **removes a directory recursively**, and a test that had to build a real run
+   * archive in order to check that a refusal becomes an `error` frame would be
+   * testing the filesystem rather than the framing. The guards themselves are
+   * `deleteRun`'s and are tested against real directories there, which is the
+   * split the other seams already make.
+   */
+  deleteRun?: (dir: string, runId: string) => { runId: string; dir: string };
 }
 
 export function createSession(send: Send, deps: SessionDeps = {}): Session {
@@ -231,6 +242,7 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
   const readOneArtifact =
     deps.artifact ??
     ((dir: string, runId: string, name: string) => readRunArtifact(dir, runId, name));
+  const removeRun = deps.deleteRun ?? ((dir: string, runId: string) => deleteRun(dir, runId));
 
   /**
    * Gates awaiting an answer, by the id this process allocated for them.
@@ -402,6 +414,43 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
             read: readOneArtifact(msg.dir, msg.runId, msg.name),
           });
         }
+      } catch (err: unknown) {
+        send({
+          type: 'error',
+          id: msg.id,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+      return;
+    }
+
+    if (msg.type === 'delete_run') {
+      // **Beside a run, and that is a claim about the guards rather than about
+      // this frame being harmless.** The reads above are exempt from the
+      // one-at-a-time rule because they write nothing; this writes, so it needs
+      // its own reason, and the reason is that `deleteRun` refuses a run whose
+      // lock names a live process and refuses one whose lock it cannot read.
+      // The run in flight is therefore the one run this cannot reach, and every
+      // other entry in the archive is a directory nothing is working on.
+      //
+      // Synchronous, for the reason the reads are: it is one `rmSync` behind
+      // three checks, and wrapping it to look asynchronous would put a tick
+      // between the request and the answer for no gain.
+      //
+      // **The throw is the refusal.** A live lock, an unreadable one, an id
+      // that is not a single entry under `.vibe/runs` and a run directory that
+      // is a link all arrive here as a `StoredStateError` whose message is the
+      // whole answer - so it reaches the sender as an `error` frame naming what
+      // it refused and why, which is the only form a person can act on.
+      try {
+        const gone = removeRun(msg.dir, msg.runId);
+        send({
+          type: 'run_deleted',
+          id: msg.id,
+          dir: msg.dir,
+          runId: msg.runId,
+          removed: gone.dir,
+        });
       } catch (err: unknown) {
         send({
           type: 'error',

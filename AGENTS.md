@@ -319,6 +319,69 @@ they are waiting on. Four things in it are worth carrying:
   also where a lock is overruled, with a confirmation. **Two places able to start a run is the
   same mistake as two able to force one**, which is why `1b` is a view with no tab of its own,
   the arrangement `settings` has had since the rail landed.
+- **`viewing` is where the window is pointed, so starting a run points it there.** The
+  corollary was missed, and it cost the whole of one manual pass: `launch` reset the column
+  and left `viewing` aimed wherever it already was, so somebody who had opened a past run
+  from the sidebar and then started a new one got six panes reading the old run while the
+  column narrated the new one. Reported as four separate bugs — *"the planner is currently
+  running plan 0, but I see nothing in the output tab… there is nothing under the plan and
+  critiques tabs! No questions either, even though it says three raised"* — and the last of
+  those is the one that identifies it: the Questions **tab** counts the live run and the
+  **pane** was forced to null by `past`, so a badge and the pane behind it disagreed about
+  one run. They were one defect.
+
+  **Half of it was a second answer to *which repository*.** `shownDir` was
+  `viewing?.dir ?? repoDir`, and `repoDir` is where the *window* is pointed — which the
+  sidebar moves, on every project click and every add. So a live run's `.vibe/runs/<id>` was
+  looked for under whichever project had most recently been clicked. `run_started` carries
+  `repo` (#223) and it is the authoritative answer, so it goes in the middle:
+  `viewing?.dir ?? run.identity?.repo ?? repoDir`. The failure was silent in the worst way —
+  a pane that finds nothing says *no plans yet*, which is exactly what a planner that has not
+  finished looks like. `CodePane` takes the live repository separately, because it diffs the
+  shas on `Run` and has to run those commands where those objects are.
+- **A run's row has four controls and exactly one of them reaches a disk, so exactly one
+  confirms.** Pinning and **renaming** are this window's own memory; `＋` on a project opens
+  the composer with that project's directory already settled — *"In this window, I shouldn't
+  have to select the project folder, it's already known"*, which is the same rule that took
+  the repository field out of the pilot: a project **is** a repository, so a second control
+  setting it is the third spelling #211 warns about. Deleting is the one that removes a
+  directory.
+
+  **A rename is a label, and never a write to the run's record.** `projects.ts` says a pin may
+  carry its task *because a run's task never changes*, and every pin rests on that sentence —
+  so a rename that wrote the new text into `state.json` would falsify it, and would make the
+  record report a brief the planner was never given. `nameOf` sits in front of the task at
+  render time, keyed by `(project, run)` like a pin and a saved conversation, and an empty
+  name **clears** rather than storing a blank, because those are one intention.
+
+  **The two deletions say opposite things and the confirmation is the only thing that can tell
+  them apart.** Removing a *project* is a row in this window — nothing on disk is touched, and
+  adding it back brings every run with it. Deleting a *run* removes `.vibe/runs/<id>` and is
+  not recoverable, so the dialog states what survives it: the branch and every commit on it
+  are in git, not in the archive.
+- **`delete_run` is the first inbound frame that destroys something, and every guard is the
+  core's.** A window is not a permission boundary — the confirmation is the window's half, and
+  it is the half that is wrong when somebody mis-clicks. `deleteRun` refuses an id that is not
+  a single entry under `.vibe/runs`, refuses a run directory that is a link (#53 — following
+  one to delete *recursively* is the worst thing this process could be talked into), refuses a
+  run whose lock names a live process, and refuses one whose lock it **cannot read**, which is
+  `src/lock.ts`'s own fail-closed rule applied to a stronger act than writing. `interrupted` —
+  a dead pid still holding a lock — is allowed through deliberately, because that wreck is the
+  main case. All four arrive at the window as an `error` frame carrying the core's own
+  sentence, shown verbatim: *"it is running, stop it first"* and *"vibe will not follow a link"*
+  are acted on differently, and a window that collapsed them into *"could not delete"* would
+  answer neither. It is answerable beside a run for a reason rather than by exemption — the
+  live-lock refusal means **the running run is the one run this frame can never reach**.
+- **An inline callback ref is not a one-off, and this one made a modal untypeable.** `Modal`
+  focused its scrim with `ref={(el) => el?.focus()}` so Escape had somewhere to land. React
+  detaches and re-attaches a callback ref on **every render**, because an inline arrow is a new
+  identity each time — and the cockpit re-renders once a second off its own clock and again on
+  every keystroke, since a controlled field's `onChange` sets state in the component above.
+  One character landed and focus went straight back to the scrim: *"I can't type in the 'What
+  are we doing' window, it keeps going out of focus when I try typing in it."* A mount effect
+  is the fix, and Escape still works from inside the dialog because a keydown bubbles. Worth
+  remembering as a shape rather than as a fact about one file: **a callback ref that does
+  anything is a callback ref that does it on every render.**
 - **Opening a run is reading files, and `viewing` is deliberately not a `Run`.** `reduce`
   builds one from frames, and a finished run's frames were narrated to a process that has
   exited — synthesising them would report finished work as running, which is the fabrication
@@ -739,7 +802,8 @@ app/src/cockpit/rounds.ts  a round as one card, and which round a thing arrived 
 app/src/cockpit/Counts.tsx the four severity counts, and the one place they are a control
 app/src/cockpit/squares.ts what the navigator may draw, and the two letters standing for a run
 app/src/cockpit/Sidebar.tsx  projects, their runs, and the pins - the rail merged into one
-app/src/cockpit/projects.ts  which repositories are open and which runs are pinned
+app/src/cockpit/projects.ts  which repositories are open, which runs are pinned, and renamed
+app/src/cockpit/Confirm.tsx  the dialog in front of anything that cannot be undone
 app/src/cockpit/outgroups.ts the output cut into rounds, and a finished run's transcript
 app/src/pilot/saved.ts       a conversation kept between launches, and which run it is about
 app/src/cockpit/artifacts.ts what a run wrote: classifying a listing, and reading a report

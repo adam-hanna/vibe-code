@@ -32,6 +32,8 @@
 /** Where the window's own lists live. Beside `vibe.repo`, which seeds them. */
 export const PROJECTS_KEY = 'vibe.projects';
 export const PINNED_KEY = 'vibe.pinned';
+/** Names a person gave their runs. See `nameOf` for why this is not the task. */
+export const NAMES_KEY = 'vibe.runnames';
 
 /**
  * How many runs a project shows before `Show more`.
@@ -173,6 +175,100 @@ export function readPins(raw: string | null): readonly Pin[] {
     out.push({ dir, runId, task: typeof row['task'] === 'string' ? row['task'] : runId });
   }
   return out;
+}
+
+// ---- names -----------------------------------------------------------------
+
+/**
+ * A name somebody gave a run, keyed the way a pin is (#223).
+ *
+ * **A label the window remembers, and deliberately not the run's task.** The
+ * complaint was *"I should also be able to re-name runs so they aren't just my
+ * initial prompt"*, and the obvious implementation — write the new text into
+ * `state.json` — is the one thing that must not happen. `projects.ts`'s own
+ * header says a pin may carry its task *because a run's task never changes: it
+ * is what the run was started with, written once*, and a rename that rewrote it
+ * would falsify that sentence and every pin resting on it. The brief is also the
+ * thing the planner was actually given; a record of a run that reported a
+ * different one would be a record of a run that did not happen.
+ *
+ * So the task stays exactly as the run recorded it and this sits in front of it
+ * for display. Clearing a name brings the task back rather than leaving a blank,
+ * which is why `nameOf` takes the fallback rather than returning null.
+ */
+export interface RunName {
+  dir: string;
+  runId: string;
+  /** What to show instead of the task. Never empty — an empty name is no name. */
+  name: string;
+}
+
+/** The name for a run, or the task it was started with. */
+export function nameOf(
+  names: readonly RunName[],
+  dir: string,
+  runId: string,
+  task: string,
+): string {
+  const key = dirKey(dir);
+  const found = names.find((n) => n.runId === runId && dirKey(n.dir) === key);
+  return found?.name ?? task;
+}
+
+/**
+ * Set a run's name, or clear it when the text is empty.
+ *
+ * **Empty clears rather than storing a blank**, because the two are the same
+ * intention — somebody who deletes a name wants the run's own brief back, and a
+ * stored empty string would draw a row with no title at all. It is also what
+ * keeps the list from growing an entry per run somebody opened the rename box on
+ * and thought better of.
+ */
+export function renameRun(
+  names: readonly RunName[],
+  dir: string,
+  runId: string,
+  name: string,
+): readonly RunName[] {
+  const key = dirKey(dir);
+  const rest = names.filter((n) => !(n.runId === runId && dirKey(n.dir) === key));
+  const trimmed = name.trim();
+  return trimmed === '' ? rest : [...rest, { dir, runId, name: trimmed }];
+}
+
+export function readNames(raw: string | null): readonly RunName[] {
+  const parsed = parse(raw);
+  if (parsed === null) return [];
+  const out: RunName[] = [];
+  for (const item of parsed) {
+    if (typeof item !== 'object' || item === null) continue;
+    const row = item as Record<string, unknown>;
+    const dir = row['dir'];
+    const runId = row['runId'];
+    const name = row['name'];
+    // All three required, and the name must have something in it: an entry that
+    // cannot be drawn is one that would hide a run's real title behind nothing.
+    if (typeof dir !== 'string' || typeof runId !== 'string') continue;
+    if (typeof name !== 'string' || name.trim() === '') continue;
+    out.push({ dir, runId, name });
+  }
+  return out;
+}
+
+/** Drop every name for a run that is gone, so the list does not grow for ever. */
+export function forgetNames(
+  names: readonly RunName[],
+  dir: string,
+  runId: string,
+): readonly RunName[] {
+  const key = dirKey(dir);
+  return names.filter((n) => !(n.runId === runId && dirKey(n.dir) === key));
+}
+
+/** The same, for every run in a project this window is no longer listing. */
+export function forgetProjectPins(pins: readonly Pin[], dir: string): readonly Pin[] {
+  const key = dirKey(dir);
+  return pins.filter((p) => dirKey(p.dir) !== key);
 }
 
 function parse(raw: string | null): unknown[] | null {

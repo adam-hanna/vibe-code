@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react';
 import type { ReactNode } from 'react';
 import type { Severity } from './Chips';
 
@@ -79,6 +80,32 @@ export function Modal({
   /** What Escape does. Must be the option that acts on nothing. */
   onDismiss: () => void;
 }) {
+  const scrim = useRef<HTMLDivElement>(null);
+
+  /**
+   * Focus the scrim **once**, so Escape has somewhere to land.
+   *
+   * This was `ref={(el) => el?.focus()}`, and an inline callback ref is not a
+   * one-off: React detaches and re-attaches it on **every render**, because the
+   * arrow function is a new identity each time. So every render called `focus()`
+   * on the scrim — and the cockpit re-renders once a second off its own clock,
+   * and again on every keystroke, because a controlled field's `onChange` is a
+   * `setState` in the component above this one.
+   *
+   * The symptom was exact and was reported as such: *"I can't type in the 'What
+   * are we doing' window, it keeps going out of focus when I try typing in it."*
+   * One character landed, the state changed, the parent re-rendered, and this
+   * ref took focus straight back off the textarea.
+   *
+   * Focusing the scrim at all is still right — a keydown from anything inside
+   * bubbles up to it, so Escape works from a field as well as from nothing — but
+   * it is a thing to do when the dialog appears, which is what a mount effect
+   * means and what a callback ref does not.
+   */
+  useEffect(() => {
+    scrim.current?.focus();
+  }, []);
+
   return (
     <div
       className="v-scrim"
@@ -86,7 +113,7 @@ export function Modal({
       // focus inside it, and `autoFocus`-free: taking focus on mount would move
       // it away from whatever the user was typing in behind the modal.
       tabIndex={-1}
-      ref={(el) => el?.focus()}
+      ref={scrim}
       onKeyDown={(e) => {
         if (e.key === 'Escape') onDismiss();
       }}

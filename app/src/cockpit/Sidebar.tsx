@@ -1,21 +1,30 @@
 import { useCallback, useEffect, useState } from 'react';
 import { LivenessDot, StateKicker } from '../design';
 import * as host from '../host';
+import { Confirm } from './Confirm';
 import { rail } from './squares';
 import { pickDirectory } from './pick';
 import {
+  NAMES_KEY,
   PINNED_KEY,
   PROJECTS_KEY,
   addProject,
   findProject,
+  forgetNames,
+  forgetProjectPins,
   isPinned,
+  nameOf,
   projectName,
+  readNames,
   readPins,
   readProjects,
+  removeProject,
+  renameRun,
+  samePin,
   togglePin,
   visible,
 } from './projects';
-import type { Pin } from './projects';
+import type { Pin, RunName } from './projects';
 import type { RailRun } from './squares';
 import type { ArchiveRun } from '../host';
 
@@ -31,8 +40,7 @@ import type { ArchiveRun } from '../host';
  *
  * So there is one sidebar, and the rail becomes its **collapsed state**: the
  * three controls `＋ ⌘K ⚙` that `design/AUDIT.md` §1.1 says must have a home are
- * still always on screen, as a strip, which is what they were. Nothing the rail
- * carried is lost and the duplicate is gone.
+ * still always on screen, as a strip, which is what they were.
  *
  * ## A project is a repository, a session is a run
  *
@@ -41,14 +49,16 @@ import type { ArchiveRun } from '../host';
  * *not* is a second definition of anything the core owns — `archive` answers per
  * directory, `listRuns` decides what a run is, and `rail()` decides which entries
  * may be drawn at all. The window's contribution is which directories you have
- * open and which runs you pinned, neither of which is a fact about any run.
+ * open, which runs you pinned and what you have renamed them to, none of which is
+ * a fact about any run.
  *
  * ## An archive is read when a project opens, not on a timer
  *
- * One read per project, when its section is first expanded, and again when the
- * run in the window changes — the two moments the archive is known to differ.
- * The same rule the artifact panes follow, for the same reason: nothing else
- * writes to these directories while this window is the one running.
+ * One read per project, when its section is first expanded, again when the run in
+ * the window changes, and again when a run is deleted — the three moments the
+ * archive is known to differ. The same rule the artifact panes follow, for the
+ * same reason: nothing else writes to these directories while this window is the
+ * one running.
  *
  * ## A row OPENS a run. It does not start one.
  *
@@ -56,15 +66,30 @@ import type { ArchiveRun } from '../host';
  * run within a project on the left bar automatically kicks off the pre-flight. I
  * don't want that."* It is the sharper version of the narrowing `Rail.tsx`
  * already made — that one said a square must not silently *force* a lock, and
- * this says a click must not silently **spend**. A resume probes both CLIs,
- * takes the lock and starts a turn; putting that behind a row in a list makes
- * browsing the archive cost money, which is the one thing browsing must not do.
+ * this says a click must not silently **spend**. A resume probes both CLIs, takes
+ * the lock and starts a turn; putting that behind a row in a list makes browsing
+ * the archive cost money, which is the one thing browsing must not do.
  *
  * So a row reads: it points the window at that run and every pane that reads a
- * run's own directory follows it. Starting the loop again is a separate,
- * labelled act, and it lives where a lock can be overruled — `1b`, reached from
- * `all runs`, which states the lock's verdict and confirms a force. **Two places
- * able to start a run is the same mistake as two able to force one.**
+ * run's own directory follows it.
+ *
+ * ## The four controls on a row, and which of them touch a disk
+ *
+ * Exactly one does. **Pin** and **rename** are this window's own memory and are
+ * `localStorage`; they change nothing in any repository, which is why neither
+ * confirms. **New run** in a project opens the composer with that project's
+ * directory already settled — that is the whole of what *"In this window, I
+ * shouldn't have to select the project folder, it's already known"* asked for,
+ * and it is also one fewer place a path can be mistyped. **Delete** is the one
+ * that removes a directory, so it is the one that confirms, and the confirmation
+ * says what survives it: the run's branch and every commit on it are in git, not
+ * in `.vibe/runs`, and this does not touch them.
+ *
+ * Removing a **project** is deliberately not the same act and the dialog says so
+ * in as many words. It takes a row out of this list; the repository is untouched,
+ * every run in it is untouched, and adding it again brings all of them back. Two
+ * controls a pixel apart, one of which deletes files and one of which does not,
+ * is exactly the pair a confirmation exists to keep separate.
  */
 
 /** One project's archive, fetched when it opens. */
@@ -74,7 +99,13 @@ interface Loaded {
   loading: boolean;
 }
 
-function useArchive(dir: string, open: boolean, currentId: string | null): Loaded {
+function useArchive(
+  dir: string,
+  open: boolean,
+  currentId: string | null,
+  /** Bumped when a run is deleted, so the list it was drawn from is re-read. */
+  beat: number,
+): Loaded {
   const [runs, setRuns] = useState<readonly ArchiveRun[]>([]);
   const [failure, setFailure] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -104,7 +135,7 @@ function useArchive(dir: string, open: boolean, currentId: string | null): Loade
     return () => {
       cancelled = true;
     };
-  }, [dir, open, currentId]);
+  }, [dir, open, currentId, beat]);
 
   return { runs: rail(runs, currentId), failure, loading };
 }
@@ -119,10 +150,10 @@ function useArchive(dir: string, open: boolean, currentId: string | null): Loade
 function PinButton({ on, onToggle }: { on: boolean; onToggle: () => void }) {
   return (
     <button
-      className={`v-nav__pin${on ? ' v-nav__pin--on' : ''}`}
+      className={`v-nav__act${on ? ' v-nav__act--on' : ''}`}
       onClick={(e) => {
-        // The row underneath resumes a run. A pin is a note to yourself about
-        // one, and must never be the click that spends tokens.
+        // The row underneath opens a run. A pin is a note to yourself about one
+        // and must never be the click that navigates.
         e.stopPropagation();
         onToggle();
       }}
@@ -134,22 +165,78 @@ function PinButton({ on, onToggle }: { on: boolean; onToggle: () => void }) {
   );
 }
 
+/**
+ * The rename box, as its own component so its seed is always current.
+ *
+ * Mounted only while a row is being renamed, which is what makes `useState(title)`
+ * correct rather than a first-render snapshot: a `typed` held on the row itself
+ * would be seeded once, and the second time somebody opened the box it would
+ * offer the name from before the first rename.
+ */
+function RenameRow({ title, onDone }: { title: string; onDone: (name: string | null) => void }) {
+  const [typed, setTyped] = useState(title);
+  return (
+    <form
+      className="v-nav__row v-nav__row--rename"
+      onSubmit={(e) => {
+        e.preventDefault();
+        onDone(typed);
+      }}
+    >
+      <input
+        className="v-nav__field"
+        value={typed}
+        onChange={(e) => setTyped(e.target.value)}
+        onKeyDown={(e) => {
+          // Escape abandons. A box that could only be left by saving would turn
+          // an accidental click into a forced decision.
+          if (e.key === 'Escape') onDone(null);
+        }}
+        aria-label="name for this run"
+        autoFocus
+      />
+      <button className="v-nav__act" type="submit" title="Save this name">
+        ✓
+      </button>
+      <button className="v-nav__act" type="button" onClick={() => onDone(null)} title="Cancel">
+        ✕
+      </button>
+    </form>
+  );
+}
+
 function RunRow({
   title,
   live,
   current,
   pinned,
+  renaming,
   onOpen,
   onPin,
+  onRename,
+  onRenamed,
+  onDelete,
 }: {
   title: string;
   live: boolean;
   current: boolean;
   pinned: boolean;
+  /** Whether this row is the one being renamed. At most one is, sidebar-wide. */
+  renaming: boolean;
   /** Show this run. Reading takes no lock, so there is no state that refuses. */
   onOpen: () => void;
   onPin: () => void;
+  /** Start renaming, or stop. Null closes the box without writing anything. */
+  onRename: () => void;
+  onRenamed: (name: string | null) => void;
+  /** Ask to delete. Never deletes — it opens the confirmation. */
+  onDelete: () => void;
 }) {
+  // The box is seeded with what is on screen, so clearing it and pressing enter
+  // is how a name is removed — `renameRun` reads an empty string as *give me the
+  // task back*, which is the same intention and must not be a second control.
+  if (renaming) return <RenameRow title={title} onDone={onRenamed} />;
+
   return (
     <div className={`v-nav__row${current ? ' v-nav__row--on' : ''}`}>
       <button className="v-nav__open" onClick={onOpen} title={title}>
@@ -159,6 +246,13 @@ function RunRow({
         <span className="v-nav__title">{title}</span>
       </button>
       <PinButton on={pinned} onToggle={onPin} />
+      <button className="v-nav__act" onClick={onRename} title="Rename this run">
+        ✎
+      </button>
+      {/* The only control in this row that reaches a disk. It opens a dialog. */}
+      <button className="v-nav__act v-nav__act--danger" onClick={onDelete} title="Delete this run">
+        −
+      </button>
     </div>
   );
 }
@@ -168,9 +262,16 @@ function Project({
   current,
   currentId,
   pins,
+  names,
+  beat,
+  renaming,
   onShow,
   onPin,
+  onRename,
+  onRenamed,
+  onDeleteRun,
   onAll,
+  onNewIn,
   onForget,
 }: {
   dir: string;
@@ -178,9 +279,17 @@ function Project({
   current: boolean;
   currentId: string | null;
   pins: readonly Pin[];
+  names: readonly RunName[];
+  beat: number;
+  renaming: { dir: string; runId: string } | null;
   onShow: (dir: string, runId: string, task: string) => void;
   onPin: (pin: Pin) => void;
+  onRename: (dir: string, runId: string) => void;
+  onRenamed: (name: string | null) => void;
+  onDeleteRun: (dir: string, runId: string, title: string) => void;
   onAll: (dir: string) => void;
+  /** Start a run in THIS project, with its directory already settled. */
+  onNewIn: (dir: string) => void;
   onForget: (dir: string) => void;
 }) {
   // The current project opens on its own, because it is the one whose runs the
@@ -188,7 +297,7 @@ function Project({
   // archives at launch would spend four reads on rows nobody asked for.
   const [open, setOpen] = useState(current);
   const [more, setMore] = useState(false);
-  const { runs, failure, loading } = useArchive(dir, open, currentId);
+  const { runs, failure, loading } = useArchive(dir, open, currentId, beat);
   const { shown, hidden } = visible(runs, more);
 
   return (
@@ -200,12 +309,22 @@ function Project({
             {projectName(dir)}
           </span>
         </button>
+        {/* Right-justified, beside the project it starts a run in. The composer
+            it opens has no repository field at all — the project is the answer,
+            and offering it again would be the second spelling #211 warns about. */}
         <button
-          className="v-nav__pin"
-          onClick={() => onForget(dir)}
-          title={`Remove ${projectName(dir)} from this list — the directory is untouched`}
+          className="v-nav__act"
+          onClick={() => onNewIn(dir)}
+          title={`New run in ${projectName(dir)}`}
         >
-          ×
+          ＋
+        </button>
+        <button
+          className="v-nav__act v-nav__act--danger"
+          onClick={() => onForget(dir)}
+          title={`Remove ${projectName(dir)} from this list`}
+        >
+          −
         </button>
       </div>
 
@@ -218,21 +337,31 @@ function Project({
           {failure === null && !loading && runs.length === 0 && (
             <span className="v-nav__note">no runs here yet</span>
           )}
-          {shown.map((r) => (
-            <RunRow
-              key={r.id}
-              title={r.task}
-              live={r.live}
-              current={r.current}
-              pinned={isPinned(pins, { dir, runId: r.id, task: r.task })}
-              // Every run opens, the live one included — reading a run's own
-              // directory takes no lock and starts nothing, so there is no
-              // reason to refuse the one that is going. Starting a run is `1b`'s
-              // job, and that is where a held lock is a question.
-              onOpen={() => onShow(dir, r.id, r.task)}
-              onPin={() => onPin({ dir, runId: r.id, task: r.task })}
-            />
-          ))}
+          {shown.map((r) => {
+            // The name if there is one, the task if there is not. Resolved once,
+            // here, so the row, its tooltip and the confirmation that deletes it
+            // cannot end up calling the same run two different things.
+            const title = nameOf(names, dir, r.id, r.task);
+            return (
+              <RunRow
+                key={r.id}
+                title={title}
+                live={r.live}
+                current={r.current}
+                pinned={isPinned(pins, { dir, runId: r.id, task: r.task })}
+                renaming={renaming !== null && renaming.dir === dir && renaming.runId === r.id}
+                // Every run opens, the live one included — reading a run's own
+                // directory takes no lock and starts nothing, so there is no
+                // reason to refuse the one that is going. Starting a run is
+                // `1b`'s job, and that is where a held lock is a question.
+                onOpen={() => onShow(dir, r.id, title)}
+                onPin={() => onPin({ dir, runId: r.id, task: r.task })}
+                onRename={() => onRename(dir, r.id)}
+                onRenamed={onRenamed}
+                onDelete={() => onDeleteRun(dir, r.id, title)}
+              />
+            );
+          })}
           {hidden > 0 && (
             <button className="v-nav__more" onClick={() => setMore(true)}>
               Show {hidden} more
@@ -249,20 +378,29 @@ function Project({
   );
 }
 
+/** What a confirmation is about. The two acts are kept apart all the way down. */
+type Pending =
+  | { kind: 'run'; dir: string; runId: string; title: string }
+  | { kind: 'project'; dir: string };
+
 export function Sidebar({
   dir,
   currentId,
   onNew,
+  onNewIn,
   onSwitch,
   onSettings,
   onRuns,
   onShow,
   onProject,
+  onDeleted,
 }: {
   /** The repository the window is pointed at. Always one of the projects. */
   dir: string;
   currentId: string | null;
   onNew: () => void;
+  /** Compose a run in one project, with the directory already settled (#223). */
+  onNewIn: (dir: string) => void;
   onSwitch: () => void;
   onSettings: () => void;
   /** Open `1b` for a project, which is where a lock can be overruled. */
@@ -270,11 +408,23 @@ export function Sidebar({
   onShow: (dir: string, runId: string, task: string) => void;
   /** Point the window at a project. */
   onProject: (dir: string) => void;
+  /** A run that is gone, so panes pointed at it can stop reading it. */
+  onDeleted: (dir: string, runId: string) => void;
 }) {
   const [projects, setProjects] = useState<readonly string[]>([]);
   const [pins, setPins] = useState<readonly Pin[]>([]);
+  const [names, setNames] = useState<readonly RunName[]>([]);
   const [adding, setAdding] = useState(false);
   const [typed, setTyped] = useState('');
+  /** Which run has its rename box open, or null. At most one, sidebar-wide. */
+  const [renaming, setRenaming] = useState<{ dir: string; runId: string } | null>(null);
+  /** What a confirmation is about, or null. Nothing is destroyed until it says. */
+  const [pending, setPending] = useState<Pending | null>(null);
+  /** The core's own refusal, kept on the dialog rather than closing it. */
+  const [refused, setRefused] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  /** Bumped after a delete, so every open project re-reads its archive. */
+  const [beat, setBeat] = useState(0);
   /**
    * What went wrong adding a project, or null.
    *
@@ -288,12 +438,13 @@ export function Sidebar({
    */
   const [problem, setProblem] = useState<string | null>(null);
 
-  // Read once. Both lists are this window's own memory, so there is nothing to
-  // re-read them for — every write below goes through the setters.
+  // Read once. All three lists are this window's own memory, so there is nothing
+  // to re-read them for — every write below goes through the setters.
   useEffect(() => {
     try {
       setProjects(readProjects(localStorage.getItem(PROJECTS_KEY)));
       setPins(readPins(localStorage.getItem(PINNED_KEY)));
+      setNames(readNames(localStorage.getItem(NAMES_KEY)));
     } catch {
       // Storage can be unavailable or full. An empty sidebar is a smaller
       // failure than a window that will not render.
@@ -397,19 +548,136 @@ export function Sidebar({
     [save],
   );
 
-  const forget = useCallback(
-    (d: string) => {
-      setProjects((list) => {
-        const next = list.filter((x) => x !== d);
-        save(PROJECTS_KEY, next);
+  /**
+   * Write a name, or clear it, and close the box either way.
+   *
+   * `null` is *abandon* and an empty string is *give me the task back* — two
+   * different intentions that would otherwise collapse into one, and only one of
+   * them writes.
+   */
+  const renamed = useCallback(
+    (name: string | null) => {
+      const at = renaming;
+      setRenaming(null);
+      if (at === null || name === null) return;
+      setNames((list) => {
+        const next = renameRun(list, at.dir, at.runId, name);
+        save(NAMES_KEY, next);
         return next;
       });
     },
-    [save],
+    [renaming, save],
   );
+
+  /**
+   * Do what the open confirmation says, and nothing else.
+   *
+   * The two branches are as different as the dialog claims they are: forgetting
+   * a project touches `localStorage` and stops there, and deleting a run is a
+   * host request that can be refused. The refusal stays on the dialog — a window
+   * that closed on it would look exactly like one that had succeeded.
+   */
+  const act = useCallback(() => {
+    const at = pending;
+    if (at === null) return;
+    if (at.kind === 'project') {
+      setProjects((list) => {
+        const next = removeProject(list, at.dir);
+        save(PROJECTS_KEY, next);
+        return next;
+      });
+      // The pins in it go too. A pinned row drawn under Pinned for a project
+      // that is no longer listed is a run with no way back to its own archive.
+      setPins((list) => {
+        const next = forgetProjectPins(list, at.dir);
+        save(PINNED_KEY, next);
+        return next;
+      });
+      setPending(null);
+      return;
+    }
+    setDeleting(true);
+    setRefused(null);
+    void host
+      .deleteRun(at.dir, at.runId)
+      .then(() => {
+        // The window's own memory of a run that no longer exists goes with it,
+        // rather than being left to accumulate against ids nothing can resolve.
+        setPins((list) => {
+          // `samePin` rather than an exact `dir` match, for the reason every
+          // other comparison in this file normalises: a pin made when the path
+          // was typed with a trailing slash would survive the run it points at.
+          const next = list.filter((p) => !samePin(p, { dir: at.dir, runId: at.runId, task: '' }));
+          save(PINNED_KEY, next);
+          return next;
+        });
+        setNames((list) => {
+          const next = forgetNames(list, at.dir, at.runId);
+          save(NAMES_KEY, next);
+          return next;
+        });
+        onDeleted(at.dir, at.runId);
+        setBeat((n) => n + 1);
+        setPending(null);
+      })
+      // The core's sentence, verbatim. *"It is running, stop it first"* and
+      // *"vibe will not follow a link to delete"* are acted on differently, and
+      // a paraphrase would answer neither.
+      .catch((err: unknown) => setRefused(err instanceof Error ? err.message : String(err)))
+      .finally(() => setDeleting(false));
+  }, [pending, save, onDeleted]);
 
   return (
     <nav className="v-nav" aria-label="projects">
+      {pending !== null && pending.kind === 'run' && (
+        <Confirm
+          kicker="deletes files"
+          title={`Delete “${pending.title}”`}
+          lead="The run's whole record goes: its plans, both reports, the answers, every checkpoint and its transcript. There is no undo."
+          facts={[
+            { label: 'run', value: pending.runId, mono: true },
+            { label: 'from', value: pending.dir, mono: true },
+            {
+              label: 'survives this',
+              value:
+                'the branch it committed to and every commit on it — those are in git, not in .vibe/runs',
+            },
+            {
+              label: 'refused if',
+              value: 'the run is still going, or vibe cannot read its lock to find out',
+            },
+          ]}
+          confirm={deleting ? 'Deleting…' : 'Delete this run'}
+          busy={deleting}
+          problem={refused}
+          onConfirm={act}
+          onCancel={() => {
+            setPending(null);
+            setRefused(null);
+          }}
+        />
+      )}
+      {pending !== null && pending.kind === 'project' && (
+        <Confirm
+          tone="quiet"
+          kicker="deletes nothing"
+          title={`Remove ${projectName(pending.dir)} from this list`}
+          lead="This is a row in this window, not a directory. Nothing on disk is touched and nothing is deleted."
+          facts={[
+            { label: 'directory', value: pending.dir, mono: true },
+            { label: 'what changes', value: 'this list, in this window, on this machine' },
+            {
+              label: 'what does not',
+              value: 'the repository, every run in it, and every branch — add it again and they are all back',
+            },
+            { label: 'also removed', value: 'any pins you made on runs in this project' },
+          ]}
+          confirm="Remove it from the list"
+          onConfirm={act}
+          onCancel={() => setPending(null)}
+        />
+      )}
+
       <div className="v-nav__actions">
         <button className="v-nav__action" onClick={onNew}>
           <span className="v-nav__glyph">＋</span> New run
@@ -425,20 +693,30 @@ export function Sidebar({
       {pins.length > 0 && (
         <section className="v-nav__section">
           <h3 className="v-nav__heading">Pinned</h3>
-          {pins.map((p) => (
-            <RunRow
-              key={`${p.dir}:${p.runId}`}
-              title={p.task}
-              // A pin is drawn without reading its project's archive, so there
-              // is no liveness to state and none is claimed. The row says what
-              // it knows: this run, in this project, that you marked.
-              live={false}
-              current={p.runId === currentId}
-              pinned
-              onOpen={() => onShow(p.dir, p.runId, p.task)}
-              onPin={() => pin(p)}
-            />
-          ))}
+          {pins.map((p) => {
+            const title = nameOf(names, p.dir, p.runId, p.task);
+            return (
+              <RunRow
+                key={`${p.dir}:${p.runId}`}
+                title={title}
+                // A pin is drawn without reading its project's archive, so there
+                // is no liveness to state and none is claimed. The row says what
+                // it knows: this run, in this project, that you marked.
+                live={false}
+                current={p.runId === currentId}
+                pinned
+                renaming={renaming !== null && renaming.dir === p.dir && renaming.runId === p.runId}
+                onOpen={() => onShow(p.dir, p.runId, title)}
+                onPin={() => pin(p)}
+                onRename={() => setRenaming({ dir: p.dir, runId: p.runId })}
+                onRenamed={renamed}
+                onDelete={() => {
+                  setRefused(null);
+                  setPending({ kind: 'run', dir: p.dir, runId: p.runId, title });
+                }}
+              />
+            );
+          })}
         </section>
       )}
 
@@ -456,10 +734,20 @@ export function Sidebar({
             current={p === dir}
             currentId={currentId}
             pins={pins}
+            names={names}
+            beat={beat}
+            renaming={renaming}
             onShow={onShow}
             onPin={pin}
+            onRename={(d, runId) => setRenaming({ dir: d, runId })}
+            onRenamed={renamed}
+            onDeleteRun={(d, runId, title) => {
+              setRefused(null);
+              setPending({ kind: 'run', dir: d, runId, title });
+            }}
             onAll={onRuns}
-            onForget={forget}
+            onNewIn={onNewIn}
+            onForget={(d) => setPending({ kind: 'project', dir: d })}
           />
         ))}
 
