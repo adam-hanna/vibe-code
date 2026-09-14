@@ -305,5 +305,40 @@ console.log('\n9 · the element reset leaves no user-agent ground showing');
   }
 }
 
+
+// ------------------------------------------ 10 · a dialog cannot outgrow the window
+// The same shape as §9 and found the same way: the rule that broke it was the
+// ABSENCE of a declaration, and it was invisible to a reader of the stylesheet.
+// `.v-modal` had no `max-height`, so a dialog whose content was long enough grew
+// past the bottom of the screen and took its own Cancel button with it — and a
+// scrim is `position: fixed; inset: 0`, so that is not a stuck dialog, it is a
+// stuck application with everything behind it visible and nothing clickable.
+//
+// It is here rather than in a vitest case because vitest stubs CSS imports to
+// the empty string, `?raw` included; this script reads the file. It is also the
+// right home on the merits — a modal that bounds itself is a design-system
+// invariant, not a fact about whichever screen last broke it.
+console.log('\n10 · a dialog cannot outgrow the window it is covering');
+{
+  const components = readFileSync(
+    path.join(here, '..', 'src', 'design', 'components.css'),
+    'utf8',
+  ).replace(/\/\*[\s\S]*?\*\//g, '');
+  const modal = /(^|\})\s*\.v-modal\s*\{([^}]*)\}/m.exec(components)?.[2] ?? '';
+  if (!/max-height\s*:/.test(modal)) {
+    fail('.v-modal has no max-height, so a long dialog can push its own actions off screen');
+  } else {
+    pass('.v-modal is bounded by the viewport');
+  }
+  // The bound alone would only clip. The body is what scrolls, and `min-height`
+  // is what lets it: a flex item's automatic minimum size is its content, so
+  // without it the body refuses to shrink and the dialog grows past the bound.
+  const body = /(^|\})\s*\.v-modal__body\s*\{([^}]*)\}/m.exec(components)?.[2] ?? '';
+  if (!/overflow-y\s*:\s*auto/.test(body) || !/min-height\s*:\s*0/.test(body)) {
+    fail('.v-modal__body does not scroll (it needs both `min-height: 0` and `overflow-y: auto`)');
+  } else {
+    pass('.v-modal__body scrolls inside the bound');
+  }
+}
 console.log(`\n${checks} checks passed, ${failures} failed\n`);
 process.exit(failures > 0 ? 1 : 0);

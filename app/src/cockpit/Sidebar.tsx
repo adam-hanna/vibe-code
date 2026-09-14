@@ -13,7 +13,9 @@ import {
   forgetNames,
   forgetProjectPins,
   isPinned,
+  PLACEHOLDER,
   nameOf,
+  preview,
   projectName,
   readNames,
   readPins,
@@ -168,13 +170,29 @@ function PinButton({ on, onToggle }: { on: boolean; onToggle: () => void }) {
 /**
  * The rename box, as its own component so its seed is always current.
  *
- * Mounted only while a row is being renamed, which is what makes `useState(title)`
+ * Mounted only while a row is being renamed, which is what makes `useState`
  * correct rather than a first-render snapshot: a `typed` held on the row itself
  * would be seeded once, and the second time somebody opened the box it would
  * offer the name from before the first rename.
+ *
+ * **It starts empty on a run that has never been renamed**, with the preview as
+ * the placeholder. The alternative is seeding a one-line field with a whole
+ * brief and asking somebody to select-all-and-delete before they can type a
+ * name — which is the same mistake the confirmation made, one control along.
+ * Pressing ✓ on the empty box writes nothing: `renameRun` reads empty as *give
+ * me the task back*, and the task is what is already there.
  */
-function RenameRow({ title, onDone }: { title: string; onDone: (name: string | null) => void }) {
-  const [typed, setTyped] = useState(title);
+function RenameRow({
+  title,
+  named,
+  onDone,
+}: {
+  title: string;
+  /** Whether `title` is a name somebody gave, rather than the run's own brief. */
+  named: boolean;
+  onDone: (name: string | null) => void;
+}) {
+  const [typed, setTyped] = useState(named ? title : '');
   return (
     <form
       className="v-nav__row v-nav__row--rename"
@@ -192,6 +210,7 @@ function RenameRow({ title, onDone }: { title: string; onDone: (name: string | n
           // an accidental click into a forced decision.
           if (e.key === 'Escape') onDone(null);
         }}
+        placeholder={named ? undefined : preview(title, PLACEHOLDER)}
         aria-label="name for this run"
         autoFocus
       />
@@ -207,6 +226,7 @@ function RenameRow({ title, onDone }: { title: string; onDone: (name: string | n
 
 function RunRow({
   title,
+  task,
   live,
   current,
   pinned,
@@ -218,6 +238,8 @@ function RunRow({
   onDelete,
 }: {
   title: string;
+  /** The run's own brief, so the rename box can tell a name from a task. */
+  task: string;
   live: boolean;
   current: boolean;
   pinned: boolean;
@@ -232,10 +254,10 @@ function RunRow({
   /** Ask to delete. Never deletes — it opens the confirmation. */
   onDelete: () => void;
 }) {
-  // The box is seeded with what is on screen, so clearing it and pressing enter
-  // is how a name is removed — `renameRun` reads an empty string as *give me the
-  // task back*, which is the same intention and must not be a second control.
-  if (renaming) return <RenameRow title={title} onDone={onRenamed} />;
+  // Clearing the box and pressing enter is how a name is removed: `renameRun`
+  // reads an empty string as *give me the task back*, which is the same
+  // intention and must not be a second control.
+  if (renaming) return <RenameRow title={title} named={title !== task} onDone={onRenamed} />;
 
   return (
     <div className={`v-nav__row${current ? ' v-nav__row--on' : ''}`}>
@@ -286,7 +308,7 @@ function Project({
   onPin: (pin: Pin) => void;
   onRename: (dir: string, runId: string) => void;
   onRenamed: (name: string | null) => void;
-  onDeleteRun: (dir: string, runId: string, title: string) => void;
+  onDeleteRun: (dir: string, runId: string, title: string, task: string) => void;
   onAll: (dir: string) => void;
   /** Start a run in THIS project, with its directory already settled. */
   onNewIn: (dir: string) => void;
@@ -346,6 +368,7 @@ function Project({
               <RunRow
                 key={r.id}
                 title={title}
+                task={r.task}
                 live={r.live}
                 current={r.current}
                 pinned={isPinned(pins, { dir, runId: r.id, task: r.task })}
@@ -358,7 +381,7 @@ function Project({
                 onPin={() => onPin({ dir, runId: r.id, task: r.task })}
                 onRename={() => onRename(dir, r.id)}
                 onRenamed={onRenamed}
-                onDelete={() => onDeleteRun(dir, r.id, title)}
+                onDelete={() => onDeleteRun(dir, r.id, title, r.task)}
               />
             );
           })}
@@ -380,7 +403,7 @@ function Project({
 
 /** What a confirmation is about. The two acts are kept apart all the way down. */
 type Pending =
-  | { kind: 'run'; dir: string; runId: string; title: string }
+  | { kind: 'run'; dir: string; runId: string; title: string; task: string }
   | { kind: 'project'; dir: string };
 
 export function Sidebar({
@@ -632,20 +655,31 @@ export function Sidebar({
       {pending !== null && pending.kind === 'run' && (
         <Confirm
           kicker="deletes files"
-          title={`Delete “${pending.title}”`}
+          // A **preview**, because a run's name is its brief until somebody
+          // renames it, and a brief in a heading is what grew this dialog past
+          // the bottom of the window. The whole of it is one row below.
+          title={`Delete “${preview(pending.title)}”`}
           lead="The run's whole record goes: its plans, both reports, the answers, every checkpoint and its transcript. There is no undo."
           facts={[
-            { label: 'run', value: pending.runId, mono: true },
-            { label: 'from', value: pending.dir, mono: true },
+            // Whichever of the two the heading did not already say in full. A
+            // renamed run has a name AND a brief and they are different facts;
+            // an un-renamed one has only the brief, and repeating it under the
+            // preview of itself would be the same text twice.
+            ...(pending.title === pending.task
+              ? []
+              : [{ label: 'named', value: pending.title } as const]),
+            { label: 'asked to', value: pending.task, scroll: true } as const,
+            { label: 'run', value: pending.runId, mono: true } as const,
+            { label: 'from', value: pending.dir, mono: true } as const,
             {
               label: 'survives this',
               value:
                 'the branch it committed to and every commit on it — those are in git, not in .vibe/runs',
-            },
+            } as const,
             {
               label: 'refused if',
               value: 'the run is still going, or vibe cannot read its lock to find out',
-            },
+            } as const,
           ]}
           confirm={deleting ? 'Deleting…' : 'Delete this run'}
           busy={deleting}
@@ -699,6 +733,7 @@ export function Sidebar({
               <RunRow
                 key={`${p.dir}:${p.runId}`}
                 title={title}
+                task={p.task}
                 // A pin is drawn without reading its project's archive, so there
                 // is no liveness to state and none is claimed. The row says what
                 // it knows: this run, in this project, that you marked.
@@ -712,7 +747,7 @@ export function Sidebar({
                 onRenamed={renamed}
                 onDelete={() => {
                   setRefused(null);
-                  setPending({ kind: 'run', dir: p.dir, runId: p.runId, title });
+                  setPending({ kind: 'run', dir: p.dir, runId: p.runId, title, task: p.task });
                 }}
               />
             );
@@ -741,9 +776,9 @@ export function Sidebar({
             onPin={pin}
             onRename={(d, runId) => setRenaming({ dir: d, runId })}
             onRenamed={renamed}
-            onDeleteRun={(d, runId, title) => {
+            onDeleteRun={(d, runId, title, task) => {
               setRefused(null);
-              setPending({ kind: 'run', dir: d, runId, title });
+              setPending({ kind: 'run', dir: d, runId, title, task });
             }}
             onAll={onRuns}
             onNewIn={onNewIn}

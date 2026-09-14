@@ -74,6 +74,15 @@ floor across every surface, and the ramps — plus that no hex literal exists ou
 `src/` rather than naming files**; the named list missed `cockpit.css` the day it appeared,
 which is the failure mode of any allow-list somebody has to remember to extend.
 
+**Its last two sections are a different kind of check and are there for a reason vitest
+cannot cover.** §9 and §10 are both about a rule broken by the **absence** of a declaration —
+a `button` with no background taking the platform's near-white, and a `.v-modal` with no
+`max-height` growing past the bottom of the screen — which is invisible to a reader of the
+stylesheet and unreachable from a token pairing. They live here rather than in a vitest case
+because **vitest stubs a CSS import to the empty string, `?raw` included**, so a test cannot
+read a stylesheet at all; this script reads the file. Anything asserting the *content* of CSS
+belongs here.
+
 **The screens the source keeps citing are in `app/src/design/HANDOFF.md`.** Twelve comments
 name a frame — `3a`, `4a`, `4h`, `5c`, `6a`, `7a`, `7c`, `7d`, `hi-fi 5`, `hi-fi 11` — and
 until it landed, none of those references could be followed from a checkout: `tokens.css`
@@ -372,6 +381,54 @@ they are waiting on. Four things in it are worth carrying:
   are acted on differently, and a window that collapsed them into *"could not delete"* would
   answer neither. It is answerable beside a run for a reason rather than by exemption — the
   live-lock refusal means **the running run is the one run this frame can never reach**.
+- **A dialog cannot outgrow the window it is covering, and that is the other half of
+  "Escape always leaves".** `.v-modal` had no `max-height` at all, so the height of a dialog
+  was whatever its caller passed in — and a confirmation that put a run's whole brief in its
+  title grew past the bottom of the screen and took its own Cancel button with it. A scrim is
+  `position: fixed; inset: 0`, so that is not a stuck dialog, it is the stuck **application**
+  the `Modal` header already warned about (#211), reached by a route that header did not
+  cover: *"Trying to delete a run breaks the app. This screen pops up and I cant click out of
+  it."*
+
+  Three changes, and each is load-bearing on its own. `.v-modal` is bounded by the viewport
+  and `.v-modal__body` scrolls inside it — **a wrapper rather than `overflow-y` on the dialog
+  itself**, because the corner marks are positioned against `.v-modal` and a scrolling dialog
+  would scroll two of the four out of view, and those marks plus the one shadow are what carry
+  elevation in this palette. `min-height: 0` on the body is what actually lets it scroll: a
+  flex item's automatic minimum size is its content, which is AGENTS.md's existing artifact-pane
+  rule with the sign reversed — there the fix was to stop a child shrinking, here it is to let
+  one. And **Escape moved to the window**, so the way out no longer depends on focus being
+  inside the scrim, on layout, or on any control being reachable.
+
+  **The bound is checked by `audit:contrast` §10 rather than by a vitest case**, because
+  vitest stubs a CSS import to the empty string — `?raw` included — and that script reads the
+  file. It is also the right home on the merits: a modal that bounds itself is a design-system
+  invariant, not a fact about whichever screen last broke it. Same shape as §9, and found the
+  same way: the rule that broke it was the **absence** of a declaration, invisible to a reader
+  of the stylesheet.
+- **A run's name is its brief, so anywhere it becomes a heading it is previewed.** That is the
+  text half of the bound above and the two are not alternatives — a modal that cannot outgrow
+  the viewport is what stops the *next* long string breaking it, and a heading that is a
+  preview is what makes this dialog readable. Every other surface drawing a task was already
+  bounded by CSS (`.v-nav__title` and `.v-switch__task` by an ellipsis, `.v-ident__name` by a
+  two-line clamp); a heading is the one case CSS could not cover, because the string *is* the
+  heading.
+
+  `preview()` in `projects.ts` takes the **first non-empty line** — a brief opens with its
+  subject and the rest is the specification, which is what makes a first line a preview rather
+  than an arbitrary prefix — and cuts that to `PREVIEW`, on a word boundary where one keeps
+  most of the budget. It **only ever shortens**: a name already short enough comes back
+  byte-identical, with no ellipsis to claim something was dropped. `PREVIEW` and `PLACEHOLDER`
+  are truncations rather than measurements, the same standing as `SHOWN` beside them.
+
+  **Nothing is hidden by it.** The delete confirmation shows the whole brief one row below the
+  heading it previewed, in a box that scrolls — *"It should just be a preview and it needs to
+  be scrollable just in case"* — and where a run has been renamed the dialog carries both, as
+  two rows, because a name and a brief are two different facts. The rename box has the same
+  rule applied one control along: it starts **empty** on a run that has never been renamed,
+  with the preview as its placeholder, rather than seeding a one-line field with four thousand
+  characters somebody then has to select-all-and-delete. Pressing ✓ on the empty box writes
+  nothing, because empty already means *keep the task*.
 - **An inline callback ref is not a one-off, and this one made a modal untypeable.** `Modal`
   focused its scrim with `ref={(el) => el?.focus()}` so Escape had somewhere to land. React
   detaches and re-attaches a callback ref on **every render**, because an inline arrow is a new

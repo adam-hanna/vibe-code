@@ -661,6 +661,32 @@
   border: 1px solid var(--accent-border);
   background: var(--surface-card);
   box-shadow: 0 18px 48px rgb(0 0 0 / 55%);
+  /* A dialog can never be taller than the window it is covering. Without this a
+     long enough child pushed the dialog past the bottom of the screen and took
+     its own Cancel button with it, which is the stuck-application state the
+     component header calls out — and nothing inside a modal can bound the size
+     of what a caller passes into it. The margin is `--space-8` so a tall dialog
+     still reads as a dialog over a scrim rather than as a second window. */
+  max-height: calc(100vh - var(--space-8));
+  /* The body is the flex item that shrinks, which is what lets it scroll. */
+  display: flex;
+  flex-direction: column;
+}
+
+/* The scrolling half. A wrapper rather than `overflow-y` on `.v-modal` itself,
+   because the corner marks are positioned against the dialog and a scrolling
+   dialog would scroll two of the four out of view — those marks and the one
+   shadow are what carry elevation here.
+
+   `min-height: 0` is load-bearing, and it is the same rule AGENTS.md records
+   from the artifact panes with the sign reversed: a flex item's automatic
+   minimum size is its content unless you say otherwise, so without this the body
+   refuses to shrink, the dialog grows past its own `max-height`, and nothing
+   scrolls. There the fix was to stop a child shrinking; here it is to let one. */
+.v-modal__body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 .v-modal::before,
 .v-modal::after {

@@ -37,6 +37,18 @@ export interface Fact {
   /** Monospace when it is a path or an id — those are strings to recognise. */
   value: ReactNode;
   mono?: boolean;
+  /**
+   * Whether this value is long enough to need a box of its own (#223).
+   *
+   * **The one row that is a document rather than a sentence.** A run's name is
+   * its brief until somebody renames it, so the row naming *what this run was
+   * asked to do* is a wall of text — and putting it in the dialog unbounded is
+   * what pushed the Cancel button off the bottom of the screen. The heading
+   * shows a preview and this shows the whole of it, in a box that scrolls, which
+   * is what *"it should just be a preview and it needs to be scrollable just in
+   * case"* asked for. Nothing is hidden and nothing is elided.
+   */
+  scroll?: boolean;
 }
 
 export function Confirm({
@@ -84,7 +96,11 @@ export function Confirm({
       {facts.map((fact) => (
         <div className="v-confirm__fact" key={fact.label}>
           <span className="v-confirm__label">{fact.label}</span>
-          <span className={`v-confirm__value${fact.mono === true ? ' v-confirm__value--mono' : ''}`}>
+          <span
+            className={`v-confirm__value${fact.mono === true ? ' v-confirm__value--mono' : ''}${
+              fact.scroll === true ? ' v-confirm__value--scroll' : ''
+            }`}
+          >
             {fact.value}
           </span>
         </div>

@@ -3,10 +3,13 @@ import cockpit from './Cockpit.tsx?raw';
 import sidebar from './Sidebar.tsx?raw';
 import newWorkstream from './NewWorkstream.tsx?raw';
 import surfaces from '../design/Surfaces.tsx?raw';
+import confirm from './Confirm.tsx?raw';
 import {
+  PREVIEW,
   forgetNames,
   forgetProjectPins,
   nameOf,
+  preview,
   readNames,
   renameRun,
 } from './projects';
@@ -244,5 +247,100 @@ describe('a modal does not take focus back on every render', () => {
     // application, not a stuck dialog (#211).
     expect(modal).toMatch(/onKeyDown/);
     expect(modal).toMatch(/e\.key === 'Escape'\) onDismiss\(\)/);
+  });
+});
+
+describe('a name is previewed in a heading, and shown whole one row below', () => {
+  test('a short name comes back byte-identical, with no ellipsis', () => {
+    // It only ever shortens. An ellipsis on a name that was already a name
+    // would say something had been left out when nothing had.
+    expect(preview('the todo app')).toBe('the todo app');
+    expect(preview('x'.repeat(PREVIEW))).toBe('x'.repeat(PREVIEW));
+  });
+
+  test('a brief is cut to its first line, and the first line to the budget', () => {
+    const long = `${'Build a TODO list web app from scratch in this empty repository, '.repeat(3)}\nTypeScript on both ends.`;
+    const short = preview(long);
+    expect(short.length).toBeLessThanOrEqual(PREVIEW + 1);
+    expect(short).toMatch(/^Build a TODO list web app/);
+    expect(short.endsWith('…')).toBe(true);
+    // The second line never appears: a preview is the subject, not a prefix of
+    // the specification.
+    expect(short).not.toMatch(/TypeScript/);
+  });
+
+  test('a first line inside the budget is the whole preview, ellipsis and all absent', () => {
+    // The screenshot's own brief opens with a 63-character sentence, so the
+    // common case is a whole first line rather than a cut one — and marking it
+    // with an ellipsis would claim something had been dropped.
+    const brief = 'Build a TODO list web app from scratch.\nTypeScript on both ends.';
+    expect(preview(brief)).toBe('Build a TODO list web app from scratch.');
+  });
+
+  test('a first line already short enough is the whole preview', () => {
+    expect(preview('Fix the lock\nand then everything else that follows')).toBe('Fix the lock');
+  });
+
+  test('leading blank lines are skipped rather than previewed', () => {
+    expect(preview('\n\n  the real subject  ')).toBe('the real subject');
+  });
+
+  test('the cut lands on a word where one is near enough', () => {
+    const cut = preview('alpha beta gamma delta epsilon zeta eta theta iota kappa', 20);
+    expect(cut).toBe('alpha beta gamma…');
+  });
+
+  test('a long unbroken string is cut mid-word rather than to nothing', () => {
+    // A path or a URL has no space to land on, and a line whose only space is at
+    // character three would otherwise be previewed as one word.
+    const cut = preview('a ' + 'x'.repeat(200), 20);
+    expect(cut).toHaveLength(21);
+    expect(cut.endsWith('…')).toBe(true);
+  });
+
+  test('whitespace inside the first line is collapsed, not preserved', () => {
+    expect(preview('two   spaces\tand a tab')).toBe('two spaces and a tab');
+  });
+});
+
+describe('a dialog cannot outgrow the window it is covering', () => {
+  test('the delete confirmation previews its title', () => {
+    // *"Why does the entire prompt show up? It should just be a preview"* — a
+    // run's name IS its brief until somebody renames it, and a brief in a
+    // heading grew the dialog past the bottom of the screen.
+    expect(sidebar).toMatch(/title=\{`Delete “\$\{preview\(pending\.title\)\}”`\}/);
+  });
+
+  test('the whole brief is still in the dialog, in a box that scrolls', () => {
+    // *"it needs to be scrollable just in case"*. Nothing is hidden: the preview
+    // is the heading and this is the text. The CSS half of both this and the
+    // modal bound is checked by `audit:contrast` §10 — vitest stubs a CSS import
+    // to the empty string, `?raw` included, and that script reads the file.
+    expect(sidebar).toMatch(/label: 'asked to', value: pending\.task, scroll: true/);
+    expect(confirm).toMatch(/v-confirm__value--scroll/);
+  });
+
+  test('the modal body is a wrapper, so the corner marks do not scroll away', () => {
+    // The structural half, and the one that protects every dialog rather than
+    // the one that broke. Nothing inside a modal can bound what a caller passes
+    // into it, so the frame has to bound itself.
+    expect(surfaces).toMatch(/<div className="v-modal__body">\{children\}<\/div>/);
+  });
+
+  test('escape leaves from anywhere, not only from inside the dialog', () => {
+    // The scrim's own handler only fires while focus is within it. A dialog with
+    // no reachable way out is a stuck application, not a stuck dialog (#211), and
+    // that state was reached — so the way out does not depend on layout or focus.
+    const modal = surfaces.slice(surfaces.indexOf('export function Modal'));
+    expect(modal).toMatch(/window\.addEventListener\('keydown', onKey\)/);
+    expect(modal).toMatch(/window\.removeEventListener\('keydown', onKey\)/);
+  });
+
+  test('the rename box does not seed a field with a whole brief', () => {
+    // The same mistake one control along: a one-line input holding four
+    // thousand characters has to be select-all-deleted before it can be typed
+    // in. Empty writes nothing, because empty already means *keep the task*.
+    expect(sidebar).toMatch(/useState\(named \? title : ''\)/);
+    expect(sidebar).toMatch(/preview\(title, PLACEHOLDER\)/);
   });
 });

@@ -45,6 +45,19 @@ export const NAMES_KEY = 'vibe.runnames';
  */
 export const SHOWN = 5;
 
+/**
+ * How much of a name a heading shows before it becomes a preview.
+ *
+ * A truncation, not a measurement — the same standing as `SHOWN` above, and on
+ * the right side of *never invent a number* for the same reason: nothing is
+ * estimated, nothing is lost, and the full text is drawn in the same dialog,
+ * one row below the heading that previewed it.
+ */
+export const PREVIEW = 72;
+
+/** The same, for a field, where a placeholder has a fraction of the room. */
+export const PLACEHOLDER = 40;
+
 export interface Pin {
   /** The project the run is in. A run id is only unique within one archive. */
   dir: string;
@@ -213,6 +226,42 @@ export function nameOf(
   const key = dirKey(dir);
   const found = names.find((n) => n.runId === runId && dirKey(n.dir) === key);
   return found?.name ?? task;
+}
+
+/**
+ * The first line of a name, shortened to fit a heading (#223).
+ *
+ * **A run's name is its brief until somebody renames it, and a brief is a
+ * document.** The delete confirmation put one straight into its own title and
+ * the dialog grew past the bottom of the screen, taking its own Cancel button
+ * with it: *"This screen pops up and I cant click out of it. Why does the
+ * entire prompt show up?"*
+ *
+ * Every other surface that draws a task was already bounded — `.v-nav__title`
+ * and `.v-switch__task` by an ellipsis, `.v-ident__name` by a two-line clamp —
+ * so this is the one case CSS could not cover, because the string *is* the
+ * heading. The layout half of the bound is still CSS's job and is still done
+ * there; this is the text half, and the two are not alternatives: a modal that
+ * cannot outgrow the viewport is what stops the next long string breaking it,
+ * and a heading that is a preview is what makes the dialog readable.
+ *
+ * It **only ever shortens**. A name already short enough comes back
+ * byte-identical, with no ellipsis to suggest something was left out — which
+ * matters because a renamed run's name is usually already a name.
+ */
+export function preview(text: string, limit = PREVIEW): string {
+  // The first non-empty line. A brief opens with its subject and the rest is
+  // the specification, which is what makes a first line a *preview* rather than
+  // an arbitrary prefix.
+  const first = text.split(/\r?\n/).find((l) => l.trim() !== '') ?? '';
+  const flat = first.trim().replace(/\s+/g, ' ');
+  if (flat.length <= limit) return flat;
+  const cut = flat.slice(0, limit);
+  const space = cut.lastIndexOf(' ');
+  // A word boundary, but only one that keeps most of the budget: a line whose
+  // only space is at character three would otherwise be cut to a single word,
+  // which is a worse preview than a hard cut mid-word.
+  return `${(space > limit / 2 ? cut.slice(0, space) : cut).trimEnd()}…`;
 }
 
 /**

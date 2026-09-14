@@ -57,6 +57,7 @@ export function Gallery() {
   const [seg, setSeg] = useState('stop');
   const [tab, setTab] = useState('findings');
   const [modal, setModal] = useState(false);
+  const [tall, setTall] = useState(false);
 
   return (
     <main
@@ -287,10 +288,21 @@ export function Gallery() {
           />
         </Section>
 
-        <Section n="14" title="Modal" note="two instances in the product, so it carries the only shadow">
+        <Section
+          n="14"
+          title="Modal"
+          note="three instances in the product, so it carries the only shadow"
+        >
           <Row>
             <Button level="secondary" onClick={() => setModal(true)}>
               Open the modal
+            </Button>
+            {/* The state that broke the app, and the reason it is a state here
+                now: a dialog is only as tall as what a caller passes into it, so
+                "every component in every state" has to include one whose content
+                does not fit. Without this the bound is a rule nobody can see. */}
+            <Button level="secondary" onClick={() => setTall(true)}>
+              Open a long one
             </Button>
           </Row>
           {modal && (
@@ -306,6 +318,26 @@ export function Gallery() {
                 </Button>
                 <Button level="secondary" onClick={() => setModal(false)}>
                   Quit anyway
+                </Button>
+              </div>
+            </Modal>
+          )}
+          {tall && (
+            <Modal onDismiss={() => setTall(false)}>
+              <div className="v-title">A dialog longer than the window</div>
+              <p className="v-lead" style={{ marginTop: 'var(--space-4)' }}>
+                The body scrolls and the frame does not, so the actions below stay reachable
+                however much there is above them — and the corner marks stay on the corners,
+                which is what they would not do if the dialog itself scrolled.
+              </p>
+              {Array.from({ length: 40 }, (_, i) => (
+                <p key={i} className="v-lead" style={{ marginTop: 'var(--space-3)' }}>
+                  Line {i + 1} of a body nobody sized in advance.
+                </p>
+              ))}
+              <div style={{ display: 'flex', gap: 'var(--space-3)', marginTop: 'var(--space-6)' }}>
+                <Button level="primary" onClick={() => setTall(false)}>
+                  Still reachable
                 </Button>
               </div>
             </Modal>

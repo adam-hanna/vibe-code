@@ -781,9 +781,19 @@
   margin-bottom: var(--space-4);
 }
 
+/* Bounded as well as previewed, and the two are not redundant. `preview()` cuts
+   the text and this cuts the layout — a 72-character preview is still three
+   lines at `--type-title` in a narrow window, and the clamp is what makes the
+   heading a heading at every width rather than only at the one it was seen in. */
 .v-confirm__title {
   font: var(--type-title);
   color: var(--text-display);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
 }
 
 .v-confirm__lead {
@@ -817,6 +827,18 @@
   font: var(--type-mono-sm);
   color: var(--text-primary);
   overflow-wrap: anywhere;
+}
+
+/* The whole of a long value, in a box of its own. `pre-wrap` because a brief has
+   its own line breaks and they are how it is read; `max-height` because the row
+   is the only one in the dialog whose content is a document, and a document in a
+   fact row is what took the Cancel button off the screen. */
+.v-confirm__value--scroll {
+  max-height: 11rem;
+  overflow-y: auto;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--rule-inner);
+  white-space: pre-wrap;
 }
 
 /* The core's own refusal, on the dialog rather than instead of it: a window that
