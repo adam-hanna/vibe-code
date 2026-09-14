@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { LivenessDot, MetaChip, StateKicker } from '../design';
 import * as host from '../host';
-import { Credentials } from '../pilot/Credentials';
 import * as keys from '../pilot/keys';
 import type { KeyStatus } from '../pilot/keys';
 // `PilotPane`, not `Pilot`: `pilot.ts` beside it is the wire, and two files
@@ -34,7 +33,8 @@ import { StalenessStrip } from './Staleness';
 import { tokens as fmtTokens } from './format';
 import { emptyRun, nextRun, reduce, staleness } from './model';
 import { rounds } from './rounds';
-import { readLaunchArgv, resumeArgv } from './argv';
+import { implementArgv, readLaunchArgv, resumeArgv } from './argv';
+import { SCALE_KEY, SCALE_VAR, readScale, writable } from './appearance';
 import type { Launched, Raise } from './argv';
 import type { Caps } from './Footer';
 import type { Effect } from '../pilot/tools';
@@ -111,6 +111,35 @@ export function Cockpit() {
     log: [],
     unknown: [],
   });
+  /**
+   * How big the product is drawn (#223).
+   *
+   * Held here rather than in `Settings`, because the setting outlives the screen
+   * that changes it: the pane is conditional and unmounts the moment you look at
+   * anything else, so a scale that lived in it would snap back to 1 on every
+   * navigation. The effect below is the one place `--type-scale` is written.
+   */
+  const [scale, setScale] = useState(() => {
+    try {
+      return readScale(localStorage.getItem(SCALE_KEY));
+    } catch {
+      // Storage can be unavailable. Text at the size it was designed is a
+      // smaller failure than a window that will not render.
+      return 1;
+    }
+  });
+  useEffect(() => {
+    document.documentElement.style.setProperty(SCALE_VAR, String(scale));
+  }, [scale]);
+  const rescale = useCallback((next: number) => {
+    setScale(readScale(String(next)));
+    try {
+      localStorage.setItem(SCALE_KEY, writable(next));
+    } catch {
+      // It still applies for this session. See above.
+    }
+  }, []);
+
   /** Whether the diagnostics popover is open (#201, #204). ⌘⇧D toggles it. */
   const [diagnostics, setDiagnostics] = useState(false);
   /**
@@ -273,7 +302,6 @@ export function Cockpit() {
   const [tab, setTab] = useState<
     | 'output'
     | 'pilot'
-    | 'keys'
     // The four artifact panes (#223). `plans`, `critique` and `review` are what
     // the dashed `Versions` tab was standing in for, and `code` is what `diff`
     // became once a round's own range was on the wire.
@@ -523,6 +551,20 @@ export function Cockpit() {
    * and the one-at-a-time rule keep exactly one definition each, which is the
    * same reason the pilot's `start_run` proposal comes through there (#144).
    */
+  /**
+   * Take a finished plan-only run into implementation (#223).
+   *
+   * Through `launch` like every other way a run starts, so the request-id
+   * allocation and the one-at-a-time rule keep one definition each. It is a
+   * RESUME of that run and not a new one - the core refuses it unless the plan
+   * actually cleared critique, and everything the plan phase settled travels
+   * with it.
+   */
+  const implement = useCallback(
+    (runId: string, dir: string) => launch(implementArgv(runId, dir)),
+    [launch],
+  );
+
   const resume = useCallback(
     // `force` last and defaulting to false, so every existing caller sends the
     // ordinary resume: taking a lock somebody may still hold is a decision, and
@@ -1000,20 +1042,6 @@ export function Cockpit() {
               Commands
               {running(commands).length > 0 ? ` · ${String(running(commands).length)}` : ''}
             </button>
-            {/* The pilot's credentials. Postdates the artwork (#143), so it
-                takes a place after the frames the design names. */}
-            <button
-              className={`v-cockpit__tab ${tab === 'keys' ? 'v-cockpit__tab--on' : ''}`}
-              onClick={() => setTab('keys')}
-            >
-              Keys
-            </button>
-            {/* Named rather than omitted. The issue that would fill it is in the
-                source and not in the tooltip: an end user cannot act on a
-                number, and "not built yet" is the whole of what this says. */}
-            <span className="v-cockpit__tab v-cockpit__tab--off" title="Not built yet">
-              Prompt
-            </span>
 
             {/*
               `5e`, in the place hi-fi 1 puts it: right-aligned in this bar,
@@ -1082,7 +1110,16 @@ export function Cockpit() {
               revision={run.artifacts.length}
             />
           )}
-          {tab === 'settings' && <Settings dir={repoDir} />}
+          {tab === 'settings' && (
+            <Settings
+              dir={repoDir}
+              scale={scale}
+              onScale={rescale}
+              statuses={keyStatuses}
+              keyFailure={keyFailure}
+              onKeysChanged={refreshKeys}
+            />
+          )}
           {/* `1b`, opened from a project in the sidebar. The columns the sidebar
               has no room for — status, cost, liveness — and the one control that
               may overrule a lock, which confirms and says what it is overruling. */}
@@ -1174,9 +1211,6 @@ export function Cockpit() {
               }
             />
           </div>
-          {tab === 'keys' && (
-            <Credentials statuses={keyStatuses} failure={keyFailure} onChanged={refreshKeys} />
-          )}
           {wire.unknown.length > 0 && (
             <div className="v-cockpit__unknown">
               {wire.unknown.length} unrecognised frame(s): {wire.unknown[wire.unknown.length - 1]}
@@ -1246,6 +1280,7 @@ export function Cockpit() {
               onPause={pause}
               onStop={() => setConfirmStop(true)}
               onResume={resume}
+              onImplement={implement}
               caps={caps}
               gates={gates}
               order={order}

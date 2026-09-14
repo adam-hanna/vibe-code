@@ -2,6 +2,7 @@ import { requestCancel } from '@src/cancel.js';
 import { main } from '@src/cli.js';
 import { refused as commandRefused, startCommand, stopAllCommands, stopCommand } from '@src/commands.js';
 import { pilotChat } from '@src/pilotchat.js';
+import { promptBlocks } from '@src/prompts.js';
 import * as log from '@src/log.js';
 import { createLineReader, decode, encode, PROTOCOL_VERSION } from '@src/protocol.js';
 import { orchestrate } from '@src/orchestrator.js';
@@ -421,6 +422,15 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
           message: err instanceof Error ? err.message : String(err),
         });
       }
+      return;
+    }
+
+    if (msg.type === 'prompts') {
+      // A read like the four above it and the simplest of them: `promptBlocks`
+      // opens nothing, reads no directory and returns the same four constants
+      // every time. It is answerable beside a run for the strongest version of
+      // the reason the others are - it cannot even observe one.
+      send({ type: 'prompts', id: msg.id, blocks: promptBlocks() });
       return;
     }
 

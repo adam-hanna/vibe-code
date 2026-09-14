@@ -1452,3 +1452,54 @@ function formatAnswer(a: Answer): string {
 A: ${a.answer}
 *(confidence: ${a.confidence}${a.rationale ? ` - ${a.rationale}` : ''})*`;
 }
+
+/**
+ * The instruction blocks every turn of a kind is given, verbatim (#223).
+ *
+ * Asked for from the settings screen — *"The prompts being used for each turn
+ * should also go there"* — and what it can honestly answer is exactly this much.
+ * A prompt here is a **function of the run**: `planPrompt` takes the task and
+ * the prior-run index, `critiquePrompt` takes the plan it is judging,
+ * `fixPrompt` takes the findings and the diff. There is no such thing as "the
+ * implement prompt" outside a run, and rendering one from invented inputs would
+ * be the fabrication this repo refuses everywhere else.
+ *
+ * What there *is* is the part that does not vary: the shared blocks that go into
+ * every turn of a kind unchanged, which are the parts a person reading a
+ * settings screen is actually asking about — *what standing instructions is the
+ * reviewer under*. Those are returned as themselves, byte for byte, from the
+ * same constants the prompts interpolate. A screen drawing this is quoting the
+ * product rather than describing it.
+ *
+ * `usedBy` names the turns each block reaches, and it is written beside the
+ * block rather than derived, because the interpolation sites are in five
+ * different template literals and a reader has no way to check a claim about
+ * them. `prompt-blocks.test.ts` is what keeps the list true: it reads this file
+ * as source and fails on a block that is named as reaching a turn it no longer
+ * reaches.
+ */
+export interface PromptBlock {
+  name: string;
+  /** Which turns include it. The loop's own role names, as `roles.ts` has them. */
+  usedBy: readonly string[];
+  /** The block, exactly as it is interpolated. Never a summary of it. */
+  text: string;
+}
+
+export function promptBlocks(): readonly PromptBlock[] {
+  return [
+    {
+      name: 'respond with JSON',
+      usedBy: ['planner', 'critic', 'answerer', 'reviewer'],
+      text: RESPOND_WITH_JSON,
+    },
+    { name: 'review breadth', usedBy: ['critic', 'reviewer'], text: REVIEW_BREADTH },
+    { name: 'fix breadth', usedBy: ['planner', 'implementer'], text: FIX_BREADTH },
+    // Through `formatFinding`, so it reaches exactly the two turns that are
+    // GIVEN a findings list - the planner revising against a critique and the
+    // implementer fixing against a review. The reviewer produces findings and
+    // is never shown a deferral mark, which is what the test caught when this
+    // line claimed otherwise.
+    { name: 'a deferred finding', usedBy: ['planner', 'implementer'], text: DEFERRED_MARK },
+  ];
+}

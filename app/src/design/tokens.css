@@ -172,15 +172,52 @@
   --font-condensed: 'Barlow Condensed', 'Barlow', system-ui, sans-serif;
   --font-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
 
-  --type-display: 600 30px/1 var(--font-condensed);
-  --type-title: 600 21px/1.1 var(--font-condensed);
-  --type-section: 600 17px/1 var(--font-condensed);
-  --type-kicker: 600 15px/1 var(--font-condensed);
-  --type-tab: 600 12px/1 var(--font-condensed);
-  --type-label: 600 10px/1 var(--font-condensed);
-  --type-lead: 400 14px/1.62 var(--font-sans);
-  --type-body: 400 13px/1.6 var(--font-sans);
-  --type-body-sm: 400 12px/1.55 var(--font-sans);
+  /**
+   * The type scale, split in two since #223, and the split is what makes the
+   * whole product resizable without a second set of sizes.
+   *
+   * `--size-*` is the DESIGN's size: the number the build spec chose, in px,
+   * which is what `audit:contrast` §8 reads and what any argument about type
+   * is about. `--type-*` is the composed shorthand every component uses, and it
+   * is the design's size times whatever the reader asked for.
+   *
+   * **`--type-scale` is the only thing a person changes**, and it multiplies
+   * every size at once - so the ramp the spec chose survives being scaled and
+   * nothing here can drift relative to anything else. It is 1 by default, which
+   * is byte-identical to what the product had before this existed. Reported as
+   * *"the font is a little too small for me"*, and the honest fix for that is
+   * the reader's own multiplier rather than a second opinion about 13px.
+   *
+   * Browser zoom would have been the other answer and is worse here: it scales
+   * layout as well as type, and `100vh` does not scale with it - which would
+   * make a `max-height: calc(100vh - …)` dialog taller than the window at any
+   * zoom above 1.
+   */
+  --type-scale: 1;
+
+  --size-display: 30px;
+  --size-title: 21px;
+  --size-section: 17px;
+  --size-kicker: 15px;
+  --size-tab: 12px;
+  --size-label: 10px;
+  --size-lead: 14px;
+  --size-body: 13px;
+  --size-body-sm: 12px;
+  --size-mono: 13px;
+  --size-mono-sm: 12px;
+  --size-chip: 10px;
+  --size-chip-micro: 9px;
+
+  --type-display: 600 calc(var(--size-display) * var(--type-scale)) / 1 var(--font-condensed);
+  --type-title: 600 calc(var(--size-title) * var(--type-scale)) / 1.1 var(--font-condensed);
+  --type-section: 600 calc(var(--size-section) * var(--type-scale)) / 1 var(--font-condensed);
+  --type-kicker: 600 calc(var(--size-kicker) * var(--type-scale)) / 1 var(--font-condensed);
+  --type-tab: 600 calc(var(--size-tab) * var(--type-scale)) / 1 var(--font-condensed);
+  --type-label: 600 calc(var(--size-label) * var(--type-scale)) / 1 var(--font-condensed);
+  --type-lead: 400 calc(var(--size-lead) * var(--type-scale)) / 1.62 var(--font-sans);
+  --type-body: 400 calc(var(--size-body) * var(--type-scale)) / 1.6 var(--font-sans);
+  --type-body-sm: 400 calc(var(--size-body-sm) * var(--type-scale)) / 1.55 var(--font-sans);
   /* Both moved up one step in #190, and the leading is the half that mattered.
    * `--type-mono-sm` was `11px/1`, and a line-height of 1 in a wrapping
    * monospace log means the wrapped rows of one entry touch - the output pane's
@@ -188,10 +225,15 @@
    * than the edge one. The per-line padding hid it between entries and could not
    * hide it inside one. 11px is gone from the product; nothing was set in it
    * that is not better at 12. */
-  --type-mono: 400 13px/1.55 var(--font-mono);
-  --type-mono-sm: 400 12px/1.5 var(--font-mono);
-  --type-chip: 700 10px/16px var(--font-sans);
-  --type-chip-micro: 700 9px/14px var(--font-sans);
+  --type-mono: 400 calc(var(--size-mono) * var(--type-scale)) / 1.55 var(--font-mono);
+  --type-mono-sm: 400 calc(var(--size-mono-sm) * var(--type-scale)) / 1.5 var(--font-mono);
+  /* The two chip styles keep a RATIO rather than the px leading they had, which
+   * is what lets them scale with everything else: a fixed 16px line box around
+   * 10px text becomes a 16px line box around 14px text the moment the scale
+   * moves, and the chip's own padding then decides its height instead. 1.6 and
+   * 1.55 are the ratios those px pairs already were. */
+  --type-chip: 700 calc(var(--size-chip) * var(--type-scale)) / 1.6 var(--font-sans);
+  --type-chip-micro: 700 calc(var(--size-chip-micro) * var(--type-scale)) / 1.55 var(--font-sans);
 
   /* Tracking is per-style and not optional: the condensed faces are unreadable
    * as caps without it, and that is the only reason they are tracked. */

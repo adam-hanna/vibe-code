@@ -1731,6 +1731,72 @@ export function deleteRun(targetDir: string, runId: string): RunRemoval {
 }
 
 /**
+ * Take a finished plan-only run into implementation (#223).
+ *
+ * **The dead end this closes was real and was reported as one:** *"after it
+ * stopped, I SHOULD have been able to continue, either with more planning or
+ * move on to implementation, but it didn't allow that. When I asked the pilot,
+ * it kicked off another run from scratch."* A plan-only run *completes* — exit
+ * 0, `status: 'planned'`, `phase: 'complete'` — so `vibe resume` correctly
+ * reports there is nothing to resume, and the only path left was a new run that
+ * re-derives the plan it already has.
+ *
+ * **It is a separate, named act rather than plan-only becoming resumable**, and
+ * that distinction is the settled one AGENTS.md records: `planOnly` says there
+ * is no next phase, a `stop` gate says a full run halts before implementing, and
+ * folding the first into the second would make `vibe plan` report needing input
+ * on a run that produced exactly what it was asked for. This changes what the
+ * run **is**, on purpose, once — so it is a decision somebody takes rather than
+ * a state the loop can wander into.
+ *
+ * It refuses everything else, and each refusal names what it found:
+ *
+ * - **A run that was never plan-only** has nothing to convert. Its `status`
+ *   already describes a run with an implementation phase.
+ * - **A plan-only run that did not finish planning** — a stall, a round cap, a
+ *   preflight refusal — is an ordinary `vibe resume`, which picks up where it
+ *   stopped and reaches the plan gate on its own. Converting it would skip the
+ *   critique the plan has not passed.
+ * - **A run with no stored plan** cannot implement one. `status: 'planned'`
+ *   without a plan is a repaired state, and a run that implemented from nothing
+ *   would be the fabrication the whole model is arranged against.
+ *
+ * What it keeps is everything the plan phase settled: the approved plan, the
+ * frozen acceptance bar, the P1s `carried` on tolerance and the findings the
+ * approving round `declined`. Those are what make this a continuation rather
+ * than a second run — the implementer is told about all four, exactly as it
+ * would have been had the run never been plan-only.
+ */
+export function continueIntoImplementation(state: RunState): void {
+  if (!state.planOnly) {
+    throw new StoredStateError(
+      `Run "${state.id}" is not a plan-only run, so there is nothing to convert: it already ` +
+        `has an implementation phase. It is at "${state.status}" - resume it normally.`,
+    );
+  }
+  if (state.status !== 'planned') {
+    throw new StoredStateError(
+      `Run "${state.id}" is plan-only but has not finished planning - it is at "${state.status}". ` +
+        'Resume it normally and it will reach the plan gate on its own; converting it now would ' +
+        'skip the critique the plan has not passed yet.',
+    );
+  }
+  if (state.plan === null || state.plan === undefined) {
+    throw new StoredStateError(
+      `Run "${state.id}" reports a finished plan but stored none, so there is nothing to ` +
+        'implement. Nothing was changed.',
+    );
+  }
+  // The conversion itself, and it is three fields. `planOnly` is what
+  // `runPhases` reads to decide there is no next phase, and `status`/`phase` are
+  // where the loop picks up - `advancePhase` is not used because this is not the
+  // loop advancing, it is a person changing what the run is.
+  state.planOnly = false;
+  state.status = 'implementing';
+  state.phase = 'implementing';
+}
+
+/**
  * Gates that were enabled and could not run, in list order.
  *
  * One source for both the report line and the exit rule, so the human contract

@@ -242,8 +242,22 @@ console.log('\n8 · every style that can wrap has leading');
 {
   const WRAPS = ['type-lead', 'type-body', 'type-body-sm', 'type-mono', 'type-mono-sm'];
   const styles = new Map();
-  for (const m of css.matchAll(/--(type-[a-z-]+):\s*(\d+)\s+(\d+(?:\.\d+)?)px\/([\d.]+(?:px)?)\s/g)) {
-    styles.set(m[1], { size: Number(m[3]), leading: m[4] });
+  // Read from `--size-*` and the shorthand's ratio, which is where those two
+  // facts live since the scale split (#223). The old regex matched
+  // `600 13px/1.6` and would now match nothing at all - and "nothing" in this
+  // check is `Infinity`, which PASSES. A parser that silently stops finding its
+  // subject is worse than one that fails, so the size lookup below throws the
+  // token name when a style has no size rather than defaulting.
+  const sizes = new Map();
+  for (const m of css.matchAll(/--size-([a-z-]+):\s*(\d+(?:\.\d+)?)px/g)) {
+    sizes.set(`type-${m[1]}`, Number(m[2]));
+  }
+  const SHORTHAND =
+    /--(type-[a-z-]+):\s*\d+\s+calc\(var\(--size-[a-z-]+\)\s*\*\s*var\(--type-scale\)\)\s*\/\s*([\d.]+(?:px)?)\s/g;
+  for (const m of css.matchAll(SHORTHAND)) {
+    const size = sizes.get(m[1]);
+    if (size === undefined) continue;
+    styles.set(m[1], { size, leading: m[2] });
   }
   for (const n of WRAPS) {
     const style = styles.get(n);
@@ -265,9 +279,18 @@ console.log('\n8 · every style that can wrap has leading');
   // And the size floor. 11px monospace was the smallest thing in the product
   // and it is what the report was about; 9 and 10px survive only on chips and
   // labels, which are short, uppercase and never a paragraph.
-  const smallest = Math.min(...WRAPS.map((n) => styles.get(n)?.size ?? Infinity));
-  if (smallest < 12) fail(`the smallest wrapping style is ${smallest}px, below the 12px floor`);
-  else pass(`the smallest wrapping style is ${smallest}px`);
+  // A style this parser could not read is a FAILURE here, never an `Infinity`
+  // that sails past the floor. That is the vacuous pass the split above would
+  // otherwise have introduced, and it is the whole reason this check has a
+  // parser rather than a list.
+  const measured = WRAPS.map((n) => styles.get(n)?.size).filter((s) => s !== undefined);
+  if (measured.length !== WRAPS.length) {
+    fail(`only ${measured.length} of ${WRAPS.length} wrapping styles could be measured`);
+  } else {
+    const smallest = Math.min(...measured);
+    if (smallest < 12) fail(`the smallest wrapping style is ${smallest}px, below the 12px floor`);
+    else pass(`the smallest wrapping style is ${smallest}px`);
+  }
 }
 
 // ------------------------------------------------- 9 · nothing inherits UA chrome

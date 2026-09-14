@@ -127,12 +127,17 @@ export function Credentials({ statuses, failure, onChanged }: CredentialsProps) 
         {/* One provider is a supported state and is said so, plainly. It is
             probably the likeliest first run: somebody with one subscription
             trying this before buying a second. */}
+        {/* **Never "the pilot cannot run"**, which is what this said until #223
+            and which stopped being true the moment the subscription backend
+            landed: that one is a `claude -p` child and needs no key at all. A
+            summary telling somebody the pilot was unusable because they had
+            stored no API key would send them to buy one they do not need. */}
         <span className="v-creds__summary">
           {ready.length === 0
-            ? 'no provider configured — the pilot cannot run'
+            ? 'no API key stored — the pilot runs on the subscription'
             : ready.length === 1
               ? `${keys.PROVIDER_NAME[ready[0] as Provider]} only, which is enough`
-              : 'both providers configured'}
+              : 'both API providers configured'}
         </span>
       </div>
 
@@ -141,8 +146,9 @@ export function Credentials({ statuses, failure, onChanged }: CredentialsProps) 
       ))}
 
       <div className="v-creds__note">
-        Keys are held in the OS keychain and never written to the project. Nothing in this window
-        can read one back — the request is made by the app itself.
+        For the API-backed pilot only — on the subscription it is a <code>claude -p</code> child
+        and needs none of this. Keys are held in the OS keychain and never written to the project.
+        Nothing in this window can read one back: the request is made by the app itself.
       </div>
     </div>
   );

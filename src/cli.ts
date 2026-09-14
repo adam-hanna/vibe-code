@@ -10,6 +10,7 @@ import {
 import {
   allocateRun,
   assertUnlinkedRun,
+  continueIntoImplementation,
   createRun,
   listRuns,
   loadRun,
@@ -81,6 +82,7 @@ Usage
   vibe run "<task>" [options]      Plan, critique to zero P1s, implement, review to zero P1s
   vibe plan "<task>" [options]     Stop after the plan is approved; do not implement
   vibe resume <run-id> [--force]   Continue a run that stopped for input
+  vibe resume <run-id> --implement Take a finished plan-only run into implementation
   vibe fork <run-id> --at <n>      Start a new run from a point in an old one
   vibe list                        Show runs in this repo
   vibe stats [--json]              What every run in this repo says about the loop
@@ -190,6 +192,15 @@ interface ParsedArgs {
     blockingQuestionsOnly?: boolean;
     skipProbe?: boolean;
     force?: boolean;
+    /**
+     * Turn a finished plan-only run into an implementing one (#223).
+     *
+     * Resume-only, and it changes what the run IS rather than where it picks
+     * up - so it is a flag somebody types rather than something the loop can
+     * reach on its own. `continueIntoImplementation` holds the rule and every
+     * refusal; this is only how it is asked for.
+     */
+    implement?: boolean;
     noVerify?: boolean;
     verifyCommand?: string;
     verifyRuns?: number;
@@ -331,6 +342,7 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       // describes one invocation's willingness to take a lock, not anything the
       // run should carry forward into the next resume.
       case '--force': out.flags.force = true; break;
+      case '--implement': out.flags.implement = true; break;
       case '--no-verify': out.flags.noVerify = true; break;
       case '--verify-command': out.flags.verifyCommand = next(); break;
       case '--verify-runs': out.flags.verifyRuns = nextNum(); break;
@@ -832,6 +844,24 @@ async function resumeRun(
     log.detail(`resuming with the run's settings: claude ${cfg.claude.model}/${cfg.claude.effort}`);
   }
   log.attachTranscript(path.join(state.dir, 'transcript.log'));
+
+  // **Before anything else reads the phase**, because this changes it. A
+  // plan-only run that finished is at `complete`, so every path below - the
+  // answers file, `resumedFrom`, `execute`'s own phase dispatch - would
+  // otherwise be told there is nothing left to do, which is the dead end this
+  // closes. `continueIntoImplementation` holds the rule and refuses with a
+  // sentence; saving here is what makes the conversion survive a process that
+  // dies before the first turn, so a second attempt is a resume rather than a
+  // second conversion.
+  if (flags.implement === true) {
+    continueIntoImplementation(state);
+    saveState(state);
+    log.ok(
+      `Plan-only run ${state.id} is now an implementing run. The approved plan, its frozen ` +
+        'acceptance bar, the P1s it carried and the findings it declined all travel with it - ' +
+        'nothing is re-planned.',
+    );
+  }
 
   const answersFile = path.join(state.dir, 'NEEDS-INPUT.md');
   if (existsSync(answersFile)) {
@@ -1590,11 +1620,34 @@ export async function execute(
           'state.json was repaired on load. See OUTSTANDING.md for what was actually carried.',
       );
     } else if (incomplete === null) {
-      log.ok(
-        state.planOnly
-          ? 'Plan cleared critique with zero P1s. Not implemented (plan-only run).'
-          : 'Plan and implementation both cleared review with zero P1s.',
-      );
+      // **A plan-only run carries its P1s in `carried`, not in `outstanding`.**
+      // The guard above is the implementation-side one: `outstanding` is written
+      // by the final fix round, which a plan-only run never reaches, so it is
+      // empty on every one of them and the branch fell through to "zero P1s"
+      // over a plan the tolerance had let through with findings open. Reported
+      // exactly - *"It says I did plan only mode but then it seemed to stop,
+      // even though it still had p1 issues"* - and the narration contradicted
+      // itself in the same run: `Plan accepted with 1 P1(s) carried into
+      // implementation` four lines above `Plan cleared critique with zero P1s`.
+      //
+      // The comment on `left` above already stated the rule this breaks -
+      // *"Never claim a spotless finish when a P1 was carried"* - so this is the
+      // same rule reaching the one path that was not checking it.
+      const tolerated = state.planOnly ? (state.carried ?? []) : [];
+      if (tolerated.length > 0) {
+        log.warn(
+          `Plan-only run finished with ${tolerated.length} P1(s) carried on tolerance: ` +
+            `${tolerated.map((f) => f.id).join(', ')}. The plan was accepted DESPITE them, not ` +
+            'without them - they are stated in the implementation prompt, so whatever implements ' +
+            'this plan is told about them.',
+        );
+      } else {
+        log.ok(
+          state.planOnly
+            ? 'Plan cleared critique with zero P1s. Not implemented (plan-only run).'
+            : 'Plan and implementation both cleared review with zero P1s.',
+        );
+      }
     }
     // Here rather than in `summary()`, and here rather than only in a log line
     // emitted forty minutes ago: the run may exit 0 with a gate that never ran,

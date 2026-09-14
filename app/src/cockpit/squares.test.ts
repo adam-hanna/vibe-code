@@ -130,10 +130,27 @@ describe('the tab bar the rail emptied', () => {
     // interleaving, and the rule is below.
     expect(at('Pilot chat')).toBeLessThan(at('Output'));
     expect(at('Output')).toBeLessThan(at('Plans'));
-    // The three that postdate the artwork come after the ones it names, and
-    // the readout is last because it is right-aligned.
+    // The ones that postdate the artwork come after the ones it names, and the
+    // readout is last because it is right-aligned.
+    //
+    // **`Prompt` and `Keys` used to be the last two and both are gone (#223),
+    // for opposite reasons.** `Prompt` was a dashed placeholder that never had
+    // anything behind it, and what it stood for is now a section of Settings —
+    // *"remove the prompt tab"* and *"the prompts being used for each turn
+    // should also go there"* are one instruction. `Keys` was real and its
+    // content moved whole, because a tab holding one form was the wrong shape
+    // for a question that is half about credentials and half about there being
+    // none: a run's agents are your own logins and have no key to enter.
+    //
+    // The claim this case makes is unchanged — the design's own positions come
+    // first and the readout is last — so it is anchored on the last tab that
+    // still exists rather than deleted with the tab it happened to name.
     expect(at('Questions')).toBeLessThan(at('Verify'));
-    expect(at('Prompt')).toBeLessThan(at('v-cockpit__readout'));
+    expect(at('Commands')).toBeLessThan(at('v-cockpit__readout'));
+    // Named absent, so a build that quietly reinstates either fails here. Both
+    // are reachable — one from Settings, one as Settings.
+    expect(bar).not.toMatch(/>\s*Prompt\s*</);
+    expect(bar).not.toMatch(/>\s*Keys\s*</);
   });
 
   test('the four artifact tabs read in the loop’s own order', () => {

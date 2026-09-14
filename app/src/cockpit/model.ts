@@ -605,6 +605,20 @@ export interface Run {
    * the id, which is a pane that behaves exactly as it did before.
    */
   artifacts: readonly string[];
+  /**
+   * That this run was plan-only and has stopped, or null (#223).
+   *
+   * **Null on every other run, including a plan-only one still planning.** It is
+   * set by `plan_only_stopped`, which the loop narrates at the one place it
+   * decides there is no next phase — so it says *this run produced a plan and
+   * built nothing from it*, which is the state that needs an offer nothing else
+   * on screen was making.
+   *
+   * `carried` is how many P1s the tolerance let the plan through with. Told, not
+   * counted here: the window has no findings list for a plan round, and a zero
+   * derived from not having one would read as a spotless plan.
+   */
+  plannedOnly: { carried: number } | null;
   /** The turn with no `endedAt`, if any. */
   running: Turn | null;
   gate: Gate | null;
@@ -734,6 +748,7 @@ export function emptyRun(): Run {
     baseSha: null,
     commits: [],
     artifacts: [],
+    plannedOnly: null,
     running: null,
     gate: null,
     lastGate: null,
@@ -1554,6 +1569,22 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
         if (name === null) return next;
         return { ...next, artifacts: [...next.artifacts, name] };
       }
+
+      /**
+       * A plan-only run reached its end (#223).
+       *
+       * **The one thing a completed plan-only run and every other completed run
+       * did not differ by on screen**, and they want opposite next actions: one
+       * is finished, the other has an approved plan and nothing built from it.
+       * `planOnly` has been durable since `createRun` and was never narrated, so
+       * the window could not tell them apart — and the only path back to the
+       * plan was a new run that re-derived it.
+       *
+       * `carried` is what the tolerance let through, counted. It is a fact about
+       * the plan being offered, not a judgement about whether to implement it.
+       */
+      case 'plan_only_stopped':
+        return { ...next, plannedOnly: { carried: num(data['carried']) ?? 0 } };
 
       case 'verify_started': {
         const gate = str(data['gate']);

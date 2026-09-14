@@ -1,10 +1,14 @@
 import { useCallback, useEffect, useState } from 'react';
 import { MetaChip, StateKicker } from '../design';
 import * as host from '../host';
+import { Credentials } from '../pilot/Credentials';
+import { Section } from './Disclosure';
+import { STEPS } from './appearance';
+import type { KeyStatus } from '../pilot/keys';
 import type { ConfigFrame } from '../host';
 
 /**
- * Project settings, and the gate matrix at the centre of them (`1h`, #223).
+ * Everything that is a setting, in one screen (`1h`, `1i`, #223).
  *
  * **The form and the raw file are the same file the CLI reads, and this keeps
  * that true structurally rather than by promise.** Every save is a patch sent to
@@ -12,7 +16,39 @@ import type { ConfigFrame } from '../host';
  * the same `validate()` `loadConfig` runs — and **answered with the config that
  * resulted**. This screen never assumes its own save took effect.
  *
- * ## Why the matrix is the centre
+ * ## Three kinds of setting, and the sections say which is which
+ *
+ * They are not interchangeable and a screen that hid the difference would be
+ * lying about where a change goes:
+ *
+ * - **The project's** — gates, roles. `vibe.config.json`, meant to be committed,
+ *   and every run in this repository gets it.
+ * - **This window's** — the type scale. `localStorage`, this machine only. How
+ *   big you like your text is not a fact about any run, which is the same rule
+ *   `projects.ts` states for the project list.
+ * - **This machine's secrets** — the pilot's API keys. The OS keychain, and
+ *   deliberately not `vibe.config.json`: that file is committed, and
+ *   `validateConfig` reports bad values **by name**, which is the one thing that
+ *   must never happen to a secret.
+ *
+ * ## Subscription against keys, which is the question this screen has to answer
+ *
+ * It is not one question, it is two, about two different things, and conflating
+ * them is what made the old Keys tab read as though the product needed an API
+ * key to work at all:
+ *
+ * - **A run's agents are always the subscription.** `claude` and `codex` are
+ *   child processes that inherit whatever you are already logged into — vibe
+ *   installs neither and holds no credential for either. There is no key to
+ *   enter and nothing on this screen to set, which is why the section states it
+ *   rather than offering a control.
+ * - **The pilot chooses, per conversation.** On the subscription it is a
+ *   `claude -p` child like any turn, and bills nothing. On an API key it is an
+ *   HTTP request this app makes, money moves, and `ledger.ts` is the only place
+ *   in the product where a dollar is a dollar. The keys below are for that
+ *   second case **only** — the pilot works with none of them.
+ *
+ * ## Why the gate matrix is the centre of the project section
  *
  * #140 made the gate matrix configuration and left every row `step`, saying in
  * `DEFAULT_GATES`'s own comment that this was *"very probably not the default
@@ -29,10 +65,7 @@ import type { ConfigFrame } from '../host';
  *
  * The rows, the modes and the two boundaries that **cannot** hold all come from
  * `src/gates.ts` over the wire, so this cannot offer a boundary the loop does
- * not have or a mode it does not honour. The two ungateable boundaries are shown
- * **with their reasons** rather than omitted: somebody looking for `final-fix`
- * and not finding it learns nothing, and `mergeSection` would have dropped a
- * hand-written row for it in silence.
+ * not have or a mode it does not honour.
  *
  * ## What each mode costs, said on the row
  *
@@ -40,16 +73,7 @@ import type { ConfigFrame } from '../host';
  * not obvious from their names. `step` holds and asks, which is free here
  * because the app runs the loop in-process — but **a terminal cannot answer a
  * promise**, so from the CLI a `step` row runs straight through. `stop` asks
- * nobody: the run ends there, resumably, whoever is listening. A matrix that did
- * not say that would let somebody arm a gate their terminal ignores.
- *
- * ## What is not built
- *
- * The rest of `1h`'s sidebar — worktree scripts, MCP, prompts — is either a
- * v1.5 issue (#137, #138) or has no configuration behind it yet. The **raw
- * JSON** is shown instead of pretending otherwise, which is `1h`'s own answer:
- * the form and the file are the same thing, so the file is a legitimate way to
- * edit what the form does not cover.
+ * nobody: the run ends there, resumably, whoever is listening.
  */
 
 /** What each mode does, and what it costs. The wording is `src/gates.ts`'s. */
@@ -59,11 +83,82 @@ const MODE_NOTE: Readonly<Record<string, string>> = {
   stop: 'ends the run, resumably, whoever is listening',
 };
 
-export function Settings({ dir }: { dir: string }) {
+/**
+ * The standing prompt blocks, fetched once when the section opens.
+ *
+ * Lazy for the reason every artifact pane is: the blocks are several pages and
+ * nobody arriving at Settings is looking for them. One read, and it never
+ * changes within a build — these are constants in `src/prompts.ts`, not
+ * configuration.
+ */
+function usePromptBlocks(open: boolean): {
+  blocks: readonly { name: string; usedBy: readonly string[]; text: string }[];
+  failure: string | null;
+  loading: boolean;
+} {
+  const [blocks, setBlocks] = useState<
+    readonly { name: string; usedBy: readonly string[]; text: string }[]
+  >([]);
+  const [failure, setFailure] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!open || !host.inShell() || blocks.length > 0) return;
+    let cancelled = false;
+    setLoading(true);
+    void host
+      .prompts()
+      .then((next) => {
+        if (!cancelled) {
+          setBlocks(next);
+          setFailure(null);
+        }
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setFailure(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, blocks.length]);
+
+  return { blocks, failure, loading };
+}
+export function Settings({
+  dir,
+  scale,
+  onScale,
+  statuses,
+  keyFailure,
+  onKeysChanged,
+}: {
+  dir: string;
+  /** How big the product is drawn. Window state — see `appearance.ts`. */
+  scale: number;
+  onScale: (next: number) => void;
+  /**
+   * Which providers hold a pilot key, read by the window and passed in (#188).
+   *
+   * Not fetched here, and that is the fix #188 made rather than an inconvenience:
+   * two panes needed this fact and each held its own copy, so entering a key
+   * updated the form while the pilot went on refusing to let anybody type,
+   * correctly according to a snapshot from before the key existed. One reader,
+   * one fact.
+   */
+  statuses: readonly KeyStatus[] | null;
+  keyFailure: string | null;
+  onKeysChanged: () => void;
+}) {
   const [frame, setFrame] = useState<ConfigFrame | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  /** Whether the prompts section is open, which is what makes its read lazy. */
+  const [showPrompts, setShowPrompts] = useState(false);
+  const prompts = usePromptBlocks(showPrompts);
 
   const load = useCallback(() => {
     if (!host.inShell()) {
@@ -157,6 +252,75 @@ export function Settings({ dir }: { dir: string }) {
       {saved !== null && failure === null && (
         <p className="v-set__note">saved to {saved}, and reread from it.</p>
       )}
+
+      {/* ---- this window ------------------------------------------------- */}
+      <section className="v-set__block">
+        <h3 className="v-set__h">how this is drawn</h3>
+        <p className="v-set__note">
+          This window, on this machine. It is not written to <code>vibe.config.json</code> — how
+          big you like your text is not a fact about any run, and that file is meant to be
+          committed.
+        </p>
+        <div className="v-set__scale">
+          {STEPS.map((step) => (
+            <label key={step.scale} className="v-set__radio">
+              <input
+                type="radio"
+                name="type-scale"
+                checked={scale === step.scale}
+                onChange={() => onScale(step.scale)}
+              />
+              <span style={{ fontSize: `calc(var(--size-body) * ${String(step.scale)})` }}>
+                {step.label}
+              </span>
+            </label>
+          ))}
+        </div>
+        {/* Every size at once, which is what keeps the ramp the spec chose. A
+            control that moved body text alone would leave headings where they
+            were and break the relationships that make a page readable. */}
+        <p className="v-set__note">
+          Every size moves together, so the proportions the design chose survive being scaled.
+          Nothing else about the look is configurable: there is one palette, and it is the one the
+          contrast gate is measured against.
+        </p>
+      </section>
+
+      {/* ---- who is logged in, and who holds a key ------------------------ */}
+      <section className="v-set__block">
+        <h3 className="v-set__h">agents, and the pilot&apos;s credentials</h3>
+        {/* The answer to "subscription or keys": they are two different things
+            about two different processes, and only one of them has a control. */}
+        <div className="v-set__fact">
+          <span className="v-set__factname">a run&apos;s agents</span>
+          <span>
+            <strong>Always your own subscriptions, and there is nothing here to set.</strong>{' '}
+            <code>claude</code> and <code>codex</code> are child processes that inherit whatever
+            you are already logged into — vibe installs neither and holds no credential for
+            either. If a run cannot reach one, that is a login in your terminal, not a setting in
+            this window; <code>vibe doctor</code> is what checks it.
+          </span>
+        </div>
+        <div className="v-set__fact">
+          <span className="v-set__factname">the pilot</span>
+          <span>
+            <strong>Chooses, per conversation.</strong> On the subscription it is a{' '}
+            <code>claude -p</code> child like any turn and bills nothing at all. On an API key it
+            is an HTTP request this app makes — money moves, and the pilot&apos;s reply says what
+            it estimates and the date the price was read. The keys below are for that second case
+            only: <strong>the pilot works with none of them.</strong>
+          </span>
+        </div>
+        <div className="v-set__fact">
+          <span className="v-set__factname">where keys live</span>
+          <span>
+            The OS keychain, never <code>vibe.config.json</code> — that file is committed, and the
+            config validator reports bad values <em>by name</em>, which is the one thing that must
+            never happen to a secret. Nothing in this window can read a key back.
+          </span>
+        </div>
+        <Credentials statuses={statuses} failure={keyFailure} onChanged={onKeysChanged} />
+      </section>
 
       <section className="v-set__block">
         <h3 className="v-set__h">where the loop hands control back</h3>
@@ -301,6 +465,68 @@ export function Settings({ dir }: { dir: string }) {
         </p>
       </section>
 
+      {/* ---- what every turn is told ------------------------------------- */}
+      <section className="v-set__block">
+        <h3 className="v-set__h">what each turn is told</h3>
+        {/* **What this can honestly show, and what it cannot.** A prompt here is
+            a function of the run — `planPrompt` takes the task and the prior-run
+            index, `critiquePrompt` takes the plan it is judging, `fixPrompt`
+            takes the findings and the diff — so there is no such thing as "the
+            implement prompt" outside a run, and rendering one from invented
+            inputs would be the fabrication this repo refuses everywhere else.
+
+            What does not vary are the standing blocks below, which is what
+            somebody reading a settings screen is actually asking about: what
+            instructions is the reviewer permanently under. They arrive verbatim
+            from the same constants the prompts interpolate. */}
+        <p className="v-set__note">
+          These are the <strong>standing</strong> instructions — the blocks every turn of a kind
+          gets unchanged, quoted from the source rather than described. What is assembled per
+          turn — the brief, the plan being judged, the findings, the diff — is in that run&apos;s
+          own artifacts, on the Plans, Plan critique and Code review tabs.
+        </p>
+        <p className="v-set__note">
+          They are not editable here and are deliberately not configuration: they are the
+          product&apos;s behaviour, and a per-project override would mean two runs of the same
+          version could not be compared.
+        </p>
+        <Section
+          id="prompt-blocks"
+          open={showPrompts}
+          onToggle={() => setShowPrompts((on) => !on)}
+          title="the blocks, in full"
+          meta={
+            prompts.blocks.length > 0 ? (
+              <MetaChip>{prompts.blocks.length} blocks</MetaChip>
+            ) : undefined
+          }
+        >
+          {prompts.failure !== null && (
+            <p className="v-set__note">
+              <StateKicker tone="alarm">not read</StateKicker> {prompts.failure}
+            </p>
+          )}
+          {prompts.failure === null && prompts.loading && prompts.blocks.length === 0 && (
+            <p className="v-set__note">asking the host what every turn is told…</p>
+          )}
+          {prompts.blocks.map((block) => (
+            <div className="v-set__prompt" key={block.name}>
+              <div className="v-set__promptname">
+                <span>{block.name}</span>
+                {/* Which turns include it. Told by the core beside the block
+                    rather than worked out here: the interpolation sites are in
+                    five different template literals and a window has no way to
+                    check a claim about them. */}
+                {block.usedBy.map((role) => (
+                  <MetaChip key={role}>{role}</MetaChip>
+                ))}
+              </div>
+              <pre className="v-set__raw">{block.text}</pre>
+            </div>
+          ))}
+        </Section>
+      </section>
+
       <section className="v-set__block">
         <h3 className="v-set__h">the file itself</h3>
         {/* `1h`'s own answer to what the form does not cover: the form and the
@@ -309,9 +535,9 @@ export function Settings({ dir }: { dir: string }) {
             second path to the same file with different validation on it. */}
         <pre className="v-set__raw">{JSON.stringify(frame.raw, null, 2)}</pre>
         <p className="v-set__note">
-          Shown rather than edited. Worktree scripts, MCP scoping and the prompt templates have no
-          form here yet; editing the file directly is the supported way to reach them, and it is
-          the same file this screen writes.
+          Shown rather than edited. Worktree scripts and MCP scoping have no form here yet;
+          editing the file directly is the supported way to reach them, and it is the same file
+          this screen writes.
         </p>
       </section>
     </div>

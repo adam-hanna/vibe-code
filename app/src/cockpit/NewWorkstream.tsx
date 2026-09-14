@@ -148,7 +148,7 @@ export function NewWorkstream({
           className="v-new__task"
           rows={5}
           value={task}
-          placeholder="the brief, in full — the runs that converge state the decisions already made and say not to re-derive them"
+          placeholder="The brief, in full"
           onChange={(e) => setTask(e.target.value)}
         />
 
@@ -282,9 +282,7 @@ export function NewWorkstream({
             read as the whole of what a run can be configured to do. */}
         <p className="v-new__note">
           No name, branch or worktree field: <code>vibe</code> names its own branch after the run
-          id it allocates, and the CLI takes neither. No setup preview and no{' '}
-          <em>create the worktree but hold</em>, because vibe cannot create a worktree yet — this
-          runs in one you already have.
+          id it allocates.
         </p>
 
         <label className="v-new__toggle">

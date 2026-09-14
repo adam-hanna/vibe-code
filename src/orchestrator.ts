@@ -612,7 +612,20 @@ async function runPhases(
       state.status = 'planned';
       advancePhase(state, 'complete');
       writeCheckpoint(state, 'complete', NO_COMMIT);
-      log.ok('Plan-only run: stopping before implementation.');
+      // Narrated with an id since #223, and it is the promotion AGENTS.md keeps
+      // describing: `planOnly` is a fact the run has held since `createRun` and
+      // never said, so a window could not tell a plan-only run that FINISHED
+      // from any other run that finished - and the two want opposite next
+      // actions. Without it the only way back to this plan was a new run that
+      // re-derives it, which is what *"it kicked off another run from scratch"*
+      // cost. Narration only: `planOnly` is already durable, so recording it
+      // would store one fact twice.
+      log.ok('Plan-only run: stopping before implementation.', {
+        id: 'plan_only_stopped',
+        // What the plan is carrying, so the offer to implement it can say so.
+        // A count of what the tolerance let through, not a judgement about it.
+        data: { carried: (state.carried ?? []).length },
+      });
       return state;
     }
     advancePhase(state, 'implementing');

@@ -529,15 +529,15 @@
 }
 
 /*
- * A tab whose data does not exist yet. Dashed and NEVER dimmed - the design's
- * rule for unavailable, because dimming reads as "disabled for you" where dashed
- * reads as "nothing has filled this in".
+ * There is no `--off` tab any more (#223). It dressed one placeholder - `Prompt`,
+ * dashed, with "not built yet" on its tooltip - and what that stood for is now a
+ * section of Settings, so the last tab in the bar with nothing behind it is gone
+ * and the rule went with it.
+ *
+ * The rule it carried is the one worth keeping in mind if another placeholder is
+ * ever needed: dashed and NEVER dimmed, because dimming reads as "disabled for
+ * you" where dashed reads as "nothing has filled this in".
  */
-.v-cockpit__tab--off {
-  color: var(--text-tertiary);
-  border-bottom: 1px dashed var(--rule-control-dim);
-  padding-bottom: var(--space-1);
-}
 
 .v-cockpit__unknown {
   font: var(--type-mono-sm);
@@ -2844,7 +2844,57 @@
   padding: var(--space-3);
   margin: 0;
   max-height: 30vh;
+  /* A prompt block is prose with its own line breaks, and they are how it is
+     read. `pre-wrap` rather than the default `pre`, so a long instruction wraps
+     in the pane instead of scrolling sideways out of it. */
+  white-space: pre-wrap;
   overflow: auto;
+}
+
+/* The appearance steps, each drawn AT the size it would set — a radio labelled
+   "large" beside four identical labels says nothing, and the point of the
+   control is what the text will look like. */
+.v-set__scale {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-5);
+  align-items: baseline;
+  padding: var(--space-3) 0;
+}
+
+/* A statement rather than a control, for the settings that have no control:
+   a run's agents are your own logins and there is nothing here to set. */
+.v-set__fact {
+  display: grid;
+  grid-template-columns: 9rem 1fr;
+  gap: var(--space-3);
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--rule-inner);
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+.v-set__factname {
+  font: var(--type-label);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+/* One standing prompt block: its name, who gets it, and the text verbatim. */
+.v-set__prompt {
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--rule-inner);
+}
+
+.v-set__promptname {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+  font: var(--type-section);
+  color: var(--text-emphasis);
 }
 
 .v-set__again {

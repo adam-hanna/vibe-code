@@ -113,6 +113,26 @@ export function resumeArgv(
 }
 
 /**
+ * Take a finished plan-only run into implementation (#223).
+ *
+ * **A resume with one flag, and deliberately not a new run.** Reported as a dead
+ * end — *"after it stopped, I SHOULD have been able to continue… When I asked
+ * the pilot, it kicked off another run from scratch"* — and a new run is exactly
+ * the wrong answer: it re-derives a plan that already exists, and it has none of
+ * what the plan phase settled, so the P1s the tolerance carried and the findings
+ * the approving round declined are simply lost.
+ *
+ * Every refusal lives in `continueIntoImplementation` on the core side, which is
+ * what keeps this a *form to an argv* rather than a second opinion about when a
+ * run may change shape. A plan that has not cleared critique, a run that was
+ * never plan-only and a run with no stored plan all come back as the core's own
+ * sentence.
+ */
+export function implementArgv(runId: string, dir: string): readonly string[] {
+  return ['resume', runId.trim(), '-C', dir.trim(), '--implement'];
+}
+
+/**
  * What a halt banner may raise on the way back in (`4d`, #223).
  *
  * `4d` gives every halt a choice — `+2 rounds`, `+2M and resume` — and each of

@@ -213,6 +213,19 @@ export interface ArtifactsFrame {
 }
 
 /**
+ * The standing instruction blocks each turn is given (#223).
+ *
+ * Verbatim, never summarised. A prompt is a function of the run — the task, the
+ * plan, the findings, the diff — so what a settings screen can honestly show is
+ * the part that does not vary, and showing it means quoting it.
+ */
+export interface PromptsFrame {
+  type: 'prompts';
+  id: number;
+  blocks: readonly { name: string; usedBy: readonly string[]; text: string }[];
+}
+
+/**
  * A run that is gone, in reply to a `delete_run` request (#223).
  *
  * `removed` is the directory the core actually deleted, which is the one thing
@@ -293,7 +306,8 @@ export type Frame =
   | DiffFrame
   | ArtifactsFrame
   | ArtifactFrame
-  | RunDeleted;
+  | RunDeleted
+  | PromptsFrame;
 
 /**
  * Whether a value is a frame this version recognises.
@@ -333,6 +347,10 @@ export function isFrame(v: unknown): v is Frame {
     // construction not the one being narrated — the core refuses to delete a
     // run whose lock is live.
     type === 'run_deleted' ||
+    // The standing prompt blocks, ignored by the cockpit's reducer for the same
+    // reason: they are the same in every run, so they say nothing about the one
+    // being narrated.
+    type === 'prompts' ||
     // The command runner's three (#211). Also ignored by the cockpit's reducer:
     // a command is not part of a run - it outlives one, and it happens when
     // there is none - so `Cockpit` folds them with `reduceCommands` instead.
@@ -666,6 +684,25 @@ export async function artifact(
     'the host did not answer with the artifact',
   );
   return frame.read;
+}
+
+/**
+ * The standing instruction blocks each turn is given (#223).
+ *
+ * The only read in this file that names neither a repository nor a run, and the
+ * absence is the point: these blocks are the same in every run, which is what
+ * makes them a **setting** rather than a fact about one. A `dir` here would be a
+ * field nobody reads and a later reader has to work out is unused.
+ */
+export async function prompts(): Promise<PromptsFrame['blocks']> {
+  const id = nextRequestId();
+  const frame = await ask<PromptsFrame>(
+    { type: 'prompts', id },
+    id,
+    'prompts',
+    'the host did not answer with the prompt blocks',
+  );
+  return frame.blocks;
 }
 
 /**

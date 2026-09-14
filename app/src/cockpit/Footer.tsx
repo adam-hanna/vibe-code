@@ -37,6 +37,8 @@ export interface FooterProps {
    * frame would be the `proposed` chip shipped as behaviour.
    */
   onResume: (runId: string, dir: string, raise?: Raise) => void;
+  /** Take a finished plan-only run into implementation (#223). See `implementArgv`. */
+  onImplement: (runId: string, dir: string) => void;
   /** The caps in force, so a raise can be relative. Null until the config is read. */
   caps: Caps | null;
   /**
@@ -141,6 +143,7 @@ export function Footer({
   onPause,
   onStop,
   onResume,
+  onImplement,
   caps,
   gates,
   order,
@@ -431,6 +434,54 @@ export function Footer({
         )}
 
         {run.reason !== null && <div className="v-footer__why">{run.reason.message}</div>}
+        {/* **A finished plan-only run is the one ending with work left to do**,
+            and until #223 it was the only ending offering nothing. `plan_only_stopped`
+            is what makes it distinguishable: every other exit-0 run built what it
+            planned, and this one has an approved plan and nothing built from it.
+
+            Reported as a dead end in as many words — *"after it stopped, I SHOULD
+            have been able to continue… When I asked the pilot, it kicked off
+            another run from scratch"* — and a new run is the wrong answer rather
+            than a slow one: it re-derives a plan that exists, and it carries none
+            of what the plan phase settled.
+
+            Offered here, beside the ending, rather than as a `RESUMABLE` exit
+            code. Exit 0 is not a halt and must not start reading as one; this is
+            a separate labelled act on a run that finished exactly as asked. */}
+        {run.plannedOnly !== null && run.identity !== null && (
+          <div className="v-footer__actions">
+            <Button
+              level="primary"
+              disabled={busy}
+              onClick={() => {
+                if (run.identity !== null) onImplement(run.identity.runId, run.identity.dir);
+              }}
+            >
+              ▶ implement this plan
+            </Button>
+            <span className="v-footer__note">
+              It continues this run rather than starting one: the approved plan, the acceptance
+              bar the critic passed, the{' '}
+              {run.plannedOnly.carried > 0
+                ? `${run.plannedOnly.carried} P1(s) it carried`
+                : 'findings it carried'}{' '}
+              and the ones it declined all travel with it, and nothing is re-planned.
+            </span>
+          </div>
+        )}
+        {/* Said whether or not the button is pressed, because it changes what
+            the plan means. The tolerance let these through — the plan was
+            accepted DESPITE them — and a reader who thinks the plan is clean is
+            reading the wrong thing. Absent, not zero, when none were carried. */}
+        {run.plannedOnly !== null && run.plannedOnly.carried > 0 && (
+          <div className="v-footer__why">
+            This plan was accepted carrying {run.plannedOnly.carried} P1(s) on tolerance — not
+            without them. They are stated in the implementation prompt, so whatever implements
+            this plan is told about them; the Plan critique tab has each in full.
+          </div>
+        )}
+
+
 
         {how !== null && how.next !== null && <div className="v-footer__note">{how.next}</div>}
 

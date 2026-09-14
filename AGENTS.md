@@ -381,6 +381,90 @@ they are waiting on. Four things in it are worth carrying:
   are acted on differently, and a window that collapsed them into *"could not delete"* would
   answer neither. It is answerable beside a run for a reason rather than by exemption — the
   live-lock refusal means **the running run is the one run this frame can never reach**.
+- **A plan-only run completes, and it now has somewhere to go.** The settled distinction
+  stands — `planOnly` says there is no next phase, a `stop` gate is the resumable halt — and it
+  left a dead end nobody had walked into until somebody did: *"after it stopped, I SHOULD have
+  been able to continue, either with more planning or move on to implementation, but it didn't
+  allow that. When I asked the pilot, it kicked off another run from scratch."* A new run is
+  the **wrong** answer rather than a slow one: it re-derives a plan that already exists, and it
+  carries none of what the plan phase settled.
+
+  `continueIntoImplementation` in `run.ts` is the named act, reached by `vibe resume <id>
+  --implement`, and it is deliberately not plan-only becoming resumable — folding the two
+  together would make `vibe plan` report needing input on a run that produced exactly what it
+  was asked for. It **changes what the run is**, once, so it is a decision somebody takes
+  rather than a state the loop can wander into, and it refuses three ways with the reason: a
+  run that was never plan-only, one whose plan has not cleared critique (converting it would
+  skip the critique), and one reporting a finished plan while storing none. What travels with
+  it is the whole point — the approved plan, the frozen acceptance bar, the P1s `carried` on
+  tolerance and the findings the approving round `declined`.
+
+  The rule lives in `run.ts` so both front ends check one copy; the `--implement` flag and the
+  window's button only ask. `plan_only_stopped` is the narration that makes the offer
+  possible — `planOnly` has been durable since `createRun` and was never said, so a window
+  could not tell a plan-only run that **finished** from any other run that finished, and the
+  two want opposite next actions. The offer is on the ending rather than by adding exit 0 to
+  `RESUMABLE`: exit 0 is not a halt and must not start reading as one.
+- **"Zero P1s" was being claimed over plans that carried some, and the guard was reading the
+  wrong list.** `state.outstanding` is written by the final fix round, which a plan-only run
+  never reaches — so it is empty on every one of them and the summary fell through to *"Plan
+  cleared critique with zero P1s"*, four lines below its own `Plan accepted with 1 P1(s)
+  carried into implementation`. The comment above that branch already stated the rule it
+  broke: *"Never claim a spotless finish when a P1 was carried."* A plan-only run carries its
+  P1s in `state.carried`; the two lists are about two phases and must stay apart.
+- **The settings screen holds three kinds of setting and says which is which.** They are not
+  interchangeable, and a screen that hid the difference would be lying about where a change
+  goes: the **project's** (gates, roles) in `vibe.config.json`, meant to be committed; **this
+  window's** (the type scale) in `localStorage`, this machine only; and **this machine's
+  secrets** (the pilot's API keys) in the OS keychain — deliberately not the config file,
+  which is committed and whose validator reports bad values *by name*.
+
+  **Subscription against keys is two questions about two processes**, and conflating them is
+  what made the old `Keys` tab read as though the product needed an API key at all. A run's
+  agents are *always* your own subscriptions — `claude` and `codex` are child processes
+  inheriting whatever you are logged into, vibe installs neither and holds no credential for
+  either — so that section **states** it rather than offering a control, and points at `vibe
+  doctor`. Only the pilot chooses, per conversation, and the keys are for its API road alone.
+  `Credentials` said *"no provider configured — the pilot cannot run"* until #223, which
+  stopped being true the moment the subscription backend landed and would have sent somebody
+  to buy a key they do not need.
+- **The type scale is a multiplier over the design's own sizes, not a second set of them.**
+  Reported as *"the font is a little too small for me"*, and 13px body text is a decision the
+  build spec made for one pair of eyes. `tokens.css` splits into `--size-*` (the design's
+  stated px, which `audit:contrast` §8 reads and which any argument about type is about) and
+  `--type-*` (the composed shorthand, `--size-*` times `--type-scale`). **Every size moves
+  together**, so the ramp the spec chose survives being scaled and no two styles can drift.
+
+  Browser zoom was the other answer and is worse here: it scales layout as well as type, and
+  viewport units do not scale with it — so `.v-modal`'s `max-height: calc(100vh - …)` would
+  compute in zoomed pixels and a dialog would be taller than the window at any zoom above 1,
+  which is the exact defect that bound was added to fix.
+
+  The auditor's parser had to move with the tokens, and the failure it was one edit away from
+  is worth remembering: its old regex matched `600 13px/1.6` and would have matched **nothing**
+  after the split — and "nothing" in a `Math.min(… ?? Infinity)` check is a **pass**. It now
+  fails when a wrapping style cannot be measured, because a parser that silently stops finding
+  its subject is worse than one that breaks.
+- **`prompts` is a read frame that names no run, and what it declines to return is the
+  design.** Asked for from the settings screen — *"the prompts being used for each turn should
+  also go there"* — and a prompt in this repo is a **function of the run**: `planPrompt` takes
+  the task and the prior-run index, `critiquePrompt` takes the plan it is judging, `fixPrompt`
+  takes the findings and the diff. There is no "implement prompt" outside a run, and rendering
+  one from invented inputs would be the fabrication everything else here is arranged against.
+
+  What there is, and what a person reading a settings screen is actually asking about, is the
+  **standing** part: the blocks every turn of a kind gets unchanged, returned verbatim from the
+  same constants the prompts interpolate. So the screen quotes the product rather than
+  describing it, and says plainly that the brief, the plan, the findings and the diff are
+  assembled per turn and live in that run's own artifacts. They are not editable and are
+  deliberately not configuration — a per-project override would mean two runs of the same
+  version could not be compared.
+
+  `usedBy` is the one claim a reader cannot check, because the interpolation sites are in five
+  different template literals. `prompt-blocks.test.ts` reads `src/prompts.ts` as source and
+  follows one hop through a helper — and it earned its place immediately, catching a `usedBy`
+  that named the reviewer for `DEFERRED_MARK` when that block reaches the planner and the
+  implementer through `formatFinding` and the reviewer never sees one.
 - **A dialog cannot outgrow the window it is covering, and that is the other half of
   "Escape always leaves".** `.v-modal` had no `max-height` at all, so the height of a dialog
   was whatever its caller passed in — and a confirmation that put a run's whole brief in its
@@ -635,8 +719,8 @@ event type**, never a name of its own: `applyCharge` narrates under `claude_turn
 `codex_turn`, the same string it just recorded, so a host acting on the fact and an archive
 holding it agree about one fact rather than two spellings of it.
 
-**Five frames are reads, and a read runs beside a run** (#223). `archive`, `config`, `diff`,
-`artifacts` and `artifact` answer a question rather than describing something that happened,
+**Six frames are reads, and a read runs beside a run** (#223). `archive`, `config`, `diff`,
+`artifacts`, `artifact` and `prompts` answer a question rather than describing something that happened,
 which is a shape the wire did not have — every other outbound frame is pushed. They are exempt
 from `serve.ts`'s one-at-a-time rule for a stronger reason than the pilot is: that rule exists
 because two *runs* would interleave their narration, and `listRuns` is documented as never
@@ -861,6 +945,8 @@ app/src/cockpit/squares.ts what the navigator may draw, and the two letters stan
 app/src/cockpit/Sidebar.tsx  projects, their runs, and the pins - the rail merged into one
 app/src/cockpit/projects.ts  which repositories are open, which runs are pinned, and renamed
 app/src/cockpit/Confirm.tsx  the dialog in front of anything that cannot be undone
+app/src/cockpit/appearance.ts  how big the product is drawn, and nothing else about the look
+app/src/cockpit/Settings.tsx   every setting, and which of the three places each one goes
 app/src/cockpit/outgroups.ts the output cut into rounds, and a finished run's transcript
 app/src/pilot/saved.ts       a conversation kept between launches, and which run it is about
 app/src/cockpit/artifacts.ts what a run wrote: classifying a listing, and reading a report

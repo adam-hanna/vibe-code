@@ -1,6 +1,7 @@
 import type { Level, Narration } from '@src/log.js';
 import type { GateContext } from '@src/host.js';
 import type { ArtifactRead, RunArtifact, RunSummary } from '@src/types.js';
+import type { PromptBlock } from '@src/prompts.js';
 
 /**
  * The wire between the loop and whatever is driving it (#153).
@@ -234,7 +235,15 @@ export type Outbound =
    * shape - a window that had to read a boolean to find out whether its own
    * request happened is one that will eventually forget to.
    */
-  | { type: 'run_deleted'; id: number; dir: string; runId: string; removed: string };
+  | { type: 'run_deleted'; id: number; dir: string; runId: string; removed: string }
+  /**
+   * The standing instruction blocks, in reply to a `prompts` request (#223).
+   *
+   * Verbatim, never summarised: the point of showing a prompt is that it is the
+   * text the model was actually given, and a paraphrase of it is a screen
+   * describing the product rather than quoting it.
+   */
+  | { type: 'prompts'; id: number; blocks: readonly PromptBlock[] };
 
 /** What the thing driving the loop says. */
 export type Inbound =
@@ -437,6 +446,16 @@ export type Inbound =
    * and the refusal is on the shape of what is present.
    */
   | { type: 'artifact'; id: number; dir: string; runId: string; name: string }
+  /**
+   * Ask what standing instructions each turn is given (#223).
+   *
+   * A read like the four above it, and the only one that names no run: these
+   * blocks are the same in every run, which is what makes them a SETTING rather
+   * than a fact about one. It takes no `dir` for the same reason - there is
+   * nothing repository-shaped to look in, and a field nobody reads is one a
+   * later reader has to work out is unused.
+   */
+  | { type: 'prompts'; id: number }
   /**
    * Delete a run from the archive (#223).
    *
@@ -642,6 +661,11 @@ export function decode(line: string): Decoded {
       }
       return { ok: true, message: { type: 'artifact', id, dir, runId, name } };
     }
+    case 'prompts':
+      // No fields to check. Every other read names a repository or a run and is
+      // refused without one; this names neither, because the blocks are the
+      // same in every run and in every repository.
+      return { ok: true, message: { type: 'prompts', id } };
     case 'diff': {
       const dir = parsed['dir'];
       if (typeof dir !== 'string' || dir === '') {
