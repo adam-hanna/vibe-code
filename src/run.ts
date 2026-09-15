@@ -15,6 +15,8 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import * as log from '@src/log.js';
 import { livenessOf } from '@src/lock.js';
+import { fillAnswers, unanswered } from '@src/answers.js';
+import type { FilledAnswer } from '@src/answers.js';
 import type { ActivityObservation } from '@src/progress.js';
 import { initialSlotFields } from '@src/slots.js';
 import { checkStoredConsistency, checkTokenShare } from '@src/consistency.js';
@@ -1665,6 +1667,65 @@ export function readRunArtifact(targetDir: string, runId: string, name: string):
   }
 }
 
+
+/**
+ * Put a person's answers into a halted run's `NEEDS-INPUT.md` (#223).
+ *
+ * **The window's road to the same file a text editor writes**, and it stops
+ * there on purpose: the resume that follows is the ordinary one, so
+ * `parseHumanAnswers`, the raise blocks, the severity moves and the
+ * `answered-<n>.md` retirement are all untouched and cannot tell where the text
+ * came from. See `src/answers.ts` for why this is not a frame carrying answers
+ * straight into `state`.
+ *
+ * Refuses rather than repairs, three ways and each with its own sentence:
+ *
+ * - **An unusable run id or a linked run directory**, through `runDirFor`, which
+ *   is the same predicate the reads and the delete go through (#53).
+ * - **A run with no `NEEDS-INPUT.md`** is not waiting on anybody. Writing one
+ *   would invent a halt, and a resume would then consume a file the loop never
+ *   produced.
+ * - **A run whose lock names a live process.** Answering a file a running loop
+ *   is about to read is a second writer on the same run, which is the state
+ *   `src/lock.ts` exists to prevent; and `unknown` refuses too, for the reason
+ *   `deleteRun` refuses it — a lock it cannot read cannot rule one out.
+ *
+ * It does not resume. Two acts, and the caller takes them in order, because a
+ * write that also spent tokens would be one nobody could take back.
+ */
+export function answerQuestions(
+  targetDir: string,
+  runId: string,
+  answers: readonly FilledAnswer[],
+): { filled: number; unmatched: readonly string[]; open: readonly string[] } {
+  const dir = runDirFor(targetDir, runId);
+  const { liveness } = livenessOf(dir);
+  if (liveness === 'running' || liveness === 'unknown') {
+    throw new StoredStateError(
+      `Run "${runId}" ${
+        liveness === 'running'
+          ? 'is running, so it is not waiting for an answer'
+          : 'holds a lock this process cannot read, so it cannot tell whether anything is still ' +
+            'working on it'
+      }. Nothing was written.`,
+    );
+  }
+  const file = path.join(dir, 'NEEDS-INPUT.md');
+  let md: string;
+  try {
+    md = readFileSync(file, 'utf8');
+  } catch {
+    throw new StoredStateError(
+      `Run "${runId}" has no NEEDS-INPUT.md, so it is not stopped on a question. Nothing was ` +
+        'written.',
+    );
+  }
+  const result = fillAnswers(md, answers);
+  // Atomic for the reason every other state write here is: a torn NEEDS-INPUT.md
+  // is one the resume refuses, and the answers would be gone with it.
+  writeAtomic(dir, 'NEEDS-INPUT.md', result.md);
+  return { filled: result.filled, unmatched: result.unmatched, open: unanswered(result.md) };
+}
 /** What was removed. The directory rather than a byte count — see `deleteRun`. */
 export interface RunRemoval {
   runId: string;

@@ -6,7 +6,13 @@ import { promptBlocks } from '@src/prompts.js';
 import * as log from '@src/log.js';
 import { createLineReader, decode, encode, PROTOCOL_VERSION } from '@src/protocol.js';
 import { orchestrate } from '@src/orchestrator.js';
-import { deleteRun, listRunArtifacts, listRuns, readRunArtifact } from '@src/run.js';
+import {
+  answerQuestions,
+  deleteRun,
+  listRunArtifacts,
+  listRuns,
+  readRunArtifact,
+} from '@src/run.js';
 import { loadConfig, readRawConfig, writeConfigPatch } from '@src/config.js';
 import { GATEABLE, GATE_MODES, UNGATEABLE } from '@src/gates.js';
 import { diffRange, diffSinceWithLimit } from '@src/git.js';
@@ -431,6 +437,36 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       // every time. It is answerable beside a run for the strongest version of
       // the reason the others are - it cannot even observe one.
       send({ type: 'prompts', id: msg.id, blocks: promptBlocks() });
+      return;
+    }
+
+    if (msg.type === 'answer_questions') {
+      // A write, beside a run, and its own guard is what makes that safe: it
+      // refuses a run whose lock names a live process and refuses one whose lock
+      // it cannot read, so the run in flight is the one run this frame cannot
+      // reach - the same reasoning `delete_run` rests on.
+      //
+      // It does not resume. The caller sends the resume argv as a separate
+      // `invoke`, which is what keeps this a write nobody has spent anything on
+      // yet and keeps the resume itself the ordinary one.
+      try {
+        const placed = answerQuestions(msg.dir, msg.runId, msg.answers);
+        send({
+          type: 'questions_answered',
+          id: msg.id,
+          dir: msg.dir,
+          runId: msg.runId,
+          filled: placed.filled,
+          unmatched: placed.unmatched,
+          open: placed.open,
+        });
+      } catch (err: unknown) {
+        send({
+          type: 'error',
+          id: msg.id,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
       return;
     }
 

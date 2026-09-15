@@ -612,7 +612,33 @@ export interface Config {
    * review loop, where they consumed a round as a plan-stage P1.
    */
   toolchain: ToolchainContract;
+  /**
+   * Prompt blocks this project replaces, by the name `promptBlocks()` gives them.
+   *
+   * **A reversal, and the reasoning it reverses is recorded rather than quietly
+   * dropped** (#223). The settings screen said these were *"deliberately not
+   * configuration: they are the product's behaviour, and a per-project override
+   * would mean two runs of the same version could not be compared."* That cost
+   * is real and is now paid on purpose: *"We need to be able to edit the
+   * prompts."* An owner who wants a reviewer under different standing
+   * instructions has no other way to get one, and telling them the product knows
+   * better is not an answer.
+   *
+   * What keeps the cost visible rather than merely accepted: an overridden block
+   * is **named on the run's own config** - `configDiff` reports `prompts.<block>`
+   * like any other setting - so a run whose reviewer was told something
+   * different says so in its record, which is the half that makes two runs
+   * comparable again.
+   *
+   * Empty by default, so a project that sets none is byte-identical to one that
+   * predates this key.
+   */
+  prompts: PromptOverrides;
 }
+
+/** Block name to replacement text. Open-ended keys, checked against the real list. */
+export type PromptOverrides = Readonly<Record<string, string>>;
+
 
 export interface LoadedConfig extends Config {
   configPath: string | null;

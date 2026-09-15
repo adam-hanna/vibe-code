@@ -71,8 +71,17 @@ describe('the pane reports a decline and never authors one (#211)', () => {
     // the top of every card - so on a card it was a third copy of something the
     // card said twice, and three copies of one consequence beside three
     // different reasons is what made the reasons look identical.
-    const occurrences = rendered.match(/NEEDS-INPUT\.md/g) ?? [];
+    //
+    // **Counted on the sentence rather than on `NEEDS-INPUT.md` (#223).** That
+    // filename was the proxy this used, and it stopped being one the moment the
+    // answer form arrived: the pane now names the same file for an unrelated
+    // reason - it is what a person's answers are written into - so a count of it
+    // measures two things at once. The claim is unchanged and is asserted
+    // directly: the decline consequence appears once, and not inside the card.
+    const occurrences = rendered.match(/A declined <strong>blocking<\/strong> question/g) ?? [];
     expect(occurrences).toHaveLength(1);
+    const card = rendered.slice(rendered.indexOf('function One('), rendered.indexOf('function Recorded'));
+    expect(card).not.toMatch(/NEEDS-INPUT/);
   });
 });
 

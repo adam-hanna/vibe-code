@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { Card, MetaChip, StateKicker } from '../design';
+import { Button, Card, MetaChip, StateKicker } from '../design';
+import * as host from '../host';
 import { Section } from './Disclosure';
 import { ofKind, readAnswers } from './artifacts';
 import { useArtifact, useArtifacts, noText } from './useArtifacts';
@@ -213,15 +214,164 @@ function RecordedRound({
   );
 }
 
+/**
+ * Answering a halted run, on the page that is already showing the questions.
+ *
+ * **The window had every question on screen and no way to answer one.** The
+ * halt banner said *"Answer the questions in NEEDS-INPUT.md, then resume"* —
+ * the CLI's own instruction, correct in a terminal and absurd here: *"thats
+ * crazy, I should answer directly in the app on the questions page."*
+ *
+ * What it does is fill in that same file and then resume, as two requests in
+ * that order. It is not a shortcut past `NEEDS-INPUT.md`: the loop's parser,
+ * the `answered-<n>.md` retirement and the raise blocks are all untouched, and
+ * a person who prefers vim gets an identical run.
+ *
+ * **Saving does not spend anything.** The write and the resume are separate
+ * buttons for that reason — somebody may answer two questions now and the third
+ * after lunch, and a Save that started a run would make that impossible.
+ */
+function AnswerForm({
+  dir,
+  runId,
+  open,
+  busy,
+  onResume,
+}: {
+  dir: string;
+  runId: string;
+  /** The questions still waiting. Answering is offered for exactly these. */
+  open: readonly { question: string; blocking: boolean }[];
+  busy: boolean;
+  onResume: (runId: string, dir: string) => void;
+}) {
+  const [typed, setTyped] = useState<Readonly<Record<string, string>>>({});
+  const [saving, setSaving] = useState(false);
+  const [result, setResult] = useState<{ filled: number; open: readonly string[] } | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
+
+  const answers = open
+    .map((q) => ({ question: q.question, answer: typed[q.question] ?? '' }))
+    .filter((a) => a.answer.trim() !== '');
+
+  const save = (then?: () => void): void => {
+    setSaving(true);
+    setFailure(null);
+    void host
+      .answerQuestions(dir, runId, answers)
+      .then((placed: { filled: number; open: readonly string[] }) => {
+        setResult({ filled: placed.filled, open: placed.open });
+        then?.();
+      })
+      // The core's own sentence. *"It is running, so it is not waiting for an
+      // answer"* and *"it has no NEEDS-INPUT.md"* are acted on differently, and
+      // a window that collapsed them into "could not save" would answer neither.
+      .catch((err: unknown) => setFailure(err instanceof Error ? err.message : String(err)))
+      .finally(() => setSaving(false));
+  };
+
+  return (
+    <div className="v-q__answer">
+      <div className="v-q__answerhead">
+        <StateKicker tone="accent">your turn</StateKicker>
+        <span>
+          These go into the run&apos;s <code>NEEDS-INPUT.md</code> — the same file{' '}
+          <code>vibe resume</code> reads, so answering here and answering in an editor are the
+          same act.
+        </span>
+      </div>
+
+      {open.map((q) => (
+        <label className="v-q__field" key={q.question}>
+          <span className="v-q__fieldq">{q.question}</span>
+          {/* **What is on the wire, and nothing that is not.** The escalation
+              file records what the planner would default to; `Question` on the
+              wire does not carry it, so the form says whether an unanswered one
+              ENDS the run rather than inventing the default it would take. */}
+          <span className="v-q__fielddefault">
+            {q.blocking
+              ? 'blocking — left blank, this is what the run stops on again'
+              : 'advisory — left blank, the planner keeps its own answer and the loop carries on'}
+          </span>
+          <textarea
+            className="v-q__fieldbox"
+            rows={3}
+            value={typed[q.question] ?? ''}
+            disabled={busy || saving}
+            placeholder="in your own words"
+            onChange={(e) => setTyped((cur) => ({ ...cur, [q.question]: e.target.value }))}
+          />
+        </label>
+      ))}
+
+      {failure !== null && (
+        <p className="v-q__note v-q__note--alarm" role="alert">
+          <StateKicker tone="alarm">refused</StateKicker> {failure}
+        </p>
+      )}
+      {result !== null && failure === null && (
+        <p className="v-q__note">
+          {result.filled} written to <code>NEEDS-INPUT.md</code>.{' '}
+          {result.open.length > 0 ? (
+            <>
+              <strong>{result.open.length} still blank</strong> — resuming now lets the planner
+              take its own default for those.
+            </>
+          ) : (
+            'Every question has an answer.'
+          )}
+        </p>
+      )}
+
+      <div className="v-q__actions">
+        <Button
+          level="secondary"
+          disabled={busy || saving || answers.length === 0}
+          onClick={() => save()}
+        >
+          {saving ? 'saving…' : `save ${String(answers.length)} answer(s)`}
+        </Button>
+        {/* The primary, because it is what somebody opened this pane to do. It
+            saves first and resumes only on a write that succeeded — a resume
+            over a refused save would spend a preflight to halt on the same
+            question. */}
+        <Button
+          level="primary"
+          disabled={busy || saving}
+          onClick={() => save(() => onResume(runId, dir))}
+        >
+          ▶ save and resume
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export function QuestionsPane({
   questions,
   dir,
   runId,
   revision = 0,
+  halted = false,
+  busy = false,
+  onResume,
 }: {
   questions: Run['questions'];
   dir: string;
   runId: string | null;
+  /**
+   * Whether the run STOPPED on these questions (#223).
+   *
+   * The form appears on a halt and never beside a live round: a run that is
+   * still going has no `NEEDS-INPUT.md` to write into, and offering a box that
+   * would be refused is worse than not offering one. Told by the exit code the
+   * run reported, never inferred from the questions themselves - an advisory
+   * question the answerer handled leaves open questions on a run nobody is
+   * waiting on.
+   */
+  halted?: boolean;
+  busy?: boolean;
+  onResume?: ((runId: string, dir: string) => void) | undefined;
   /** How many artifacts the run has written, so a settled round appears (#223). */
   revision?: number;
 }) {
@@ -262,6 +412,15 @@ export function QuestionsPane({
   const outstanding =
     questions === null ? 0 : questions.open.filter((q) => q.answer === null && !q.declined).length;
   const declined = questions === null ? 0 : questions.open.filter((q) => q.declined).length;
+  // The ones a person can still answer: unanswered, and not ones the answerer
+  // declined on their behalf. A declined question already has the planner's own
+  // fallback behind it and is not what the run is waiting on.
+  const waiting =
+    questions === null
+      ? []
+      : questions.open
+          .filter((q) => q.answer === null && !q.declined)
+          .map((q) => ({ question: q.question, blocking: q.blocking }));
 
   return (
     <div className="v-q">
@@ -300,6 +459,17 @@ export function QuestionsPane({
           {questions.open.map((q) => (
             <One key={q.question} q={live(q)} />
           ))}
+          {/* Only on a halt, and only for the questions still waiting. See
+              `halted` above for why it is told rather than worked out. */}
+          {halted && runId !== null && onResume !== undefined && waiting.length > 0 && (
+            <AnswerForm
+              dir={dir}
+              runId={runId}
+              open={waiting}
+              busy={busy}
+              onResume={onResume}
+            />
+          )}
           {/* The counts are the loop's and are what the round acted on. If the
               list is shorter, the pane admits it rather than letting the list
               read as the whole of what was asked. */}

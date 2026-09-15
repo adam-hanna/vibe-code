@@ -243,7 +243,25 @@ export type Outbound =
    * text the model was actually given, and a paraphrase of it is a screen
    * describing the product rather than quoting it.
    */
-  | { type: 'prompts'; id: number; blocks: readonly PromptBlock[] };
+  | { type: 'prompts'; id: number; blocks: readonly PromptBlock[] }
+  /**
+   * What an `answer_questions` request placed, in its own words.
+   *
+   * `filled` is how many questions got text and `open` is which are still
+   * blank - reported rather than assumed, because a resume with a question
+   * still open spends a preflight and halts on the same question, and the
+   * window can say so before any of that. `unmatched` names answers the file
+   * does not ask for; they are never appended.
+   */
+  | {
+      type: 'questions_answered';
+      id: number;
+      dir: string;
+      runId: string;
+      filled: number;
+      unmatched: readonly string[];
+      open: readonly string[];
+    };
 
 /** What the thing driving the loop says. */
 export type Inbound =
@@ -479,7 +497,22 @@ export type Inbound =
    * single joined path would be a caller handing this process somewhere to
    * delete, which is the thing the split exists to prevent.
    */
-  | { type: 'delete_run'; id: number; dir: string; runId: string };
+  | { type: 'delete_run'; id: number; dir: string; runId: string }
+  /**
+   * Put a person's answers into a halted run's `NEEDS-INPUT.md` (#223).
+   *
+   * **Deliberately does not resume.** Two acts, taken in order by the caller,
+   * because a write that also spent tokens would be one nobody could take back -
+   * and because the resume that follows is the ORDINARY one, which is what keeps
+   * `parseHumanAnswers` the single definition of what an answer is.
+   */
+  | {
+      type: 'answer_questions';
+      id: number;
+      dir: string;
+      runId: string;
+      answers: readonly { question: string; answer: string }[];
+    };
 
 export function encode(msg: Outbound): string {
   return `${JSON.stringify(msg)}\n`;
@@ -660,6 +693,39 @@ export function decode(line: string): Decoded {
         return { ok: false, id, reason: 'artifact named no artifact' };
       }
       return { ok: true, message: { type: 'artifact', id, dir, runId, name } };
+    }
+    case 'answer_questions': {
+      // `dir` and `runId` checked exactly as the reads check them, and for the
+      // stronger version of the same reason: this one WRITES, so an empty `dir`
+      // resolving to the host's cwd would fill in a different repository's
+      // NEEDS-INPUT.md and report success.
+      const dir = parsed['dir'];
+      const runId = parsed['runId'];
+      if (typeof dir !== 'string' || dir === '') {
+        return { ok: false, id, reason: 'answer_questions carried no dir' };
+      }
+      if (typeof runId !== 'string' || runId === '') {
+        return { ok: false, id, reason: 'answer_questions carried no runId' };
+      }
+      const raw = parsed['answers'];
+      if (!Array.isArray(raw)) {
+        return { ok: false, id, reason: 'answer_questions carried no answers' };
+      }
+      // Per entry, dropping what cannot be placed rather than refusing the
+      // whole request: an answer with no question names nothing in the file, and
+      // losing nine good answers to one malformed row is the worse failure. A
+      // request that survives with none is answered with `filled: 0`, which is a
+      // true statement about what happened.
+      const answers: { question: string; answer: string }[] = [];
+      for (const item of raw as unknown[]) {
+        if (typeof item !== 'object' || item === null) continue;
+        const row = item as Record<string, unknown>;
+        const question = row['question'];
+        const answer = row['answer'];
+        if (typeof question !== 'string' || typeof answer !== 'string') continue;
+        answers.push({ question, answer });
+      }
+      return { ok: true, message: { type: 'answer_questions', id, dir, runId, answers } };
     }
     case 'prompts':
       // No fields to check. Every other read names a repository or a run and is

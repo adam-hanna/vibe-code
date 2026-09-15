@@ -2401,6 +2401,76 @@
   margin: var(--space-2) 0 0;
 }
 
+/* Answering, on the page already showing the questions. A bordered block rather
+   than loose fields, because it is a different act from reading: everything
+   above it is the record and this is the one part that writes. */
+.v-q__answer {
+  margin-top: var(--space-5);
+  padding: var(--space-4);
+  border: 1px solid var(--accent-border);
+  background: var(--surface-accent-tint);
+}
+
+.v-q__answerhead {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+.v-q__field {
+  display: block;
+  margin-bottom: var(--space-4);
+}
+
+.v-q__fieldq {
+  display: block;
+  font: var(--type-body);
+  color: var(--text-emphasis);
+  margin-bottom: var(--space-1);
+}
+
+/* Whether leaving it blank ends the run or leaves a fallback in place. Not what
+   the planner would answer - the wire does not carry that. */
+.v-q__fielddefault {
+  display: block;
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  margin-bottom: var(--space-2);
+}
+
+.v-q__fieldbox {
+  width: 100%;
+  font: var(--type-body);
+  color: var(--text-primary);
+  background: var(--surface-card);
+  border: 1px solid var(--rule-control);
+  padding: var(--space-2) var(--space-3);
+  resize: vertical;
+}
+
+.v-q__fieldbox:focus-visible {
+  outline: 2px solid var(--accent-solid);
+  outline-offset: 1px;
+}
+
+.v-q__actions {
+  display: flex;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+}
+
+/* The primary sits last, matching every other action row in the product. */
+.v-q__actions .v-btn:last-child {
+  margin-left: auto;
+}
+
+.v-q__note--alarm {
+  color: var(--text-primary);
+}
+
 /* ------------------------------------------------------------ all workstreams (1b) */
 
 .v-ws {
@@ -2854,6 +2924,60 @@
 /* The appearance steps, each drawn AT the size it would set — a radio labelled
    "large" beside four identical labels says nothing, and the point of the
    control is what the text will look like. */
+
+/* A saved-on-blur number. Narrow, because every one of them is a small count
+   and a wide box invites a paragraph. */
+.v-set__num {
+  width: 5rem;
+  font: var(--type-mono-sm);
+  color: var(--text-primary);
+  background: var(--surface-card);
+  border: 1px solid var(--rule-control);
+  padding: var(--space-2);
+}
+
+/* A model name, which is long and unpredictable — the one field on this screen
+   whose legal values nothing in the product enumerates. */
+.v-set__text {
+  width: 100%;
+  min-width: 10rem;
+  font: var(--type-mono-sm);
+  color: var(--text-primary);
+  background: var(--surface-card);
+  border: 1px solid var(--rule-control);
+  padding: var(--space-2);
+}
+
+.v-set__num:focus-visible,
+.v-set__text:focus-visible {
+  outline: 2px solid var(--accent-solid);
+  outline-offset: 1px;
+}
+
+.v-set__num:disabled,
+.v-set__text:disabled {
+  border-style: dashed;
+  color: var(--text-tertiary);
+}
+
+/* A sub-heading inside a section, for the one section that has two subjects:
+   how many rounds, and what verdict ends them. */
+.v-set__h4 {
+  font: var(--type-kicker);
+  letter-spacing: var(--track-kicker);
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  margin: var(--space-5) 0 var(--space-2);
+}
+
+/* A control sitting in the middle of the sentence that explains it, which is
+   where the P1 tolerance belongs: the number means nothing without the clause. */
+.v-set__inline {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: var(--space-2);
+}
 .v-set__scale {
   display: flex;
   flex-wrap: wrap;
@@ -2895,6 +3019,55 @@
   margin-bottom: var(--space-2);
   font: var(--type-section);
   color: var(--text-emphasis);
+}
+
+/* The editable block. Monospace and tall, because it is a standing instruction
+   somebody is going to read line by line before deciding to change it. */
+.v-set__promptbox {
+  width: 100%;
+  font: var(--type-mono-sm);
+  color: var(--text-primary);
+  background: var(--surface-panel);
+  border: 1px solid var(--rule-control);
+  padding: var(--space-3);
+  resize: vertical;
+}
+
+.v-set__promptbox:focus-visible {
+  outline: 2px solid var(--accent-solid);
+  outline-offset: 1px;
+}
+
+.v-set__promptrow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+
+/* The library. Loading one fills the box and changes nothing — the row above is
+   where a version becomes what a turn is told. */
+.v-set__drafts {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--rule-inner);
+}
+
+.v-set__draft {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  border: 1px solid var(--rule-inner);
+  padding: 0 var(--space-1);
+}
+
+.v-set__draft .v-nav__act {
+  opacity: 1;
 }
 
 .v-set__again {

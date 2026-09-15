@@ -14,12 +14,14 @@ import type { Role, RoleProviders, RolePatches, RoleTable } from '@src/roles.js'
 import { setOwn } from '@src/runtime.js';
 import type { AgentProvider, ToolchainContract, ToolRequirement, Phase } from '@src/runtime.js';
 import { DEFAULT_GATES, validateGates } from '@src/gates.js';
+import { promptBlockNames } from '@src/prompts.js';
 import { EFFORTS } from '@src/types.js';
 import type {
   Config,
   ConfigOverrides,
   GatesConfig,
   LoadedConfig,
+  PromptOverrides,
   Sandbox,
   VerifyConfig,
 } from '@src/types.js';
@@ -183,6 +185,9 @@ export const DEFAULTS: Config = {
     // far enough for a second reading to differ.
     workIntervalMs: 60_000,
   },
+  // Empty: a project that overrides no prompt is byte-identical to one that
+  // predates the key, which is what makes this safe to add to every config.
+  prompts: {},
   toolchain: {
     // Deliberately minimal. `git` is needed in every phase because vibe commits
     // per round; node and npm only matter once something is being built or
@@ -288,6 +293,7 @@ function mergeConfig(base: Config, override: unknown): Config {
     verify: mergeSection(base.verify, override['verify']),
     progress: mergeSection(base.progress, override['progress']),
     toolchain: mergeToolchain(base.toolchain, override['toolchain']),
+    prompts: mergePrompts(base.prompts, override['prompts']),
   };
 }
 
@@ -306,6 +312,25 @@ function mergeToolchain(base: ToolchainContract, override: unknown): ToolchainCo
     // user's own tool names, so `__proto__` is reachable, and a swallowed entry
     // would skip `validateToolchain` instead of being reported by name.
     if (isRecord(requirement)) setOwn(out, tool, requirement as unknown as ToolRequirement);
+  }
+  return out;
+}
+
+/**
+ * Prompt overrides, merged per block rather than per known key (#223).
+ *
+ * `mergeToolchain`'s shape and `mergeToolchain`'s reason: the keys are block
+ * names rather than a fixed set this file owns, so `mergeSection` - which
+ * iterates the *base's* keys - would silently discard every one of them, since
+ * the base is empty. Through `setOwn` for the same reason both of those are:
+ * the keys come from a user's file, `__proto__` is reachable, and a swallowed
+ * entry would skip validation instead of being reported by name.
+ */
+function mergePrompts(base: PromptOverrides, override: unknown): PromptOverrides {
+  if (!isRecord(override)) return base;
+  const out: Record<string, string> = { ...base };
+  for (const [block, text] of Object.entries(override)) {
+    if (typeof text === 'string') setOwn(out, block, text);
   }
   return out;
 }
@@ -418,6 +443,7 @@ const SECTIONS = [
   'gates',
   'verify',
   'progress',
+  'prompts',
 ] as const;
 
 /**
@@ -678,6 +704,7 @@ function validate(cfg: Config): void {
     throw new Error('progress.workIntervalMs must be at least 5000ms');
   }
   validateToolchain(cfg.toolchain);
+  validatePrompts(cfg.prompts);
 }
 
 const PHASES: readonly Phase[] = ['plan', 'implement', 'review'];
@@ -1053,6 +1080,36 @@ function validateVerify(verify: VerifyConfig): void {
       if (overlap !== null) throw new Error(`${where}.artifacts: ${overlap}`);
     }
   });
+}
+
+/**
+ * Prompt overrides, checked against the real block list (#223).
+ *
+ * **A key this build does not recognise is refused by name**, and that is the
+ * whole of why this function exists. An unknown key would otherwise be an
+ * override that silently does nothing: `block()` would find no entry, render
+ * the default, and nobody would be told - so somebody who believes they changed
+ * what the reviewer is under finds out by reading a review that ignored them.
+ * The same reasoning `gates.ts` gives for refusing `complete` and `final-fix` by
+ * name rather than letting `mergeSection` drop them.
+ *
+ * The text itself is accepted on trust, exactly as `RoleSetting.model` is: there
+ * is no way to judge whether an instruction is a good one, and a length limit
+ * would be a number with nothing behind it.
+ */
+function validatePrompts(prompts: PromptOverrides): void {
+  const known = new Set(promptBlockNames());
+  for (const [name, text] of Object.entries(prompts)) {
+    if (!known.has(name)) {
+      throw new Error(
+        `prompts."${name}" is not a prompt block this build has. The blocks are: ` +
+          `${[...known].map((n) => `"${n}"`).join(', ')}.`,
+      );
+    }
+    if (typeof text !== 'string') {
+      throw new Error(`prompts."${name}" must be a string`);
+    }
+  }
 }
 
 function validateToolchain(toolchain: ToolchainContract): void {

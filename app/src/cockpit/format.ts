@@ -333,7 +333,13 @@ const ENDINGS: Readonly<Record<number, Ending>> = {
     tone: 'accent',
     kicker: 'needs you',
     detail: 'the run stopped on a question it could not answer for itself.',
-    next: 'Answer the questions in NEEDS-INPUT.md, then resume the run — it picks up from here.',
+    // The Questions tab, not the file (#223). It was the CLI's own instruction,
+    // correct there and absurd in a window that is already displaying the
+    // questions: *"It says I need to answer the questions in needs-input.md but
+    // thats crazy, I should answer directly in the app on the questions page."*
+    // The file is still what gets written and still what the resume reads - the
+    // window fills it in - so answering either way is the same act.
+    next: 'Answer them on the Questions tab, and it resumes from here. Editing NEEDS-INPUT.md by hand still works and is the same file.',
   },
   3: {
     tone: 'alarm',
@@ -371,3 +377,13 @@ const ENDINGS: Readonly<Record<number, Ending>> = {
 export function ending(exit: number): Ending | null {
   return ENDINGS[exit] ?? null;
 }
+
+/**
+ * The exit code a run takes when it stops on a question (#223).
+ *
+ * `EXIT.NEEDS_HUMAN` in `src/charge.ts`, named here rather than written as `2`
+ * at the one site that reads it: a bare number in a JSX condition is the kind of
+ * thing that gets copied to a second site and then only half-updated, and this
+ * is the code the whole answer form is gated on.
+ */
+export const NEEDS_HUMAN = 2;

@@ -381,6 +381,88 @@ they are waiting on. Four things in it are worth carrying:
   are acted on differently, and a window that collapsed them into *"could not delete"* would
   answer neither. It is answerable beside a run for a reason rather than by exemption — the
   live-lock refusal means **the running run is the one run this frame can never reach**.
+- **A console child spawned without `windowsHide` allocates a window, and the detach is why.**
+  Reported as *"there are a whole bunch of windows that popup and quickly disappear when I
+  run"*, and the count is exact: one `where.exe` per binary this resolves — claude, codex,
+  git, node. Every long-lived spawn already passed the flag; the two PATH lookups in
+  `proc.ts` and `commands.ts` did not, and before the host was `DETACHED_PROCESS` they
+  inherited its window-less console and nothing showed. **So this is the second half of that
+  change rather than a new defect** — the same reasoning `host.rs` records for why
+  `CREATE_NO_WINDOW` is the wrong flag there is why `windowsHide` is the right one here. Worth
+  remembering as a shape: **a detached parent means every console child must hide its own
+  window, because there is no console to inherit.**
+- **Prompts became configuration, and the reasoning that is being reversed is recorded.** The
+  settings screen said they were *"deliberately not configuration: they are the product's
+  behaviour, and a per-project override would mean two runs of the same version could not be
+  compared."* That cost is real and is now paid on purpose — *"We need to be able to edit the
+  prompts"* — because an owner who wants a reviewer under different standing instructions has
+  no other way to get one, and the product knowing better is not an answer. What keeps the
+  cost visible rather than merely accepted: `prompts.<block>` is a setting like any other, so
+  `configDiff` names it and a run's record says its reviewer was told something different.
+
+  **It is a module latch, not a parameter, and that is `cancel.ts`'s trade.** Every builder in
+  `prompts.ts` takes a long positional list and three carry a comment saying an inserted
+  parameter *"would silently reinterpret"* an existing call — so threading a config through
+  seven of them is the change most likely to go wrong quietly. `execute` installs it beside
+  `clearCancel()` and installs **unconditionally**, so an empty table is what clears it and no
+  path leaves a previous run's overrides standing. Safe for the reason `cancel.ts` states:
+  one run per process.
+
+  Three rules travel with it. A **blank** override is ignored rather than sent — clearing the
+  box means *give me the default back*, and an empty standing instruction is not a weaker one,
+  it is a missing one. A **name this build does not have is refused by name**, because an
+  unknown key would otherwise be an override that silently does nothing: `block()` finds no
+  entry, renders the default, and somebody who believes they changed the reviewer's
+  instructions finds out by reading a review that ignored them. And `promptBlockNames()` is
+  **derived** from `promptBlocks()`, because a second list is one that can disagree.
+
+  **Three storage places, and the screen says which is which.** The *default* is a constant in
+  `src/prompts.ts`; the one *in force* is the project's config, because the loop has to read
+  it; the *library* of saved versions is `localStorage`, because a draft nobody has adopted is
+  not a fact about any run. Saving and adopting are separate controls for exactly that reason,
+  and *use the default* **clears the key** rather than copying today's text into it — a cleared
+  key follows the product forward when the default is improved.
+- **A question is answered where it is shown, and the window writes the same file a text
+  editor would.** The halt banner carried the CLI's own instruction — *"Answer the questions
+  in NEEDS-INPUT.md, then resume the run"* — correct in a terminal and absurd in a window
+  already displaying them: *"thats crazy, I should answer directly in the app on the questions
+  page."*
+
+  The tempting shape is a frame carrying answers straight into `state`, and it would be **a
+  second definition of what an answer is**: one that skips `parseHumanAnswers`, skips the
+  `answered-<n>.md` retirement and skips the raise and severity-move blocks in the same file,
+  leaving `resumeRun` with two roads in that drift on the next change to either. So
+  `src/answers.ts` fills in the blockquote the template already leaves empty, and the resume
+  that follows is the ordinary one — **a person typing into the app and a person typing into
+  vim produce the same file**.
+
+  Matched on the **question text**, which is what both ends already hold: `writeEscalation`
+  renders `### <n>. <question>` and `parseHumanAnswers` reads it back off that line. An index
+  would be a third thing to keep in step and would silently answer the wrong question the
+  first time a round's questions were reordered. A question the file does not ask is
+  **reported, never appended** — the file is the record of what was *asked*.
+
+  **The write does not resume.** Two acts, in that order, because a write that also spent
+  tokens would be one nobody could take back and would put spending behind a Save button. The
+  frame refuses a run with no `NEEDS-INPUT.md` (writing one would invent a halt) and a run
+  whose lock names a live process (answering a file a running loop is about to read is a
+  second writer). And the round trip is the only test that matters here: both halves of the
+  format are in this repo, so checking the writer against a format written down in a comment
+  would check nothing — every case drives `fillAnswers` output through the real parser.
+- **A model is typed, never picked from a list**, and that is the core's own decision rather
+  than a shortcut. `RoleSetting.model` is validated only for being a non-empty string because
+  *"no allowlist and no default table: guessing whether a model exists is the
+  never-invent-a-number rule applied to a name"*. A dropdown would be exactly that guess and
+  would go stale the week either vendor ships a model — *"models are always evolving, we
+  probably don't want these hard coded."* A typo is caught by the run summary before anything
+  is spent, and by a turn failure naming `roles.<role>.model`.
+- **The four caps and the tolerance are a form now, and P0 is stated as having no setting.**
+  Every one was reachable only as a `--max-*` flag. `gate()` refuses a round with any P0
+  before it looks at the tolerance at all — *P0 findings are never carried forward* — so a run
+  cannot be configured to accept one, and a control would be a promise the loop does not keep.
+  The numbers save **on blur**, because each save rewrites `vibe.config.json` and answers with
+  the result: a patch per keystroke rewrites it five times to type `12`, and the intermediate
+  `1` is a real, valid, wrong setting a run starting in that moment would take.
 - **A plan-only run completes, and it now has somewhere to go.** The settled distinction
   stands — `planOnly` says there is no next phase, a `stop` gate is the resumable halt — and it
   left a dead end nobody had walked into until somebody did: *"after it stopped, I SHOULD have
@@ -946,6 +1028,8 @@ app/src/cockpit/Sidebar.tsx  projects, their runs, and the pins - the rail merge
 app/src/cockpit/projects.ts  which repositories are open, which runs are pinned, and renamed
 app/src/cockpit/Confirm.tsx  the dialog in front of anything that cannot be undone
 app/src/cockpit/appearance.ts  how big the product is drawn, and nothing else about the look
+app/src/cockpit/drafts.ts      saved prompt versions - the window's library, not the project's
+src/answers.ts          filling in NEEDS-INPUT.md from somewhere that is not a text editor
 app/src/cockpit/Settings.tsx   every setting, and which of the three places each one goes
 app/src/cockpit/outgroups.ts the output cut into rounds, and a finished run's transcript
 app/src/pilot/saved.ts       a conversation kept between launches, and which run it is about

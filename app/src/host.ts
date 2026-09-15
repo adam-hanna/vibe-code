@@ -213,6 +213,24 @@ export interface ArtifactsFrame {
 }
 
 /**
+ * What a `questions_answered` reply says (#223).
+ *
+ * `filled` and `open` rather than a boolean, because *some of them* is the
+ * common case and the two need different next actions: a resume with a question
+ * still open spends a preflight and halts on the same question, so the window
+ * says so before any of that.
+ */
+export interface QuestionsAnswered {
+  type: 'questions_answered';
+  id: number;
+  dir: string;
+  runId: string;
+  filled: number;
+  unmatched: readonly string[];
+  open: readonly string[];
+}
+
+/**
  * The standing instruction blocks each turn is given (#223).
  *
  * Verbatim, never summarised. A prompt is a function of the run — the task, the
@@ -222,7 +240,17 @@ export interface ArtifactsFrame {
 export interface PromptsFrame {
   type: 'prompts';
   id: number;
-  blocks: readonly { name: string; usedBy: readonly string[]; text: string }[];
+  blocks: readonly {
+    name: string;
+    usedBy: readonly string[];
+    /** As it will RENDER: this project's override, or the product's own. */
+    text: string;
+    /** The product's own, always — so a screen can offer *revert* without
+     *  holding a second copy of a constant it does not own. */
+    fallback: string;
+    /** Whether this project replaces it. Told, so a screen never infers it. */
+    overridden: boolean;
+  }[];
 }
 
 /**
@@ -307,7 +335,8 @@ export type Frame =
   | ArtifactsFrame
   | ArtifactFrame
   | RunDeleted
-  | PromptsFrame;
+  | PromptsFrame
+  | QuestionsAnswered;
 
 /**
  * Whether a value is a frame this version recognises.
@@ -351,6 +380,7 @@ export function isFrame(v: unknown): v is Frame {
     // reason: they are the same in every run, so they say nothing about the one
     // being narrated.
     type === 'prompts' ||
+    type === 'questions_answered' ||
     // The command runner's three (#211). Also ignored by the cockpit's reducer:
     // a command is not part of a run - it outlives one, and it happens when
     // there is none - so `Cockpit` folds them with `reduceCommands` instead.
@@ -703,6 +733,33 @@ export async function prompts(): Promise<PromptsFrame['blocks']> {
     'the host did not answer with the prompt blocks',
   );
   return frame.blocks;
+}
+
+/**
+ * Answer a halted run's questions, without resuming it (#223).
+ *
+ * **Two acts, in this order, and the split is deliberate.** This writes into the
+ * run's own `NEEDS-INPUT.md` — the same file a text editor would fill in, so the
+ * resume that follows is the ordinary one and `parseHumanAnswers` stays the
+ * single definition of what an answer is. A frame that also resumed would be a
+ * write nobody could take back, and would put spending behind a Save button.
+ *
+ * Every refusal is the core's: a run that is not stopped on a question, one
+ * whose lock names a live process, and an id it will not join onto a path.
+ */
+export async function answerQuestions(
+  dir: string,
+  runId: string,
+  answers: readonly { question: string; answer: string }[],
+): Promise<{ filled: number; unmatched: readonly string[]; open: readonly string[] }> {
+  const id = nextRequestId();
+  const frame = await ask<QuestionsAnswered>(
+    { type: 'answer_questions', id, dir, runId, answers },
+    id,
+    'questions_answered',
+    'the host did not say whether the answers were written',
+  );
+  return { filled: frame.filled, unmatched: frame.unmatched, open: frame.open };
 }
 
 /**

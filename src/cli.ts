@@ -27,6 +27,7 @@ import {
 import type { AllocatedRun } from '@src/run.js';
 import { acquireLock, describeLiveness } from '@src/lock.js';
 import { cancelRequested, clearCancel } from '@src/cancel.js';
+import { installPromptOverrides } from '@src/prompts.js';
 import { describeEnding as describeProcessEnding, installEndingStamp } from '@src/ending.js';
 import { commitFork, listForkPoints, planFork } from '@src/fork.js';
 import type { Liveness, LockHandle } from '@src/lock.js';
@@ -1524,6 +1525,13 @@ export async function execute(
   // cancel that survived into it would kill its first agent turn instantly -
   // reported as the run being stopped by somebody who stopped a different one.
   clearCancel();
+  // The prompt overrides this run's config asks for (#223), installed in the
+  // same breath and for the same reason the latch above is cleared: it is a
+  // module latch, one run per process, and one left standing from a previous
+  // run would put a different project's standing instructions into this one's
+  // reviewer. Installed unconditionally, so an empty table is what clears it -
+  // there is no path that leaves the previous run's overrides in place.
+  installPromptOverrides(cfg.prompts);
   const started = Date.now();
   const recovery = emptyRecovery();
   let reported = false;

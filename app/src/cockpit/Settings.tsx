@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
-import { MetaChip, StateKicker } from '../design';
+import { Button, MetaChip, StateKicker } from '../design';
 import * as host from '../host';
 import { Credentials } from '../pilot/Credentials';
 import { Section } from './Disclosure';
 import { STEPS } from './appearance';
+import { DRAFTS_KEY, draftsFor, readDrafts, removeDraft, saveDraft } from './drafts';
+import type { Draft } from './drafts';
 import type { KeyStatus } from '../pilot/keys';
-import type { ConfigFrame } from '../host';
+import type { ConfigFrame, PromptsFrame } from '../host';
 
 /**
  * Everything that is a setting, in one screen (`1h`, `1i`, #223).
@@ -84,6 +86,267 @@ const MODE_NOTE: Readonly<Record<string, string>> = {
 };
 
 /**
+ * The loop's caps, in the order a run reaches them.
+ *
+ * Every key here is a `loop.*` the config validator already knows and a
+ * `--max-*` `parseArgs` already takes, so this is a form over settings that
+ * existed rather than new configuration. The notes say what **reaching** one
+ * costs, because that is the decision somebody is making when they raise it.
+ */
+const LIMITS: readonly { key: string; note: string }[] = [
+  {
+    key: 'maxQuestionRounds',
+    note: 'how many times the planner may ask, and have the answerer answer, before it gives up and asks you',
+  },
+  {
+    key: 'maxPlanRounds',
+    note: 'how many times the plan may be sent back by the critique. A question round no longer spends one of these',
+  },
+  { key: 'maxReviewRounds', note: 'how many fix-and-re-review cycles the code gets' },
+  { key: 'maxVerifyRounds', note: 'how many times a failing verification gate may be fixed' },
+];
+
+/**
+ * A number that is saved when you leave it, never on every keystroke.
+ *
+ * **Each save is a round trip that rewrites `vibe.config.json` and answers with
+ * the config that resulted**, so a patch per character would be a file rewritten
+ * five times to type `12` — and the intermediate `1` is a real, valid, wrong
+ * setting that a run starting in that moment would take.
+ *
+ * Empty is refused rather than sent. `Number('')` is 0, and 0 means something
+ * specific in three of these five keys, so a cleared field must not arrive as a
+ * ceiling nobody typed — the same rule `4a`'s override fields already follow.
+ */
+function NumberField({
+  id,
+  value,
+  disabled,
+  onSave,
+}: {
+  id: string;
+  value: number | undefined;
+  disabled: boolean;
+  onSave: (next: number) => void;
+}) {
+  const [typed, setTyped] = useState(value === undefined ? '' : String(value));
+  // Re-seeded when the saved value changes, so a refused patch shows what is
+  // actually in force rather than what was typed at it.
+  useEffect(() => {
+    setTyped(value === undefined ? '' : String(value));
+  }, [value]);
+
+  const commit = (): void => {
+    const n = Number(typed);
+    if (typed.trim() === '' || !Number.isFinite(n) || n < 0) {
+      setTyped(value === undefined ? '' : String(value));
+      return;
+    }
+    if (n !== value) onSave(n);
+  };
+
+  return (
+    <input
+      id={id}
+      className="v-set__num"
+      value={typed}
+      disabled={disabled}
+      inputMode="numeric"
+      onChange={(e) => setTyped(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') e.currentTarget.blur();
+        // Escape puts back what is in force, which is the only way out of a
+        // half-typed number that does not save it.
+        if (e.key === 'Escape') setTyped(value === undefined ? '' : String(value));
+      }}
+    />
+  );
+}
+
+/**
+ * A string that is saved when you leave it, for `NumberField`'s reason.
+ *
+ * Empty **is** a value here and clears the key, which is the opposite of the
+ * number fields: a role with no model takes its agent's default, and that is a
+ * legal state somebody may want back. It is sent as an empty string rather than
+ * omitted so `mergeSection`'s patch actually clears it.
+ */
+function TextField({
+  id,
+  value,
+  placeholder,
+  disabled,
+  onSave,
+}: {
+  id: string;
+  value: string | undefined;
+  placeholder: string;
+  disabled: boolean;
+  onSave: (next: string) => void;
+}) {
+  const [typed, setTyped] = useState(value ?? '');
+  useEffect(() => {
+    setTyped(value ?? '');
+  }, [value]);
+
+  return (
+    <input
+      id={id}
+      className="v-set__text"
+      value={typed}
+      disabled={disabled}
+      placeholder={placeholder}
+      spellCheck={false}
+      onChange={(e) => setTyped(e.target.value)}
+      onBlur={() => {
+        if (typed.trim() !== (value ?? '').trim()) onSave(typed.trim());
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') e.currentTarget.blur();
+        if (e.key === 'Escape') setTyped(value ?? '');
+      }}
+    />
+  );
+}
+
+/**
+ * One block: what it renders as, and the three ways to change it.
+ *
+ * **Saving and adopting are separate buttons, and that is the design.** A draft
+ * in the library changes nothing about any run; adopting one writes
+ * `prompts.<block>` into `vibe.config.json`, which is what a turn actually
+ * reads. Collapsing them would mean every experiment landed in a file the whole
+ * team commits.
+ *
+ * *Use the default* clears the key rather than writing the default text into it.
+ * Those are different: a cleared key follows the product forward when the
+ * default is improved, and a copy of today's text pins this project to today's.
+ */
+function PromptBlock({
+  block,
+  drafts,
+  busy,
+  onAdopt,
+  onSaveDraft,
+  onRemoveDraft,
+}: {
+  block: PromptsFrame['blocks'][number];
+  drafts: readonly Draft[];
+  busy: boolean;
+  /** Empty adopts the default, because that is what clearing the key means. */
+  onAdopt: (block: string, text: string) => void;
+  onSaveDraft: (draft: Draft) => void;
+  onRemoveDraft: (block: string, name: string) => void;
+}) {
+  const [typed, setTyped] = useState(block.text);
+  const [name, setName] = useState('');
+  const mine = draftsFor(drafts, block.name);
+  // Re-seeded when what is in force changes, so a refused patch shows what the
+  // config actually holds rather than what was typed at it.
+  useEffect(() => {
+    setTyped(block.text);
+  }, [block.text]);
+
+  const dirty = typed.trim() !== block.text.trim();
+
+  return (
+    <div className="v-set__prompt">
+      <div className="v-set__promptname">
+        <span>{block.name}</span>
+        {block.usedBy.map((role) => (
+          <MetaChip key={role}>{role}</MetaChip>
+        ))}
+        {block.overridden ? (
+          <MetaChip kind="checkable">this project&apos;s</MetaChip>
+        ) : (
+          <MetaChip>the default</MetaChip>
+        )}
+      </div>
+
+      <textarea
+        className="v-set__promptbox"
+        rows={12}
+        value={typed}
+        disabled={busy}
+        spellCheck={false}
+        onChange={(e) => setTyped(e.target.value)}
+      />
+
+      <div className="v-set__promptrow">
+        <Button level="primary" disabled={busy || !dirty} onClick={() => onAdopt(block.name, typed)}>
+          {dirty ? 'use this' : 'in force'}
+        </Button>
+        {/* Clears the key rather than writing the default in. See the header. */}
+        <Button
+          level="secondary"
+          disabled={busy || !block.overridden}
+          onClick={() => onAdopt(block.name, '')}
+        >
+          use the default
+        </Button>
+        {block.overridden && !dirty && (
+          <button
+            className="v-set__again"
+            onClick={() => setTyped(block.fallback)}
+            disabled={busy}
+          >
+            show me the default
+          </button>
+        )}
+      </div>
+
+      <div className="v-set__promptrow">
+        <input
+          className="v-set__text"
+          value={name}
+          disabled={busy}
+          placeholder="name this version to save it"
+          aria-label={`name a saved version of ${block.name}`}
+          onChange={(e) => setName(e.target.value)}
+        />
+        {/* Saving touches no run. It is the library, not the config. */}
+        <Button
+          level="secondary"
+          disabled={busy || name.trim() === '' || typed.trim() === ''}
+          onClick={() => {
+            onSaveDraft({ block: block.name, name, text: typed });
+            setName('');
+          }}
+        >
+          save this version
+        </Button>
+      </div>
+
+      {mine.length > 0 && (
+        <div className="v-set__drafts">
+          <span className="v-set__factname">saved</span>
+          {mine.map((d) => (
+            <span className="v-set__draft" key={d.name}>
+              <button className="v-set__again" disabled={busy} onClick={() => setTyped(d.text)}>
+                {d.name}
+              </button>
+              <button
+                className="v-nav__act v-nav__act--danger"
+                disabled={busy}
+                title={`forget "${d.name}"`}
+                onClick={() => onRemoveDraft(block.name, d.name)}
+              >
+                −
+              </button>
+            </span>
+          ))}
+          <span className="v-set__note">
+            Loading one puts it in the box. It is not in force until you press{' '}
+            <strong>use this</strong>.
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
  * The standing prompt blocks, fetched once when the section opens.
  *
  * Lazy for the reason every artifact pane is: the blocks are several pages and
@@ -92,18 +355,21 @@ const MODE_NOTE: Readonly<Record<string, string>> = {
  * configuration.
  */
 function usePromptBlocks(open: boolean): {
-  blocks: readonly { name: string; usedBy: readonly string[]; text: string }[];
+  blocks: PromptsFrame['blocks'];
   failure: string | null;
   loading: boolean;
+  /** Re-read after an adopt: only the core knows what a block now renders as. */
+  reload: () => void;
 } {
+  const [attempt, setAttempt] = useState(0);
   const [blocks, setBlocks] = useState<
-    readonly { name: string; usedBy: readonly string[]; text: string }[]
+    PromptsFrame['blocks']
   >([]);
   const [failure, setFailure] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    if (!open || !host.inShell() || blocks.length > 0) return;
+    if (!open || !host.inShell() || (blocks.length > 0 && attempt === 0)) return;
     let cancelled = false;
     setLoading(true);
     void host
@@ -123,9 +389,9 @@ function usePromptBlocks(open: boolean): {
     return () => {
       cancelled = true;
     };
-  }, [open, blocks.length]);
+  }, [open, blocks.length, attempt]);
 
-  return { blocks, failure, loading };
+  return { blocks, failure, loading, reload: () => setAttempt((n) => n + 1) };
 }
 export function Settings({
   dir,
@@ -159,6 +425,29 @@ export function Settings({
   /** Whether the prompts section is open, which is what makes its read lazy. */
   const [showPrompts, setShowPrompts] = useState(false);
   const prompts = usePromptBlocks(showPrompts);
+  /**
+   * The saved prompt versions, this window's own library (#223).
+   *
+   * Read once. A draft nobody has adopted is not a fact about any run and has no
+   * business in a file the whole team commits — the same reasoning `projects.ts`
+   * gives for the project list.
+   */
+  const [drafts, setDrafts] = useState<readonly Draft[]>([]);
+  useEffect(() => {
+    try {
+      setDrafts(readDrafts(localStorage.getItem(DRAFTS_KEY)));
+    } catch {
+      // Storage can be unavailable. An empty library is a smaller failure than
+      // a settings screen that will not render.
+    }
+  }, []);
+  const keep = useCallback((key: string, value: unknown) => {
+    try {
+      localStorage.setItem(key, JSON.stringify(value));
+    } catch {
+      // The library still works for this session. See above.
+    }
+  }, []);
 
   const load = useCallback(() => {
     if (!host.inShell()) {
@@ -217,9 +506,14 @@ export function Settings({
 
   const effective = frame.effective as {
     gates?: Record<string, string>;
-    roles?: Record<string, string | { provider?: string; effort?: string }>;
+    roles?: Record<string, string | { provider?: string; effort?: string; model?: string }>;
+    loop?: Record<string, number | undefined>;
   };
   const gates = effective.gates ?? {};
+  const loop = effective.loop ?? {};
+  // Which loop keys the FILE claims, as opposed to which are in force — the
+  // same split the gate matrix draws its `default` chip from.
+  const claimedLoop = (frame.raw['loop'] ?? {}) as Record<string, unknown>;
   const roles = effective.roles ?? {};
   // Which rows the FILE claims, as opposed to which are in force. That is the
   // whole reason `raw` travels beside `effective`.
@@ -322,6 +616,78 @@ export function Settings({
         <Credentials statuses={statuses} failure={keyFailure} onChanged={onKeysChanged} />
       </section>
 
+      {/* ---- how hard it tries, and what it will accept ------------------- */}
+      <section className="v-set__block">
+        <h3 className="v-set__h">how many rounds, and what it will accept</h3>
+        {/* **The four caps and the tolerance were reachable only as flags.**
+            Every one of them is a `--max-*` or `--p1-tolerance` on the CLI and
+            a `loop.*` key in the file, so this is a form over settings that
+            already existed rather than new configuration — which is the rule
+            the whole screen is built under. */}
+        <p className="v-set__note">
+          A cap is where the loop gives up and hands back, not where it is aiming. Reaching one
+          stops the run <em>resumably</em> and writes what it was stuck on — nothing is lost, and
+          a resume with a raised cap picks up from the same checkpoint.
+        </p>
+        <table className="v-set__matrix">
+          <tbody>
+            {LIMITS.map((limit) => (
+              <tr key={limit.key}>
+                <td>
+                  <code>{limit.key}</code>
+                  {claimedLoop[limit.key] === undefined && <MetaChip>default</MetaChip>}
+                </td>
+                <td>
+                  <NumberField
+                    id={`loop-${limit.key}`}
+                    value={loop[limit.key]}
+                    disabled={busy}
+                    onSave={(n) => save({ loop: { [limit.key]: n } })}
+                  />
+                </td>
+                <td className="v-set__why">{limit.note}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+
+        <h4 className="v-set__h4">what counts as good enough</h4>
+        <div className="v-set__fact">
+          <span className="v-set__factname">P0</span>
+          <span>
+            <strong>Always zero, and there is no setting for it.</strong> `gate()` refuses a round
+            with any P0 before it looks at the tolerance at all —{' '}
+            <em>P0 findings are never carried forward</em> — so a run cannot be configured to
+            accept one. A P0 is the judge saying this is wrong, not that it is imperfect.
+          </span>
+        </div>
+        <div className="v-set__fact">
+          <span className="v-set__factname">P1</span>
+          <span>
+            How many the plan or the implementation may be <strong>accepted carrying</strong>,
+            rather than sent back for another round. They are not forgiven: a carried P1 is
+            stated in the next phase&apos;s prompt, listed in <code>OUTSTANDING.md</code>, and
+            said on the run&apos;s summary. <code>0</code> demands a spotless verdict.
+            <span className="v-set__inline">
+              <NumberField
+                id="loop-p1Tolerance"
+                value={loop["p1Tolerance"]}
+                disabled={busy}
+                onSave={(n) => save({ loop: { p1Tolerance: n } })}
+              />
+              {claimedLoop['p1Tolerance'] === undefined && <MetaChip>default</MetaChip>}
+            </span>
+          </span>
+        </div>
+        <div className="v-set__fact">
+          <span className="v-set__factname">P2 and P3</span>
+          <span>
+            Never block anything. They are recorded on the round and carried into{' '}
+            <code>FOLLOW-UPS.md</code>, which is what that file is for.
+          </span>
+        </div>
+      </section>
+
       <section className="v-set__block">
         <h3 className="v-set__h">where the loop hands control back</h3>
         <table className="v-set__matrix">
@@ -398,6 +764,7 @@ export function Settings({
               <th>role</th>
               <th>agent</th>
               <th>effort</th>
+              <th>model</th>
             </tr>
           </thead>
           <tbody>
@@ -445,24 +812,35 @@ export function Settings({
                       ))}
                     </select>
                   </td>
+                  <td>
+                    {/* **A text field rather than a list, and that is the core's
+                        own decision rather than a shortcut.** `RoleSetting.model`
+                        is validated only for being a non-empty string, because
+                        "no allowlist and no default table: guessing whether a
+                        model exists is the never-invent-a-number rule applied to
+                        a name". A dropdown here would be exactly that guess, and
+                        it would go stale the week either vendor ships a model —
+                        which is the report: *"models are always evolving, we
+                        probably don't want these hard coded."*
+
+                        A typo is caught by the run summary before anything is
+                        spent, and by a turn failure naming `roles.<role>.model`
+                        rather than the provider key. */}
+                    <TextField
+                      id={`model-${role}`}
+                      value={current.model}
+                      placeholder={`— ${current.provider ?? 'agent'} default —`}
+                      disabled={busy}
+                      onSave={(next) =>
+                        save({ roles: { [role]: { ...current, model: next } } })
+                      }
+                    />
+                  </td>
                 </tr>
               );
             })}
           </tbody>
         </table>
-        <p className="v-set__note">
-          {/* The refusal that is a rule rather than a bug, worth saying here
-              because this is the form that can produce it. */}
-          Two roles on the same agent is allowed; a <strong>writing</strong> role on a persisted
-          Codex thread is refused outright rather than repaired, because{' '}
-          <code>codex exec resume</code> takes no sandbox flag and the setting would silently
-          revert after the first turn.
-        </p>
-        <p className="v-set__note">
-          The rest of <code>1i</code> is not here: <strong>accounts</strong> want each CLI&apos;s
-          detected version and its rate-limit headroom, and no frame carries either;{' '}
-          <strong>MCP servers</strong> are not configurable here yet.
-        </p>
       </section>
 
       {/* ---- what every turn is told ------------------------------------- */}
@@ -485,10 +863,24 @@ export function Settings({
           turn — the brief, the plan being judged, the findings, the diff — is in that run&apos;s
           own artifacts, on the Plans, Plan critique and Code review tabs.
         </p>
+        {/* **The reversal, stated rather than quietly dropped.** This said they
+            were *deliberately not configuration*, and that a per-project
+            override would mean two runs of one version could not be compared.
+            That cost is real and is now paid on purpose — an owner who wants a
+            reviewer under different standing instructions has no other way to
+            get one. What keeps the cost visible is that an overridden block is
+            named on the run's own config, like any other setting. */}
         <p className="v-set__note">
-          They are not editable here and are deliberately not configuration: they are the
-          product&apos;s behaviour, and a per-project override would mean two runs of the same
-          version could not be compared.
+          Editing one changes what every turn of that kind is told,{' '}
+          <strong>in this project</strong>: it is written to <code>vibe.config.json</code>, which
+          is committed. A run whose reviewer was told something different says so on its own
+          config — which is what keeps two runs comparable.
+        </p>
+        <p className="v-set__note">
+          <strong>Saving a version and using it are separate.</strong> A saved version lives in
+          this window and changes nothing about any run; <em>use this</em> is the one that writes
+          the project&apos;s file. <em>Use the default</em> clears the key rather than copying
+          today&apos;s text into it, so the block follows the product forward.
         </p>
         <Section
           id="prompt-blocks"
@@ -510,36 +902,39 @@ export function Settings({
             <p className="v-set__note">asking the host what every turn is told…</p>
           )}
           {prompts.blocks.map((block) => (
-            <div className="v-set__prompt" key={block.name}>
-              <div className="v-set__promptname">
-                <span>{block.name}</span>
-                {/* Which turns include it. Told by the core beside the block
-                    rather than worked out here: the interpolation sites are in
-                    five different template literals and a window has no way to
-                    check a claim about them. */}
-                {block.usedBy.map((role) => (
-                  <MetaChip key={role}>{role}</MetaChip>
-                ))}
-              </div>
-              <pre className="v-set__raw">{block.text}</pre>
-            </div>
+            <PromptBlock
+              key={block.name}
+              block={block}
+              drafts={drafts}
+              busy={busy}
+              // Empty clears the key, which is what "use the default" means: a
+              // cleared key follows the product forward when the default is
+              // improved, where a copy of today's text pins this project to it.
+              onAdopt={(name, text) => {
+                save({ prompts: { [name]: text } });
+                // The section re-reads, because the blocks it is drawing are
+                // what the core will now render — and only the core knows that.
+                prompts.reload();
+              }}
+              onSaveDraft={(draft) =>
+                setDrafts((cur) => {
+                  const next = saveDraft(cur, draft);
+                  keep(DRAFTS_KEY, next);
+                  return next;
+                })
+              }
+              onRemoveDraft={(name, which) =>
+                setDrafts((cur) => {
+                  const next = removeDraft(cur, name, which);
+                  keep(DRAFTS_KEY, next);
+                  return next;
+                })
+              }
+            />
           ))}
         </Section>
       </section>
 
-      <section className="v-set__block">
-        <h3 className="v-set__h">the file itself</h3>
-        {/* `1h`'s own answer to what the form does not cover: the form and the
-            file are the same thing, so the file is a legitimate way to edit the
-            rest. Read-only here — an editor that could write arbitrary JSON is a
-            second path to the same file with different validation on it. */}
-        <pre className="v-set__raw">{JSON.stringify(frame.raw, null, 2)}</pre>
-        <p className="v-set__note">
-          Shown rather than edited. Worktree scripts and MCP scoping have no form here yet;
-          editing the file directly is the supported way to reach them, and it is the same file
-          this screen writes.
-        </p>
-      </section>
     </div>
   );
 }

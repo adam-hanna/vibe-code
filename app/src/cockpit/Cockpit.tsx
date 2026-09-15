@@ -30,7 +30,7 @@ import { Switcher } from './Switcher';
 import { Workstreams } from './Workstreams';
 import { VerifyPane } from './VerifyPane';
 import { StalenessStrip } from './Staleness';
-import { tokens as fmtTokens } from './format';
+import { NEEDS_HUMAN, tokens as fmtTokens } from './format';
 import { emptyRun, nextRun, reduce, staleness } from './model';
 import { rounds } from './rounds';
 import { implementArgv, readLaunchArgv, resumeArgv } from './argv';
@@ -1108,6 +1108,13 @@ export function Cockpit() {
               dir={shownDir}
               runId={shownRunId}
               revision={run.artifacts.length}
+              // Told by the exit code the run reported, never inferred from the
+              // questions: an advisory question the answerer handled leaves open
+              // questions on a run nobody is waiting on, and a form beside one
+              // would be refused by the core for having no NEEDS-INPUT.md.
+              halted={!past && run.completed?.exit === NEEDS_HUMAN}
+              busy={busy}
+              onResume={resume}
             />
           )}
           {tab === 'settings' && (

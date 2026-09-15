@@ -53,7 +53,20 @@ export function resolveBin(name: string, options: ResolveOptions = {}): string {
   const finder = isWin
     ? path.join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'where.exe')
     : 'which';
-  const found = spawnSync(finder, [name], { encoding: 'utf8' });
+  // `windowsHide` here as well as on the long-lived spawns, and it is not
+  // cosmetic since #223. The host is spawned `DETACHED_PROCESS`, so it holds no
+  // console at all - which means a console-subsystem child spawned WITHOUT this
+  // flag allocates a fresh console of its own, and a fresh console comes with a
+  // visible window. `where.exe` runs for a few milliseconds and the window
+  // flashes for exactly that long, once per binary this resolves. Reported as
+  // *"there are a whole bunch of windows that popup and quickly disappear when
+  // I run"*, which is precisely the count: claude, codex, git, node.
+  //
+  // Before the detach it inherited the host's own (window-less) console and
+  // nothing showed, so this is the second half of that change rather than a new
+  // defect - the same reasoning `host.rs` records for why `CREATE_NO_WINDOW` is
+  // the wrong flag there and the right one here.
+  const found = spawnSync(finder, [name], { encoding: 'utf8', windowsHide: true });
   const allHits =
     found.status === 0
       ? found.stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)

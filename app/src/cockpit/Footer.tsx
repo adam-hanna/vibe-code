@@ -359,8 +359,9 @@ export function Footer({
                 document with nothing in it to answer. */}
             <div className="v-footer__note">
               <strong>Stop</strong> ends the run resumably and writes these into{' '}
-              <code>NEEDS-INPUT.md</code> with a blank under each — answer them there in your own
-              words and <code>vibe resume</code>, and yours are what the planner gets instead.
+              <code>NEEDS-INPUT.md</code> with a blank under each. Answer them on the{' '}
+              <strong>Questions</strong> tab — the window fills in that same file and resumes —
+              and yours are what the planner gets instead of its own defaults.
             </div>
           </div>
         )}
