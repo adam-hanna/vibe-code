@@ -30,6 +30,39 @@ export const ROLE_NAMES: readonly Role[] = [
 export const PROVIDERS: readonly AgentProvider[] = ['claude', 'codex'];
 
 /**
+ * The models this build knows a name for, per agent (#223).
+ *
+ * **A list, and it is not an allowlist.** `validateRoleSetting` still accepts
+ * any non-empty string and nothing here narrows it — *"guessing whether a model
+ * exists is the never-invent-a-number rule applied to a name"* stands, and a
+ * settings screen that could only offer these would go stale the week either
+ * vendor ships one: *"models are always evolving, we probably don't want these
+ * hard coded."* That objection was answered the first time by shipping a text
+ * field, and the reply to that was *"the model should be a drop down and not a
+ * text input"*, which is a fair report about a text field being the worst way to
+ * pick between three things you already know the names of.
+ *
+ * So both: the list is what a window may **offer**, and a value not on it is
+ * still typed, still saved and still shown. Three rules keep the list honest.
+ *
+ * Every entry is a name **this repository already ships**, and that is the whole
+ * of where the list came from: `opus` is `DEFAULTS.claude.model`, `haiku` is
+ * `preflight.ts`'s `PROBE_MODEL`, `sonnet` is the role-table example in
+ * `README.md`, `gpt-5.6-luna` is `DEFAULTS.codex.model` and `gpt-5.6-pro` is the
+ * one the CLI's own `--help` prints beside `--role`. Nothing here is a claim
+ * about a vendor's catalogue that vibe made up. It lives in the core beside the
+ * defaults rather than in the app, for the reason `pilot.MODELS` gives about
+ * Rust: a list compiled into the surface that *displays* it goes stale on
+ * somebody else's schedule instead of ours, and this is the file the default it
+ * has to agree with lives in. And it is **per agent**, because a Claude model
+ * handed to Codex is a turn that fails after it has been spawned.
+ */
+export const KNOWN_MODELS: Readonly<Record<AgentProvider, readonly string[]>> = {
+  claude: ['opus', 'sonnet', 'haiku'],
+  codex: ['gpt-5.6-luna', 'gpt-5.6-pro'],
+};
+
+/**
  * One shape for both providers.
  *
  * `schema` is optional on either: a Codex planner must be given `PLAN_SCHEMA`

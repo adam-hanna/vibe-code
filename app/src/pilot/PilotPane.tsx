@@ -19,7 +19,7 @@ import { systemPrompt } from './brief';
 import { readEmitted, visible } from './emit';
 import { useFollow } from './follow';
 import { declare, execute } from './tools';
-import { chatKey, readChat, worthSaving, writable } from './saved';
+import { chatKey, chatMove, readChat, worthSaving, writable } from './saved';
 import {
   costOf,
   describeDay,
@@ -686,23 +686,42 @@ export function PilotPane({
   useEffect(() => {
     const key = chatKey(dir, runId);
     const before = chat.current;
-    if (before === key) return;
+    let stored: string | null = null;
+    try {
+      stored = localStorage.getItem(key);
+    } catch {
+      // Storage can be switched off. Treated as nothing stored, which sends the
+      // decision down the `restore` road and lands on an empty conversation —
+      // a smaller failure than a window that will not render.
+    }
+    const move = chatMove({
+      from: before,
+      to: key,
+      intoRun: runId !== null,
+      stored: stored !== null,
+      holding: worthSaving(held.current),
+    });
+    if (move === 'stay') return;
     chat.current = key;
 
     // **Adoption.** A run is *proposed* by a conversation, so when one starts,
     // the exchange that decided what to build is the one already on screen —
-    // under the project's own key, because there was no run id to use. Restoring
-    // this run's (empty) conversation here would throw that away at the exact
-    // moment it succeeded, which is the worst possible time.
+    // wherever it happened to be typed. That last clause is the fix: it used to
+    // adopt only out of the project bucket, so a brief typed while a past run
+    // was open went to *that* run's key and the run it proposed started empty.
     //
-    // Narrow on purpose: only the un-launched bucket is ever adopted, and only
-    // into a run. Switching between two runs restores, which is what it should.
-    if (runId !== null && before === chatKey(dir, null) && worthSaving(held.current)) {
+    // It never adopts over a conversation the target already has, which is what
+    // keeps a **resume** safe: that run has its own exchange and it is the one
+    // worth keeping.
+    if (move === 'adopt') {
       try {
         localStorage.setItem(key, writable(held.current));
         // Cleared, so the next run in this project starts from nothing rather
-        // than inheriting the conversation that launched the previous one.
-        localStorage.removeItem(before);
+        // than inheriting the conversation that launched the previous one. Only
+        // the project bucket is cleared: taking a *run's* key away here would
+        // delete a real conversation to tidy up after a move.
+        const bucket = chatKey(dir, null);
+        if (before === bucket) localStorage.removeItem(bucket);
       } catch {
         // The conversation is still on screen and still correct. What is lost is
         // its return next time.
@@ -710,13 +729,7 @@ export function PilotPane({
       return;
     }
 
-    try {
-      dispatch({ type: 'restore', conversation: readChat(localStorage.getItem(key)) });
-    } catch {
-      // Storage can be unavailable. An empty pane is a smaller failure than a
-      // window that will not render.
-      dispatch({ type: 'restore', conversation: emptyConversation() });
-    }
+    dispatch({ type: 'restore', conversation: readChat(stored) });
   }, [dir, runId]);
 
   // Save on every settled change. `live` is dropped by `writable`, so a turn in
@@ -1305,9 +1318,28 @@ export function PilotPane({
           and not to the pane. */}
       <div className="v-pilot__log v-selectable" ref={log.ref} onScroll={log.onScroll}>
         {entries.length === 0 && conversation.live === null && (
+          /* **Two different emptinesses, and they were drawn as one.** With no
+             run, this is the conversation that has not started — the front door.
+             Beside a *run*, it means that run has no conversation stored, which
+             is a fact about this window's memory and not about the run: a run
+             started from the CLI never had one here, and one from a build before
+             `saved.ts` did not either. Saying *"nothing yet"* over an opened run
+             reads as the pane having failed to load something, which is exactly
+             how it was reported — *"nor do I see the pilot chat update"*. */
           <div className="v-pilot__note">
-            Nothing yet. The pilot can read this run and propose a launch or a gate answer — it
-            cannot fire either one, edit vibe.config.json, or read the run archive.
+            {runId === null ? (
+              <>
+                Nothing yet. The pilot can read this repository and propose a launch — it cannot
+                fire one, edit vibe.config.json, or read the run archive.
+              </>
+            ) : (
+              <>
+                No conversation was kept for this run. A chat is stored by this window, per run, so
+                a run started from the terminal or by an older build has none — the run itself is
+                unaffected, and its plans, reports and transcript are in the tabs above. Anything
+                you say here is kept with this run from now on.
+              </>
+            )}
           </div>
         )}
         {/* Hi-fi 5: this is the run's log, not a chat beside one. Rounds and

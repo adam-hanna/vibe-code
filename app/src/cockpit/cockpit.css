@@ -3927,3 +3927,136 @@
   font-variant-numeric: tabular-nums;
   color: var(--text-tertiary);
 }
+
+/* ------------------------------------------- an opened run's record (4h, #223)
+
+   The column when the window is pointed at a run it is not narrating. It is a
+   *different drawing* rather than the live column with its clocks stopped, so it
+   gets its own block: no live card, no accent border, no liveness dot, and
+   nothing that animates — exactly one element on screen pulses, and on a run
+   that ended on Tuesday the honest count is zero. */
+
+.v-rec {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+.v-rec__head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  align-items: flex-start;
+}
+
+.v-rec__task {
+  font: var(--type-body);
+  color: var(--text-primary);
+}
+
+.v-rec__ident {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.v-rec__id {
+  font: var(--type-mono);
+  color: var(--text-tertiary);
+  /* The column is 364px and a run id is long. It wraps rather than overflowing:
+     an id is copied out of here into a terminal, so no part of it may be hidden. */
+  overflow-wrap: anywhere;
+}
+
+.v-rec__h {
+  margin: var(--space-2) 0 0;
+  font: var(--type-kicker);
+  letter-spacing: var(--tracking-kicker);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.v-rec__facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--space-1) var(--space-3);
+  margin: 0;
+}
+
+.v-rec__facts dt {
+  color: var(--text-tertiary);
+}
+
+.v-rec__facts dd {
+  margin: 0;
+  color: var(--text-primary);
+}
+
+.v-rec__rounds {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.v-rec__rounds li {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  border-bottom: 1px solid var(--rule-inner);
+  padding-bottom: var(--space-1);
+}
+
+.v-rec__rounds strong {
+  font: var(--type-mono);
+  color: var(--text-primary);
+}
+
+.v-rec__spend,
+.v-rec__ended,
+.v-rec__note,
+.v-rec__failure {
+  margin: 0;
+}
+
+.v-rec__spend {
+  font: var(--type-mono);
+  color: var(--text-primary);
+}
+
+.v-rec__ended {
+  color: var(--text-primary);
+}
+
+.v-rec__note {
+  color: var(--text-tertiary);
+}
+
+/* A refusal the core worded, shown as one. It is not an error in this window. */
+.v-rec__failure {
+  border-left: 2px solid var(--rule-strong);
+  padding-left: var(--space-3);
+  color: var(--text-primary);
+}
+
+.v-rec__acts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+/* The model cell's two states, when `other…` has revealed the text box. Its own
+   class rather than `.v-set__inline`, which is a control sitting *inside* a
+   sentence and carries the left margin that goes with that. */
+.v-set__model {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}

@@ -1,6 +1,6 @@
 import type { Level, Narration } from '@src/log.js';
 import type { GateContext } from '@src/host.js';
-import type { ArtifactRead, RunArtifact, RunSummary } from '@src/types.js';
+import type { ArtifactRead, RunArtifact, RunRecord, RunSummary } from '@src/types.js';
 import type { PromptBlock } from '@src/prompts.js';
 
 /**
@@ -180,6 +180,19 @@ export type Outbound =
       roleNames: readonly string[];
       providers: readonly string[];
       efforts: readonly string[];
+      /**
+       * The model names this build knows, per agent (#223).
+       *
+       * **Not the vocabulary the others are.** `roleNames`, `providers` and
+       * `efforts` are closed sets the validator enforces, and a value outside
+       * one is refused; a model is any non-empty string and stays that way, for
+       * `KNOWN_MODELS`' stated reason. So this is sent as something a form may
+       * *offer*, and a form that showed only these would be claiming a catalogue
+       * nobody here has read. It is carried on this frame rather than composed
+       * in the window because the list has to agree with `DEFAULTS`, and they
+       * are the same file.
+       */
+      models: Readonly<Record<string, readonly string[]>>;
     }
   /**
    * The diff a run has produced, in reply to a `diff` request (#223, `1d`).
@@ -220,6 +233,22 @@ export type Outbound =
       name: string;
       read: ArtifactRead;
     }
+  /**
+   * A run's own record, in reply to a `record` request (#223).
+   *
+   * **The column's half of opening a run.** Six panes already followed the run
+   * the window was pointed at, because each reads a file that run wrote; the
+   * loop column beside them stayed with the live run and said so in a strip,
+   * which was honest and was still the wrong answer — *"when I click on an
+   * existing run, I don't see the right nav update."* It stayed because it had
+   * nothing to follow with: `reduce` builds a `Run` out of narration, and a
+   * finished run's narration went to a process that has exited.
+   *
+   * So this is not narration replayed. It is `state.json`, shaped by the core,
+   * carrying what the loop wrote down and nothing computed from it — which is
+   * what lets the window draw a record without re-deriving one.
+   */
+  | { type: 'record'; id: number; dir: string; runId: string; record: RunRecord }
   /**
    * A run that is gone, in reply to a `delete_run` request (#223).
    *
@@ -465,6 +494,20 @@ export type Inbound =
    */
   | { type: 'artifact'; id: number; dir: string; runId: string; name: string }
   /**
+   * Ask for one run's own record (#223).
+   *
+   * **A read, beside `artifacts` and `artifact`, and the same pair of fields for
+   * the same reason:** `dir` is the repository and `runId` names a directory
+   * under its `.vibe/runs`, which is the pair `assertUsableRunId` checks. A
+   * single path would be a caller handing this process somewhere to read.
+   *
+   * Answerable beside a run, like every other read — `loadRun` opens one file
+   * and writes nothing — and the *live* run is the one case where asking is
+   * pointless rather than refused: the window is already being narrated that
+   * run, so it has something better than a record.
+   */
+  | { type: 'record'; id: number; dir: string; runId: string }
+  /**
    * Ask what standing instructions each turn is given (#223).
    *
    * A read like the four above it, and the only one that names no run: these
@@ -661,6 +704,7 @@ export function decode(line: string): Decoded {
     }
     case 'artifacts':
     case 'artifact':
+    case 'record':
     case 'delete_run': {
       // Both fields required and both checked here, for `archive`'s reason:
       // there is no `parseArgs` below this to catch a missing one, and an empty
@@ -677,6 +721,13 @@ export function decode(line: string): Decoded {
       }
       if (type === 'artifacts') {
         return { ok: true, message: { type: 'artifacts', id, dir, runId } };
+      }
+      // Here for `delete_run`'s reason and not because the three are alike: the
+      // two fields a record needs are the two checked above, and a case of its
+      // own would be a second copy of the check that stops one repository's
+      // archive being answered as though it were another's.
+      if (type === 'record') {
+        return { ok: true, message: { type: 'record', id, dir, runId } };
       }
       // Here rather than in a case of its own: the two fields it needs are the
       // two checked above, and the checks are the point. A separate case would

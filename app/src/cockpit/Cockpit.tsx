@@ -14,6 +14,8 @@ import { Footer } from './Footer';
 import { PlansPane } from './PlansPane';
 import { ReportPane } from './ReportPane';
 import { Kickoff } from './Kickoff';
+import { RecordColumn } from './RecordColumn';
+import { useRecord } from './useRecord';
 import { LoopColumn } from './LoopColumn';
 import { NewWorkstream } from './NewWorkstream';
 import { OutputPane } from './OutputPane';
@@ -735,6 +737,20 @@ export function Cockpit() {
   // and infers nothing - and one call is what keeps the pilot's log, the report
   // panes and the Code tab from disagreeing about which round a thing arrived in.
   const cards = rounds(run);
+  /**
+   * The opened run's own record, for the column beside the panes (#223).
+   *
+   * Asked for only when the window is pointed at a run it is **not** narrating:
+   * for the live one the window already has something strictly better than a
+   * record, which is the narration itself. `run.artifacts.length` re-reads it
+   * for the same reason every artifact pane uses it — it counts what the run
+   * said it wrote, so a re-read happens because something landed on disk.
+   */
+  const opened = useRecord(
+    past && viewing !== null ? viewing.dir : '',
+    past && viewing !== null ? viewing.runId : null,
+    run.artifacts.length,
+  );
 
   return (
     <div className="v-cockpit">
@@ -1068,19 +1084,20 @@ export function Cockpit() {
             </button>
           </div>
           {/* **Which run the panes are about, whenever it is not the live one.**
-              Opening a past run changes what six panes read and nothing else on
-              screen — the loop column, the spend readout and the footer all stay
-              with the run this window is narrating — so without this the window
-              would be showing two runs at once and saying so nowhere. It carries
-              the way back and the way forward: stop reading, or go to `1b`,
-              which is the only place a run is started. */}
+              The panes and the column both follow an opened run now (#223), so
+              this no longer has to explain a window showing two runs at once —
+              what is left is the one thing that genuinely does not follow: the
+              spend readout in the bar above, which is the live run's, because it
+              is charged as the run goes rather than read off a record. It
+              carries the way back and the way forward: stop reading, or go to
+              `1b`, which is the only place a run is started. */}
           {past && viewing !== null && (
             <div className="v-cockpit__viewing">
               <StateKicker tone="quiet">reading</StateKicker>
               <span className="v-cockpit__viewingwhat">{viewing.task}</span>
               <span className="v-cockpit__viewingnote">
-                from disk. The column and the spend beside it are the run this window is
-                narrating, not this one.
+                from disk. The spend in the bar above is the run this window is narrating; what
+                this one spent is in its record, on the right.
               </span>
               <button className="v-doc__again" onClick={() => setTab('runs')}>
                 resume it…
@@ -1239,60 +1256,89 @@ export function Cockpit() {
           onToggle={() => setShowLoop((on) => !on)}
         >
           <div className="v-cockpit__loop">
-            {/* While there is no run, this column is four not-started groups and
-                a sentence saying what it is waiting for — and what it is waiting
-                for is a brief, which is composed next door.
+            {/* **The column follows the run the window is pointed at** (#223).
+                Opening a run used to change six panes and leave this one showing
+                the live run, with a strip saying so — honest, and still the
+                wrong answer: *"when I click on an existing run, I don't see the
+                right nav update."*
 
-                The launch form used to live here (#211). It has moved into the
-                pilot pane, because two forms building the same argv is the third
-                spelling that issue warns against, and because the front door
-                being a form beside the conversation is the complaint itself.
-
-                Offered again once the command has RETURNED, not once the loop
-                said it was done: `serve.ts` runs one at a time and refuses a
-                second invoke until the first settles. */}
-            {(!launched || run.completed !== null) && !outside && (
+                It is a **different drawing**, not this one with the clocks
+                stopped. `reduce` builds a `Run` out of narration and a finished
+                run's narration went to a process that has exited, so there is no
+                live card to show and none is invented; what there is instead is
+                the run's own record, which the core reads off `state.json`. */}
+            {past && viewing !== null ? (
+              <RecordColumn
+                record={opened.record}
+                failure={opened.failure}
+                loading={opened.loading}
+                task={viewing.task}
+                // `1b`, which is the only place a run is started. A control that
+                // resumed from here would be a second way to spend, which is the
+                // same mistake as two places able to force a lock.
+                onResume={() => setTab('runs')}
+                onBack={() => setViewing(null)}
+              />
+            ) : (
               <>
-                <div className="v-loop__waiting">
-                  <StateKicker tone="quiet">waiting for the brief</StateKicker>
-                  <p>
-                    Say what you want in the conversation — that is the front door. There is no
-                    start button: when the pilot has enough, it <strong>proposes</strong> the exact
-                    command and you press that.
-                  </p>
-                </div>
-                {/* `4a`, for the one moment somebody is deciding how THIS run
-                    should differ from the project's defaults. */}
-                <button
-                  className="v-launch__more"
-                  onClick={() => setComposing({ dir: repoDir, locked: false })}
-                  disabled={busy || !wire.connected}
-                >
-                  or set this run&apos;s overrides…
-                </button>
+                {/* While there is no run, this column is four not-started groups
+                    and a sentence saying what it is waiting for — and what it is
+                    waiting for is a brief, which is composed next door.
+
+                    The launch form used to live here (#211). It has moved into
+                    the pilot pane, because two forms building the same argv is
+                    the third spelling that issue warns against, and because the
+                    front door being a form beside the conversation is the
+                    complaint itself.
+
+                    Offered again once the command has RETURNED, not once the
+                    loop said it was done: `serve.ts` runs one at a time and
+                    refuses a second invoke until the first settles. */}
+                {(!launched || run.completed !== null) && !outside && (
+                  <>
+                    <div className="v-loop__waiting">
+                      <StateKicker tone="quiet">waiting for the brief</StateKicker>
+                      <p>
+                        Say what you want in the conversation — that is the front door. There is no
+                        start button: when the pilot has enough, it <strong>proposes</strong> the
+                        exact command and you press that.
+                      </p>
+                    </div>
+                    {/* `4a`, for the one moment somebody is deciding how THIS run
+                        should differ from the project's defaults. */}
+                    <button
+                      className="v-launch__more"
+                      onClick={() => setComposing({ dir: repoDir, locked: false })}
+                      disabled={busy || !wire.connected}
+                    >
+                      or set this run&apos;s overrides…
+                    </button>
+                  </>
+                )}
+                {/* The counts in the column are controls, and this is where they
+                    go. The same setter the pilot's round cards use, so a severity
+                    chip means one thing wherever it is drawn. */}
+                <LoopColumn run={run} now={now} hostPid={wire.hostPid} onOpen={open} />
+                {/* `4g`, and only on the ending that means the loop finished.
+                    Every other exit is a halt, and a halt gets the footer's
+                    banner and its one action rather than a summary of work that
+                    stopped early. */}
+                {run.completed?.exit === 0 && <Summary run={run} />}
+                <Footer
+                  run={run}
+                  busy={busy}
+                  onDecide={answer}
+                  onPause={pause}
+                  onStop={() => setConfirmStop(true)}
+                  onResume={resume}
+                  onImplement={implement}
+                  caps={caps}
+                  gates={gates}
+                  order={order}
+                  pausing={pausing}
+                />
               </>
             )}
-            {/* The counts in the column are controls, and this is where they go.
-                The same setter the pilot's round cards use, so a severity chip
-                means one thing wherever it is drawn. */}
-            <LoopColumn run={run} now={now} hostPid={wire.hostPid} onOpen={open} />
-            {/* `4g`, and only on the ending that means the loop finished. Every
-                other exit is a halt, and a halt gets the footer's banner and its
-                one action rather than a summary of work that stopped early. */}
-            {run.completed?.exit === 0 && <Summary run={run} />}
-            <Footer
-              run={run}
-              busy={busy}
-              onDecide={answer}
-              onPause={pause}
-              onStop={() => setConfirmStop(true)}
-              onResume={resume}
-              onImplement={implement}
-              caps={caps}
-              gates={gates}
-              order={order}
-              pausing={pausing}
-            />
           </div>
         </SidePanel>
       </div>

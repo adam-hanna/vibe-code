@@ -12,11 +12,12 @@ import {
   listRunArtifacts,
   listRuns,
   readRunArtifact,
+  readRunRecord,
 } from '@src/run.js';
 import { loadConfig, readRawConfig, writeConfigPatch } from '@src/config.js';
 import { GATEABLE, GATE_MODES, UNGATEABLE } from '@src/gates.js';
 import { diffRange, diffSinceWithLimit } from '@src/git.js';
-import { PROVIDERS, ROLE_NAMES } from '@src/roles.js';
+import { KNOWN_MODELS, PROVIDERS, ROLE_NAMES } from '@src/roles.js';
 import { EFFORTS } from '@src/types.js';
 import type { ArtifactRead, LoadedConfig, RunArtifact } from '@src/types.js';
 import type { RunLoop } from '@src/cli.js';
@@ -431,6 +432,36 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       return;
     }
 
+    if (msg.type === 'record') {
+      // A read like the four above it, and the last of them to be built. It is
+      // exempt from the one-at-a-time rule for `archive`'s reason and a
+      // narrower one of its own: `loadRun` opens one file and writes nothing,
+      // and the run somebody opens while another is going is by definition not
+      // the run in flight.
+      //
+      // **The throw is the refusal.** `loadRun` throws a `StoredStateError` for
+      // an id it will not join onto a path, a run directory it will not follow
+      // (#53) and a `state.json` its validators reject — three different
+      // findings with three different sentences, and each is the whole answer.
+      // An empty record would say a run did nothing.
+      try {
+        send({
+          type: 'record',
+          id: msg.id,
+          dir: msg.dir,
+          runId: msg.runId,
+          record: readRunRecord(msg.dir, msg.runId),
+        });
+      } catch (err: unknown) {
+        send({
+          type: 'error',
+          id: msg.id,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+      return;
+    }
+
     if (msg.type === 'prompts') {
       // A read like the four above it and the simplest of them: `promptBlocks`
       // opens nothing, reads no directory and returns the same four constants
@@ -566,6 +597,7 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
           roleNames: ROLE_NAMES,
           providers: PROVIDERS,
           efforts: EFFORTS,
+          models: KNOWN_MODELS,
         });
       } catch (err: unknown) {
         // `validate`'s own message, naming the field - which is what lets a

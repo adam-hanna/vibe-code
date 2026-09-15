@@ -211,6 +211,110 @@ function TextField({
 }
 
 /**
+ * The sentinel for *let me type one*.
+ *
+ * A string no model can be, rather than an empty value, because empty already
+ * means *take the agent's default* and the two are opposite intentions.
+ */
+const OTHER = ' other';
+
+/**
+ * Which model a role runs on: a list of the ones this build knows, and a way
+ * past it (#223).
+ *
+ * **This reverses a decision made one report ago, and the reversal is narrow.**
+ * The field was free text, argued from the core's own rule - *"no allowlist and
+ * no default table: guessing whether a model exists is the never-invent-a-number
+ * rule applied to a name"* - and the reply was *"the model should be a drop down
+ * and not a text input"*. Both are right about different halves. Typing
+ * `gpt-5.6-luna` from memory to change one role is a bad control; a list that
+ * *claimed* to be the vendor's catalogue would be the invention.
+ *
+ * So the list is what this build **knows a name for**, sent by the core from
+ * `KNOWN_MODELS` beside the defaults it has to agree with, and three things keep
+ * it from becoming an allowlist:
+ *
+ * - **A value not on the list is still shown**, as its own option, marked. A
+ *   select that silently dropped it would rewrite a role's model by rendering,
+ *   which is the worst kind of data loss because nobody pressed anything.
+ * - **`other…` is always there**, and it reveals the text field this replaced.
+ *   A model that shipped this morning is typeable this morning; the core still
+ *   validates it as any non-empty string, so nothing here can refuse one.
+ * - **Empty is a legal state and is offered**, because a role with no model
+ *   takes its agent's own default, which is what every unconfigured row is.
+ */
+function ModelField({
+  id,
+  value,
+  agent,
+  known,
+  disabled,
+  onSave,
+}: {
+  id: string;
+  value: string | undefined;
+  agent: string;
+  known: readonly string[];
+  disabled: boolean;
+  onSave: (next: string) => void;
+}) {
+  const current = value ?? '';
+  // `other…` is a mode, not a value. It is held here rather than derived from
+  // `current` because somebody who has just chosen it has typed nothing yet, and
+  // a derived flag would flip the control back the moment the box emptied.
+  const [typing, setTyping] = useState(false);
+
+  if (typing) {
+    return (
+      <div className="v-set__model">
+        <TextField
+          id={id}
+          value={value}
+          placeholder={`- ${agent} default -`}
+          disabled={disabled}
+          onSave={onSave}
+        />
+        <button className="v-doc__again" onClick={() => setTyping(false)} disabled={disabled}>
+          pick from the list
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <select
+      id={id}
+      value={current}
+      disabled={disabled}
+      onChange={(e) => {
+        if (e.target.value === OTHER) {
+          setTyping(true);
+          return;
+        }
+        onSave(e.target.value);
+      }}
+    >
+      {/* Not set, which is what an unconfigured row is and a legal thing to go
+          back to. Removing it would make every row claim a model somebody
+          chose. */}
+      <option value="">— {agent} default —</option>
+      {known.map((m) => (
+        <option key={m} value={m}>
+          {m}
+        </option>
+      ))}
+      {/* Configured, and not one this build has a name for. Kept rather than
+          dropped: it may be a model that shipped after this build, and a select
+          that could not represent its own value would overwrite it. */}
+      {current !== '' && !known.includes(current) && (
+        <option value={current}>{current} — not one this build knows</option>
+      )}
+      <option value={OTHER}>other…</option>
+    </select>
+  );
+}
+
+/**
  * One block: what it renders as, and the three ways to change it.
  *
  * **Saving and adopting are separate buttons, and that is the design.** A draft
@@ -813,23 +917,29 @@ export function Settings({
                     </select>
                   </td>
                   <td>
-                    {/* **A text field rather than a list, and that is the core's
-                        own decision rather than a shortcut.** `RoleSetting.model`
-                        is validated only for being a non-empty string, because
-                        "no allowlist and no default table: guessing whether a
-                        model exists is the never-invent-a-number rule applied to
-                        a name". A dropdown here would be exactly that guess, and
-                        it would go stale the week either vendor ships a model —
-                        which is the report: *"models are always evolving, we
-                        probably don't want these hard coded."*
+                    {/* **The list this build knows, and `other…` past it.** The
+                        first cut was free text, argued from the core's own rule:
+                        `RoleSetting.model` is validated only for being a
+                        non-empty string, because "guessing whether a model
+                        exists is the never-invent-a-number rule applied to a
+                        name". The reply was *"the model should be a drop down
+                        and not a text input"*, and both hold — so the select
+                        offers what the core sent, keeps a configured value it
+                        does not recognise, and has a way in for one that shipped
+                        this morning. Nothing here narrows the validator.
 
-                        A typo is caught by the run summary before anything is
-                        spent, and by a turn failure naming `roles.<role>.model`
-                        rather than the provider key. */}
-                    <TextField
+                        A typo is still caught by the run summary before anything
+                        is spent, and by a turn failure naming `roles.<role>
+                        .model` rather than the provider key. */}
+                    <ModelField
                       id={`model-${role}`}
                       value={current.model}
-                      placeholder={`— ${current.provider ?? 'agent'} default —`}
+                      agent={current.provider ?? 'agent'}
+                      // Per agent, because a Claude model handed to Codex is a
+                      // turn that fails after it has been spawned. A row whose
+                      // agent this build has no list for offers none rather than
+                      // borrowing the other one's.
+                      known={frame.models[current.provider ?? ''] ?? []}
                       disabled={busy}
                       onSave={(next) =>
                         save({ roles: { [role]: { ...current, model: next } } })

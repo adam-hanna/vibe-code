@@ -90,3 +90,61 @@ export function writable(conversation: Conversation): string {
 export function worthSaving(conversation: Conversation): boolean {
   return conversation.messages.length > 0 || conversation.replies.length > 0;
 }
+
+/**
+ * What to do when the window is pointed at a different conversation (#223).
+ *
+ * **Pulled out of the effect that does it, because the effect could not be
+ * tested and got this wrong in a way nobody could see.** The app has no jsdom,
+ * so a decision living inside a component is a decision nothing checks; this is
+ * pure, and `saved.test.ts` drives every transition through it.
+ *
+ * ## The defect it is the fix for
+ *
+ * Adoption used to be allowed only *from* the project bucket — `chatKey(dir,
+ * null)` — which is right about where a pre-run conversation lives and wrong
+ * about where one can be *typed*. Open run A, type the brief for a new run into
+ * the composer, press the proposal: the conversation went to A's key, because
+ * that is where the window was pointed, and the run that it proposed started
+ * life with nothing. Then opening that run showed an empty pane, which is the
+ * report — *"I don't see the pilot chat update"* — arriving one step removed
+ * from its cause.
+ *
+ * ## The rule
+ *
+ * A conversation belongs to the run it is *about*, and a run that is starting is
+ * about whatever proposed it. So:
+ *
+ * - **`adopt`** — a run id has arrived, there is something on screen, and that
+ *   run has nothing stored. What is on screen proposed it, wherever it was
+ *   typed. This is the widening.
+ * - **`restore`** — anything else with a different key, including a *resume*,
+ *   where the target already has its own conversation. Adopting over that would
+ *   destroy a real exchange to keep a stray one, which is strictly worse than
+ *   the bug above.
+ * - **`stay`** — the key has not moved.
+ *
+ * `stored` is passed in rather than read here, because a pure function that
+ * touched `localStorage` would be neither.
+ */
+export type ChatMove = 'adopt' | 'restore' | 'stay';
+
+export function chatMove(args: {
+  /** The key the conversation on screen belongs to, or null before the first. */
+  from: string | null;
+  /** The key the window is now pointed at. */
+  to: string;
+  /** Whether the run id the window is now pointed at is a run at all. */
+  intoRun: boolean;
+  /** Whether anything is stored under `to`. */
+  stored: boolean;
+  /** Whether what is on screen is worth carrying. */
+  holding: boolean;
+}): ChatMove {
+  if (args.from === args.to) return 'stay';
+  // Never on the first load: `from` is null because this window has shown
+  // nothing yet, and there is no exchange to have proposed anything.
+  if (args.from === null) return 'restore';
+  if (args.intoRun && args.holding && !args.stored) return 'adopt';
+  return 'restore';
+}

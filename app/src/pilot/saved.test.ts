@@ -105,13 +105,27 @@ describe('an empty conversation is not written', () => {
 });
 
 describe('a run adopts the conversation that proposed it', () => {
-  test('the pane moves the un-launched chat rather than restoring over it', () => {
-    // Source-read, because the claim is about an effect's control flow. A run
-    // starting changes the key from the project's bucket to the run's; reading
-    // the run's (empty) conversation at that moment would throw away the
-    // exchange that decided what to build, at the exact moment it succeeded.
-    expect(pilotPane).toMatch(/before === chatKey\(dir, null\)/);
-    expect(pilotPane).toMatch(/localStorage\.removeItem\(before\)/);
+  test('the pane moves the chat that proposed it rather than restoring over it', () => {
+    // **Case 2, and the part that changed is the part that was the defect.** The
+    // claim still holds and is unchanged: a run starting must not read its own
+    // (empty) conversation, because that throws away the exchange that decided
+    // what to build at the exact moment it succeeded. What this used to pin
+    // beside it was the *condition* — `before === chatKey(dir, null)` — which
+    // said the exchange only counts when it was typed in the project's bucket.
+    // That is false: type a brief while a past run is open and it is typed under
+    // that run's key, so the run it proposed started life with nothing and
+    // opening it showed an empty pane.
+    //
+    // The condition moved into `chatMove`, which is pure and has the transition
+    // table this file could never assert from source — including the resume case
+    // the widening needs a guard for. What stays here is the half that is still
+    // about this file: that the move is a write-and-clear and not a read.
+    expect(pilotPane).toMatch(/const move = chatMove\(\{/);
+    expect(pilotPane).toMatch(/if \(move === 'adopt'\)/);
+    expect(pilotPane).toMatch(/localStorage\.setItem\(key, writable\(held\.current\)\)/);
+    // Cleared, and only the bucket: taking a *run's* key away here would delete
+    // a real conversation to tidy up after a move.
+    expect(pilotPane).toMatch(/if \(before === bucket\) localStorage\.removeItem\(bucket\)/);
   });
 
   test('the loader keys on the run, never on the conversation', () => {

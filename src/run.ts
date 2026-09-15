@@ -42,6 +42,8 @@ import type {
   RoundClaim,
   RoundRecord,
   RunCheckpointMeta,
+  RunEvent,
+  RunRecord,
   RunArtifact,
   RunPhase,
   RunState,
@@ -1725,6 +1727,91 @@ export function answerQuestions(
   // is one the resume refuses, and the answers would be gone with it.
   writeAtomic(dir, 'NEEDS-INPUT.md', result.md);
   return { filled: result.filled, unmatched: result.unmatched, open: unanswered(result.md) };
+}
+
+/**
+ * Read a run's own record, for a window that has opened it (#223).
+ *
+ * **Through `loadRun`, so there is one definition of a legal run.** Every guard
+ * it carries applies here unchanged — the usable-id check, the refusal to follow
+ * a link (#53), the stored-state validators — and the sentence it throws is the
+ * whole answer, which is why this does not catch: the caller crossing a process
+ * boundary reports it as an `error` frame naming what was refused, and an empty
+ * record would be indistinguishable from a run that did nothing.
+ *
+ * It re-derives nothing. The counters, the spend and the finding lists are read
+ * off the state the loop wrote; `ended` is selected from the events rather than
+ * composed, and `liveness` is the lock's own verdict rather than a guess made
+ * from `status` — a `running` status on a dead pid is exactly the wreck #131
+ * exists to tell apart, and collapsing the two would hide it.
+ */
+export function readRunRecord(targetDir: string, runId: string): RunRecord {
+  const state = loadRun(targetDir, runId);
+  const dir = path.join(targetDir, RUNS_DIR, runId);
+  const { liveness } = livenessOf(dir);
+  return {
+    id: state.id,
+    task: state.task,
+    status: state.status,
+    phase: state.phase ?? null,
+    planOnly: state.planOnly,
+    createdAt: state.createdAt,
+    lastActivityAt: state.lastActivityAt ?? null,
+    branch: state.branch,
+    liveness,
+    rounds: {
+      plan: state.planRound,
+      question: state.questionRound,
+      review: state.reviewRound,
+      verify: state.verifyRound,
+    },
+    spend: {
+      tokens: state.tokensUsed,
+      // Absent rather than zero on a run that recorded none: `codexTokens` is
+      // optional precisely because a run with no Codex turn has not measured a
+      // Codex total, and `0 tok` would be a claim that it had.
+      codexTokens: state.codexTokens ?? null,
+      // Zero is a real answer here and is kept — `costUsd` is written on every
+      // charge — but a run that has charged nothing has not been measured, and
+      // that is the same distinction `RunSummary.costUsd` draws.
+      costUsd: state.tokensUsed === 0 ? null : state.costUsd,
+    },
+    findings: {
+      carried: state.carried?.length ?? 0,
+      declined: state.declined?.length ?? 0,
+      outstanding: state.outstanding?.length ?? 0,
+      deferred: state.deferred?.length ?? 0,
+    },
+    hasPlan: state.plan !== null,
+    ended: endingOf(state.events),
+  };
+}
+
+/**
+ * The event that ended the run, or null.
+ *
+ * **Selected by type, never by reading the prose.** `escalation` and `error` are
+ * the two types `execute` records where it gives up, so the last of either is
+ * the ending — picking the most recent alarming *sentence* out of the log is the
+ * English-matching #133 exists to prevent, and it picks the wrong line, because
+ * a healthy run is full of warnings that are not the ending.
+ *
+ * A run that simply finished has neither, and null is the honest answer: the
+ * status already says `complete`, and inventing a phrase for it would make every
+ * ending read as a failure.
+ */
+function endingOf(events: readonly RunEvent[]): { type: string; message: string } | null {
+  for (let i = events.length - 1; i >= 0; i -= 1) {
+    const event = events[i];
+    if (event === undefined) continue;
+    if (event.type !== 'escalation' && event.type !== 'error') continue;
+    const message = event['message'];
+    // A recorded event whose message is not a string is reported as the type
+    // alone rather than as `undefined` or as a stringified object: the type is
+    // the fact, and the sentence is the elaboration.
+    return { type: event.type, message: typeof message === 'string' ? message : '' };
+  }
+  return null;
 }
 /** What was removed. The directory rather than a byte count — see `deleteRun`. */
 export interface RunRemoval {

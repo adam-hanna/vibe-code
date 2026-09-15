@@ -1971,3 +1971,84 @@ export interface RunSummary {
    */
   unverified?: true;
 }
+
+/**
+ * A run's own record, read back after the process that made it has gone (#223).
+ *
+ * **Why this is not a `Run` rebuilt from frames.** The window's `Run` is built
+ * by `reduce` out of narration, and a finished run's narration was addressed to
+ * a process that has exited — so replaying it would draw a live card for a turn
+ * nobody is waiting on, which is the fabrication the whole model is arranged
+ * against. What *is* still true is `state.json`, so this is that file, shaped by
+ * the core rather than re-read by a webview: the counts the run recorded, the
+ * spend the charge seam totalled, and how it ended.
+ *
+ * Reported as *"when I click on an existing run, I don't see the right nav
+ * update"*. Six panes followed the opened run and the column beside them did
+ * not, because the column had nothing to follow it with. This is the something.
+ *
+ * **Every field is read, never derived.** There is no "progress", no percentage
+ * and no position in a list of phases: a round count is a number the loop wrote
+ * down, and a run that recorded nothing for a field reports absent rather than
+ * zero. The one shaping decision is `ended`, which is taken from the *last*
+ * `escalation` or `error` event rather than by matching the transcript — the
+ * English-matching #133 exists to prevent.
+ */
+export interface RunRecord {
+  id: string;
+  task: string;
+  status: RunStatus;
+  /** What it was doing when it stopped, or null on a run that never said. */
+  phase: RunPhase | null;
+  /** Whether it was asked for a plan and nothing else. */
+  planOnly: boolean;
+  createdAt: string;
+  /**
+   * When anything was last observed working, or null.
+   *
+   * Absolute, and it is the caller's job to keep it that way: hi-fi 17's rule is
+   * that on a card which has stopped every relative time becomes an absolute
+   * one, because `6s ago` is a claim that has to keep being true.
+   */
+  lastActivityAt: string | null;
+  branch: string | null;
+  /** From its lock, so a record can say whether anything still holds this run. */
+  liveness: Liveness;
+  /**
+   * How many rounds of each loop the run recorded.
+   *
+   * Four counters the core keeps on `RunState` and nothing else here computes.
+   * A question round is deliberately its own number and not folded into the
+   * plan rounds, for the reason `advancesRound` gives: a revision answering
+   * *answers* is not the producer's side of a round, because nothing judged
+   * anything.
+   */
+  rounds: { plan: number; question: number; review: number; verify: number };
+  /**
+   * What it spent, from the one seam every token is charged through.
+   *
+   * `codexTokens` and `costUsd` are nullable for the reason they are nullable
+   * everywhere else: a Codex turn bills nothing at all, so a dollar figure has
+   * no quantity to be an estimate of, and a run that charged nothing has not
+   * spent zero — it has not been measured.
+   */
+  spend: { tokens: number; codexTokens: number | null; costUsd: number | null };
+  /**
+   * The four finding lists the run ended holding, as counts.
+   *
+   * Counts rather than the findings, because the findings themselves are in the
+   * round's own artifact and the Code review tab already reads it — a frame
+   * carrying every finding in full would put a review's whole report on the wire
+   * to draw four numbers.
+   */
+  findings: { carried: number; declined: number; outstanding: number; deferred: number };
+  /** Whether a plan of record exists, and nothing about its contents. */
+  hasPlan: boolean;
+  /**
+   * How it ended, in the core's own words, or null on a run that just stopped.
+   *
+   * The `type` is the event type, so a reader acts on the fact rather than on a
+   * sentence — the same rule `run_escalated` and `run_failed` follow on the wire.
+   */
+  ended: { type: string; message: string } | null;
+}

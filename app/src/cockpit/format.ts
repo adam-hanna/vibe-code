@@ -387,3 +387,28 @@ export function ending(exit: number): Ending | null {
  * is the code the whole answer form is gated on.
  */
 export const NEEDS_HUMAN = 2;
+
+/**
+ * An absolute moment from a stored ISO timestamp — `14 Sep, 15:33`.
+ *
+ * **Date as well as time, which is what separates it from `clock`.** That one
+ * renders a moment inside the run you are watching, where the date is today by
+ * construction; this renders one off a record that may be a week old, and
+ * `15:33` alone would be a time with no day attached — read as this afternoon
+ * every time.
+ *
+ * An unparseable value is said to be unrecorded rather than rendered. `Invalid
+ * Date` sitting where a timestamp goes reads as something somebody measured, and
+ * these strings come from a file another process wrote.
+ */
+export function recorded(iso: string | null): string {
+  if (iso === null) return 'not recorded';
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return 'not recorded';
+  return at.toLocaleString(undefined, {
+    day: 'numeric',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}

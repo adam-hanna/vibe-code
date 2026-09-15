@@ -154,6 +154,17 @@ export interface ConfigFrame {
   roleNames: readonly string[];
   providers: readonly string[];
   efforts: readonly string[];
+  /**
+   * The model names this build knows, per agent (#223).
+   *
+   * **Offered, not enforced**, which is what separates it from the three lists
+   * above. Those are closed sets the validator refuses a value outside of; a
+   * model is any non-empty string, because *"guessing whether a model exists is
+   * the never-invent-a-number rule applied to a name"* — so a row whose model is
+   * not on this list is still shown and still saved, and there is an `other…`
+   * way in for a model that shipped this morning.
+   */
+  models: Readonly<Record<string, readonly string[]>>;
 }
 
 /**
@@ -230,6 +241,39 @@ export interface QuestionsAnswered {
   open: readonly string[];
 }
 
+
+/**
+ * A run's own record, read back after the process that made it has gone (#223).
+ *
+ * **Deliberately not a `Run`.** `reduce` builds one of those out of narration,
+ * and a finished run's narration was addressed to a process that has exited — so
+ * synthesising frames for it would draw a live card for a turn nobody is waiting
+ * on. This is `state.json` instead, shaped by the core: the counts the loop
+ * wrote down, the spend the charge seam totalled, and how it ended. Every field
+ * is read; nothing on it is computed from two others.
+ */
+export interface RecordFrame {
+  type: 'record';
+  id: number;
+  dir: string;
+  runId: string;
+  record: {
+    id: string;
+    task: string;
+    status: string;
+    phase: string | null;
+    planOnly: boolean;
+    createdAt: string;
+    lastActivityAt: string | null;
+    branch: string | null;
+    liveness: string;
+    rounds: { plan: number; question: number; review: number; verify: number };
+    spend: { tokens: number; codexTokens: number | null; costUsd: number | null };
+    findings: { carried: number; declined: number; outstanding: number; deferred: number };
+    hasPlan: boolean;
+    ended: { type: string; message: string } | null;
+  };
+}
 /**
  * The standing instruction blocks each turn is given (#223).
  *
@@ -336,6 +380,7 @@ export type Frame =
   | ArtifactFrame
   | RunDeleted
   | PromptsFrame
+  | RecordFrame
   | QuestionsAnswered;
 
 /**
@@ -380,6 +425,10 @@ export function isFrame(v: unknown): v is Frame {
     // reason: they are the same in every run, so they say nothing about the one
     // being narrated.
     type === 'prompts' ||
+    // A past run's own record, ignored by the reducer for a sharper version of
+    // the same reason: it describes a run this process is NOT narrating, and
+    // folding it into the live run is exactly the confusion it exists to end.
+    type === 'record' ||
     type === 'questions_answered' ||
     // The command runner's three (#211). Also ignored by the cockpit's reducer:
     // a command is not part of a run - it outlives one, and it happens when
@@ -714,6 +763,31 @@ export async function artifact(
     'the host did not answer with the artifact',
   );
   return frame.read;
+}
+
+/**
+ * One run's own record (#223).
+ *
+ * **What makes opening a run change the column beside the panes.** The six
+ * artifact panes already followed the opened run because each reads a file that
+ * run wrote; the loop column had nothing to follow with, and said so in a strip
+ * — honest, and still the wrong answer to *"when I click on an existing run, I
+ * don't see the right nav update."*
+ *
+ * A failure is a rejection carrying the core's own sentence, not an empty
+ * record: a run whose id will not join onto a path, a directory vibe refuses to
+ * follow (#53) and a `state.json` the validators reject are three different
+ * findings, and an empty record would say the run did nothing.
+ */
+export async function record(dir: string, runId: string): Promise<RecordFrame['record']> {
+  const id = nextRequestId();
+  const frame = await ask<RecordFrame>(
+    { type: 'record', id, dir, runId },
+    id,
+    'record',
+    "the host did not answer with the run's record",
+  );
+  return frame.record;
 }
 
 /**

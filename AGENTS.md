@@ -381,6 +381,92 @@ they are waiting on. Four things in it are worth carrying:
   are acted on differently, and a window that collapsed them into *"could not delete"* would
   answer neither. It is answerable beside a run for a reason rather than by exemption — the
   live-lock refusal means **the running run is the one run this frame can never reach**.
+- **Opening a run moves the column too, and what it moves to is a record rather
+  than a replay.** Six panes followed the opened run because each reads a file
+  that run wrote; the loop column stayed with the live one and said so in a
+  strip. That was honest and was still the wrong answer — *"when I click on an
+  existing run, I don't see the right nav update"* — because it stayed for a
+  reason nobody outside this repository can see: it had nothing to follow with.
+
+  The tempting fix is to replay the run's narration into `reduce`, and it is the
+  one thing that must not happen: a finished run's frames were addressed to a
+  process that has exited, so a replay draws a live card for a turn nobody is
+  waiting on, and `state.events` is the **durable** set rather than the narrated
+  one — phase transitions are not in it, so the replay would also be short. What
+  is still true is `state.json`, so `record` is a seventh read frame carrying it,
+  shaped by the core: the four round counters, the spend, the four finding
+  counts, the branch and how it ended. Every field is read; nothing on it is
+  computed from two others, which is what lets the window draw it while
+  *"the webview re-derives nothing"* stays true.
+
+  `RecordColumn` is a different drawing and not the live column with its clocks
+  stopped. **Nothing on it animates** — *exactly one element on screen pulses*,
+  and on a run that ended on Tuesday the honest count is zero — and every time on
+  it is absolute, which is hi-fi 17's rule at its strongest. `recorded()` carries
+  the **day** as well as the time, because `clock()` renders a moment inside the
+  run you are watching, where the date is today by construction; a bare `15:33`
+  on a week-old record reads as this afternoon every time. `ended` is selected
+  from the events **by type**, never by picking the most alarming sentence out of
+  the log, which is the English-matching #133 exists to prevent.
+
+  The strip stays, narrowed to the one thing that genuinely does not follow: the
+  spend readout in the tab bar, which is the live run's because it is charged as
+  the run goes rather than read off a record.
+- **A conversation belongs to the run it is about, and *about* includes the run
+  it proposed.** Adoption was allowed only out of the project bucket —
+  `chatKey(dir, null)` — which is right about where a pre-run conversation lives
+  and wrong about where one can be **typed**. Open a past run, type the brief for
+  a new one into the composer, press the proposal: the exchange was saved under
+  *that run's* key, because that is where the window was pointed, and the run it
+  proposed started life with nothing. Opening that run then showed an empty pane,
+  which is the report — *"nor do I see the pilot chat update"* — arriving one step
+  removed from its cause. Confirmed rather than guessed: the only surviving run
+  in the manual-pass archive had no `vibe.chat.` key at all, while three deleted
+  ones did.
+
+  `chatMove` in `saved.ts` is the widened rule and it is **pure**, which is the
+  other half of the fix: the app has no jsdom, so a decision living inside an
+  effect is a decision nothing tests, and that is how the narrow condition
+  survived being written down. Adoption now takes the conversation on screen
+  whatever key it was under — **unless the target already has one**, which is the
+  guard a resume needs: that run has its own exchange, and adopting over it would
+  destroy a real conversation to save a stray one, which is strictly worse than
+  the bug being fixed. Only the project bucket is cleared afterwards; removing a
+  *run's* key would delete a real conversation to tidy up after a move.
+
+  And a run with no stored conversation now **says so**. *"Nothing yet"* is right
+  before any run and reads as a failed load beside one — a run started from the
+  terminal, or by a build older than `saved.ts`, never had a conversation here,
+  and that is a fact about this window's memory rather than about the run.
+- **A model is picked from a list this build ships, and typed past it.** This
+  reverses the decision one report above it, and the reversal is narrow rather
+  than a change of mind about the rule. Free text was argued from the core's own
+  sentence — *"guessing whether a model exists is the never-invent-a-number rule
+  applied to a name"* — and the reply was *"the model should be a drop down and
+  not a text input"*. Both are right about different halves: typing
+  `gpt-5.6-luna` from memory to change one role is a bad control, and a list
+  *claiming* to be a vendor's catalogue would be the invention.
+
+  `KNOWN_MODELS` in `roles.ts` is what a window may **offer**, and it is not an
+  allowlist: `validateRoleSetting` is unchanged and still takes any non-empty
+  string. Every entry is a name this repository already ships — `opus` is
+  `DEFAULTS.claude.model`, `haiku` is `preflight.ts`'s `PROBE_MODEL`, `sonnet` is
+  `README.md`'s role-table example, `gpt-5.6-luna` is `DEFAULTS.codex.model`, and
+  `gpt-5.6-pro` is what `--help` prints beside `--role` — so the list is a fact
+  about this build rather than a claim about a catalogue. It lives in the core
+  beside the defaults it has to agree with, for the reason `pilot.MODELS` gives
+  about Rust: a list compiled into the surface that displays it goes stale on
+  somebody else's schedule instead of ours. It is **per agent**, because a Claude
+  model handed to Codex is a turn that fails after it has been spawned.
+
+  Two rules keep the select from becoming the allowlist the list is not. A
+  configured value it does not recognise is **kept as its own option, marked** —
+  a select that could not represent its own value would rewrite a role's model by
+  rendering, which is the worst kind of data loss because nobody pressed
+  anything. And `other…` is always there, revealing the text field this replaced,
+  so a model that shipped this morning is typeable this morning. `other…` is a
+  sentinel rather than the empty option, because empty already means *take the
+  agent's default* and the two are opposite intentions.
 - **A console child spawned without `windowsHide` allocates a window, and the detach is why.**
   Reported as *"there are a whole bunch of windows that popup and quickly disappear when I
   run"*, and the count is exact: one `where.exe` per binary this resolves — claude, codex,
@@ -801,8 +887,9 @@ event type**, never a name of its own: `applyCharge` narrates under `claude_turn
 `codex_turn`, the same string it just recorded, so a host acting on the fact and an archive
 holding it agree about one fact rather than two spellings of it.
 
-**Six frames are reads, and a read runs beside a run** (#223). `archive`, `config`, `diff`,
-`artifacts`, `artifact` and `prompts` answer a question rather than describing something that happened,
+**Seven frames are reads, and a read runs beside a run** (#223). `archive`, `config`, `diff`,
+`artifacts`, `artifact`, `prompts` and `record` answer a question rather than describing something
+that happened,
 which is a shape the wire did not have — every other outbound frame is pushed. They are exempt
 from `serve.ts`'s one-at-a-time rule for a stronger reason than the pilot is: that rule exists
 because two *runs* would interleave their narration, and `listRuns` is documented as never
@@ -1033,6 +1120,8 @@ src/answers.ts          filling in NEEDS-INPUT.md from somewhere that is not a t
 app/src/cockpit/Settings.tsx   every setting, and which of the three places each one goes
 app/src/cockpit/outgroups.ts the output cut into rounds, and a finished run's transcript
 app/src/pilot/saved.ts       a conversation kept between launches, and which run it is about
+app/src/cockpit/RecordColumn.tsx a run that is over, drawn from its record and not from frames
+app/src/cockpit/useRecord.ts    asking the host what a run that is over recorded
 app/src/cockpit/artifacts.ts what a run wrote: classifying a listing, and reading a report
 app/src/cockpit/useArtifacts.ts asking the host for a listing, and for one file when it opens
 app/src/cockpit/Disclosure.tsx the one section-that-opens, at every level it appears
