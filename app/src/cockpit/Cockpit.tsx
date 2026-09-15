@@ -14,8 +14,9 @@ import { Footer } from './Footer';
 import { PlansPane } from './PlansPane';
 import { ReportPane } from './ReportPane';
 import { Kickoff } from './Kickoff';
-import { RecordColumn } from './RecordColumn';
-import { useRecord } from './useRecord';
+import { preview } from './projects';
+import { useReplay } from './useReplay';
+
 import { LoopColumn } from './LoopColumn';
 import { NewWorkstream } from './NewWorkstream';
 import { OutputPane } from './OutputPane';
@@ -738,19 +739,33 @@ export function Cockpit() {
   // panes and the Code tab from disagreeing about which round a thing arrived in.
   const cards = rounds(run);
   /**
-   * The opened run's own record, for the column beside the panes (#223).
+   * The opened run, said again, for the column beside the panes (#223).
    *
    * Asked for only when the window is pointed at a run it is **not** narrating:
-   * for the live one the window already has something strictly better than a
-   * record, which is the narration itself. `run.artifacts.length` re-reads it
-   * for the same reason every artifact pane uses it — it counts what the run
-   * said it wrote, so a re-read happens because something landed on disk.
+   * for the live one the window already has the narration this reconstructs.
+   * `run.artifacts.length` re-reads it for the same reason every artifact pane
+   * uses it — it counts what the run said it wrote, so a re-read happens because
+   * something landed on disk and never on a timer.
    */
-  const opened = useRecord(
+  const opened = useReplay(
     past && viewing !== null ? viewing.dir : '',
     past && viewing !== null ? viewing.runId : null,
     run.artifacts.length,
   );
+  /**
+   * The run the loop column, the round cards and the footer are about.
+   *
+   * **One expression, so they cannot disagree**, and it is the same `Run` type
+   * either way — which is the whole correction to the first attempt at this. A
+   * replayed run goes through `reduce` exactly as a live one does, so the column
+   * draws it with the same components and *"as if I had run it myself"* is true
+   * by construction rather than by resemblance.
+   *
+   * The live run is what is drawn until the replay arrives, and a replay that
+   * failed leaves it there with the failure said beside it — a column showing
+   * one run while claiming to show another is the confusion this set out to fix.
+   */
+  const columnRun = past && opened.run !== null ? opened.run : run;
 
   return (
     <div className="v-cockpit">
@@ -1256,29 +1271,50 @@ export function Cockpit() {
           onToggle={() => setShowLoop((on) => !on)}
         >
           <div className="v-cockpit__loop">
-            {/* **The column follows the run the window is pointed at** (#223).
-                Opening a run used to change six panes and leave this one showing
-                the live run, with a strip saying so — honest, and still the
-                wrong answer: *"when I click on an existing run, I don't see the
-                right nav update."*
+            {/* **The column follows the run the window is pointed at** (#223),
+                and it is the SAME column. Opening a run used to change six panes
+                and leave this one on the live run — *"when I click on an existing
+                run, I don't see the right nav update"* — and the first answer to
+                that was a summary, a second screen from a second shape, which
+                was the wrong answer again: *"I want the right panel to look just
+                as it would have when I click on an old run as if I had run it
+                myself."*
 
-                It is a **different drawing**, not this one with the clocks
-                stopped. `reduce` builds a `Run` out of narration and a finished
-                run's narration went to a process that has exited, so there is no
-                live card to show and none is invented; what there is instead is
-                the run's own record, which the core reads off `state.json`. */}
+                So a finished run is fetched as its own **narration** and folded
+                through `reduce`, and what is drawn below is `LoopColumn` with a
+                `Run` — the same component, the same type, the same cards. The
+                objection this overrules is answered rather than dropped: a
+                replay would *"report finished work as running"* only if a turn
+                could still be open, and every turn in an archive is a turn that
+                ended, because `applyCharge` records one when it is charged. */}
             {past && viewing !== null ? (
-              <RecordColumn
-                record={opened.record}
-                failure={opened.failure}
-                loading={opened.loading}
-                task={viewing.task}
-                // `1b`, which is the only place a run is started. A control that
-                // resumed from here would be a second way to spend, which is the
-                // same mistake as two places able to force a lock.
-                onResume={() => setTab('runs')}
-                onBack={() => setViewing(null)}
-              />
+              <div className="v-loop__reading">
+                <StateKicker tone="quiet">reading</StateKicker>
+                <span className="v-loop__readingwhat">{preview(viewing.task)}</span>
+                {opened.loading && opened.run === null && <p>Reading this run…</p>}
+                {/* The core's own sentence, verbatim. A run whose id will not
+                    join onto a path, a directory vibe refuses to follow (#53)
+                    and a `state.json` the validators reject are three findings
+                    needing three responses, and *"could not read the run"*
+                    answers none of them. */}
+                {opened.failure !== null && (
+                  <p className="v-loop__readingwhy">{opened.failure}</p>
+                )}
+                {/* Said once, here, rather than as a blank on every turn row.
+                    `state.turnStartedAt` describes the turn in flight, so the
+                    only starts an archive keeps are the ones a checkpoint froze
+                    — and a duration invented from the gap between two charges
+                    would include every gate the loop held at. */}
+                {opened.run !== null && (
+                  <p className="v-loop__readingwhy">
+                    Some turns have no duration: a run records a turn when it is charged, and only a
+                    checkpoint keeps the moment one began.
+                  </p>
+                )}
+                <button className="v-doc__again" onClick={() => setViewing(null)}>
+                  back to the live run
+                </button>
+              </div>
             ) : (
               <>
                 {/* While there is no run, this column is four not-started groups
@@ -1315,30 +1351,44 @@ export function Cockpit() {
                     </button>
                   </>
                 )}
-                {/* The counts in the column are controls, and this is where they
-                    go. The same setter the pilot's round cards use, so a severity
-                    chip means one thing wherever it is drawn. */}
-                <LoopColumn run={run} now={now} hostPid={wire.hostPid} onOpen={open} />
-                {/* `4g`, and only on the ending that means the loop finished.
-                    Every other exit is a halt, and a halt gets the footer's
-                    banner and its one action rather than a summary of work that
-                    stopped early. */}
-                {run.completed?.exit === 0 && <Summary run={run} />}
-                <Footer
-                  run={run}
-                  busy={busy}
-                  onDecide={answer}
-                  onPause={pause}
-                  onStop={() => setConfirmStop(true)}
-                  onResume={resume}
-                  onImplement={implement}
-                  caps={caps}
-                  gates={gates}
-                  order={order}
-                  pausing={pausing}
-                />
               </>
             )}
+            {/* The counts in the column are controls, and this is where they
+                go. The same setter the pilot's round cards use, so a severity
+                chip means one thing wherever it is drawn.
+
+                `hostPid` is the live host's, so it is withheld from a run this
+                process is not running: a pid beside a finished run would name a
+                process that has nothing to do with it. */}
+            <LoopColumn
+              run={columnRun}
+              now={now}
+              hostPid={past ? null : wire.hostPid}
+              onOpen={open}
+            />
+            {/* `4g`, and only on the ending that means the loop finished.
+                Every other exit is a halt, and a halt gets the footer's
+                banner and its one action rather than a summary of work that
+                stopped early. */}
+            {columnRun.completed?.exit === 0 && <Summary run={columnRun} />}
+            {/* The same footer, about the same run. Its live controls draw
+                themselves off `run.completed`, which a finished run has set — so
+                stop and pause do not appear beside one, and what remains is the
+                ending, the resume and the plan-only offer, which are exactly the
+                actions an opened run wants. */}
+            <Footer
+              run={columnRun}
+              busy={busy}
+              onDecide={answer}
+              onPause={pause}
+              onStop={() => setConfirmStop(true)}
+              onResume={resume}
+              onImplement={implement}
+              caps={caps}
+              gates={gates}
+              order={order}
+              pausing={pausing}
+            />
           </div>
         </SidePanel>
       </div>

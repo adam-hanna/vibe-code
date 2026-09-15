@@ -17,6 +17,13 @@ import * as log from '@src/log.js';
 import { livenessOf } from '@src/lock.js';
 import { fillAnswers, unanswered } from '@src/answers.js';
 import type { FilledAnswer } from '@src/answers.js';
+import { replayRun } from '@src/replay.js';
+import type {
+  CheckpointView,
+  QuestionRoundSize,
+  Replay,
+  RoundCensus,
+} from '@src/replay.js';
 import type { ActivityObservation } from '@src/progress.js';
 import { initialSlotFields } from '@src/slots.js';
 import { checkStoredConsistency, checkTokenShare } from '@src/consistency.js';
@@ -42,8 +49,6 @@ import type {
   RoundClaim,
   RoundRecord,
   RunCheckpointMeta,
-  RunEvent,
-  RunRecord,
   RunArtifact,
   RunPhase,
   RunState,
@@ -1729,89 +1734,154 @@ export function answerQuestions(
   return { filled: result.filled, unmatched: result.unmatched, open: unanswered(result.md) };
 }
 
+
 /**
- * Read a run's own record, for a window that has opened it (#223).
+ * Read a finished run back as the narration it produced (#223).
  *
  * **Through `loadRun`, so there is one definition of a legal run.** Every guard
- * it carries applies here unchanged — the usable-id check, the refusal to follow
- * a link (#53), the stored-state validators — and the sentence it throws is the
- * whole answer, which is why this does not catch: the caller crossing a process
+ * it carries applies unchanged — the usable-id check, the refusal to follow a
+ * link (#53), the stored-state validators — and the sentence it throws is the
+ * whole answer, which is why this does not catch: a caller crossing a process
  * boundary reports it as an `error` frame naming what was refused, and an empty
- * record would be indistinguishable from a run that did nothing.
+ * replay would be indistinguishable from a run that did nothing.
  *
- * It re-derives nothing. The counters, the spend and the finding lists are read
- * off the state the loop wrote; `ended` is selected from the events rather than
- * composed, and `liveness` is the lock's own verdict rather than a guess made
- * from `status` — a `running` status on a dead pid is exactly the wreck #131
- * exists to tell apart, and collapsing the two would hide it.
+ * What it gathers beyond `state.json` is the three things the events do not
+ * hold and the files do: each checkpoint's frozen `turnStartedAt` (the only
+ * turn durations an archive keeps), each judge round's own report (a census is
+ * narration with no event, so the counting was never durable — the report is),
+ * and each question round's answers. All three are reads, and a file that
+ * cannot be read is simply absent from the reconstruction rather than fatal to
+ * it: a run whose critique artifact was deleted still has its turns.
  */
-export function readRunRecord(targetDir: string, runId: string): RunRecord {
+export function readRunReplay(targetDir: string, runId: string): Replay {
   const state = loadRun(targetDir, runId);
   const dir = path.join(targetDir, RUNS_DIR, runId);
-  const { liveness } = livenessOf(dir);
-  return {
-    id: state.id,
-    task: state.task,
-    status: state.status,
-    phase: state.phase ?? null,
-    planOnly: state.planOnly,
-    createdAt: state.createdAt,
-    lastActivityAt: state.lastActivityAt ?? null,
-    branch: state.branch,
-    liveness,
-    rounds: {
-      plan: state.planRound,
-      question: state.questionRound,
-      review: state.reviewRound,
-      verify: state.verifyRound,
-    },
-    spend: {
-      tokens: state.tokensUsed,
-      // Absent rather than zero on a run that recorded none: `codexTokens` is
-      // optional precisely because a run with no Codex turn has not measured a
-      // Codex total, and `0 tok` would be a claim that it had.
-      codexTokens: state.codexTokens ?? null,
-      // Zero is a real answer here and is kept — `costUsd` is written on every
-      // charge — but a run that has charged nothing has not been measured, and
-      // that is the same distinction `RunSummary.costUsd` draws.
-      costUsd: state.tokensUsed === 0 ? null : state.costUsd,
-    },
-    findings: {
-      carried: state.carried?.length ?? 0,
-      declined: state.declined?.length ?? 0,
-      outstanding: state.outstanding?.length ?? 0,
-      deferred: state.deferred?.length ?? 0,
-    },
-    hasPlan: state.plan !== null,
-    ended: endingOf(state.events),
-  };
+  return replayRun(state, {
+    checkpoints: readCheckpointViews(dir),
+    censuses: readRoundCensuses(dir),
+    questions: readQuestionSizes(dir),
+  });
+}
+
+/** One artifact, parsed, or null for every way that can fail. */
+function readJson(dir: string, name: string): unknown {
+  // The link question first, which is #53's rule and the reason this is not
+  // simply `readFileSync`: an artifact that is a link is one vibe never looks
+  // inside, and `existsSync` would follow it to answer.
+  if (linkedArtifactReason(dir, name) !== null) return null;
+  try {
+    return JSON.parse(readFileSync(path.join(dir, name), 'utf8')) as unknown;
+  } catch {
+    return null;
+  }
 }
 
 /**
- * The event that ended the run, or null.
+ * What each checkpoint froze, newest last.
  *
- * **Selected by type, never by reading the prose.** `escalation` and `error` are
- * the two types `execute` records where it gives up, so the last of either is
- * the ending — picking the most recent alarming *sentence* out of the log is the
- * English-matching #133 exists to prevent, and it picks the wrong line, because
- * a healthy run is full of warnings that are not the ending.
- *
- * A run that simply finished has neither, and null is the honest answer: the
- * status already says `complete`, and inventing a phrase for it would make every
- * ending read as a failure.
+ * Sorted by `n` rather than by directory order, because `checkpoint-10.json`
+ * sorts before `checkpoint-2.json` lexically and a timeline out of order would
+ * attribute a turn to the wrong round.
  */
-function endingOf(events: readonly RunEvent[]): { type: string; message: string } | null {
-  for (let i = events.length - 1; i >= 0; i -= 1) {
-    const event = events[i];
-    if (event === undefined) continue;
-    if (event.type !== 'escalation' && event.type !== 'error') continue;
-    const message = event['message'];
-    // A recorded event whose message is not a string is reported as the type
-    // alone rather than as `undefined` or as a stringified object: the type is
-    // the fact, and the sentence is the elaboration.
-    return { type: event.type, message: typeof message === 'string' ? message : '' };
+function readCheckpointViews(dir: string): CheckpointView[] {
+  const out: CheckpointView[] = [];
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return out;
   }
-  return null;
+  for (const name of names) {
+    if (!/^checkpoint-\d+\.json$/.test(name)) continue;
+    const parsed = readJson(dir, name);
+    if (!isRecord(parsed)) continue;
+    const meta = parsed['checkpoint'];
+    if (!isRecord(meta)) continue;
+    const n = meta['n'];
+    const at = meta['at'];
+    if (typeof n !== 'number' || typeof at !== 'string') continue;
+    out.push({
+      n,
+      at,
+      boundary: typeof meta['boundary'] === 'string' ? meta['boundary'] : '',
+      phase: typeof meta['phase'] === 'string' ? meta['phase'] : null,
+      planRound: typeof meta['planRound'] === 'number' ? meta['planRound'] : 0,
+      reviewRound: typeof meta['reviewRound'] === 'number' ? meta['reviewRound'] : 0,
+      verifyRound: typeof meta['verifyRound'] === 'number' ? meta['verifyRound'] : 0,
+      questionRound: typeof meta['questionRound'] === 'number' ? meta['questionRound'] : 0,
+      commit: typeof meta['commit'] === 'string' ? meta['commit'] : null,
+      // On the checkpoint's own copy of the state, not on its meta: it is the
+      // turn that was in flight when the snapshot was taken.
+      turnStartedAt: typeof parsed['turnStartedAt'] === 'string' ? parsed['turnStartedAt'] : null,
+    });
+  }
+  return out.sort((a, b) => a.n - b.n);
+}
+
+/** Each judge round's four counts, from the round's own report. */
+function readRoundCensuses(dir: string): RoundCensus[] {
+  const out: RoundCensus[] = [];
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return out;
+  }
+  for (const name of names) {
+    const critique = /^plan-critique-(\d+)\.json$/.exec(name);
+    const review = /^code-review-(\d+)\.json$/.exec(name);
+    const match = critique ?? review;
+    if (match === null) continue;
+    const round = Number.parseInt(match[1] ?? '', 10);
+    if (!Number.isInteger(round)) continue;
+    const parsed = readJson(dir, name);
+    if (!isRecord(parsed)) continue;
+    const findings = parsed['findings'];
+    if (!Array.isArray(findings)) continue;
+    const counts = { p0: 0, p1: 0, p2: 0, p3: 0 };
+    for (const finding of findings as unknown[]) {
+      if (!isRecord(finding)) continue;
+      // Counted by the severity the report recorded. A severity moved
+      // afterwards (#142) is deliberately not applied here: the round's report
+      // is the record of what the judge produced, and rewriting it in the replay
+      // would make the column disagree with the artifact the pane shows.
+      const severity = finding['severity'];
+      if (severity === 'P0') counts.p0 += 1;
+      else if (severity === 'P1') counts.p1 += 1;
+      else if (severity === 'P2') counts.p2 += 1;
+      else if (severity === 'P3') counts.p3 += 1;
+    }
+    out.push({ phase: critique !== null ? 'plan' : 'review', round, counts });
+  }
+  return out;
+}
+
+/** How many questions each question round raised, from its answers artifact. */
+function readQuestionSizes(dir: string): QuestionRoundSize[] {
+  const out: QuestionRoundSize[] = [];
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return out;
+  }
+  for (const name of names) {
+    const match = /^answers-(\d+)\.json$/.exec(name);
+    if (match === null) continue;
+    const round = Number.parseInt(match[1] ?? '', 10);
+    if (!Number.isInteger(round)) continue;
+    const parsed = readJson(dir, name);
+    if (!Array.isArray(parsed)) continue;
+    let blocking = 0;
+    for (const answer of parsed as unknown[]) {
+      // `defer_to_human` is the answerer saying it could not settle this one,
+      // which is precisely what makes a question blocking. Counted rather than
+      // assumed: a round the answerer handled in full blocks nothing.
+      if (isRecord(answer) && answer['defer_to_human'] === true) blocking += 1;
+    }
+    out.push({ round, total: parsed.length, blocking });
+  }
+  return out;
 }
 /** What was removed. The directory rather than a byte count — see `deleteRun`. */
 export interface RunRemoval {

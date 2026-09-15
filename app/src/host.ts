@@ -241,38 +241,43 @@ export interface QuestionsAnswered {
   open: readonly string[];
 }
 
-
 /**
- * A run's own record, read back after the process that made it has gone (#223).
+ * A finished run, said again (#223).
  *
- * **Deliberately not a `Run`.** `reduce` builds one of those out of narration,
- * and a finished run's narration was addressed to a process that has exited — so
- * synthesising frames for it would draw a live card for a turn nobody is waiting
- * on. This is `state.json` instead, shaped by the core: the counts the loop
- * wrote down, the spend the charge seam totalled, and how it ended. Every field
- * is read; nothing on it is computed from two others.
+ * **Not a second shape, which is the whole point.** The first answer to *"when I
+ * click on an existing run, I don't see the right nav update"* was a summary —
+ * a different screen drawn from a different record — and the report on it was
+ * exact: *"I want the right panel to look just as it would have when I click on
+ * an old run as if I had run it myself."*
+ *
+ * So the core sends back the **narration**, and the window folds it through the
+ * same `reduce` a live run goes through. The column, the round cards and the log
+ * are then the same components rendering the same `Run`. There is no second
+ * builder, so there is nothing to disagree with the first.
+ *
+ * Each step carries its own `at` from the run's record: stamping a replay with
+ * arrival time would date a week-old run to this afternoon, and every duration
+ * on it would be the time it took to send.
  */
-export interface RecordFrame {
-  type: 'record';
+export interface ReplayFrame {
+  type: 'replay';
   id: number;
   dir: string;
   runId: string;
-  record: {
-    id: string;
-    task: string;
-    status: string;
-    phase: string | null;
-    planOnly: boolean;
-    createdAt: string;
-    lastActivityAt: string | null;
-    branch: string | null;
-    liveness: string;
-    rounds: { plan: number; question: number; review: number; verify: number };
-    spend: { tokens: number; codexTokens: number | null; costUsd: number | null };
-    findings: { carried: number; declined: number; outstanding: number; deferred: number };
-    hasPlan: boolean;
-    ended: { type: string; message: string } | null;
-  };
+  steps: readonly {
+    at: number;
+    narration: { level: Level; message: string; id: string | null; data: Record<string, unknown> | null };
+  }[];
+  /**
+   * The exit code the run reported, or null when its record does not say.
+   *
+   * Beside the steps rather than among them, because a `result` is not
+   * narration — it is the frame that answers a request. Null rather than a
+   * guessed zero: a status this build does not recognise has not said the run
+   * succeeded, and the footer draws an unknown code as the number rather than as
+   * a phrase invented for it.
+   */
+  exit: number | null;
 }
 /**
  * The standing instruction blocks each turn is given (#223).
@@ -380,7 +385,7 @@ export type Frame =
   | ArtifactFrame
   | RunDeleted
   | PromptsFrame
-  | RecordFrame
+  | ReplayFrame
   | QuestionsAnswered;
 
 /**
@@ -425,10 +430,10 @@ export function isFrame(v: unknown): v is Frame {
     // reason: they are the same in every run, so they say nothing about the one
     // being narrated.
     type === 'prompts' ||
-    // A past run's own record, ignored by the reducer for a sharper version of
+    // A past run's narration, ignored by THIS reducer for a sharper version of
     // the same reason: it describes a run this process is NOT narrating, and
     // folding it into the live run is exactly the confusion it exists to end.
-    type === 'record' ||
+    type === 'replay' ||
     type === 'questions_answered' ||
     // The command runner's three (#211). Also ignored by the cockpit's reducer:
     // a command is not part of a run - it outlives one, and it happens when
@@ -766,28 +771,34 @@ export async function artifact(
 }
 
 /**
- * One run's own record (#223).
+ * One finished run, said again (#223).
  *
  * **What makes opening a run change the column beside the panes.** The six
- * artifact panes already followed the opened run because each reads a file that
- * run wrote; the loop column had nothing to follow with, and said so in a strip
- * — honest, and still the wrong answer to *"when I click on an existing run, I
- * don't see the right nav update."*
+ * artifact panes already followed the opened run, because each reads a file that
+ * run wrote; the loop column had nothing to follow with and stayed on the live
+ * run, saying so in a strip. That was honest and was still the wrong answer.
  *
- * A failure is a rejection carrying the core's own sentence, not an empty
- * record: a run whose id will not join onto a path, a directory vibe refuses to
- * follow (#53) and a `state.json` the validators reject are three different
- * findings, and an empty record would say the run did nothing.
+ * The steps are narration, and the caller folds them through the **same**
+ * `reduce` a live run goes through — so this returns no shape of its own to
+ * render, which is the difference between this and the summary it replaced.
+ *
+ * A failure is a rejection carrying the core's own sentence, never an empty
+ * replay: a run whose id will not join onto a path, a directory vibe refuses to
+ * follow (#53) and a `state.json` the validators reject are three findings
+ * needing three responses, and an empty replay would say the run did nothing.
  */
-export async function record(dir: string, runId: string): Promise<RecordFrame['record']> {
+export async function replay(dir: string, runId: string): Promise<{
+  steps: ReplayFrame['steps'];
+  exit: number | null;
+}> {
   const id = nextRequestId();
-  const frame = await ask<RecordFrame>(
-    { type: 'record', id, dir, runId },
+  const frame = await ask<ReplayFrame>(
+    { type: 'replay', id, dir, runId },
     id,
-    'record',
-    "the host did not answer with the run's record",
+    'replay',
+    'the host did not answer with the run',
   );
-  return frame.record;
+  return { steps: frame.steps, exit: frame.exit };
 }
 
 /**

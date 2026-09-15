@@ -381,37 +381,69 @@ they are waiting on. Four things in it are worth carrying:
   are acted on differently, and a window that collapsed them into *"could not delete"* would
   answer neither. It is answerable beside a run for a reason rather than by exemption — the
   live-lock refusal means **the running run is the one run this frame can never reach**.
-- **Opening a run moves the column too, and what it moves to is a record rather
-  than a replay.** Six panes followed the opened run because each reads a file
-  that run wrote; the loop column stayed with the live one and said so in a
-  strip. That was honest and was still the wrong answer — *"when I click on an
-  existing run, I don't see the right nav update"* — because it stayed for a
-  reason nobody outside this repository can see: it had nothing to follow with.
+- **Opening a run moves the column too, and it is the same column.** Six panes
+  followed the opened run because each reads a file that run wrote; the loop
+  column stayed with the live one and said so in a strip. That was honest and was
+  still the wrong answer — *"when I click on an existing run, I don't see the
+  right nav update"* — because it stayed for a reason nobody outside this
+  repository can see: it had nothing to follow with.
 
-  The tempting fix is to replay the run's narration into `reduce`, and it is the
-  one thing that must not happen: a finished run's frames were addressed to a
-  process that has exited, so a replay draws a live card for a turn nobody is
-  waiting on, and `state.events` is the **durable** set rather than the narrated
-  one — phase transitions are not in it, so the replay would also be short. What
-  is still true is `state.json`, so `record` is a seventh read frame carrying it,
-  shaped by the core: the four round counters, the spend, the four finding
-  counts, the branch and how it ended. Every field is read; nothing on it is
-  computed from two others, which is what lets the window draw it while
-  *"the webview re-derives nothing"* stays true.
+  **The first fix was a summary, and it was wrong in a way worth recording.** It
+  read `state.json`, shaped it into a `RunRecord`, and drew a second component
+  from it: round counts, spend, findings, ending. Every number on it was real.
+  It was still rejected, correctly: *"I want the right panel to look just as it
+  would have when I click on an old run as if I had run it myself. You just added
+  a summary or something and changed it entirely."* A person opening a run wants
+  **the run**, not a report about it — and a second drawing of one object is two
+  things to keep in step, which is the mistake `SidePanel` and `Counts` both
+  exist to avoid.
 
-  `RecordColumn` is a different drawing and not the live column with its clocks
-  stopped. **Nothing on it animates** — *exactly one element on screen pulses*,
-  and on a run that ended on Tuesday the honest count is zero — and every time on
-  it is absolute, which is hi-fi 17's rule at its strongest. `recorded()` carries
-  the **day** as well as the time, because `clock()` renders a moment inside the
-  run you are watching, where the date is today by construction; a bare `15:33`
-  on a week-old record reads as this afternoon every time. `ended` is selected
-  from the events **by type**, never by picking the most alarming sentence out of
-  the log, which is the English-matching #133 exists to prevent.
+  So the core says the run **again**. `src/replay.ts` reconstructs the narration
+  and the window folds it through the **same `reduce`** a live run goes through,
+  so `LoopColumn`, the round cards, `Summary` and `Footer` are the same
+  components rendering the same `Run`. `columnRun` is one expression deciding
+  which run that is, so the column and the footer cannot disagree about it.
 
-  The strip stays, narrowed to the one thing that genuinely does not follow: the
-  spend readout in the tab bar, which is the live run's because it is charged as
-  the run goes rather than read off a record.
+  **The standing objection is answered rather than dropped.** This file said a
+  replay *"would report finished work as running"*. That is true of a naive one
+  and false of this one: every turn in an archive is a turn that **ended**,
+  because `applyCharge` records it when it is charged, which is after it
+  returned. Every `turn_started` is followed by the charge that closes it, the
+  sequence ends with the ending the run actually had, and `run.running` is null
+  when the fold finishes — so nothing pulses, because nothing is open.
+
+  Four things make it a read rather than a reconstruction by guess:
+
+  - **The labels are the loop's own ids.** `seatOf` is the inverse of the
+    `label:` sites in `orchestrator.ts` — `plan`, `critique-0`, `revise-q2`,
+    `fix-3` — and `run-replay.test.ts` reads that file as source and fails on the
+    commit that respells one, which is the guarantee `artifacts.ts` gets the same
+    way. This is not the English-matching #133 exists to prevent: #133 is about
+    prose written for a human and read for a decision, and these are identifiers.
+    A label this build cannot place is left out of the column rather than guessed
+    into it — the rule `phase_started` already follows — and its **charge is
+    still emitted**, so the replayed spend cannot disagree with the record.
+  - **A turn's duration is recorded only sometimes, and the rest say so.**
+    `state.turnStartedAt` is one field describing the turn in flight, so the only
+    starts an archive keeps are the ones a checkpoint froze, plus the last turn's
+    in `state.json` itself. A turn without one is emitted `unmeasured` and draws
+    no duration. Deriving one from the gap between two charges would be a proxy
+    wearing another measurement's clothes: that interval includes every gate the
+    loop held at. The column says this **once**, in its head, rather than leaving
+    a blank on each row.
+  - **A heartbeat is not durable, so none is synthesised.** A replayed turn has
+    no live token count and no activity count, because those measured a turn in
+    flight. The totals are on the charge events, where they belong.
+  - **A census is narration with no event, so the counts come from the artifact.**
+    `plan-critique-<n>.json` and `code-review-<n>.json` are the durable record of
+    what each judge produced, and the replay counts severities out of them. A
+    severity moved afterwards (#142) is deliberately **not** applied: the round's
+    report is the record of what the judge produced, and rewriting it here would
+    make the column disagree with the artifact the pane beside it shows.
+
+  `exit` travels beside the steps rather than among them, because a `result` is
+  not narration — it is the frame that answers a request — and a status this
+  build does not recognise reports **null** rather than a guessed zero.
 - **A conversation belongs to the run it is about, and *about* includes the run
   it proposed.** Adoption was allowed only out of the project bucket —
   `chatKey(dir, null)` — which is right about where a pre-run conversation lives
@@ -467,6 +499,33 @@ they are waiting on. Four things in it are worth carrying:
   so a model that shipped this morning is typeable this morning. `other…` is a
   sentinel rather than the empty option, because empty already means *take the
   agent's default* and the two are opposite intentions.
+- **`externalBin` means every MSI build writes `%TEMP%\node.exe`, and anything
+  running from there breaks the bundle.** `npm run app:build` failed four times
+  with `failed to bundle project: The process cannot access the file because it
+  is being used by another process. (os error 32)` — no path, no file name, and
+  the exe itself built clean every time. It reads as a project problem and is
+  not one.
+
+  `bundle.externalBin` is `binaries/node`, and tauri-bundler's
+  `generate_binaries_data` copies that 92.5 MB binary into the **temp directory
+  with the target triple stripped** — `node-x86_64-pc-windows-msvc.exe` becomes
+  `%TEMP%\node.exe` — before it writes `main.wxs` or copies the icon. `TEMP` here
+  is cygwin's `C:\cygwin64\tmp`, and a Vite dev server was running out of exactly
+  that image: `"C:\cygwin64\tmp\node.exe" node_modules\vite\bin\vite.js`. Windows
+  holds a running executable's image against writes, so the copy is a sharing
+  violation.
+
+  **Three things about finding it are worth keeping.** The Restart Manager
+  (`rstrtmgr.dll` — `RmStartSession`/`RmRegisterResources`/`RmGetList`, callable
+  from PowerShell with `Add-Type`) names the holding process, which is the answer
+  `os error 32` refuses to give; probing the project's own files found nothing
+  held, which was the evidence that it was not the project. The one run that
+  succeeded was nine minutes *before* that dev server started — so deleting
+  `wix/` and `bundle/`, which is what got the credit at the time, had nothing to
+  do with it. And the exe is unaffected either way: `tauri build` produces it
+  before bundling, `cfg(dev)` is unset, and running
+  `target/release/vibe-desktop.exe` is a real bundled build. The MSI only matters
+  for updating an installed copy, which needs elevation anyway.
 - **A console child spawned without `windowsHide` allocates a window, and the detach is why.**
   Reported as *"there are a whole bunch of windows that popup and quickly disappear when I
   run"*, and the count is exact: one `where.exe` per binary this resolves — claude, codex,
@@ -888,7 +947,7 @@ event type**, never a name of its own: `applyCharge` narrates under `claude_turn
 holding it agree about one fact rather than two spellings of it.
 
 **Seven frames are reads, and a read runs beside a run** (#223). `archive`, `config`, `diff`,
-`artifacts`, `artifact`, `prompts` and `record` answer a question rather than describing something
+`artifacts`, `artifact`, `prompts` and `replay` answer a question rather than describing something
 that happened,
 which is a shape the wire did not have — every other outbound frame is pushed. They are exempt
 from `serve.ts`'s one-at-a-time rule for a stronger reason than the pilot is: that rule exists
@@ -1120,8 +1179,8 @@ src/answers.ts          filling in NEEDS-INPUT.md from somewhere that is not a t
 app/src/cockpit/Settings.tsx   every setting, and which of the three places each one goes
 app/src/cockpit/outgroups.ts the output cut into rounds, and a finished run's transcript
 app/src/pilot/saved.ts       a conversation kept between launches, and which run it is about
-app/src/cockpit/RecordColumn.tsx a run that is over, drawn from its record and not from frames
-app/src/cockpit/useRecord.ts    asking the host what a run that is over recorded
+src/replay.ts           a finished run, said again - and what an archive cannot say
+app/src/cockpit/useReplay.ts   folding a finished run through the reducer that drew it live
 app/src/cockpit/artifacts.ts what a run wrote: classifying a listing, and reading a report
 app/src/cockpit/useArtifacts.ts asking the host for a listing, and for one file when it opens
 app/src/cockpit/Disclosure.tsx the one section-that-opens, at every level it appears

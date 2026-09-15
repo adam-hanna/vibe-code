@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import cockpit from './Cockpit.tsx?raw';
-import column from './RecordColumn.tsx?raw';
+import replayHook from './useReplay.ts?raw';
 import settings from './Settings.tsx?raw';
 import pilot from '../pilot/PilotPane.tsx?raw';
 import { chatKey, chatMove } from '../pilot/saved';
@@ -15,31 +15,74 @@ import { recorded } from './format';
  * screen is still about a different one.
  */
 
-describe('the column follows the run the window is pointed at', () => {
-  test('a past run gets a record, and the live run is still narrated', () => {
-    // Not the live column with its clocks stopped. `reduce` builds a `Run` out
-    // of narration and a finished run's narration went to a process that has
-    // exited, so there is no live card to draw and none is invented — what
-    // replaces it is the run's own record, read by the core off `state.json`.
-    expect(cockpit).toMatch(/past && viewing !== null \? \(\s*<RecordColumn/);
-    expect(cockpit).toMatch(/<LoopColumn run=\{run\}/);
+describe('an opened run is drawn by the column that drew it live', () => {
+  test('the column takes a Run, and the replayed one is the same type', () => {
+    // **The correction to the first attempt.** That one built a *summary* — a
+    // second screen from a second shape — and the report was exact: *"I want the
+    // right panel to look just as it would have when I click on an old run as if
+    // I had run it myself."* So there is one `LoopColumn`, taking one `Run`, and
+    // which run it is is decided in one expression.
+    expect(cockpit).toMatch(/const columnRun = past && opened\.run !== null \? opened\.run : run;/);
+    expect(cockpit).toMatch(/<LoopColumn\s+run=\{columnRun\}/);
+    // And there is no second column component to drift from the first.
+    expect(cockpit).not.toMatch(/RecordColumn/);
   });
 
-  test('the record is asked for only when the window is NOT narrating that run', () => {
-    // For the live run the window already has something strictly better than a
-    // record — the narration itself — so asking would be a read whose answer is
-    // already on screen and one tick staler.
-    expect(cockpit).toMatch(/useRecord\(\s*past && viewing !== null \? viewing\.dir : ''/);
+  test('the footer and the summary are about the same run as the column', () => {
+    // A footer about the live run beside a column about an opened one is the
+    // two-runs-at-once confusion this set out to end.
+    expect(cockpit).toMatch(/<Footer\s+run=\{columnRun\}/);
+    expect(cockpit).toMatch(/columnRun\.completed\?\.exit === 0 && <Summary run=\{columnRun\} \/>/);
   });
 
-  test('nothing in the record column pulses, and every time on it is absolute', () => {
-    // *Exactly one element on screen pulses*, and on a run that ended on Tuesday
-    // the honest count is zero. `6s ago` is a claim that has to keep being true,
-    // which is how a held gate came to read `5h39m ago` about a turn that took a
-    // minute (hi-fi 17).
-    expect(column).not.toMatch(/LivenessDot|ThinkingWave|elapsed\(/);
-    expect(column).toMatch(/recorded\(record\.createdAt\)/);
-    expect(column).toMatch(/recorded\(record\.lastActivityAt\)/);
+  test('a replayed run is folded through the SAME reducer', () => {
+    // No second builder, so nothing can disagree with the first. This is what
+    // makes "as if I had run it myself" true by construction rather than by
+    // resemblance.
+    expect(replayHook).toMatch(/reduce\(built, \{ type: 'narration', \.\.\.step\.narration \}, step\.at\)/);
+    expect(replayHook).toMatch(/import \{ emptyRun, reduce \} from '\.\/model'/);
+  });
+
+  test('each step is folded at its own time, never at arrival', () => {
+    // A replay stamped with `Date.now()` would date a week-old run to this
+    // afternoon and give every turn a duration of nothing.
+    expect(replayHook).not.toMatch(/reduce\([^)]*Date\.now\(\)\)/);
+    expect(replayHook).toMatch(/step\.at/);
+  });
+
+  test('the ending is applied as the frame it is', () => {
+    // A `result` closes whatever turn was open and sets `completed`, which is
+    // what makes the footer draw this run's ending — and it is why nothing is
+    // left running when the fold finishes.
+    expect(replayHook).toMatch(/type: 'result', id: 0, exit: got\.exit/);
+    expect(replayHook).toMatch(/got\.exit !== null/);
+  });
+
+  test('the live host’s pid is withheld from a run this process is not running', () => {
+    // A pid beside a finished run names a process that has nothing to do with
+    // it.
+    expect(cockpit).toMatch(/hostPid=\{past \? null : wire\.hostPid\}/);
+  });
+
+  test('the strip says the one thing an archive cannot say, once', () => {
+    // `state.turnStartedAt` describes the turn in flight, so the only starts an
+    // archive keeps are the ones a checkpoint froze. Said here rather than as a
+    // blank on every turn row — and a duration invented from the gap between two
+    // charges would include every gate the loop held at.
+    expect(cockpit).toMatch(/Some turns have no duration/);
+  });
+
+  test('a refusal is shown in the core’s own words', () => {
+    // A run whose id will not join onto a path, a directory vibe refuses to
+    // follow (#53) and a `state.json` the validators reject are three findings
+    // needing three responses, and *"could not read the run"* answers none.
+    expect(cockpit).toMatch(/\{opened\.failure\}/);
+  });
+
+  test('a failed replay leaves the live run drawn rather than an empty column', () => {
+    // `columnRun` falls back to `run`, so the column never goes blank — and the
+    // failure is said beside it rather than in place of everything.
+    expect(cockpit).toMatch(/past && opened\.run !== null \? opened\.run : run/);
   });
 
   test('an absolute stamp carries the day, not just the time', () => {
@@ -48,8 +91,6 @@ describe('the column follows the run the window is pointed at', () => {
     // day attached reads as this afternoon every time.
     const stamp = recorded('2026-01-05T15:33:00.000Z');
     expect(stamp).not.toBe('not recorded');
-    expect(stamp).toMatch(/\d/);
-    // Two fields, so it cannot be a bare time.
     expect(stamp.length).toBeGreaterThan('15:33'.length);
   });
 
@@ -58,24 +99,6 @@ describe('the column follows the run the window is pointed at', () => {
     for (const bad of [null, '', 'the other day', '2026-13-45']) {
       expect(recorded(bad)).toBe('not recorded');
     }
-  });
-
-  test('the record column starts no run, because 1b is the only place that does', () => {
-    // A control here would be a second way to spend, which is the same mistake
-    // as two places able to force a lock.
-    expect(column).not.toMatch(/invoke|launchArgv|host\.send/);
-    expect(column).toMatch(/onClick=\{onResume\}/);
-  });
-
-  test('a refusal is shown in the core’s own words', () => {
-    // A run whose id will not join onto a path, a directory vibe refuses to
-    // follow (#53) and a `state.json` the validators reject are three findings
-    // needing three responses, and *"could not read the run"* answers none.
-    expect(column).toMatch(/\{failure\}/);
-  });
-
-  test('a run that charged nothing says so rather than showing zero', () => {
-    expect(column).toMatch(/spend\.tokens === 0 \? \(\s*'nothing charged'/);
   });
 });
 

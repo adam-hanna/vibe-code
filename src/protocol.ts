@@ -1,6 +1,6 @@
 import type { Level, Narration } from '@src/log.js';
 import type { GateContext } from '@src/host.js';
-import type { ArtifactRead, RunArtifact, RunRecord, RunSummary } from '@src/types.js';
+import type { ArtifactRead, RunArtifact, RunSummary } from '@src/types.js';
 import type { PromptBlock } from '@src/prompts.js';
 
 /**
@@ -234,21 +234,38 @@ export type Outbound =
       read: ArtifactRead;
     }
   /**
-   * A run's own record, in reply to a `record` request (#223).
+   * A finished run said again, in reply to a `replay` request (#223).
    *
-   * **The column's half of opening a run.** Six panes already followed the run
-   * the window was pointed at, because each reads a file that run wrote; the
-   * loop column beside them stayed with the live run and said so in a strip,
-   * which was honest and was still the wrong answer — *"when I click on an
-   * existing run, I don't see the right nav update."* It stayed because it had
-   * nothing to follow with: `reduce` builds a `Run` out of narration, and a
-   * finished run's narration went to a process that has exited.
+   * **The column's half of opening a run, and it is not a second drawing.**
+   * Six panes already followed the run the window was pointed at, because each
+   * reads a file that run wrote; the loop column beside them had nothing to
+   * follow with and stayed on the live run. The first answer to that was a
+   * *summary* — a different screen, from a different shape — and the report on
+   * it was exact: *"I want the right panel to look just as it would have when I
+   * click on an old run as if I had run it myself."*
    *
-   * So this is not narration replayed. It is `state.json`, shaped by the core,
-   * carrying what the loop wrote down and nothing computed from it — which is
-   * what lets the window draw a record without re-deriving one.
+   * So this carries the **narration**, and the window folds it through the same
+   * `reduce` a live run goes through. The column, the round cards and the log
+   * are then the same components rendering the same `Run`, because there is no
+   * second builder to disagree with the first.
+   *
+   * Every step carries its own `at` from the run's record: a replay stamped
+   * with arrival time would date a week-old run to this afternoon, and the
+   * durations would be the time it took to send.
+   *
+   * `exit` travels beside the steps rather than among them because a `result`
+   * is not narration — it is the frame that answers a request, and the window
+   * applies it as one. Null is a status this build does not recognise, which
+   * has not said the run succeeded.
    */
-  | { type: 'record'; id: number; dir: string; runId: string; record: RunRecord }
+  | {
+      type: 'replay';
+      id: number;
+      dir: string;
+      runId: string;
+      steps: readonly { at: number; narration: Narration }[];
+      exit: number | null;
+    }
   /**
    * A run that is gone, in reply to a `delete_run` request (#223).
    *
@@ -494,7 +511,7 @@ export type Inbound =
    */
   | { type: 'artifact'; id: number; dir: string; runId: string; name: string }
   /**
-   * Ask for one run's own record (#223).
+   * Ask for one finished run, said again (#223).
    *
    * **A read, beside `artifacts` and `artifact`, and the same pair of fields for
    * the same reason:** `dir` is the repository and `runId` names a directory
@@ -504,9 +521,9 @@ export type Inbound =
    * Answerable beside a run, like every other read — `loadRun` opens one file
    * and writes nothing — and the *live* run is the one case where asking is
    * pointless rather than refused: the window is already being narrated that
-   * run, so it has something better than a record.
+   * run, so it already has the narration this would reconstruct.
    */
-  | { type: 'record'; id: number; dir: string; runId: string }
+  | { type: 'replay'; id: number; dir: string; runId: string }
   /**
    * Ask what standing instructions each turn is given (#223).
    *
@@ -704,7 +721,7 @@ export function decode(line: string): Decoded {
     }
     case 'artifacts':
     case 'artifact':
-    case 'record':
+    case 'replay':
     case 'delete_run': {
       // Both fields required and both checked here, for `archive`'s reason:
       // there is no `parseArgs` below this to catch a missing one, and an empty
@@ -723,11 +740,11 @@ export function decode(line: string): Decoded {
         return { ok: true, message: { type: 'artifacts', id, dir, runId } };
       }
       // Here for `delete_run`'s reason and not because the three are alike: the
-      // two fields a record needs are the two checked above, and a case of its
+      // two fields a replay needs are the two checked above, and a case of its
       // own would be a second copy of the check that stops one repository's
       // archive being answered as though it were another's.
-      if (type === 'record') {
-        return { ok: true, message: { type: 'record', id, dir, runId } };
+      if (type === 'replay') {
+        return { ok: true, message: { type: 'replay', id, dir, runId } };
       }
       // Here rather than in a case of its own: the two fields it needs are the
       // two checked above, and the checks are the point. A separate case would

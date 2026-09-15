@@ -12,7 +12,7 @@ import {
   listRunArtifacts,
   listRuns,
   readRunArtifact,
-  readRunRecord,
+  readRunReplay,
 } from '@src/run.js';
 import { loadConfig, readRawConfig, writeConfigPatch } from '@src/config.js';
 import { GATEABLE, GATE_MODES, UNGATEABLE } from '@src/gates.js';
@@ -432,7 +432,7 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       return;
     }
 
-    if (msg.type === 'record') {
+    if (msg.type === 'replay') {
       // A read like the four above it, and the last of them to be built. It is
       // exempt from the one-at-a-time rule for `archive`'s reason and a
       // narrower one of its own: `loadRun` opens one file and writes nothing,
@@ -443,14 +443,14 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       // an id it will not join onto a path, a run directory it will not follow
       // (#53) and a `state.json` its validators reject — three different
       // findings with three different sentences, and each is the whole answer.
-      // An empty record would say a run did nothing.
+      // An empty replay would say a run did nothing.
       try {
         send({
-          type: 'record',
+          type: 'replay',
           id: msg.id,
           dir: msg.dir,
           runId: msg.runId,
-          record: readRunRecord(msg.dir, msg.runId),
+          ...readRunReplay(msg.dir, msg.runId),
         });
       } catch (err: unknown) {
         send({
