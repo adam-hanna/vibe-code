@@ -517,29 +517,52 @@ export interface OutputLine {
   role: string | null;
 }
 
+/**
+ * One question round, as the window holds it (#223).
+ *
+ * Its own interface because `Run.questions` is a **list** now and a list wants a
+ * name for its element. The move is the same one `verify` and `censuses` already
+ * made, for the same reason and after the same defect: one field holding "the
+ * latest" cannot draw a history, and this column is a history.
+ */
+export interface QuestionRound {
+  total: number;
+  blocking: number;
+  /** Which question round this is, or null on a core that did not say (#223). */
+  round: number | null;
+  /** `loop.maxQuestionRounds`, so the group can say `2/3` rather than `2`. */
+  cap: number | null;
+  open: readonly Question[];
+  /**
+   * When the round opened, on this window's arrival clock.
+   *
+   * What attaches the round to the phase it belongs under. Without it the
+   * column drew the questions at the foot of the whole `PLAN` group, so round
+   * 1's questions appeared beneath round 2 the moment a second plan round
+   * started - reported as *"the questions from the first round appeared under
+   * THIS round, not the ROUND 1"*. The same clock `during()` compares, so the
+   * comparison is like with like.
+   */
+  at: number;
+}
+
 export interface Run {
   cycles: readonly Cycle[];
-  /** The question loop, nested inside cycle 1. Null until one opens. */
-  questions: {
-    total: number;
-    blocking: number;
-    /** Which question round this is, or null on a core that did not say (#223). */
-    round: number | null;
-    /** `loop.maxQuestionRounds`, so the group can say `2/3` rather than `2`. */
-    cap: number | null;
-    open: readonly Question[];
-    /**
-     * When the round opened, on this window's arrival clock.
-     *
-     * What attaches the group to the phase it belongs under. Without it the
-     * column drew the questions at the foot of the whole `PLAN` group, so round
-     * 1's questions appeared beneath round 2 the moment a second plan round
-     * started - reported as *"the questions from the first round appeared under
-     * THIS round, not the ROUND 1"*. The same clock `during()` compares, so the
-     * comparison is like with like.
-     */
-    at: number;
-  } | null;
+  /**
+   * Every question round, oldest first (#223, `7a`).
+   *
+   * **A list rather than the latest, and the single field is what broke.** It
+   * held one round and each `questions_opened` replaced the one before, so a run
+   * that asked three rounds of questions could only ever draw the third —
+   * reported as *"only plan round 2 has full details... they all should"*. The
+   * counts on rounds 1 and 2 were not stale, they were **gone**, and nothing on
+   * screen said a round had had any.
+   *
+   * It is the same shape `verify` and `censuses` already have and it is the same
+   * argument: a column that reads as a history cannot be built out of fields
+   * that remember only the most recent thing. Empty until a round opens.
+   */
+  questions: readonly QuestionRound[];
   /**
    * The rate-limit wait in flight, or the last one, or null (`7e`).
    *
@@ -739,7 +762,7 @@ export interface Run {
 export function emptyRun(): Run {
   return {
     cycles: [],
-    questions: null,
+    questions: [],
     rateLimit: null,
     verify: [],
     censuses: [],
@@ -1738,21 +1761,36 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
         };
       }
 
+      /**
+       * A round opened. **Appended, never replacing the one before it.**
+       *
+       * This is the whole of the fix: the field held one round, so the second
+       * `questions_opened` of a run silently destroyed the first — its counts,
+       * its cap and every question in it — and the column could only ever draw
+       * the last one. A run that asked three rounds showed one.
+       *
+       * Appended plainly, the way `artifacts` appends a name written twice: two
+       * frames are two events, and collapsing them here would be this window
+       * deciding that a round it was told about twice happened once.
+       */
       case 'questions_opened':
         return {
           ...next,
-          questions: {
-            total: num(data['total']) ?? 0,
-            blocking: num(data['blocking']) ?? 0,
-            // Hi-fi 14's nested counter, or null on a core that predates it
-            // (#223). Both or neither would be wrong here: a round with no cap
-            // is still a position worth drawing, and the group says `round 2`
-            // rather than `round 2/3` rather than saying nothing.
-            round: num(data['round']),
-            cap: num(data['cap']),
-            open: readQuestions(data['questions']),
-            at,
-          },
+          questions: [
+            ...next.questions,
+            {
+              total: num(data['total']) ?? 0,
+              blocking: num(data['blocking']) ?? 0,
+              // Hi-fi 14's nested counter, or null on a core that predates it
+              // (#223). Both or neither would be wrong here: a round with no cap
+              // is still a position worth drawing, and the group says `round 2`
+              // rather than `round 2/3` rather than saying nothing.
+              round: num(data['round']),
+              cap: num(data['cap']),
+              open: readQuestions(data['questions']),
+              at,
+            },
+          ],
         };
 
       /**
@@ -1779,20 +1817,29 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
        * already been reported by the core that could not place it either.
        */
       case 'questions_answered': {
-        const before = next.questions;
-        if (before === null) return next;
+        // **The round the loop is on**, which is the last one opened. The
+        // answerer takes its turn on the questions that were just raised, so
+        // there is exactly one round an answer can belong to and it is this one.
+        // Searching the list for a matching `round` would look safer and would
+        // be worse: the frame need not carry one, and a null would then match
+        // whichever earlier round also had none.
+        const before = next.questions[next.questions.length - 1];
+        if (before === undefined) return next;
         const answers = readAnswers(data['answers'], false);
         const declined = readAnswers(data['declined'], true);
         const found = [...answers, ...declined];
         return {
           ...next,
-          questions: {
-            ...before,
-            open: before.open.map((q) => {
-              const a = found.find((x) => x.question.trim() === q.question.trim());
-              return a === undefined ? q : { ...q, ...a };
-            }),
-          },
+          questions: [
+            ...next.questions.slice(0, -1),
+            {
+              ...before,
+              open: before.open.map((q) => {
+                const a = found.find((x) => x.question.trim() === q.question.trim());
+                return a === undefined ? q : { ...q, ...a };
+              }),
+            },
+          ],
         };
       }
 
@@ -2140,6 +2187,22 @@ export function runningRow(turn: Turn, now: number): RunningRow {
 }
 
 /**
+ * The question round the loop is on, or null (#223).
+ *
+ * **One expression, because three surfaces ask it** — the Questions tab's badge,
+ * the halt banner in the footer and the pane itself — and three spellings of
+ * "the latest one" is how a badge and the pane behind it come to disagree about
+ * one run, which is a defect this window has already had once.
+ *
+ * The **last** rather than the last with open questions: a round whose answers
+ * all came back is still the round the loop is on, and a banner that skipped
+ * back to an earlier one would be pointing at questions that were settled.
+ */
+export function latestQuestions(run: Run): QuestionRound | null {
+  return run.questions[run.questions.length - 1] ?? null;
+}
+
+/**
  * A run's own narration, folded into the `Run` it describes (#223).
  *
  * **One fold, two callers, and that is the point.** `useReplay` uses it to draw
@@ -2164,4 +2227,30 @@ export function foldReplay(
     built = reduce(built, { type: 'narration', ...step.narration }, step.at);
   }
   return built;
+}
+
+/**
+ * A replayed run, made ready to be carried on with (#223).
+ *
+ * **The ending has to go, and leaving it on was a real defect.** `foldReplay`
+ * folds the narration as it happened, which includes `run_escalated` or
+ * `run_failed` — so seeding a resume with it put the *previous* stop's reason on
+ * a run that was starting, and the footer correctly drew what it was given:
+ * `ENDING — the run is stopping`, quoting a stop from an hour ago, exactly where
+ * the pause and stop controls should have been.
+ *
+ * Three fields and each is an ending in its own right: `reason` is why the loop
+ * is giving up, `ended` is the verdict it reached, and `completed` is the exit
+ * code the command returned. A resume has none of them yet, and saying so is the
+ * difference between a run that is starting and one that has stopped.
+ *
+ * `running` goes too. Nothing is executing at the moment a resume is seeded —
+ * the first turn has not been announced — and a live card left over from the
+ * replay would pulse for a turn that ended hours ago.
+ *
+ * What stays is everything the resume is being given back: the cycles, their
+ * turns, the censuses, the spend, the commits and the artifacts.
+ */
+export function forResume(run: Run): Run {
+  return { ...run, reason: null, ended: null, completed: null, running: null };
 }

@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Button, StateKicker } from '../design';
 import { boundary, ending, hold, nextHold } from './format';
 import type { Raise } from './argv';
+import { latestQuestions } from './model';
 import type { Run } from './model';
 
 /**
@@ -174,6 +175,10 @@ export function Footer({
     // it. Told rather than inferred: the verdict is the loop's word, and a
     // window recomputing it from the fraction would disagree about flaky.
     const failing = run.verify[run.verify.length - 1]?.gates.find((g) => g.status === 'failed');
+    // The questions this hold is about: the round the loop is on, through the
+    // same expression the tab badge and the pane use (#223). `Run.questions` is
+    // a list now, so "the latest" is a decision and it is made in one place.
+    const asked = latestQuestions(run);
     // What this boundary is asking, or null if this build has no description of
     // it - in which case nothing is drawn rather than something generic.
     const held = hold(gate.boundary);
@@ -293,7 +298,7 @@ export function Footer({
         */}
         {gate.boundary === 'question-round' && (
           <div className="v-footer__verify">
-            {run.questions === null ? (
+            {asked === null ? (
               // A real state, not an error: `questions_opened` is what fills
               // this, and a build that held here without seeing one says so
               // rather than drawing an empty inbox as "no questions".
@@ -304,10 +309,10 @@ export function Footer({
             ) : (
               <>
                 <div className="v-footer__note">
-                  {run.questions.total} question{run.questions.total === 1 ? '' : 's'}
-                  {run.questions.blocking > 0 && (
+                  {asked.total} question{asked.total === 1 ? '' : 's'}
+                  {asked.blocking > 0 && (
                     <>
-                      , <strong>{run.questions.blocking} blocking</strong>
+                      , <strong>{asked.blocking} blocking</strong>
                     </>
                   )}
                   :
@@ -316,7 +321,7 @@ export function Footer({
                     what a person should read rather than the order they were
                     asked in. A decline on a blocking question is the one that
                     ends runs. */}
-                {[...run.questions.open]
+                {[...asked.open]
                   .sort(
                     (a, b) =>
                       Number(b.blocking) - Number(a.blocking) ||
@@ -345,7 +350,7 @@ export function Footer({
                       )}
                     </div>
                   ))}
-                {run.questions.open.length < run.questions.total && (
+                {asked.open.length < asked.total && (
                   <div className="v-footer__note">
                     The count is the loop&apos;s; this build could not read every question behind
                     it. The rest are in the run&apos;s <code>answers-N.json</code>.

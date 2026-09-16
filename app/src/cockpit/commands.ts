@@ -32,6 +32,21 @@ export interface Command {
   output: string;
   /** True once output has been dropped from the front. */
   truncated: boolean;
+  /**
+   * Every byte this command has written, including what has been dropped.
+   *
+   * **The cursor `read_command` hands back**, and it counts what was written
+   * rather than what is kept - which is the whole reason it exists as a field
+   * instead of being read off `output.length`. A dev server left up all
+   * afternoon writes past `COMMAND_OUTPUT_KEEP`, and a cursor measured against a
+   * buffer that drops from the front would silently rewind: the model would ask
+   * for "everything after 60,000" and be handed lines it had already read.
+   *
+   * With this, the first byte still held is at `bytes - output.length`, so a
+   * read that starts before it can say how much it missed instead of pretending
+   * it saw the lot (#223).
+   */
+  bytes: number;
 }
 
 export interface Commands {
@@ -82,6 +97,7 @@ export function started(commands: Commands, frame: CommandStarted): Commands {
     stopped: false,
     output: '',
     truncated: false,
+    bytes: 0,
   };
   // A refusal is cleared by a start, because the two answer the same question
   // and the newer one is the answer.
@@ -97,7 +113,7 @@ export function output(commands: Commands, frame: CommandOutput): Commands {
       text = text.slice(text.length - COMMAND_OUTPUT_KEEP);
       truncated = true;
     }
-    return { ...command, output: text, truncated };
+    return { ...command, output: text, truncated, bytes: command.bytes + frame.chunk.length };
   });
 }
 
@@ -146,4 +162,48 @@ export function outcome(command: Command): string | null {
 /** The command line as a person reads it. Never what is spawned - see `resolved`. */
 export function line(command: Command): string {
   return [command.program, ...command.args].join(' ');
+}
+
+/**
+ * What one command has written since a cursor, and what that read missed.
+ *
+ * **The tail is what makes a long-running command readable at all** (#223). The
+ * pilot could ask what a command had produced and was handed the whole buffer
+ * every time, so a dev server's answer grew without bound and nothing in it said
+ * which part was new — reported as *"I need it to be able to tail logs from
+ * processes it starts so it can debug"*. A cursor is the difference between
+ * reading a log and re-reading it.
+ *
+ * Pure and here rather than in `tools.ts` for the reason this whole module is
+ * pure: `model.ts`'s rule is that the only logic in the app is testable, and the
+ * arithmetic below has two off-by-one edges and a truncation case.
+ *
+ * **`missed` is the honest half.** A cursor older than the buffer cannot be
+ * served, and the two wrong answers are opposite: returning the kept tail as if
+ * it were everything makes the reader believe it has the whole log, and
+ * returning nothing makes it believe the command went quiet. So the dropped
+ * count is reported and the read resumes at the oldest byte still held.
+ */
+export interface Tail {
+  /** What was written after the cursor, as far as the buffer still holds it. */
+  text: string;
+  /** Characters dropped between the cursor and the oldest byte still kept. */
+  missed: number;
+  /** Pass this back as `since` next time. Always `command.bytes`. */
+  cursor: number;
+}
+
+export function tail(command: Command, since: number | null): Tail {
+  const kept = command.output.length;
+  const first = command.bytes - kept;
+  if (since === null) return { text: command.output, missed: 0, cursor: command.bytes };
+  // A cursor from the future is a reader that has seen everything - which is
+  // the ordinary state of a quiet command, not an error. Clamped rather than
+  // refused, and it reads as "nothing new" either way.
+  const from = Math.min(Math.max(since, 0), command.bytes);
+  return {
+    text: command.output.slice(Math.max(from - first, 0)),
+    missed: Math.max(first - from, 0),
+    cursor: command.bytes,
+  };
 }

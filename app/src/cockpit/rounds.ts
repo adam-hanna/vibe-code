@@ -3,6 +3,7 @@ import type {
   Commit,
   CycleKind,
   PhaseGroup,
+  QuestionRound,
   Run,
   Turn,
   VerifyPass,
@@ -133,7 +134,7 @@ export interface RoundCard {
    * plan round — two different countings, so matching on the number would match
    * the wrong thing.
    */
-  questions: Run['questions'];
+  questions: QuestionRound | null;
 }
 
 /** The work reading a round ends on: the latest one any of its turns reported. */
@@ -249,10 +250,15 @@ export function rounds(run: Run): readonly RoundCard[] {
     // like a second pass rather than silently making the first one the answer.
     if (card !== undefined) cards[i] = { ...card, commit };
   }
-  if (run.questions !== null) {
-    const i = during(starts, run.questions.at);
+  for (const round of run.questions) {
+    const i = during(starts, round.at);
     const card = cards[i];
-    if (card !== undefined) cards[i] = { ...card, questions: run.questions };
+    // The latest wins a round that somehow opened two question rounds under one
+    // plan round. That is not a shape the loop produces - `revisePlan` opens a
+    // phase per question round - and it is written the way a verification pass
+    // is so that if it ever did, the card would behave like one rather than
+    // silently keeping the first.
+    if (card !== undefined) cards[i] = { ...card, questions: round };
   }
   return cards;
 }
@@ -296,26 +302,40 @@ export function censusByPhase(run: Run): ReadonlyMap<number, Census> {
 }
 
 /**
- * The phase the question round opened during, or null.
+ * Which question round belongs to which **phase**, for the loop column.
  *
- * **By arrival, through `during()`, for the same reason a census is.**
- * `questions_opened` carries the *question* round, which counts separately from
- * the plan round a phase is numbered by, so matching on a number would match two
- * different countings.
+ * Built from `rounds()` rather than beside it, so "by arrival" has one
+ * definition and the column and the pilot's log cannot disagree about which
+ * round raised which questions.
  *
- * Null when no questions have opened, and null when they opened before any phase
- * of this session did — a real state on a resumed run, where attaching them to
- * the first phase in view would file an earlier session's questions under this
- * session's first round.
+ * **It replaced `questionsPhase`, which could only answer for one round.** That
+ * function returned the phase id of *the* question round, because `Run` held
+ * one — so the column asked `questionsAt === phase.id` and at most one round in
+ * the whole run could ever draw a questions block. A map is the same question
+ * asked once per round.
+ *
+ * Keyed by phase id, which `reduce` allocates and never reuses.
  */
-export function questionsPhase(run: Run): number | null {
-  if (run.questions === null) return null;
-  const cards = rounds(run);
-  const i = during(
-    cards.map((c) => c.startedAt),
-    run.questions.at,
-  );
-  return cards[i]?.phaseId ?? null;
+export function questionsByPhase(run: Run): ReadonlyMap<number, QuestionRound> {
+  const out = new Map<number, QuestionRound>();
+  for (const card of rounds(run)) {
+    if (card.questions !== null) out.set(card.phaseId, card.questions);
+  }
+  return out;
+}
+
+/**
+ * The question rounds that opened before any phase of this session did.
+ *
+ * A real state on a **resume**, where the frames start mid-run: those rounds
+ * attach to no card, and filing them under this session's first round would
+ * credit an earlier session's questions to work that has not happened yet. The
+ * column draws them at the foot instead, so they are visible without being
+ * attributed to the wrong round.
+ */
+export function unplacedQuestions(run: Run): readonly QuestionRound[] {
+  const placed = new Set(questionsByPhase(run).values());
+  return run.questions.filter((round) => !placed.has(round));
 }
 
 /**

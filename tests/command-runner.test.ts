@@ -255,3 +255,79 @@ test('every command started is listed, oldest first', async () => {
     [one.id, two.id],
   );
 });
+
+
+test('stopping a command takes its whole tree, and that is the platform doing it', async (t) => {
+  // **The question the dev-server story rests on**, asked because the pilot
+  // could not answer it: `npm run dev` is `node npm-cli.js` spawning a script
+  // that spawns `concurrently` that spawns Vite and a watcher, so a stop that
+  // reached only the process this module named would leave a server on its port
+  // with nobody holding it.
+  //
+  // It does not, and the reason is worth writing down because nothing in this
+  // file does it: **libuv assigns every child a Node process spawns to a global
+  // Job Object with `KILL_ON_JOB_CLOSE`**, and job membership is inherited, so
+  // the whole tree goes when the top of it does. Measured rather than assumed -
+  // a `taskkill /T` was written here first and then removed, because this test
+  // passed identically without it and a fix that changes no outcome is a fix
+  // with no evidence behind it.
+  //
+  // **Windows only**, where that mechanism is what is being pinned. Elsewhere a
+  // tree would need a process group and nothing here sets one up, so asserting
+  // it there would be a claim about behaviour this build does not have.
+  if (process.platform !== 'win32') return;
+  clearCommands();
+  t.after(() => void stopAllCommands());
+
+  const started = startCommand({
+    program: process.execPath,
+    // A parent that reports its child's pid and then does nothing for ever. The
+    // grandchild's stdio is ignored, so this process holds no handle to it and
+    // nothing here would reap it - which is what makes its death evidence about
+    // the kill rather than about the fixture.
+    args: [
+      '-e',
+      'const{spawn}=require("child_process");' +
+        'const c=spawn(process.execPath,["-e","setInterval(()=>{},50)"],{stdio:"ignore"});' +
+        'console.log("grandchild "+c.pid);' +
+        'setInterval(()=>{},1000)',
+    ],
+    dir: repo(),
+  });
+  if (refused(started)) throw new Error(started.refused);
+
+  await wrote(started.id, /grandchild \d+/);
+  const pid = Number(/grandchild (\d+)/.exec(readCommand(started.id)?.output ?? '')?.[1]);
+  assert.ok(Number.isInteger(pid) && pid > 0, 'the fixture should report a pid');
+  // Whatever this test does, that process does not outlive it. It is not our
+  // child, so nothing else would ever reap it.
+  t.after(() => {
+    try {
+      process.kill(pid);
+    } catch {
+      // Already gone, which is the passing case.
+    }
+  });
+
+  // Alive first, so what follows is about the kill rather than about a process
+  // that never started. Signal 0 is the existence check.
+  process.kill(pid, 0);
+
+  assert.equal(stopCommand(started.id), true);
+  await ended(started.id);
+
+  // Polled, because "the parent's streams closed" and "the job tore down" are
+  // two events and nothing orders them.
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      break;
+    }
+    if (Date.now() > deadline) {
+      throw new Error(`grandchild ${String(pid)} was still running 10s after the tree was stopped`);
+    }
+    await new Promise((r) => setTimeout(r, 20));
+  }
+});

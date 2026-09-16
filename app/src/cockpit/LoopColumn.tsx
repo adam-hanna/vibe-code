@@ -3,10 +3,10 @@ import { LivenessDot, MetaChip, StateKicker } from '../design';
 import { Counts } from './Counts';
 import { Caret } from './Disclosure';
 import { clock, elapsed } from './format';
-import { censusByPhase, questionsPhase, title } from './rounds';
+import { censusByPhase, questionsByPhase, title, unplacedQuestions } from './rounds';
 import { RunningRow } from './RunningRow';
 import type { KeyboardEvent } from 'react';
-import type { Census, CycleKind, PhaseGroup, Preflight, ResumedFrom, Run, Turn } from './model';
+import type { Census, CycleKind, PhaseGroup, Preflight, QuestionRound, ResumedFrom, Run, Turn } from './model';
 
 /**
  * Where a count or a box sends the reader (#223).
@@ -153,7 +153,7 @@ function Round({
   /** What the gate made of this phase, or null. Hi-fi 2 puts it on the row. */
   census: Census | null;
   /** The question round that opened during this phase, or null. See `Questions`. */
-  questions: Run['questions'];
+  questions: QuestionRound | null;
   /** Whether the body is showing. The head is always drawn. */
   open: boolean;
   onToggle: () => void;
@@ -221,14 +221,39 @@ function Round({
               now={now}
             />
           ))}
-          {turns.length === 0 && phase.gates.length === 0 && questions === null && (
-            // The implementing phase is the one that reaches this: it has never
-            // had a `log.step` of its own, so `phase_started` IS its
-            // announcement (#152).
-            <div className="v-phase__silent">
-              announced by the phase, with no turn line of its own
-            </div>
-          )}
+          {/* **An answerer turn is drawn whether or not its round has a
+              questions block** (#223). They used to be rendered *only* inside
+              that block, and `Run.questions` held one round at a time — so the
+              moment a second question round opened, the first round's answerer
+              turn stopped being drawn anywhere at all. Reported as *"only plan
+              round 2 has full details... they all should"*: a run with three
+              question rounds showed one answerer turn and silently dropped two.
+
+              **The field is a list now and that removed the cause**, so this is
+              no longer holding a loss up. It stays because the two halves are
+              still independent: an answerer turn is a *turn* — something that
+              ran and was paid for — and nothing about whether a questions block
+              happens to be on screen beside it may decide whether it appears. */}
+          {questions === null &&
+            answerers.map((turn) => (
+              <Version
+                key={turn.id}
+                turn={turn}
+                draw={drawOf(turn, runningId, settledId)}
+                now={now}
+              />
+            ))}
+          {turns.length === 0 &&
+            answerers.length === 0 &&
+            phase.gates.length === 0 &&
+            questions === null && (
+              // A phase that announced itself and ran nothing under it. The
+              // implementing phase used to be the one that reached this, because
+              // it had no `turn_started` of its own until #223 gave it one.
+              <div className="v-phase__silent">
+                announced by the phase, with no turn line of its own
+              </div>
+            )}
           {questions !== null && (
             <Questions
               questions={questions}
@@ -283,7 +308,7 @@ function Questions({
   settledId,
   now,
 }: {
-  questions: NonNullable<Run['questions']>;
+  questions: QuestionRound;
   /** The answerer's turns from this phase, which belong here rather than above. */
   turns: readonly Turn[];
   onOpen?: OpenAt | undefined;
@@ -687,10 +712,12 @@ export function LoopColumn({
   // tested, and a second answer is how this column and the pilot's log come to
   // disagree about one round.
   const censusOf = censusByPhase(run);
-  // Which round the question loop opened during, through the same module for the
-  // same reason: a second answer here is how this column and the pilot's log come
-  // to disagree about one round.
-  const questionsAt = questionsPhase(run);
+  // Which question round each phase raised, through the same module for the same
+  // reason: a second answer here is how this column and the pilot's log come to
+  // disagree about one round. A **map**, because every round that asked has one
+  // (#223) - a single answer meant at most one round in the run could draw its
+  // counts, which is what "only plan round 2 has full details" was.
+  const questionsOf = questionsByPhase(run);
 
   return (
     <section className="v-loop" aria-label="loop">
@@ -739,7 +766,7 @@ export function LoopColumn({
                   census={censusOf.get(phase.id) ?? null}
                   // `7a`'s nested question loop, on the round it opened during
                   // rather than at the foot of the group.
-                  questions={questionsAt === phase.id ? run.questions : null}
+                  questions={questionsOf.get(phase.id) ?? null}
                   open={!shut.has(`p${String(phase.id)}`)}
                   onToggle={() => { toggle(`p${String(phase.id)}`); }}
                   onOpen={onOpen}
@@ -752,20 +779,21 @@ export function LoopColumn({
         );
       })}
 
-      {/* A question round that opened before any phase of this session did. Real
-          on a resume, where the frames start mid-run: it is drawn here rather
+      {/* Question rounds that opened before any phase of this session did. Real
+          on a resume, where the frames start mid-run: they are drawn here rather
           than filed under this session's first round, which would credit an
           earlier session's questions to work that has not happened yet. */}
-      {run.questions !== null && questionsAt === null && (
+      {unplacedQuestions(run).map((round) => (
         <Questions
-          questions={run.questions}
+          key={round.at}
+          questions={round}
           turns={[]}
           onOpen={onOpen}
           runningId={runningId}
           settledId={settledId}
           now={now}
         />
-      )}
+      ))}
 
       {/* Four groups are always the shape of a run, so the ones that have not
           started are named rather than absent - at reduced weight, because a

@@ -1,5 +1,5 @@
 import { launchArgv } from '../cockpit/argv';
-import { line, outcome } from '../cockpit/commands';
+import { line, outcome, tail } from '../cockpit/commands';
 import { OUTPUT_KEEP } from '../cockpit/model';
 import type { Command, Commands } from '../cockpit/commands';
 import type { Tool } from './pilot';
@@ -79,6 +79,23 @@ export type Effect =
    * so there is no line for a `;` to be in.
    */
   | { kind: 'command'; dir: string; program: string; args: readonly string[] }
+  /**
+   * Stop a command this session started (#223).
+   *
+   * **The fourth kind, and it is the other half of the third.** The pilot could
+   * start a dev server and could not stop one, and what it did instead is the
+   * evidence: asked to stop the server, it said *"I have no tool that kills a
+   * command"* and proposed `npx kill-port 5173 4000` — which killed a stale
+   * process on a port it had guessed from `package.json`, left the real server
+   * running on the port Vite had actually fallen back to, and took an unrelated
+   * `node --watch` down with it. A capability with no off switch is not a
+   * narrower capability; it is one whose off switch gets improvised.
+   *
+   * It names a command by the id `read_command` reports, so what is killed is
+   * something this window started and is holding a handle to — never a pid, and
+   * never a port, which is what made the improvised version dangerous.
+   */
+  | { kind: 'stop_command'; commandId: string }
   /**
    * Answer a waiting gate.
    *
@@ -425,7 +442,9 @@ const READ_COMMAND: ToolDef = {
   description:
     'What the commands you have run are doing: the command line, whether it is still running, ' +
     'how it ended, and its output. Call this after a run_command proposal is accepted, and ' +
-    'again while a long-running one is up — a dev server keeps writing.',
+    'again while a long-running one is up — a dev server keeps writing. Every answer carries a ' +
+    '"cursor"; pass it back as "since" on the next call to read only what is new, which is how ' +
+    'you tail a server rather than re-reading its whole log.',
   input_schema: {
     type: 'object',
     properties: {
@@ -434,11 +453,29 @@ const READ_COMMAND: ToolDef = {
         description:
           'One command, by the id read_command reports. Omit for every command in this session.',
       },
+      since: {
+        type: 'integer',
+        minimum: 0,
+        description:
+          'The "cursor" from your last read of this command. Returns only what has been written ' +
+          'since. Omit to read everything the window still holds.',
+      },
     },
     additionalProperties: false,
   },
   call: (input, ctx) => {
     const wanted = isRecord(input) ? input['id'] : undefined;
+    const asked = isRecord(input) ? input['since'] : undefined;
+    // Refused rather than coerced, the same rule `lines` follows above: a model
+    // that sent a string cursor is reasoning about a different answer shape, and
+    // reading it as 0 would hand back the whole log under the name of a tail.
+    if (asked !== undefined && (typeof asked !== 'number' || !Number.isInteger(asked) || asked < 0)) {
+      return {
+        kind: 'refused',
+        content: '"since" has to be a whole number — the "cursor" from your last read of this command.',
+      };
+    }
+    const since = typeof asked === 'number' ? asked : null;
     const all = ctx.commands.all;
     if (wanted !== undefined) {
       if (typeof wanted !== 'string') {
@@ -458,12 +495,23 @@ const READ_COMMAND: ToolDef = {
               : `Running and finished: ${all.map((c) => c.id).join(', ')}.`),
         };
       }
-      return { kind: 'ran', content: JSON.stringify(describeCommand(one)) };
+      return { kind: 'ran', content: JSON.stringify(describeCommand(one, since)) };
+    }
+    // A `since` with no `id` is refused rather than applied to all of them: one
+    // cursor cannot describe several commands, and quietly using it on each
+    // would report one server's position as another's.
+    if (since !== null) {
+      return {
+        kind: 'refused',
+        content:
+          '"since" is a cursor into one command, so it needs an "id" as well. Omit both to see ' +
+          'every command, then read one back with its own cursor.',
+      };
     }
     return {
       kind: 'ran',
       content: JSON.stringify({
-        commands: all.map(describeCommand),
+        commands: all.map((c) => describeCommand(c, null)),
         // Said rather than left to be inferred from an empty list, which a model
         // would otherwise read as "the commands failed".
         note:
@@ -475,8 +523,16 @@ const READ_COMMAND: ToolDef = {
   },
 };
 
-/** One command as a model reads it. Output last, because it is the long part. */
-function describeCommand(command: Command): Record<string, unknown> {
+/**
+ * One command as a model reads it. Output last, because it is the long part.
+ *
+ * **`cursor` is on every answer, including the ones that did not ask for a
+ * tail**, because the first read is where a reader learns the position exists.
+ * A model handed a cursor only once it had already asked for one would have no
+ * way to discover tailing at all.
+ */
+function describeCommand(command: Command, since: number | null): Record<string, unknown> {
+  const read = tail(command, since);
   return {
     id: command.id,
     command: line(command),
@@ -486,8 +542,16 @@ function describeCommand(command: Command): Record<string, unknown> {
     // and a model reading `exit 0` on a live dev server would report it finished.
     outcome: outcome(command),
     running: command.endedAt === null,
+    // The position to pass back as `since`. Unchanged between two reads means
+    // the command has written nothing in between - which is a real answer about
+    // a server that has finished starting, and is not the same as "it is gone".
+    cursor: read.cursor,
+    since,
+    // Kept for the reason the window keeps it: a tail presented as the whole is
+    // the one thing a bounded buffer must never do.
     truncated: command.truncated,
-    output: command.output,
+    missed: read.missed,
+    output: read.text,
   };
 }
 
@@ -563,9 +627,70 @@ const RUN_COMMAND: ToolDef = {
 };
 
 /**
+ * The stop control, as a proposal (#223).
+ *
+ * **Propose-only, exactly like the tool that starts one**, and the symmetry is
+ * the point rather than caution for its own sake: killing a process somebody is
+ * using is as consequential as starting one, and the only honest place to draw
+ * the line is in front of a person. The card names the command line, so what is
+ * stopped is what was read.
+ *
+ * It refuses a command that has already ended, with the outcome, because
+ * "stopped" and "exited on its own" are different facts about a process and a
+ * model told the second will not report the first.
+ */
+const STOP_COMMAND: ToolDef = {
+  name: 'stop_command',
+  description:
+    'Propose stopping a command this session started, by its id. This does NOT stop it: the ' +
+    'user sees which command and presses. Use it for a dev server you brought up and are done ' +
+    'with — never a port-killer or a process-name kill, which take down whatever else happens ' +
+    'to be listening.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      id: {
+        type: 'string',
+        description: 'The command id, as read_command reports it.',
+      },
+    },
+    required: ['id'],
+    additionalProperties: false,
+  },
+  call: (input, ctx) => {
+    if (!isRecord(input)) return { kind: 'refused', content: 'this call sent no arguments.' };
+    const id = text(input, 'id');
+    if (bad(id)) return { kind: 'refused', content: id.why };
+    const all = ctx.commands.all;
+    const one = all.find((c) => c.id === id);
+    if (one === undefined) {
+      return {
+        kind: 'refused',
+        content:
+          `there is no command "${id}" in this session. ` +
+          (all.length === 0
+            ? 'Nothing has been run yet, so there is nothing to stop.'
+            : `Running and finished: ${all.map((c) => c.id).join(', ')}.`),
+      };
+    }
+    if (one.endedAt !== null) {
+      return {
+        kind: 'refused',
+        content: `"${id}" (${line(one)}) has already ended — ${outcome(one) ?? 'no outcome recorded'}.`,
+      };
+    }
+    return {
+      kind: 'proposes',
+      summary: `stop ${line(one)} (${id})`,
+      effect: { kind: 'stop_command', commandId: one.id },
+    };
+  },
+};
+
+/**
  * The table.
  *
- * Reads first, then the three that need a person, which is also the order they
+ * Reads first, then the four that need a person, which is also the order they
  * are useful in: a model that proposes before it has looked is proposing about a
  * run it has not read.
  */
@@ -576,6 +701,7 @@ export const TOOLS: readonly ToolDef[] = [
   START_RUN,
   ANSWER_GATE,
   RUN_COMMAND,
+  STOP_COMMAND,
 ];
 
 /** The table as the vendor is told it — the executors stripped off. */

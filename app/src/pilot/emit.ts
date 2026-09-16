@@ -75,18 +75,44 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 /**
  * Read the calls a reply emitted.
  *
- * `turn` seeds the ids, which is what keeps them unique across a conversation
- * without a counter and without randomness — a reducer keyed on ids must never
- * be handed two calls that share one, and `settle` would answer only the first.
- * They cannot collide with a vendor's (`toolu_…`, `call_…`) either.
+ * ## The ids, and the collision that cost a whole session
+ *
+ * `turn` seeded them alone, and the comment here claimed that kept them "unique
+ * across a conversation without a counter and without randomness". The first
+ * half is what was wrong: a **turn id is unique within one window session and a
+ * conversation outlives one**. `nextRequestId` in `host.ts` is a module counter
+ * starting at 0, so every launch walks the same numbers again, and `saved.ts`
+ * restores the conversation - tool results included - from `localStorage`.
+ *
+ * `settle` refuses a call that already has a result, which is right: two results
+ * for one id is a 400 from both vendors. So a new call landing on a restored
+ * id was silently left unsettled, for ever, and the pane drew it as **waiting to
+ * be run** with nothing saying why. Measured from a real session: three
+ * consecutive `read_command` calls stuck, the model correctly reporting *"my
+ * last read didn't come back"*, and a fourth working because its number happened
+ * not to collide.
+ *
+ * `origin` is what distinguishes *this* window's calls from a restored one's,
+ * which is exactly the axis the collision is on. It is a **parameter** rather
+ * than a `crypto.randomUUID()` inside here, so this function stays pure and the
+ * tests stay deterministic - the randomness lives at the one call site that has
+ * a window to be the lifetime of.
+ *
+ * A reducer keyed on ids must never be handed two calls that share one, and
+ * these still cannot collide with a vendor's (`toolu_…`, `call_…`) either.
  */
-export function readEmitted(text: string, turn: number): readonly Emitted[] {
+export function readEmitted(
+  text: string,
+  turn: number,
+  /** This window session, so a restored conversation's ids are a different set. */
+  origin: string,
+): readonly Emitted[] {
   const out: Emitted[] = [];
   BLOCK.lastIndex = 0;
   let match: RegExpExecArray | null;
   while ((match = BLOCK.exec(text)) !== null) {
     const body = match[1] ?? '';
-    const id = `emit:${String(turn)}:${String(out.length)}`;
+    const id = `emit:${origin}:${String(turn)}:${String(out.length)}`;
     let envelope: unknown;
     try {
       envelope = JSON.parse(body) as unknown;

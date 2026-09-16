@@ -34,7 +34,7 @@ import { Workstreams } from './Workstreams';
 import { VerifyPane } from './VerifyPane';
 import { StalenessStrip } from './Staleness';
 import { NEEDS_HUMAN, tokens as fmtTokens } from './format';
-import { emptyRun, foldReplay, nextRun, reduce, staleness } from './model';
+import { emptyRun, foldReplay, forResume, latestQuestions, nextRun, reduce, staleness } from './model';
 import { rounds } from './rounds';
 import { implementArgv, readLaunchArgv, resumeArgv } from './argv';
 import { SCALE_KEY, SCALE_VAR, readScale, writable } from './appearance';
@@ -636,7 +636,9 @@ export function Cockpit() {
       void host
         .replay(dir, runId)
         .then((got) => {
-          seed = foldReplay(got.steps);
+          // Stripped of the previous ending: a resume has not stopped, and
+          // seeding one would draw a halt banner over a run that is starting.
+          seed = forResume(foldReplay(got.steps));
         })
         .catch(() => {
           // Deliberately silent. The run is about to start either way, and a
@@ -772,15 +774,16 @@ export function Cockpit() {
    *
    * Nothing here decides anything: the effect was built by `tools.ts` from what
    * the model asked for, and a person pressed a button. This is the routing, and
-   * it routes to the same two functions the buttons call.
+   * it routes to the same functions the buttons call.
    */
   const onEffect = useCallback(
     (effect: Effect) => {
       if (effect.kind === 'invoke') launch(effect.argv);
       else if (effect.kind === 'command') runCommand(effect.program, effect.args);
+      else if (effect.kind === 'stop_command') stopCommand(effect.commandId);
       else answer(effect.askId, effect.decision);
     },
-    [launch, answer, runCommand],
+    [launch, answer, runCommand, stopCommand],
   );
 
   const outside = !host.inShell();
@@ -793,6 +796,16 @@ export function Cockpit() {
    * rather than wrong.
    */
   const shownRunId = viewing?.runId ?? run.identity?.runId ?? null;
+  /**
+   * The question round the loop is on, through `model.ts` rather than by index.
+   *
+   * The badge on the Questions tab and the pane behind it read the **same**
+   * expression, which is the thing that broke the last time they did not: the
+   * tab counted the live run while the pane had been forced to null, so a badge
+   * and the pane behind it disagreed about one run and it was reported as two
+   * separate bugs.
+   */
+  const openQuestions = latestQuestions(run);
   /**
    * Which repository those panes read in.
    *
@@ -1134,8 +1147,8 @@ export function Cockpit() {
               onClick={() => open('questions')}
             >
               Questions
-              {run.questions !== null && run.questions.blocking > 0
-                ? ` · ${String(run.questions.blocking)}`
+              {openQuestions !== null && openQuestions.blocking > 0
+                ? ` · ${String(openQuestions.blocking)}`
                 : ''}
             </button>
             {/* `5d`. The count is verification passes, not gates: the pane's
@@ -1221,7 +1234,7 @@ export function Cockpit() {
           {tab === 'spend' && <SpendPane run={run} />}
           {tab === 'questions' && (
             <QuestionsPane
-              questions={past ? null : run.questions}
+              questions={past ? null : openQuestions}
               dir={shownDir}
               runId={shownRunId}
               revision={run.artifacts.length}

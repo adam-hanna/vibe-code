@@ -4,6 +4,7 @@ import replayHook from './useReplay.ts?raw';
 import model from './model.ts?raw';
 import settings from './Settings.tsx?raw';
 import footer from './Footer.tsx?raw';
+import column from './LoopColumn.tsx?raw';
 import pilot from '../pilot/PilotPane.tsx?raw';
 import { chatKey, chatMove } from '../pilot/saved';
 import { recorded } from './format';
@@ -258,8 +259,20 @@ describe('a resumed run keeps the column it already had', () => {
     // the run."* `reduce` builds a `Run` from the frames THIS process narrates,
     // and a resume narrates only what happens from the resume onwards — so a run
     // three plan rounds deep came back showing one.
-    expect(cockpit).toMatch(/seed = foldReplay\(got\.steps\)/);
+    expect(cockpit).toMatch(/seed = forResume\(foldReplay\(got\.steps\)\)/);
     expect(cockpit).toMatch(/dispatch\(\{ type: 'seed', run: seed \}\)/);
+  });
+
+  test('the seed carries no ending, because a resume has not ended', () => {
+    // **What happened without it:** the replay folds `run_escalated` like every
+    // other line, so seeding put the PREVIOUS stop's reason on a run that was
+    // starting — and the footer drew exactly what it was given, `ENDING — the
+    // run is stopping`, quoting an hour-old stop where the pause and stop
+    // controls belong.
+    const strip = model.slice(model.indexOf('export function forResume'));
+    for (const field of ['reason: null', 'ended: null', 'completed: null', 'running: null']) {
+      expect(strip).toContain(field);
+    }
   });
 
   test('the seed lands AFTER launch, because launch resets the column', () => {
@@ -333,5 +346,27 @@ describe('a resume points at the repository, not at the run', () => {
     const body = cockpit.slice(cockpit.indexOf('const resume = useCallback'));
     const launched = body.indexOf('launch(argv);\n          if (seed !== null)');
     expect(launched).toBeGreaterThan(-1);
+  });
+});
+
+describe('every round shows what ran in it', () => {
+  test('an answerer turn is drawn even when its round has no questions block', () => {
+    // **The defect.** Answerer turns were rendered ONLY inside the questions
+    // block, and `Run.questions` holds one round at a time — so the moment a
+    // second question round opened, the first round's answerer turn stopped
+    // being drawn anywhere. A run with three question rounds showed one and
+    // silently dropped two: *"only plan round 2 has full details... they all
+    // should."*
+    //
+    // It is a turn — something that ran and was paid for — so nothing about
+    // which round's questions happen to be on screen may decide whether it
+    // appears, and it is a loss on a live run as much as on a replayed one.
+    expect(column).toMatch(/questions === null &&\s*answerers\.map/);
+  });
+
+  test('the empty-phase line only shows when the phase really ran nothing', () => {
+    // It counted `turns` alone, so a round holding only an answerer turn drew
+    // BOTH the turn and "announced by the phase, with no turn line of its own".
+    expect(column).toMatch(/turns\.length === 0 &&\s*answerers\.length === 0 &&/);
   });
 });

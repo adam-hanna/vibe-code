@@ -563,3 +563,22 @@
 .v-round__open:hover {
   color: var(--accent-on-tint);
 }
+
+/* Your half of the exchange, given the same weight the pilot's half has (#223).
+   It carried nothing but a left rule, so in a long log the two ran together. */
+.v-pilot__you {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  align-items: flex-start;
+  background: var(--surface-inset);
+  padding: var(--space-3);
+  border-left: 2px solid var(--accent-border);
+}
+
+/* The rule now belongs to the block above, so the quote itself drops it and
+   keeps only the wrapping the text needs. */
+.v-pilot__you .v-pilot__asked {
+  border-left: none;
+  padding-left: 0;
+}

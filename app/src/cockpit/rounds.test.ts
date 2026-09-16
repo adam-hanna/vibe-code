@@ -1,7 +1,25 @@
 import { describe, expect, test } from 'vitest';
 import { emptyRun } from './model';
-import { censusByPhase, committed, questionsPhase, rounds, roundTitle, title } from './rounds';
-import type { Census, Commit, Cycle, PhaseGroup, Run, Turn, VerifyPass, Work } from './model';
+import {
+  censusByPhase,
+  committed,
+  questionsByPhase,
+  rounds,
+  roundTitle,
+  title,
+  unplacedQuestions,
+} from './rounds';
+import type {
+  Census,
+  Commit,
+  Cycle,
+  PhaseGroup,
+  QuestionRound,
+  Run,
+  Turn,
+  VerifyPass,
+  Work,
+} from './model';
 
 /**
  * The round card, which is the object hi-fi 5's log is made of (#223).
@@ -427,33 +445,58 @@ describe('what a card refuses to say', () => {
 });
 
 describe('the question round belongs to the round it opened during', () => {
-  const asked = (at: number): NonNullable<Run['questions']> => ({
+  const asked = (at: number, round = 1): QuestionRound => ({
     total: 2,
     blocking: 1,
-    round: 1,
+    round,
     cap: 3,
     open: [],
     at,
   });
+
+  /** Which phase id each question round landed on, in list order. */
+  const placedOn = (r: Run): (number | null)[] =>
+    r.questions.map((q) => {
+      const hit = [...questionsByPhase(r).entries()].find(([, v]) => v === q);
+      return hit?.[0] ?? null;
+    });
 
   test('questions opened in round 2 do not move under round 1, or the other way', () => {
     // The defect this closes: the group was drawn at the foot of the whole PLAN
     // cycle, so the moment a second plan round opened, round 1's questions were
     // beneath round 2's row.
     const cycles = planCycles(planRound(0, 1_000, [1, 2]), planRound(1, 10_000, [3, 4]));
-    expect(questionsPhase(run({ cycles, questions: asked(1_500) }))).toBe(1);
-    expect(questionsPhase(run({ cycles, questions: asked(10_500) }))).toBe(3);
+    expect(placedOn(run({ cycles, questions: [asked(1_500)] }))).toEqual([1]);
+    expect(placedOn(run({ cycles, questions: [asked(10_500)] }))).toEqual([3]);
+  });
+
+  test('two rounds land on two phases, which is what one answer could not do', () => {
+    // **The widening** (#223). `questionsPhase` returned the phase of *the*
+    // question round, because `Run` held one - so the column asked
+    // `questionsAt === phase.id` and at most one round in the whole run could
+    // ever draw its counts. Both rounds place now, each on its own phase.
+    const cycles = planCycles(planRound(0, 1_000, [1, 2]), planRound(1, 10_000, [3, 4]));
+    const r = run({ cycles, questions: [asked(1_500, 1), asked(10_500, 2)] });
+    expect(placedOn(r)).toEqual([1, 3]);
+    expect(questionsByPhase(r).get(1)?.round).toBe(1);
+    expect(questionsByPhase(r).get(3)?.round).toBe(2);
   });
 
   test('a round that opened before any phase of this session attaches to nothing', () => {
     // Real on a resume. Filing it under the first phase in view would credit an
     // earlier session's questions to work that has not happened yet.
     const cycles = planCycles(planRound(0, 9_000, [1, 2]));
-    expect(questionsPhase(run({ cycles, questions: asked(1_000) }))).toBeNull();
+    const r = run({ cycles, questions: [asked(1_000)] });
+    expect(placedOn(r)).toEqual([null]);
+    // It is not lost, though - the column draws it at the foot, so a resumed
+    // run's earlier questions are visible without being attributed to the wrong
+    // round.
+    expect(unplacedQuestions(r)).toHaveLength(1);
   });
 
   test('a run that has asked nothing has no phase for it', () => {
-    expect(questionsPhase(run({ cycles: [cycle()] }))).toBeNull();
+    expect(questionsByPhase(run({ cycles: [cycle()] })).size).toBe(0);
+    expect(unplacedQuestions(run({ cycles: [cycle()] }))).toEqual([]);
   });
 
   test('the card carries them too, so a merged round explains its second turn', () => {
@@ -463,16 +506,17 @@ describe('the question round belongs to the round it opened during', () => {
     // `questions_opened` carries the QUESTION round, which counts separately
     // from the plan round a card is keyed by.
     const cycles = planCycles(planRound(0, 1_000, [1, 2]), planRound(1, 10_000, [3, 4]));
-    const cards = rounds(run({ cycles, questions: asked(10_500) }));
+    const cards = rounds(run({ cycles, questions: [asked(10_500)] }));
     const carrying = cards.filter((c) => c.questions !== null);
     expect(carrying).toHaveLength(1);
     expect(carrying[0]?.phaseId).toBe(3);
     // And a round that opened before any phase attaches to no card at all,
     // rather than to the first one it can find.
-    const early = rounds(run({ cycles, questions: asked(10) }));
+    const early = rounds(run({ cycles, questions: [asked(10)] }));
     expect(early.every((c) => c.questions === null)).toBe(true);
   });
 });
+
 
 test('a phase this build does not know renders as itself', () => {
   // The rule `boundary()` and `ending()` follow. A confident label invented for

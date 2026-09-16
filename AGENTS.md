@@ -276,10 +276,38 @@ they are waiting on. Four things in it are worth carrying:
 - **The question loop is drawn on the round that opened it, and it is a count rather than a
   list.** `7a` nests it inside the plan cycle and it used to be drawn at the *foot* of the
   whole group — so the moment a second plan round opened, round 1's questions appeared beneath
-  round 2's row. `questions_opened` now carries an arrival time and `questionsPhase()` places
-  it through the same `during()` a census goes through, so there is one definition of "by
-  arrival" and not two. The question **text** is the Questions pane's job: this column is 364px
-  wide, a question is a paragraph, and a list of them pushed every later round off the screen.
+  round 2's row. `questions_opened` carries an arrival time and `questionsByPhase()` places
+  each round through the same `during()` a census goes through, so there is one definition of
+  "by arrival" and not two. The question **text** is the Questions pane's job: this column is
+  364px wide, a question is a paragraph, and a list of them pushed every later round off the
+  screen.
+
+  **`Run.questions` is a list, and the single field is what made placing them pointless**
+  (#223). Fixing *where* a round was drawn left a second defect underneath it with the same
+  symptom: the field held one round, each `questions_opened` replaced the one before, and
+  `questionsPhase()` could therefore only ever answer for one round in the whole run. So a run
+  that asked three rounds of questions drew the counts on one of them — *"only plan round 2 has
+  full details… they all should"* — and rounds 1 and 2 were not stale, they were **gone**, with
+  nothing on screen saying a round had had any. Two things about the shape of the fix:
+
+  - **It is the move `verify` and `censuses` already made**, stated in their own comments in
+    the same interface: *a list rather than the latest, because the pane's trend is a comparison
+    ACROSS passes*. A column that reads as a history cannot be built out of fields that remember
+    only the most recent thing, and this is the third field to learn it.
+  - **"The latest" became a named expression rather than three index reads.** `latestQuestions`
+    is what the Questions tab's badge, the halt banner and the pane all call. Three spellings
+    of the same idea is how a badge and the pane behind it came to disagree about one run the
+    last time, which was reported as two separate bugs.
+
+  An answer lands on the **last round opened**, not on a round matched by number: the frame need
+  not carry a round at all, and a null would then match whichever earlier round also had none.
+  A round that opened before any phase of this session — real on a resume — still attaches to
+  no card, and the column draws it at the foot rather than crediting an earlier session's
+  questions to work that has not happened yet.
+
+  The **replay** gets this for free and was wrong in exactly the same way: `src/replay.ts`
+  emits one `questions_opened` per question round, and every one of them but the last was being
+  folded on top of the one before.
 
 - **A count is a control wherever it is drawn.** `Counts` is one component for the loop column,
   the findings pane and the pilot's round card, and clicking it opens the findings — the four
@@ -1516,10 +1544,86 @@ displayed.**
   out. The asymmetry with a run's agent children is deliberate: those are work a resume picks
   up, and a server left listening on 5173 after its window has gone is a port with no owner.
 
-`Effect` has a third kind and `keys.test.ts` moved with it. The sentence it tested was never
-"there are two" — it was *every effect is a request the window also makes*, which still holds.
 
-**Every pilot capability is a host request the app already makes** (#144). The four tools in
+**A process the pilot starts is one it can follow, and one it can turn off** (#223). Running a
+command landed without the three things that make a *background* process usable, and a manual
+pass found all three in one exchange. Asked to start the app, the pilot proposed `npm run dev`,
+said *"I'll read it back with read_command to confirm both processes bound their ports"* — and
+then could not. Three reads in a row came back as **waiting to be run**, it reported that
+honestly twice, and the person watching wrote: *"I need the pilot to be smarter. I need it to
+be able to know when things started up. I need it to be able to tail logs from processes it
+starts so it can debug."*
+
+- **The reads were a defect, and it is the one worth remembering.** `emit.ts` numbered a call
+  `emit:<turn>:<n>`, and its own comment claimed that kept ids unique "across a conversation".
+  It does not: a **turn id is unique within one window session and a conversation outlives
+  one**. `nextRequestId` is a module counter starting at 0, so every launch walks the same
+  numbers again, and `saved.ts` restores the conversation from `localStorage` with its tool
+  results in it. `settle` then refused — correctly, since two results for one id is a 400 from
+  both vendors — and the call was never settled at all. **Nothing anywhere said so**: no error,
+  no refusal, just a card reading *waiting to be run* for ever and a model told nothing. The id
+  now carries an `origin` for the window session, passed in rather than generated inside, so
+  `readEmitted` stays pure and the randomness lives at the one call site whose lifetime is the
+  window's. The shape to carry away is the general one: **an id is only as unique as the thing
+  that seeds it is long-lived**, and this one was seeded by something shorter than the record
+  it was written into.
+- **A read has a cursor, because a log is followed rather than re-read.** `read_command`
+  answered with the whole buffer every time, so a dev server's answer grew without bound and
+  nothing in it said which part was new. Every answer now carries `cursor`, passed back as
+  `since`, and `tail()` in `app/src/cockpit/commands.ts` is where the arithmetic lives — pure,
+  for `model.ts`'s reason, because it has two off-by-one edges and a truncation case. `bytes`
+  counts what was **written** rather than what is kept, so a cursor cannot rewind when the
+  buffer drops from the front, and a read that starts before the oldest byte still held reports
+  how much it **missed** rather than presenting a tail as the whole. A `since` with no `id` is
+  refused: one position cannot describe two commands.
+- **The app says when a process changes state, so the pilot stops guessing.** Two wakes, once
+  each per command, and they are different facts: one that **ended** has an outcome, and one
+  still running that has written nothing for `SETTLED_MS` has **finished starting up** — which
+  is the only measurable form of *"it came up"*, and the wake says that rather than claiming the
+  server works. It carries **no output**: it says a command moved and tells the model to read
+  it, so what gets reported is something read rather than something the app asserted.
+
+  **This one is on where the gate watcher is off**, and the line between them is the whole
+  argument. A gate opens when the loop reaches it, possibly hours later with nobody in the
+  room — which is why that watcher is *"the first turn in the product that nobody asked for"*.
+  A command exists because somebody pressed **run it** in this window seconds earlier, on a
+  proposal that usually says in as many words that the pilot will read it back. Finishing that
+  sentence is the second half of an attended turn, not an unattended one. It is bounded by the
+  same `ready`, `MAX_CHAIN` and daily ledger as everything else here.
+- **`stop_command` exists because the absence of it got improvised around.** Asked to stop the
+  server, the pilot said *"I have no tool that kills a command"* and proposed `npx kill-port
+  5173 4000` — which killed a stale process on a port it had guessed from `package.json`, left
+  the real server running on the port Vite had **actually** fallen back to, and took an
+  unrelated `node --watch` down with it. A capability with no off switch is not a narrower
+  capability; it is one whose off switch gets improvised, on a port rather than on a process.
+  It names a command by the id `read_command` reports, it is propose-only exactly as starting
+  one is, and a command that has already ended is refused **with its outcome**, because
+  *stopped* and *exited on its own* are different facts and a model told the second will not
+  report the first.
+- **The prompt now says to name a port from what the process printed**, never from a config
+  file. This is the finding underneath the whole exchange: the pilot read `5173` out of
+  `package.json`, Vite found that port taken and fell back to `5174` and said so in its output,
+  and a person sent to the first address would have been looking at a different process than
+  the one they had just started.
+
+**A stop already takes the whole tree, and that is the platform rather than this code.** It was
+worth asking, because `npm run dev` is `node npm-cli.js` spawning a script that spawns
+`concurrently` that spawns Vite and a watcher — and `child.kill()` on Windows is
+`TerminateProcess` against exactly the pid it names. A `taskkill /T /F` was written into
+`stopCommand` for it and then **removed**: the test passed identically without it, because
+**libuv assigns every child a Node process spawns to a global Job Object with
+`KILL_ON_JOB_CLOSE`** and job membership is inherited down the tree. A fix that changes no
+outcome is a fix with no evidence behind it. What survives is the measurement —
+`command-runner.test.ts` pins that a grandchild this process holds no handle to dies with the
+command — because it is load-bearing for the dev-server story and it is somebody else's
+behaviour, not ours.
+
+`Effect` has four kinds now and `keys.test.ts` moved with each of them. The sentence it tested
+was never "there are two" — it was *every effect is a request the window also makes*, which
+still holds of all four: `stop_command` routes to the `stopCommand` the card's own stop control
+already called, and adds nothing to the wire.
+
+**Every pilot capability is a host request the app already makes** (#144). The tools in
 `app/src/pilot/tools.ts` produce an `invoke` or an `answer` — the two inbound frames in
 `src/protocol.ts` — built by the same `launchArgv` the Launch form uses and handed *up* to
 `Cockpit`, which owns the one `host.send` in the window. So `consistency.ts` stays the only

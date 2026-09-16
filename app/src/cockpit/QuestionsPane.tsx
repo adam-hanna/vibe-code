@@ -5,7 +5,7 @@ import { Section } from './Disclosure';
 import { ofKind, readAnswers } from './artifacts';
 import { useArtifact, useArtifacts, noText } from './useArtifacts';
 import type { RecordedAnswer } from './artifacts';
-import type { Question, Run } from './model';
+import type { Question, QuestionRound } from './model';
 
 /**
  * The open questions, with the answerer's draft beside each (`1f`, #223).
@@ -356,7 +356,7 @@ export function QuestionsPane({
   busy = false,
   onResume,
 }: {
-  questions: Run['questions'];
+  questions: QuestionRound | null;
   dir: string;
   runId: string | null;
   /**

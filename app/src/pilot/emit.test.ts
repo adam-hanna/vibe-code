@@ -2,7 +2,9 @@ import { describe, expect, test } from 'vitest';
 import { FENCE, UNNAMED, readEmitted, visible } from './emit';
 import { noCommands } from '../cockpit/commands';
 import { execute } from './tools';
-import { trailingResults } from './transcript';
+import { emptyConversation, follow, reduce, settle, trailingResults } from './transcript';
+import { emptyRun } from '../cockpit/model';
+import type { Conversation } from './transcript';
 import type { Message } from './pilot';
 
 /**
@@ -31,7 +33,7 @@ describe('reading a call out of prose', () => {
       'Press it if you agree.',
     ].join('\n');
 
-    const calls = readEmitted(text, 4);
+    const calls = readEmitted(text, 4, 'w1');
     expect(calls).toHaveLength(1);
     expect(calls[0]?.name).toBe('start_run');
     // The arguments are JSON text, exactly as a vendor streams them, so
@@ -47,27 +49,27 @@ describe('reading a call out of prose', () => {
     // A reducer keyed on ids handed two calls sharing one would answer the
     // first and leave the second unanswered for ever, which is unsendable.
     const text = [block('{ "tool": "read_run" }'), block('{ "tool": "read_output" }')].join('\n\n');
-    const ids = readEmitted(text, 7).map((c) => c.id);
+    const ids = readEmitted(text, 7, 'w1').map((c) => c.id);
     expect(new Set(ids).size).toBe(2);
-    for (const id of ids) expect(id).toMatch(/^emit:7:/);
+    for (const id of ids) expect(id).toMatch(/^emit:w1:7:/);
   });
 
   test('a tool with no arguments is not a broken call', () => {
     // `read_run` takes none, so the model writes no `input`. An empty argument
     // string is what `readCall` already treats as "a tool that takes no input".
-    expect(readEmitted(block('{ "tool": "read_run" }'), 1)[0]?.arguments).toBe('');
+    expect(readEmitted(block('{ "tool": "read_run" }'), 1, 'w1')[0]?.arguments).toBe('');
   });
 
   test('a block that is not JSON is kept as a call that cannot be run', () => {
     // Kept rather than dropped. A model emits truncated JSON when a turn runs
     // out of room, and the only way it corrects itself is being told.
-    const calls = readEmitted(block('{ "tool": "start_run", "input": {'), 1);
+    const calls = readEmitted(block('{ "tool": "start_run", "input": {'), 1, 'w1');
     expect(calls).toHaveLength(1);
     expect(JSON.parse.bind(JSON, calls[0]?.arguments ?? '')).toThrow();
   });
 
   test('a block that names no tool is refused by name, listing the ones that exist', () => {
-    const calls = readEmitted(block('{ "input": { "task": "x" } }'), 1);
+    const calls = readEmitted(block('{ "input": { "task": "x" } }'), 1, 'w1');
     expect(calls[0]?.name).toBe(UNNAMED);
     const settlement = execute(
       { name: calls[0]?.name ?? '', input: {}, unreadable: null },
@@ -84,13 +86,13 @@ describe('reading a call out of prose', () => {
     // The whole reason the info string is specific. A pilot that explains a
     // snippet of JSON must not have that snippet run.
     const text = ['```json', '{ "tool": "start_run" }', '```'].join('\n');
-    expect(readEmitted(text, 1)).toHaveLength(0);
+    expect(readEmitted(text, 1, 'w1')).toHaveLength(0);
   });
 
   test('an unterminated block is not a call', () => {
     // Half a call is not a call: a turn that ran out of room mid-block would
     // otherwise propose an argv that was still being written.
-    expect(readEmitted('```' + FENCE + '\n{ "tool": "start_run"', 1)).toHaveLength(0);
+    expect(readEmitted('```' + FENCE + '\n{ "tool": "start_run"', 1, 'w1')).toHaveLength(0);
   });
 });
 
@@ -143,5 +145,79 @@ describe('answering a call on a backend with no tool role', () => {
     // that used to be sent instead asked the model to answer nothing.
     expect(trailingResults([{ role: 'user', content: 'hi' }])).toBeNull();
     expect(trailingResults([])).toBeNull();
+  });
+});
+
+describe('an id has to outlive the window that made it', () => {
+  /**
+   * The defect this file's ids had, reproduced end to end (#223).
+   *
+   * **A turn id is unique within one window session; a conversation is not.**
+   * `nextRequestId` restarts at 0 on every launch, `saved.ts` restores the
+   * conversation with its tool results, and `settle` correctly refuses to answer
+   * a call that already has a result. So a new call landing on a restored id was
+   * never settled at all: the pane drew `waiting to be run` for ever, the model
+   * was told nothing, and there was no error anywhere.
+   *
+   * It is driven through `settle` rather than asserted on the string, because
+   * the string is not the claim — the claim is that the call gets an answer.
+   */
+  const emitted = (text: string, turn: number, origin: string): Conversation => {
+    const opened = follow(emptyConversation(), turn, 'subscription');
+    const withCalls = readEmitted(text, turn, origin).reduce(
+      (state, call) =>
+        reduce(state, {
+          kind: 'tool_call',
+          turn,
+          id: call.id,
+          name: call.name,
+          arguments: call.arguments,
+        }),
+      opened,
+    );
+    return reduce(withCalls, { kind: 'ended', turn, stop: null });
+  };
+
+  const settleAll = (conversation: Conversation): Conversation =>
+    conversation.replies
+      .flatMap((reply) => reply.calls)
+      .reduce(
+        (state, call) =>
+          call.settlement === null
+            ? settle(state, call.id, execute(call, { run: emptyRun(), commands: noCommands(), dir: 'C:/r' }))
+            : state,
+        conversation,
+      );
+
+  const said = block('{ "tool": "read_command" }');
+
+  test('a second window session answers its own call rather than inheriting an old one', () => {
+    // Session one asks, and is answered.
+    const first = settleAll(emitted(said, 3, 'w1'));
+    expect(first.messages.filter((m) => m.role === 'tool')).toHaveLength(1);
+
+    // The window is relaunched: the counter restarts, so this turn is 3 again,
+    // and the stored conversation comes back with session one's result in it.
+    const restored: Conversation = { ...first, live: null };
+    const again = settleAll({
+      ...emitted(said, 3, 'w2'),
+      messages: [...restored.messages],
+      replies: [...restored.replies, ...emitted(said, 3, 'w2').replies],
+    });
+
+    // Both calls have a settlement, and each has its own result.
+    const calls = again.replies.flatMap((reply) => reply.calls);
+    expect(calls).toHaveLength(2);
+    for (const call of calls) expect(call.settlement).not.toBeNull();
+    expect(new Set(calls.map((c) => c.id)).size).toBe(2);
+    expect(again.messages.filter((m) => m.role === 'tool')).toHaveLength(2);
+  });
+
+  test('the same origin and turn is still one id, which is what settle relies on', () => {
+    // The guard being kept: settling one call twice must not put two results on
+    // the wire for it, which both vendors reject.
+    const one = settleAll(emitted(said, 3, 'w1'));
+    const twice = settleAll(one);
+    expect(twice.messages.filter((m) => m.role === 'tool')).toHaveLength(1);
   });
 });

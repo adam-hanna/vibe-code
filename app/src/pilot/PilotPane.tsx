@@ -52,7 +52,8 @@ import type { KeyStatus } from './keys';
 import type { Effect, Settlement } from './tools';
 import type { Call, Conversation, Reply } from './transcript';
 import type { Launched } from '../cockpit/argv';
-import type { Commands } from '../cockpit/commands';
+import { line, outcome } from '../cockpit/commands';
+import type { Command, Commands } from '../cockpit/commands';
 import type { Run } from '../cockpit/model';
 
 /**
@@ -84,6 +85,51 @@ import type { Run } from '../cockpit/model';
 
 /** Turns the pilot may take on its own before a person has to speak again. */
 const MAX_CHAIN = 8;
+
+/**
+ * How long a running command has to stay quiet before it counts as up (#223).
+ *
+ * **A shape rather than a duration**, the same standing as `MISSED_TICKS` in the
+ * core: what is being detected is a process that has finished saying what it
+ * says on startup, and every dev server here does that in one burst — Vite
+ * prints its banner and stops, `node --watch` prints ready and stops. Two
+ * seconds is long enough that a burst arriving in several chunks is one event
+ * and short enough that the answer arrives while somebody is still looking.
+ *
+ * It is not a claim that the server is *working*. It is a claim that it has
+ * stopped writing, which is the measurable half, and the wake says exactly that
+ * rather than "it started".
+ */
+const SETTLED_MS = 2_000;
+
+/**
+ * What a command has done that is worth waking the pilot for.
+ *
+ * Two states and not one, because they need opposite readings: a command that
+ * **ended** has an exit code and is over, and one that has gone **quiet** is
+ * still running and has finished starting up. A dev server only ever reaches the
+ * second, and it is the one that answers *"did it start?"*.
+ */
+type CommandNews = 'ended' | 'quiet';
+
+function commandWake(command: Command, news: CommandNews): string {
+  const head =
+    news === 'ended'
+      ? `[the app woke you — nobody typed this] The command "${line(command)}" (${command.id}) has ended — ${outcome(command) ?? 'no outcome recorded'}.`
+      : `[the app woke you — nobody typed this] The command "${line(command)}" (${command.id}) is still running and has written nothing for ${String(SETTLED_MS / 1000)}s, which usually means it has finished starting up.`;
+  return [
+    head,
+    '',
+    'Read it with read_command before you say anything about it — this message',
+    'carries no output, deliberately, so that what you report is what you read.',
+    'Take the "cursor" from the answer and pass it back as "since" next time, so',
+    'a later read gives you only what is new.',
+    '',
+    news === 'quiet'
+      ? 'Say whether it came up, and name the port or URL from what it actually printed rather than from a config file. If it did not come up, say what the output shows and what you would try.'
+      : 'Say what it did, and whether that is what was wanted. If it failed, quote the part of the output that says why.',
+  ].join('\n');
+}
 
 /** Where the gate watcher's switch is remembered. See `watching` below. */
 const WATCH_KEY = 'vibe.pilot.watchGates';
@@ -204,6 +250,12 @@ function EffectDetail({ effect }: { effect: Effect }) {
         {`in ${effect.dir}`}
       </pre>
     );
+  }
+  if (effect.kind === 'stop_command') {
+    // The id alone, because that is what is being acted on. The summary above
+    // the card already carries the command line, and repeating it here as if it
+    // were the argv would draw a command about to be *run*.
+    return <pre className="v-proposal__argv">{`stop ${effect.commandId}`}</pre>;
   }
   return (
     <pre className="v-proposal__argv">{JSON.stringify(effect.decision, null, 2)}</pre>
@@ -422,8 +474,18 @@ function ReplyCard({
           Read off the reply rather than interleaved from `messages`, so the
           order cannot be got wrong - a message and the turn it opened are one
           thing here. */}
+      {/* **Labelled, because the reply beside it is.** The pilot's half carries a
+          chip naming the backend and yours carried nothing but a 2px rule, so in
+          a long log the two ran together: *"we need to more easily differentiate
+          between my message and the pilot's messages. Right now, its too hard for
+          me to tell which is which."* The chip is the same vocabulary the answer
+          uses rather than a second one, and the ground is what makes the two
+          scannable apart without reading either. */}
       {reply.asked !== null && (
-        <div className="v-pilot__asked v-selectable">{reply.asked}</div>
+        <div className="v-pilot__you">
+          <MetaChip>you</MetaChip>
+          <div className="v-pilot__asked v-selectable">{reply.asked}</div>
+        </div>
       )}
       <div className="v-pilot__reply">
         <div className="v-pilot__meta">
@@ -724,6 +786,24 @@ export function PilotPane({
    * like a message count on the frame after somebody changed either.
    */
   const hostTurn = useRef(-1);
+  /**
+   * What makes this window's emitted call ids its own (#223).
+   *
+   * **A turn id is unique within one window session; a conversation is not.**
+   * `nextRequestId` restarts at 0 on every launch and `saved.ts` restores the
+   * conversation — tool results and all — so `emit:<turn>:<n>` from this session
+   * could land on an id a *previous* session had already answered. `settle`
+   * correctly refuses to answer a call twice, so the new one was never settled
+   * at all and the pane drew **waiting to be run** for ever, with nothing
+   * anywhere saying why. That is the defect behind *"I asked the pilot to start
+   * the app"* and three dead reads in a row.
+   *
+   * Random, and deliberately so: the axis the collision is on is *which window
+   * session produced this*, and there is no monotonic source that survives a
+   * relaunch to count it with. It is generated **here**, at the one place whose
+   * lifetime is the window's, and passed into `readEmitted`, which stays pure.
+   */
+  const origin = useRef(crypto.randomUUID().slice(0, 8));
   const [entry, setEntry] = useState('');
   const [live, setLive] = useState<number | null>(null);
   // The pilot's own books (#145). Read from `localStorage` at mount, because a
@@ -876,7 +956,7 @@ export function PilotPane({
         // live, and `ended` is what closes it. Read from `frame.text`, which is
         // the whole reply, rather than from the deltas we accumulated - a block
         // split across two deltas is still one block in the whole.
-        for (const call of readEmitted(frame.text, turn)) {
+        for (const call of readEmitted(frame.text, turn, origin.current)) {
           dispatch({
             type: 'event',
             event: { kind: 'tool_call', turn, id: call.id, name: call.name, arguments: call.arguments },
@@ -1120,6 +1200,83 @@ export function PilotPane({
     setStalled(false);
     start([...conversation.messages, { role: 'user' as const, content: reason }], reason, reason);
   }, [run.gate, watching, ready, live, conversation.messages, start]);
+
+  /**
+   * The command watcher (#223).
+   *
+   * **The pilot could start a process and then had no way to find out what it
+   * did.** It proposed `npm run dev`, the person pressed it, and the only thing
+   * that could tell the pilot how it went was the pilot asking — so it asked
+   * blind, twice, before the server had written anything, and then reported the
+   * truth: *"my last read didn't come back."* The verdict was exact and is the
+   * whole reason this exists: *"I need it to be able to know when things started
+   * up."*
+   *
+   * Two states wake it, once each per command, and they are different facts. A
+   * command that **ended** has an outcome. A command that is still running and
+   * has gone quiet for `SETTLED_MS` after writing something has **finished
+   * starting up** — which is the only measurable form of "it came up", and the
+   * wake says so in those words rather than claiming the server works.
+   *
+   * ## Why this one is on and the gate watcher is off
+   *
+   * The gate watcher is off by default because a gate opens when the loop
+   * reaches it, possibly hours later with nobody in the room, and AGENTS.md
+   * records it as *"the first turn in the product that nobody asked for"*. This
+   * is the opposite end of that scale: a command exists because somebody pressed
+   * **run it** in this window seconds earlier, on a proposal that usually says
+   * in as many words that the pilot will read it back. Waking to finish the
+   * sentence it started is not an unattended turn; it is the second half of an
+   * attended one.
+   *
+   * It is bounded the same way everything unattended here is — `ready` covers
+   * the ceiling, the key, the repository and any outstanding proposal, and
+   * `MAX_CHAIN` and the ledger bound the chain it starts.
+   *
+   * **It carries no output.** The wake says a command changed state and tells the
+   * model to go and read it, so what the pilot reports is something it read
+   * rather than something the app told it — which is the same reason
+   * `read_output` exists beside the narration the pane already draws.
+   */
+  const woken = useRef<Map<string, CommandNews>>(new Map());
+  useEffect(() => {
+    if (!ready || live !== null) return;
+
+    const say = (command: Command, news: CommandNews): void => {
+      woken.current.set(command.id, news);
+      const reason = commandWake(command, news);
+      chain.current = 0;
+      setStalled(false);
+      start([...conversation.messages, { role: 'user' as const, content: reason }], reason, reason);
+    };
+
+    for (const command of commands.all) {
+      const seen = woken.current.get(command.id);
+      // An end outranks a quiet: a server that came up and then fell over has
+      // two things worth saying and the second is the one that matters.
+      if (command.endedAt !== null) {
+        if (seen !== 'ended') {
+          say(command, 'ended');
+          return;
+        }
+        continue;
+      }
+      // Nothing written yet is a command that has not begun, not one that is
+      // quiet. Waking here would report a process nobody could describe.
+      if (seen !== undefined || command.bytes === 0) continue;
+      // The timer is the measurement. Every new chunk re-renders this effect,
+      // whose cleanup clears the pending one — so the window restarts on each
+      // write and fires only once the writing has actually stopped.
+      const timer = setTimeout(() => {
+        // Re-read at the moment it fires: the run may have moved on, and a
+        // command that ended in the meantime is handled by the branch above on
+        // the render that ending caused.
+        say(command, 'quiet');
+      }, SETTLED_MS);
+      return () => clearTimeout(timer);
+    }
+    return;
+  }, [commands, ready, live, conversation.messages, start]);
 
   const submit = useCallback(() => {
     const content = entry.trim();

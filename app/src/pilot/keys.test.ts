@@ -118,18 +118,27 @@ describe('the webview can store a key and can never read one', () => {
     // #144's one sentence, checked as a boundary. The table may declare what it
     // likes; what it may not do is reach the loop another way.
     //
-    // **This pinned two kinds and now pins three.** `invoke` and `answer` were
-    // the two inbound frames that existed, and #211 added `command` along with
-    // the frame it sends and the window's own control that sends it. So the
-    // claim moved: the sentence was never "there are two", it was "each one is
-    // a request the window also makes", and that is still true. A fourth is
+    // **This pinned two kinds, then three, and now pins four.** `invoke` and
+    // `answer` were the two inbound frames that existed; #211 added `command`
+    // along with the frame it sends and the window's own control that sends it;
+    // and #223 added `stop_command`, which is the same frame's other half —
+    // `Cockpit.stopCommand` already existed for the card's own stop control, so
+    // this widens what the pilot may *propose* and adds nothing to the wire.
+    //
+    // The claim has never been "there are N". It is that **each one is a request
+    // the window also makes**, and that is still true of all four. A fifth is
     // still a decision somebody takes on purpose, which is what this fails for.
     const effect = tools.slice(
       tools.indexOf('export type Effect ='),
       tools.indexOf('export const ORIGIN'),
     );
     const kinds = [...effect.matchAll(/kind: '(\w+)'/g)].map((m) => m[1]);
-    expect([...new Set(kinds)].sort()).toEqual(['answer', 'command', 'invoke']);
+    expect([...new Set(kinds)].sort()).toEqual([
+      'answer',
+      'command',
+      'invoke',
+      'stop_command',
+    ]);
     // The structural half, and it is the one that did NOT move. The pane hands
     // an accepted effect UP to the cockpit, which owns the one `host.send` in
     // the window; a tool module that imported the wire could send its own frame
@@ -174,10 +183,11 @@ describe('the webview can store a key and can never read one', () => {
     // #114 first). An absence is only a decision if something fails when it
     // stops being one.
     //
-    // The table grew by two in #211 - `read_command` and `run_command` - and the
-    // list moves with it, which is the point of spelling it out rather than
-    // counting. **Neither refusal moved**: there is still no config tool and no
-    // archive tool, and the second assertion is the one that says so.
+    // The table grew by two in #211 - `read_command` and `run_command` - and by
+    // one more in #223, `stop_command`, which is the off switch the runner had
+    // no tool for. The list moves with it, which is the point of spelling it out
+    // rather than counting. **No refusal moved**: there is still no config tool
+    // and no archive tool, and the second assertion is the one that says so.
     const declared = [...tools.matchAll(/^ {2}name: '(\w+)',$/gm)].map((m) => m[1] ?? '');
     expect(declared.sort()).toEqual([
       'answer_gate',
@@ -186,6 +196,7 @@ describe('the webview can store a key and can never read one', () => {
       'read_run',
       'run_command',
       'start_run',
+      'stop_command',
     ]);
     expect(declared.filter((n) => /config|archive|runs/.test(n))).toEqual([]);
   });
