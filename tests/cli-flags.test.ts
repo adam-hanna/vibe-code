@@ -28,6 +28,9 @@ test('progress is on by default, at a 30s cadence and a 60s work reading', () =>
     enabled: true,
     intervalMs: 30_000,
     workIntervalMs: 60_000,
+    // A third figure since #223, and a ceiling rather than a cadence: how long a
+    // turn may produce nothing at all before it is stopped.
+    maxQuietMs: 600_000,
   });
 });
 

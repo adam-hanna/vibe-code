@@ -184,6 +184,17 @@ export const DEFAULTS: Config = {
     // an implement turn that changed nothing new in sixty seconds has not moved
     // far enough for a second reading to differ.
     workIntervalMs: 60_000,
+    // 10 minutes. The owner's figure, taken against a measured separation rather
+    // than in the abstract: across the six healthy turns of the 2026-09-15 run
+    // the longest gap without new activity was 3m30 (a 12m30 critique), an
+    // 11m30 implement turn never exceeded 32 seconds, and the stall that
+    // prompted this ran 39m17s without a byte. Ten minutes is about three times
+    // the worst healthy gap and a quarter of the stall.
+    //
+    // Not a census, and it is not presented as one: this is one run, and the
+    // number is a setting precisely so it can move when somebody has watched
+    // more of them.
+    maxQuietMs: 600_000,
   },
   // Empty: a project that overrides no prompt is byte-identical to one that
   // predates the key, which is what makes this safe to add to every config.
@@ -702,6 +713,20 @@ function validate(cfg: Config): void {
   // a tree an agent is writing to.
   if (!Number.isFinite(cfg.progress.workIntervalMs) || cfg.progress.workIntervalMs < 5000) {
     throw new Error('progress.workIntervalMs must be at least 5000ms');
+  }
+  // 0 disables, exactly as `budget.maxTokens: 0` does, so the off switch is the
+  // same shape wherever a ceiling appears. Above zero it must clear one full
+  // heartbeat interval: a ceiling shorter than the gap between the beats that
+  // measure it could fire on a turn that had simply not been looked at yet.
+  if (!Number.isFinite(cfg.progress.maxQuietMs) || cfg.progress.maxQuietMs < 0) {
+    throw new Error('progress.maxQuietMs must be 0 (no limit) or a positive number of ms');
+  }
+  if (cfg.progress.maxQuietMs > 0 && cfg.progress.maxQuietMs < cfg.progress.intervalMs) {
+    throw new Error(
+      `progress.maxQuietMs is ${cfg.progress.maxQuietMs}ms, shorter than the ` +
+        `${cfg.progress.intervalMs}ms progress.intervalMs that measures it. A turn cannot be ` +
+        'observed quiet for less time than the gap between observations.',
+    );
   }
   validateToolchain(cfg.toolchain);
   validatePrompts(cfg.prompts);

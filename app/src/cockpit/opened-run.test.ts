@@ -211,3 +211,35 @@ describe('a model is picked from a list this build ships, and typed past it', ()
     expect(settings).toMatch(/agent=\{current\.provider \?\? 'agent'\}/);
   });
 });
+
+describe('a turn that has gone quiet has a ceiling, and it is on the screen', () => {
+  test('the silence ceiling is a control, not only a flag', () => {
+    // Every other ceiling in this section was reachable only as a CLI flag until
+    // it was put here; this one is new and starts here, because the number is a
+    // decision somebody has to be able to revisit.
+    expect(settings).toMatch(/progress-maxQuietMinutes/);
+    expect(settings).toMatch(/save\(\{ progress: \{ maxQuietMs: n \* 60_000 \} \}\)/);
+  });
+
+  test('it is typed in minutes and stored in milliseconds', () => {
+    // The config is in ms because everything timing-related in it is. A form
+    // that made somebody type 600000 to mean ten minutes would be the storage
+    // layer's units leaking onto the screen.
+    expect(settings).toMatch(/Math\.round\(progress\['maxQuietMs'\] \/ 60_000\)/);
+    expect(settings).toMatch(/<span className="v-set__unit">minutes<\/span>/);
+  });
+
+  test('it says what it measures, because a long turn is not a quiet turn', () => {
+    // The distinction the whole setting rests on: measured from the child's last
+    // line, not from how long the turn has been going. An 11m30 implement turn
+    // never went more than 32 seconds without speaking.
+    expect(settings).toMatch(/no output at all/);
+    expect(settings).toMatch(/a long turn is not a quiet turn/);
+  });
+
+  test('a value the file does not claim is marked as the default', () => {
+    // The same split every other row in this screen draws: what is in force
+    // versus what the project actually chose.
+    expect(settings).toMatch(/claimedProgress\['maxQuietMs'\] === undefined && <MetaChip>/);
+  });
+});

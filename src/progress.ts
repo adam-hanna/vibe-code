@@ -490,15 +490,60 @@ export function heartbeatData(args: HeartbeatLine): Record<string, unknown> {
 }
 
 /**
+ * How many missed ticks make a turn quiet rather than merely slow.
+ *
+ * **Three, and the number is a shape rather than a duration** — the same answer,
+ * for the same reason, as `MISSED_TICKS` in `app/src/cockpit/model.ts`, which
+ * decides when `7c` calls a run stale. The design's one open judgement there is
+ * how stale is stale, and its own answer is that this is a question about vibe's
+ * heartbeat cadence, so the threshold is expressed in ticks and multiplied by
+ * the cadence the run configured. At the default 30-second interval that is 90
+ * seconds; a run configured slower moves with it, which a hardcoded 90_000 would
+ * not.
+ *
+ * It is duplicated across the two packages rather than shared, exactly as the
+ * markers in `src/raise.ts` and `app/src/cockpit/raise.ts` are, and for the same
+ * reason: they are two packages. Both comments name the other.
+ */
+export const MISSED_TICKS = 3;
+
+/**
  * One heartbeat line.
  *
  * Every segment except elapsed time is omitted when the stream has not supplied
  * a number for it. That is what lets the sparser Codex stream degrade to
  * elapsed-only rather than reporting invented figures.
+ *
+ * **The quiet segment is the one that is drawn by its absence** (#223). A beat
+ * fires on its own timer whether or not the child said anything, so a line
+ * arriving proves *vibe* is alive and proves nothing about the turn — and for 40
+ * minutes of a run on 2026-09-15 this printed `review-0: 23m30s · 32 events ·
+ * command_execution` every thirty seconds while the child had not written a byte
+ * since 17:45:33. The one number that had stopped moving was the event count,
+ * and reading it required diffing two lines by eye. `sinceOutputMs` was on the
+ * record the whole time and was simply not in the sentence.
+ *
+ * It appears only once the gap is at least `MISSED_TICKS` beats, so a healthy
+ * turn never carries it: measured across the six healthy turns of that run, the
+ * longest any went without new activity was 3m30 on a 12m30 critique, and an
+ * 11m30 implement turn never went more than 32 seconds.
  */
 export function formatHeartbeat(args: HeartbeatLine): string {
-  const { label, elapsedMs, snapshot, unit, contextWindow } = args;
+  const { label, elapsedMs, snapshot, unit, contextWindow, intervalMs, sinceOutputMs } = args;
   const parts: string[] = [formatElapsed(elapsedMs)];
+
+  // Second, right after elapsed, because it is the thing a person scanning a
+  // stalled run is looking for. Both halves have to be real: without a cadence
+  // there is nothing to derive the threshold from, and a turn whose child has
+  // never written has no gap rather than a gap of zero.
+  if (
+    intervalMs !== undefined &&
+    intervalMs > 0 &&
+    sinceOutputMs !== undefined &&
+    sinceOutputMs >= intervalMs * MISSED_TICKS
+  ) {
+    parts.push(`quiet ${formatElapsed(sinceOutputMs)}`);
+  }
 
   if (snapshot.activities > 0) {
     parts.push(`${snapshot.activities} ${unit}${snapshot.activities === 1 ? '' : 's'}`);
@@ -637,6 +682,19 @@ export interface ProgressOptions {
    * one stays a measurement.
    */
   onSpend?: ((tokens: number) => void) | undefined;
+  /**
+   * How long the child has been silent, reported each beat (#223).
+   *
+   * Beside `onSpend` and for the same reason: the heartbeat is the only thing
+   * watching a turn *while* it runs, so a ceiling that is not enforced from here
+   * is one that cannot fire until the turn returns - and a stalled turn is
+   * exactly the turn that does not return.
+   *
+   * Called only when there is a gap to report. A turn whose child has written
+   * nothing at all has no gap rather than a gap of zero, which is the same
+   * distinction `sinceOutputMs` draws on the line itself.
+   */
+  onQuiet?: ((quietMs: number) => void) | undefined;
   now?: (() => number) | undefined;
   /**
    * Where a heartbeat goes. Defaults to `log.detail`, which since #133 carries
@@ -757,6 +815,7 @@ export function createHeartbeat(
     measure,
     held,
     onSpend,
+    onQuiet,
     parse,
     unit,
     provider,
@@ -825,6 +884,12 @@ export function createHeartbeat(
     // want opposite placements.
     try {
       onSpend?.(snapshot.tokens);
+      // Same placement and the same reason: after the line that explains it, so
+      // a stop always has the `quiet Xm` beat sitting above it on screen. Only
+      // when the child has written at least once - a turn with no line yet has
+      // no gap, and treating that as an infinite one would stop every turn
+      // before it had begun.
+      if (lastLineAt !== null) onQuiet?.(Math.max(0, lastEmitAt - lastLineAt));
     } catch {
       // Same rule as the sink: a guard that throws must not kill the turn it
       // was watching. What it decided is the loop's to record, not this one's.
@@ -1103,6 +1168,10 @@ export function progressOptions(
     // implement turn ran to 8.8M tokens under a 25M ceiling and the run never
     // got to notice, because the turn never returned to be charged.
     onSpend: (tokens) => guardTurnSpend(state, cfg, label, tokens),
+    // The other ceiling on a turn in flight, and the one the turn ceiling cannot
+    // cover: `codex.timeoutMs` bounds how long a turn may take, this bounds how
+    // long it may say nothing while taking it.
+    onQuiet: (quietMs) => guardTurnQuiet(cfg, label, quietMs),
   };
 }
 
@@ -1145,5 +1214,46 @@ function guardTurnSpend(state: RunState, cfg: Config, label: string, tokens: num
     `the ${label} turn took this run to ${fmtTokens(spent)} tokens, at or past the ceiling of ` +
       `${fmtTokens(ceiling)} in budget.maxTokens. The turn was stopped mid-flight; its spend is ` +
       'charged and the run can be resumed with a higher ceiling.',
+  );
+}
+
+/**
+ * Stop a turn that has gone silent (#223).
+ *
+ * **The turn ceiling cannot do this job, and a run of 2026-09-15 is the
+ * evidence.** A review turn wrote its last line at 17:45:33 and was killed at
+ * 18:24:50 when `codex.timeoutMs` expired — 39 minutes 17 seconds during which
+ * the heartbeat fired seventy-eight times, each reporting the same 32 events,
+ * and nothing acted on it. Raising that ceiling would have bought a longer hang.
+ * The two limits answer different questions: one is how long a turn may *take*,
+ * this is how long it may say *nothing* while taking it.
+ *
+ * It is `guardTurnSpend`'s shape exactly, and inherits all three of its rules:
+ *
+ * - **It cancels, it does not throw.** `requestCancel` is #209's latch — the
+ *   child dies, the error travels up as a `Cancelled`, and the loop turns it
+ *   into the ending a round cap already takes. A throw from a timer callback has
+ *   no caller to catch it.
+ * - **Only what may be killed dies.** `cancel.ts` kills interruptible children
+ *   only, never `git` and never the verification gate, which is the user's own
+ *   command and is entitled to be silent for as long as it likes.
+ * - **The measurement is the one already on the beat.** `sinceOutputMs` has been
+ *   carried since #223 and is what the line now prints; nothing new is measured
+ *   here, and the ceiling is the user's.
+ *
+ * Disabled with the ceiling and with progress itself: `maxQuietMs: 0` means no
+ * limit, and `progress.enabled: false` means no beats to measure from.
+ */
+function guardTurnQuiet(cfg: Config, label: string, quietMs: number): void {
+  const ceiling = cfg.progress.maxQuietMs;
+  if (ceiling <= 0) return;
+  if (quietMs < ceiling) return;
+  // Named with both figures and with the setting, because "stalled" without them
+  // is the sentence nobody can check or change. `requestCancel` is idempotent,
+  // so a later beat past the same line does not stack a second reason.
+  requestCancel(
+    `the ${label} turn produced no output for ${formatElapsed(quietMs)}, at or past the ceiling ` +
+      `of ${formatElapsed(ceiling)} in progress.maxQuietMs. The turn was stopped mid-flight; the ` +
+      'run can be resumed, and the ceiling raised or switched off with 0 if the turn was working.',
   );
 }

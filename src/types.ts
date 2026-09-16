@@ -500,6 +500,32 @@ export interface ProgressConfig {
    * either.
    */
   workIntervalMs: number;
+  /**
+   * How long a turn may produce nothing at all before it is stopped. 0 disables.
+   *
+   * **A ceiling on silence, which is a different question from the turn ceiling
+   * beside it.** `codex.timeoutMs` and `claude.*TimeoutMs` bound how long a turn
+   * may *take*; this bounds how long it may say nothing while taking it. A run
+   * on 2026-09-15 shows why both are needed: a review turn went silent 5m14s in
+   * and was killed 39m17s later at the 45-minute Codex ceiling, having done
+   * nothing for the whole of it. Raising that ceiling would only have made it
+   * hang for longer.
+   *
+   * **Silence is measured from the child's last line**, not from its last
+   * completed item, because that is the finer of the two signals `progress.ts`
+   * holds and the one a stall trips first.
+   *
+   * The default is the owner's, taken with the separation in front of them: the
+   * longest any healthy turn in that run went without speaking was 3m30, on a
+   * 12m30 critique, and an 11m30 implement turn never went more than 32 seconds
+   * - so ten minutes is roughly three times the worst observed and an order of
+   * magnitude under the stall. It is a decision rather than a census, which is
+   * why it is a setting and why the number is here to be changed.
+   *
+   * Off with `enabled: false`, like `workIntervalMs`: a run that does not want
+   * progress does not want this either, and there is no second switch.
+   */
+  maxQuietMs: number;
 }
 
 /**

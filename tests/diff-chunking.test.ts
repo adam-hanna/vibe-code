@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { diffChunks, diffSince, splitNul } from '@src/git.js';
+import { diffChunks, diffSince, gitBin, splitNul } from '@src/git.js';
 import { initGit } from './helpers/loop-harness.js';
 
 /**
@@ -241,14 +241,39 @@ test('an awkward filename is listed and diffed as itself', async () => {
 });
 
 test('an empty change is one empty chunk and no files at all', async () => {
+  // **Case 2, and the part that moved is the fixture rather than the claim.**
+  // This asked for the empty answer with `baseSha: null` in a repository that
+  // already had a commit — a pairing the product cannot produce, because
+  // `markBase` returns null *if and only if* there were no commits when the
+  // implement phase began. Since #223 a null base means "everything here is this
+  // run's work", so that combination now correctly reports the whole tree, and
+  // asking for it here was asking about a state no run reaches.
+  //
+  // The claim is unchanged and is the reason the case exists: an empty diff must
+  // come back as no files, never as `['']` — a phantom file is one the run
+  // cannot name, and it would land in `state.reviewCoverage` as a file the run
+  // claims to have shown the reviewer.
   const dir = repo({ commit: true });
+  const base = execFileSync(gitBin(), ['rev-parse', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
 
-  const { chunks, files } = await diffChunks(dir, null, { maxChars: 10 });
+  const { chunks, files } = await diffChunks(dir, base, { maxChars: 10 });
 
   assert.deepEqual(files, [], 'not [""] - a phantom file is one the run cannot name');
   assert.equal(chunks.length, 1);
   assert.equal(chunks[0]?.diff, '');
   assert.deepEqual(chunks[0]?.files, []);
+});
+
+test('with no base, a greenfield run’s whole tree is the change', async () => {
+  // The other side of the same coin, and the defect that prompted it: a run in a
+  // repository that had no commits committed its work, and `git diff --cached`
+  // then reported nothing, because it compares the index to HEAD. The reviewer
+  // was handed an empty diff over a finished implementation.
+  const dir = repo({ commit: true });
+
+  const { files } = await diffChunks(dir, null);
+
+  assert.ok(files.length > 0, 'a null base means the history IS the run, so it must be visible');
 });
 
 test('the NUL splitter reads empty output as no files and keeps awkward names whole', () => {

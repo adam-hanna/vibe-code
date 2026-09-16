@@ -497,16 +497,83 @@ export interface DiffChunk {
 async function resolveDiffMode(
   cwd: string,
   baseSha: string | null,
+  options: { revealUntracked?: boolean } = {},
 ): Promise<{ prefix: string[]; whole: string }> {
   if (baseSha) {
     let { stdout: whole } = await git(cwd, ['diff', `${baseSha}..HEAD`]);
     if (whole) return { prefix: ['diff', `${baseSha}..HEAD`], whole };
+    // **The round is uncommitted, and `git diff HEAD` cannot see a file git has
+    // never seen.** This fallback exists for `git.commitEachRound: false`, where
+    // the implementation stays in the working tree - and an implementation is
+    // mostly *new files*, every one of them untracked and therefore invisible
+    // here. A round that only added files produced an empty diff and the
+    // reviewer was handed nothing, which is the same defect the no-base branch
+    // below had by a different route.
+    //
+    // `add -N` is intent-to-add: it registers the paths so a diff can describe
+    // them and stages **no content** - measured, `git diff --cached` stays empty
+    // after it. That matters because this is somebody's working tree.
+    //
+    // Only when the caller says so, and only `diffChunks` does. `diffSince` is
+    // what the `diff` read frame reaches, and a read frame that touched the
+    // index would be the surprise `protocol.ts` refuses a null base to avoid.
+    if (options.revealUntracked === true) {
+      await git(cwd, ['add', '-N', '.'], { allowFail: true });
+    }
     ({ stdout: whole } = await git(cwd, ['diff', 'HEAD']));
     return { prefix: ['diff', 'HEAD'], whole };
   }
   await git(cwd, ['add', '-A'], { allowFail: true });
-  const { stdout: whole } = await git(cwd, ['diff', '--cached']);
-  return { prefix: ['diff', '--cached'], whole };
+  // **Against the empty tree, not against HEAD.** `git diff --cached` alone
+  // compares the index to HEAD, and falls back to the empty tree only while
+  // there is no HEAD - so the moment the implement round committed, a greenfield
+  // run's review diff became EMPTY. Measured on a run of 2026-09-15: 40 files
+  // and 5,915 insertions committed as `ceba37d`, and `git diff --cached`
+  // returned 0 characters, while the same command against the empty tree
+  // returned 210,111. The reviewer was handed nothing, said so in its own
+  // summary, went looking through the tree by hand and then stalled.
+  //
+  // Naming the base explicitly is safe here and nowhere else, and `markBase` is
+  // why: it returns null if and only if the repository had **no commits** when
+  // the implement phase began. So with no base, everything from the empty tree
+  // onward is this run's own work - there is no earlier history for this to
+  // sweep up. In a repository that had commits, `baseSha` is a sha and the
+  // branch above is taken.
+  //
+  // It covers both `git.commitEachRound` settings in one command rather than
+  // branching on whether a commit happened: `git add -A` has just staged
+  // everything, so the index holds the round's work whether or not it was
+  // committed, and the empty tree is the right left-hand side either way.
+  const empty = await emptyTree(cwd);
+  const prefix = empty === null ? ['diff', '--cached'] : ['diff', '--cached', empty];
+  const { stdout: whole } = await git(cwd, prefix);
+  return { prefix, whole };
+}
+
+/**
+ * The name of the empty tree in this repository, or null if git will not say.
+ *
+ * **Asked for rather than hardcoded.** `4b825dc…` is the SHA-1 spelling and is
+ * the one nearly every reference gives, but a repository created with
+ * `--object-format=sha256` has a different empty tree - so a constant here would
+ * be right on this machine and silently wrong on somebody else's. `hash-object`
+ * computes it from the repository's own object format, which is the only answer
+ * that cannot go stale.
+ *
+ * `/dev/null` rather than empty stdin because `git()` spawns without one, and
+ * Git for Windows maps that path itself - measured working on this platform.
+ *
+ * Null on any failure, and the caller falls back to the plain `--cached` form:
+ * that is the behaviour every run had before this, so a git that will not answer
+ * leaves the review exactly as it was rather than failing the phase.
+ */
+async function emptyTree(cwd: string): Promise<string | null> {
+  const { code, stdout } = await git(cwd, ['hash-object', '-t', 'tree', '/dev/null'], {
+    allowFail: true,
+  });
+  if (code !== 0) return null;
+  const sha = stdout.trim();
+  return /^[0-9a-f]{40,64}$/.test(sha) ? sha : null;
 }
 
 /**
@@ -538,7 +605,10 @@ export async function diffChunks(
   options: { maxChars?: number } = {},
 ): Promise<{ chunks: DiffChunk[]; files: string[] }> {
   const maxChars = options.maxChars ?? DIFF_MAX_CHARS;
-  const { prefix, whole } = await resolveDiffMode(cwd, baseSha);
+  // `revealUntracked` because this is the REVIEW's read: a round that only added
+  // files must not look empty to the reviewer. `diffSince` has its own reader and
+  // is what the read frame reaches, so nothing there touches the index.
+  const { prefix, whole } = await resolveDiffMode(cwd, baseSha, { revealUntracked: true });
 
   // Before the size branch, not after it: both paths return this list, and the
   // caller needs it for the prompt and for the coverage record even when there

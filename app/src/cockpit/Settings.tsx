@@ -612,12 +612,15 @@ export function Settings({
     gates?: Record<string, string>;
     roles?: Record<string, string | { provider?: string; effort?: string; model?: string }>;
     loop?: Record<string, number | undefined>;
+    progress?: Record<string, number | boolean | undefined>;
   };
   const gates = effective.gates ?? {};
   const loop = effective.loop ?? {};
   // Which loop keys the FILE claims, as opposed to which are in force — the
   // same split the gate matrix draws its `default` chip from.
   const claimedLoop = (frame.raw['loop'] ?? {}) as Record<string, unknown>;
+  const progress = effective.progress ?? {};
+  const claimedProgress = (frame.raw['progress'] ?? {}) as Record<string, unknown>;
   const roles = effective.roles ?? {};
   // Which rows the FILE claims, as opposed to which are in force. That is the
   // whole reason `raw` travels beside `effective`.
@@ -788,6 +791,41 @@ export function Settings({
           <span>
             Never block anything. They are recorded on the round and carried into{' '}
             <code>FOLLOW-UPS.md</code>, which is what that file is for.
+          </span>
+        </div>
+        <h4 className="v-set__h4">when a turn has gone quiet</h4>
+        {/* **A ceiling on silence, and it is not the turn timeout.** The agent
+            timeouts bound how long a turn may *take*; this bounds how long it
+            may say nothing while taking it. A review turn went silent five
+            minutes in and was killed thirty-nine minutes later when the Codex
+            turn ceiling expired, having done nothing for any of it — raising
+            that ceiling would only have bought a longer hang. */}
+        <div className="v-set__fact">
+          <span className="v-set__factname">silence</span>
+          <span>
+            Minutes a turn may produce <strong>no output at all</strong> before it is stopped.
+            Measured from the child&apos;s last line, which is the finer of the two clocks and the
+            one a stall trips first — a long turn is not a quiet turn, because a turn is long by
+            doing many things. Stopping is <em>resumable</em>, like every other cap here.{' '}
+            <code>0</code> switches it off.
+            <span className="v-set__inline">
+              <NumberField
+                id="progress-maxQuietMinutes"
+                // Minutes on screen, milliseconds in the file. The config is in
+                // ms because everything else timing-related in it is, and a form
+                // that made somebody type 600000 to mean ten minutes would be
+                // the units leaking out of the storage layer.
+                value={
+                  typeof progress['maxQuietMs'] === 'number'
+                    ? Math.round(progress['maxQuietMs'] / 60_000)
+                    : undefined
+                }
+                disabled={busy}
+                onSave={(n) => save({ progress: { maxQuietMs: n * 60_000 } })}
+              />
+              <span className="v-set__unit">minutes</span>
+              {claimedProgress['maxQuietMs'] === undefined && <MetaChip>default</MetaChip>}
+            </span>
           </span>
         </div>
       </section>

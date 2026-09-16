@@ -435,21 +435,31 @@ test('the implement turn records what it left in the tree', async () => {
 
 test('a write turn that changed nothing says so, in those words', async () => {
   const state = freshRun({ planOnly: false, git: true, commit: true });
-  await orchestrate(
-    state,
-    config(),
-    false,
-    agents(
-      {
-        // Never calls `work()`, so the tree is untouched by the turn the run
-        // just paid for. This is the reading most worth having and the one a
-        // "report only what there is to report" rule would have dropped.
-        claude: (label) =>
-          label === 'plan' || label.startsWith('revise-') ? planFixture() : 'I did nothing.',
-        codex: () => report([]),
-      },
-      [],
-    ),
+  // **The run ends at the review phase now, and the case is stronger for it**
+  // (#223). Nothing was written, so there is no diff, and the review phase
+  // refuses rather than spawning a reviewer over nothing. The `work_measured`
+  // record this asserts on is written when the implement turn ends, which is
+  // before that — so what is measured here is unchanged and the ending is the
+  // new, correct one.
+  await assert.rejects(
+    () =>
+      orchestrate(
+        state,
+        config(),
+        false,
+        agents(
+          {
+            // Never calls `work()`, so the tree is untouched by the turn the run
+            // just paid for. This is the reading most worth having and the one a
+            // "report only what there is to report" rule would have dropped.
+            claude: (label) =>
+              label === 'plan' || label.startsWith('revise-') ? planFixture() : 'I did nothing.',
+            codex: () => report([]),
+          },
+          [],
+        ),
+      ),
+    /no diff to read/,
   );
 
   const rows = measured(state);

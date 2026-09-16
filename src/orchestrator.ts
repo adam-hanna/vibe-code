@@ -4021,6 +4021,39 @@ async function runReview(
   });
   const { chunks, files } = await git.diffChunks(cwd, state.baseSha);
 
+  // **An empty diff is refused, not reviewed.** There was a guard for a diff too
+  // BIG for one turn and none at all for one with nothing in it, and
+  // `diffChunks` answers the empty case with a perfectly well-formed result -
+  // one chunk, no files, an empty string - so nothing downstream could tell
+  // "here is the change" from "there is no change to read". The reviewer was
+  // spawned with a prompt that said *here is the diff* followed by nothing.
+  //
+  // Measured on a run of 2026-09-15: it improvised, ran 32 shell commands in
+  // five minutes looking for the change by hand, went silent, and was killed 39
+  // minutes later at the Codex turn ceiling. The run ended `status: error` on a
+  // tree whose implementation was complete and whose verification gate had just
+  // passed three times out of three.
+  //
+  // This is the rule the file above already applies to a directory that is not a
+  // repository, in almost the same words, and it is the same refusal: the
+  // reviewer's only input is a diff produced by git, and there is no second
+  // source for it. `EXIT.PREFLIGHT` because that code is documented for exactly
+  // this - *"the target directory cannot host those phases at all ... whose
+  // review phase has no diff to read"* - and it is resumable, so the round is
+  // still there once the cause is fixed.
+  if (files.length === 0 && chunks.every((c) => c.diff === '')) {
+    throw new Escalation(
+      EXIT.PREFLIGHT,
+      `The review phase has no diff to read: git reported no change ${
+        state.baseSha === null
+          ? 'in this repository at all'
+          : `since ${state.baseSha.slice(0, 7)}`
+      }. The reviewer's only input is a diff, and there is no second source for ` +
+        'it, so no review turn was started and nothing was spent. Either the implement phase ' +
+        'wrote nothing, or its work is somewhere this range cannot see it.',
+    );
+  }
+
   // The round's own report, before the round is bought again. A process that
   // died between the artifact write and `recordPendingFindings` leaves a
   // complete-looking `code-review-<n>.json` for a round the resume is about to

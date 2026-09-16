@@ -3962,3 +3962,10 @@
 .v-loop__readingwhy {
   color: var(--text-tertiary);
 }
+
+/* The unit beside a number field, where the file's unit and the screen's differ
+   — minutes typed, milliseconds stored. */
+.v-set__unit {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+}

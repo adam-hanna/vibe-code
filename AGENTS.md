@@ -499,6 +499,83 @@ they are waiting on. Four things in it are worth carrying:
   so a model that shipped this morning is typeable this morning. `other…` is a
   sentinel rather than the empty option, because empty already means *take the
   agent's default* and the two are opposite intentions.
+- **The reviewer was handed an empty diff, and then hung — two defects, and the
+  second one hid behind the first.** Reported as *"the code review round 0 timed
+  out after 45 min"*, which is what it looked like and is not what happened.
+
+  **The diff was empty because `git diff --cached` compares the index to HEAD.**
+  A greenfield run has no baseline commit, so `markBase` returns null — its
+  contract is that null means *no commits when the implement phase began* — and
+  the no-base branch of `resolveDiffMode` fell back to `git add -A` plus
+  `git diff --cached`. That is right until the round commits, and the moment it
+  does the index matches HEAD and the diff is **nothing**. Measured on the run:
+  40 files and 5,915 insertions committed as `ceba37d`, `git diff --cached`
+  returning 0 characters, and the same command against the **empty tree**
+  returning 210,111. Naming the empty tree explicitly is safe there and nowhere
+  else, and `markBase`'s contract is the whole reason: with no base, everything
+  in the history is this run's work, so there is no earlier history to sweep up.
+  It is asked for with `hash-object -t tree /dev/null` rather than written as
+  `4b825dc…`, because a repository created with `--object-format=sha256` has a
+  different one and a constant would be right here and silently wrong elsewhere.
+
+  **A second route to the same emptiness turned up underneath it**, and the guard
+  below is what surfaced it: with `git.commitEachRound: false` the round stays in
+  the working tree, and the fallback `git diff HEAD` **cannot see a file git has
+  never seen**. An implementation is mostly new files, so a round that only added
+  them showed the reviewer nothing at all. `git add -N .` — intent-to-add —
+  registers the paths so the diff describes them and stages no content
+  (measured: `git diff --cached` stays empty after it). It is passed only by
+  `diffChunks`, which is the review's read; `diffSince` is what the `diff` read
+  frame reaches, and a read frame that touched the index would be the surprise
+  `protocol.ts` refuses a null base to avoid.
+
+  **And an empty diff is now refused rather than reviewed.** There was a guard
+  for a diff too *big* for one turn and none for one with nothing in it, and
+  `diffChunks` answers the empty case with a well-formed result — one chunk, no
+  files, an empty string — so nothing downstream could tell *here is the change*
+  from *there is no change to read*. It is the rule `reviewPhase` already applies
+  to a directory that is not a repository, in almost the same words, and it takes
+  the same `EXIT.PREFLIGHT`, whose own comment names this case: *"whose review
+  phase has no diff to read"*.
+
+- **A stalled turn burned its whole ceiling, and the measurement to stop it was
+  already on the wire.** The review turn wrote its last byte at 17:45:33 and was
+  killed at 18:24:50 when `codex.timeoutMs` expired — **39m17s of total silence**
+  during which the heartbeat fired seventy-eight times, each reporting the same
+  `32 events`. Raising that ceiling would have bought a longer hang: the two
+  limits answer different questions, one being how long a turn may *take* and the
+  other how long it may say *nothing* while taking it.
+
+  **The honest number came from measuring, not from picking.** The question that
+  decides it is whether a long turn looks silent, and in that run it does not: an
+  11m30 implement turn never went more than **32 seconds** without new activity,
+  a 12m30 critique never more than **3m30**, and the stall was **39m**. An order
+  of magnitude of separation. `progress.maxQuietMs` is **10 minutes** at the
+  owner's decision — about three times the worst healthy gap — and the honesty is
+  in saying what it rests on: one run, six healthy turns, which is enough to show
+  the separation exists and is not the census `budget.maxTokens` earned its 25M
+  from. That is why it is a setting, and why it is on the settings screen.
+
+  `guardTurnQuiet` is `guardTurnSpend`'s shape exactly and inherits all three of
+  its rules — it **cancels rather than throws**, so #209's latch kills the child
+  and the loop turns it into the ending a round cap already takes; it kills only
+  interruptible children, so `git` and the user's own verification gate are
+  untouched and may be silent for as long as they like; and it introduces no new
+  measurement, because `sinceOutputMs` has been on every beat since #223.
+  `maxQuietMs: 0` disables it, the same shape `budget.maxTokens: 0` has, and a
+  ceiling shorter than the interval that measures it is **refused by name**: a
+  turn cannot be observed quiet for less time than the gap between observations.
+
+  **The reporting half cost nothing and should have existed already.** The gap
+  was measured, carried on the frame, and simply not in the sentence — so forty
+  minutes of a dead turn printed `review-0: 23m30s · 32 events ·
+  command_execution` every thirty seconds and the only evidence was a count that
+  had stopped moving, readable by diffing two lines by eye. `formatHeartbeat`
+  now says `quiet 18m20s`, second, right after elapsed. It appears only once the
+  gap is `MISSED_TICKS` beats — **three, a shape rather than a duration**, the
+  same constant and the same reasoning as `app/src/cockpit/model.ts`'s, which
+  decides when `7c` calls a run stale. Duplicated across the two packages for the
+  reason `src/raise.ts`'s markers are, and both comments name the other.
 - **`externalBin` means every MSI build writes `%TEMP%\node.exe`, and anything
   running from there breaks the bundle.** `npm run app:build` failed four times
   with `failed to bundle project: The process cannot access the file because it
