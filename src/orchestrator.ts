@@ -6,6 +6,7 @@ import {
   parseStructured,
   RateLimitError,
 } from '@src/claude.js';
+import { Cancelled, cancelRequested, sleepUnlessCancelled } from '@src/cancel.js';
 import { codexTurn } from '@src/codex.js';
 import type { CodexTurnOptions, CodexTurnResult } from '@src/codex.js';
 import { preserveGateArtifacts, sweepGateArtifacts } from '@src/artifacts.js';
@@ -3299,7 +3300,20 @@ async function withRateLimitRetry<T>(
           provider,
         },
       );
-      await sleep(waitMs);
+      // **Interruptible since #223.** This used to be a bare `setTimeout`, which
+      // is the one place a run spends real time with nothing to kill - so `stop`
+      // did nothing for the length of the window, and because `serve.ts` holds
+      // the one-at-a-time gate for the whole of `main()`, neither could anything
+      // else be started. A fifteen-minute wait locked the window for fifteen
+      // minutes: *"I ended a run, and now I can't create a new one."*
+      const slept = await sleepUnlessCancelled(waitMs);
+      if (!slept) {
+        // Woken by a cancel. Thrown here rather than letting the next turn's
+        // refusal do it, for two reasons: the loop would otherwise narrate
+        // `rate_limit_resumed` on a wait that did not resume, and it would
+        // announce a turn it is about to refuse to start.
+        throw new Cancelled(cancelRequested() ?? 'the run was stopped during a rate-limit wait');
+      }
       log.step(`Resuming "${label}" after rate-limit wait`, {
         id: 'rate_limit_resumed',
         data: { label },
@@ -3322,7 +3336,6 @@ function describeReset(err: RateLimitError): string {
   return err.resetsAt ? `Resets at ${err.resetsAt.toLocaleString()}.` : 'No reset time reported.';
 }
 
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * What previous runs on this repository decided, for the planner's index (#52).

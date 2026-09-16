@@ -538,6 +538,43 @@ they are waiting on. Four things in it are worth carrying:
   the same `EXIT.PREFLIGHT`, whose own comment names this case: *"whose review
   phase has no diff to read"*.
 
+- **A rate-limit wait is the one place a run spends real time with nothing to
+  kill, and that made `stop` a no-op and the window unusable.** Reported as two
+  symptoms that are one defect: *"I ended a run, and now I can't create a new
+  one."* Codex hit 100% of its five-hour window, the loop narrated *"Waiting 15
+  min"*, and the host log has nothing after that line.
+
+  The wait was `new Promise((resolve) => setTimeout(resolve, ms))` — a bare
+  timer with no knowledge of the cancel latch and no way to be woken. `cancel.ts`
+  ends a turn by killing the **child** it is allowed to kill, and a sleeping loop
+  has no child, so pressing stop set a flag nothing was reading. And because
+  `serve.ts` holds its one-at-a-time gate for the whole of `main()`, the same
+  fifteen minutes that ignored the stop also **refused every new run**. A wait
+  the product will not interrupt locks the front door for exactly as long as it
+  lasts.
+
+  `sleepUnlessCancelled` lives in `cancel.ts` because that is where the latch is,
+  and it returns **whether it slept** rather than throwing — so the decision
+  stays at the call site in the loop, where every other ending is decided, rather
+  than in a timer callback. A cancel that is *already* latched returns without
+  sleeping at all, which is the fail-closed direction: a run being stopped must
+  not spend fifteen minutes doing nothing first.
+
+  **Waiters are deliberately not children**, though the shape is identical.
+  `requestCancel` returns how many children it killed, and the whole meaning of
+  zero is that the cancel arrived between turns and no work was discarded — a
+  rate-limit wait *is* between turns, so counting one as a kill would report work
+  destroyed where none was. So `registerWait` has its own set, woken after the
+  kills and never counted among them.
+
+  Two things travel with it. The loop **throws `Cancelled` itself** when the wait
+  comes back woken, rather than letting the next turn's refusal do it: otherwise
+  it would narrate `rate_limit_resumed` on a wait that did not resume, and
+  announce a turn the latch is about to refuse to start — and `rate_limit_resumed`
+  is half of what lets `7e` call this *waiting* rather than halted. And the timer
+  is **cleared** on the way out, because a cancelled run holding an hour-long
+  timer would keep the host from exiting, which is the same class of problem one
+  layer down.
 - **A stalled turn burned its whole ceiling, and the measurement to stop it was
   already on the wire.** The review turn wrote its last byte at 17:45:33 and was
   killed at 18:24:50 when `codex.timeoutMs` expired — **39m17s of total silence**
@@ -1234,7 +1271,7 @@ src/work.ts          how far a write turn has got - measured, and labelled a pro
 src/schemas.ts       the JSON schemas both CLIs are pinned to
 src/validate.ts      parser vocabulary for model output
 src/proc.ts          child-process plumbing, and how a child ended
-src/cancel.ts        stopping a turn that is already running - the latch, and what it may kill
+src/cancel.ts        stopping a turn that is already running - the latch, what it may kill, and the wait it may cut short
 src/commands.ts      a command a person pressed - no shell, no shim, and where it runs
 src/ending.ts        how this process ended - the stamp beside the lock
 src/git.ts           branch and commit operations
