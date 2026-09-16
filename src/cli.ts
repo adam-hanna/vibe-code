@@ -6,6 +6,7 @@ import {
   EFFORTS,
   environmentStale,
   loadConfig,
+  withProjectFile,
 } from '@src/config.js';
 import {
   allocateRun,
@@ -719,7 +720,11 @@ export function resumeConfig(targetDir: string, state: RunState, flags: ParsedAr
   const load = (overrides: ConfigOverrides, roles: RolePatches): Config =>
     stored === undefined
       ? loadConfig(targetDir, overrides, roles)
-      : applyOverrides(stored, overrides, roles);
+      // **The project's file on top of the run's memory** (#223). Without it the
+      // settings screen could not reach a run that had already started, so a run
+      // stopped on a ceiling could not be resumed past it by raising that
+      // ceiling - which is the one moment the screen is most wanted.
+      : applyOverrides(withProjectFile(stored, targetDir), overrides, roles);
 
   // What this resume would have run on with no flags at all. Compared against
   // the effective config so the event below records the user's change, and not

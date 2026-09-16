@@ -538,6 +538,62 @@ they are waiting on. Four things in it are worth carrying:
   the same `EXIT.PREFLIGHT`, whose own comment names this case: *"whose review
   phase has no diff to read"*.
 
+- **A resume reads the project's file, and the rule that widens is recorded.**
+  `state.config` exists so a resume does not silently revert a setting — a run
+  started with `--max-question-rounds 5` used to come back at 3 the next time it
+  was resumed without the flag — and that is still true and still worth
+  preventing. What the stored config being the *only* base also did was make the
+  settings screen useless at the one moment it is most wanted: *"if I adjust the
+  number of maxQuestionRounds, maxPlanRounds, etc, that needs to apply to ALL
+  runs (for example, if I need to bump that and continue)."* A run that stopped
+  on a ceiling could not be resumed past it by raising that ceiling, which is the
+  only reason anybody raises one.
+
+  `withProjectFile` is the layering, and each layer is a stronger statement of
+  intent than the one under it. The **stored** config is the run's memory,
+  including flags from an earlier resume, and still supplies every key nobody has
+  written down since. The **file** is a decision somebody wrote into a document
+  their repository keeps, so a key it names wins over that memory — including
+  over a flag from a previous resume, which was a one-off where this is standing.
+  The **flags** on this invocation win over both, unchanged.
+
+  It merges the **raw** object rather than a resolved config, which is what keeps
+  it narrow: a file silent about `claude.model` leaves the run on the model it
+  has been using, and `mergeSection` merges keys rather than replacing a section,
+  so naming one cap does not reset the four beside it — that would be the silent
+  revert this mechanism exists to prevent, arriving by a new route.
+
+  Nothing is hidden by it, and the machinery for saying so already existed:
+  `configDiff` compares this base against the effective config and records
+  `resume_config` naming every key that moved, and `environmentStale` clears the
+  probed facts when the role table shifts.
+- **Every ceiling that can end a run is on the settings screen, and the pilot's
+  is beside them.** A run stopped with *"a ceiling in `budget` was reached"*,
+  named `budget.planShare`, and sat above a footer saying *"Settings has the
+  caps"* — true of the round caps and false of these: *"I got this error but
+  don't see anywhere to edit this in settings. All of these types of settings
+  need to be editable."* The five `budget` keys are now a form beside the four
+  `loop` caps.
+
+  **Two of them are typed in units the file does not use**, and that is the same
+  decision the quiet ceiling made: `maxTokens` is entered in **millions** because
+  the run's own message quotes it as `25.0M` and a form demanding seven zeroes is
+  the storage layer's units on the screen, and `planShare` is entered as a
+  **percentage** because the message says `40% cap` while the file keeps a
+  fraction.
+
+  **The pilot's own ceiling moved here from beside the conversation** — *"move
+  pilot tokens and pilot $/day out of pilot chat and into the same settings
+  group"*. A ceiling is a setting, and one set beside the thing it limits was the
+  only setting in the product with no home on this screen. What stays in the pane
+  is the *reading* — what today has cost — because that is about the conversation
+  in front of you. It is still `localStorage` and still this window's, which is
+  the second of the three kinds the screen already names, and the copy says so:
+  these bound the conversation, the two above bound the loop, and they never sum.
+
+  `Cockpit` owns the value because the control and the enforcement are now in
+  two sibling panes — the same arrangement the type scale has, and for the same
+  reason: a change in Settings has to reach a pane that is already open.
 - **A rate-limit wait is the one place a run spends real time with nothing to
   kill, and that made `stop` a no-op and the window unusable.** Reported as two
   symptoms that are one defect: *"I ended a run, and now I can't create a new

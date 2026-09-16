@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Button, MetaChip, StateKicker } from '../design';
 import * as host from '../host';
 import { Credentials } from '../pilot/Credentials';
+import type { PilotLimits } from '../pilot/ledger';
 import { Section } from './Disclosure';
 import { STEPS } from './appearance';
 import { DRAFTS_KEY, draftsFor, readDrafts, removeDraft, saveDraft } from './drafts';
@@ -504,6 +505,8 @@ export function Settings({
   statuses,
   keyFailure,
   onKeysChanged,
+  limits,
+  onLimits,
 }: {
   dir: string;
   /** How big the product is drawn. Window state — see `appearance.ts`. */
@@ -521,6 +524,15 @@ export function Settings({
   statuses: readonly KeyStatus[] | null;
   keyFailure: string | null;
   onKeysChanged: () => void;
+  /**
+   * The pilot's own daily ceiling, and the setter for it (#223).
+   *
+   * Owned by `Cockpit` because the pane that ENFORCES it is a sibling of this
+   * one — the same arrangement the type scale has, and for the same reason: a
+   * change here has to reach a pane that is already open.
+   */
+  limits: PilotLimits;
+  onLimits: (next: PilotLimits) => void;
 }) {
   const [frame, setFrame] = useState<ConfigFrame | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
@@ -613,6 +625,7 @@ export function Settings({
     roles?: Record<string, string | { provider?: string; effort?: string; model?: string }>;
     loop?: Record<string, number | undefined>;
     progress?: Record<string, number | boolean | undefined>;
+    budget?: Record<string, number | boolean | undefined>;
   };
   const gates = effective.gates ?? {};
   const loop = effective.loop ?? {};
@@ -621,6 +634,8 @@ export function Settings({
   const claimedLoop = (frame.raw['loop'] ?? {}) as Record<string, unknown>;
   const progress = effective.progress ?? {};
   const claimedProgress = (frame.raw['progress'] ?? {}) as Record<string, unknown>;
+  const budget = effective.budget ?? {};
+  const claimedBudget = (frame.raw['budget'] ?? {}) as Record<string, unknown>;
   const roles = effective.roles ?? {};
   // Which rows the FILE claims, as opposed to which are in force. That is the
   // whole reason `raw` travels beside `effective`.
@@ -721,6 +736,53 @@ export function Settings({
           </span>
         </div>
         <Credentials statuses={statuses} failure={keyFailure} onChanged={onKeysChanged} />
+        <h4 className="v-set__h4">the pilot&apos;s own ceiling</h4>
+        {/* **Moved here from beside the conversation** (#145 built it there,
+            #223 moved it): *"move pilot tokens and pilot $/day out of pilot chat
+            and into the same settings group"*. A ceiling is a setting, and this
+            was the only one in the product with no home on this screen. What
+            stays in the pane is the *reading* — what today has cost — because
+            that is about the conversation in front of you.
+
+            It is a **third** kind of setting on a screen that already names
+            three, and it lands in the second: this window's, in `localStorage`,
+            this machine only. Not the project's file, which is committed, and
+            not the keychain, which holds one kind of secret. */}
+        <div className="v-set__fact">
+          <span className="v-set__factname">not the run&apos;s</span>
+          <span>
+            These bound the <strong>conversation</strong>, not the loop. A pilot turn on an API key
+            is the one place in this product where a dollar is a dollar — money moves and the vendor
+            publishes the usage — where the run&apos;s two ceilings above are work-volume brakes on a
+            subscription that bills nothing. The two never sum, and a run is never stopped by these.
+            <span className="v-set__inline">
+              <NumberField
+                id="pilot-dailyTokens"
+                value={limits.dailyTokens ?? undefined}
+                disabled={false}
+                onSave={(n) => onLimits({ ...limits, dailyTokens: n > 0 ? n : null })}
+              />
+              <span className="v-set__unit">tokens/day</span>
+              <NumberField
+                id="pilot-dailyUsd"
+                value={limits.dailyUsd ?? undefined}
+                disabled={false}
+                onSave={(n) => onLimits({ ...limits, dailyUsd: n > 0 ? n : null })}
+              />
+              <span className="v-set__unit">$/day</span>
+            </span>
+          </span>
+        </div>
+        <div className="v-set__fact">
+          <span className="v-set__factname">blank is no ceiling</span>
+          <span>
+            Both are off by default, and that is deliberate: a hard default cap on a conversation
+            stops you mid-sentence for no good reason. <strong>Per day</strong> rather than per
+            session, because a conversation has no natural end and a day is the window both
+            vendors&apos; own dashboards use. It gates the tool loop as well as the composer — a
+            chain answering itself is the unattended half, which is the half a spend limit is for.
+          </span>
+        </div>
       </section>
 
       {/* ---- how hard it tries, and what it will accept ------------------- */}
@@ -828,6 +890,158 @@ export function Settings({
             </span>
           </span>
         </div>
+      </section>
+
+      {/* ---- what it may spend ------------------------------------------- */}
+      <section className="v-set__block">
+        <h3 className="v-set__h">what it may spend</h3>
+        {/* **The ceilings that end a run, and they were not here.** A run
+            stopped with *"a ceiling in `budget` was reached"* and pointed at
+            `budget.planShare`, and the footer's own note said *"Settings has the
+            caps"* — which was true of the round caps and false of these.
+            Reported exactly that way: *"I got this error but don't see anywhere
+            to edit this in settings. All of these types of settings need to be
+            editable."* */}
+        <p className="v-set__note">
+          Every one of these stops the run <em>resumably</em> and says which it was. Raising one and
+          resuming picks up from the last checkpoint: a resume reads this file, so a change here
+          reaches a run that has already started.
+        </p>
+        <table className="v-set__matrix">
+          <tbody>
+            {/* Tokens in millions, because the ceiling is 25,000,000 and the
+                run's own message quotes it as `25.0M`. The file keeps the whole
+                number; a form that made somebody type seven zeroes would be the
+                storage layer's units on the screen. */}
+            <tr>
+              <td>
+                <code>maxTokens</code>
+                {claimedBudget['maxTokens'] === undefined && <MetaChip>default</MetaChip>}
+              </td>
+              <td>
+                <span className="v-set__inline">
+                  <NumberField
+                    id="budget-maxTokens"
+                    value={
+                      typeof budget['maxTokens'] === 'number'
+                        ? budget['maxTokens'] / 1_000_000
+                        : undefined
+                    }
+                    disabled={busy}
+                    onSave={(n) => save({ budget: { maxTokens: Math.round(n * 1_000_000) } })}
+                  />
+                  <span className="v-set__unit">million</span>
+                </span>
+              </td>
+              <td className="v-set__why">
+                the only ceiling that counts <strong>both</strong> agents, and so the one that
+                actually bounds a run. <code>0</code> is no limit.
+              </td>
+            </tr>
+            <tr>
+              <td>
+                <code>planShare</code>
+                {claimedBudget['planShare'] === undefined && <MetaChip>default</MetaChip>}
+              </td>
+              <td>
+                {/* A fraction in the file and a percentage on screen, for the
+                    reason the tokens are in millions: the run's own message says
+                    `40% cap`. */}
+                <span className="v-set__inline">
+                  <NumberField
+                    id="budget-planShare"
+                    value={
+                      typeof budget['planShare'] === 'number'
+                        ? Math.round(budget['planShare'] * 100)
+                        : undefined
+                    }
+                    disabled={busy}
+                    onSave={(n) => save({ budget: { planShare: n / 100 } })}
+                  />
+                  <span className="v-set__unit">% of the ceiling</span>
+                </span>
+              </td>
+              <td className="v-set__why">
+                how much of it planning may use before stopping. Planning that will not converge is
+                the most expensive way to fail — it produces nothing, and the whole-run ceiling only
+                catches it once the budget is gone. <code>0</code> disables it.
+              </td>
+            </tr>
+            <tr>
+              <td>
+                <code>maxCostUsd</code>
+                {claimedBudget['maxCostUsd'] === undefined && <MetaChip>default</MetaChip>}
+              </td>
+              <td>
+                <span className="v-set__inline">
+                  <NumberField
+                    id="budget-maxCostUsd"
+                    value={typeof budget['maxCostUsd'] === 'number' ? budget['maxCostUsd'] : undefined}
+                    disabled={busy}
+                    onSave={(n) => save({ budget: { maxCostUsd: n } })}
+                  />
+                  <span className="v-set__unit">$, Claude-side</span>
+                </span>
+              </td>
+              <td className="v-set__why">
+                <strong>Not money on a subscription.</strong> The Claude CLI derives it from token
+                counts at API rates and nothing is billed; Codex reports no cost at all, so this
+                covers half a run. Treat it as a second work-volume brake.
+              </td>
+            </tr>
+            <tr>
+              <td>
+                <code>maxWaitMinutes</code>
+                {claimedBudget['maxWaitMinutes'] === undefined && <MetaChip>default</MetaChip>}
+              </td>
+              <td>
+                <span className="v-set__inline">
+                  <NumberField
+                    id="budget-maxWaitMinutes"
+                    value={
+                      typeof budget['maxWaitMinutes'] === 'number'
+                        ? budget['maxWaitMinutes']
+                        : undefined
+                    }
+                    disabled={busy}
+                    onSave={(n) => save({ budget: { maxWaitMinutes: n } })}
+                  />
+                  <span className="v-set__unit">minutes</span>
+                </span>
+              </td>
+              <td className="v-set__why">
+                the longest rate-limit window the loop will sit out rather than stopping. A wait can
+                be stopped from the footer now, so this is where it gives up on its own.
+              </td>
+            </tr>
+            <tr>
+              <td>
+                <code>codexLimitPercent</code>
+                {claimedBudget['codexLimitPercent'] === undefined && <MetaChip>default</MetaChip>}
+              </td>
+              <td>
+                <span className="v-set__inline">
+                  <NumberField
+                    id="budget-codexLimitPercent"
+                    value={
+                      typeof budget['codexLimitPercent'] === 'number'
+                        ? budget['codexLimitPercent']
+                        : undefined
+                    }
+                    disabled={busy}
+                    onSave={(n) => save({ budget: { codexLimitPercent: n } })}
+                  />
+                  <span className="v-set__unit">% used</span>
+                </span>
+              </td>
+              <td className="v-set__why">
+                stop before a Codex turn once its rate-limit window is this full. A whole-run brake,
+                not per-turn metering — the figure is an integer percent of a rolling window and does
+                not move measurably for one turn. <code>0</code> disables it.
+              </td>
+            </tr>
+          </tbody>
+        </table>
       </section>
 
       <section className="v-set__block">

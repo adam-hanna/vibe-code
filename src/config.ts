@@ -824,6 +824,7 @@ function artifactSegments(entry: string): string[] {
  * nothing. An unreadable file **throws**, exactly as `loadConfig` does, because
  * a form that treated one as empty would offer to overwrite it.
  */
+
 export function readRawConfig(targetDir: string): Record<string, unknown> {
   const configPath = path.join(targetDir, 'vibe.config.json');
   if (!existsSync(configPath)) return {};
@@ -836,6 +837,43 @@ export function readRawConfig(targetDir: string): Record<string, unknown> {
   }
   if (!isRecord(parsed)) throw new Error('Invalid vibe.config.json: not a JSON object');
   return parsed;
+}
+
+/**
+ * The run's stored settings, brought up to date with the project's file (#223).
+ *
+ * **The file wins over the run's memory, and that reverses a narrower rule.**
+ * `state.config` exists so a resume does not silently revert a setting: a run
+ * started with `--max-question-rounds 5` used to come back at 3 the next time it
+ * was resumed without the flag. That is still true and still matters. What it
+ * also did, because the stored config was the *only* base, was make the settings
+ * screen useless at the one moment it is most wanted — *"if I adjust the number
+ * of maxQuestionRounds, maxPlanRounds, etc, that needs to apply to ALL runs (for
+ * example, if I need to bump that and continue)"*. A run that stopped on a
+ * ceiling could not be resumed past it by raising the ceiling.
+ *
+ * So the order is **stored, then the file, then the flags given now**, and each
+ * layer is a stronger statement of intent than the one under it:
+ *
+ * - The **stored** config is the run's memory, including flags from an earlier
+ *   resume. It still supplies every key nobody has written down since.
+ * - The **file** is a decision somebody wrote into a document their repository
+ *   keeps, so a key it names wins over that memory — including over a flag from
+ *   a previous resume, which was a one-off where this is standing.
+ * - The **flags** on this invocation win over both, unchanged.
+ *
+ * Only keys the file actually names move, because `mergeConfig` merges the raw
+ * object rather than a resolved config: a file that says nothing about
+ * `claude.model` leaves the run on the model it has been using, which is the
+ * property `state.config` was added for.
+ *
+ * Nothing is hidden by it. `configDiff` already compares this base against the
+ * effective config and records `resume_config` naming every key that moved, and
+ * `environmentStale` already clears probed facts when the role table shifts — so
+ * a run whose settings changed underneath it says so in its own record.
+ */
+export function withProjectFile(stored: Config, targetDir: string): Config {
+  return mergeConfig(stored, readRawConfig(targetDir));
 }
 
 /**

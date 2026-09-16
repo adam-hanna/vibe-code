@@ -26,11 +26,9 @@ import {
   formatUsd,
   limitVerdict,
   readLedger,
-  readLimits,
   record,
   today,
   writeLedger,
-  writeLimits,
 } from './ledger';
 import type { Ledger, PilotLimits } from './ledger';
 import {
@@ -391,62 +389,6 @@ function TurnElapsed({ startedAt, now }: { startedAt: number | null; now: number
   return <span className="v-pilot__elapsed">{elapsed(Math.max(0, now - startedAt))}</span>;
 }
 
-/**
- * The pilot's own ceiling, set here and nowhere else (#145).
- *
- * **Two fields, both blank by default, and blank means no ceiling.** A hard
- * default cap on a conversation is the kind of thing that stops you mid-sentence
- * for no good reason - but this is the first real spend in the product, and a
- * runaway loop in a chat is as possible as one anywhere else, so it exists and
- * is off.
- *
- * Per day rather than per session: a conversation has no natural end, so
- * `maxTokens`' shape does not transfer, and a day is the window both vendors'
- * own dashboards use. The labels say *pilot* because the run has two ceilings of
- * its own and a user must never wonder which one they just changed.
- */
-function PilotLimitFields({
-  limits,
-  onChange,
-}: {
-  limits: PilotLimits;
-  onChange: (limits: PilotLimits) => void;
-}) {
-  // A blank field is no ceiling, and a value that is not a positive number is
-  // also no ceiling - refusing to store a ceiling nobody could have meant,
-  // rather than storing a zero that would stop everything.
-  const read = (raw: string): number | null => {
-    const n = Number(raw);
-    return raw.trim() !== '' && Number.isFinite(n) && n > 0 ? n : null;
-  };
-  return (
-    <span className="v-pilot__limits">
-      <label className="v-pilot__limit">
-        pilot tokens/day
-        <input
-          className="v-pilot__limit-input"
-          type="number"
-          min="1"
-          placeholder="no limit"
-          value={limits.dailyTokens ?? ''}
-          onChange={(e) => onChange({ ...limits, dailyTokens: read(e.target.value) })}
-        />
-      </label>
-      <label className="v-pilot__limit">
-        pilot $/day
-        <input
-          className="v-pilot__limit-input"
-          type="number"
-          min="0.01"
-          step="0.01"
-          placeholder="no limit"
-          value={limits.dailyUsd ?? ''}
-          onChange={(e) => onChange({ ...limits, dailyUsd: read(e.target.value) })}
-        />
-      </label>
-    </span>
-  );
-}
 
 function ReplyCard({
   reply,
@@ -584,6 +526,17 @@ export interface PilotPaneProps {
    *
    * One reader, in `Cockpit`, for the same reason it owns the one `host.send`.
    */
+  /**
+   * The pilot's own daily ceiling, owned by `Cockpit` (#223).
+   *
+   * **A prop rather than this pane's own state**, because the control that sets
+   * it moved to Settings — *"move pilot tokens and pilot $/day out of pilot chat
+   * and into the same settings group"*. A ceiling is a setting, and one set
+   * beside the conversation it limits was the only setting in the product with
+   * no home on the settings screen. Lifting it is what lets a change there reach
+   * an open pane, which is the same arrangement the type scale has.
+   */
+  limits: PilotLimits;
   statuses: readonly KeyStatus[] | null;
   /**
    * The repository this conversation is about (#211).
@@ -656,6 +609,7 @@ export function PilotPane({
   commands,
   onEffect,
   onPending,
+  limits,
   statuses,
   kickoff,
   onOpen,
@@ -775,7 +729,6 @@ export function PilotPane({
   // The pilot's own books (#145). Read from `localStorage` at mount, because a
   // per-day ceiling that reset when the app restarted would not be a ceiling.
   const [ledger, setLedger] = useState<Ledger>(readLedger);
-  const [limits, setLimits] = useState<PilotLimits>(readLimits);
   /** Turns already in the books, so a re-render cannot bill one twice. */
   const counted = useRef<Set<number>>(new Set());
   /** The chain ran out and the pilot is holding for a person. */
@@ -1291,15 +1244,14 @@ export function PilotPane({
           means two things on one screen — a proxy for work volume beside a run,
           which is not money, and this, which is. Hi-fi 11 solved the harder
           version of the same problem by making the asymmetry the point. */}
+      {/* The books say what the day cost; the CEILING on it moved to Settings
+          (#223). *"Move pilot tokens and pilot $/day out of pilot chat and into
+          the same settings group"* - a ceiling is a setting, and setting one
+          beside the conversation it limits made it the only setting in the
+          product with no home on the settings screen. What stays here is the
+          reading, because that is about this conversation and nothing else. */}
       <div className="v-pilot__books">
         <span className="v-pilot__note">{describeDay(day)}</span>
-        <PilotLimitFields
-          limits={limits}
-          onChange={(next) => {
-            setLimits(next);
-            writeLimits(next);
-          }}
-        />
       </div>
       {!verdict.allowed && verdict.why !== null && (
         <div className="v-pilot__note v-pilot__note--alarm">

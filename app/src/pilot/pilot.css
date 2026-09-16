@@ -365,34 +365,6 @@
   border-bottom: 1px solid var(--rule-structure);
 }
 
-.v-pilot__limits {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-}
-
-.v-pilot__limit {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  font: var(--type-body-sm);
-  color: var(--text-tertiary);
-}
-
-.v-pilot__limit-input {
-  width: 8ch;
-  font: var(--type-body-sm);
-  color: var(--text-primary);
-  background: var(--surface-card);
-  border: 1px solid var(--rule-control);
-  padding: var(--space-1) var(--space-2);
-}
-
-.v-pilot__limit-input:focus-visible {
-  outline: 2px solid var(--accent-solid);
-  outline-offset: 1px;
-}
-
 /* The per-turn estimate, beside the counts it was computed from and never
    instead of them: the tokens are what the vendor said and the dollars are what
    this build worked out, so a reader can check one against the other. */

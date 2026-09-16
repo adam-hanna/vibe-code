@@ -38,6 +38,8 @@ import { emptyRun, nextRun, reduce, staleness } from './model';
 import { rounds } from './rounds';
 import { implementArgv, readLaunchArgv, resumeArgv } from './argv';
 import { SCALE_KEY, SCALE_VAR, readScale, writable } from './appearance';
+import { readLimits, writeLimits } from '../pilot/ledger';
+import type { PilotLimits } from '../pilot/ledger';
 import type { Launched, Raise } from './argv';
 import type { Caps } from './Footer';
 import type { Effect } from '../pilot/tools';
@@ -143,6 +145,25 @@ export function Cockpit() {
     }
   }, []);
 
+
+  /**
+   * The pilot's own daily ceiling (#223).
+   *
+   * **Owned here so the control and the enforcement can be in different
+   * places.** It is set on the settings screen — *"move pilot tokens and pilot
+   * $/day out of pilot chat and into the same settings group"* — and enforced in
+   * the pilot pane, which is where a turn is about to be spent. Two siblings, so
+   * the state is one level up, exactly as the type scale is and for the same
+   * reason: a change in Settings has to reach a pane that is already open.
+   *
+   * `localStorage` and not `vibe.config.json`, unchanged: this is the *pilot's*
+   * ceiling, it is this machine's, and the run's two ceilings are the project's.
+   */
+  const [limits, setLimits] = useState<PilotLimits>(readLimits);
+  const relimit = useCallback((next: PilotLimits) => {
+    setLimits(next);
+    writeLimits(next);
+  }, []);
   /** Whether the diagnostics popover is open (#201, #204). ⌘⇧D toggles it. */
   const [diagnostics, setDiagnostics] = useState(false);
   /**
@@ -1157,6 +1178,8 @@ export function Cockpit() {
               statuses={keyStatuses}
               keyFailure={keyFailure}
               onKeysChanged={refreshKeys}
+              limits={limits}
+              onLimits={relimit}
             />
           )}
           {/* `1b`, opened from a project in the sidebar. The columns the sidebar
@@ -1231,6 +1254,7 @@ export function Cockpit() {
               commands={commands}
               onEffect={onEffect}
               onPending={setProposals}
+              limits={limits}
               statuses={keyStatuses}
               // Hi-fi 5's `open verify`. A round card is the round's summary
               // and the pane beside it holds the detail, so the card links to
