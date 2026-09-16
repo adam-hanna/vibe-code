@@ -538,6 +538,67 @@ they are waiting on. Four things in it are worth carrying:
   the same `EXIT.PREFLIGHT`, whose own comment names this case: *"whose review
   phase has no diff to read"*.
 
+- **The implement turn never announced itself, so the window drew an idle run
+  while it spent fourteen million tokens.** Every other turn in the loop emits
+  `turn_started` — plan, revise, critique, answer, review and all three fix
+  kinds — and the implement turn, which `charge.ts` calls *"the single most
+  expensive step in a run"*, did not. `narration-identity.test.ts` pinned the
+  absence as deliberate, and its reasoning was sound as far as it went: *"adding
+  a step line purely to make the vocabulary symmetrical would change what the
+  terminal prints, and the CLI's output is a contract; symmetry is not worth
+  that."*
+
+  **It was never about symmetry.** `turn_started` is the only id `reduce` builds
+  a `Turn` from, and `run.running` is what the cockpit draws a live card off. So
+  with it missing the window showed `IDLE — no turn is open`, the CODE group had
+  no row, and — worst — **every heartbeat was discarded**, because a beat with no
+  turn open cannot be attributed and the reducer drops it by design.
+
+  The evidence is a run of 2026-09-16 and it clears the bar this file sets for
+  reopening a settled decision. The terminal printed `implement: 14m30s · 63 tool
+  uses · Write …TodoToggle… · 13.7M tok · ctx 25%` every thirty seconds while the
+  window showed an idle run, so the turn was stopped by hand by somebody who
+  reasonably concluded it had hung: **14.2M tokens and 50 files of finished work,
+  thrown away because the product said nothing was happening.** That is "one
+  channel, two renderers" breaking in the one place it costs the most.
+
+  The cost the old note named is accepted rather than dodged — the terminal gains
+  one line per run — and it is not a host-only narration, because `model_said`'s
+  rule is that a transcript disagreeing with the window breaks the same guarantee
+  in the same place. `round` is `state.reviewRound`, the field the three fix
+  kinds already carry, because the CODE group re-opens on every fix and the round
+  is what tells one pass through it from the next.
+- **A resumed run keeps the column it already had, and a stopped turn is part of
+  it.** Two halves of one report: *"the previous plan, critique, code, etc rounds
+  don't show up on the right bar. I want it to look as I just left it when I
+  stopped the run."*
+
+  `reduce` builds a `Run` from the frames **this process** narrates, and a resume
+  narrates only what happens from the resume onward — so a run three plan rounds
+  deep came back showing one, with every earlier round, census and turn simply
+  gone. `resume` now **seeds** the column with `foldReplay` of the run's own
+  narration before it sends the `invoke`, and the ordering is what makes that
+  safe rather than racy: no live frame exists yet, so the seed cannot land on top
+  of something the loop has already said. The ending is deliberately *not*
+  seeded — `useReplay` applies it because a run you opened has ended and must say
+  so, where a run you are resuming has not, and seeding `completed` would draw a
+  halt banner over a run that is starting. A replay that fails costs the history
+  and never the resume: the column simply begins empty, which is what every
+  resume did before.
+
+  `foldReplay` lives in `model.ts` and serves both callers, because two copies of
+  that loop would be two answers to *"what did this run look like"* — the mistake
+  the replay was built to avoid.
+
+  And the replay now includes **failed** turns. A turn that was stopped, timed
+  out or threw is charged through `chargeFailure` under `turn_failed` rather than
+  as `claude_turn`, so a replay taking only the successful ones drew a run
+  *missing the turn it stopped on*, which is the exact opposite of what was
+  asked for. The killed implement turn above is the case: 14.2M tokens and
+  fourteen minutes of work, absent from its own replay. A failed turn is
+  attributed by the `provider` it records, and one whose provider this build
+  cannot read is **skipped rather than misattributed** — putting a Codex turn's
+  spend on Claude's side of the ledger is worse than a missing row.
 - **A resume reads the project's file, and the rule that widens is recorded.**
   `state.config` exists so a resume does not silently revert a setting — a run
   started with `--max-question-rounds 5` used to come back at 3 the next time it

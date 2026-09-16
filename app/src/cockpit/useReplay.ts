@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import * as host from '../host';
-import { emptyRun, reduce } from './model';
+import { foldReplay, reduce } from './model';
 import type { Run } from './model';
 
 /**
@@ -53,10 +53,9 @@ export function useReplay(dir: string, runId: string | null, revision = 0): Repl
       .replay(dir, runId)
       .then((got) => {
         if (cancelled) return;
-        let built = emptyRun();
-        for (const step of got.steps) {
-          built = reduce(built, { type: 'narration', ...step.narration }, step.at);
-        }
+        // The same fold a resume seeds its column with, so "what did this run
+        // look like" has one answer and not two.
+        let built = foldReplay(got.steps);
         // The ending, applied as the frame it is. A `result` closes whatever
         // turn was open and sets `completed`, which is what makes the footer
         // draw this run's ending rather than nothing — and it is why nothing is

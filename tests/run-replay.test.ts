@@ -422,3 +422,62 @@ test('the list has an entry for every agent and no agent this build cannot seat'
   // one that can disagree, and the disagreement is a row whose select is empty.
   assert.deepEqual(Object.keys(KNOWN_MODELS).sort(), [...PROVIDERS].sort());
 });
+
+// ---- a turn that was stopped is still a turn that happened -------------------
+
+test('a turn charged after FAILING is replayed, not dropped', () => {
+  // **The hole this closes, and it was the expensive one.** A turn that was
+  // stopped, timed out or threw is charged through `chargeFailure` under
+  // `turn_failed` rather than as `claude_turn`, so a replay taking only the
+  // successful ones drew a run *missing the turn it stopped on* — the opposite
+  // of *"I want it to look as I just left it when I stopped the run."*
+  //
+  // The case is a real one: a run of 2026-09-16 whose implement turn was killed
+  // 14m30s in at 14.2M tokens, having written 50 files. Its replay had no CODE
+  // group at all.
+  const state = stateWith({
+    status: 'needs-input',
+    events: [
+      { at: iso(10_000), type: 'claude_turn', label: 'plan', tokens: 1 },
+      {
+        at: iso(90_000),
+        type: 'turn_failed',
+        label: 'implement',
+        provider: 'claude',
+        tokens: 14_247_741,
+        error: 'the run was stopped: stopped from the window',
+      },
+    ],
+  });
+  const replay = replayRun(state, NOTHING);
+  const phases = replay.steps
+    .filter((s) => s.narration.id === 'phase_started')
+    .map((s) => s.narration.data?.['phase']);
+  assert.ok(phases.includes('implementing'), 'the stopped turn opens its own group');
+  // Charged under the agent that ran it, so the replayed spend still adds up.
+  const charge = replay.steps.find((s) => s.narration.id === 'claude_turn' && s.at === NOW + 90_000);
+  assert.equal(charge?.narration.data?.['tokens'], 14_247_741);
+});
+
+test('a stopped turn is said to have stopped rather than to have been charged', () => {
+  // The sentence is the only place the difference shows, since both go out under
+  // the same id — which they must, because that id is what carries the spend.
+  const state = stateWith({
+    events: [
+      { at: iso(10_000), type: 'turn_failed', label: 'implement', provider: 'claude', tokens: 5 },
+    ],
+  });
+  const said = replayRun(state, NOTHING).steps.find((s) => s.narration.id === 'claude_turn');
+  assert.match(said?.narration.message ?? '', /implement stopped/);
+});
+
+test('a failed turn whose provider this build cannot read is skipped, not misattributed', () => {
+  // Fail closed: putting a Codex turn's spend on Claude's side of the ledger is
+  // worse than a missing row, because a reader cannot see that it happened.
+  const state = stateWith({
+    events: [{ at: iso(10_000), type: 'turn_failed', label: 'implement', tokens: 5 }],
+  });
+  const replay = replayRun(state, NOTHING);
+  assert.equal(replay.steps.find((s) => s.narration.id === 'claude_turn'), undefined);
+  assert.equal(replay.steps.find((s) => s.narration.id === 'codex_turn'), undefined);
+});

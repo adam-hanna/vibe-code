@@ -34,7 +34,7 @@ import { Workstreams } from './Workstreams';
 import { VerifyPane } from './VerifyPane';
 import { StalenessStrip } from './Staleness';
 import { NEEDS_HUMAN, tokens as fmtTokens } from './format';
-import { emptyRun, nextRun, reduce, staleness } from './model';
+import { emptyRun, foldReplay, nextRun, reduce, staleness } from './model';
 import { rounds } from './rounds';
 import { implementArgv, readLaunchArgv, resumeArgv } from './argv';
 import { SCALE_KEY, SCALE_VAR, readScale, writable } from './appearance';
@@ -102,8 +102,15 @@ export function Cockpit() {
     // `Date.now()` here rather than inside `reduce`: the model takes the arrival
     // time as an argument so it stays pure and testable, and this is the one
     // place a real clock is read.
-    (state: Run, action: Frame | { type: 'reset' }) =>
-      action.type === 'reset' ? nextRun(state) : reduce(state, action, Date.now()),
+    (state: Run, action: Frame | { type: 'reset' } | { type: 'seed'; run: Run }) => {
+      if (action.type === 'reset') return nextRun(state);
+      // **A resume's column, before the loop adds to it** (#223). The run the
+      // replay folded IS a `Run`, so this replaces rather than merges - there is
+      // nothing to merge with, because `resume` seeds before it sends the
+      // invoke and no live frame can have arrived yet.
+      if (action.type === 'seed') return { ...action.run, protocol: state.protocol, seq: state.seq };
+      return reduce(state, action, Date.now());
+    },
     undefined,
     emptyRun,
   );
@@ -589,12 +596,57 @@ export function Cockpit() {
     [launch],
   );
 
+  /**
+   * Pick a halted run back up, with the column it already had (#223).
+   *
+   * **A resumed run used to start from an empty column, and that is what was
+   * reported:** *"the previous plan, critique, code, etc rounds don't show up on
+   * the right bar. I want it to look as I just left it when I stopped the run."*
+   * `reduce` builds a `Run` from the frames *this process* narrates, and a
+   * resume narrates only what happens from the resume onwards — so a run three
+   * plan rounds deep came back showing one, and every earlier round, census and
+   * turn was simply gone from the window.
+   *
+   * So the column is **seeded** with the run's own narration before the loop
+   * starts adding to it. The ordering is what makes this safe rather than racy:
+   * the replay is fetched and folded *before* the `invoke` is sent, so there are
+   * no live frames yet to arrive out of order, and the seed can never land on
+   * top of something the loop has already said.
+   *
+   * The ending is deliberately **not** applied. `useReplay` applies it because a
+   * run you opened has ended and must say so; a run you are resuming has not,
+   * and seeding `completed` would draw a halt banner over a run that is starting.
+   *
+   * A replay that fails costs nothing but the history: the resume goes ahead on
+   * an empty column, which is exactly what it did before. Losing the seed must
+   * never cost somebody the resume.
+   */
   const resume = useCallback(
     // `force` last and defaulting to false, so every existing caller sends the
     // ordinary resume: taking a lock somebody may still hold is a decision, and
     // the one screen that can see the lock's verdict is the one that offers it.
-    (runId: string, dir: string, raise?: Raise, force = false) =>
-      launch(resumeArgv(runId, dir, raise ?? {}, force)),
+    (runId: string, dir: string, raise?: Raise, force = false) => {
+      const argv = resumeArgv(runId, dir, raise ?? {}, force);
+      if (!host.inShell()) {
+        launch(argv);
+        return;
+      }
+      setBusy(true);
+      void host
+        .replay(dir, runId)
+        .then((got) => {
+          dispatch({ type: 'seed', run: foldReplay(got.steps) });
+        })
+        .catch(() => {
+          // Deliberately silent. The run is about to start either way, and a
+          // failure here means the column begins empty - which is what every
+          // resume did until now, not a new failure worth a banner.
+        })
+        .finally(() => {
+          setBusy(false);
+          launch(argv);
+        });
+    },
     [launch],
   );
 

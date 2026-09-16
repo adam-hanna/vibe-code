@@ -1,4 +1,4 @@
-import type { Frame, Level } from '../host';
+import type { Frame, Level, Narration } from '../host';
 
 /**
  * The run, assembled from frames and from nothing else (#159).
@@ -2137,4 +2137,31 @@ export function runningRow(turn: Turn, now: number): RunningRow {
     comparable:
       'no comparable turns — vibe scorecard reads the archive, but no frame carries it here',
   };
+}
+
+/**
+ * A run's own narration, folded into the `Run` it describes (#223).
+ *
+ * **One fold, two callers, and that is the point.** `useReplay` uses it to draw
+ * a run somebody opened; `Cockpit` uses it to *seed* a resume, so the column
+ * starts with what the run already did instead of with an empty one. Two copies
+ * of this loop would be two answers to "what did this run look like", which is
+ * the mistake the replay was built to avoid in the first place.
+ *
+ * Each step is folded at **its own** time rather than at arrival: a replay
+ * stamped with `Date.now()` would date a week-old run to this afternoon and give
+ * every turn a duration of nothing.
+ *
+ * It deliberately does not apply the ending. A `result` is a frame the caller
+ * applies, and the two callers want opposite things from it — a run you opened
+ * has ended and should say so, and a run you are **resuming** has not.
+ */
+export function foldReplay(
+  steps: readonly { at: number; narration: Omit<Narration, 'type'> }[],
+): Run {
+  let built = emptyRun();
+  for (const step of steps) {
+    built = reduce(built, { type: 'narration', ...step.narration }, step.at);
+  }
+  return built;
 }

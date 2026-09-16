@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -202,4 +203,53 @@ test('a ceiling shorter than the beat that measures it is refused by name', () =
 
 test('a negative ceiling is refused rather than treated as off', () => {
   assert.throws(() => loadConfig(configWith({ maxQuietMs: -1 })), /maxQuietMs/);
+});
+
+// ---- the turn the window could not see --------------------------------------
+
+test('EVERY turn the loop runs announces itself, including the implement turn', () => {
+  // **The most expensive omission in the product.** `reduce` builds a `Turn` and
+  // sets `run.running` from `turn_started` and from nothing else, so a turn that
+  // does not announce itself is a turn the cockpit cannot draw: no live card, no
+  // elapsed, no liveness dot — and, worst, **every heartbeat discarded**, because
+  // a beat with no turn open cannot be attributed and the reducer drops it.
+  //
+  // The implement turn was the one without it, which is the one that matters:
+  // `charge.ts` calls it *"the single most expensive step in a run"* and it has
+  // its own 90-minute timeout. Measured on a run of 2026-09-16, the terminal
+  // printed `implement: 14m30s · 63 tool uses · 13.7M tok · ctx 25%` every
+  // thirty seconds while the window showed `IDLE — no turn is open`, so the turn
+  // was stopped by somebody who reasonably concluded it had hung. 14.2M tokens
+  // and 50 files of finished work, thrown away because the product said nothing
+  // was happening.
+  //
+  // Source-read and matched against the LABEL sites rather than against a list
+  // written here: every label is a turn that runs, so every one of them needs a
+  // `turn_started` and a hardcoded expectation would go stale on the commit that
+  // adds a ninth.
+  let at = path.dirname(fileURLToPath(import.meta.url));
+  while (!existsSync(path.join(at, 'src', 'orchestrator.ts')) && path.dirname(at) !== at) {
+    at = path.dirname(at);
+  }
+  const source = readFileSync(path.join(at, 'src', 'orchestrator.ts'), 'utf8');
+
+  const labels = [...source.matchAll(/label: (?:`([^`]+)`|'([^']+)')/g)].length;
+  const announced = [...source.matchAll(/id: 'turn_started'/g)].length;
+  assert.ok(labels > 0, 'the label sites moved — this test is reading the wrong thing');
+  assert.ok(
+    announced >= labels,
+    `${String(labels)} turn label(s) but only ${String(announced)} turn_started — a turn that ` +
+      'does not announce itself is one the window draws as idle while it spends',
+  );
+});
+
+test('the implement turn announces itself as the implementer implementing', () => {
+  // Named rather than merely counted, because this is the one that was missing
+  // and a count alone would pass if some other site were duplicated.
+  let at = path.dirname(fileURLToPath(import.meta.url));
+  while (!existsSync(path.join(at, 'src', 'orchestrator.ts')) && path.dirname(at) !== at) {
+    at = path.dirname(at);
+  }
+  const source = readFileSync(path.join(at, 'src', 'orchestrator.ts'), 'utf8');
+  assert.match(source, /role: 'implementer', kind: 'implement', round: state\.reviewRound/);
 });

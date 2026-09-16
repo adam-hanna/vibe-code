@@ -104,6 +104,11 @@ test('a clean pass is legible as a sequence of ids, with no sentence read', asyn
       'plan_approved', //    and what the gate made of them
       'artifact_written', // PLAN.md, written once the plan is approved
       'phase_started', //  implementing
+      // The implementer announcing itself (#223). It did NOT, and the absence was
+      // pinned here as deliberate - see the case below for the evidence that
+      // reversed it. Without this the window drew an idle run for the whole of
+      // the most expensive turn in the product.
+      'turn_started', //   the implementer
       'claude_turn',
       // What the implement turn left in the tree, once, as the turn ended
       // (#136). The sampler's own `work_progress` readings would appear here
@@ -185,11 +190,11 @@ test('turn_started names the role, so a host need not infer it from the label', 
 
   assert.deepEqual(
     seen.filter((n) => n.id === 'turn_started').map((n) => n.data?.['role']),
-    ['planner', 'critic', 'reviewer'],
+    ['planner', 'critic', 'implementer', 'reviewer'],
   );
   assert.deepEqual(
     seen.filter((n) => n.id === 'turn_started').map((n) => n.data?.['kind']),
-    ['plan', 'critique', 'review'],
+    ['plan', 'critique', 'implement', 'review'],
   );
 });
 
@@ -213,24 +218,55 @@ test('the round a card carries is the one that names the artifact behind it', as
   );
 });
 
-test('the implementing phase is announced, and its turn is the phase', async () => {
-  // Worth pinning rather than leaving as a surprise. Every other phase contains
-  // one or more turns that announce themselves; the implementing phase contains
-  // exactly one implementer turn and has never had a `log.step` of its own.
+test('the implementing phase is announced, and so is its turn', async () => {
+  // **Case 2, and the reasoning this reverses is worth keeping.** It used to
+  // assert the opposite — that the implement turn has no `turn_started` and the
+  // phase line stands in for it — on the grounds that *"adding a step line purely
+  // to make the vocabulary symmetrical would change what the terminal prints,
+  // and the CLI's output is a contract; symmetry is not worth that."*
   //
-  // So `phase_started` IS the implement turn's announcement. Adding a step line
-  // purely to make the vocabulary symmetrical would change what the terminal
-  // prints, and the CLI's output is a contract - symmetry is not worth that.
+  // That is sound about symmetry and was never about symmetry. `turn_started` is
+  // the only id `reduce` builds a `Turn` from, and `run.running` is what the
+  // cockpit draws a live card off — so the window showed `IDLE — no turn is
+  // open` for the whole of the implement turn, the CODE group had no row, and
+  // **every heartbeat was discarded**, because a beat with no turn open cannot be
+  // attributed and the reducer drops it.
+  //
+  // The evidence is a run of 2026-09-16. The terminal printed `implement: 14m30s
+  // · 63 tool uses · Write …TodoToggle… · 13.7M tok · ctx 25%` every thirty
+  // seconds; the window showed an idle run; the turn was stopped by hand by
+  // somebody who reasonably concluded it had hung. 14.2M tokens and 50 files of
+  // finished work, thrown away because the product said nothing was happening.
+  // That is "one channel, two renderers" breaking where it costs the most, and
+  // it clears the bar AGENTS.md sets for reopening a settled decision: new
+  // evidence, not a fresh opinion.
+  //
+  // The cost the old note named is real and is accepted rather than dodged: the
+  // terminal gains one line per run. It is not a host-only narration, because
+  // `model_said`'s rule says a transcript that disagreed with the window would
+  // break the same guarantee in the same place.
   const state = cleanRun('vibe-ident-impl-');
   const seen = await pass(state);
 
+  // Unchanged, and still worth pinning: one phase line, not one per turn.
   const implementing = seen.filter(
     (n) => n.id === 'phase_started' && n.data?.['phase'] === 'implementing',
   );
   assert.equal(implementing.length, 1);
-  assert.equal(
-    seen.some((n) => n.id === 'turn_started' && n.data?.['role'] === 'implementer'),
-    false,
+
+  const turns = seen.filter(
+    (n) => n.id === 'turn_started' && n.data?.['role'] === 'implementer',
+  );
+  assert.equal(turns.length, 1, 'the implementing phase holds exactly one implementer turn');
+  assert.equal(turns[0]?.data?.['kind'], 'implement');
+  // The round the CODE group re-opens at, the same field the three fix kinds
+  // carry — a clean pass has had no review round, so it is 0.
+  assert.equal(turns[0]?.data?.['round'], 0);
+  // And it is announced AFTER its phase, so the turn lands inside the group
+  // rather than opening one of its own.
+  assert.ok(
+    seen.indexOf(implementing[0]!) < seen.indexOf(turns[0]!),
+    'the phase opens the group and the turn goes in it',
   );
 });
 

@@ -659,6 +659,30 @@ async function runPhases(
       id: 'phase_started',
       data: { phase: 'implementing', baseSha: state.baseSha },
     });
+    // **The turn the window could not see** (#223). Every other turn in the loop
+    // announces itself - plan, revise, critique, answer, review, and all three
+    // fix kinds - and the implement turn, which `charge.ts` calls "the single
+    // most expensive step in a run", did not. `reduce` builds a `Turn` and sets
+    // `run.running` from this id and from nothing else, so without it the
+    // cockpit drew `IDLE - no turn is open` for the whole of it, the CODE group
+    // had no row, and - worst - **every heartbeat was dropped**, because a beat
+    // with no turn open cannot be attributed and is discarded by the reducer.
+    //
+    // Measured on a run of 2026-09-16: the terminal printed `implement: 14m30s ·
+    // 63 tool uses · Write …TodoToggle… · 13.7M tok · ctx 25%` every thirty
+    // seconds while the window showed an idle run, so the turn was stopped by
+    // somebody who reasonably concluded it had hung. 14.2M tokens and 50 files
+    // of finished work, killed because the product said nothing was happening.
+    // That is "one channel, two renderers" breaking in the one place it costs
+    // the most.
+    //
+    // `round` is the review round for the reason the fix kinds use it: the CODE
+    // group re-opens on every fix, and the round is what tells one pass through
+    // it from the next.
+    log.step(`${holderLabel('implementer', roles)} is implementing the plan`, {
+      id: 'turn_started',
+      data: { role: 'implementer', kind: 'implement', round: state.reviewRound },
+    });
     const impl = await writeTurn(
       state,
       cfg,

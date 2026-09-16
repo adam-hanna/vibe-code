@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import cockpit from './Cockpit.tsx?raw';
 import replayHook from './useReplay.ts?raw';
+import model from './model.ts?raw';
 import settings from './Settings.tsx?raw';
 import pilot from '../pilot/PilotPane.tsx?raw';
 import { chatKey, chatMove } from '../pilot/saved';
@@ -38,16 +39,21 @@ describe('an opened run is drawn by the column that drew it live', () => {
   test('a replayed run is folded through the SAME reducer', () => {
     // No second builder, so nothing can disagree with the first. This is what
     // makes "as if I had run it myself" true by construction rather than by
-    // resemblance.
-    expect(replayHook).toMatch(/reduce\(built, \{ type: 'narration', \.\.\.step\.narration \}, step\.at\)/);
-    expect(replayHook).toMatch(/import \{ emptyRun, reduce \} from '\.\/model'/);
+    // resemblance. The fold moved into `model.ts` when the resume began seeding
+    // its column from the same steps: that is the only file in the app with
+    // logic, and one fold serving both callers is what stops "what did this run
+    // look like" having two answers.
+    expect(model).toMatch(/reduce\(built, \{ type: 'narration', \.\.\.step\.narration \}, step\.at\)/);
+    expect(replayHook).toMatch(/foldReplay\(got\.steps\)/);
   });
 
   test('each step is folded at its own time, never at arrival', () => {
     // A replay stamped with `Date.now()` would date a week-old run to this
     // afternoon and give every turn a duration of nothing.
-    expect(replayHook).not.toMatch(/reduce\([^)]*Date\.now\(\)\)/);
-    expect(replayHook).toMatch(/step\.at/);
+    expect(model).toMatch(/foldReplay/);
+    const fold = model.slice(model.indexOf('export function foldReplay'));
+    expect(fold).not.toMatch(/Date\.now\(\)/);
+    expect(fold).toMatch(/step\.at/);
   });
 
   test('the ending is applied as the frame it is', () => {
@@ -241,5 +247,50 @@ describe('a turn that has gone quiet has a ceiling, and it is on the screen', ()
     // The same split every other row in this screen draws: what is in force
     // versus what the project actually chose.
     expect(settings).toMatch(/claimedProgress\['maxQuietMs'\] === undefined && <MetaChip>/);
+  });
+});
+
+describe('a resumed run keeps the column it already had', () => {
+  test('the column is seeded from the run’s own narration before the loop adds to it', () => {
+    // **The report:** *"the previous plan, critique, code, etc rounds don't show
+    // up on the right bar. I want it to look as I just left it when I stopped
+    // the run."* `reduce` builds a `Run` from the frames THIS process narrates,
+    // and a resume narrates only what happens from the resume onwards — so a run
+    // three plan rounds deep came back showing one.
+    expect(cockpit).toMatch(/dispatch\(\{ type: 'seed', run: foldReplay\(got\.steps\) \}\)/);
+  });
+
+  test('the seed lands before the invoke, so nothing can arrive out of order', () => {
+    // The ordering is what makes this safe rather than racy: no live frame
+    // exists yet, so the seed can never overwrite something the loop has said.
+    const body = cockpit.slice(cockpit.indexOf('const resume = useCallback'));
+    const seeded = body.indexOf("dispatch({ type: 'seed'");
+    const sent = body.indexOf('launch(argv);', seeded);
+    expect(seeded).toBeGreaterThan(-1);
+    expect(sent).toBeGreaterThan(seeded);
+  });
+
+  test('a resume does NOT seed the ending, because the run has not ended', () => {
+    // `useReplay` applies the `result` because a run you opened has ended and
+    // must say so. Seeding `completed` here would draw a halt banner over a run
+    // that is starting.
+    const body = cockpit.slice(cockpit.indexOf('const resume = useCallback'));
+    const upToLaunch = body.slice(0, body.indexOf('[launch],'));
+    expect(upToLaunch).not.toMatch(/type: 'result'/);
+  });
+
+  test('a replay that fails still resumes the run', () => {
+    // Losing the history must never cost somebody the resume — an empty column
+    // is what every resume had until now, not a new failure worth a banner.
+    const body = cockpit.slice(cockpit.indexOf('const resume = useCallback'));
+    expect(body).toMatch(/\.catch\(\(\) => \{/);
+    expect(body).toMatch(/\.finally\(\(\) => \{[\s\S]*?launch\(argv\);/);
+  });
+
+  test('one fold serves the opened run and the resumed one', () => {
+    // Two copies of that loop would be two answers to "what did this run look
+    // like", which is the mistake the replay was built to avoid.
+    expect(replayHook).toMatch(/foldReplay\(got\.steps\)/);
+    expect(cockpit).toMatch(/foldReplay\(got\.steps\)/);
   });
 });

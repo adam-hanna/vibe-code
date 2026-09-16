@@ -202,17 +202,42 @@ interface ChargedTurn {
   label: string;
   type: 'claude_turn' | 'codex_turn';
   data: Record<string, unknown>;
+  /** Whether the turn was charged after FAILING - stopped, timed out, or threw. */
+  failed: boolean;
 }
 
 function chargedTurns(state: RunState): ChargedTurn[] {
   const out: ChargedTurn[] = [];
   for (const event of state.events) {
-    if (event.type !== 'claude_turn' && event.type !== 'codex_turn') continue;
+    // **`turn_failed` counts too, and leaving it out was a hole** (#223). A turn
+    // that was stopped, timed out or threw is charged through `chargeFailure`
+    // under this type rather than as `claude_turn`, so a replay that took only
+    // the successful ones drew a run *missing the turn it stopped on* - which is
+    // the opposite of *"I want it to look as I just left it when I stopped the
+    // run."* The killed implement turn of 2026-09-16 is the case: 14.2M tokens
+    // and fourteen minutes of work, absent from its own replay.
+    const failed = event.type === 'turn_failed';
+    if (event.type !== 'claude_turn' && event.type !== 'codex_turn' && !failed) continue;
     const at = ms(typeof event['at'] === 'string' ? event['at'] : null);
     const label = event['label'];
     if (at === null || typeof label !== 'string') continue;
+    // A failed turn records which agent ran it; a charged one is identified by
+    // the event type itself. A provider this build does not know is skipped
+    // rather than attributed to the wrong agent, which would put a Codex turn's
+    // spend on Claude's side of the ledger.
+    const provider = event['provider'];
+    const type: 'claude_turn' | 'codex_turn' | null = failed
+      ? provider === 'claude'
+        ? 'claude_turn'
+        : provider === 'codex'
+          ? 'codex_turn'
+          : null
+      : event.type === 'claude_turn'
+        ? 'claude_turn'
+        : 'codex_turn';
+    if (type === null) continue;
     const { at: _at, type: _type, ...rest } = event;
-    out.push({ at, label, type: event.type, data: rest });
+    out.push({ at, label, type, data: rest, failed });
   }
   // By time rather than by position. A resumed run appends to `events`, so
   // order is already chronological — sorting says so rather than assuming it.
@@ -371,7 +396,10 @@ export function replayRun(state: RunState, sources: ReplaySources): Replay {
     // Emitted whatever the label was. A turn this build cannot place in the
     // column still spent what it spent, and dropping the charge would make the
     // replayed total disagree with the run's own record.
-    push(turn.at, say(turn.type, `${turn.label} charged`, turn.data));
+    push(
+      turn.at,
+      say(turn.type, `${turn.label} ${turn.failed ? 'stopped' : 'charged'}`, turn.data),
+    );
 
     // The judge's verdict, read from the round's own artifact rather than from
     // a census — a census is narration with no event, so the archive has the
