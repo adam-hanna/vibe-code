@@ -492,18 +492,28 @@ export function Footer({
           and four equal-weight buttons make them read all four every time.
 
           The action is offered only when the run said which run it is (#207) and
-          only for an ending a resume can actually pick up - so an unknown exit
-          code gets the sentence and no button, rather than a control that might
-          do nothing.
+          where it is (#223), and only for an ending a resume can actually pick
+          up - so an unknown exit code gets the sentence and no button, rather
+          than a control that might do nothing.
+
+          **`repo`, never `dir`, and that distinction cost a resume.** The two
+          are both on `run_started` and they are not interchangeable:
+          `identity.dir` is the run's OWN directory - `<repo>/.vibe/runs/<id>` -
+          and `identity.repo` is the repository. This passed `dir`, so the resume
+          ran with `-C <run dir>` and the core looked for the run *inside
+          itself*, answering `No run "..." under .vibe\runs` about a run that was
+          sitting there intact. `repo` was added to the frame for exactly this
+          reason and this call site was never moved onto it.
         */}
-        {RESUMABLE.has(exit) && run.identity !== null && (
+        {RESUMABLE.has(exit) && run.identity?.repo != null && (
           <>
             <div className="v-footer__actions">
               <Button
                 level="primary"
                 disabled={busy}
                 onClick={() => {
-                  if (run.identity !== null) onResume(run.identity.runId, run.identity.dir);
+                  const at = run.identity;
+                  if (at?.repo != null) onResume(at.runId, at.repo);
                 }}
               >
                 ▶ resume this run
@@ -524,9 +534,11 @@ export function Footer({
                   className="v-footer__demoted"
                   disabled={busy}
                   onClick={() => {
-                    if (run.identity !== null) {
-                      onResume(run.identity.runId, run.identity.dir, raise.raise);
-                    }
+                    // The repository, for the reason above: `dir` is the run's
+                    // own directory, and resuming into it looks for the run
+                    // inside itself.
+                    const at = run.identity;
+                    if (at?.repo != null) onResume(at.runId, at.repo, raise.raise);
                   }}
                 >
                   {raise.label}
@@ -543,10 +555,10 @@ export function Footer({
             )}
           </>
         )}
-        {RESUMABLE.has(exit) && run.identity === null && (
+        {RESUMABLE.has(exit) && run.identity?.repo == null && (
           <div className="v-footer__note">
-            This run is resumable, but the loop never said which run it is — so there is nothing to
-            point a resume at from here. `vibe list` has the id.
+            This run is resumable, but the loop never said which run it is or which repository it
+            is in — so there is nothing to point a resume at from here. `vibe list` has the id.
           </div>
         )}
       </div>

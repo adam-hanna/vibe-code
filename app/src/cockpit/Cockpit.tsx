@@ -632,10 +632,11 @@ export function Cockpit() {
         return;
       }
       setBusy(true);
+      let seed: Run | null = null;
       void host
         .replay(dir, runId)
         .then((got) => {
-          dispatch({ type: 'seed', run: foldReplay(got.steps) });
+          seed = foldReplay(got.steps);
         })
         .catch(() => {
           // Deliberately silent. The run is about to start either way, and a
@@ -644,7 +645,18 @@ export function Cockpit() {
         })
         .finally(() => {
           setBusy(false);
+          // **`launch` first, and the order is the whole of it.** `launch` opens
+          // with `dispatch({ type: 'reset' })`, so a seed dispatched before it
+          // is thrown away by the very next action - which is what happened on
+          // the first cut of this, and it is invisible because an empty column
+          // is exactly what the bug looked like anyway. Both dispatches land in
+          // one batch and the reducer applies them in order: reset, then seed.
+          //
+          // Still before any frame can arrive: `launch` ends at `void send(...)`
+          // and the wire delivers asynchronously, so nothing the loop says can
+          // be overwritten by this.
           launch(argv);
+          if (seed !== null) dispatch({ type: 'seed', run: seed });
         });
     },
     [launch],

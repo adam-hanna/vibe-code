@@ -568,6 +568,20 @@ they are waiting on. Four things in it are worth carrying:
   in the same place. `round` is `state.reviewRound`, the field the three fix
   kinds already carry, because the CODE group re-opens on every fix and the round
   is what tells one pass through it from the next.
+- **A resume is pointed at the repository, and `dir` is not it.** `run_started`
+  carries both and they are not interchangeable: `identity.dir` is the run's
+  **own** directory — `<repo>/.vibe/runs/<id>` — and `identity.repo` is the
+  repository. The footer's resume passed `dir`, so the command ran with
+  `-C <run dir>` and the core looked for the run *inside itself*, answering
+  `No run "20260915-201723-…" under .vibe\runs` about a run sitting there
+  intact. `repo` was added to that frame for exactly this reason (#223) and this
+  call site was never moved onto it; `1b`'s resume passes `repoDir` and was
+  always right, which is why this survived — the footer's button is the one
+  nobody had pressed.
+
+  A run whose `repo` is null — an older core narrated it — is **told** rather
+  than resumed into a guess, which is the existing "the loop never said which run
+  it is" sentence widened by four words rather than a second mechanism.
 - **A resumed run keeps the column it already had, and a stopped turn is part of
   it.** Two halves of one report: *"the previous plan, critique, code, etc rounds
   don't show up on the right bar. I want it to look as I just left it when I

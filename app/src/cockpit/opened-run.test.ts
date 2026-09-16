@@ -3,6 +3,7 @@ import cockpit from './Cockpit.tsx?raw';
 import replayHook from './useReplay.ts?raw';
 import model from './model.ts?raw';
 import settings from './Settings.tsx?raw';
+import footer from './Footer.tsx?raw';
 import pilot from '../pilot/PilotPane.tsx?raw';
 import { chatKey, chatMove } from '../pilot/saved';
 import { recorded } from './format';
@@ -251,23 +252,32 @@ describe('a turn that has gone quiet has a ceiling, and it is on the screen', ()
 });
 
 describe('a resumed run keeps the column it already had', () => {
-  test('the column is seeded from the run’s own narration before the loop adds to it', () => {
+  test('the column is seeded from the run’s own narration', () => {
     // **The report:** *"the previous plan, critique, code, etc rounds don't show
     // up on the right bar. I want it to look as I just left it when I stopped
     // the run."* `reduce` builds a `Run` from the frames THIS process narrates,
     // and a resume narrates only what happens from the resume onwards — so a run
     // three plan rounds deep came back showing one.
-    expect(cockpit).toMatch(/dispatch\(\{ type: 'seed', run: foldReplay\(got\.steps\) \}\)/);
+    expect(cockpit).toMatch(/seed = foldReplay\(got\.steps\)/);
+    expect(cockpit).toMatch(/dispatch\(\{ type: 'seed', run: seed \}\)/);
   });
 
-  test('the seed lands before the invoke, so nothing can arrive out of order', () => {
-    // The ordering is what makes this safe rather than racy: no live frame
-    // exists yet, so the seed can never overwrite something the loop has said.
+  test('the seed lands AFTER launch, because launch resets the column', () => {
+    // **I had this backwards on the first cut, and it was invisible.** `launch`
+    // opens with `dispatch({ type: 'reset' })`, so a seed dispatched *before* it
+    // was thrown away by the very next action — and the symptom of a discarded
+    // seed is an empty column, which is exactly what the bug looked like anyway.
+    //
+    // Both dispatches land in one batch and the reducer applies them in order:
+    // reset, then seed. And it is still before any frame can arrive, because
+    // `launch` ends at `void send(...)` and the wire delivers asynchronously —
+    // so the seed can neither be erased by the reset nor overwrite something the
+    // loop has already said.
     const body = cockpit.slice(cockpit.indexOf('const resume = useCallback'));
+    const launched = body.indexOf('launch(argv);');
     const seeded = body.indexOf("dispatch({ type: 'seed'");
-    const sent = body.indexOf('launch(argv);', seeded);
-    expect(seeded).toBeGreaterThan(-1);
-    expect(sent).toBeGreaterThan(seeded);
+    expect(launched).toBeGreaterThan(-1);
+    expect(seeded).toBeGreaterThan(launched);
   });
 
   test('a resume does NOT seed the ending, because the run has not ended', () => {
@@ -292,5 +302,36 @@ describe('a resumed run keeps the column it already had', () => {
     // like", which is the mistake the replay was built to avoid.
     expect(replayHook).toMatch(/foldReplay\(got\.steps\)/);
     expect(cockpit).toMatch(/foldReplay\(got\.steps\)/);
+  });
+});
+
+describe('a resume points at the repository, not at the run', () => {
+  test('the footer resumes with identity.repo', () => {
+    // **The two are both on `run_started` and are not interchangeable.**
+    // `identity.dir` is the run's OWN directory — `<repo>/.vibe/runs/<id>` — and
+    // `identity.repo` is the repository. Passing `dir` ran the resume with
+    // `-C <run dir>`, so the core looked for the run *inside itself* and
+    // answered `No run "..." under .vibe\runs` about a run sitting there intact.
+    // `repo` was added to the frame for exactly this and this call site was
+    // never moved onto it.
+    expect(footer).toMatch(/onResume\(at\.runId, at\.repo\)/);
+    expect(footer).toMatch(/onResume\(at\.runId, at\.repo, raise\.raise\)/);
+    expect(footer).not.toMatch(/onResume\(run\.identity\.runId, run\.identity\.dir/);
+  });
+
+  test('a run whose repository is unknown is told, not resumed into a guess', () => {
+    // The honest half. `repo` arrived later than the frame did, so a run
+    // narrated by an older core has none — and the window cannot invent one.
+    expect(footer).toMatch(/RESUMABLE\.has\(exit\) && run\.identity\?\.repo == null/);
+    expect(footer).toMatch(/RESUMABLE\.has\(exit\) && run\.identity\?\.repo != null/);
+  });
+
+  test('the seed is dispatched AFTER launch, because launch resets', () => {
+    // `launch` opens with `dispatch({ type: 'reset' })`, so a seed dispatched
+    // before it is thrown away by the very next action — and invisibly, because
+    // an empty column is exactly what the bug looked like anyway.
+    const body = cockpit.slice(cockpit.indexOf('const resume = useCallback'));
+    const launched = body.indexOf('launch(argv);\n          if (seed !== null)');
+    expect(launched).toBeGreaterThan(-1);
   });
 });
