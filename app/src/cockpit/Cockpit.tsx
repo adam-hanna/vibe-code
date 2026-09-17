@@ -1328,6 +1328,11 @@ export function Cockpit() {
               // it — and null, before any run, is the conversation that will
               // propose one.
               runId={shownRunId}
+              // Pointed at rather than started here. `viewing` is set by
+              // clicking a row in the archive, and a click is a read — so the
+              // conversation must not travel with it, which is what adoption
+              // was doing to every run somebody browsed to (#223).
+              opened={viewing !== null}
               commands={commands}
               onEffect={onEffect}
               onPending={setProposals}

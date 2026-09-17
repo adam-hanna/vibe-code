@@ -136,6 +136,24 @@ export function chatMove(args: {
   to: string;
   /** Whether the run id the window is now pointed at is a run at all. */
   intoRun: boolean;
+  /**
+   * Whether the window was **pointed** at this run rather than starting it
+   * (#223).
+   *
+   * **The clause that was missing, and adoption without it swallowed the
+   * archive.** `intoRun && holding && !stored` is true of two completely
+   * different acts: a run this window just launched, which the conversation on
+   * screen proposed — and a past run somebody **clicked on** that happens to
+   * have no conversation of its own. The second took the chat with it, so
+   * browsing the archive left the same exchange on screen no matter which run
+   * was open, and worse, wrote it into that run's key on the way past.
+   * Reported as *"changing runs doesn't change the pilot chat"*.
+   *
+   * The two are indistinguishable from the arguments above, which is why this
+   * one is passed: only the cockpit knows whether `viewing` moved. Adoption is
+   * for a run that was *started* here; opening one is a read.
+   */
+  opened: boolean;
   /** Whether anything is stored under `to`. */
   stored: boolean;
   /** Whether what is on screen is worth carrying. */
@@ -145,6 +163,6 @@ export function chatMove(args: {
   // Never on the first load: `from` is null because this window has shown
   // nothing yet, and there is no exchange to have proposed anything.
   if (args.from === null) return 'restore';
-  if (args.intoRun && args.holding && !args.stored) return 'adopt';
+  if (args.intoRun && !args.opened && args.holding && !args.stored) return 'adopt';
   return 'restore';
 }

@@ -624,6 +624,17 @@ export interface PilotPaneProps {
    */
   runId: string | null;
   /**
+   * Whether `runId` is a run the window was **pointed at** rather than one it
+   * started (#223).
+   *
+   * Only `Cockpit` can answer it — `viewing` is where the window is pointed and
+   * this pane cannot see it — and `chatMove` needs it to tell *adopting* from
+   * *browsing*. Without it, clicking a past run that had no conversation
+   * carried the conversation on screen into it, so the chat never changed and
+   * the exchange was written into the wrong run's key on the way past.
+   */
+  opened: boolean;
+  /**
    * Commands this window has run, so `read_command` has something to read.
    *
    * A prop rather than this pane's own state, for the reason `statuses` is one:
@@ -668,6 +679,7 @@ export function PilotPane({
   launched,
   dir,
   runId,
+  opened,
   commands,
   onEffect,
   onPending,
@@ -714,6 +726,10 @@ export function PilotPane({
       from: before,
       to: key,
       intoRun: runId !== null,
+      // Pointed at, rather than started here. Adoption is for the run this
+      // conversation PROPOSED; opening one from the sidebar is a read, and it
+      // used to carry the chat along with it (#223).
+      opened,
       stored: stored !== null,
       holding: worthSaving(held.current),
     });
@@ -746,7 +762,7 @@ export function PilotPane({
     }
 
     dispatch({ type: 'restore', conversation: readChat(stored) });
-  }, [dir, runId]);
+  }, [dir, runId, opened]);
 
   // Save on every settled change. `live` is dropped by `writable`, so a turn in
   // flight is not stored half-streamed and a window killed mid-turn leaves a
@@ -1117,8 +1133,17 @@ export function PilotPane({
   }, [owesReply, conversation.messages, start, verdict.allowed]);
 
   /**
-   * Why nothing can be sent, or null. Drawn in the composer, because a disabled
-   * field with no reason beside it is the same defect in every product.
+   * Why nothing can be **sent**, or null. Drawn beside the composer, because a
+   * disabled control with no reason beside it is the same defect in every
+   * product — and this one had it three times over.
+   *
+   * **It used to answer for two of the five reasons and disable the textarea
+   * for all of them**, so a pane holding an undecided proposal, or one that had
+   * spent its daily ceiling, was a box that could not be clicked into, under a
+   * placeholder cheerfully inviting you to say what you wanted built. Reported
+   * as *"my pilot chat won't allow me to click inside of it and enter text"* —
+   * which is exactly what it looks like from outside, since a disabled
+   * `textarea` cannot even take focus.
    *
    * The **repository** case is the subscription backend's and only its: that
    * turn is a child process that has to run somewhere, and `--restricted` makes
@@ -1130,19 +1155,25 @@ export function PilotPane({
       ? `no ${keys.PROVIDER_NAME[provider]} key — enter one under Keys`
       : !needsKey(provider) && dir.trim() === ''
         ? 'choose a repository first — this backend runs in one and can read only that one'
-        : null;
+        : !verdict.allowed
+          ? // The ceiling is the pilot's own and is off unless somebody set one,
+            // so the sentence names where it is set. `why` is the ledger's own
+            // wording rather than a second one written here.
+            `${verdict.why ?? "the pilot's daily ceiling is spent"} — raise it under Settings, or wait for tomorrow`
+          : proposals.length > 0
+            ? // The one that is not a fault. A proposal appends no tool result,
+              // so the conversation is unsendable until somebody decides — which
+              // is what makes propose-only structural rather than promised
+              // (#144). Naming it turns a dead box into an instruction.
+              `answer the ${proposals.length === 1 ? 'proposal' : `${String(proposals.length)} proposals`} above first — run it or decline, and the pilot carries on`
+            : owed.length > 0
+              ? // The frame or two between a turn ending and the settle effect
+                // running. It clears itself, so this says so rather than
+                // reading as a state somebody has to get out of.
+                'running what the pilot asked for…'
+              : null;
 
-  const ready =
-    // The subscription backend needs no key, which is the whole of #193: the
-    // pane does something useful with nothing configured. What it does need is a
-    // directory to run in, which is the line above.
-    blocked === null &&
-    owed.length === 0 &&
-    // The pilot's own ceiling, which is off unless somebody set one. It gates
-    // the tool loop as well as the composer: a chain of tool calls is exactly
-    // the runaway this exists to stop, and stopping only the human's messages
-    // would guard the half that is already attended.
-    verdict.allowed;
+  const ready = blocked === null;
 
   useEffect(() => {
     onPending?.(proposals.length);
@@ -1280,7 +1311,11 @@ export function PilotPane({
 
   const submit = useCallback(() => {
     const content = entry.trim();
-    if (content === '' || live !== null) return;
+    // `ready` is checked HERE as well as on the button, because the field is no
+    // longer disabled: Enter reaches this with a proposal outstanding, and a
+    // send that went anyway would put a message on a conversation both vendors
+    // reject for holding an unanswered tool call.
+    if (content === '' || live !== null || !ready) return;
     setEntry('');
     // A person spoke, so the pilot's rope is new again. The ceiling exists to
     // stop it spending unattended, and it is not unattended now.
@@ -1290,7 +1325,7 @@ export function PilotPane({
     // this is the only place that knows both, and sent in full: neither vendor
     // remembers a previous request.
     start([...conversation.messages, { role: 'user' as const, content }], content);
-  }, [conversation.messages, entry, live, start]);
+  }, [conversation.messages, entry, live, ready, start]);
 
   const onDecide = useCallback(
     (id: string, accepted: boolean, note: string) => {
@@ -1500,15 +1535,24 @@ export function PilotPane({
           thing your eye lands on last before typing. */}
       {kickoff}
 
+      {/* **Why send is off, said out loud.** A control that cannot be used and
+          does not say why is the same defect everywhere, and here it was worse
+          than usual: the textarea was disabled too, so the answer to "why can I
+          not type" was not reachable by clicking on anything. */}
+      {blocked !== null && <div className="v-pilot__blocked">{blocked}</div>}
+
       <div className="v-pilot__composer">
         <textarea
           className="v-pilot__entry"
           rows={2}
-          placeholder={
-            blocked ?? 'say what you want built — enter sends, shift+enter is a new line'
-          }
+          placeholder="say what you want built — enter sends, shift+enter is a new line"
           value={entry}
-          disabled={!ready}
+          // **Never disabled.** Composing and sending are two acts, and only the
+          // second of them can be blocked: a proposal waiting to be answered, a
+          // spent ceiling and a missing key are all reasons the message cannot
+          // GO, not reasons it cannot be written. Disabling the field threw away
+          // whatever was half-typed the moment a proposal arrived, and left a
+          // box that could not take focus with no explanation in reach (#223).
           onChange={(e) => setEntry(e.target.value)}
           onKeyDown={(e) => {
             if (e.key !== 'Enter') return;

@@ -498,6 +498,65 @@ they are waiting on. Four things in it are worth carrying:
   before any run and reads as a failed load beside one — a run started from the
   terminal, or by a build older than `saved.ts`, never had a conversation here,
   and that is a fact about this window's memory rather than about the run.
+
+  **And adoption is for a run this window *started*, never one it opened**
+  (#223). The rule above is right and its condition was one clause short:
+  `intoRun && holding && !stored` is true of two completely different acts —
+  a run this window just launched, which the conversation on screen proposed,
+  and a past run somebody **clicked on** that happens to have no conversation of
+  its own. The second took the chat with it, so browsing the archive left the
+  same exchange on screen whichever run was open, and wrote it into that run's
+  key on the way past: **a read that silently created a record.** Reported as
+  *"changing runs doesn't change the pilot chat"*, which is the symptom of every
+  destination inheriting the same conversation.
+
+  The two are indistinguishable from `chatMove`'s arguments, which is why it is
+  told: only the cockpit knows whether `viewing` moved, and `opened` is that
+  fact. The clause is a **narrowing** of adoption rather than a new mechanism —
+  every case the widening was for still adopts, and `opened-run.test.ts` pins
+  the two that differ only in this flag, because a pair that reads identically
+  from inside the function is exactly what a future edit would collapse.
+- **Your half of the pilot chat is mirrored, and only your half** (#223). The
+  first answer to *"it's too hard to tell which is which"* was a `you` chip and
+  a tinted ground, and `pilot.css` recorded at the time that a mirrored layout
+  was **deliberately** not wanted: the pilot's replies carry chips, prices and
+  proposal cards, so putting the one un-annotated thing in the conversation on
+  its own axis would be decoration. That reasoning is right about the *reply* and
+  was wrong about the reader — a chip and a ground are read once you have found
+  the block, and a long log needs something findable while scrolling past it. The
+  second report settled it: *"maybe right justify my input and left justify the
+  pilot's?"*
+
+  The objection is answered rather than overruled, and the **asymmetry is the
+  answer**: your half is bounded at 80% and pulled right, and the reply keeps the
+  whole column, because a proposal card holding an argv has to stay readable and
+  squeezing it to make a diagram of the conversation would trade the thing that
+  matters for the thing that is pretty. The text inside stays left-aligned: a
+  right-aligned paragraph has a ragged left edge, and the left edge is the one
+  the eye returns to on every line.
+- **The composer is always typeable, and every reason it will not *send* has a
+  sentence** (#223). `ready` folded five conditions together, `blocked`
+  explained two of them, and the `textarea` was disabled for all five — so a
+  pane holding an undecided proposal, or one that had spent its daily ceiling,
+  was a box that could not be clicked into, under a placeholder cheerfully
+  inviting you to say what you wanted built. Reported as *"my pilot chat won't
+  allow me to click inside of it and enter text"*, which is precisely what a
+  disabled field looks like from outside: it cannot take focus, so there is
+  nothing to click and no tooltip to read.
+
+  Two halves, and the first is the one worth copying. **Composing and sending
+  are two acts and only the second can be blocked** — a proposal waiting to be
+  answered is a reason a message cannot go, not a reason it cannot be written,
+  and disabling the field also threw away whatever was half-typed the moment a
+  proposal arrived. So the field is never disabled, `submit` grew the `ready`
+  check the button already had (Enter is the second road to it), and the send
+  button is what refuses. And `ready` is now literally `blocked === null`, so a
+  state that stops a send and a state with no sentence for it cannot come apart
+  — which is how three of the five came to have no words in the first place.
+
+  The sentence is drawn on its own line rather than in the placeholder, because
+  a placeholder disappears the moment somebody types and this is the one thing
+  they need while looking at a button that will not work.
 - **A model is picked from a list this build ships, and typed past it.** This
   reverses the decision one report above it, and the reversal is narrow rather
   than a change of mind about the rule. Free text was argued from the core's own

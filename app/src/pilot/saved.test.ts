@@ -131,8 +131,17 @@ describe('a run adopts the conversation that proposed it', () => {
   test('the loader keys on the run, never on the conversation', () => {
     // A conversation in those deps would re-run the loader on every reply, and
     // a loader that runs mid-conversation replaces it with itself-from-disk.
+    //
+    // **Asserted as the absence rather than as an exact list** (#223). It
+    // pinned `[dir, runId]` literally, and the list grew a third entry the
+    // moment `chatMove` needed to know whether the run was OPENED or started
+    // here - a fact about which run the window is pointed at, which is exactly
+    // what this loader is allowed to key on. Pinning the spelling failed for a
+    // change the claim permits, so the claim is now what is checked.
     const from = pilotPane.indexOf('const key = chatKey(dir, runId);');
-    const deps = pilotPane.slice(from, pilotPane.indexOf('}, [', from) + 20);
-    expect(deps).toMatch(/\}, \[dir, runId\]\)/);
+    const deps = pilotPane.slice(from, pilotPane.indexOf('}, [', from) + 40);
+    expect(deps).toMatch(/\}, \[dir, runId[^\]]*\]\)/);
+    expect(deps).not.toMatch(/\}, \[[^\]]*conversation/);
+    expect(deps).not.toMatch(/\}, \[[^\]]*held/);
   });
 });

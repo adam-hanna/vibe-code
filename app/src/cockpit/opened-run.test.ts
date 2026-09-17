@@ -123,11 +123,36 @@ describe('a conversation belongs to the run it is about', () => {
     // press the proposal — the exchange stayed under A's key and the run it
     // proposed started life with nothing. Opening that run then showed an empty
     // pane, which is the report one step removed from its cause.
-    expect(chatMove({ from: A, to: B, intoRun: true, stored: false, holding: true })).toBe('adopt');
+    expect(chatMove({ from: A, to: B, intoRun: true, opened: false, stored: false, holding: true })).toBe('adopt');
+  });
+
+
+  test('OPENING a run never adopts, however empty that run is', () => {
+    // **The defect the `opened` clause is for** (#223). Every other argument
+    // here is identical to the adopt case above - a run, nothing stored, a
+    // conversation on screen - because from `chatMove`'s side the two acts are
+    // indistinguishable without being told. One is a run this window launched,
+    // which the conversation proposed; the other is a row somebody clicked.
+    //
+    // Adoption on the second one meant browsing the archive left the same chat
+    // on screen whichever run was open, AND wrote it into that run's key on the
+    // way past - so a read silently created a record. Reported as *"changing
+    // runs doesn't change the pilot chat"*.
+    expect(chatMove({ from: A, to: B, intoRun: true, opened: true, stored: false, holding: true })).toBe(
+      'restore',
+    );
+  });
+
+  test('opening a run that HAS a conversation restores it, as it always did', () => {
+    // Unchanged by the clause, and worth pinning separately: the case that was
+    // already right must not be fixed into a different answer.
+    expect(chatMove({ from: A, to: B, intoRun: true, opened: true, stored: true, holding: true })).toBe(
+      'restore',
+    );
   });
 
   test('the project bucket is still adopted, which is the case that already worked', () => {
-    expect(chatMove({ from: bucket, to: B, intoRun: true, stored: false, holding: true })).toBe(
+    expect(chatMove({ from: bucket, to: B, intoRun: true, opened: false, stored: false, holding: true })).toBe(
       'adopt',
     );
   });
@@ -136,11 +161,11 @@ describe('a conversation belongs to the run it is about', () => {
     // The guard the widening needs. That run has its own exchange and it is the
     // one worth keeping — adopting over it would destroy a real conversation to
     // save a stray one, which is strictly worse than the bug this fixes.
-    expect(chatMove({ from: A, to: B, intoRun: true, stored: true, holding: true })).toBe('restore');
+    expect(chatMove({ from: A, to: B, intoRun: true, opened: false, stored: true, holding: true })).toBe('restore');
   });
 
   test('an empty screen adopts nothing, so a run does not inherit a blank', () => {
-    expect(chatMove({ from: A, to: B, intoRun: true, stored: false, holding: false })).toBe(
+    expect(chatMove({ from: A, to: B, intoRun: true, opened: false, stored: false, holding: false })).toBe(
       'restore',
     );
   });
@@ -148,7 +173,7 @@ describe('a conversation belongs to the run it is about', () => {
   test('going back to the project bucket restores it, never adopts into it', () => {
     // `intoRun` is false, and it has to be: the bucket is where a conversation
     // waits for a run, not a run of its own.
-    expect(chatMove({ from: A, to: bucket, intoRun: false, stored: true, holding: true })).toBe(
+    expect(chatMove({ from: A, to: bucket, intoRun: false, opened: false, stored: true, holding: true })).toBe(
       'restore',
     );
   });
@@ -156,7 +181,7 @@ describe('a conversation belongs to the run it is about', () => {
   test('the first load of the window restores and cannot adopt', () => {
     // `from` is null because this window has shown nothing yet, so there is no
     // exchange that could have proposed anything.
-    expect(chatMove({ from: null, to: B, intoRun: true, stored: false, holding: true })).toBe(
+    expect(chatMove({ from: null, to: B, intoRun: true, opened: false, stored: false, holding: true })).toBe(
       'restore',
     );
   });
@@ -164,7 +189,7 @@ describe('a conversation belongs to the run it is about', () => {
   test('a key that has not moved does nothing at all', () => {
     // The loader must not run mid-conversation: a restore at that moment is a
     // conversation replaced by itself-from-disk, losing the turn in flight.
-    expect(chatMove({ from: B, to: B, intoRun: true, stored: true, holding: true })).toBe('stay');
+    expect(chatMove({ from: B, to: B, intoRun: true, opened: false, stored: true, holding: true })).toBe('stay');
   });
 
   test('only the project bucket is cleared after an adoption', () => {
