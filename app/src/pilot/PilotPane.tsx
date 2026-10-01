@@ -16,7 +16,7 @@ import {
 } from './backend';
 import type { Backend } from './backend';
 import { systemPrompt } from './brief';
-import { readEmitted, visible } from './emit';
+import { readEmitted, unique, visible } from './emit';
 import { useFollow } from './follow';
 import { declare, execute } from './tools';
 import { chatKey, chatMove, readChat, worthSaving, writable } from './saved';
@@ -840,6 +840,15 @@ export function PilotPane({
    * lifetime is the window's, and passed into `readEmitted`, which stays pure.
    */
   const origin = useRef(crypto.randomUUID().slice(0, 8));
+  /**
+   * Everything the model has said this turn, for the tool parse (#223).
+   *
+   * A ref rather than reducer state because the frame handler is registered once
+   * and would otherwise close over a stale conversation - the same reason
+   * `hostTurn` is one. Keyed by turn so a new turn starts from nothing rather
+   * than inheriting the last one's prose, which would re-raise its calls.
+   */
+  const whole = useRef<{ turn: number; text: string }>({ turn: -1, text: '' });
   const [entry, setEntry] = useState('');
   const [live, setLive] = useState<number | null>(null);
   // The pilot's own books (#145). Read from `localStorage` at mount, because a
@@ -972,6 +981,13 @@ export function PilotPane({
         const turn = frame.id;
         if (turn === null || turn !== hostTurn.current) return;
         if (frame.type === 'pilot_delta') {
+          // Kept for the parse, not for the display (#223). The pane shows the
+          // final message - `retext` below replaces the accumulated text with it
+          // on purpose, because the interstitials are the model talking to itself
+          // between its own file reads. But a tool call written in one of those
+          // is still a tool call, and it used to be dropped.
+          if (whole.current.turn !== turn) whole.current = { turn, text: '' };
+          whole.current.text += frame.text;
           dispatch({ type: 'event', event: { kind: 'text', turn, delta: frame.text } });
           return;
         }
@@ -987,12 +1003,32 @@ export function PilotPane({
         // its own Read and Glob calls included; this is the final message. Both
         // came off the wire and this is the one that answers "what did it say".
         dispatch({ type: 'retext', turn, text: frame.text });
-        // The tool calls, lifted out of the reply and dispatched **before** the
-        // terminal event: `reduce` drops an event for a turn that is no longer
-        // live, and `ended` is what closes it. Read from `frame.text`, which is
-        // the whole reply, rather than from the deltas we accumulated - a block
-        // split across two deltas is still one block in the whole.
-        for (const call of readEmitted(frame.text, turn, origin.current)) {
+        /**
+         * The tool calls, lifted out of **everything the model said this turn**.
+         *
+         * Dispatched before the terminal event, because `reduce` drops an event
+         * for a turn that is no longer live and `ended` is what closes it.
+         *
+         * **It used to read `frame.text` alone, and that is the final message
+         * rather than the whole reply** (#223). `readDelta` yields every assistant
+         * block in the turn - including the interstitials between the model's own
+         * `Read` and `Glob` calls - while `result.result` is only the last one. So
+         * a model that wrote a `vibe-tool` block, then went on reading files, then
+         * summarised, had its call silently thrown away: no card, no refusal,
+         * nothing. And the model does not know that, so it says what it did -
+         * *"I put up two `gh` cards and you want the second one"* - over a
+         * transcript with no cards in it, which is as confusing as this product
+         * has been.
+         *
+         * The old comment's reason for using `frame.text` was real and is kept:
+         * a block split across two deltas is one block in the whole. Concatenating
+         * the deltas satisfies that too, which is why this is a strict
+         * improvement rather than a trade - and `unique` handles the one thing it
+         * adds, a model that repeats its own block in the summary.
+         */
+        const said = whole.current.turn === turn ? whole.current.text : '';
+        for (const call of unique(readEmitted(`${said}
+${frame.text}`, turn, origin.current))) {
           dispatch({
             type: 'event',
             event: { kind: 'tool_call', turn, id: call.id, name: call.name, arguments: call.arguments },

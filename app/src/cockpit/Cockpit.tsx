@@ -581,11 +581,28 @@ export function Cockpit() {
       setViewing(null);
       setOpenAt(null);
       setLaunched(true);
-      setSentLaunch(readLaunchArgv(argv));
+      const sent = readLaunchArgv(argv);
+      setSentLaunch(sent);
+      // **And at the repository it is starting in**, which is the same rule one
+      // field along (#223). `viewing` was moved above and `repoDir` was not, so a
+      // run started somewhere the window was not pointed left the sidebar showing
+      // a different project — and since a project section only reads its archive
+      // while it is open, that run was not merely in the wrong place in the list,
+      // it was never fetched. The pilot's `start_run` carries the directory it
+      // was given, so this is the case where the two could differ: open a past
+      // run in project B, type a brief, and the run starts in B while the sidebar
+      // is still on A.
+      //
+      // Taken from the argv rather than from a parameter, because the argv is
+      // what was actually sent — a second source would be a second answer to
+      // which repository this run is in. A null parse leaves it alone: that is an
+      // argv this build cannot read, and guessing a directory out of one is worse
+      // than pointing at nothing.
+      if (sent !== null) rememberRepo(sent.dir);
       requests.current += 1;
       void send({ type: 'invoke', id: requests.current, argv });
     },
-    [send],
+    [send, rememberRepo],
   );
 
   /**

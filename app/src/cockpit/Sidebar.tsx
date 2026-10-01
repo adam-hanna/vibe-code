@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { LivenessDot, StateKicker } from '../design';
 import * as host from '../host';
 import { Confirm } from './Confirm';
@@ -318,6 +318,30 @@ function Project({
   // window is about. Every other one is a click — a sidebar that read four
   // archives at launch would spend four reads on rows nobody asked for.
   const [open, setOpen] = useState(current);
+  /**
+   * …and it opens when it *becomes* current, not only when it starts that way
+   * (#223).
+   *
+   * **The seed above was the whole rule, and it is only true at mount.** Point
+   * the window at another project — `＋` on its row, a click, adding one — and
+   * its `current` flips true while `open` stays whatever it was initialised to.
+   * `useArchive` returns early on a shut section, so that project's runs were
+   * never read at all, and a run started in it did not appear: *"after I started
+   * a run and had the pilot help, it didn't immediately show up in my runs."*
+   * Nothing was broken about the read or the start — the section it would have
+   * been drawn in was closed, and the only way to find out was to open it.
+   *
+   * **On the transition, not on the value**, which is the same shape the gate
+   * watcher uses. `setOpen(current)` on every render would re-open a section
+   * somebody had deliberately collapsed, every second, for as long as the window
+   * stayed pointed there — so the rule is that *arriving* opens it and a collapse
+   * afterwards is respected.
+   */
+  const wasCurrent = useRef(current);
+  useEffect(() => {
+    if (current && !wasCurrent.current) setOpen(true);
+    wasCurrent.current = current;
+  }, [current]);
   const [more, setMore] = useState(false);
   const { runs, failure, loading } = useArchive(dir, open, currentId, beat);
   const { shown, hidden } = visible(runs, more);

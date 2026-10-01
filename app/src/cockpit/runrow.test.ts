@@ -344,3 +344,49 @@ describe('a dialog cannot outgrow the window it is covering', () => {
     expect(sidebar).toMatch(/preview\(title, PLACEHOLDER\)/);
   });
 });
+
+describe('a project section follows where the window is pointed (#223)', () => {
+  /**
+   * **A run that started and could not be seen.** Reported as *"after I started a
+   * run and had the pilot help, it didn't immediately show up in my runs"*, and
+   * nothing was wrong with the start or with the read: `open` was seeded from
+   * `current` at mount and never followed it, so pointing the window at another
+   * project left that project's section shut — and `useArchive` returns early on
+   * a shut section, so its runs were never read at all.
+   *
+   * Asserted from source, which is weaker than rendering it and is what this
+   * package has: there is no jsdom, so a hook's behaviour over time cannot be
+   * driven here. What source *can* carry is the shape, and the shape is the thing
+   * a later edit would get wrong — which is why the negative below matters more
+   * than the positive.
+   */
+  const effect = sidebar.slice(
+    sidebar.indexOf('const wasCurrent = useRef(current);'),
+    sidebar.indexOf('}, [current]);') + '}, [current]);'.length,
+  );
+
+  test('becoming current opens the section, not only starting that way', () => {
+    expect(effect).toContain('useRef(current)');
+    expect(effect).toContain('if (current && !wasCurrent.current) setOpen(true);');
+    expect(effect).toContain('}, [current]);');
+  });
+
+  test('it fires on the transition, so a deliberate collapse is respected', () => {
+    // **The negative is the real claim.** `setOpen(current)` on every render would
+    // re-open a section somebody had just collapsed, once a second, for as long as
+    // the window stayed pointed at it — a fix that replaces one invisible
+    // behaviour with a visibly annoying one.
+    expect(effect).not.toMatch(/setOpen\(current\)/);
+    // And it only ever opens. Nothing here closes a section on the way out, because
+    // leaving a project is not a request to hide its runs.
+    expect(effect).not.toMatch(/setOpen\(false\)/);
+  });
+
+  test('a shut section still reads nothing, which is why the above matters', () => {
+    // The early return is the other half: without it the bug would have been
+    // invisible rather than total, and with it a shut section is a project whose
+    // archive is never fetched. One read per project when it opens is the rule
+    // (`Sidebar.tsx`'s header), and this is what enforces it.
+    expect(sidebar).toContain("if (!open || dir.trim() === '' || !host.inShell()) return;");
+  });
+});

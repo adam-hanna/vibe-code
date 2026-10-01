@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { FENCE, UNNAMED, readEmitted, visible } from './emit';
+import { FENCE, UNNAMED, readEmitted, unique, visible } from './emit';
 import { noCommands } from '../cockpit/commands';
 import { execute } from './tools';
 import { emptyConversation, follow, reduce, settle, trailingResults } from './transcript';
@@ -219,5 +219,74 @@ describe('an id has to outlive the window that made it', () => {
     const one = settleAll(emitted(said, 3, 'w1'));
     const twice = settleAll(one);
     expect(twice.messages.filter((m) => m.role === 'tool')).toHaveLength(1);
+  });
+});
+
+describe('a call written before the model finished reading is still a call (#223)', () => {
+  /**
+   * **The worst failure this channel has had, because it is silent on both
+   * sides.** `readDelta` yields every assistant block in a turn — including the
+   * interstitials between the model's own `Read` and `Glob` calls — while
+   * `result.result` is only the final message. The parse read the final message
+   * alone, so a model that wrote a block, went on reading files and then
+   * summarised had its call thrown away: no card, no refusal, nothing on screen.
+   *
+   * And the model cannot tell. It says what it did — *"I put up two `gh` cards
+   * and you want the second one"* — over a transcript containing no cards, and
+   * the person reading it has no way to know which of the two is lying.
+   */
+  const turnOf = (...blocks: string[]) => blocks.join('\n\nthinking out loud\n\n');
+
+  test('a block in an interstitial message survives the summary that follows it', () => {
+    const interstitial = block('{ "tool": "run_command", "input": { "program": "gh" } }');
+    const whole = turnOf('Let me look at the issue.', interstitial, 'Here is what I found.');
+    const calls = unique(readEmitted(whole, 4, 'w1'));
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.name).toBe('run_command');
+  });
+
+  test('two different calls to one tool both survive, which is the case that happened', () => {
+    // The pilot put up two `gh` cards — one with an empty `--repo ""` that would
+    // only error, one correct — and said which to press. Collapsing them by tool
+    // name would have hidden the one it was pointing at.
+    const broken = block('{ "tool": "run_command", "input": { "args": ["issue", "view", "--repo", ""] } }');
+    const good = block('{ "tool": "run_command", "input": { "args": ["issue", "view", "236"] } }');
+    const calls = unique(readEmitted(turnOf(broken, good), 4, 'w1'));
+    expect(calls).toHaveLength(2);
+    expect(calls[0]?.arguments).toContain('--repo');
+    expect(calls[1]?.arguments).toContain('236');
+  });
+
+  test('a model repeating its own block in the summary proposes once, not twice', () => {
+    // Each card is a proposal that has to be answered before the conversation can
+    // be sent, and the second would be a command somebody runs twice.
+    const same = block('{ "tool": "read_run", "input": {} }');
+    const calls = unique(readEmitted(turnOf(same, same), 4, 'w1'));
+    expect(calls).toHaveLength(1);
+  });
+
+  test('the first occurrence is the one kept, so the id is where it was first written', () => {
+    const same = block('{ "tool": "read_run", "input": {} }');
+    const other = block('{ "tool": "read_output", "input": {} }');
+    const calls = unique(readEmitted(turnOf(same, other, same), 4, 'w1'));
+    expect(calls.map((c) => c.id)).toEqual(['emit:w1:4:0', 'emit:w1:4:1']);
+  });
+
+  test('a block split across two deltas is one block once they are joined', () => {
+    // The old reason for reading only the final message, and it is kept rather
+    // than traded away: concatenating the deltas satisfies it too.
+    const half = '```' + FENCE + '\n{ "tool": "read_run"';
+    const rest = ', "input": {} }\n```';
+    const calls = unique(readEmitted(half + rest, 4, 'w1'));
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.name).toBe('read_run');
+  });
+
+  test('two tools with identical arguments are two calls, not one', () => {
+    // The key is the pair. `read_run` and `read_output` both take no arguments,
+    // so keying on the arguments alone would silently drop one.
+    const a = block('{ "tool": "read_run" }');
+    const b = block('{ "tool": "read_output" }');
+    expect(unique(readEmitted(turnOf(a, b), 4, 'w1'))).toHaveLength(2);
   });
 });

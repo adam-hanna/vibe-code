@@ -367,6 +367,28 @@ they are waiting on. Four things in it are worth carrying:
   **pane** was forced to null by `past`, so a badge and the pane behind it disagreed about
   one run. They were one defect.
 
+  **And the sidebar had the same corollary, one field further out** (#223).
+  `launch` moved `viewing` and left `repoDir` alone, so a run started somewhere
+  the window was not pointed drew a sidebar still showing another project — and
+  because a project section reads its archive only **while it is open**, that
+  run was not merely in the wrong place in the list, it was never fetched at all.
+  On top of that, `Project`'s `open` was seeded from `current` at mount and never
+  followed it, so pointing the window at a project after launch left its section
+  shut for ever. Together those are one report: *"after I started a run and had
+  the pilot help, it didn't immediately show up in my runs."* Nothing was wrong
+  with the start or with the read — the section it would have been drawn in was
+  closed, and the only way to find that out was to open it.
+
+  Two narrow fixes, and the shape of each is the point. `launch` now calls
+  `rememberRepo` with the directory **off the argv it is sending**, because that
+  is what was actually sent and a second source would be a second answer; a null
+  parse leaves it alone, since guessing a directory out of an argv this build
+  cannot read is worse than pointing at nothing. And a section opens when it
+  **becomes** current rather than on the value, which is the gate watcher's shape:
+  `setOpen(current)` every render would re-open a section somebody had just
+  collapsed, once a second, for as long as the window stayed there. Arriving
+  opens it; a collapse afterwards is respected.
+
   **Half of it was a second answer to *which repository*.** `shownDir` was
   `viewing?.dir ?? repoDir`, and `repoDir` is where the *window* is pointed — which the
   sidebar moves, on every project click and every add. So a live run's `.vibe/runs/<id>` was
@@ -2124,6 +2146,38 @@ What is still asymmetric is the wire and not the capability: a vendor validates 
 call against a schema before it arrives, and an emitted one is validated here on
 arrival. `BACKEND_NOTE` says which road this backend is on, because what comes
 back looks the same and how it got there does not.
+
+**A turn is read whole, and reading only its last message silently ate calls**
+(#223). `readDelta` yields **every** assistant block in a turn — including the
+interstitials the model writes between its own `Read` and `Glob` calls — while
+`result.result` is only the final message. The parse read `frame.text` alone, and
+its comment called that *"the whole reply"*, which it is not. So a model that
+wrote a `vibe-tool` block, went on reading files and then summarised had its call
+**thrown away**: no card, no refusal, nothing drawn at all.
+
+**It is the worst shape of failure this channel can have, because it is silent on
+both sides.** The model does not know its block was dropped, so it says what it
+did — *"I put up two `gh` cards and you want the second one"* — over a transcript
+with no cards in it, and the person reading has no way to tell which of the two
+is lying. Reported as *"it said run the second gh card… but nothing happened? I
+had to nudge it and then it finally tried to run the github cli"*: the nudge
+worked because by then the model was not reading files, so its block landed in
+the final message.
+
+The old reason for reading the final message was real and is **kept rather than
+traded**: a block split across two deltas is one block in the whole. Concatenating
+the deltas satisfies that too, so this is a strict improvement. What it adds is a
+model repeating its own block in the summary, and `unique` answers that — keyed on
+the **name and the arguments together**, because the case that produced the report
+was two different `gh` cards, one with an empty `--repo ""` that would only error
+and one correct, with the model naming which to press. Collapsing by tool name
+would have hidden the one it was pointing at.
+
+The accumulation is a **ref keyed by turn**, for the reason `hostTurn` is one: the
+frame handler is registered once and reducer state read inside it would be stale.
+It feeds the parse only — the pane still shows the final message, because the
+interstitials are the model talking to itself, and `retext` replacing the
+accumulated text is a display decision that was always right.
 
 **The pilot runs in the repository the window named, and that path is a
 permission boundary.** `--restricted` confines `Read`, `Glob` and `Grep` to the
