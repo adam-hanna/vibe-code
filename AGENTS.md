@@ -516,6 +516,67 @@ they are waiting on. Four things in it are worth carrying:
   every case the widening was for still adopts, and `opened-run.test.ts` pins
   the two that differ only in this flag, because a pair that reads identically
   from inside the function is exactly what a future edit would collapse.
+- **The pilot reads the request before it proposes a run, and that is a prompt
+  rather than a gate** (#223). The pane had been the front door since #211 — the
+  launch bar is gone and `start_run` is a proposal — and it still *behaved* like
+  a form, because nothing in `brief.ts` ever said that reading the request was
+  part of the job. One message in, an argv out. Reported as the change that
+  matters most: *"I don't want the run to start automatically… I want the pilot
+  to do diligence, think critically, uncover potential gotchas, ask the user
+  clarifications, then once the pilot feels comfortable, kick off the run."*
+
+  **Nothing structural moved.** `start_run` is still propose-only and the person
+  still presses the card — decision 1 of #144, reaffirmed at the owner's
+  decision, because a run is the most expensive thing in the product and a brief
+  is the part that decides whether it converges. What changed is *when* the card
+  arrives: at the end of an interrogation rather than at the start of one.
+
+  **The enforced version was considered and declined**, and the reasoning is
+  worth keeping because it is the general case. A gate would refuse `start_run`
+  until some counter said questions had been asked — testable, and the weaker
+  design twice over. A counter measures *that* a question was asked and can say
+  nothing about whether it was worth asking, so the enforceable form of
+  diligence is the **performance** of it, which is the ritual a model is best at
+  faking. And a brief that is already unambiguous is a brief that should be run:
+  a gate makes the good case pay for the bad one every time, and the escape
+  hatch it then needs is a second way to start a run, which is the third
+  spelling #211 warns about.
+
+  What makes prose the right instrument is that the thing being asked for is
+  judgement, and the standard it is held to is a **measurement rather than an
+  opinion** — this file's own hardest-won lesson, from a census of runs that
+  converged and runs that stalled: the ones that converge state the decisions
+  already made and say *do not re-derive them*.
+
+  **The bound is load-bearing and is the half a test can check.** Diligence that
+  never ends spends the person's attention, which is the one budget in this
+  product with no ceiling, so the doctrine carries a stopping rule — *could a
+  competent implementer who never saw this conversation read the brief and not
+  have to guess?* — explicit permission for one exchange to be a complete
+  intake, and a structural limit: **the loop has its own question round**, so the
+  pilot is not resolving everything, only what changes the *shape* of the plan
+  and therefore has to be settled before a plan exists to critique.
+
+  One thing it must say and nearly did not: **the planner never sees this
+  chat.** A decision settled in conversation and left out of the brief is a
+  decision the run makes again, differently — which from the outside is
+  indistinguishable from the pilot never having asked. `brief.test.ts` pins the
+  stopping rule, that hand-off sentence and the doctrine's position *above* the
+  run block, since a doctrine under two hundred lines of JSON is one a model
+  reads last.
+- **The pilot reads the repository on screen, not the one in the sidebar**
+  (#223). `shownDir` is the one expression deciding which repository is on
+  screen and the six reading panes were moved onto it when the live run and the
+  opened run came apart; the pilot was left on `repoDir`, which is where the
+  *sidebar* is pointed. It matters more here than on a reader, because `dir` is
+  the pilot's **permission boundary** — the directory `claude -p --restricted`
+  is spawned in and the only one it may read, and where an accepted
+  `run_command` runs. So the pane could be reading one repository while the tabs
+  beside it read another, and with no project selected it refused to send at
+  all: *"I just tried sending a chat to an old run's pilot but I can't"*.
+  `Kickoff` deliberately keeps `repoDir`, because a **new** run starts where
+  `launch` sends it and pointing the bar at an opened run's repository would
+  make the two disagree about that.
 - **Your half of the pilot chat is mirrored, and only your half** (#223). The
   first answer to *"it's too hard to tell which is which"* was a `you` chip and
   a tinted ground, and `pilot.css` recorded at the time that a mirrored layout
@@ -1451,6 +1512,96 @@ Two things about it are load-bearing and neither is obvious:
   one, so the recording site asks `isAbnormal`, not `signal !== null` — and on the platform
   this repo is developed on the *parent's* stamp is the half that carries the finding.
 
+
+**A run can work in a worktree of its own, and the archive deliberately stays at home** (#223).
+Working in `.worktrees/<issue>` is a thing this file has told a *human* to do since the repo was
+developed on itself — so the tool changing the code is a published build rather than the tree it
+is editing — and doing it by hand is four commands plus a cleanup nobody remembers. Asked for as
+*"the pilot should automatically start a worktree for the vibe session to run in"*, with a toggle
+and a custom script.
+
+**The whole feature is one distinction**, and `src/worktree.ts` holds it:
+
+- **`state.targetDir` is the run's home.** The archive, the lock and the planner's past-run index
+  all live there, and none of them move.
+- **`workDirOf(state)` is where the work happens** — every git operation, the verification gate,
+  and the cwd of every agent child.
+
+They are the same directory unless the run has a worktree, which is what makes this inert when it
+is off. In the loop it costs **one line**: `runPhases` resolves `cwd` once and threads it to
+ninety-odd call sites, and that comment — *"resolved once and threaded"* — is why redirecting a
+run into another tree is a one-line change rather than an audit.
+
+**Putting the archive in the worktree was the obvious shape and is the wrong one.** It was
+offered and declined: a run's record would land in a tree somebody is about to prune, and this
+file carries a hand-written `cp -r` recipe for exactly that loss because `git worktree remove`
+takes `.vibe/` with it. Worse, the next run's planner reads `.vibe/runs` in the tree it is given,
+so every auto-worktree run would start blind to a history it had itself produced — #52 going
+quietly dead. Keeping the archive at home costs one indirection and deletes the whole class.
+
+Five things are load-bearing:
+
+- **A decision is stored; the path is derived.** `state.worktree` is a boolean and the location
+  comes back out of `worktreePath(targetDir, id)`, for the reason `loadRun` re-derives `dir` and
+  `targetDir`: a repository legitimately moves, and a stored absolute path is the thing that
+  breaks when it does. What cannot be re-derived is whether the run *started* with the setting
+  on, since it may have been toggled since — so that is what is kept, in the **first** state
+  write, because `allocateRun` requires it: a run that came back believing it had no worktree
+  would work in the repository while its branch is checked out elsewhere.
+- **It is created detached, and `prepareGit` still names the branch.** `git worktree add -b`
+  here would be a second answer to a question seven call sites and `run_branch` already settle,
+  and the two would disagree the first time somebody set `git.branchPrefix` or passed
+  `--no-branch`. This decides *where*; that decides *which branch*, inside it. The custom script
+  is told `VIBE_WORKTREE`, `VIBE_REPO` and `VIBE_RUN_ID` and deliberately **not** a branch.
+- **The script goes through a shell, and that is `verify.command`'s rule rather than a hole in
+  `commands.ts`'s.** `verify.ts` states it at the one place a shell is used at all — *"Model-
+  authored text is never passed to a shell"* — and this is the same category: a line a **person**
+  wrote into a file they commit, whose whole purpose is to be a sequence, because a worktree
+  nobody installed into cannot run the gate. `runUserCommand` is **exported and shared** rather
+  than copied, so "a shell is used in exactly one place" stays true and the hard-won Windows
+  branch — `cmd.exe /d /c` with `windowsVerbatimArguments`, because `shell: true` adds a layer of
+  quoting that mangles an already-quoted argument — is not written twice. No model can reach the
+  key: there is no config tool (#144 decision 3).
+- **A script that reports success is checked anyway.** `createWorktree` asks git whether there is
+  a working tree at the path afterwards, because a script that exits 0 and leaves nothing would
+  otherwise hand the loop a directory that is not a checkout, and every git command after it
+  would fail one at a time with nothing naming the cause. It refuses before the first turn, where
+  a refusal costs a sentence — the same bargain `gitPrecondition` strikes four lines below it,
+  and for the reason #71 records: that run spent 30M tokens before the review phase discovered
+  its own directory could not host it.
+- **Creation lives in the preflight gate, which is the one site a resume also passes.** So a run
+  whose worktree was pruned between sessions gets it back, and `createWorktree` is idempotent by
+  asking whether the tree is usable rather than whether the directory exists — a half-made one is
+  what a killed creation leaves, and reusing that would put the run somewhere git does not know
+  about.
+
+**Off by default, and that is not timidity.** A bare `git worktree add` produces a checkout with
+no dependencies installed, so on most projects the verification gate cannot run in it — turning
+it on without `git.worktreeCommand` would break runs that work today. The feature is only useful
+*with* its setup command, so the default cannot be on; this file states the general rule as
+*"groundwork ships separately, with no behaviour change"*, and the proof it was followed is that
+the threading landed with 1870 tests green and `worktree` never set.
+
+**What it costs is disk, and nothing here reclaims it.** This file already measures a worktree
+that has built the app at gigabytes, and auto-creating one per run makes that faster rather than
+different. Nothing deletes them and nothing pretends to — the directory is named after the run so
+the ones worth pruning can be told apart, and the section on the settings screen says so in the
+same words rather than leaving somebody to find out.
+
+**`.worktrees/` is self-ignoring wherever it sits.** `ensureWorktreesIgnored` is
+`ensureVibeIgnored`'s shape and its reason: this repo's own `.gitignore` lists `.worktrees/`, but
+a directory vibe creates in **somebody else's** checkout cannot rely on that, and a tree full of
+untracked worktrees is a `git status` nobody can read. It never overwrites an existing file.
+
+**And `workDir` reaches the window, because the pilot reads a directory.** `run_started` carries
+it beside `repo`, which is this file's own rule about a fact the run holds and never says: with a
+worktree the loop writes in a subdirectory and the repository root still holds whatever was there
+before, so a pilot pointed at the root would describe a tree the run is not touching and report
+that nothing is changing while a great deal is. The root is its permission boundary and the
+worktree is inside it, so `--restricted` already allowed the read — what was missing was any
+reason to look. The prompt says it **only when the two differ**, since a sentence about working in
+the repository would be noise on every run that has no worktree, which is all of them by default.
+
 ## Repo map
 
 ```
@@ -1493,6 +1644,7 @@ src/cancel.ts        stopping a turn that is already running - the latch, what i
 src/commands.ts      a command a person pressed - no shell, no shim, and where it runs
 src/ending.ts        how this process ended - the stamp beside the lock
 src/git.ts           branch and commit operations
+src/worktree.ts      a checkout of its own: where the work happens, and where it does not
 tests/               node:test, one file per concern
 
 app/                 the desktop app - Vite + React, its own package.json and gate

@@ -310,9 +310,13 @@ const START_RUN: ToolDef = {
   name: 'start_run',
   description:
     'Propose starting a run. This does NOT start one: it puts the exact command in front of the ' +
-    'user, who runs it or does not. Write the brief in full and state the decisions already made ' +
-    '— the runs that converge say "do not re-derive them"; the ones that stall leave the design ' +
-    'open.',
+    'user, who runs it or does not. Call it when the brief is settled, not when the request ' +
+    'arrives — a run is long and expensive and converges or stalls on what it was given, so ' +
+    'reading the request properly is the job that comes first. Write the brief in FULL: the ' +
+    'decisions as settled, what was ruled out and why, what "done" means, and what you found in ' +
+    'the repository. The planner never sees this conversation, so anything settled here and left ' +
+    'out of the brief is a decision the run makes again, differently. The runs that converge say ' +
+    '"do not re-derive them"; the ones that stall leave the design open.',
   input_schema: {
     type: 'object',
     properties: {

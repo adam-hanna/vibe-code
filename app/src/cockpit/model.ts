@@ -708,6 +708,18 @@ export interface Run {
     dir: string;
     /** The repository, which is NOT `dir` — that is `.vibe/runs/<id>`. */
     repo: string | null;
+    /**
+     * Where the work happens, which is `repo` unless the run has a worktree.
+     *
+     * **Carried because something else reads a directory** (#223). With
+     * `git.worktree` on, the loop writes in `<repo>/.worktrees/<run-id>` and the
+     * repository root still holds whatever was there before — so a reader
+     * pointed at the root describes a tree the run is not touching, and reports
+     * that nothing is happening while a great deal is. Null on every core that
+     * predates the field, which reads as "the repository", because that is what
+     * it was.
+     */
+    workDir: string | null;
     /** The brief, as the run recorded it. The workstream's name. */
     task: string | null;
     resumed: boolean;
@@ -1541,6 +1553,7 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
             // (#223), so a run narrated by an older core has an identity with
             // neither and a header that says so rather than one that is absent.
             repo: str(data['repo']),
+            workDir: str(data['workDir']),
             task: str(data['task']),
             resumed: data['resumed'] === true,
             at,

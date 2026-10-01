@@ -197,6 +197,22 @@ export interface RunInit {
   allocated?: AllocatedRun | undefined;
   config?: RunState['config'] | undefined;
   extraContext?: string | null | undefined;
+  /**
+   * Whether this run works in a worktree of its own (#223).
+   *
+   * Here rather than assigned afterwards, for the reason this interface exists at
+   * all: `allocateRun`'s comment states that the first persisted state must
+   * already carry everything, because the old order wrote three times and a kill
+   * between the first and the last left a resumable run whose settings were
+   * silently the defaults. A run that came back believing it had no worktree
+   * would work in the repository while its branch is checked out somewhere else,
+   * and git refuses that - so the failure is loud, which is lucky rather than
+   * designed.
+   *
+   * The directory itself is made later, by the preflight gate, which is also
+   * what a resume goes through - so one site covers both.
+   */
+  worktree?: boolean | undefined;
 }
 
 export function createRun(
@@ -211,6 +227,11 @@ export function createRun(
     id,
     dir,
     targetDir,
+    // Spread rather than assigned, because `exactOptionalPropertyTypes` makes
+    // `worktree: undefined` a different thing from an absent key — and absent is
+    // what every run before this field had, which is what keeps `workDirOf`
+    // collapsing to `targetDir` for all of them.
+    ...(init.worktree === true ? { worktree: true } : {}),
     task,
     // Every managed conversation's starting state, stated where the lifecycle
     // is rather than as three literals here.

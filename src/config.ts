@@ -135,6 +135,14 @@ export const DEFAULTS: Config = {
     useBranch: true,
     branchPrefix: 'vibe/',
     commitEachRound: true,
+    // Off, because a bare worktree has no node_modules and the verification gate
+    // could not run in one - see `GitConfig.worktree`.
+    worktree: false,
+    worktreeCommand: null,
+    // `verify.timeoutMs`'s figure, borrowed rather than invented: the same kind
+    // of command, on the same machine, and `npm ci` cold is the case that
+    // decides it.
+    worktreeTimeoutMs: 15 * 60 * 1000,
   },
   context: {
     enabled: true,
@@ -652,6 +660,25 @@ function validate(cfg: Config): void {
   ] as const) {
     const v = cfg.loop[key];
     if (!Number.isInteger(v) || v < 1) throw new Error(`loop.${key} must be a positive integer`);
+  }
+  // The worktree keys (#223). Refused by name for the reason every other key in
+  // this function is: `validateConfig` reporting the key is the only way somebody
+  // who believes they configured something finds out they did not.
+  if (typeof cfg.git.worktree !== 'boolean') {
+    throw new Error('git.worktree must be true or false');
+  }
+  if (
+    cfg.git.worktreeCommand !== null &&
+    (typeof cfg.git.worktreeCommand !== 'string' || cfg.git.worktreeCommand.trim() === '')
+  ) {
+    throw new Error(
+      'git.worktreeCommand must be a non-empty command string, or null to use git worktree add. ' +
+        'A blank string is not "no command" - it would reach a shell, exit 0 and leave no ' +
+        'worktree behind.',
+    );
+  }
+  if (!Number.isFinite(cfg.git.worktreeTimeoutMs) || cfg.git.worktreeTimeoutMs <= 0) {
+    throw new Error('git.worktreeTimeoutMs must be a positive number');
   }
   // Zero is meaningful here, unlike the round caps: it demands a spotless verdict.
   if (!Number.isInteger(cfg.loop.p1Tolerance) || cfg.loop.p1Tolerance < 0) {

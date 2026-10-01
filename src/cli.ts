@@ -61,6 +61,7 @@ import { closeCodexRateLimits, describeLimits, readCodexRateLimits } from '@src/
 import { describeGates } from '@src/gates.js';
 import { renderScorecard, scoreArchive } from '@src/scorecard.js';
 import { resolveGates } from '@src/verify.js';
+import { createWorktree, workDirOf } from '@src/worktree.js';
 import type { AgentPreflight } from '@src/preflight.js';
 import * as git from '@src/git.js';
 import * as log from '@src/log.js';
@@ -634,7 +635,15 @@ async function startRun(
   handle: LockHandle,
   loop: RunLoop = orchestrate,
 ): Promise<ExitCode> {
-  const state = createRun(targetDir, task, planOnly, { allocated, config: cfg, extraContext });
+  // The decision is taken here and the directory is made by the preflight gate.
+  // Recorded in the FIRST state write, so a resume cannot come back believing it
+  // has no worktree while its branch is checked out in one (#223).
+  const state = createRun(targetDir, task, planOnly, {
+    allocated,
+    config: cfg,
+    extraContext,
+    worktree: cfg.git.worktree,
+  });
 
   log.attachTranscript(path.join(state.dir, 'transcript.log'));
   log.heading(`Run ${state.id}`, {
@@ -649,7 +658,19 @@ async function startRun(
     // reads this site as source, and its regex walks from the id straight to the
     // data.
     id: 'run_started',
-    data: { runId: state.id, dir: state.dir, repo: targetDir, task, resumed: false },
+    data: {
+      runId: state.id,
+      dir: state.dir,
+      repo: targetDir,
+      // Where the WORK happens, which is the repo unless this run has a worktree
+      // (#223). A fact the run holds and did not say, which is the shape
+      // AGENTS.md calls a screen that cannot be built: the pilot reads the
+      // repository, and with a worktree the code it should be reading sits in a
+      // subdirectory it would otherwise never look in.
+      workDir: workDirOf(state),
+      task,
+      resumed: false,
+    },
   });
   log.info(`Repo:    ${targetDir}`);
   log.info(`Claude:  ${cfg.claude.model} / ${cfg.claude.effort}`);
@@ -908,6 +929,7 @@ async function resumeRun(
           runId: state.id,
           dir: state.dir,
           repo: targetDir,
+          workDir: workDirOf(state),
           task: state.task,
           resumed: true,
           from: resumedFrom(state),
@@ -957,6 +979,7 @@ async function resumeRun(
       runId: state.id,
       dir: state.dir,
       repo: targetDir,
+      workDir: workDirOf(state),
       task: state.task,
       resumed: true,
       from: resumedFrom(state),
@@ -1825,9 +1848,55 @@ export async function runPreflight(
   // its own blast radius, and this is the half that must not over-refuse.
   const ahead: readonly Phase[] = resumePhase(state) === 'complete' ? [] : phases;
 
+  // **The worktree, before anything is spent and before `prepareGit` runs** (#223).
+  //
+  // One creation site, and it is here rather than beside `createRun` for two
+  // reasons. A **resume** reaches it too, so a run whose worktree was pruned
+  // between sessions gets it back instead of failing one git command at a time
+  // with nothing naming the cause. And this gate is already the place that
+  // refuses a directory which cannot host the phases ahead - `gitPrecondition`
+  // is four lines below - so the refusal has a home, an exit code and a
+  // sentence, rather than a third mechanism beside them.
+  //
+  // Ordering is what makes it correct: `execute` awaits this gate before it
+  // calls the loop, and `runPhases` opens with `prepareGit`. So the tree exists
+  // before the branch is decided in it, which is the whole arrangement - this
+  // decides WHERE, `prepareGit` still decides WHICH BRANCH.
+  if (state.worktree === true) {
+    const made = await createWorktree({
+      targetDir: state.targetDir,
+      id: state.id,
+      command: cfg.git.worktreeCommand,
+      timeoutMs: cfg.git.worktreeTimeoutMs,
+    });
+    if (!made.ok) {
+      log.heading('Preflight');
+      log.fail(made.reason, { id: 'run_failed', data: { code: EXIT.PREFLIGHT, reason: made.reason } });
+      state.status = 'error';
+      recordEvent(state, 'preflight-failed', { reasons: [made.reason] });
+      return EXIT.PREFLIGHT;
+    }
+    // Said rather than left to be inferred from a path, and only when something
+    // happened: a resume that found its worktree already there has nothing to
+    // announce. `how` is the half a reader cannot see from the directory - a
+    // tree made by `git worktree add` and one made by somebody's own script look
+    // identical afterwards, and which it was decides where to look when the
+    // contents are wrong.
+    if (made.created) {
+      log.step(`Working in ${made.dir}`, {
+        id: 'worktree_created',
+        data: { dir: made.dir, how: made.how },
+      });
+    }
+  }
+
   // Before the probes, so a refusal costs nothing: the run that produced #71
   // spent 30M tokens before the review phase found this out for itself.
-  const blocked = await gitPrecondition(state.targetDir, ahead);
+  // The tree the run will WRITE in, which is the worktree when it has one (#223).
+  // Asking this of `targetDir` would check the repository's cleanliness and then
+  // let the loop write somewhere else - a precondition about the wrong directory
+  // is worse than none, because it passes.
+  const blocked = await gitPrecondition(workDirOf(state), ahead);
   if (blocked !== null) {
     log.heading('Preflight');
     log.fail(blocked, { id: 'run_failed', data: { code: EXIT.PREFLIGHT, reason: blocked } });

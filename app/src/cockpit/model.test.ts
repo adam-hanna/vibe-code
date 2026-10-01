@@ -215,11 +215,15 @@ describe('which run this is', () => {
     expect(run.identity).toEqual({
       runId: '20260907-031221-a-task',
       dir: '/repo/.vibe/runs/20260907-031221-a-task',
-      // The frame above is what a core older than #223 sends, and both of the
-      // header's other two lines come back null rather than being filled in
-      // from what is here - the repository is NOT `dir` with `.vibe/runs/<id>`
-      // trimmed off, and the task is not the run id with its stamp removed.
+      // The frame above is what a core older than #223 sends, and all three of
+      // the facts added after it come back null rather than being filled in from
+      // what is here - the repository is NOT `dir` with `.vibe/runs/<id>`
+      // trimmed off, the task is not the run id with its stamp removed, and the
+      // work directory is not assumed to be the repository just because that is
+      // what it used to be. A null here reads as "nobody said", which every
+      // reader of it already handles.
       repo: null,
+      workDir: null,
       task: null,
       resumed: false,
       // When the CORE said this, which is the honest answer to "when did the

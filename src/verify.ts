@@ -277,7 +277,7 @@ export async function runGateCommand(
   let first: { run: number; exitCode: number | null; output: string } | null = null;
 
   for (let run = 1; run <= wanted; run += 1) {
-    const result = await execute(command, cwd, env, gate.timeoutMs);
+    const result = await runUserCommand(command, cwd, env, gate.timeoutMs);
     const ok = result.code === 0;
     attempts.push({ run, ok, exitCode: result.code });
 
@@ -378,8 +378,9 @@ export function detectCommand(cwd: string): string | null {
   }
 }
 
-interface ExecResult {
+export interface ExecResult {
   code: number | null;
+  /** stdout and stderr interleaved, as a reader of a terminal sees them. */
   output: string;
 }
 
@@ -389,8 +390,17 @@ interface ExecResult {
  * A shell is appropriate here and nowhere else in vibe: this string comes from
  * configuration the user wrote, not from model output. Model-authored text is
  * never passed to a shell.
+ *
+ * **Exported since #223, and shared rather than copied.** `git.worktree.command`
+ * is the second setting in the same category - a line a person wrote into their
+ * own committed config, whose whole purpose is to be a sequence - and the
+ * Windows branch below is the reason this must not be written twice: `shell:
+ * true` expands to `cmd.exe /d /s /c "<command>"`, and that extra layer of
+ * quoting mangles a command whose own arguments are quoted. A second copy would
+ * be a second place for that to be got wrong, and "a shell is used in exactly
+ * one place" would stop being true of the product.
  */
-function execute(
+export function runUserCommand(
   command: string,
   cwd: string,
   env: NodeJS.ProcessEnv,

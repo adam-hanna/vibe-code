@@ -150,7 +150,130 @@ const HOW_TO_READ = [
   'fill one in and do not compute one out of two others.',
 ].join('\n');
 
+/**
+ * What to do when somebody hands you work (#223).
+ *
+ * **The pane was already the front door and the pilot behaved like a form.** The
+ * launch bar went in #211 and `start_run` became a proposal, so structurally the
+ * conversation had been the way in for two releases — and a brief typed into it
+ * still came straight back as a card, because nothing in this prompt ever told
+ * the pilot that reading the request was part of its job. One message in, an
+ * argv out. Reported as the change that matters most: *"I don't want the run to
+ * start automatically… I want the pilot to do diligence, think critically,
+ * uncover potential gotchas, ask the user clarifications."*
+ *
+ * ## Why this is a prompt and not a gate
+ *
+ * The alternative was to refuse `start_run` until some counter said questions
+ * had been asked, and it was considered and declined at the owner's decision.
+ * Two reasons it is the weaker design even though it is the testable one. A
+ * counter measures *that* a question was asked and can say nothing about whether
+ * it was worth asking, so the enforceable version of diligence is the
+ * performance of it — which is exactly the ritual a model is best at faking. And
+ * a brief that is already unambiguous is a brief that should be run: a gate
+ * would make the good case pay for the bad one, every time, and the escape hatch
+ * it then needs is a second way to start a run, which is the third spelling #211
+ * warns about.
+ *
+ * What makes prose the right instrument here is that the thing being asked for
+ * is **judgement**, and the standard it is judged against is a fact about this
+ * repository rather than an opinion: AGENTS.md's hardest-won lesson is that runs
+ * converge or stall on the brief, and it says so from a census of runs that did
+ * both.
+ *
+ * ## The bound, which matters as much as the instruction
+ *
+ * Diligence that never ends is its own failure, and a pilot that interrogates a
+ * two-line brief for six turns is worse than one that proposes too early — it
+ * spends the person's attention, which is the one budget this product has no
+ * ceiling for. The bound is structural rather than a number: **the loop has its
+ * own question round**, so the planner can and does ask. The pilot's job is the
+ * subset the planner cannot do — the questions whose answers change the *shape*
+ * of the plan, which have to be settled before a plan exists to critique.
+ */
+const INTAKE = [
+  '## When somebody describes work they want done',
+  '',
+  'Do not answer it with a start_run call. That is the end of this job, not the',
+  'start of it, and the gap between the two is where you are useful.',
+  '',
+  'A run is expensive and long, and it converges or stalls on the brief it was',
+  'given. The runs that converge state the decisions already made and say "do not',
+  're-derive them". The runs that stall leave the design open and the loop spends',
+  'its rounds discovering that. That is measured from this repository\'s own',
+  'archive, not a style preference: your read of the request is the single',
+  'highest-leverage thing in the product.',
+  '',
+  'So take the request apart first:',
+  '',
+  '- **Look before you ask.** You can read this repository. What is already here,',
+  '  what conventions does it follow, does some of this exist already, has this',
+  '  been attempted before? A question whose answer is in a file you could have',
+  '  opened is a question that costs the person something and tells you nothing.',
+  '- **Find what will bite.** Undecided design questions, acceptance criteria',
+  '  nobody has stated, work that cannot be verified by any gate this repository',
+  '  runs, a dependency on something that does not exist yet, a brief that is',
+  '  really three briefs. Say these out loud. Being the one who noticed is worth',
+  '  more than being quick.',
+  '- **Ask what changes the plan.** Few questions, each load-bearing, each one',
+  '  you could say what you would do differently with either answer. Not a',
+  '  questionnaire, and never a question you are asking to look thorough.',
+  '- **Say what you would do.** Diligence is not neutrality. Where you have a',
+  '  recommendation, make it and give the reason, so the person is agreeing or',
+  '  disagreeing with something rather than filling in a form.',
+  '',
+  'Then stop. The test is not "have I asked enough questions", it is: **could a',
+  'competent implementer who never saw this conversation read the brief and not',
+  'have to guess?** If yes, you are done, and one exchange is a perfectly good',
+  'intake for a request that was clear to begin with — do not manufacture doubt',
+  'to look careful.',
+  '',
+  'You are not resolving everything. The loop has its own question round and the',
+  'planner will ask about what it hits. Yours is the part the planner cannot do:',
+  'the decisions that change the SHAPE of the plan, which have to be settled',
+  'before there is a plan to critique.',
+  '',
+  'When you are there, call start_run and write the brief in full: the decisions',
+  'as settled, what was ruled out and why, what "done" means, and anything you',
+  'found in the repository that the planner would otherwise have to discover.',
+  'Everything the conversation settled goes in the brief — the planner does not',
+  'get to read this chat, and a decision that lives only here is a decision the',
+  'run will make again, differently. Say whether it should be plan-only.',
+  '',
+  'The person still presses the button. What you are deciding is when to put it',
+  'in front of them.',
+].join('\n');
+
 /** The brief, or the fact that this window has not launched anything. */
+/**
+ * Where the run is writing, when that is not the repository root (#223).
+ *
+ * **The consequence of `git.worktree` that reaches the pilot.** With it on the
+ * loop works in `<repo>/.worktrees/<run-id>`, and the repository root still holds
+ * whatever was there before — so a pilot reading the root would describe a tree
+ * the run is not touching and report that nothing has changed while a great deal
+ * has. It is inside the root, so `--restricted` already permits it; what was
+ * missing was any reason to look.
+ *
+ * Said only when it differs. A sentence explaining that the work is in the
+ * repository would be noise on every run that has no worktree, which is all of
+ * them by default.
+ */
+function whereTheWorkIs(run: Run): string[] {
+  const identity = run.identity;
+  if (identity === null) return [];
+  const work = identity.workDir;
+  if (work === null || work === identity.repo) return [];
+  return [
+    '',
+    `This run works in a git worktree, not in the repository root: ${work}`,
+    'Read the code there. The repository root still holds whatever it held before',
+    'the run started, so describing it would describe a tree nothing is changing.',
+    "The run's own artifacts - PLAN.md, the critiques, the reports - are still",
+    'under the repository, not in the worktree.',
+  ];
+}
+
 function whatWasAsked(launched: Launched | null): string {
   if (launched === null) {
     return [
@@ -237,7 +360,13 @@ export function systemPrompt(
   return [
     WHO,
     '',
+    // **Before the run block, deliberately.** Everything below this is a
+    // description of a run that may not exist yet; this is the job. A doctrine
+    // buried under two hundred lines of JSON is one a model reads last.
+    INTAKE,
+    '',
     whatWasAsked(launched),
+    ...whereTheWorkIs(run),
     '',
     '## The run, as this window holds it',
     '',

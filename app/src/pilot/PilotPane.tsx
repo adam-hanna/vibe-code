@@ -1473,8 +1473,20 @@ export function PilotPane({
           <div className="v-pilot__note">
             {runId === null ? (
               <>
-                Nothing yet. The pilot can read this repository and propose a launch — it cannot
-                fire one, edit vibe.config.json, or read the run archive.
+                {/* **The front door describes the flow, not the permissions
+                    table** (#223). It used to open with what the pilot cannot
+                    do, which is the wrong first sentence for the first thing
+                    anybody reads — and one clause of it was false: the
+                    subscription pilot reads `.vibe/runs` like any other
+                    directory, which is a correction the system prompt already
+                    made and this copy had not. What a person needs here is what
+                    happens when they type, because it is no longer obvious: the
+                    reply is questions rather than a run. */}
+                Say what you want built. The pilot reads this repository, digs into the request and
+                asks about anything that would change the shape of the work — a run is long and
+                expensive, and it converges or stalls on the brief it was given. When the brief is
+                settled it puts the exact command in front of you, and you press it. Nothing here
+                starts a run on its own.
               </>
             ) : (
               <>

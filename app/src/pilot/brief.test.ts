@@ -184,3 +184,94 @@ describe('every turn carries it', () => {
     expect(pilotPane).toContain('system: systemPrompt(run, launched)');
   });
 });
+
+describe('the pilot is told to read the request before it proposes a run (#223)', () => {
+  /**
+   * **The change that made the pane a front door rather than a form.**
+   * Structurally it already was one — the launch bar went in #211 and
+   * `start_run` became a proposal — but nothing in the prompt said that reading
+   * the request was part of the job, so a brief typed in came straight back as
+   * an argv. Reported as *"I don't want the run to start automatically… I want
+   * the pilot to do diligence, think critically, uncover potential gotchas, ask
+   * the user clarifications."*
+   *
+   * Diligence is judgement and is instructed rather than enforced, at the
+   * owner's decision, so what can be checked here is that the instruction is
+   * **present, reaches both backends, and carries its bound**. That last one is
+   * the half a test is actually good for: an instruction to be thorough with no
+   * stopping rule is how a two-line brief turns into six turns of interrogation,
+   * and the stopping rule is the part somebody editing this file for length
+   * would cut first.
+   */
+  // Whitespace-collapsed, because the prompt is prose hard-wrapped for the
+  // person reading this file and a line break is not part of any claim. A test
+  // that matched the wrapping would fail on a reflow that changed nothing.
+  const flat = (s: string) => s.replace(/\s+/g, ' ');
+  const intake = (channel: 'native' | 'emitted') =>
+    flat(systemPrompt(emptyRun(), null, channel));
+
+  test('it says what not to do with a request, in the place a model reads first', () => {
+    const prompt = intake('emitted');
+    expect(prompt).toContain('Do not answer it with a start_run call');
+    // Before the run block. A doctrine under two hundred lines of JSON is one a
+    // model reads last, and this is the job rather than context for it.
+    expect(prompt.indexOf('When somebody describes work')).toBeLessThan(
+      prompt.indexOf('The run, as this window holds it'),
+    );
+  });
+
+  test('the standard it is held to is this repository’s own measurement', () => {
+    // Not a style preference, and the prompt says so: AGENTS.md's hardest-won
+    // lesson comes from a census of runs that converged and runs that stalled.
+    // A model told "be thorough" performs thoroughness; one told what separated
+    // the two outcomes has something to aim at.
+    expect(intake('native')).toContain('do not re-derive them');
+  });
+
+  test('it carries a stopping rule, which is the half that bounds it', () => {
+    // Diligence that never ends is its own failure: it spends the person's
+    // attention, which is the one budget with no ceiling in this product.
+    const prompt = intake('native');
+    expect(prompt).toContain('not have to guess');
+    // And the explicit permission to stop after one exchange, so a clear brief
+    // is not made to pay for an unclear one.
+    expect(prompt).toContain('do not manufacture doubt');
+  });
+
+  test('it says where the pilot’s job ends and the planner’s begins', () => {
+    // The structural bound rather than a number. The loop HAS a question round,
+    // so the pilot is not resolving everything - only what has to be settled
+    // before a plan exists to critique.
+    expect(intake('native')).toContain('own question round');
+  });
+
+  test('it says the conversation does not travel with the run', () => {
+    // The failure this prevents is silent and expensive: a decision settled in
+    // the chat, left out of the brief, and made again by the planner - which is
+    // indistinguishable from the pilot never having asked.
+    expect(intake('native')).toContain('does not get to read this chat');
+  });
+
+  test('both backends get it, because both are the front door', () => {
+    // `WHAT_YOU_CAN_READ` is the one section the two are told different things
+    // in, for a real reason. This is not that: the job is the same whichever
+    // wire a call comes back on.
+    for (const channel of ['native', 'emitted'] as const) {
+      expect(intake(channel)).toContain('When somebody describes work');
+    }
+  });
+
+  test('a run that is already going still gets it, because the next one is proposed here too', () => {
+    // Keyed on nothing: intake is not conditional on `launched` being null. The
+    // conversation that proposes run N+1 happens while run N is going, and a
+    // doctrine that switched itself off would be absent exactly then.
+    const going = reduce(
+      emptyRun(),
+      { type: 'narration', level: 'info', message: 'x', id: 'phase_started', data: { phase: 'planning' } } as Frame,
+      1_000,
+    );
+    expect(flat(systemPrompt(going, { task: 't', dir: '/r', planOnly: false }))).toContain(
+      'When somebody describes work',
+    );
+  });
+});

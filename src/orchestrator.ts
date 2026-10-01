@@ -172,6 +172,7 @@ export type { ExitCode, TurnCharge, TurnSpend } from '@src/charge.js';
 // One name for both in the file that records the first would be the confusion
 // the pair exists to remove (#131).
 import { describeEnding as describeChildEnding, endingOf, isAbnormal } from '@src/proc.js';
+import { workDirOf } from '@src/worktree.js';
 import { formatWork, withWorkProgress, workData } from '@src/work.js';
 
 /**
@@ -584,7 +585,13 @@ async function runPhases(
   turns: AgentTurns,
   host?: Host,
 ): Promise<RunState> {
-  const cwd = state.targetDir;
+  // **Where the work happens, which is not necessarily the run's home** (#223).
+  // `state.targetDir` is the repository the archive and the lock live in;
+  // `workDirOf` is the tree this run writes in, and they differ when the run has
+  // a worktree of its own. Resolved once and threaded, so no step below can
+  // answer "which tree" from a different field while holding a state that says
+  // otherwise - which is the same reason `roles` is resolved here.
+  const cwd = workDirOf(state);
   // Resolved once and threaded, so no step below can answer "who does this job"
   // from the module default while holding a config that says otherwise.
   const roles = rolesFor(cfg);

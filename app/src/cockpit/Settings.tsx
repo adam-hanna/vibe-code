@@ -626,6 +626,7 @@ export function Settings({
     loop?: Record<string, number | undefined>;
     progress?: Record<string, number | boolean | undefined>;
     budget?: Record<string, number | boolean | undefined>;
+    git?: Record<string, string | number | boolean | null | undefined>;
   };
   const gates = effective.gates ?? {};
   const loop = effective.loop ?? {};
@@ -636,6 +637,8 @@ export function Settings({
   const claimedProgress = (frame.raw['progress'] ?? {}) as Record<string, unknown>;
   const budget = effective.budget ?? {};
   const claimedBudget = (frame.raw['budget'] ?? {}) as Record<string, unknown>;
+  const git = effective.git ?? {};
+  const claimedGit = (frame.raw['git'] ?? {}) as Record<string, unknown>;
   const roles = effective.roles ?? {};
   // Which rows the FILE claims, as opposed to which are in force. That is the
   // whole reason `raw` travels beside `effective`.
@@ -1042,6 +1045,89 @@ export function Settings({
             </tr>
           </tbody>
         </table>
+      </section>
+
+      <section className="v-set__block">
+        <h3 className="v-set__h">where the run does its work</h3>
+        {/* **A worktree is a thing AGENTS.md tells a human to do**, and doing it
+            by hand is four commands and a cleanup nobody remembers. Asked for as
+            *"the pilot should automatically start a worktree for the vibe session
+            to run in"*.
+
+            The section says what it costs as well as what it buys, because the
+            cost is disk and nothing in the product reclaims it. */}
+        <p className="v-set__note">
+          With this on, a run works in <code>.worktrees/&lt;run-id&gt;</code> instead of in the
+          repository — so the tree being edited is not the tree you are sitting in, and several
+          runs can exist side by side on their own branches. The run&apos;s record stays in the
+          repository either way: an archive written into a worktree is one the next run&apos;s
+          planner cannot read.
+        </p>
+        <p className="v-set__note">
+          Nothing removes them. One worktree per run, and a checkout that has built a large
+          project is gigabytes — they are named after the run so the ones worth deleting can be
+          told apart.
+        </p>
+        <div className="v-set__row">
+          <label className="v-set__label" htmlFor="git-worktree">
+            work in a worktree
+            {claimedGit['worktree'] === undefined && <MetaChip>default</MetaChip>}
+          </label>
+          {/* A two-option select rather than a checkbox, and that is a design
+              decision rather than laziness: this screen has no checkbox, and an
+              unstyled `input[type=checkbox]` takes the platform's own light
+              control on a dark window — which is precisely the class of defect
+              `audit:contrast` §9 exists to catch. The selects here are already
+              styled. */}
+          <select
+            id="git-worktree"
+            value={git['worktree'] === true ? 'on' : 'off'}
+            disabled={busy}
+            onChange={(e) => save({ git: { worktree: e.target.value === 'on' } })}
+          >
+            <option value="off">off — run in the repository</option>
+            <option value="on">on — a worktree per run</option>
+          </select>
+        </div>
+        <div className="v-set__row">
+          <label className="v-set__label" htmlFor="git-worktree-command">
+            how to make one
+            {claimedGit['worktreeCommand'] === undefined && <MetaChip>default</MetaChip>}
+          </label>
+          <TextField
+            id="git-worktree-command"
+            value={typeof git['worktreeCommand'] === 'string' ? git['worktreeCommand'] : ''}
+            placeholder={'git worktree add --detach "$VIBE_WORKTREE" HEAD'}
+            disabled={busy}
+            onSave={(next) => save({ git: { worktreeCommand: next === '' ? null : next } })}
+          />
+        </div>
+        <p className="v-set__note">
+          Left empty, vibe runs <code>git worktree add --detach</code> and nothing else — which
+          gives you a checkout with no dependencies installed, so on most projects the
+          verification gate cannot run in it. That is what this field is for. It runs through a
+          shell in the repository, so it can be a sequence, and it is given
+          <code> VIBE_WORKTREE</code> (where the worktree must end up),<code> VIBE_REPO</code> and
+          <code> VIBE_RUN_ID</code>. It must leave a git working tree at
+          <code> VIBE_WORKTREE</code>; if it does not, the run refuses before spending anything.
+          It is <em>not</em> given a branch — the loop decides that, inside the worktree.
+        </p>
+        <div className="v-set__row">
+          <label className="v-set__label" htmlFor="git-worktree-timeout">
+            how long that may take, in minutes
+            {claimedGit['worktreeTimeoutMs'] === undefined && <MetaChip>default</MetaChip>}
+          </label>
+          <NumberField
+            id="git-worktree-timeout"
+            value={
+              typeof git['worktreeTimeoutMs'] === 'number'
+                ? Math.round(git['worktreeTimeoutMs'] / 60_000)
+                : undefined
+            }
+            disabled={busy}
+            onSave={(next) => save({ git: { worktreeTimeoutMs: next * 60_000 } })}
+          />
+        </div>
       </section>
 
       <section className="v-set__block">

@@ -362,6 +362,61 @@ export interface GitConfig {
   useBranch: boolean;
   branchPrefix: string;
   commitEachRound: boolean;
+  /**
+   * Run in a git worktree of its own rather than in the repository (#223).
+   *
+   * **Off by default, and that is not timidity.** A bare `git worktree add`
+   * produces a checkout with no `node_modules` and nothing built, so on most
+   * projects the verification gate cannot run in it — which means turning this on
+   * without `worktreeCommand` would break runs that work today. The feature is
+   * only useful *with* its setup command, so the default cannot be on; AGENTS.md
+   * states the same rule generally as *"groundwork ships separately, with no
+   * behaviour change"*.
+   *
+   * What it buys is what AGENTS.md already tells a human to do by hand: the tree
+   * being edited is not the tree you are working in, several runs can exist side
+   * by side, and a run's branch is checked out somewhere that is not your
+   * desk. What it costs is disk — a worktree per run, and AGENTS.md measures a
+   * built one at gigabytes — so nothing here deletes them and nothing pretends
+   * to: `.worktrees/<run-id>` is named after the run precisely so the ones worth
+   * pruning can be identified.
+   */
+  worktree: boolean;
+  /**
+   * The user's own command, run instead of `git worktree add` (#223).
+   *
+   * **The main path rather than an exotic escape hatch.** A worktree that cannot
+   * build is not useful, so the real shape of this setting is
+   * `git worktree add --detach "$VIBE_WORKTREE" HEAD && cd "$VIBE_WORKTREE" && npm ci`,
+   * and the default path exists mostly so the setting means something before
+   * anybody has written one.
+   *
+   * It runs through a shell, which is allowed for exactly the reason
+   * `verify.command` is: it is a line a **person** wrote into a file they commit,
+   * and being a sequence is the whole point of it. `runUserCommand` in
+   * `verify.ts` is shared rather than copied so "a shell is used in one place"
+   * stays true — and no model can reach this key, since there is no config tool
+   * (#144 decision 3).
+   *
+   * It is told `VIBE_WORKTREE`, `VIBE_REPO` and `VIBE_RUN_ID` through the
+   * environment rather than as arguments, so a path with a space in it cannot be
+   * re-split into two words, and it must leave a working tree at
+   * `VIBE_WORKTREE` — checked afterwards, because a script that exits 0 and
+   * leaves nothing behind would otherwise fail one git command at a time with
+   * nothing naming the cause. Deliberately **not** told a branch: `prepareGit`
+   * names that, and a second answer to it is how the two come to disagree.
+   */
+  worktreeCommand: string | null;
+  /**
+   * How long that command may take.
+   *
+   * **Borrowed from `verify.timeoutMs` rather than chosen**, and the borrowing is
+   * the honest part: this is the same kind of thing — the user's own command,
+   * doing project work on this machine — and `npm ci` on a cold cache is the case
+   * that decides it. Nothing here has measured a setup script, so taking a figure
+   * that was measured for a comparable command beats inventing one.
+   */
+  worktreeTimeoutMs: number;
 }
 
 export interface ContextConfig {
@@ -1421,7 +1476,43 @@ export interface ForkPendingEntry {
 export interface RunState {
   id: string;
   dir: string;
+  /**
+   * The repository this run belongs to.
+   *
+   * **Where the archive is, which since #223 is not necessarily where the work
+   * happens.** `dir` is `<targetDir>/.vibe/runs/<id>`, the lock sits inside that,
+   * and `listRuns` reads `<targetDir>/.vibe/runs` for the planner's past-run
+   * index — so this is the run's *home*. When `worktree` is set the loop's git
+   * operations, verification gate and agent children all run in a separate
+   * checkout instead, and `workDirOf` is the one place that difference is
+   * resolved.
+   *
+   * Keeping the archive here rather than in the worktree is the decision that
+   * makes auto-worktrees usable at all: a record written into a tree somebody is
+   * about to prune is a record the next run's planner cannot read, and
+   * `AGENTS.md` has a hand-written `cp -r` recipe for exactly that problem.
+   */
   targetDir: string;
+  /**
+   * Whether this run works in a git worktree of its own (#223).
+   *
+   * **A decision, not a path, and that split is the design.** The path is
+   * `worktreePath(targetDir, id)` — derived, never stored — for the same reason
+   * `loadRun` re-derives `dir` and `targetDir`: a repository legitimately moves,
+   * and a stored absolute path is the thing that breaks when it does. What
+   * cannot be re-derived is whether this run was *started* with worktrees on,
+   * because the setting may have been toggled since; so that is what is kept.
+   *
+   * It also means vibe owns the location rather than a custom script choosing
+   * one. A script that printed its own path would be a path this field would
+   * have to store, and a resume after a move would then look in a place that no
+   * longer exists.
+   *
+   * Absent on every run that predates this and on every run with the setting
+   * off, which is what makes `workDirOf` collapse to `targetDir` — so a run that
+   * never had a worktree behaves exactly as it did.
+   */
+  worktree?: boolean;
   task: string;
   /**
    * The Claude conversation's id - `SLOTS.main`'s storage. Minted before the

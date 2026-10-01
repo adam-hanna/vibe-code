@@ -395,3 +395,31 @@ describe('every round shows what ran in it', () => {
     expect(column).toMatch(/turns\.length === 0 &&\s*answerers\.length === 0 &&/);
   });
 });
+
+describe('the pilot reads the repository on screen, not the one in the sidebar (#223)', () => {
+  test('the pane is handed shownDir, like every other pane that reads a run', () => {
+    // `shownDir` is the one expression deciding which repository is on screen -
+    // `viewing?.dir ?? run.identity?.repo ?? repoDir` - and the six readers were
+    // moved onto it when the live run and the opened run came apart. The pilot
+    // was left on `repoDir`, which is where the SIDEBAR is pointed.
+    //
+    // It matters more here than on a reader. `dir` is the pilot's permission
+    // boundary: the directory `claude -p --restricted` is spawned in and the
+    // only one it may read, and where an accepted `run_command` runs. So the
+    // pane could be reading one repository while the tabs beside it read
+    // another, and with no project selected it refused to send at all -
+    // reported as *"I just tried sending a chat to an old run's pilot but I
+    // can't"*.
+    const pane = cockpit.slice(cockpit.indexOf('<PilotPane'), cockpit.indexOf('onEffect={onEffect}'));
+    expect(pane).toContain('dir={shownDir}');
+    expect(pane).not.toContain('dir={repoDir}');
+  });
+
+  test('the launch bar keeps the window’s own directory, because a NEW run starts there', () => {
+    // Not an oversight and not the same question. `Kickoff` is about the run
+    // that does not exist yet, and `launch` sends `repoDir` - so pointing the
+    // bar at an opened run's repository would make the two disagree about where
+    // a run starts, which is a worse bug than the one above.
+    expect(cockpit).toContain('<Kickoff dir={repoDir} />');
+  });
+});

@@ -1322,7 +1322,19 @@ export function Cockpit() {
             <PilotPane
               run={run}
               launched={sentLaunch}
-              dir={repoDir}
+              // **The run's repository, not the window's** (#223). Every other
+              // pane that reads a run moved onto `shownDir` and this one was
+              // missed, which is the second-answer-to-which-repository defect
+              // AGENTS.md already records, one pane later. It is worse here
+              // than on a reader: `dir` is the pilot's PERMISSION BOUNDARY -
+              // the directory `claude -p --restricted` is spawned in and the
+              // only one it can read - and it is where an accepted
+              // `run_command` runs. So opening a run in another project left
+              // the pilot reading a different repository from the one on
+              // screen, and with no project selected at all it was blocked
+              // outright: *"I just tried sending a chat to an old run's pilot
+              // but I can't"*.
+              dir={shownDir}
               // Which conversation to show. It follows the run the panes are
               // reading, so opening a finished run brings back the chat about
               // it — and null, before any run, is the conversation that will
