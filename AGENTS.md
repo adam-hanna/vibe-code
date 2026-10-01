@@ -531,6 +531,35 @@ they are waiting on. Four things in it are worth carrying:
   is the part that decides whether it converges. What changed is *when* the card
   arrives: at the end of an interrogation rather than at the start of one.
 
+  **The first attempt shipped the doctrine with no route to it, and the mistake
+  is worth more than the fix.** This note said the pane *"had been the front door
+  since #211"* and it was wrong: what #211 deleted was the launch bar inside the
+  pilot pane, and `1b` — `NewWorkstream`, the composer somebody actually reaches
+  from `＋` — still built an argv and started the run. So the prompt was written,
+  tested against `brief.test.ts`, and changed nothing at all, because nobody was
+  talking to the model it instructed: *"in the pilot chat, my request didn't show
+  up and the pilot isn't doing anything."* Checking the pane and concluding the
+  front door had moved was reading one half of a two-door building.
+
+  The general lesson: **a behaviour is only as real as its route**, and a test
+  over a prompt cannot see who is sent it. `frontdoor.test.ts` pins the three
+  hops instead — submit calls `onBrief` and not `onLaunch`, the cockpit carries
+  the brief over and moves the tab with it, and the pane says it as something a
+  *person* said rather than as a wake.
+
+  **The direct launch stays, and that is forced rather than chosen.** The pilot's
+  `start_run` takes a brief, a directory and plan-only; `launchArgv`'s gate
+  overrides and caps have no field on that tool, so a run that needs the
+  overrides block in `1b` has no conversational route at all. Deleting the button
+  would delete a capability rather than a shortcut. What changed is which one is
+  **primary** — `talk it through` is what Enter does and what the eye lands on,
+  and the other says `skip the pilot` in those words, because a control that
+  quietly did the old thing would make *"I don't want the run to start
+  automatically"* false again by default. Carrying the overrides into the pilot's
+  proposal was the alternative and is worse: the window would have to merge them
+  into an accepted argv the card never showed, which breaks *what runs is what was
+  displayed* to save a click.
+
   **The enforced version was considered and declined**, and the reasoning is
   worth keeping because it is the general case. A gate would refuse `start_run`
   until some counter said questions had been asked — testable, and the weaker

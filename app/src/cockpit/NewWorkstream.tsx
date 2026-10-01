@@ -33,9 +33,14 @@ import type { ConfigFrame } from '../host';
  *   name and no branch — so a field here would be typed into and ignored.
  * - **The base-branch picker with fetch freshness.** No flag, and no frame that
  *   would report freshness.
- * - **The setup preview.** Worktree scripts do not exist (#208): vibe cannot
- *   create the worktree it insists you already have, so there is nothing to
- *   preview and no `create the worktree but hold` to offer.
+ * - **The setup preview.** This was *"worktree scripts do not exist (#208):
+ *   vibe cannot create the worktree it insists you already have"*, and half of
+ *   that stopped being true in #223 - `git.worktree` and `git.worktreeCommand`
+ *   are settings now, and the loop makes the worktree itself. What is still
+ *   absent is a **preview**, and deliberately: the script is a line somebody
+ *   wrote in `vibe.config.json` and rendering what it would do means running it,
+ *   which is the one thing a modal must not do before anybody has pressed
+ *   anything. The settings screen is where that line is read and edited.
  *
  * Each is stated on the frame rather than left out, because a modal that showed
  * only what it had would read as the whole of what a run can be configured to
@@ -49,6 +54,7 @@ export function NewWorkstream({
   dir,
   onDir,
   onLaunch,
+  onBrief,
   onClose,
   busy,
   locked = false,
@@ -56,6 +62,16 @@ export function NewWorkstream({
   dir: string;
   onDir: (dir: string) => void;
   onLaunch: (argv: readonly string[]) => void;
+  /**
+   * Hand the brief to the pilot instead of starting a run (#223).
+   *
+   * **The default way out of this modal**, and the reason it exists: a run is
+   * long and expensive and converges or stalls on the brief it was given, so the
+   * useful thing to do with a freshly typed one is interrogate it. Asked for as
+   * *"I don't want the run to start automatically. Rather, I want the user
+   * message to be fed into the pilot chat."*
+   */
+  onBrief: (task: string) => void;
   onClose: () => void;
   busy: boolean;
   /**
@@ -132,7 +148,9 @@ export function NewWorkstream({
         onSubmit={(e) => {
           e.preventDefault();
           if (!ready || busy) return;
-          onLaunch(argv);
+          // **Submit is the conversation now, not the run.** Enter in the brief
+          // field reaches here, and that gesture must land on the safe half.
+          onBrief(task.trim());
           onClose();
         }}
       >
@@ -281,8 +299,9 @@ export function NewWorkstream({
         {/* Named rather than omitted. A modal showing only what it had would
             read as the whole of what a run can be configured to do. */}
         <p className="v-new__note">
-          No name, branch or worktree field: <code>vibe</code> names its own branch after the run
-          id it allocates.
+          No name or branch field: <code>vibe</code> names its own branch after the run id it
+          allocates. Whether the run works in a worktree is a project setting rather than a
+          per-run one — it is under Settings, with the command that makes one.
         </p>
 
         <label className="v-new__toggle">
@@ -294,16 +313,33 @@ export function NewWorkstream({
           </span>
         </label>
 
-        {/* The exact command, because it is the one thing that is definitely
-            true about what pressing this will do. */}
+        {/* The exact command the SECOND button runs. It is no longer what
+            submitting does, so it sits with the control it describes rather than
+            above both of them. */}
         <pre className="v-new__argv">vibe {argv.join(' ')}</pre>
 
         <div className="v-new__foot">
           <Button type="button" onClick={onClose}>
             cancel
           </Button>
+          {/* **Kept, and it is not a hedge.** The pilot's `start_run` takes a
+              brief, a directory and plan-only - it cannot express a gate
+              override or a cap, because `launchArgv`'s overrides have no field
+              on that tool. So a run that needs the block above is the one case
+              with no conversational route, and removing this would remove a
+              capability rather than a shortcut. Labelled for what it skips. */}
+          <Button
+            type="button"
+            disabled={!ready || busy}
+            onClick={() => {
+              if (!ready || busy) return;
+              onLaunch(argv);
+            }}
+          >
+            skip the pilot and {planOnly ? 'plan' : 'run'} now
+          </Button>
           <Button level="primary" type="submit" disabled={!ready || busy}>
-            {planOnly ? 'create & plan' : 'create & run'}
+            talk it through
           </Button>
         </div>
       </form>

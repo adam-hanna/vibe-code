@@ -651,6 +651,24 @@ export interface PilotPaneProps {
    */
   kickoff?: ReactNode;
   /**
+   * A brief somebody typed somewhere else, to be said here (#223).
+   *
+   * **The composer in `1b` is the front door and it was bypassing this pane
+   * entirely.** It built an argv and started a run, so a brief typed into it
+   * never reached the pilot — reported exactly that way: *"in the pilot chat, my
+   * request didn't show up and the pilot isn't doing anything."* The intake
+   * doctrine was written and nothing was routed through it.
+   *
+   * It arrives as a prop rather than a method for the reason `kickoff` is a
+   * slot: `Cockpit` owns what a run is and this pane owns what a conversation
+   * is, and a handle reaching in would be a second way to put words in one.
+   *
+   * Sent as something the PERSON said — not a `wake` — because they typed it.
+   */
+  ask?: string | null | undefined;
+  /** Called once it has been said, so the same brief cannot be sent twice. */
+  onAsked?: (() => void) | undefined;
+  /**
    * The launch this window sent, or null if it sent none (#191).
    *
    * The brief is the one thing about a run that no frame carries, so it cannot
@@ -686,6 +704,8 @@ export function PilotPane({
   limits,
   statuses,
   kickoff,
+  ask,
+  onAsked,
   onOpen,
 }: PilotPaneProps) {
   const [conversation, dispatch] = useReducer(apply, undefined, emptyConversation);
@@ -1231,6 +1251,36 @@ export function PilotPane({
     setStalled(false);
     start([...conversation.messages, { role: 'user' as const, content: reason }], reason, reason);
   }, [run.gate, watching, ready, live, conversation.messages, start]);
+
+  /**
+   * Say a brief that was typed in the composer (#223).
+   *
+   * **This is what makes the intake doctrine reachable.** Without it the
+   * doctrine was advice to a model nobody was talking to: `1b` went straight to
+   * an argv, so the only way into the conversation was to type into it a second
+   * time.
+   *
+   * Two things keep it from misbehaving. It is keyed on the **value** rather
+   * than on having run, so StrictMode's second pass finds the brief already said
+   * instead of saying it twice. And it **defers rather than drops** when the pane
+   * cannot send — no repository, a proposal outstanding, a spent ceiling — by
+   * leaving `ask` alone until `ready` flips, so the brief is not silently lost
+   * at the one moment somebody is watching for it. The composer already says why
+   * send is off.
+   */
+  const asked = useRef<string | null>(null);
+  useEffect(() => {
+    const want = ask ?? null;
+    if (want === null || want === asked.current) return;
+    if (!ready || live !== null) return;
+    asked.current = want;
+    // A person spoke, so the rope is new - the same reset `submit` does, since
+    // this is the same act arriving through another door.
+    chain.current = 0;
+    setStalled(false);
+    start([...conversation.messages, { role: 'user' as const, content: want }], want);
+    onAsked?.();
+  }, [ask, ready, live, conversation.messages, start, onAsked]);
 
   /**
    * The command watcher (#223).

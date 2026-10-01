@@ -385,6 +385,19 @@ export function Cockpit() {
     setTab(next as typeof tab);
     setOpenAt(round ?? null);
   }, []);
+  /**
+   * A brief typed in `1b`, on its way to the pilot (#223).
+   *
+   * **The composer was the front door and it skipped the pilot entirely**, so a
+   * brief typed into it built an argv and started a run: *"in the pilot chat, my
+   * request didn't show up and the pilot isn't doing anything."* The intake
+   * doctrine existed and nothing was routed through it.
+   *
+   * Held here because this is the component that owns both — the modal and the
+   * pane — and cleared by the pane the moment it has said it, so the same brief
+   * cannot be sent twice.
+   */
+  const [brief, setBrief] = useState<string | null>(null);
   /** Pilot proposals waiting on a person, so a hidden tab can say so (#144). */
   const [proposals, setProposals] = useState(0);
   /**
@@ -923,6 +936,15 @@ export function Cockpit() {
           }}
           locked={composing.locked}
           onLaunch={launch}
+          // The default way out, and the one that spends nothing: the brief goes
+          // to the pilot, which reads it, asks about what would change the plan
+          // and proposes the run when it is settled (#223). The tab moves with
+          // it, because a conversation nobody is looking at is the same as none.
+          onBrief={(task) => {
+            setBrief(task);
+            setComposing(null);
+            open('pilot');
+          }}
           onClose={() => setComposing(null)}
           busy={busy || !wire.connected}
         />
@@ -1347,6 +1369,8 @@ export function Cockpit() {
               opened={viewing !== null}
               commands={commands}
               onEffect={onEffect}
+              ask={brief}
+              onAsked={() => setBrief(null)}
               onPending={setProposals}
               limits={limits}
               statuses={keyStatuses}
