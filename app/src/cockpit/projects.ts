@@ -34,6 +34,8 @@ export const PROJECTS_KEY = 'vibe.projects';
 export const PINNED_KEY = 'vibe.pinned';
 /** Names a person gave their runs. See `nameOf` for why this is not the task. */
 export const NAMES_KEY = 'vibe.runnames';
+/** What projects have been renamed to, by directory (#223). See `ProjectName`. */
+export const PROJECT_NAMES_KEY = 'vibe.projectnames';
 
 /**
  * How many runs a project shows before `Show more`.
@@ -367,6 +369,61 @@ export function readNames(raw: string | null): readonly RunName[] {
     if (typeof dir !== 'string' || typeof runId !== 'string') continue;
     if (typeof name !== 'string' || name.trim() === '') continue;
     out.push({ dir, runId, name });
+  }
+  return out;
+}
+
+/**
+ * A project's name, when somebody gave it one (#223): *"I'd like to be able to
+ * rename projects and runs"*.
+ *
+ * **A label in this window, never a rename on disk**, for the run name's reason
+ * one level up. A project *is* its repository, and every request this window
+ * sends names the directory — so the directory stays exactly what it is, and
+ * this sits in front of the folder name for display. Keyed through `dirKey`
+ * like a pin, so one repository typed two ways has one name; clearing it brings
+ * the folder name back.
+ */
+export interface ProjectName {
+  dir: string;
+  name: string;
+}
+
+/** The name for a project, or `fallback` — its folder, or its path under a parent. */
+export function projectLabel(names: readonly ProjectName[], dir: string, fallback: string): string {
+  const key = dirKey(dir);
+  return names.find((n) => dirKey(n.dir) === key)?.name ?? fallback;
+}
+
+/** Set a project's name, or clear it when the text is empty — `renameRun`'s rule. */
+export function renameProject(
+  names: readonly ProjectName[],
+  dir: string,
+  name: string,
+): readonly ProjectName[] {
+  const key = dirKey(dir);
+  const rest = names.filter((n) => dirKey(n.dir) !== key);
+  const trimmed = name.trim();
+  return trimmed === '' ? rest : [...rest, { dir, name: trimmed }];
+}
+
+/** Drop a project's name, for one this window is no longer listing. */
+export function forgetProjectName(names: readonly ProjectName[], dir: string): readonly ProjectName[] {
+  const key = dirKey(dir);
+  return names.filter((n) => dirKey(n.dir) !== key);
+}
+
+export function readProjectNames(raw: string | null): readonly ProjectName[] {
+  const parsed = parse(raw);
+  if (parsed === null) return [];
+  const out: ProjectName[] = [];
+  for (const item of parsed) {
+    if (typeof item !== 'object' || item === null) continue;
+    const row = item as Record<string, unknown>;
+    const dir = row['dir'];
+    const name = row['name'];
+    if (typeof dir !== 'string' || typeof name !== 'string' || name.trim() === '') continue;
+    out.push({ dir, name });
   }
   return out;
 }

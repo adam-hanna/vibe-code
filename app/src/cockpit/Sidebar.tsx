@@ -8,10 +8,15 @@ import { pickDirectory } from './pick';
 import {
   NAMES_KEY,
   PINNED_KEY,
+  PROJECT_NAMES_KEY,
   PROJECTS_KEY,
   addProject,
   findProject,
   forgetNames,
+  forgetProjectName,
+  projectLabel,
+  readProjectNames,
+  renameProject,
   forgetProjectPins,
   isPinned,
   PLACEHOLDER,
@@ -32,7 +37,7 @@ import {
   within,
 } from './projects';
 import type { ReactNode } from 'react';
-import type { Pin, ProjectNode, RunName } from './projects';
+import type { Pin, ProjectName, ProjectNode, RunName } from './projects';
 import type { RailRun } from './squares';
 import { draftsIn, settled } from './pending';
 import type { Draft } from './pending';
@@ -193,11 +198,14 @@ function PinButton({ on, onToggle }: { on: boolean; onToggle: () => void }) {
 function RenameRow({
   title,
   named,
+  what = 'run',
   onDone,
 }: {
   title: string;
   /** Whether `title` is a name somebody gave, rather than the run's own brief. */
   named: boolean;
+  /** What is being named — a run, or a project (#223). */
+  what?: 'run' | 'project';
   onDone: (name: string | null) => void;
 }) {
   const [typed, setTyped] = useState(named ? title : '');
@@ -219,7 +227,7 @@ function RenameRow({
           if (e.key === 'Escape') onDone(null);
         }}
         placeholder={named ? undefined : preview(title, PLACEHOLDER)}
-        aria-label="name for this run"
+        aria-label={`name for this ${what}`}
         autoFocus
       />
       <button className="v-nav__act" type="submit" title="Save this name">
@@ -269,7 +277,15 @@ function RunRow({
 
   return (
     <div className={`v-nav__row${current ? ' v-nav__row--on' : ''}`}>
-      <button className="v-nav__open" onClick={onOpen} title={title}>
+      <button
+        className="v-nav__open"
+        onClick={onOpen}
+        // A second way to rename, for the row whose ✎ only shows on hover
+        // (#223): *"I'd like to be able to rename projects and runs"* was asked
+        // about a control that already existed and had not been found.
+        onDoubleClick={onRename}
+        title={`${title} — double-click to rename`}
+      >
         {/* The archive's verdict, never one derived here. A run this window is
             showing gets the dot too, because it is the running one. */}
         {live ? <LivenessDot state="live" /> : <span className="v-nav__bullet">·</span>}
@@ -334,6 +350,10 @@ function DraftRow({
 function Project({
   dir,
   label,
+  named,
+  renamingProject,
+  onRenameProject,
+  onRenamedProject,
   current,
   holds,
   nested,
@@ -358,8 +378,15 @@ function Project({
   onForget,
 }: {
   dir: string;
-  /** What the row is called: the folder name, or its path under the parent. */
+  /** What the row is called: its name, else the folder, else its path under the parent. */
   label: string;
+  /** Whether `label` is a name somebody gave the project (#223). */
+  named: boolean;
+  /** Whether this project's rename box is open. */
+  renamingProject: boolean;
+  onRenameProject: () => void;
+  /** The name typed, or null to abandon. Empty brings the folder name back. */
+  onRenamedProject: (name: string | null) => void;
   /** Whether this is the project the window is pointed at. */
   current: boolean;
   /**
@@ -439,44 +466,59 @@ function Project({
 
   return (
     <div className="v-nav__project">
-      <div className="v-nav__row v-nav__row--project">
-        <button className="v-nav__open" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
-          <span className="v-nav__folder">{open ? '▾' : '▸'}</span>
-          <span className={`v-nav__title${current ? ' v-nav__title--on' : ''}`}>
-            {label}
-          </span>
-        </button>
-        {/* Right-justified, beside the project it starts a run in. The composer
-            it opens has no repository field at all — the project is the answer,
-            and offering it again would be the second spelling #211 warns about. */}
-        {/* **This project's settings live on its row** (#223): *"I want the
-            global settings to be accessed via the 'settings' on the left bar.
-            Then… a settings icon on the project dropdown row… where project
-            level settings live."* On the right with the row's other actions,
-            because the arrow on the left is the disclosure and a second control
-            there would be a second thing that opens the section. */}
-        <button
-          className="v-nav__act"
-          onClick={() => onProjectSettings(dir)}
-          title={`Settings for ${projectName(dir)}`}
-        >
-          ⚙
-        </button>
-        <button
-          className="v-nav__act"
-          onClick={() => onNewIn(dir)}
-          title={`New run in ${projectName(dir)}`}
-        >
-          ＋
-        </button>
-        <button
-          className="v-nav__act v-nav__act--danger"
-          onClick={() => onForget(dir)}
-          title={`Remove ${projectName(dir)} from this list`}
-        >
-          −
-        </button>
-      </div>
+      {renamingProject ? (
+        <RenameRow title={label} named={named} what="project" onDone={onRenamedProject} />
+      ) : (
+        <div className="v-nav__row v-nav__row--project">
+          <button
+            className="v-nav__open"
+            onClick={() => setOpen((o) => !o)}
+            onDoubleClick={onRenameProject}
+            aria-expanded={open}
+            title={`${dir} — double-click to rename`}
+          >
+            <span className="v-nav__folder">{open ? '▾' : '▸'}</span>
+            <span className={`v-nav__title${current ? ' v-nav__title--on' : ''}`}>
+              {label}
+            </span>
+          </button>
+          {/* Right-justified, beside the project it starts a run in. The composer
+              it opens has no repository field at all — the project is the answer,
+              and offering it again would be the second spelling #211 warns about. */}
+          {/* **This project's settings live on its row** (#223): *"I want the
+              global settings to be accessed via the 'settings' on the left bar.
+              Then… a settings icon on the project dropdown row… where project
+              level settings live."* On the right with the row's other actions,
+              because the arrow on the left is the disclosure and a second control
+              there would be a second thing that opens the section. */}
+          <button
+            className="v-nav__act"
+            onClick={() => onProjectSettings(dir)}
+            title={`Settings for ${label}`}
+          >
+            ⚙
+          </button>
+          {/* Renaming a project names the row and nothing else: the directory is
+              what every request sends, so it stays exactly what it is. */}
+          <button className="v-nav__act" onClick={onRenameProject} title={`Rename ${label}`}>
+            ✎
+          </button>
+          <button
+            className="v-nav__act"
+            onClick={() => onNewIn(dir)}
+            title={`New run in ${label}`}
+          >
+            ＋
+          </button>
+          <button
+            className="v-nav__act v-nav__act--danger"
+            onClick={() => onForget(dir)}
+            title={`Remove ${label} from this list`}
+          >
+            −
+          </button>
+        </div>
+      )}
 
       {open && (
         <div className="v-nav__runs">
@@ -591,6 +633,9 @@ export function Sidebar({
   const [projects, setProjects] = useState<readonly string[]>([]);
   const [pins, setPins] = useState<readonly Pin[]>([]);
   const [names, setNames] = useState<readonly RunName[]>([]);
+  const [projectNames, setProjectNames] = useState<readonly ProjectName[]>([]);
+  /** Which project has its rename box open, or null. */
+  const [renamingProject, setRenamingProject] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [typed, setTyped] = useState('');
   /** Which run has its rename box open, or null. At most one, sidebar-wide. */
@@ -622,6 +667,7 @@ export function Sidebar({
       setProjects(readProjects(localStorage.getItem(PROJECTS_KEY)));
       setPins(readPins(localStorage.getItem(PINNED_KEY)));
       setNames(readNames(localStorage.getItem(NAMES_KEY)));
+      setProjectNames(readProjectNames(localStorage.getItem(PROJECT_NAMES_KEY)));
     } catch {
       // Storage can be unavailable or full. An empty sidebar is a smaller
       // failure than a window that will not render.
@@ -746,6 +792,21 @@ export function Sidebar({
     [renaming, save],
   );
 
+  /** The same for a project: null abandons, empty brings the folder name back. */
+  const renamedProject = useCallback(
+    (name: string | null) => {
+      const at = renamingProject;
+      setRenamingProject(null);
+      if (at === null || name === null) return;
+      setProjectNames((list) => {
+        const next = renameProject(list, at, name);
+        save(PROJECT_NAMES_KEY, next);
+        return next;
+      });
+    },
+    [renamingProject, save],
+  );
+
   /**
    * Do what the open confirmation says, and nothing else.
    *
@@ -773,6 +834,12 @@ export function Sidebar({
       setPins((list) => {
         const next = forgetProjectPins(list, at.dir);
         save(PINNED_KEY, next);
+        return next;
+      });
+      // And its name, so adding it back starts from the folder name.
+      setProjectNames((list) => {
+        const next = forgetProjectName(list, at.dir);
+        save(PROJECT_NAMES_KEY, next);
         return next;
       });
       setPending(null);
@@ -822,7 +889,15 @@ export function Sidebar({
         // A nested project is named by where it sits under its parent, so
         // `.worktrees/gh-236-…` reads as the worktree it is rather than as a
         // second repository with a branch for a name.
-        label={parent === null ? projectName(p) : relativeTo(parent, p)}
+        label={projectLabel(projectNames, p, parent === null ? projectName(p) : relativeTo(parent, p))}
+        named={projectLabel(projectNames, p, '') !== ''}
+        renamingProject={renamingProject !== null && dirKey(renamingProject) === dirKey(p)}
+        onRenameProject={() => {
+          // One rename box at a time, sidebar-wide.
+          setRenaming(null);
+          setRenamingProject(p);
+        }}
+        onRenamedProject={renamedProject}
         current={dirKey(p) === dirKey(dir)}
         holds={within(p, dir)}
         nested={
@@ -844,7 +919,10 @@ export function Sidebar({
         renaming={renaming}
         onShow={onShow}
         onPin={pin}
-        onRename={(d, runId) => setRenaming({ dir: d, runId })}
+        onRename={(d, runId) => {
+          setRenamingProject(null);
+          setRenaming({ dir: d, runId });
+        }}
         onRenamed={renamed}
         onDeleteRun={(d, runId, title, task) => {
           setRefused(null);
@@ -918,7 +996,7 @@ export function Sidebar({
         <Confirm
           tone="quiet"
           kicker="deletes nothing"
-          title={`Remove ${projectName(pending.dir)} from this list`}
+          title={`Remove ${projectLabel(projectNames, pending.dir, projectName(pending.dir))} from this list`}
           lead="This is a row in this window, not a directory. Nothing on disk is touched and nothing is deleted."
           facts={[
             { label: 'directory', value: pending.dir, mono: true },
@@ -960,7 +1038,10 @@ export function Sidebar({
                 renaming={renaming !== null && renaming.dir === p.dir && renaming.runId === p.runId}
                 onOpen={() => onShow(p.dir, p.runId, title)}
                 onPin={() => pin(p)}
-                onRename={() => setRenaming({ dir: p.dir, runId: p.runId })}
+                onRename={() => {
+                  setRenamingProject(null);
+                  setRenaming({ dir: p.dir, runId: p.runId });
+                }}
                 onRenamed={renamed}
                 onDelete={() => {
                   setRefused(null);

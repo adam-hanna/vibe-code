@@ -255,3 +255,32 @@ describe('a project inside another is drawn under it (#223)', () => {
     expect(relativeTo('/elsewhere', tree)).toBe('gh-236');
   });
 });
+
+describe('a project can be renamed, and only its row changes (#223)', () => {
+  // *"I'd like to be able to rename projects and runs"*.
+  test('a name sits in front of the folder, keyed like a pin, and empty clears it', async () => {
+    const { forgetProjectName, projectLabel, readProjectNames, renameProject } = await import('./projects');
+    const named = renameProject([], 'C:\\Users\\me\\erm', '  ERM  ');
+    expect(projectLabel(named, 'c:/users/me/erm/', 'erm')).toBe('ERM');
+    expect(projectLabel(named, '/elsewhere', 'elsewhere')).toBe('elsewhere');
+    expect(renameProject(named, 'c:/users/me/erm', '   ')).toEqual([]);
+    expect(renameProject(named, 'c:/users/me/erm', 'Risk')).toEqual([{ dir: 'c:/users/me/erm', name: 'Risk' }]);
+    expect(forgetProjectName(named, 'C:\\Users\\me\\erm')).toEqual([]);
+    expect(readProjectNames('[{"dir":"/a","name":"A"},{"dir":"/b","name":""},{"name":"x"}]')).toEqual([
+      { dir: '/a', name: 'A' },
+    ]);
+    expect(readProjectNames('not json')).toEqual([]);
+  });
+
+  test('the row has a rename control, double-click renames both, and the directory is never touched', () => {
+    const row = sidebar.slice(sidebar.indexOf('function Project('));
+    expect(row).toContain('onClick={onRenameProject} title={`Rename ${label}`}');
+    expect(row).toContain('onDoubleClick={onRenameProject}');
+    const run = sidebar.slice(sidebar.indexOf('function RunRow('), sidebar.indexOf('function DraftRow('));
+    expect(run).toContain('onDoubleClick={onRename}');
+    // A rename is this window's memory: no host request carries it.
+    const renamed = sidebar.slice(sidebar.indexOf('const renamedProject'), sidebar.indexOf('Do what the open confirmation says'));
+    expect(renamed).not.toMatch(/host\./);
+    expect(renamed).toContain('save(PROJECT_NAMES_KEY, next)');
+  });
+});

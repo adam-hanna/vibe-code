@@ -419,6 +419,14 @@ they are waiting on. Four things in it are worth carrying:
   render time, keyed by `(project, run)` like a pin and a saved conversation, and an empty
   name **clears** rather than storing a blank, because those are one intention.
 
+  **A project is renamed the same way, for the same reason one level up** (#223): *"I'd like
+  to be able to rename projects and runs."* A project *is* its repository and every request
+  names the directory, so `projectLabel` puts a name in front of the folder for display and the
+  path is never touched; keyed through `dirKey`, cleared by an empty box, and forgotten when the
+  project is removed. The run's ✎ had existed all along and was not found, because it shows only
+  on hover — so the project row's ✎ is always drawn, like its other actions, and **double-click
+  on either title renames it** as a second road.
+
   **The two deletions say opposite things and the confirmation is the only thing that can tell
   them apart.** Removing a *project* is a row in this window — nothing on disk is touched, and
   adding it back brings every run with it. Deleting a *run* removes `.vibe/runs/<id>` and is
