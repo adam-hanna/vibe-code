@@ -121,6 +121,7 @@
 .v-side {
   width: 364px;
   flex: none;
+  position: relative;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -133,6 +134,34 @@
 
 .v-side--right {
   border-left: 1px solid var(--rule-structure);
+}
+
+/* The inner edge of an open panel is its resize handle (#223). It straddles the
+   rule, so the hit target is wider than the line it sits on, and it shows the
+   accent only while it is being found or used. */
+.v-side__resize {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  z-index: 2;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.v-side--left .v-side__resize {
+  right: -4px;
+}
+
+.v-side--right .v-side__resize {
+  left: -4px;
+}
+
+.v-side__resize:hover,
+.v-side__resize:active,
+.v-side__resize:focus-visible {
+  background: linear-gradient(var(--accent-solid), var(--accent-solid)) center / 2px 100% no-repeat;
+  outline: none;
 }
 
 /* Shut: a strip, never a gap. The way back is where the panel was. */

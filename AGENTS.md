@@ -1390,6 +1390,15 @@ they are waiting on. Four things in it are worth carrying:
   Neither is persisted, and that is deliberate — a collapse is a gesture for the next few
   minutes, where `localStorage` holds the repository and the spend ceiling because those are
   decisions.
+
+  **The width is the exception, and it is on the same side of that line** (#223): *"The two
+  side bars (left and right) should be width adjustable when open."* An open panel's inner edge
+  is a handle — drag, arrow keys, double-click for the design's 364px — and the width **is**
+  kept, per edge, because how wide you like a column is a preference set once, like the type
+  scale. This overrides `HANDOFF.md`'s *"364px, fixed"* at the owner's word, so the comments
+  that say *"a 364px column"* describe the default, not a guarantee: anything in a side column
+  must still fit at 240px, the floor. The ceiling is half the window, so the main pane cannot
+  be squeezed out, and a window made narrower pulls a wide panel back with it.
 - **A tab's count is how many things are behind it, and never a property of them.**
   `Plan critique · 2` was two blocking findings and was read as two critiques, which is the
   reasonable reading, since every other count in that bar — Code, Questions, Verify, Commands

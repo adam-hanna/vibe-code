@@ -1,4 +1,5 @@
-import type { ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import type { KeyboardEvent, PointerEvent, ReactNode } from 'react';
 
 /**
  * A column that can be put away without being lost (#223).
@@ -29,7 +30,69 @@ import type { ReactNode } from 'react';
  * days later still folded up would be answering a question nobody asked twice.
  * `localStorage` holds the repository and the pilot's spend ceiling because both
  * are decisions; this is a gesture.
+ *
+ * ## The width is dragged, and that one is remembered
+ *
+ * *"The two side bars (left and right) should be width adjustable when open."*
+ * The inner edge of an open panel is a handle: drag it, or focus it and use the
+ * arrow keys, and double-click puts the design's width back. **This one is
+ * kept**, per edge, and the line between it and the collapse is the one drawn
+ * above: how wide you like the runs column is a preference you set once, like
+ * the type scale, where a collapse is for the next few minutes. The bounds are
+ * truncations rather than measurements — wide enough that a row's controls fit,
+ * and never more than half the window, so the main pane cannot be squeezed out.
  */
+
+/** The design's width, and what a double-click on the handle goes back to. */
+export const SIDE_DEFAULT = 364;
+const SIDE_MIN = 240;
+const SIDE_MAX = 720;
+/** How far one arrow key moves the edge. */
+const SIDE_STEP = 16;
+const widthKey = (side: 'left' | 'right'): string => `vibe.side.${side}.width`;
+
+/** A width the panel may take in a window `viewport` pixels wide. */
+export function clampWidth(px: number, viewport: number): number {
+  if (!Number.isFinite(px)) return SIDE_DEFAULT;
+  const ceiling = Math.max(SIDE_MIN, Math.min(SIDE_MAX, Math.floor(viewport / 2)));
+  return Math.round(Math.min(ceiling, Math.max(SIDE_MIN, px)));
+}
+
+/** A stored width, or the default when there is none or it is not a number. */
+export function readWidth(raw: string | null): number {
+  const n = raw === null ? NaN : Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : SIDE_DEFAULT;
+}
+
+/** The width state for one edge, read once and written on every change. */
+function useSideWidth(side: 'left' | 'right'): [number, (next: number) => void] {
+  const [width, setWidth] = useState(() => {
+    try {
+      return clampWidth(readWidth(localStorage.getItem(widthKey(side))), window.innerWidth);
+    } catch {
+      return SIDE_DEFAULT;
+    }
+  });
+  const set = useCallback(
+    (next: number) => {
+      const clamped = clampWidth(next, window.innerWidth);
+      setWidth(clamped);
+      try {
+        localStorage.setItem(widthKey(side), String(clamped));
+      } catch {
+        // Kept for this session; it will not be back next time.
+      }
+    },
+    [side],
+  );
+  // A window made narrower must not leave a panel wider than half of it.
+  useEffect(() => {
+    const fit = (): void => setWidth((w) => clampWidth(w, window.innerWidth));
+    window.addEventListener('resize', fit);
+    return () => window.removeEventListener('resize', fit);
+  }, []);
+  return [width, set];
+}
 export function SidePanel({
   side,
   title,
@@ -64,6 +127,32 @@ export function SidePanel({
   // "expand" with the same glyph is the one thing this control must not do.
   const away = side === 'left' ? '‹' : '›';
   const back = side === 'left' ? '›' : '‹';
+  const [width, setWidth] = useSideWidth(side);
+  /** Where a drag started: the pointer's x and the width at that moment. */
+  const drag = useRef<{ x: number; width: number } | null>(null);
+  // Dragging toward the main pane widens the panel, so the sign depends on the
+  // edge it is pinned to.
+  const toward = side === 'left' ? 1 : -1;
+  const onPointerDown = (e: PointerEvent<HTMLDivElement>): void => {
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    drag.current = { x: e.clientX, width };
+  };
+  const onPointerMove = (e: PointerEvent<HTMLDivElement>): void => {
+    const at = drag.current;
+    if (at === null) return;
+    setWidth(at.width + toward * (e.clientX - at.x));
+  };
+  const onPointerUp = (e: PointerEvent<HTMLDivElement>): void => {
+    drag.current = null;
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+  };
+  const onKeyDown = (e: KeyboardEvent<HTMLDivElement>): void => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    e.preventDefault();
+    const right = e.key === 'ArrowRight' ? 1 : -1;
+    setWidth(width + (side === 'left' ? right : -right) * SIDE_STEP);
+  };
 
   if (!open) {
     return (
@@ -92,7 +181,24 @@ export function SidePanel({
   }
 
   return (
-    <aside className={`v-side v-side--${side}`} aria-label={title}>
+    <aside className={`v-side v-side--${side}`} aria-label={title} style={{ width }}>
+      <div
+        className="v-side__resize"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label={`Resize ${title}`}
+        aria-valuenow={width}
+        aria-valuemin={SIDE_MIN}
+        aria-valuemax={SIDE_MAX}
+        tabIndex={0}
+        title="Drag to resize · double-click for the default width"
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerUp}
+        onDoubleClick={() => setWidth(SIDE_DEFAULT)}
+        onKeyDown={onKeyDown}
+      />
       <header className="v-side__head">
         <span className="v-side__title">{title}</span>
         <button
