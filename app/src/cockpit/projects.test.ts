@@ -323,3 +323,14 @@ describe('a project can be pointed at another directory (#223)', () => {
     expect(sidebar).toContain('}, [epoch]);');
   });
 });
+
+describe('a moved project is offered its old settings, only where there are none (#223)', () => {
+  // *"lets copy it when there isn't already one"*.
+  test('the offer reads the old directory and writes through the ordinary save', () => {
+    const block = settingsSrc.slice(settingsSrc.indexOf('const [carry, setCarry]'));
+    expect(block).toContain("if (scope !== 'project' || movedFrom === null || movedFrom === undefined || !noFileHere) return;");
+    expect(block).toContain('.config(movedFrom)');
+    expect(settingsSrc).toContain("onClick={() => write(carry.raw, 'project')}");
+    expect(cockpit).toContain('setMoved({ from: repoDir, to: next });');
+  });
+});

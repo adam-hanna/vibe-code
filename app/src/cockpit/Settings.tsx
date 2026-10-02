@@ -620,6 +620,7 @@ function WhereItIs({ dir, onRelocate }: { dir: string; onRelocate: (to: string) 
 export function Settings({
   scope,
   onRelocate,
+  movedFrom,
   dir,
   scale,
   onScale,
@@ -639,6 +640,8 @@ export function Settings({
   scope: 'project' | 'global';
   /** Point the project at another directory; the refusal, or null (#223). */
   onRelocate?: (to: string) => string | null;
+  /** Where this project pointed before it was moved here, in this session. */
+  movedFrom?: string | null;
   dir: string;
   /** How big the product is drawn. Window state — see `appearance.ts`. */
   scale: number;
@@ -742,6 +745,30 @@ export function Settings({
     },
     [dir, onSaved],
   );
+  /**
+   * The old directory's `vibe.config.json`, offered to a project just moved to
+   * a directory that has none (#223): *"lets copy it when there isn't already
+   * one"*. Never when the new directory has its own — that file is usually
+   * committed and belongs to the repository. A copy, so the old file stays.
+   */
+  const [carry, setCarry] = useState<{ path: string; raw: Record<string, unknown> } | null>(null);
+  const noFileHere = frame !== null && frame.path === null;
+  useEffect(() => {
+    setCarry(null);
+    if (scope !== 'project' || movedFrom === null || movedFrom === undefined || !noFileHere) return;
+    let live = true;
+    void host
+      .config(movedFrom)
+      .then((old) => {
+        if (live && old.path !== null && Object.keys(old.raw).length > 0) setCarry({ path: old.path, raw: old.raw });
+      })
+      // An old directory whose file cannot be read has nothing to offer.
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [scope, movedFrom, noFileHere]);
+
   /** A save to whichever file this screen was opened for. */
   const save = useCallback((patch: Record<string, unknown>) => write(patch, scope), [write, scope]);
 
@@ -833,6 +860,27 @@ export function Settings({
           : 'Your settings for every project on this machine. How each vendor is reached, the CLIs and the pilot’s permissions are only ever set here; for the rest, a project that sets a key in its own file wins, and the chip says when one does.'}
       </p>
       {scope === 'project' && onRelocate !== undefined && <WhereItIs dir={dir} onRelocate={onRelocate} />}
+      {carry !== null && (
+        <div className="v-set__fact">
+          <span className="v-set__factname">bring the settings</span>
+          <span>
+            This directory has no <code>vibe.config.json</code>, and the one this project pointed at
+            before does: <code>{carry.path}</code>. Copying it writes the same settings here, checked
+            like any other save; the old file is left where it is.
+            <span className="v-set__inline">
+              <Button
+                level="primary"
+                disabled={busy}
+                // The offer goes once the file exists, and stays on a refusal,
+                // which is shown above with the field it named.
+                onClick={() => write(carry.raw, 'project')}
+              >
+                copy it here
+              </Button>
+            </span>
+          </span>
+        </div>
+      )}
       <div className="v-set__head">
         <span>
           {scope === 'global' ? (

@@ -469,6 +469,8 @@ export function Cockpit() {
    * so the sidebar reads it again rather than drawing what it held (#223).
    */
   const [projectsEpoch, setProjectsEpoch] = useState(0);
+  /** The last move, so the new directory's settings can offer the old file. */
+  const [moved, setMoved] = useState<{ from: string; to: string } | null>(null);
   const saveDrafts = useCallback((change: (list: readonly Draft[]) => readonly Draft[]) => {
     setDrafts((list) => {
       const next = change(list);
@@ -506,6 +508,7 @@ export function Cockpit() {
       const next = to.trim();
       saveDrafts((list) => list.map((d) => (dirKey(d.dir) === dirKey(repoDir) ? { ...d, dir: next } : d)));
       setProjectsEpoch((n) => n + 1);
+      setMoved({ from: repoDir, to: next });
       rememberRepo(next);
       return null;
     },
@@ -1516,6 +1519,7 @@ export function Cockpit() {
               key={`${settingsScope}:${repoDir}`}
               scope={settingsScope}
               onRelocate={relocate}
+              movedFrom={moved !== null && dirKey(moved.to) === dirKey(repoDir) ? moved.from : null}
               dir={repoDir}
               scale={scale}
               onScale={rescale}

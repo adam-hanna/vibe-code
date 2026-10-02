@@ -438,6 +438,13 @@ they are waiting on. Four things in it are worth carrying:
   screen's empty state too, since a project pointed at the wrong place is the one whose
   configuration may not read.
 
+  **The old `vibe.config.json` is offered, never carried.** After a move, if the new directory
+  has no file and the old one has one, the screen offers to copy it — through the ordinary save,
+  so it is validated like any other — and leaves the old file where it is. Never when the new
+  directory has its own: that file is usually committed and is the repository's, and a move
+  that merged into it would change a tracked file nobody asked to change. An offer rather than
+  a step of the move, because the move otherwise writes nothing to disk.
+
   **The two deletions say opposite things and the confirmation is the only thing that can tell
   them apart.** Removing a *project* is a row in this window — nothing on disk is touched, and
   adding it back brings every run with it. Deleting a *run* removes `.vibe/runs/<id>` and is
