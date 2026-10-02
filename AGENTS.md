@@ -2444,6 +2444,37 @@ carry it:
   have handed a child in that child's stdout, stderr and lines, because Codex's 401 quotes the key
   in full and every caller hands stderr to a log. `keys.test.ts` pins the second reader.
 
+**The pilot reports how full its context is, and can compact or clear it** (#223).
+Asked for as *"report context remaining for the pilot and offer some way to compact
+it"*. Three things are worth keeping:
+
+- **The figure is the last request's prompt, never `tokens`.** The reply already
+  carried `tokens`, and it is what the turn *moved*, summed over every request: a
+  Codex pilot turn measured 40,078 input tokens against a last prompt of 14,280.
+  Claude's comes from the last assistant message plus `modelUsage.contextWindow`
+  (`promptContext`, the arithmetic `extractUsage` already uses). **Codex's comes
+  from its own rollout file**, `$CODEX_HOME/sessions/…/rollout-…-<thread>.jsonl`,
+  because `codex exec --json` says neither the prompt size nor the window. That
+  file's `token_count` event carries both, and its window is the one Codex itself
+  compacts against. It is a format nobody promised, so `rolloutContext` fails
+  closed to *no figure*. The API road has a count and no window, and says so
+  rather than dividing by a guess.
+- **Compaction is session rotation with a handoff, on every backend.** `/compact`
+  does not work headless (settled above), and `codex exec` has nothing like it.
+  So the pilot is asked for its own handoff summary in one turn, and then the
+  wire is replaced. A CLI chat gives up its session and **carries** the summary
+  into the first message of the next one; `carry` is cleared only when a new
+  session has taken it, so a failed turn sends it again. An API chat re-sends
+  only the request and the summary. **The log is never shortened**: `messages` is
+  the wire and `replies` is the record, so both compact and clear change the
+  first and leave the second alone. A clear leaves a divider in the log.
+- **The session moved into the conversation, and that fixed two defects.** It was
+  a ref in the pane. A relaunch therefore restored the transcript and forgot the
+  session, so the pilot answered the next message from nothing. Opening another
+  run's chat kept the ref, so that chat continued inside the previous one's
+  session. `Conversation.session` names its backend and is saved with the chat. A
+  turn on another backend retires it, because that session never saw the turn.
+
 **The pilot runs in the repository the window named, and that path is a
 permission boundary.** `--restricted` confines `Read`, `Glob` and `Grep` to the
 child's working directory, so `cwd` is not incidental the way it is for a process

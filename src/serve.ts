@@ -801,6 +801,7 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
             text: reply.text,
             sessionId: reply.sessionId,
             tokens: reply.tokens,
+            context: reply.context,
           });
         })
         .catch((err: unknown) => {

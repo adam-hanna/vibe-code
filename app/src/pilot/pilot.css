@@ -634,3 +634,36 @@
   border-top: 1px solid var(--rule-card);
   background: var(--surface-inset);
 }
+
+/* How full the pilot's context is, and the two controls that empty it (#223).
+   Right of the books, because `space-between` already puts it there and it is
+   about the conversation, not the money. Emphasis rather than a ground past 80%:
+   `--text-emphasis` is the product's alarm colour, and a ground would make one
+   sentence look like a halt banner. */
+.v-pilot__context {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.v-pilot__note--warn {
+  color: var(--text-emphasis);
+}
+
+/* Where the pilot's memory starts again: a rule across the log with the reason
+   on it, because a cleared context is a fact about every reply after it. */
+.v-pilot__divider {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+}
+
+.v-pilot__divider::before,
+.v-pilot__divider::after {
+  content: '';
+  flex: 1;
+  border-top: 1px solid var(--rule-structure);
+}

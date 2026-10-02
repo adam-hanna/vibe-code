@@ -120,6 +120,46 @@ export interface Reply {
    * wait on a turn that took four seconds.
    */
   startedAt: number | null;
+  /**
+   * How full the conversation was when this turn ended, as the backend said
+   * (#223). Optional because every reply saved before it has none, and absent
+   * is the truth about those. The API road leaves it unset and `contextNow`
+   * reads its usage instead; see there.
+   */
+  context?: Context | null;
+  /** This turn was the pilot writing its own summary, to carry into a fresh context. */
+  compacts?: boolean;
+  /**
+   * Not a turn at all: the place a person cleared the pilot's context. Drawn as
+   * a divider, so the log says where the pilot's memory starts again.
+   */
+  cleared?: boolean;
+}
+
+/**
+ * The size of a conversation and the window it is measured against (#223).
+ *
+ * `window` is null when nothing reported one, and is then drawn as a count with
+ * no share - never as a share of a window guessed from a model name.
+ */
+export interface Context {
+  tokens: number;
+  window: number | null;
+}
+
+/**
+ * The CLI conversation a subscription chat lives in, and which CLI holds it.
+ *
+ * Stored with the chat rather than beside the pane (#223). It was a ref, which
+ * meant two defects with one cause: a relaunch restored the transcript and
+ * forgot the session, so the pilot answered the next message with no memory of
+ * the conversation on screen; and opening another run's chat kept the ref, so
+ * that chat was continued inside the *previous* one's session. A conversation
+ * and the session that remembers it are one thing.
+ */
+export interface Session {
+  backend: Backend;
+  id: string;
 }
 
 /**
@@ -164,10 +204,196 @@ export interface Conversation {
   replies: readonly Reply[];
   /** Events this build did not recognise. Counted, never discarded silently. */
   unknown: number;
+  /** The subscription session holding this conversation, or null for a new one. */
+  session: Session | null;
+  /**
+   * A summary waiting to be carried into the next session, or null (#223).
+   *
+   * Set when a subscription chat compacts and cleared once a new session has
+   * taken it - not when it is sent, so a turn that fails on the way carries it
+   * again rather than starting from nothing.
+   */
+  carry: string | null;
 }
 
 export function emptyConversation(): Conversation {
-  return { messages: [], live: null, replies: [], unknown: 0 };
+  return { messages: [], live: null, replies: [], unknown: 0, session: null, carry: null };
+}
+
+/** The session to resume on `backend`, or null when this one has none there. */
+export function heldSession(conversation: Conversation, backend: Backend): string | null {
+  const session = conversation.session;
+  return session !== null && session.backend === backend ? session.id : null;
+}
+
+/**
+ * Record the session the CLI says the live turn ran in.
+ *
+ * The backend is the live turn's, not a parameter, because the frame handler
+ * that calls this is registered once and the pane's picker in it would be
+ * stale. Taking a session is what delivers a carried summary, so it clears.
+ */
+export function adoptSession(conversation: Conversation, turn: number, id: string): Conversation {
+  const live = conversation.live;
+  if (live === null || live.turn !== turn) return conversation;
+  return { ...conversation, session: { backend: live.provider, id }, carry: null };
+}
+
+/** Record how full the conversation was at the end of the live turn. */
+export function measure(conversation: Conversation, turn: number, context: Context | null): Conversation {
+  const live = conversation.live;
+  if (live === null || live.turn !== turn || context === null) return conversation;
+  // Off the wire and only typed, never checked, so a malformed one is no
+  // measurement rather than a NaN in the reading.
+  const counts = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n) && n > 0;
+  if (!counts(context.tokens) || (context.window !== null && !counts(context.window))) return conversation;
+  return { ...conversation, live: { ...live, context } };
+}
+
+/**
+ * What the pilot is asked when a person compacts its context (#223).
+ *
+ * There is no compaction on either CLI's headless road - `/compact` is a TUI
+ * command, which `AGENTS.md` settled for `claude -p`, and `codex exec` has none
+ * either - so this is the loop's own answer, session rotation with a handoff:
+ * the model writes what it needs, and the next turn starts a new conversation
+ * holding only that. Written to the model as its own reader, because the
+ * summary is for it and nobody else.
+ */
+export const COMPACT_PROMPT = [
+  'Your context is being compacted. Write a handoff summary of this conversation',
+  'for yourself. It replaces everything said so far: the next message will arrive',
+  'in a fresh conversation holding only this summary and the system prompt, so',
+  'anything you leave out is forgotten.',
+  '',
+  'Include what the person wants and why; every decision settled and what was',
+  'ruled out; what you learned from the repository or the run, with file paths;',
+  'every proposal you made and how it was answered; open questions; and what you',
+  'were about to do next. Complete rather than brief.',
+  '',
+  'Do not call any tools and do not write a vibe-tool block in this reply.',
+].join('\n');
+
+/** Ask for that summary: a turn nobody typed, which says what it is. */
+export function compact(
+  conversation: Conversation,
+  turn: number,
+  provider: Backend,
+  startedAt: number | null = null,
+): Conversation {
+  const opened = follow(
+    { ...conversation, messages: [...conversation.messages, { role: 'user', content: COMPACT_PROMPT }] },
+    turn,
+    provider,
+    { startedAt },
+  );
+  return opened.live === null ? opened : { ...opened, live: { ...opened.live, compacts: true } };
+}
+
+/**
+ * The first message of the session after a compaction: the summary, then what
+ * was actually sent. Said as what it is, so the model reads it as its own notes
+ * rather than as something the person wrote.
+ */
+export function withCarry(carry: string | null, prompt: string): string {
+  if (carry === null) return prompt;
+  return [
+    '[Your context was compacted. This is the summary you wrote of the conversation',
+    'so far; it replaces the earlier messages.]',
+    '',
+    carry,
+    '',
+    '[What follows is the next message.]',
+    '',
+    prompt,
+  ].join('\n');
+}
+
+/**
+ * Forget everything the pilot was holding, keeping the log on screen (#223).
+ *
+ * The record is the replies and stays whole; what goes is the wire - the
+ * messages a vendor is re-sent and the session a CLI resumes. The marker is a
+ * reply so it sits in the log in order; it has no turn and no usage.
+ */
+export function clearContext(conversation: Conversation): Conversation {
+  if (conversation.live !== null) return conversation;
+  const marker: Reply = {
+    turn: -(conversation.replies.length + 1),
+    provider: conversation.replies[conversation.replies.length - 1]?.provider ?? 'subscription',
+    model: null,
+    text: '',
+    calls: [],
+    usage: null,
+    outcome: { kind: 'ended', stop: null },
+    asked: null,
+    woke: null,
+    startedAt: null,
+    cleared: true,
+  };
+  return {
+    ...conversation,
+    messages: [],
+    session: null,
+    carry: null,
+    replies: [...conversation.replies, marker],
+  };
+}
+
+/** Where the pilot's context stands, for the reading beside the composer. */
+export type ContextNow =
+  | { kind: 'measured'; context: Context }
+  /** Compacted; nothing has measured the new conversation yet. */
+  | { kind: 'compacted' }
+  /** Nothing in it: the next message starts a conversation. */
+  | { kind: 'fresh' }
+  /** A turn ran and its size was not reported. */
+  | { kind: 'unmeasured' };
+
+/**
+ * A vendor turn's prompt size, from the usage it streamed.
+ *
+ * An API turn is one request, so its prompt is the occupancy. The two vendors
+ * nest differently and this is where that is respected: Anthropic reports
+ * cache reads and writes **beside** the input, OpenAI's `cached_tokens` is a
+ * subset **of** it - `src/codex.ts` states the same convention - so adding it
+ * would count those tokens twice. No window: neither API says one.
+ */
+function apiContext(reply: Reply): Context | null {
+  const usage = reply.usage;
+  if (usage === null || usage.input === null) return null;
+  const tokens =
+    reply.provider === 'anthropic'
+      ? usage.input + (usage.cache_read ?? 0) + (usage.cache_write ?? 0)
+      : usage.input;
+  return tokens > 0 ? { tokens, window: null } : null;
+}
+
+/**
+ * The reading, for whichever backend the next turn will go to.
+ *
+ * Subscription backends answer from the session first, because that is what
+ * the next turn resumes: no session there means an empty context whatever the
+ * log says - which is what a chat from an older build, or one held by the other
+ * CLI, honestly has. API backends re-send `messages`, so the log is the answer.
+ */
+export function contextNow(conversation: Conversation, backend: Backend): ContextNow {
+  const cli = backend === 'subscription' || backend === 'codex';
+  if (cli && conversation.carry !== null) return { kind: 'compacted' };
+  if (cli && heldSession(conversation, backend) === null) return { kind: 'fresh' };
+  for (let i = conversation.replies.length - 1; i >= 0; i -= 1) {
+    const reply = conversation.replies[i];
+    if (reply === undefined) continue;
+    if (reply.cleared === true) return { kind: 'fresh' };
+    if (reply.compacts === true && reply.outcome?.kind === 'ended' && reply.text !== '')
+      return { kind: 'compacted' };
+    // A refused or stopped turn measured nothing about the context it left.
+    if (reply.outcome?.kind !== 'ended') continue;
+    if (reply.provider !== backend) return { kind: 'unmeasured' };
+    const context = reply.context ?? (cli ? null : apiContext(reply));
+    return context === null ? { kind: 'unmeasured' } : { kind: 'measured', context };
+  }
+  return conversation.messages.length === 0 ? { kind: 'fresh' } : { kind: 'unmeasured' };
 }
 
 /**
@@ -363,11 +589,32 @@ export function reduce(conversation: Conversation, event: PilotEvent): Conversat
   // that said nothing and asked for two things is not empty, so the test is both
   // fields rather than the text alone.
   const said = done.text !== '' || done.calls.length > 0;
+  // **A compaction that worked replaces the wire with itself.** The request and
+  // the summary are the whole of what the next turn needs, and they are a real
+  // exchange rather than one written here. The log keeps every reply. A
+  // subscription chat also gives up its session and carries the summary into
+  // the next one. One that called a tool, ended any other way or said nothing
+  // did not compact, and is folded as an ordinary turn.
+  if (done.compacts === true && outcome.kind === 'ended' && done.text !== '' && done.calls.length === 0) {
+    const cli = done.provider === 'subscription' || done.provider === 'codex';
+    return {
+      ...conversation,
+      live: null,
+      replies: [...conversation.replies, done],
+      messages: [{ role: 'user', content: COMPACT_PROMPT }, assistant(done)],
+      session: cli ? null : conversation.session,
+      carry: cli ? done.text : null,
+    };
+  }
+  // A turn taken on another backend is one the held CLI session never saw, so
+  // resuming it later would answer from a conversation with a hole in it.
+  const stale = said && conversation.session !== null && conversation.session.backend !== done.provider;
   return {
     ...conversation,
     live: null,
     replies: [...conversation.replies, done],
     messages: said ? [...conversation.messages, assistant(done)] : conversation.messages,
+    session: stale ? null : conversation.session,
   };
 }
 
@@ -617,4 +864,39 @@ export function spendParts(usage: Usage): readonly string[] {
   if (usage.cache_read !== null) parts.push(`${usage.cache_read} cache read`);
   if (usage.cache_write !== null) parts.push(`${usage.cache_write} cache write`);
   return parts;
+}
+
+/** Past this share of the window the reading is drawn as an alarm. */
+export const CONTEXT_ALARM = 0.8;
+
+/** Compact tokens, the same spelling as `cockpit/format.tokens`. */
+function short(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+  if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
+  return String(n);
+}
+
+/**
+ * The sentence beside the composer.
+ *
+ * **Remaining, because that is the question** - *"report context remaining"* -
+ * and it is only stated when a window was reported. Without one the count is
+ * all there is, and the sentence says so rather than dividing by a guess.
+ */
+export function describeContext(now: ContextNow, cli: boolean): { text: string; alarm: boolean } {
+  if (now.kind === 'fresh') return { text: 'context empty — the next message starts fresh', alarm: false };
+  if (now.kind === 'compacted') {
+    return {
+      text: cli
+        ? 'context compacted — the summary goes with your next message'
+        : 'context compacted to the summary above',
+      alarm: false,
+    };
+  }
+  if (now.kind === 'unmeasured') return { text: 'context size not reported by the last turn', alarm: false };
+  const { tokens, window } = now.context;
+  if (window === null) return { text: `context ${short(tokens)} tokens · window not reported`, alarm: false };
+  const used = tokens / window;
+  const left = Math.max(0, Math.round((1 - used) * 100));
+  return { text: `context ${short(tokens)} of ${short(window)} · ${String(left)}% left`, alarm: used >= CONTEXT_ALARM };
 }

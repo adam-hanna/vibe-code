@@ -78,7 +78,7 @@ test('every message reaches the window, the last is the reply, and the instructi
     return Promise.resolve({ code: 0, signal: null, stdout: out.join('\n'), stderr: '' });
   };
   const deltas: string[] = [];
-  const reply = await pilotCodex({ ...OPTIONS, onDelta: (t) => deltas.push(t) }, exec);
+  const reply = await pilotCodex({ ...OPTIONS, onDelta: (t) => deltas.push(t) }, exec, () => null);
   assert.equal(instructionsSeen, 'you are the pilot');
   assert.equal(reply.text, 'done');
   assert.equal(reply.sessionId, 'th-9', "Codex's thread is the one that resumes");
@@ -96,9 +96,9 @@ test('a turn that failed, or said nothing, is an error and never an empty reply'
       stdout: line({ type: 'turn.failed', error: { message: 'model not found' } }),
       stderr: '',
     });
-  await assert.rejects(pilotCodex(OPTIONS, failing), /model not found/);
+  await assert.rejects(pilotCodex(OPTIONS, failing, () => null), /model not found/);
   const silent: RunFn = () => Promise.resolve({ code: 0, signal: null, stdout: '', stderr: '' });
-  await assert.rejects(pilotCodex(OPTIONS, silent), /said nothing/);
+  await assert.rejects(pilotCodex(OPTIONS, silent, () => null), /said nothing/);
 });
 
 const settle = (): Promise<void> => new Promise<void>((r) => setImmediate(r));
@@ -107,7 +107,7 @@ test('the host sends a turn naming codex to the Codex pilot, and only that one',
   const seen: string[] = [];
   const answer = (who: string) => (): Promise<PilotChatResult> => {
     seen.push(who);
-    return Promise.resolve({ text: 'ok', sessionId: 's', tokens: ZERO });
+    return Promise.resolve({ text: 'ok', sessionId: 's', tokens: ZERO, context: null });
   };
   const sent: Outbound[] = [];
   const session = createSession((m) => void sent.push(m), {

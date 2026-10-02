@@ -210,6 +210,7 @@ test('a pilot turn is spawned with the directories the settings allow', async ()
         text: 'ok',
         sessionId: 's',
         tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, total: 0 },
+        context: null,
       });
     },
   });

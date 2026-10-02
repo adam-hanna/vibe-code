@@ -29,7 +29,7 @@ const had = (text: string): Conversation => ({
   messages: [{ role: 'user', content: text }] as Conversation['messages'],
   replies: [reply(1, 'an answer')],
   live: null,
-  unknown: 0,
+  unknown: 0, session: null, carry: null,
 });
 
 describe('a conversation belongs to a run, inside a project', () => {

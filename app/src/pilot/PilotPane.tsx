@@ -28,12 +28,20 @@ import {
 } from './ledger';
 import type { Ledger, PilotLimits } from './ledger';
 import {
+  adoptSession,
   answerOf,
   ask,
   autoRan,
+  clearContext,
+  compact,
+  COMPACT_PROMPT,
+  contextNow,
+  describeContext,
   decide,
   emptyConversation,
   follow,
+  heldSession,
+  measure,
   needsFollow,
   reduce,
   refuse,
@@ -44,7 +52,9 @@ import {
   unanswered,
   unrecognised,
   wake,
+  withCarry,
 } from './transcript';
+import type { Context } from './transcript';
 import type { ReactNode } from 'react';
 import type { KeyStatus } from './keys';
 import type { PilotAccess } from './access';
@@ -197,6 +207,14 @@ type Action =
   /** A proposal the person's settings ran without a card (#223). */
   | { type: 'auto'; id: string; why: string }
   | { type: 'unknown' }
+  /** The pilot summarising itself, to carry into a fresh context (#223). */
+  | { type: 'compact'; turn: number; provider: Backend; openedAt: number }
+  /** The session the CLI says the live turn ran in. */
+  | { type: 'adopt'; turn: number; sessionId: string }
+  /** How full the conversation was when the live turn ended. */
+  | { type: 'measure'; turn: number; context: Context | null }
+  /** Forget what the pilot holds; the log stays. */
+  | { type: 'clear' }
   /** A conversation read back from storage, replacing whatever is here (#223). */
   | { type: 'restore'; conversation: Conversation };
 
@@ -222,6 +240,14 @@ function apply(state: Conversation, action: Action): Conversation {
       return autoRan(state, action.id, action.why);
     case 'unknown':
       return unrecognised(state);
+    case 'compact':
+      return compact(state, action.turn, action.provider, action.openedAt);
+    case 'adopt':
+      return adoptSession(state, action.turn, action.sessionId);
+    case 'measure':
+      return measure(state, action.turn, action.context);
+    case 'clear':
+      return clearContext(state);
     // Replaces rather than merges. Two conversations interleaved by arrival
     // would be a transcript of a discussion that never happened.
     case 'restore':
@@ -502,6 +528,8 @@ function ReplyCard({
             reader has to be able to tell what they asked for from what the run
             caused (#211). */}
         {reply.woke !== null && <StateKicker tone="quiet">woke at a gate</StateKicker>}
+        {/* A compaction is a turn nobody typed, so it says what it is (#223). */}
+        {reply.compacts === true && <StateKicker tone="quiet">compacting context</StateKicker>}
         <MetaChip>{BACKEND_NAME[reply.provider]}</MetaChip>
         {/* What ANSWERED, not what was asked for: an alias resolves to a dated
             version, and the resolved one is the fact worth showing. Absent until
@@ -538,6 +566,11 @@ function ReplyCard({
         <div className="v-pilot__text v-selectable">{visible(reply.text)}</div>
       )}
       {outcome?.kind === 'failed' && <div className="v-pilot__why">{outcome.message}</div>}
+      {reply.compacts === true && outcome?.kind === 'ended' && reply.text !== '' && reply.calls.length === 0 && (
+        <div className="v-pilot__spend">
+          the pilot carries on from this summary — it no longer holds the conversation above it
+        </div>
+      )}
 
       {reply.calls.map((call) => (
         <CallCard
@@ -842,25 +875,14 @@ export function PilotPane({
   const [vendor, setVendor] = useState<keys.Provider>('anthropic');
   const provider: Backend = backendFor(vendor, access ?? NO_ACCESS);
   const [model, setModel] = useState<string>(SUBSCRIPTION_MODELS[0] ?? '');
-  /**
-   * The conversation the CLI is keeping, once it has said what it is (#193).
-   *
-   * Allocated here on the first turn and then **replaced by whatever the CLI
-   * returns**, which is authoritative over ours. Null means the next turn opens
-   * a new conversation; a session id means it resumes one, which is what makes a
-   * subscription turn cost nothing in re-sent context.
-   */
-  const session = useRef<string | null>(null);
-  // A conversation belongs to the backend that is holding it. Carrying a CLI
-  // session id across to a vendor — or back, or from one CLI to the other — would
-  // resume a conversation on a wire that has never heard of it (#193). The
-  // backend moves when the vendor is picked AND when Settings changes the road,
-  // so this follows the derived value rather than the picker.
+  // The conversation the CLI is keeping is `conversation.session` now, stored
+  // with the chat (#223) - see `Session` for the two defects a ref here had. It
+  // names its backend, so a session is never resumed on a wire that has never
+  // heard of it (#193), and a turn taken on another backend retires it.
   const heldBy = useRef<Backend>(provider);
   useEffect(() => {
     if (heldBy.current === provider) return;
     heldBy.current = provider;
-    session.current = null;
     setModel(modelsFor(provider, pilot.MODELS)[0] ?? '');
   }, [provider]);
   /**
@@ -1089,7 +1111,10 @@ export function PilotPane({
           return;
         }
         // The CLI's id wins over the one we proposed, always.
-        session.current = frame.sessionId;
+        dispatch({ type: 'adopt', turn, sessionId: frame.sessionId });
+        // Before `ended`, which closes the turn this lands on. A host older
+        // than the field sends none, and that is an unmeasured turn.
+        dispatch({ type: 'measure', turn, context: frame.context ?? null });
         // The reply the CLI says it made, over the deltas we accumulated. The
         // deltas are every assistant block in the turn, interstitials between
         // its own Read and Glob calls included; this is the final message. Both
@@ -1162,6 +1187,8 @@ ${frame.text}`, turn, origin.current))) {
        * answer) and it was still not typed by anybody.
        */
       woke: string | null = null,
+      /** This turn is the pilot writing the summary a compaction carries (#223). */
+      compacting = false,
     ) => {
       /**
        * When the wait started, taken **here** rather than when the request
@@ -1184,7 +1211,7 @@ ${frame.text}`, turn, origin.current))) {
       // the calls come back in a fenced block that `emit.ts` reads (#211). Same
       // table, same executors, same proposal card; only the channel differs.
       if (!needsKey(provider)) {
-        const id = session.current;
+        const id = heldSession(held.current, provider);
         void host
           .pilotTurn({
             agent: agentOf(provider),
@@ -1193,7 +1220,10 @@ ${frame.text}`, turn, origin.current))) {
             // else said is already there and the results are the only new
             // thing. An empty prompt here used to be sent instead, which asked
             // the model to answer nothing.
-            prompt: said ?? trailingResults(messages) ?? '',
+            //
+            // A new session after a compaction opens with the summary, which is
+            // the whole of how the compaction reaches the next conversation.
+            prompt: withCarry(id === null ? held.current.carry : null, said ?? trailingResults(messages) ?? ''),
             system: systemPrompt(run, launched, 'emitted', access, provider === 'subscription'),
             model,
             dir,
@@ -1203,7 +1233,8 @@ ${frame.text}`, turn, origin.current))) {
           .then((turn) => {
             hostTurn.current = turn;
             setLive(turn);
-            if (said === null) dispatch({ type: 'follow', turn, provider, openedAt });
+            if (compacting) dispatch({ type: 'compact', turn, provider, openedAt });
+            else if (said === null) dispatch({ type: 'follow', turn, provider, openedAt });
             else if (woke !== null)
               dispatch({ type: 'wake', reason: woke, turn, provider, openedAt });
             else dispatch({ type: 'ask', content: said, turn, provider, openedAt });
@@ -1211,7 +1242,9 @@ ${frame.text}`, turn, origin.current))) {
           .catch((err: unknown) =>
             dispatch({
               type: 'refuse',
-              content: said,
+              // A refused compaction is drawn without the prompt as though
+              // somebody had typed it.
+              content: compacting ? null : said,
               provider,
               message: err instanceof Error ? err.message : String(err),
               woke,
@@ -1237,14 +1270,15 @@ ${frame.text}`, turn, origin.current))) {
           // down the wrong road (#223).
           hostTurn.current = -1;
           setLive(turn);
-          if (said === null) dispatch({ type: 'follow', turn, provider, openedAt });
+          if (compacting) dispatch({ type: 'compact', turn, provider, openedAt });
+          else if (said === null) dispatch({ type: 'follow', turn, provider, openedAt });
           else if (woke !== null) dispatch({ type: 'wake', reason: woke, turn, provider, openedAt });
           else dispatch({ type: 'ask', content: said, turn, provider, openedAt });
         })
         .catch((err: unknown) =>
           dispatch({
             type: 'refuse',
-            content: said,
+            content: compacting ? null : said,
             provider,
             message: err instanceof Error ? err.message : String(err),
             woke,
@@ -1261,6 +1295,13 @@ ${frame.text}`, turn, origin.current))) {
   // as long as anybody could read it.
   const proposals = owed.filter((call) => call.settlement?.kind === 'proposes');
   const owesReply = needsFollow(conversation, sentAt.current);
+
+  // A compaction or a clear shrinks the wire (#223). The count this compares
+  // against has to shrink with it, or the conversation growing back through the
+  // old number would read as already sent and a tool result would go unanswered.
+  useEffect(() => {
+    if (conversation.messages.length < sentAt.current) sentAt.current = conversation.messages.length;
+  }, [conversation.messages.length]);
 
   // The other half of a tool loop. Keyed on the message count so StrictMode's
   // second pass finds the turn already sent rather than sending it twice.
@@ -1491,6 +1532,21 @@ ${frame.text}`, turn, origin.current))) {
     return;
   }, [commands, ready, live, conversation.messages, start]);
 
+  const contextState = contextNow(conversation, provider);
+  const contextLine = describeContext(contextState, !needsKey(provider));
+  // Both need a context worth emptying, and a turn that is not running.
+  // Compacting is a turn, so it also needs everything a send needs.
+  const holding = contextState.kind === 'measured' || contextState.kind === 'unmeasured';
+  const canCompact = holding && live === null && ready;
+  const canClear = (holding || contextState.kind === 'compacted') && live === null;
+  const compactNow = useCallback(() => {
+    if (live !== null || !ready) return;
+    // A person pressed it, so this is an attended turn and the chain starts over.
+    chain.current = 0;
+    setStalled(false);
+    start([...conversation.messages, { role: 'user' as const, content: COMPACT_PROMPT }], COMPACT_PROMPT, null, true);
+  }, [conversation.messages, live, ready, start]);
+
   const submit = useCallback(() => {
     const content = entry.trim();
     // `ready` is checked HERE as well as on the button, because the field is no
@@ -1622,6 +1678,28 @@ ${frame.text}`, turn, origin.current))) {
           reading, because that is about this conversation and nothing else. */}
       <div className="v-pilot__books">
         <span className="v-pilot__note">{describeDay(day)}</span>
+        {/* How full the pilot's context is, and the two ways to empty it (#223).
+            Beside the books rather than on a card, because it is about the
+            conversation as a whole and the next turn, not about one reply. */}
+        <span className="v-pilot__context">
+          <span className={`v-pilot__note${contextLine.alarm ? ' v-pilot__note--warn' : ''}`}>{contextLine.text}</span>
+          <Button
+            level="tertiary"
+            disabled={!canCompact}
+            title="The pilot writes a summary of this conversation, and carries on from the summary in a fresh context. The log above stays."
+            onClick={compactNow}
+          >
+            compact
+          </Button>
+          <Button
+            level="tertiary"
+            disabled={!canClear}
+            title="The pilot forgets this conversation and starts its next turn with nothing. The log above stays."
+            onClick={() => dispatch({ type: 'clear' })}
+          >
+            clear
+          </Button>
+        </span>
       </div>
       {!verdict.allowed && verdict.why !== null && (
         <div className="v-pilot__note v-pilot__note--alarm">
@@ -1684,6 +1762,10 @@ ${frame.text}`, turn, origin.current))) {
         {entries.map((entry) =>
           entry.kind === 'round' ? (
             <RoundCard key={`round-${entry.card.key}`} card={entry.card} onOpen={onOpen} />
+          ) : entry.reply.cleared === true ? (
+            <div key={`reply-${String(entry.reply.turn)}`} className="v-pilot__divider" role="separator">
+              context cleared — the pilot remembers nothing above this line
+            </div>
           ) : (
             <ReplyCard
               key={`reply-${String(entry.reply.turn)}`}

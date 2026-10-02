@@ -12,7 +12,7 @@ const reply: Reply = {
 };
 const conversation: Conversation = {
   messages: [{ role: 'tool', id: 'read-1', name: 'read_run', content: 'The run record' }],
-  replies: [reply], live: null, unknown: 0,
+  replies: [reply], live: null, unknown: 0, session: null, carry: null,
 };
 
 describe('reopening a conversation is read only', () => {
