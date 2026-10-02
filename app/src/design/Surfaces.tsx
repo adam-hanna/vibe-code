@@ -81,9 +81,12 @@ export function Modal({
   children,
   width = 520,
   onDismiss,
+  label,
 }: {
   children: ReactNode;
   width?: number;
+  /** A concise name for assistive technology, independent of the content. */
+  label?: string;
   /** What Escape does. Must be the option that acts on nothing. */
   onDismiss: () => void;
 }) {
@@ -151,7 +154,7 @@ export function Modal({
       {/* Deliberately not dismissed by clicking the scrim. Every dialog here
           guards something expensive - ending a run, launching one, deleting one -
           and a stray click outside is not an intention. Escape is. */}
-      <div className="v-modal" style={{ width }} role="dialog" aria-modal="true">
+      <div className="v-modal" style={{ width }} role="dialog" aria-modal="true" aria-label={label}>
         {/* The scrolling half, and the reason it is a wrapper rather than
             `overflow` on `.v-modal` itself: the corner marks are absolutely
             positioned against the dialog, and a scrolling dialog would scroll

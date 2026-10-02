@@ -1,6 +1,6 @@
 import { dirKey } from '../cockpit/projects';
 import { emptyConversation } from './transcript';
-import type { Conversation } from './transcript';
+import type { Conversation, Reply } from './transcript';
 import { DRAFT_PREFIX } from '../cockpit/pending';
 
 /**
@@ -33,6 +33,11 @@ import { DRAFT_PREFIX } from '../cockpit/pending';
  */
 
 const PREFIX = 'vibe.chat.';
+
+/** Turn ids restart with the window; the request timestamp keeps them distinct. */
+export function replyKey(reply: Pick<Reply, 'provider' | 'turn' | 'startedAt'>): string {
+  return `${reply.provider}:${String(reply.turn)}:${String(reply.startedAt ?? 'legacy')}`;
+}
 
 /** Where a conversation lives. `none` is the one that has not launched yet. */
 /**

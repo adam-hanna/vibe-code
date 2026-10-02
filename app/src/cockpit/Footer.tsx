@@ -610,6 +610,15 @@ export function Footer({
     );
   }
 
+  // No run means no process to pause or stop. The old footer offered both on
+  // the welcome screen, turning a harmless empty workspace into a control desk.
+  if (run.identity === null && run.preflight === null && run.running === null) {
+    return <div className="v-footer v-footer--welcome">
+      <span className="v-footer__ready">Ready when you are</span>
+      <p>The pilot prepares the brief. You decide when the run begins.</p>
+    </div>;
+  }
+
   return (
     <div className="v-footer">
       <div className="v-footer__banner">

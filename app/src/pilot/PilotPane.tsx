@@ -3,6 +3,8 @@ import { Button, MetaChip, StateKicker, ThinkingWave } from '../design';
 import { elapsed } from '../cockpit/format';
 import { logOf } from './log';
 import { RoundCard } from './RoundCard';
+import { Welcome } from './Welcome';
+import { Icon } from '../design/Icon';
 import * as host from '../host';
 import * as keys from './keys';
 import * as pilot from './pilot';
@@ -13,7 +15,7 @@ import { readEmitted, unique, visible } from './emit';
 import { useFollow } from './follow';
 import { autoRun, NO_ACCESS } from './access';
 import { declare, settleCall } from './tools';
-import { chatKey, chatMove, isDraftKey, readChat, worthSaving, writable } from './saved';
+import { chatKey, chatMove, isDraftKey, readChat, replyKey, worthSaving, writable } from './saved';
 import {
   costOf,
   describeDay,
@@ -32,6 +34,7 @@ import {
   decide,
   emptyConversation,
   follow,
+  needsFollow,
   reduce,
   refuse,
   retext,
@@ -800,6 +803,10 @@ export function PilotPane({
     }
 
     const back = readChat(stored);
+    // Restoring is browsing. Historical usage is already in the books, and a
+    // saved tool result must not resume an unattended vendor request.
+    for (const reply of back.replies) counted.current.add(replyKey(reply));
+    sentAt.current = back.messages.length;
     // Every call that came back from storage is one nobody in this session saw
     // asked for, so none of them may run without a press (#223) — a `git
     // commit` from yesterday's conversation must not fire because the window
@@ -897,7 +904,7 @@ export function PilotPane({
   // per-day ceiling that reset when the app restarted would not be a ceiling.
   const [ledger, setLedger] = useState<Ledger>(readLedger);
   /** Turns already in the books, so a re-render cannot bill one twice. */
-  const counted = useRef<Set<number>>(new Set());
+  const counted = useRef<Set<string>>(new Set());
   /** The chain ran out and the pilot is holding for a person. */
   const [stalled, setStalled] = useState(false);
   /**
@@ -907,7 +914,7 @@ export function PilotPane({
    * the reply count - because the question it answers is *where is the reader
    * looking*, and only the reader can move that.
    */
-  const log = useFollow<HTMLDivElement>();
+  const log = useFollow<HTMLDivElement>(conversation.replies.length > 0 || conversation.live !== null || run.cycles.length > 0);
   /**
    * The clock behind the elapsed on an open turn (#211).
    *
@@ -934,6 +941,8 @@ export function PilotPane({
   const sentAt = useRef(-1);
 
   useEffect(() => {
+    // The browser preview has no Tauri event bridge to subscribe to.
+    if (!host.inShell()) return;
     let stop: (() => void) | null = null;
     let cancelled = false;
     void (async () => {
@@ -1020,13 +1029,13 @@ export function PilotPane({
   // something else entirely.
   useEffect(() => {
     const fresh = conversation.replies.filter(
-      (reply) => reply.outcome !== null && reply.usage !== null && !counted.current.has(reply.turn),
+      (reply) => reply.outcome !== null && reply.usage !== null && !counted.current.has(replyKey(reply)),
     );
     if (fresh.length === 0) return;
     let next = ledger;
     const at = new Date();
     for (const reply of fresh) {
-      counted.current.add(reply.turn);
+      counted.current.add(replyKey(reply));
       if (reply.usage === null) continue;
       next = record(next, costOf(reply.provider, reply.model, reply.usage), at);
     }
@@ -1049,6 +1058,7 @@ export function PilotPane({
   // for would be the window stating something it was not told - the same rule
   // the field's own comment states.
   useEffect(() => {
+    if (!host.inShell()) return;
     let stop: (() => void) | null = null;
     let cancelled = false;
     void (async () => {
@@ -1250,8 +1260,7 @@ ${frame.text}`, turn, origin.current))) {
   // effect running, and saying "waiting on you" about those would be untrue for
   // as long as anybody could read it.
   const proposals = owed.filter((call) => call.settlement?.kind === 'proposes');
-  const last = conversation.messages[conversation.messages.length - 1];
-  const owesReply = conversation.live === null && owed.length === 0 && last?.role === 'tool';
+  const owesReply = needsFollow(conversation, sentAt.current);
 
   // The other half of a tool loop. Keyed on the message count so StrictMode's
   // second pass finds the turn already sent rather than sending it twice.
@@ -1297,7 +1306,7 @@ ${frame.text}`, turn, origin.current))) {
     needsKey(provider) && (statuses === null || !keys.usable(statuses).includes(provider))
       ? `no ${keys.PROVIDER_NAME[provider]} key — enter one in Settings, or switch ${keys.PROVIDER_NAME[provider]} to your subscription there`
       : !needsKey(provider) && dir.trim() === ''
-        ? 'choose a repository first — this backend runs in one and can read only that one'
+        ? 'Add a project in the sidebar to send your first message.'
         : !verdict.allowed
           ? // The ceiling is the pilot's own and is off unless somebody set one,
             // so the sentence names where it is set. `why` is the ledger's own
@@ -1535,6 +1544,7 @@ ${frame.text}`, turn, origin.current))) {
       <div className="v-pilot__controls">
         <select
           className="v-pilot__select"
+          aria-label="Pilot provider"
           value={vendor}
           // The session and the model follow in the effect on `provider`.
           onChange={(e) => setVendor(e.target.value === 'openai' ? 'openai' : 'anthropic')}
@@ -1548,7 +1558,7 @@ ${frame.text}`, turn, origin.current))) {
             </option>
           ))}
         </select>
-        <select className="v-pilot__select" value={model} onChange={(e) => setModel(e.target.value)}>
+        <select className="v-pilot__select" aria-label="Pilot model" value={model} onChange={(e) => setModel(e.target.value)}>
           {modelsFor(provider, pilot.MODELS).map((m) => (
             <option key={m} value={m}>
               {m}
@@ -1565,7 +1575,6 @@ ${frame.text}`, turn, origin.current))) {
             configured is a supported state, and so is a window that has not
             been pointed at a repository yet - two different absences with two
             different fixes. */}
-        {blocked !== null && <span className="v-pilot__note">{blocked}</span>}
         {/* The one switch that lets the pilot spend without anybody typing.
             It said *"speak up at a gate — one turn each, still proposes only"*,
             which is three clauses in the product's own vocabulary and answers
@@ -1590,7 +1599,7 @@ ${frame.text}`, turn, origin.current))) {
               }
             }}
           />
-          <span>Have the pilot weigh in whenever the run stops for you</span>
+          <span>Help at run checkpoints</span>
         </label>
         {proposals.length > 0 && (
           <span className="v-pilot__note">
@@ -1639,7 +1648,7 @@ ${frame.text}`, turn, origin.current))) {
              `saved.ts` did not either. Saying *"nothing yet"* over an opened run
              reads as the pane having failed to load something, which is exactly
              how it was reported — *"nor do I see the pilot chat update"*. */
-          <div className="v-pilot__note">
+          <div className="v-pilot__empty">
             {runId === null ? (
               <>
                 {/* **The front door describes the flow, not the permissions
@@ -1651,18 +1660,18 @@ ${frame.text}`, turn, origin.current))) {
                     made and this copy had not. What a person needs here is what
                     happens when they type, because it is no longer obvious: the
                     reply is questions rather than a run. */}
-                Say what you want built. The pilot reads this repository, digs into the request and
-                asks about anything that would change the shape of the work — a run is long and
-                expensive, and it converges or stalls on the brief it was given. When the brief is
-                settled it puts the exact command in front of you, and you press it. Nothing here
-                starts a run on its own.
+                <Welcome onPrompt={(prompt) => {
+                  setEntry(prompt);
+                  // A starter prepares a message. Sending is still the person's action.
+                  log.ref.current?.parentElement?.querySelector<HTMLTextAreaElement>('.v-pilot__entry')?.focus();
+                }} />
               </>
             ) : (
               <>
-                No conversation was kept for this run. A chat is stored by this window, per run, so
-                a run started from the terminal or by an older build has none — the run itself is
-                unaffected, and its plans, reports and transcript are in the tabs above. Anything
-                you say here is kept with this run from now on.
+                <div className="v-empty-chat"><Icon name="code" size={28} />
+                  <h2>A fresh conversation about this run</h2>
+                  <p>There is no saved chat here. Explore its plans and reports above, or ask the pilot about the work. New messages will be saved with this run.</p>
+                </div>
               </>
             )}
           </div>
@@ -1725,8 +1734,9 @@ ${frame.text}`, turn, origin.current))) {
       <div className="v-pilot__composer">
         <textarea
           className="v-pilot__entry"
+          aria-label="Message your pilot"
           rows={2}
-          placeholder="say what you want built — enter sends, shift+enter is a new line"
+          placeholder="What would you like to build, improve, or figure out?"
           value={entry}
           // **Never disabled.** Composing and sending are two acts, and only the
           // second of them can be blocked: a proposal waiting to be answered, a
@@ -1754,8 +1764,8 @@ ${frame.text}`, turn, origin.current))) {
           }}
         />
         {live === null ? (
-          <Button level="primary" disabled={!ready || entry.trim() === ''} onClick={submit}>
-            send
+          <Button level="primary" aria-label="Send message" disabled={!ready || entry.trim() === ''} onClick={submit}>
+            <Icon name="send" size={18} />
           </Button>
         ) : (
           <Button
@@ -1777,6 +1787,7 @@ ${frame.text}`, turn, origin.current))) {
           </Button>
         )}
       </div>
+      <p className="v-pilot__hint">Enter to send <span>·</span> Shift + Enter for a new line</p>
     </div>
   );
 }

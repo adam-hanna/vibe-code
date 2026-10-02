@@ -70,18 +70,27 @@ export interface Follow<T extends HTMLElement> {
 }
 
 /** Keep a scroller pinned to its end for as long as its reader leaves it there. */
-export function useFollow<T extends HTMLElement>(): Follow<T> {
+export function useFollow<T extends HTMLElement>(enabled = true): Follow<T> {
   const ref = useRef<T>(null);
   // Armed to begin with: an empty pane is at its bottom, and the first reply
   // should arrive in view without anybody having to ask for it.
   const following = useRef(true);
 
   const onScroll = useCallback(() => {
+    if (!enabled) return;
     const el = ref.current;
     if (el !== null) following.current = atBottom(el);
-  }, []);
+  }, [enabled]);
 
   useEffect(() => {
+    // The welcome is a document to read from its beginning, not the end of a
+    // conversation. Start observing only once there is a real log to follow.
+    if (!enabled) {
+      // There is no log yet. Scrolling the welcome must not disarm the first
+      // reply of a new conversation; later replies still respect the reader.
+      following.current = true;
+      return;
+    }
     const el = ref.current;
     if (el === null) return;
 
@@ -100,7 +109,7 @@ export function useFollow<T extends HTMLElement>(): Follow<T> {
     return () => {
       watch.disconnect();
     };
-  }, []);
+  }, [enabled]);
 
   return { ref, onScroll };
 }

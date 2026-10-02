@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { LivenessDot, MetaChip, StateKicker } from '../design';
+import { Icon, VibeMark } from '../design/Icon';
+import { projectName } from './projects';
 import * as host from '../host';
 import * as keys from '../pilot/keys';
 import type { KeyStatus } from '../pilot/keys';
@@ -878,6 +880,7 @@ export function Cockpit() {
    */
   const [commands, setCommands] = useState(noCommands);
   useEffect(() => {
+    if (!host.inShell()) return;
     let stop: (() => void) | null = null;
     let cancelled = false;
     void (async () => {
@@ -1024,10 +1027,16 @@ export function Cockpit() {
   return (
     <div className="v-cockpit">
       <header className="v-cockpit__bar">
-        <LivenessDot state={outside ? 'absent' : wire.connected ? 'live' : 'quiet'} />
-        <span className="v-cockpit__title">vibe</span>
+        <div className="v-cockpit__brand"><VibeMark /><span className="v-cockpit__title">vibe<span className="v-cockpit__brand-dot">.</span></span></div>
+        <span className="v-cockpit__breadcrumb">Workspace <span>/</span> <strong>{shownDir.trim() === '' ? 'Your next idea' : projectName(shownDir)}</strong></span>
+        <button className="v-cockpit__search" onClick={() => setSwitching(true)} title="Switch run (Ctrl+K)">
+          <Icon name="search" size={15} /> <span>Find a run</span><kbd>Ctrl K</kbd>
+        </button>
+        <div className="v-cockpit__connection"><LivenessDot state={outside ? 'absent' : wire.connected ? 'live' : 'quiet'} />
+          <span>{outside ? 'Browser preview' : wire.connected ? 'Connected' : 'Connecting'}</span>
+        </div>
         {outside ? (
-          <MetaChip>browser · no shell</MetaChip>
+          null
         ) : (
           <>
             {/* Hi-fi 15: a chip **only when a value is wrong**, and it names the
@@ -1255,13 +1264,23 @@ export function Cockpit() {
           />
         </SidePanel>
 
-        <div className="v-cockpit__pane">
+        <div className="v-cockpit__pane" role="main">
+          <header className="v-workspace__head">
+            <div><p className="v-workspace__eyebrow">{viewing !== null ? 'Run archive' : 'Make room for good work'}</p>
+              <h2>{tab === 'pilot' ? 'Your pilot' : tab === 'output' ? 'Activity' : tab === 'plans' ? 'Plans' : tab === 'critique' ? 'Plan critique' : tab === 'code' ? 'Code changes' : tab === 'review' ? 'Code review' : tab === 'verify' ? 'Verification' : tab === 'questions' ? 'Questions' : tab === 'commands' ? 'Commands' : tab === 'spend' ? 'Usage' : tab === 'settings' ? 'Settings' : 'Project runs'}</h2>
+            </div>
+            <button className="v-workspace__usage" onClick={() => setTab('spend')} title="Usage for the live run">
+              <Icon name="loop" size={15} />
+              {run.spend.tokens === null ? 'No usage reported' : `${fmtTokens(run.spend.tokens)} tokens`}
+            </button>
+          </header>
           {/*
             Hi-fi 1's bar, in the design's own order. It had twelve tabs against
             the design's seven, and `design/AUDIT.md` traced most of that to the
             missing rail rather than to a decision anybody made: `Settings` is
             the rail's `⚙`, `Runs` is the rail plus ⌘K, and `Spend` is a
-            right-aligned readout in this bar rather than a tab of its own.
+            readout rather than a tab of its own. The October redesign moves
+            that readout into the canvas heading, leaving more room for tabs.
 
             `Pilot` is first and is where the window lands, which hi-fi 5 says in
             as many words. `Verify`, `Commands` and `Keys` follow the seven: they
@@ -1275,15 +1294,17 @@ export function Cockpit() {
                 nobody sees blocks the conversation silently. */}
             <button
               className={`v-cockpit__tab ${tab === 'pilot' ? 'v-cockpit__tab--on' : ''}`}
+              aria-current={tab === 'pilot' ? 'page' : undefined}
               onClick={() => setTab('pilot')}
             >
-              Pilot chat{proposals > 0 ? ` · ${String(proposals)}` : ''}
+              Pilot{proposals > 0 ? ` · ${String(proposals)}` : ''}
             </button>
             <button
               className={`v-cockpit__tab ${tab === 'output' ? 'v-cockpit__tab--on' : ''}`}
+              aria-current={tab === 'output' ? 'page' : undefined}
               onClick={() => setTab('output')}
             >
-              Output
+              Activity
             </button>
             {/* Hi-fi 3, and it is built now (#223). The tooltip on the tab it
                 replaces said *"this window cannot read a run's artifacts"*,
@@ -1293,6 +1314,7 @@ export function Cockpit() {
                 attached to it. Both are now on the core side, where they belong. */}
             <button
               className={`v-cockpit__tab ${tab === 'plans' ? 'v-cockpit__tab--on' : ''}`}
+              aria-current={tab === 'plans' ? 'page' : undefined}
               onClick={() => open('plans')}
             >
               Plans
@@ -1318,29 +1340,33 @@ export function Cockpit() {
                 draws all four beside the tolerance that decided them. */}
             <button
               className={`v-cockpit__tab ${tab === 'critique' ? 'v-cockpit__tab--on' : ''}`}
+              aria-current={tab === 'critique' ? 'page' : undefined}
               onClick={() => open('critique')}
             >
-              Plan critique
+              Critique
             </button>
             {/* `1d`, per round. The whole-run diff is this pane's first section
                 and is still what it opens on before any round has committed. */}
             <button
               className={`v-cockpit__tab ${tab === 'code' ? 'v-cockpit__tab--on' : ''}`}
+              aria-current={tab === 'code' ? 'page' : undefined}
               onClick={() => open('code')}
             >
               Code{run.commits.length > 0 ? ` · ${String(run.commits.length)}` : ''}
             </button>
             <button
               className={`v-cockpit__tab ${tab === 'review' ? 'v-cockpit__tab--on' : ''}`}
+              aria-current={tab === 'review' ? 'page' : undefined}
               onClick={() => open('review')}
             >
-              Code review
+              Review
             </button>
             {/* `1f`. The count is blocking questions, not all of them: an
                 advisory question the answerer handled needs nobody, and a
                 badge that included it would train you to ignore the badge. */}
             <button
               className={`v-cockpit__tab ${tab === 'questions' ? 'v-cockpit__tab--on' : ''}`}
+              aria-current={tab === 'questions' ? 'page' : undefined}
               onClick={() => open('questions')}
             >
               Questions
@@ -1353,6 +1379,7 @@ export function Cockpit() {
                 gate count would move for a reason nobody cares about. */}
             <button
               className={`v-cockpit__tab ${tab === 'verify' ? 'v-cockpit__tab--on' : ''}`}
+              aria-current={tab === 'verify' ? 'page' : undefined}
               onClick={() => setTab('verify')}
             >
               Verify{run.verify.length > 0 ? ` · ${String(run.verify.length)}` : ''}
@@ -1363,6 +1390,7 @@ export function Cockpit() {
                 only grew would be the tray-badge failure `4e` names. */}
             <button
               className={`v-cockpit__tab ${tab === 'commands' ? 'v-cockpit__tab--on' : ''}`}
+              aria-current={tab === 'commands' ? 'page' : undefined}
               onClick={() => setTab('commands')}
             >
               Commands
@@ -1379,19 +1407,8 @@ export function Cockpit() {
               Absent rather than `0 tok` before anything is charged. A run that
               has spent nothing yet has not spent zero; it has not been measured.
             */}
-            <button
-              className={`v-cockpit__readout ${tab === 'spend' ? 'v-cockpit__readout--on' : ''}`}
-              onClick={() => setTab('spend')}
-              title="what this run has spent"
-            >
-              {run.spend.tokens === null
-                ? 'spend · nothing charged yet'
-                : `${fmtTokens(run.spend.tokens)} tok${
-                    run.spend.codexTokens === null
-                      ? ''
-                      : ` · codex ${fmtTokens(run.spend.codexTokens)}`
-                  }`}
-            </button>
+            {/* Usage now lives in the workspace heading, giving the artifact
+                navigation its full width. The same pane keeps both providers. */}
           </div>
           {/* **Which run the panes are about, whenever it is not the live one.**
               The panes and the column both follow an opened run now (#223), so
@@ -1406,8 +1423,7 @@ export function Cockpit() {
               <StateKicker tone="quiet">reading</StateKicker>
               <span className="v-cockpit__viewingwhat">{viewing.task}</span>
               <span className="v-cockpit__viewingnote">
-                from disk. The spend in the bar above is the run this window is narrating; what
-                this one spent is in its record, on the right.
+                Reading a saved run. Usage above belongs to the live run; this run&apos;s record is in the overview.
               </span>
               <button className="v-doc__again" onClick={() => setTab('runs')}>
                 resume it…
@@ -1572,7 +1588,7 @@ export function Cockpit() {
               // it underneath would point the pilot at a repository the run is
               // not in.
               kickoff={
-                (!launched || run.completed !== null) && !outside ? (
+                (!launched || run.completed !== null) && repoDir.trim() !== '' ? (
                   <Kickoff dir={repoDir} />
                 ) : undefined
               }
@@ -1593,7 +1609,7 @@ export function Cockpit() {
             take the left, next to the rail they are drawn from. */}
         <SidePanel
           side="right"
-          title="Groups"
+          title="Run overview"
           mark="⋮⋮"
           open={showLoop}
           onToggle={() => setShowLoop((on) => !on)}
@@ -1663,9 +1679,7 @@ export function Cockpit() {
                     <div className="v-loop__waiting">
                       <StateKicker tone="quiet">waiting for the brief</StateKicker>
                       <p>
-                        Say what you want in the conversation — that is the front door. There is no
-                        start button: when the pilot has enough, it <strong>proposes</strong> the
-                        exact command and you press that.
+                        Describe the work to your pilot. Review the brief, then approve its proposal to begin.
                       </p>
                     </div>
                     {/* `4a`, for the one moment somebody is deciding how THIS run
@@ -1675,7 +1689,7 @@ export function Cockpit() {
                       onClick={() => setComposing({ dir: repoDir, locked: false })}
                       disabled={busy || !wire.connected}
                     >
-                      or set this run&apos;s overrides…
+                      Customize this run
                     </button>
                   </>
                 )}

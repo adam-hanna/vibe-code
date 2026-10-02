@@ -56,14 +56,11 @@ export function Kickoff({ dir }: { dir: string }) {
       <p className="v-kick__note">
         {dir.trim() === '' ? (
           <>
-            The pilot runs <strong>inside a repository</strong> and can read only that one, so it
-            needs a project before it can say anything. Add one in the sidebar.
+            <strong>Start with a project.</strong> Add a repository in the sidebar so your pilot can explore its code.
           </>
         ) : (
           <>
-            The pilot is reading <code className="v-kick__where">{dir}</code> and nothing else.
-            Ask for what you want above — when it has enough it proposes the exact command and you
-            press it. There is no start button, on purpose.
+            Working in <code className="v-kick__where">{dir}</code>. Your pilot can read this repository; you approve each run.
           </>
         )}
       </p>

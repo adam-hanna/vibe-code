@@ -69,11 +69,13 @@ export function SidePanel({
     return (
       <aside
         className={`v-side v-side--${side} v-side--shut${shut === undefined ? '' : ' v-side--tools'}`}
+        aria-label={title}
       >
         <button
           className="v-side__grip"
           onClick={onToggle}
           aria-expanded={false}
+          aria-label={`Show ${title}`}
           title={`Show ${title}`}
         >
           <span className="v-side__chev">{back}</span>
@@ -90,13 +92,14 @@ export function SidePanel({
   }
 
   return (
-    <aside className={`v-side v-side--${side}`}>
+    <aside className={`v-side v-side--${side}`} aria-label={title}>
       <header className="v-side__head">
         <span className="v-side__title">{title}</span>
         <button
           className="v-side__toggle"
           onClick={onToggle}
           aria-expanded
+          aria-label={`Hide ${title}`}
           title={`Hide ${title}`}
         >
           {away}

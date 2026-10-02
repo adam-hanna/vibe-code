@@ -414,6 +414,13 @@ export function unanswered(conversation: Conversation): readonly Call[] {
   );
 }
 
+/** A fresh tool result continues the current exchange; restored results do not. */
+export function needsFollow(conversation: Conversation, sentMessageCount: number): boolean {
+  if (conversation.live !== null || conversation.messages.length === sentMessageCount) return false;
+  if (unanswered(conversation).length > 0) return false;
+  return conversation.messages[conversation.messages.length - 1]?.role === 'tool';
+}
+
 /**
  * Apply `f` to one call, wherever it sits, and leave everything else alone.
  *

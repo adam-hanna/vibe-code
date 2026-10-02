@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { LivenessDot, StateKicker } from '../design';
+import { LivenessDot } from '../design';
+import { Icon } from '../design/Icon';
 import * as host from '../host';
 import { Confirm } from './Confirm';
 import { rail } from './squares';
@@ -935,11 +936,8 @@ export function Sidebar({
       )}
 
       <div className="v-nav__actions">
-        <button className="v-nav__action" onClick={onNew}>
-          <span className="v-nav__glyph">＋</span> New run
-        </button>
-        <button className="v-nav__action" onClick={onSettings}>
-          <span className="v-nav__glyph">⚙</span> Settings
+        <button className="v-nav__action v-nav__action--new" onClick={onNew}>
+          <span className="v-nav__glyph"><Icon name="plus" size={17} /></span> New run
         </button>
       </div>
 
@@ -978,7 +976,7 @@ export function Sidebar({
         <h3 className="v-nav__heading">Projects</h3>
         {projects.length === 0 && (
           <span className="v-nav__note">
-            None yet. A project is a repository — add the one you want to work in.
+            Your ideas need a home. Add a repository to get started.
           </span>
         )}
         {nestProjects(projects).map((node) => draw(node, null))}
@@ -988,7 +986,7 @@ export function Sidebar({
             fails at preflight, minutes later, in a run that had to start to find
             out (#189). */}
         <button className="v-nav__more" onClick={choose}>
-          ＋ Add a project
+          <Icon name="plus" size={15} /> Add a project
         </button>
         {adding && (
           <form
@@ -1018,9 +1016,12 @@ export function Sidebar({
         )}
       </section>
 
-      {!host.inShell() && (
-        <StateKicker tone="quiet">browser · the archive is read by the host</StateKicker>
-      )}
+      <div className="v-nav__footer">
+        <button className="v-nav__action" onClick={onSettings}>
+          <span className="v-nav__glyph"><Icon name="settings" size={17} /></span> Settings
+        </button>
+        <p>{host.inShell() ? 'A second perspective, by design.' : 'Preview mode · run agents in the desktop app.'}</p>
+      </div>
     </nav>
   );
 }

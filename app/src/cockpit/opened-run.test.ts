@@ -208,7 +208,7 @@ describe('a conversation belongs to the run it is about', () => {
     // Two different emptinesses drawn as one. Beside a run, *"nothing yet"*
     // reads as the pane having failed to load something — which is exactly how
     // it was reported.
-    expect(pilot).toMatch(/No conversation was kept for this run/);
+    expect(pilot).toMatch(/There is no saved chat here/);
     expect(pilot).toMatch(/runId === null \? \(/);
   });
 });
