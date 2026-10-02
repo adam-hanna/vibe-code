@@ -137,7 +137,7 @@ describe('reading is immediate; acting is not', () => {
 });
 
 describe('start_run proposes, and never starts', () => {
-  const good = { task: 'do the thing', directory: '/repo', plan_only: true };
+  const good = { task: 'do the thing', directory: 'C:/repo', plan_only: true };
 
   test('it builds the argv the launch form builds, and stops there', () => {
     const settlement = execute(call('start_run', good), ctx(emptyRun()));
@@ -148,14 +148,14 @@ describe('start_run proposes, and never starts', () => {
     // one definition of a legal invocation.
     expect(settlement.effect).toEqual({
       kind: 'invoke',
-      argv: launchArgv('do the thing', '/repo', true),
+      argv: launchArgv('do the thing', 'C:/repo', true),
     });
   });
 
   test('plan_only has no default, because that is not a fallback-value decision', () => {
     // The difference between a plan and a run that writes code and commits.
     const settlement = execute(
-      call('start_run', { task: 'x', directory: '/repo' }),
+      call('start_run', { task: 'x', directory: 'C:/repo' }),
       ctx(emptyRun()),
     );
     expect(settlement.kind).toBe('refused');
@@ -164,13 +164,73 @@ describe('start_run proposes, and never starts', () => {
 
   test('a field of the wrong type is refused by name, not coerced', () => {
     for (const input of [
-      { task: 7, directory: '/repo', plan_only: true },
+      { task: 7, directory: 'C:/repo', plan_only: true },
       { task: 'x', directory: '', plan_only: true },
-      { task: '   ', directory: '/repo', plan_only: false },
+      { task: '   ', directory: 'C:/repo', plan_only: false },
       'not an object',
     ]) {
       expect(execute(call('start_run', input), ctx(emptyRun())).kind).toBe('refused');
     }
+  });
+
+  test('the composer\'s overrides reach the argv the card shows (#223)', () => {
+    // `1b`'s direct launch went, so `start_run` is the only road from the
+    // overrides block to a run. Built by the same `launchArgv`, so what the card
+    // draws is exactly what the button would have sent.
+    const settlement = execute(
+      call('start_run', {
+        ...good,
+        gates: { implemented: 'stop' },
+        max_tokens: 40_000_000,
+        p1_tolerance: 1,
+      }),
+      ctx(emptyRun()),
+    );
+    expect(settlement.kind).toBe('proposes');
+    if (settlement.kind !== 'proposes') return;
+    expect(settlement.effect).toEqual({
+      kind: 'invoke',
+      argv: launchArgv('do the thing', 'C:/repo', true, {
+        gates: { implemented: 'stop' },
+        maxTokens: 40_000_000,
+        p1Tolerance: 1,
+      }),
+    });
+  });
+
+  test('an override of the wrong shape is refused by name, never coerced', () => {
+    // `--max-tokens 0` turns the ceiling OFF, so a value nobody meant reaching
+    // the argv is the opposite of leaving it alone.
+    for (const [input, named] of [
+      [{ ...good, max_tokens: -1 }, 'max_tokens'],
+      [{ ...good, max_tokens: 2.5 }, 'max_tokens'],
+      [{ ...good, max_tokens: '25M' }, 'max_tokens'],
+      [{ ...good, p1_tolerance: 'one' }, 'p1_tolerance'],
+      [{ ...good, gates: 'implemented=stop' }, 'gates'],
+      [{ ...good, gates: { implemented: 3 } }, 'gates.implemented'],
+    ] as const) {
+      const settlement = execute(call('start_run', input), ctx(emptyRun()));
+      expect(settlement.kind).toBe('refused');
+      expect(settlement.kind === 'refused' && settlement.content).toContain(named);
+    }
+  });
+
+  test('a run starts in the project and nowhere else (#223)', () => {
+    // A pilot told to "use a worktree" made one by hand and proposed the run in
+    // it: the record landed in a tree about to be pruned and the run was filed
+    // under a project nobody added. Worktrees are vibe's job, so the refusal
+    // says where the run goes and that the setting is what makes one.
+    const settlement = execute(
+      call('start_run', { ...good, directory: 'C:/repo/.worktrees/gh-236' }),
+      ctx(emptyRun()),
+    );
+    expect(settlement.kind).toBe('refused');
+    expect(settlement.kind === 'refused' && settlement.content).toContain('git.worktree');
+    expect(settlement.kind === 'refused' && settlement.content).toContain('"directory": "C:/repo"');
+    // The same project spelled differently is the same project.
+    expect(execute(call('start_run', { ...good, directory: 'c:\\repo\\' }), ctx(emptyRun())).kind).toBe(
+      'proposes',
+    );
   });
 
   test('a full run says so in the summary, because that one commits', () => {

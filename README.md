@@ -603,6 +603,46 @@ to report, not that the record is incomplete.
 
 Drop `vibe.config.json` in the target repo; CLI flags override it. See `vibe.config.example.json`.
 
+**Settings for every project** go in a file of the same shape at `~/.config/vibe/config.json`
+(`$XDG_CONFIG_HOME/vibe/config.json` if that is set, `%APPDATA%\vibe\config.json` on Windows).
+Any key may go in either file. The order is the defaults, then that file, then the project's
+`vibe.config.json`, then flags — so put your own models, budgets and round caps there once, and
+let a repository's file say only what is different about it. `vibe doctor` names the file when
+there is one, and the desktop app's Settings screen edits either. Set `VIBE_GLOBAL_CONFIG` to use
+another path, or to an empty string to ignore it.
+
+**One section belongs only in that file: `pilot`**, what the desktop app's pilot may do without
+asking. A project's `vibe.config.json` that sets it is refused, because that file is committed and
+a repository you clone must not be able to widen its own pilot.
+
+```json
+{
+  "pilot": {
+    "yolo": false,
+    "safeCommands": ["git status", "git diff", "git log", "git show", "git add", "git commit",
+                     "git branch --list", "git branch --show-current", "git rev-parse", "git ls-files"],
+    "dirs": []
+  }
+}
+```
+
+- **`safeCommands`** run as soon as the pilot asks, with no card. Each is a program and the
+  arguments it starts with, so `git commit` covers `git commit -m "…"`. There is no shell, so the
+  list means the same on every platform; `ls` and `cat` work wherever they exist as programs, but
+  they are not defaults because Windows has neither. `git commit` runs the repository's own hooks.
+- **`dirs`** are absolute directories, beyond the project, that the pilot may read and run a
+  command in.
+- **`yolo`** runs every command without a card and makes every disk readable. Starting a run and
+  answering a gate still need your press.
+- **`anthropic`** and **`openai`** are `"subscription"` (the default) or `"api"`: whether the pilot
+  reaches that vendor through its CLI on your subscription — `claude -p`, or `codex exec` with its
+  own tools switched off — or over the API with a key from the OS keychain. Runs always use the CLIs.
+
+**`cli` is the other section that belongs only in that file**: `{"cli": {"claude": "/path/to/claude",
+"codex": "/path/to/codex"}}`, for when vibe cannot find a CLI. vibe looks at `VIBE_CLAUDE_BIN` /
+`VIBE_CODEX_BIN` first, then this, then your `PATH` (preferring a real executable over a script
+shim), then the usual install locations. Leave a key out, or set it to `null`, to search.
+
 Every key below is shown at its default, so this block is a complete statement of the
 defaults rather than a sample — omit any section and you get exactly what is printed here.
 

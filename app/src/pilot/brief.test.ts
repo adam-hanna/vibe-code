@@ -181,7 +181,9 @@ describe('every turn carries it', () => {
     // prompt was fine, it was just never sent.
     const sends = [...pilotPane.matchAll(/pilot\s*\n?\s*(?:\/\/[^\n]*\n\s*)*\.send\(/g)];
     expect(sends.length).toBe(1);
-    expect(pilotPane).toContain('system: systemPrompt(run, launched)');
+    // The API road names its channel and the access settings now (#223); what
+    // is pinned is still that the one send carries the prompt.
+    expect(pilotPane).toContain('system: systemPrompt(run, launched, ');
   });
 });
 

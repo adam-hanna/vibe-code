@@ -506,6 +506,29 @@ export function decide(
 }
 
 /**
+ * A proposal that ran without a card, because the person's settings said it
+ * could (#223).
+ *
+ * `decide`'s shape with a different sentence, and the sentence is the point:
+ * *"the user accepted this"* would be false — nobody pressed anything — and a
+ * model told that would describe a person's choice that never happened. `why`
+ * names the setting (the safe-list pattern, or YOLO), so what the model reports
+ * is the reason it actually ran.
+ */
+export function autoRan(conversation: Conversation, id: string, why: string): Conversation {
+  if (answerOf(conversation, id) !== null) return conversation;
+  const call = conversation.replies.flatMap((reply) => reply.calls).find((c) => c.id === id);
+  if (call === undefined || call.settlement?.kind !== 'proposes') return conversation;
+  return {
+    ...conversation,
+    messages: [
+      ...conversation.messages,
+      { role: 'tool', id, name: call.name, content: `${why} The request was sent.` },
+    ],
+  };
+}
+
+/**
  * Replace the live turn's text with the reply the CLI says it made (#211).
  *
  * **Only the subscription backend has two answers to "what did it say", and this

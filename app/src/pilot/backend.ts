@@ -4,10 +4,11 @@ import type { Provider } from './keys';
 /**
  * Where a pilot turn actually runs (#193).
  *
- * Two of the three are vendors reached over HTTP from Rust with a key from the
- * keychain. The third is **the CLI the user already pays for**: `claude -p`,
- * spawned by the host through `src/pilotchat.ts`, on the subscription. So an API
- * key is optional rather than a precondition for the pane doing anything at all.
+ * Two of the four are vendors reached over HTTP from Rust with a key from the
+ * keychain. The other two are **the CLIs the user already pays for**: `claude -p`
+ * through `src/pilotchat.ts`, and `codex exec` through `src/pilotcodex.ts` (#223),
+ * both spawned by the host on the subscription. So an API key is optional rather
+ * than a precondition for the pane doing anything at all, for either vendor.
  *
  * **A backend is not a provider, and widening `Provider` would have been the
  * wrong move.** `Provider` is the *keychain's* vocabulary - `key_set` and
@@ -18,9 +19,11 @@ import type { Provider } from './keys';
  *
  * ## The two are asymmetric, and both directions are on purpose
  *
- * The API-backed pilot has **no filesystem at all** and the subscription one can
- * read the repository - `--tools Read Glob Grep` under `--restricted`, which is
- * what makes it useful for *"what is this doing"*.
+ * The Claude CLI has file tools of its own - `--tools Read Glob Grep` under
+ * `--restricted`. Every other backend reads through vibe's `list_dir` and
+ * `read_file`, answered by the host inside the allowed directories (#223): the
+ * vendors because they never had a filesystem, and the Codex CLI because its own
+ * tools are switched off.
  *
  * In the other direction the two reach the **same** tools by different roads,
  * which is #211 and is a change from how this shipped. `claude -p` still takes
@@ -35,15 +38,49 @@ import type { Provider } from './keys';
  * acceptable - a block read wrong produces a card with a visibly wrong argv that
  * nobody presses, never an action.
  */
-export type Backend = Provider | 'subscription';
+export type Backend = Provider | 'subscription' | 'codex';
 
-/** Subscription first: it is the one that works with nothing configured. */
-export const BACKENDS: readonly Backend[] = ['subscription', ...PROVIDERS];
+/**
+ * Subscription first: it is the one that works with nothing configured.
+ *
+ * `subscription` is the Claude CLI and keeps that spelling because it is stored
+ * on every saved reply; `codex` is the OpenAI subscription, through `codex exec`
+ * (#223).
+ */
+export const BACKENDS: readonly Backend[] = ['subscription', 'codex', ...PROVIDERS];
 
 export const BACKEND_NAME: Readonly<Record<Backend, string>> = {
   subscription: 'Claude (subscription)',
+  codex: 'Codex (subscription)',
   ...PROVIDER_NAME,
 };
+
+/**
+ * How the pilot reaches one vendor, as Settings chose it (#223). The shape of
+ * `PilotAccess`'s two route fields, restated here so this module needs nothing
+ * from the window.
+ */
+export interface Routes {
+  anthropic: 'subscription' | 'api';
+  openai: 'subscription' | 'api';
+}
+
+/**
+ * The backend a conversation with this vendor runs on (#223).
+ *
+ * *"two options for both anthropic and openAI: (1) subscription, (2) api key"* —
+ * so the conversation picks the vendor and Settings picks the road, and this is
+ * the one place the two become a backend.
+ */
+export function backendFor(vendor: Provider, routes: Routes): Backend {
+  if (vendor === 'anthropic') return routes.anthropic === 'api' ? 'anthropic' : 'subscription';
+  return routes.openai === 'api' ? 'openai' : 'codex';
+}
+
+/** Which CLI the host spawns for a backend that needs no key. */
+export function agentOf(backend: Exclude<Backend, Provider>): 'claude' | 'codex' {
+  return backend === 'codex' ? 'codex' : 'claude';
+}
 
 /**
  * Whether this backend needs a key, narrowing to the keychain's vocabulary.
@@ -53,7 +90,7 @@ export const BACKEND_NAME: Readonly<Record<Backend, string>> = {
  * stronger than a comment saying not to.
  */
 export function needsKey(backend: Backend): backend is Provider {
-  return backend !== 'subscription';
+  return backend === 'anthropic' || backend === 'openai';
 }
 
 /**
@@ -69,9 +106,20 @@ export const SUBSCRIPTION_MODELS: readonly string[] = [
   'claude-haiku-4-5-20251001',
 ];
 
+/**
+ * What `codex exec` may be asked to run on (#223).
+ *
+ * The two Codex names this build already ships — `DEFAULTS.codex.model` and the
+ * one `--help` prints beside `--role` — which is `KNOWN_MODELS.codex` in
+ * `src/roles.ts`. Restated rather than imported because the app and the core are
+ * two packages; `backend.test.ts` reads that file and fails when they disagree.
+ */
+export const CODEX_SUBSCRIPTION_MODELS: readonly string[] = ['gpt-5.6-luna', 'gpt-5.6-pro'];
+
 /** What this backend can be asked to run on. */
 export function modelsFor(backend: Backend, api: Readonly<Record<Provider, readonly string[]>>): readonly string[] {
-  return needsKey(backend) ? api[backend] : SUBSCRIPTION_MODELS;
+  if (needsKey(backend)) return api[backend];
+  return backend === 'codex' ? CODEX_SUBSCRIPTION_MODELS : SUBSCRIPTION_MODELS;
 }
 
 /**
@@ -91,6 +139,7 @@ export function modelsFor(backend: Backend, api: Readonly<Record<Provider, reado
  */
 export const BACKEND_NOTE: Readonly<Record<Backend, string>> = {
   subscription: '',
-  anthropic: 'over the API, billed to your key. It can propose a run and cannot read files.',
-  openai: 'over the API, billed to your key. It can propose a run and cannot read files.',
+  codex: '',
+  anthropic: 'over the API, billed to your key. It can propose a run, and reads files through vibe.',
+  openai: 'over the API, billed to your key. It can propose a run, and reads files through vibe.',
 };

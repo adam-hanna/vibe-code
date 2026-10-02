@@ -2,6 +2,15 @@ import type { Level, Narration } from '@src/log.js';
 import type { GateContext } from '@src/host.js';
 import type { ArtifactRead, RunArtifact, RunSummary } from '@src/types.js';
 import type { PromptBlock } from '@src/prompts.js';
+import type { FsAnswer, PilotAccess } from '@src/pilotaccess.js';
+
+/** Where one CLI is, as `config` reports it (#223). */
+export interface CliStatus {
+  configured: string | null;
+  via: 'settings' | 'env' | 'search';
+  found: string | null;
+  problem: string | null;
+}
 
 /**
  * The wire between the loop and whatever is driving it (#153).
@@ -111,6 +120,18 @@ export type Outbound =
   /** A fragment of a pilot reply, in order (#193). */
   | { type: 'pilot_delta'; id: number; text: string }
   /**
+   * A pilot turn that was stopped from the window (#223), answering `pilot_stop`.
+   * Its own frame rather than an `error`, because a turn somebody stopped is not
+   * a turn that failed, and a pane told the second would draw a failure.
+   */
+  | { type: 'pilot_stopped'; id: number }
+  /**
+   * A directory listing or a file's text, for the pilot's `list_dir` and
+   * `read_file` (#223). Answered only inside `pilotRoots`; outside them the
+   * answer is an `error` naming the directories it may read.
+   */
+  | ({ type: 'fs'; id: number } & FsAnswer)
+  /**
    * A pilot turn finished.
    *
    * **There is no money on it and there is nowhere to put any.** A subscription
@@ -164,6 +185,20 @@ export type Outbound =
       effective: unknown;
       raw: Record<string, unknown>;
       path: string | null;
+      /**
+       * The settings for every project, as written, and where they live (#223).
+       * `globalPath` is null when the layer is switched off; `globalRaw` is `{}`
+       * when there is no file yet. Sent beside `raw` so a form can say of each
+       * value whether it is the default, the person's own, or this project's.
+       */
+      globalRaw: Record<string, unknown>;
+      globalPath: string | null;
+      /**
+       * `DEFAULTS` merged with the global file and nothing else: what a project
+       * that says nothing would get. The form's "all projects" view draws this,
+       * and computing it in the window would be a second merge.
+       */
+      globalEffective: unknown;
       /** The boundaries that can hold, and the modes they may take (#140). */
       gateable: readonly string[];
       modes: readonly string[];
@@ -193,6 +228,19 @@ export type Outbound =
        * are the same file.
        */
       models: Readonly<Record<string, readonly string[]>>;
+      /**
+       * What the pilot may do without asking (#223), resolved from the settings
+       * for all projects over the defaults. Carried rather than read by the
+       * window for the reason `globalEffective` is: a merge on that side is a
+       * second answer. Never from a project's file, which may not set it.
+       */
+      pilot: PilotAccess;
+      /**
+       * Where each CLI was found, and how (#223): the settings' path, the
+       * environment variable, or the search. `found` is null with a `problem`
+       * when it could not be found, in the resolver's own sentence.
+       */
+      clis: Readonly<Record<'claude' | 'codex', CliStatus>>;
     }
   /**
    * The diff a run has produced, in reply to a `diff` request (#223, `1d`).
@@ -406,6 +454,19 @@ export type Inbound =
     }
   /** Stop a running command. `commandId` is one this session started. */
   | { type: 'command_stop'; id: number; commandId: string }
+  /**
+   * Stop a subscription pilot turn (#223). `turn` is the id the `pilot` frame
+   * was sent with. The stop button used to call the Rust pilot's cancel, which
+   * only knows API-backed turns, so on the subscription path it was refused and
+   * the refusal was swallowed: the button did nothing and the child ran on.
+   */
+  | { type: 'pilot_stop'; id: number; turn: number }
+  /**
+   * List a directory or read a file for the pilot (#223). `dir` is the project
+   * a relative `path` is resolved against; where it may land is the host's
+   * decision, from the settings for all projects, and never the frame's.
+   */
+  | { type: 'fs'; id: number; op: 'list' | 'read'; dir: string; path: string }
   | {
       type: 'pilot';
       id: number;
@@ -432,6 +493,12 @@ export type Inbound =
       /** The conversation to continue, or to create on the first turn. */
       sessionId: string;
       resume: boolean;
+      /**
+       * Which CLI takes the turn (#223): `claude -p`, or `codex exec` for the
+       * OpenAI subscription. Absent is `claude`, which is what every window
+       * before the Codex pilot sent.
+       */
+      agent?: 'claude' | 'codex';
     }
   /**
    * Ask what runs the archive holds (#223, `1b`).
@@ -462,7 +529,18 @@ export type Inbound =
    * rule, not this frame's, so there is one definition of a legal config and it
    * is the CLI's.
    */
-  | { type: 'config'; id: number; dir: string; patch?: Record<string, unknown> }
+  | {
+      type: 'config';
+      id: number;
+      dir: string;
+      patch?: Record<string, unknown>;
+      /**
+       * Which file a patch is written to (#223). Absent is the project, which is
+       * what every window before the global layer sent. Meaningless on a read,
+       * which always answers with both.
+       */
+      scope?: 'project' | 'global';
+    }
   /**
    * Read the diff a run has produced (#223, `1d`).
    *
@@ -670,6 +748,26 @@ export function decode(line: string): Decoded {
       }
       return { ok: true, message: { type: 'command', id, dir, program, args } };
     }
+    case 'pilot_stop': {
+      const turn = parsed['turn'];
+      if (typeof turn !== 'number' || !Number.isInteger(turn)) {
+        return { ok: false, id, reason: 'pilot_stop named no turn' };
+      }
+      return { ok: true, message: { type: 'pilot_stop', id, turn } };
+    }
+    case 'fs': {
+      const op = parsed['op'];
+      if (op !== 'list' && op !== 'read') {
+        return { ok: false, id, reason: 'fs carried an op that was not "list" or "read"' };
+      }
+      const dir = parsed['dir'];
+      // Required for `archive`'s reason: an empty one would resolve against the
+      // host's cwd, which is a directory nobody chose.
+      if (typeof dir !== 'string' || dir === '') return { ok: false, id, reason: 'fs carried no dir' };
+      const at = parsed['path'];
+      if (typeof at !== 'string') return { ok: false, id, reason: 'fs carried no path' };
+      return { ok: true, message: { type: 'fs', id, op, dir, path: at } };
+    }
     case 'command_stop': {
       const commandId = parsed['commandId'];
       if (typeof commandId !== 'string' || commandId === '') {
@@ -693,6 +791,12 @@ export function decode(line: string): Decoded {
       if (typeof resume !== 'boolean') {
         return { ok: false, id, reason: 'pilot did not say whether it resumes' };
       }
+      // Refused when present and unknown, for `scope`'s reason: a misspelt agent
+      // that fell back to Claude would answer on the wrong vendor and look fine.
+      const agent = parsed['agent'];
+      if (agent !== undefined && agent !== 'claude' && agent !== 'codex') {
+        return { ok: false, id, reason: 'pilot named an agent that was not "claude" or "codex"' };
+      }
       return {
         ok: true,
         message: {
@@ -704,6 +808,7 @@ export function decode(line: string): Decoded {
           sessionId: parsed['sessionId'] as string,
           dir: parsed['dir'] as string,
           resume,
+          ...(agent === undefined ? {} : { agent }),
         },
       };
     }
@@ -842,7 +947,15 @@ export function decode(line: string): Decoded {
       if (!isRecord(patch)) {
         return { ok: false, id, reason: 'config carried a patch that was not an object' };
       }
-      return { ok: true, message: { type: 'config', id, dir, patch } };
+      // Refused rather than defaulted when present and unknown: a misspelt scope
+      // that fell back to the project would write the wrong file and say it had
+      // worked.
+      const scope = parsed['scope'];
+      if (scope === undefined) return { ok: true, message: { type: 'config', id, dir, patch } };
+      if (scope !== 'project' && scope !== 'global') {
+        return { ok: false, id, reason: 'config carried a scope that was not "project" or "global"' };
+      }
+      return { ok: true, message: { type: 'config', id, dir, patch, scope } };
     }
     case 'cancel': {
       // Optional, and refused rather than coerced when present but unusable.

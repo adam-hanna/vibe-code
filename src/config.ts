@@ -1,4 +1,5 @@
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import {
   DEFAULT_ROLE_PROVIDERS,
@@ -15,6 +16,8 @@ import { setOwn } from '@src/runtime.js';
 import type { AgentProvider, ToolchainContract, ToolRequirement, Phase } from '@src/runtime.js';
 import { DEFAULT_GATES, validateGates } from '@src/gates.js';
 import { promptBlockNames } from '@src/prompts.js';
+import { readPilotAccess, refuseProjectPilot } from '@src/pilotaccess.js';
+import { readCliPaths, refuseProjectCli } from '@src/clipaths.js';
 import { EFFORTS } from '@src/types.js';
 import type {
   Config,
@@ -297,7 +300,7 @@ function mergeGates(base: GatesConfig, override: unknown): GatesConfig {
   return out as unknown as GatesConfig;
 }
 
-function mergeConfig(base: Config, override: unknown): Config {
+export function mergeConfig(base: Config, override: unknown): Config {
   if (!isRecord(override)) return base;
   return {
     roles: mergeRoles(base.roles, override['roles']),
@@ -508,7 +511,21 @@ export function loadConfig(
     }
   }
 
-  const merged = withRolePatches(mergeConfig(mergeConfig(DEFAULTS, fromFile), overrides), roles);
+  // The pilot's permissions are the machine's alone (#223), so a project file
+  // naming them is refused here, on every road that reads one.
+  if (isRecord(fromFile)) {
+    refuseProjectPilot(fromFile, 'vibe.config.json');
+    refuseProjectCli(fromFile, 'vibe.config.json');
+  }
+
+  // The global layer sits under the project's file and over the defaults, so a
+  // project that says nothing about a key inherits the person's own choice and
+  // one that does say wins (#223).
+  const fromGlobal = readGlobalConfig();
+  const merged = withRolePatches(
+    mergeConfig(mergeConfig(mergeConfig(DEFAULTS, fromGlobal), fromFile), overrides),
+    roles,
+  );
   // Order matters. `resolveRoleScopedAgents` reads the table, so a bad role
   // value checked afterwards would surface as an empty `toolchain.node.agents`
   // - a toolchain error for what is a `roles` mistake.
@@ -516,7 +533,7 @@ export function loadConfig(
   // No prior table, unlike `applyOverrides`: these layers are raw file and flag
   // input, so any `agents` in one is a contract the user wrote by hand and keeps
   // winning over the role table, exactly as it did before per-role flags.
-  const cfg = resolveRoleScopedAgents(merged, [fromFile, overrides]);
+  const cfg = resolveRoleScopedAgents(merged, [fromGlobal, fromFile, overrides]);
   validate(cfg);
   return { ...cfg, configPath: existsSync(configPath) ? configPath : null };
 }
@@ -853,17 +870,58 @@ function artifactSegments(entry: string): string[] {
  */
 
 export function readRawConfig(targetDir: string): Record<string, unknown> {
-  const configPath = path.join(targetDir, 'vibe.config.json');
+  return readRawFile(path.join(targetDir, 'vibe.config.json'), 'vibe.config.json');
+}
+
+/** A config file's own contents, or `{}` when there is none. Refuses, never repairs. */
+function readRawFile(configPath: string, label: string): Record<string, unknown> {
   if (!existsSync(configPath)) return {};
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(configPath, 'utf8')) as unknown;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`Invalid vibe.config.json: ${message}`);
+    throw new Error(`Invalid ${label}: ${message}`);
   }
-  if (!isRecord(parsed)) throw new Error('Invalid vibe.config.json: not a JSON object');
+  if (!isRecord(parsed)) throw new Error(`Invalid ${label}: not a JSON object`);
   return parsed;
+}
+
+/**
+ * Where the settings for every project live, or null when they are switched off (#223).
+ *
+ * **A second file of the same shape, not a second kind of setting.** Asked for
+ * as *"Some settings are global… some are project specific"*, and the answer
+ * chosen was that any key may be set at either level and the project wins: the
+ * order is `DEFAULTS` → this file → `vibe.config.json` → flags. So somebody's
+ * models, budgets and round caps are written once, and a project that needs
+ * something different says so in its own file — which is still the one meant to
+ * be committed, while this one is a machine's and is not.
+ *
+ * The platform's own config directory: `%APPDATA%\vibe` on Windows, and
+ * `$XDG_CONFIG_HOME/vibe` (else `~/.config/vibe`) elsewhere. `VIBE_GLOBAL_CONFIG`
+ * overrides it, and **empty switches the layer off** — which is what `npm test`
+ * sets, because a suite that read the developer's own settings would pass or
+ * fail according to whose machine it ran on.
+ */
+export function globalConfigPath(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+  home: string = os.homedir(),
+): string | null {
+  const forced = env['VIBE_GLOBAL_CONFIG'];
+  if (forced !== undefined) return forced.trim() === '' ? null : forced;
+  const base =
+    platform === 'win32'
+      ? (env['APPDATA'] ?? path.join(home, 'AppData', 'Roaming'))
+      : (env['XDG_CONFIG_HOME'] ?? path.join(home, '.config'));
+  return path.join(base, 'vibe', 'config.json');
+}
+
+/** The global file's own contents, or `{}` when there is none or the layer is off. */
+export function readGlobalConfig(): Record<string, unknown> {
+  const at = globalConfigPath();
+  return at === null ? {} : readRawFile(at, at);
 }
 
 /**
@@ -900,7 +958,13 @@ export function readRawConfig(targetDir: string): Record<string, unknown> {
  * a run whose settings changed underneath it says so in its own record.
  */
 export function withProjectFile(stored: Config, targetDir: string): Config {
-  return mergeConfig(stored, readRawConfig(targetDir));
+  // The global file is a written-down decision too, so it outranks the run's
+  // memory for the same reason the project's does - and the project still
+  // outranks it, as it does on a fresh run (#223).
+  const project = readRawConfig(targetDir);
+  refuseProjectPilot(project, 'vibe.config.json');
+  refuseProjectCli(project, 'vibe.config.json');
+  return mergeConfig(mergeConfig(stored, readGlobalConfig()), project);
 }
 
 /**
@@ -929,8 +993,25 @@ export function withProjectFile(stored: Config, targetDir: string): Config {
 export function writeConfigPatch(
   targetDir: string,
   patch: Record<string, unknown>,
+  /**
+   * Which file (#223). `global` writes the settings for every project and is
+   * validated twice: on its own, so it is a legal config wherever it is read,
+   * and under this project's file, so a save cannot leave the project in front
+   * of you unloadable.
+   */
+  scope: 'project' | 'global' = 'project',
 ): { path: string } {
-  const raw = readRawConfig(targetDir);
+  const globalPath = globalConfigPath();
+  if (scope === 'global' && globalPath === null) {
+    throw new Error('global settings are switched off (VIBE_GLOBAL_CONFIG is empty)');
+  }
+  // Refused before anything is merged, so the sentence is the pilot rule's own
+  // rather than whatever the merge would have tripped over (#223).
+  if (scope === 'project') {
+    refuseProjectPilot(patch, 'vibe.config.json');
+    refuseProjectCli(patch, 'vibe.config.json');
+  }
+  const raw = scope === 'global' ? readGlobalConfig() : readRawConfig(targetDir);
   const candidate: Record<string, unknown> = { ...raw };
   for (const [key, value] of Object.entries(patch)) {
     const existing = raw[key];
@@ -947,11 +1028,24 @@ export function writeConfigPatch(
   // The same pipeline `loadConfig` runs, in the same order and for the same
   // reasons - `validateRoles` first, because `resolveRoleScopedAgents` reads the
   // table and a bad role checked afterwards surfaces as a toolchain error.
-  const merged = mergeConfig(DEFAULTS, candidate);
+  const project = scope === 'global' ? readRawConfig(targetDir) : candidate;
+  const global = scope === 'global' ? candidate : readGlobalConfig();
+  if (scope === 'global') {
+    // Not part of `Config`, so `validate` never sees it - checked here instead,
+    // because a write is the one moment a bad value can be refused unwritten.
+    readPilotAccess(candidate);
+    readCliPaths(candidate);
+    const alone = mergeConfig(DEFAULTS, candidate);
+    validateRoles(alone.roles);
+    validate(resolveRoleScopedAgents(alone, [candidate]));
+  }
+  const merged = mergeConfig(mergeConfig(DEFAULTS, global), project);
   validateRoles(merged.roles);
-  validate(resolveRoleScopedAgents(merged, [candidate]));
+  validate(resolveRoleScopedAgents(merged, [global, project]));
 
-  const configPath = path.join(targetDir, 'vibe.config.json');
+  const configPath =
+    scope === 'global' && globalPath !== null ? globalPath : path.join(targetDir, 'vibe.config.json');
+  if (scope === 'global') mkdirSync(path.dirname(configPath), { recursive: true });
   const tmp = `${configPath}.tmp`;
   writeFileSync(tmp, `${JSON.stringify(candidate, null, 2)}\n`, 'utf8');
   renameSync(tmp, configPath);

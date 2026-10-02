@@ -65,6 +65,15 @@
   color: var(--text-emphasis);
 }
 
+/* A path someone has to recognise, so it is monospace and wraps anywhere —
+   a Windows install path is one unbroken word. */
+.v-cred__path {
+  font: var(--type-mono-sm);
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
 .v-cred__entry {
   display: flex;
   gap: var(--space-2);

@@ -7,6 +7,9 @@ import {
   dirKey,
   findProject,
   isPinned,
+  nestProjects,
+  relativeTo,
+  within,
   projectName,
   readPins,
   readProjects,
@@ -210,5 +213,45 @@ describe('the sidebar is the navigator, and 1b is where a lock is overruled', ()
     const to = cockpit.indexOf("{tab === 'pilot' && ", from);
     const bar = from < 0 ? '' : cockpit.slice(from, to < 0 ? cockpit.length : to);
     expect(bar).not.toMatch(/>\s*Runs\b/);
+  });
+});
+
+describe('a project inside another is drawn under it (#223)', () => {
+  // A run started in a worktree points the window at the worktree, which used
+  // to make it a top-level project nobody added - so the run looked missing.
+  const repo = '/home/me/apps/erm';
+  const tree = `${repo}/erm/.worktrees/gh-236`;
+
+  test('a worktree nests under the project that contains it', () => {
+    expect(nestProjects([repo, tree])).toEqual([
+      { dir: repo, children: [{ dir: tree, children: [] }] },
+    ]);
+  });
+
+  test('the nearest container wins, and order is the list\'s own', () => {
+    const inner = `${repo}/erm`;
+    expect(nestProjects([tree, repo, '/other', inner])).toEqual([
+      { dir: repo, children: [{ dir: inner, children: [{ dir: tree, children: [] }] }] },
+      { dir: '/other', children: [] },
+    ]);
+  });
+
+  test('a shared prefix is not containment', () => {
+    // `/home/me/apps/erm-two` starts with `/home/me/apps/erm` and is not in it.
+    expect(nestProjects([repo, `${repo}-two`])).toHaveLength(2);
+  });
+
+  test('containment uses the same rules as every other comparison here', () => {
+    expect(nestProjects(['C:\\Users\\me\\repo', 'c:/users/me/repo/.worktrees/x'])).toHaveLength(1);
+    expect(within('C:\\Users\\me\\repo', 'c:/users/me/repo/.worktrees/x')).toBe(true);
+    expect(within(repo, repo)).toBe(true);
+    expect(within(repo, `${repo}-two`)).toBe(false);
+  });
+
+  test('a nested project is named by its path under the parent', () => {
+    expect(relativeTo(repo, tree)).toBe('erm/.worktrees/gh-236');
+    expect(relativeTo(`${repo}/`, `${tree}/`)).toBe('erm/.worktrees/gh-236');
+    // Spellings that do not line up fall back to the folder name, never a guess.
+    expect(relativeTo('/elsewhere', tree)).toBe('gh-236');
   });
 });

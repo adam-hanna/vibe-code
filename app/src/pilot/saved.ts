@@ -1,6 +1,7 @@
 import { dirKey } from '../cockpit/projects';
 import { emptyConversation } from './transcript';
 import type { Conversation } from './transcript';
+import { DRAFT_PREFIX } from '../cockpit/pending';
 
 /**
  * A conversation, kept between launches (#223).
@@ -34,6 +35,16 @@ import type { Conversation } from './transcript';
 const PREFIX = 'vibe.chat.';
 
 /** Where a conversation lives. `none` is the one that has not launched yet. */
+/**
+ * Whether a key holds a draft's conversation (#223). A draft is a run that has
+ * not started, so once its run adopts the conversation the draft's copy is a
+ * stale duplicate rather than a second record — unlike a run's own key, which
+ * adoption never removes.
+ */
+export function isDraftKey(key: string): boolean {
+  return key.includes(`::${DRAFT_PREFIX}`);
+}
+
 export function chatKey(dir: string, runId: string | null): string {
   return `${PREFIX}${dirKey(dir)}::${runId ?? 'none'}`;
 }

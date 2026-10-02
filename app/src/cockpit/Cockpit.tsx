@@ -15,6 +15,17 @@ import { PlansPane } from './PlansPane';
 import { ReportPane } from './ReportPane';
 import { Kickoff } from './Kickoff';
 import { preview } from './projects';
+import {
+  DRAFTS_KEY,
+  addDraft,
+  bindDraft,
+  markLaunched,
+  newDraft,
+  readDrafts,
+  removeDraft,
+} from './pending';
+import type { Draft } from './pending';
+import { chatKey } from '../pilot/saved';
 import { useReplay } from './useReplay';
 
 import { LoopColumn } from './LoopColumn';
@@ -297,6 +308,17 @@ export function Cockpit() {
    * sequence that could disagree with the one the run actually walks.
    */
   const [order, setOrder] = useState<readonly string[]>([]);
+  /**
+   * What the pilot may do without asking (#223), from the same read. Null until
+   * it arrives, which the pane treats as the narrowest answer: everything is a
+   * card.
+   */
+  const [access, setAccess] = useState<host.PilotAccess | null>(null);
+  /**
+   * Bumped by every save in Settings, so a change there reaches this read —
+   * including the pilot's safe list, which an open conversation acts on.
+   */
+  const [configEpoch, setConfigEpoch] = useState(0);
   useEffect(() => {
     if (repoDir.trim() === '' || !host.inShell()) return;
     let cancelled = false;
@@ -308,6 +330,7 @@ export function Cockpit() {
           gates?: Record<string, string>;
         };
         if (cancelled) return;
+        setAccess(frame.pilot);
         if (effective.gates !== undefined) setGates(effective.gates);
         setOrder(frame.gateable);
         const loop = effective.loop;
@@ -329,7 +352,7 @@ export function Cockpit() {
     return () => {
       cancelled = true;
     };
-  }, [repoDir]);
+  }, [repoDir, configEpoch]);
   const [tab, setTab] = useState<
     | 'output'
     | 'pilot'
@@ -398,6 +421,90 @@ export function Cockpit() {
    * cannot be sent twice.
    */
   const [brief, setBrief] = useState<string | null>(null);
+  /**
+   * Runs asked for and not started yet, and the one on screen (#223).
+   *
+   * **Pressing start is where a run begins as far as anybody can see**, so the
+   * row appears then, under its project, and the conversation that follows is
+   * that row's. When the pilot's proposal is pressed and the run says
+   * `run_started`, the draft is bound to it and the run adopts the conversation —
+   * one row that turns into the run, rather than a second row arriving while the
+   * chat that decided it disappeared. See `pending.ts`.
+   */
+  const [drafts, setDrafts] = useState<readonly Draft[]>(() => {
+    try {
+      return readDrafts(localStorage.getItem(DRAFTS_KEY));
+    } catch {
+      return [];
+    }
+  });
+  const saveDrafts = useCallback((change: (list: readonly Draft[]) => readonly Draft[]) => {
+    setDrafts((list) => {
+      const next = change(list);
+      try {
+        localStorage.setItem(DRAFTS_KEY, JSON.stringify(next));
+      } catch {
+        // The drafts still work for this session; they will not be back next time.
+      }
+      return next;
+    });
+  }, []);
+  const [draftId, setDraftId] = useState<string | null>(null);
+  const drafting = drafts.find((d) => d.id === draftId) ?? null;
+  /**
+   * The draft whose proposal was pressed, so only ITS run can claim it.
+   *
+   * A ref rather than a field read off `drafting`, because the thing being
+   * guarded against is a run started some other way — a resume from the footer,
+   * a run continued into implementation — arriving while a draft happens to be
+   * open. Only the pilot's `invoke` sets this, and every other launch clears it.
+   */
+  const launchedFrom = useRef<string | null>(null);
+  /**
+   * A brief waiting for its draft's conversation to be on screen.
+   *
+   * **One commit later, on purpose.** Pointing the pane at a new draft makes it
+   * load that draft's (empty) conversation, and a brief handed over in the same
+   * render would be sent on top of whatever conversation was on screen before —
+   * so the previous chat would ride into the new run's first message. The pane's
+   * load runs in a child effect, before this one, so by the time `brief` is set
+   * the pane is already holding the right conversation.
+   */
+  const [queued, setQueued] = useState<string | null>(null);
+  useEffect(() => {
+    if (queued === null || drafting === null) return;
+    setBrief(queued);
+    setQueued(null);
+  }, [queued, drafting]);
+  /** Discard a draft and the conversation kept under it. Nothing on disk. */
+  const forgetDraft = useCallback(
+    (d: Draft) => {
+      saveDrafts((list) => removeDraft(list, d.id));
+      try {
+        localStorage.removeItem(chatKey(d.dir, d.id));
+      } catch {
+        // Storage off: the conversation was never kept either.
+      }
+      setDraftId((at) => (at === d.id ? null : at));
+    },
+    [saveDrafts],
+  );
+  /** Let go of drafts whose run the archive now draws. Their chat moved already. */
+  const settleDrafts = useCallback(
+    (ids: readonly string[]) => saveDrafts((list) => list.filter((d) => !ids.includes(d.id))),
+    [saveDrafts],
+  );
+  // The run a draft's proposal started has said who it is: bind the draft to it
+  // and let go of the draft, which moves the pilot pane onto the run's key — and
+  // that move is a start rather than a click, so the run adopts the conversation.
+  const startedId = run.identity?.runId ?? null;
+  useEffect(() => {
+    if (startedId === null || drafting === null) return;
+    if (launchedFrom.current !== drafting.id) return;
+    launchedFrom.current = null;
+    saveDrafts((list) => bindDraft(list, drafting.id, startedId));
+    setDraftId(null);
+  }, [startedId, drafting, saveDrafts]);
   /** Pilot proposals waiting on a person, so a hidden tab can say so (#144). */
   const [proposals, setProposals] = useState(0);
   /**
@@ -564,7 +671,12 @@ export function Cockpit() {
    * a pilot feature.
    */
   const launch = useCallback(
-    (argv: readonly string[]) => {
+    // `fromDraft` is the draft whose proposal this is, and only the pilot's
+    // `invoke` passes one: a resume or an implement is not the run a draft asked
+    // for, and must not be the run that claims it (#223).
+    (argv: readonly string[], fromDraft: string | null = null) => {
+      launchedFrom.current = fromDraft;
+      if (fromDraft !== null) saveDrafts((list) => markLaunched(list, fromDraft));
       // A new run is a new column. Appending to the previous one's cycles would
       // draw a single loop out of two runs.
       dispatch({ type: 'reset' });
@@ -602,7 +714,7 @@ export function Cockpit() {
       requests.current += 1;
       void send({ type: 'invoke', id: requests.current, argv });
     },
-    [send, rememberRepo],
+    [send, rememberRepo, saveDrafts],
   );
 
   /**
@@ -808,12 +920,12 @@ export function Cockpit() {
    */
   const onEffect = useCallback(
     (effect: Effect) => {
-      if (effect.kind === 'invoke') launch(effect.argv);
+      if (effect.kind === 'invoke') launch(effect.argv, draftId);
       else if (effect.kind === 'command') runCommand(effect.program, effect.args);
       else if (effect.kind === 'stop_command') stopCommand(effect.commandId);
       else answer(effect.askId, effect.decision);
     },
-    [launch, answer, runCommand, stopCommand],
+    [draftId, launch, answer, runCommand, stopCommand],
   );
 
   const outside = !host.inShell();
@@ -825,7 +937,9 @@ export function Cockpit() {
    * and when the live run *is* the opened one, `viewing` is simply redundant
    * rather than wrong.
    */
-  const shownRunId = viewing?.runId ?? run.identity?.runId ?? null;
+  // A draft on screen has no run yet, so the panes read nothing rather than
+  // whichever run the column happens to hold (#223).
+  const shownRunId = viewing?.runId ?? (drafting !== null ? null : (run.identity?.runId ?? null));
   /**
    * The question round the loop is on, through `model.ts` rather than by index.
    *
@@ -849,7 +963,7 @@ export function Cockpit() {
    * nothing says *no plans yet*, which is indistinguishable from a planner that
    * has not finished.
    */
-  const shownDir = viewing?.dir ?? run.identity?.repo ?? repoDir;
+  const shownDir = viewing?.dir ?? drafting?.dir ?? run.identity?.repo ?? repoDir;
   /**
    * The live run's repository, for the one pane that is always about it.
    *
@@ -952,13 +1066,26 @@ export function Cockpit() {
             setComposing((at) => (at === null ? at : { ...at, dir: next }));
           }}
           locked={composing.locked}
-          onLaunch={launch}
-          // The default way out, and the one that spends nothing: the brief goes
-          // to the pilot, which reads it, asks about what would change the plan
-          // and proposes the run when it is settled (#223). The tab moves with
-          // it, because a conversation nobody is looking at is the same as none.
-          onBrief={(task) => {
-            setBrief(task);
+          // The only way out, and the one that spends nothing: the brief goes to
+          // the pilot, which reads it, asks about what would change the plan and
+          // proposes the run when it is settled (#223). The tab moves with it,
+          // because a conversation nobody is looking at is the same as none.
+          // **And the row appears now, not when the run starts** (#223). The
+          // draft is the run as far as the person is concerned; the core has
+          // nothing until the proposal is pressed, and the draft is what the
+          // sidebar draws in between.
+          onBrief={(message, task) => {
+            const draft = newDraft(
+              composing.dir,
+              task,
+              Date.now(),
+              Math.random().toString(36).slice(2, 8),
+            );
+            saveDrafts((list) => addDraft(list, draft));
+            setDraftId(draft.id);
+            setViewing(null);
+            rememberRepo(draft.dir);
+            setQueued(message);
             setComposing(null);
             open('pilot');
           }}
@@ -1055,6 +1182,18 @@ export function Cockpit() {
         >
           <Sidebar
             dir={repoDir}
+            drafts={drafts}
+            draftId={draftId}
+            // Back to a draft's conversation. It has no run to read, so the
+            // panes are pointed at nothing and the pilot tab is where it is.
+            onDraft={(d) => {
+              setViewing(null);
+              setDraftId(d.id);
+              rememberRepo(d.dir);
+              open('pilot');
+            }}
+            onForgetDraft={forgetDraft}
+            onSettled={settleDrafts}
             currentId={run.identity?.runId ?? null}
             onNew={() => setComposing({ dir: repoDir, locked: false })}
             // A run in THIS project, with the repository already answered. It
@@ -1064,7 +1203,6 @@ export function Cockpit() {
               rememberRepo(next);
               setComposing({ dir: next, locked: true });
             }}
-            onSwitch={() => setSwitching(true)}
             onSettings={() => setTab('settings')}
             // `1b` in the main pane, which is where a lock can be overruled with
             // a confirmation. A sidebar row must not be a second way to force.
@@ -1076,11 +1214,13 @@ export function Cockpit() {
             // alone — no probe, no lock, no turn.
             onShow={(next, runId, task) => {
               rememberRepo(next);
+              setDraftId(null);
               setViewing({ dir: next, runId, task });
               setOpenAt(null);
             }}
             onProject={(next) => {
               rememberRepo(next);
+              setDraftId(null);
               // A run in the old project is not a run in this one, and the panes
               // key off the run id alone. Cleared rather than carried.
               setViewing(null);
@@ -1296,6 +1436,7 @@ export function Cockpit() {
               onKeysChanged={refreshKeys}
               limits={limits}
               onLimits={relimit}
+              onSaved={() => setConfigEpoch((n) => n + 1)}
             />
           )}
           {/* `1b`, opened from a project in the sidebar. The columns the sidebar
@@ -1378,12 +1519,18 @@ export function Cockpit() {
               // reading, so opening a finished run brings back the chat about
               // it — and null, before any run, is the conversation that will
               // propose one.
-              runId={shownRunId}
+              // A draft's conversation is its own, keyed by the draft id until
+              // the run it asked for starts and adopts it (#223).
+              runId={drafting?.id ?? shownRunId}
+              access={access}
               // Pointed at rather than started here. `viewing` is set by
               // clicking a row in the archive, and a click is a read — so the
               // conversation must not travel with it, which is what adoption
               // was doing to every run somebody browsed to (#223).
-              opened={viewing !== null}
+              // A draft counts as pointed-at too: arriving at one restores ITS
+              // conversation rather than adopting whatever was on screen, which
+              // is what a fresh draft needs. Leaving it for its run is the start.
+              opened={viewing !== null || drafting !== null}
               commands={commands}
               onEffect={onEffect}
               ask={brief}

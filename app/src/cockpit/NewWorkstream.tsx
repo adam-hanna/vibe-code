@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Button, MetaChip, Modal, StateKicker } from '../design';
 import * as host from '../host';
-import { launchArgv } from './argv';
+import { briefFor } from './argv';
 import { pickDirectory } from './pick';
 import type { Overrides } from './argv';
 import type { ConfigFrame } from '../host';
@@ -53,7 +53,6 @@ type Gates = Readonly<Record<string, string>>;
 export function NewWorkstream({
   dir,
   onDir,
-  onLaunch,
   onBrief,
   onClose,
   busy,
@@ -61,17 +60,27 @@ export function NewWorkstream({
 }: {
   dir: string;
   onDir: (dir: string) => void;
-  onLaunch: (argv: readonly string[]) => void;
   /**
    * Hand the brief to the pilot instead of starting a run (#223).
    *
-   * **The default way out of this modal**, and the reason it exists: a run is
-   * long and expensive and converges or stalls on the brief it was given, so the
+   * **The only way out of this modal**, and the reason it exists: a run is long
+   * and expensive and converges or stalls on the brief it was given, so the
    * useful thing to do with a freshly typed one is interrogate it. Asked for as
    * *"I don't want the run to start automatically. Rather, I want the user
    * message to be fed into the pilot chat."*
+   *
+   * It used to be one of two. `skip the pilot` built an argv here and started
+   * the run, and was kept because the overrides block had no other road to a
+   * run; it went at the owner's decision — *"There should only be one start
+   * button and it should follow the 'talk it through' path"* — and the overrides
+   * travel in the message instead, which `start_run` can now carry. See
+   * `briefFor`.
    */
-  onBrief: (task: string) => void;
+  /**
+   * `message` is what the pilot is told; `task` is the brief alone, which is
+   * what the sidebar's draft row is called until the run exists.
+   */
+  onBrief: (message: string, task: string) => void;
   onClose: () => void;
   busy: boolean;
   /**
@@ -130,7 +139,6 @@ export function NewWorkstream({
     (tolerance.trim() !== '' && !Number.isFinite(Number(tolerance)));
 
   const ready = task.trim() !== '' && dir.trim() !== '' && !badNumber;
-  const argv = launchArgv(task, dir, planOnly, overrides);
 
   const choose = () => {
     void pickDirectory()
@@ -148,9 +156,10 @@ export function NewWorkstream({
         onSubmit={(e) => {
           e.preventDefault();
           if (!ready || busy) return;
-          // **Submit is the conversation now, not the run.** Enter in the brief
-          // field reaches here, and that gesture must land on the safe half.
-          onBrief(task.trim());
+          // **Submit is the conversation, not the run.** Enter in the brief field
+          // reaches here, and so does the one button. The settings go with the
+          // brief, in the message, so the pilot can carry them on `start_run`.
+          onBrief(briefFor(task, planOnly, overrides), task.trim());
           onClose();
         }}
       >
@@ -313,33 +322,15 @@ export function NewWorkstream({
           </span>
         </label>
 
-        {/* The exact command the SECOND button runs. It is no longer what
-            submitting does, so it sits with the control it describes rather than
-            above both of them. */}
-        <pre className="v-new__argv">vibe {argv.join(' ')}</pre>
-
+        {/* No argv here any more. The command is drawn on the pilot's
+            proposal card, which is where it is pressed — an argv in this modal
+            would describe a command nothing on this screen runs. */}
         <div className="v-new__foot">
           <Button type="button" onClick={onClose}>
             cancel
           </Button>
-          {/* **Kept, and it is not a hedge.** The pilot's `start_run` takes a
-              brief, a directory and plan-only - it cannot express a gate
-              override or a cap, because `launchArgv`'s overrides have no field
-              on that tool. So a run that needs the block above is the one case
-              with no conversational route, and removing this would remove a
-              capability rather than a shortcut. Labelled for what it skips. */}
-          <Button
-            type="button"
-            disabled={!ready || busy}
-            onClick={() => {
-              if (!ready || busy) return;
-              onLaunch(argv);
-            }}
-          >
-            skip the pilot and {planOnly ? 'plan' : 'run'} now
-          </Button>
           <Button level="primary" type="submit" disabled={!ready || busy}>
-            talk it through
+            start
           </Button>
         </div>
       </form>

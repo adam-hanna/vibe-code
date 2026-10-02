@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { launchArgv, readLaunchArgv } from './argv';
+import { briefFor, launchArgv, readLaunchArgv } from './argv';
 
 /**
  * The overrides `4a` can express (#223).
@@ -74,5 +74,39 @@ describe('the builder and the reader stay in step', () => {
       p1Tolerance: 0,
     });
     expect(readLaunchArgv(argv)).toEqual({ task: 'the brief', dir: '/r', planOnly: false });
+  });
+});
+
+describe('the composer hands its settings to the pilot in the message (#223)', () => {
+  // `1b` launches nothing now. What it chose has to reach the run through the
+  // pilot's `start_run`, and the message is where the person can see that it did.
+  test('the brief comes first and is untouched, the settings after it', () => {
+    const said = briefFor('  fix the thing\n', true);
+    expect(said.startsWith('fix the thing\n')).toBe(true);
+    expect(said).toContain('start_run');
+    expect(said).toContain('- plan_only: true');
+  });
+
+  test('plan-only is always stated, because start_run will not guess it', () => {
+    expect(briefFor('t', false)).toContain('- plan_only: false');
+  });
+
+  test('only overrides somebody set are stated', () => {
+    // A list of the project's defaults would read as choices somebody made.
+    const plain = briefFor('t', true, { gates: {}, maxTokens: null, p1Tolerance: null });
+    expect(plain).not.toMatch(/gates|max_tokens|p1_tolerance/);
+  });
+
+  test('the overrides use the field names start_run takes', () => {
+    const said = briefFor('t', false, {
+      gates: { 'review-round': 'stop', implemented: 'auto' },
+      maxTokens: 0,
+      p1Tolerance: 2,
+    });
+    // Sorted, as the argv is. And a cap of 0 is stated as 0, because it turns the
+    // ceiling off - it is a choice, not an absence.
+    expect(said).toContain('- gates: implemented=auto, review-round=stop');
+    expect(said).toContain('- max_tokens: 0');
+    expect(said).toContain('- p1_tolerance: 2');
   });
 });

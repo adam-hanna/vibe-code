@@ -63,12 +63,14 @@ describe('how big the product is drawn', () => {
 });
 
 describe('subscription against keys, which is two questions about two processes', () => {
-  test('a run’s agents are stated as having nothing to configure', () => {
-    // They are child processes inheriting your own logins. vibe installs
-    // neither and holds no credential for either, so a control here would be a
-    // promise the app cannot keep.
-    expect(settings).toMatch(/Always your own subscriptions, and there is nothing here to set/);
+  test('a run’s agents are stated as always the subscription CLIs', () => {
+    // They are child processes inheriting your own logins, and vibe holds no
+    // credential for either. What became configurable (#223) is only WHERE the
+    // CLI is, asked for as *"give them an option to provide a path"* — so the
+    // screen still says no key reaches a run, and still points at the check.
+    expect(settings).toMatch(/Runs always use the <code>claude<\/code> and <code>codex<\/code> CLIs on your own/);
     expect(settings).toMatch(/vibe doctor/);
+    expect(credentials).toMatch(/Runs still use the <code>\{bin\}<\/code> CLI on your subscription/);
   });
 
   test('the keys are named as the pilot’s, and only on the API road', () => {
@@ -85,10 +87,13 @@ describe('subscription against keys, which is two questions about two processes'
     // Asserted on the rendered expression rather than the whole file: the
     // comment above it **quotes** the old sentence, on purpose, and a test that
     // matched the file would fail on the explanation of its own fix.
-    const from = credentials.indexOf('<span className="v-creds__summary">');
-    const summary = credentials.slice(from, credentials.indexOf('</span>', from));
-    expect(summary).not.toMatch(/the pilot cannot run/);
-    expect(summary).toMatch(/the pilot runs on the subscription/);
+    //
+    // The summary line it read went with the two-choice cards (#223); the claim
+    // is now carried by the subscription card, which is the default road and
+    // says it needs nothing entered and bills nothing.
+    expect(credentials).not.toMatch(/the pilot cannot run/);
+    const sub = credentials.slice(credentials.indexOf("route === 'subscription' ?"));
+    expect(sub).toMatch(/you are already logged into, and nothing is\s+billed/);
   });
 
   test('the screen says which of the three places a setting goes', () => {
@@ -161,5 +166,62 @@ describe('a finished plan-only run has somewhere to go', () => {
     // window could not tell a plan-only run that finished from any other run
     // that finished — and the two want opposite next actions.
     expect(cockpit).toMatch(/implementArgv/);
+  });
+});
+
+describe('the test command is on the settings screen (#223)', () => {
+  // A Bazel project had no `package.json`, so the required gate found nothing
+  // to run and a finished run ended exit 7 after 42M tokens. `verify.command`
+  // was reachable only by hand-editing the file.
+  const block = settings.slice(settings.indexOf('how the run checks its work'));
+
+  test('the command saves to verify.command, and empty means auto-detect', () => {
+    expect(block).toContain("save({ verify: { command: next === '' ? null : next } })");
+  });
+
+  test('the pass count and the timeout are there too, in minutes', () => {
+    expect(block).toContain('save({ verify: { runs: next } })');
+    expect(block).toContain('save({ verify: { timeoutMs: next * 60_000 } })');
+  });
+
+  test('a project that lists gates is told where they live, not given a field that cannot save', () => {
+    // `validateConfig` refuses `verify.command` beside `verify.gates`.
+    expect(settings).toContain("const listsGates = Array.isArray(verify['gates']);");
+    expect(block).toMatch(/listsGates \? \(/);
+  });
+});
+
+describe('one form, pointed at one of two files (#223)', () => {
+  // *"Some settings are global, like api keys, etc. Some are project specific,
+  // like the worktree command."* Any key at either level, project wins.
+  test('a save goes to the file the switch names', () => {
+    // One writer, told its file; `save` is that writer pointed by the switch.
+    expect(settings).toContain('.config(dir, patch, to)');
+    expect(settings).toContain('(patch: Record<string, unknown>) => write(patch, scope), [write, scope]');
+  });
+
+  test("the pilot's permissions are written to the global file whichever way the switch points", () => {
+    // A project's file is committed, and the core refuses one that sets `pilot`.
+    const block = settings.slice(settings.indexOf('what the pilot may do without asking'));
+    const writes = [...block.matchAll(/write\(\{ pilot: [^)]*\)/g)].map((m) => m[0]);
+    expect(writes.length).toBeGreaterThan(0);
+    for (const w of writes) expect(w).toContain("'global'");
+    expect(block).not.toMatch(/\bsave\(\{ pilot/);
+  });
+
+  test('the global view draws the defaults plus the global file, never this project', () => {
+    // Computed by the host, so the window does not merge anything itself.
+    expect(settings).toContain("const raw = scope === 'global' ? frame.globalRaw : frame.raw;");
+    expect(settings).toContain("(scope === 'global' ? frame.globalEffective : frame.effective)");
+  });
+
+  test('no row draws the old two-way default chip', () => {
+    expect(settings).not.toContain('<MetaChip>default</MetaChip>');
+  });
+
+  test('the worktree command lists its placeholders, branch included', () => {
+    const block = settings.slice(settings.indexOf('where the run does its work'));
+    expect(block).toContain('$VIBE_WORKTREE');
+    expect(block).toContain('$VIBE_BRANCH');
   });
 });

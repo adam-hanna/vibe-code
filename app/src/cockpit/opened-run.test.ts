@@ -273,7 +273,14 @@ describe('a turn that has gone quiet has a ceiling, and it is on the screen', ()
   test('a value the file does not claim is marked as the default', () => {
     // The same split every other row in this screen draws: what is in force
     // versus what the project actually chose.
-    expect(settings).toMatch(/claimedProgress\['maxQuietMs'\] === undefined && <MetaChip>/);
+    //
+    // Through `source` since the global layer (#223): there are three answers now
+    // — the default, the person's setting for all projects, this project's — and
+    // one helper gives all of them, so no row can draw the old two-way chip.
+    expect(settings).toContain("{source('progress', 'maxQuietMs')}");
+    const helper = settings.slice(settings.indexOf('const source = ('));
+    expect(helper).toContain('<MetaChip>{unset}</MetaChip>');
+    expect(helper).toContain('<MetaChip>all projects</MetaChip>');
   });
 });
 

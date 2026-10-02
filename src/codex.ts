@@ -2,6 +2,7 @@
 import path from 'node:path';
 import { attachSpend } from '@src/charge.js';
 import { attachEnding, describeEnding, resolveBin, run } from '@src/proc.js';
+import { configuredBin } from '@src/clipaths.js';
 import type { ChildEnding, RunFn } from '@src/proc.js';
 import { detail, warn } from '@src/log.js';
 import { createHeartbeat, parseCodexLine, withHeartbeat } from '@src/progress.js';
@@ -11,6 +12,10 @@ import type { Effort, Sandbox, TokenUsage, TurnActivity } from '@src/types.js';
 let cachedBin: string | null = null;
 
 export function codexBin(): string {
+  // The environment variable, then the settings, then the search - see
+  // `claudeBin` (#223).
+  const configured = process.env['VIBE_CODEX_BIN'] ? null : configuredBin('codex');
+  if (configured !== null) return configured;
   cachedBin ??= resolveBin('codex', {
     envVar: 'VIBE_CODEX_BIN',
     // `.sandbox-bin` appears on PATH ahead of the real install on this layout,
@@ -150,7 +155,7 @@ function extractTokens(usage: Record<string, unknown>): TokenUsage {
  * failing the turn, because the structured output file is the actual result
  * and losing a token count is not worth losing the work for.
  */
-function parseEvents(stdout: string): CodexEvents {
+export function parseEvents(stdout: string): CodexEvents {
   const out: CodexEvents = { threadId: null, tokens: ZERO_TOKENS, failure: null, failed: false };
 
   for (const line of stdout.split(/\r?\n/)) {

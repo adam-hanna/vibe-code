@@ -1,5 +1,6 @@
 import { attachSpend } from '@src/charge.js';
 import { attachEnding, describeEnding, resolveBin, run } from '@src/proc.js';
+import { configuredBin } from '@src/clipaths.js';
 import type { ChildEnding, RunFn } from '@src/proc.js';
 import { detail, warn } from '@src/log.js';
 import { createHeartbeat, parseClaudeLine, withHeartbeat } from '@src/progress.js';
@@ -9,6 +10,12 @@ import type { ClaudeTurnResult, ContextUsage, Effort, PermissionMode, TokenUsage
 let cachedBin: string | null = null;
 
 export function claudeBin(): string {
+  // The environment variable first, then the settings, then the search (#223).
+  // `resolveBin` handles the variable itself, so the settings are read only when
+  // it is unset - and they are not cached, so a change in Settings reaches the
+  // next turn. Only the search is, because it spawns `which`.
+  const configured = process.env['VIBE_CLAUDE_BIN'] ? null : configuredBin('claude');
+  if (configured !== null) return configured;
   cachedBin ??= resolveBin('claude', {
     envVar: 'VIBE_CLAUDE_BIN',
     fallbacks: [

@@ -41,7 +41,7 @@
     "watch": "tsc --watch",
     "typecheck": "tsc --noEmit",
     "pretest": "npm run build",
-    "test": "node --test \"dist/tests/**/*.test.js\"",
+    "test": "node scripts/test.mjs",
     "prepare": "npm run build",
     "doctor": "npm run build && node dist/src/main.js doctor"
   },

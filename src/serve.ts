@@ -2,6 +2,10 @@ import { requestCancel } from '@src/cancel.js';
 import { main } from '@src/cli.js';
 import { refused as commandRefused, startCommand, stopAllCommands, stopCommand } from '@src/commands.js';
 import { pilotChat } from '@src/pilotchat.js';
+import { pilotCodex } from '@src/pilotcodex.js';
+import { cliStatus } from '@src/clipaths.js';
+import { pilotFs, pilotRoots, readPilotAccess, resolvedAccess } from '@src/pilotaccess.js';
+import type { PilotAccess } from '@src/pilotaccess.js';
 import { promptBlocks } from '@src/prompts.js';
 import * as log from '@src/log.js';
 import { createLineReader, decode, encode, PROTOCOL_VERSION } from '@src/protocol.js';
@@ -14,7 +18,15 @@ import {
   readRunArtifact,
   readRunReplay,
 } from '@src/run.js';
-import { loadConfig, readRawConfig, writeConfigPatch } from '@src/config.js';
+import {
+  DEFAULTS,
+  globalConfigPath,
+  loadConfig,
+  mergeConfig,
+  readGlobalConfig,
+  readRawConfig,
+  writeConfigPatch,
+} from '@src/config.js';
 import { GATEABLE, GATE_MODES, UNGATEABLE } from '@src/gates.js';
 import { diffRange, diffSinceWithLimit } from '@src/git.js';
 import { KNOWN_MODELS, PROVIDERS, ROLE_NAMES } from '@src/roles.js';
@@ -177,6 +189,8 @@ export interface SessionDeps {
    * an `error` rather than an empty reply.
    */
   pilot?: (options: PilotChatOptions) => Promise<PilotChatResult>;
+  /** What runs one Codex pilot turn. Defaults to `pilotCodex` (#223). */
+  pilotCodex?: (options: PilotChatOptions) => Promise<PilotChatResult>;
   /**
    * What reads the archive. Defaults to `listRuns` (#223).
    *
@@ -198,7 +212,11 @@ export interface SessionDeps {
    * refused while a run is going, and that a refusal from the validator becomes
    * an `error` carrying the validator's own sentence.
    */
-  writeConfig?: (dir: string, patch: Record<string, unknown>) => { path: string };
+  writeConfig?: (
+    dir: string,
+    patch: Record<string, unknown>,
+    scope: 'project' | 'global',
+  ) => { path: string };
   /** What reads a diff. Defaults to `diffSince` (#223), which shells out to git. */
   diff?: (
     dir: string,
@@ -227,11 +245,21 @@ export interface SessionDeps {
    * split the other seams already make.
    */
   deleteRun?: (dir: string, runId: string) => { runId: string; dir: string };
+  /**
+   * What the pilot may do without asking (#223). Defaults to the settings for
+   * all projects. Read on every use rather than once, so a change in Settings
+   * reaches the next turn without a restart - and a seam because the default
+   * reads a file under the developer's home.
+   */
+  pilotAccess?: () => PilotAccess;
 }
 
 export function createSession(send: Send, deps: SessionDeps = {}): Session {
   const invoke = deps.invoke ?? ((argv, loop) => main(argv, loop));
   const chat = deps.pilot ?? pilotChat;
+  const chatCodex = deps.pilotCodex ?? pilotCodex;
+  /** Subscription pilot turns in flight, by request id, so `pilot_stop` can reach one. */
+  const pilotTurns = new Map<number, AbortController>();
   const archive = deps.archive ?? ((dir: string) => listRuns(dir));
   const readConfig = deps.config ?? ((dir: string) => loadConfig(dir));
   const writeConfig = deps.writeConfig ?? writeConfigPatch;
@@ -251,6 +279,7 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
     deps.artifact ??
     ((dir: string, runId: string, name: string) => readRunArtifact(dir, runId, name));
   const removeRun = deps.deleteRun ?? ((dir: string, runId: string) => deleteRun(dir, runId));
+  const access = deps.pilotAccess ?? (() => readPilotAccess(readGlobalConfig()));
 
   /**
    * Gates awaiting an answer, by the id this process allocated for them.
@@ -360,6 +389,23 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       // for it.
       send({ type: 'result', id: msg.id, exit: 0 });
       settleIfDone();
+      return;
+    }
+
+    if (msg.type === 'fs') {
+      // A read, beside a run, for `archive`'s reason: it writes nothing. The
+      // boundary is decided here from the machine's settings, so a window - or
+      // a model talking through one - cannot name its way outside it (#223).
+      try {
+        const answer = pilotFs(msg.op, msg.dir, msg.path, pilotRoots(msg.dir, access()));
+        send(
+          'refused' in answer
+            ? { type: 'error', id: msg.id, message: answer.refused }
+            : { type: 'fs', id: msg.id, ...answer },
+        );
+      } catch (err: unknown) {
+        send({ type: 'error', id: msg.id, message: err instanceof Error ? err.message : String(err) });
+      }
       return;
     }
 
@@ -580,7 +626,8 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
         return;
       }
       try {
-        const path = msg.patch === undefined ? null : writeConfig(msg.dir, msg.patch).path;
+        const path =
+          msg.patch === undefined ? null : writeConfig(msg.dir, msg.patch, msg.scope ?? 'project').path;
         // The config that RESULTED, whether this was a read or a write, so a
         // form never has to assume its own save took effect.
         const loaded = readConfig(msg.dir);
@@ -590,7 +637,12 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
           dir: msg.dir,
           effective: loaded,
           raw: readRawConfig(msg.dir),
-          path: path ?? loaded.configPath,
+          // The project's path even after a global write: `path` has always
+          // meant the project's file, and the global one has its own field.
+          path: msg.scope === 'global' ? loaded.configPath : (path ?? loaded.configPath),
+          globalRaw: readGlobalConfig(),
+          globalPath: globalConfigPath(),
+          globalEffective: mergeConfig(DEFAULTS, readGlobalConfig()),
           gateable: GATEABLE,
           modes: GATE_MODES,
           ungateable: UNGATEABLE,
@@ -598,6 +650,8 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
           providers: PROVIDERS,
           efforts: EFFORTS,
           models: KNOWN_MODELS,
+          pilot: resolvedAccess(access()),
+          clis: { claude: cliStatus('claude'), codex: cliStatus('codex') },
         });
       } catch (err: unknown) {
         // `validate`'s own message, naming the field - which is what lets a
@@ -658,6 +712,14 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       return;
     }
 
+    if (msg.type === 'pilot_stop') {
+      // A turn that has already ended is not an error: the click raced the
+      // reply, and the reply is what the pane is about to draw anyway.
+      pilotTurns.get(msg.turn)?.abort();
+      send({ type: 'result', id: msg.id, exit: 0 });
+      return;
+    }
+
     if (msg.type === 'command_stop') {
       // No reply beyond the ordinary `result`: the kill is observable as the
       // `command_ended` the close event produces, and a second answer saying it
@@ -680,7 +742,20 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       // wait on a chat turn, and #206 already decided that a supervisor going
       // away abandons work rather than finishing it.
       const id = msg.id;
-      void chat({
+      // Where the turn may read, from the machine's settings and never the
+      // frame (#223). A section that does not parse refuses the turn with its
+      // own sentence rather than running it under a guess.
+      let addDirs: string[];
+      try {
+        addDirs = pilotRoots(msg.dir, access());
+      } catch (err: unknown) {
+        send({ type: 'error', id, message: err instanceof Error ? err.message : String(err) });
+        return;
+      }
+      // This turn's own off switch (#223), held until it settles either way.
+      const stopper = new AbortController();
+      pilotTurns.set(id, stopper);
+      void (msg.agent === 'codex' ? chatCodex : chat)({
         prompt: msg.prompt,
         system: msg.system,
         model: msg.model,
@@ -694,7 +769,9 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
         // is the permission boundary rather than an incidental working
         // directory, and the frame is refused without it.
         cwd: msg.dir,
+        addDirs,
         timeoutMs: PILOT_TIMEOUT_MS,
+        signal: stopper.signal,
         onDelta: (text: string) => {
           send({ type: 'pilot_delta', id, text });
         },
@@ -709,6 +786,11 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
           });
         })
         .catch((err: unknown) => {
+          // Stopped from the window: said as itself, never as a failure.
+          if (stopper.signal.aborted) {
+            send({ type: 'pilot_stopped', id });
+            return;
+          }
           // An `error` rather than an empty `pilot_reply`: a reply with no text
           // would look like a model that had nothing to say, and this is a turn
           // that did not happen. `RateLimitError` arrives here as itself, which
@@ -718,6 +800,9 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
             id,
             message: err instanceof Error ? err.message : String(err),
           });
+        })
+        .finally(() => {
+          pilotTurns.delete(id);
         });
       return;
     }

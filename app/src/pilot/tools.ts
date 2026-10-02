@@ -1,7 +1,11 @@
 import { launchArgv } from '../cockpit/argv';
+import type { Overrides } from '../cockpit/argv';
+import { dirKey } from '../cockpit/projects';
 import { line, outcome, tail } from '../cockpit/commands';
 import { OUTPUT_KEEP } from '../cockpit/model';
 import type { Command, Commands } from '../cockpit/commands';
+import { allowedDir, NO_ACCESS } from './access';
+import type { PilotAccess } from './access';
 import type { Tool } from './pilot';
 import type { Run } from '../cockpit/model';
 
@@ -125,13 +129,36 @@ export type Settlement =
   /** It could not be run at all, and the model is told why. */
   | { kind: 'refused'; content: string };
 
+/**
+ * A read the host has to answer (#223), which a pure function cannot.
+ *
+ * Not a `Settlement`, because it is not an answer yet: the pane asks the host
+ * and settles the call with what came back — `ran` with the listing or the
+ * text, `refused` with the host's own sentence. The boundary is the host's to
+ * decide, so nothing here checks the path.
+ */
+export interface Read {
+  kind: 'reads';
+  op: 'list' | 'read';
+  path: string;
+}
+
+/** What running a call produced, including a read still to be made. */
+export type Outcome = Settlement | Read;
+
 /** What a read may see: the run as the window holds it, and nothing else. */
 export interface ToolContext {
   run: Run;
   /** Commands this window started, so `read_command` has something to read. */
   commands: Commands;
-  /** The repository, which is the only directory a command may run in. */
+  /** The repository: where a command runs unless it names another directory. */
   dir: string;
+  /**
+   * What the pilot may do without asking, and the directories beyond `dir` it
+   * may work in (#223). Optional so a read-only caller need not invent one;
+   * absent is the narrowest — the repository and nothing else.
+   */
+  access?: PilotAccess;
 }
 
 export interface ToolDef {
@@ -140,7 +167,7 @@ export interface ToolDef {
   /** JSON Schema, passed to the vendor verbatim by whichever adapter is seated. */
   readonly input_schema: Record<string, unknown>;
   /** Pure: what the model asked for and the run, in; what happened, out. */
-  readonly call: (input: unknown, ctx: ToolContext) => Settlement;
+  readonly call: (input: unknown, ctx: ToolContext) => Outcome;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -306,6 +333,44 @@ const READ_OUTPUT: ToolDef = {
   },
 };
 
+/**
+ * `start_run`'s optional overrides, or the sentence refusing them.
+ *
+ * Refused rather than coerced, field by field and by name, for the reason
+ * `NewWorkstream` refuses a number that is not one: `--max-tokens 0` turns the
+ * ceiling OFF, so a value nobody meant reaching the argv is the opposite of
+ * leaving it alone. The boundary and mode NAMES are not checked here — the core
+ * refuses an unknown one by name when the run starts, and a second list of them
+ * in the window is one that can disagree.
+ */
+function overridesOf(input: Readonly<Record<string, unknown>>): Overrides | string {
+  const over: { gates?: Record<string, string>; maxTokens?: number; p1Tolerance?: number } = {};
+  const gates = input['gates'];
+  if (gates !== undefined) {
+    if (!isRecord(gates)) return '"gates" has to be an object of boundary to mode.';
+    const out: Record<string, string> = {};
+    for (const [boundary, mode] of Object.entries(gates)) {
+      if (typeof mode !== 'string' || mode.trim() === '') {
+        return `"gates.${boundary}" has to be a mode name, such as "step" or "stop".`;
+      }
+      out[boundary] = mode.trim();
+    }
+    over.gates = out;
+  }
+  for (const [field, key] of [
+    ['max_tokens', 'maxTokens'],
+    ['p1_tolerance', 'p1Tolerance'],
+  ] as const) {
+    const value = input[field];
+    if (value === undefined) continue;
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+      return `"${field}" has to be a whole number of zero or more. Omit it to keep the project default.`;
+    }
+    over[key] = value;
+  }
+  return over;
+}
+
 const START_RUN: ToolDef = {
   name: 'start_run',
   description:
@@ -326,7 +391,11 @@ const START_RUN: ToolDef = {
       },
       directory: {
         type: 'string',
-        description: 'An absolute path to the git worktree the run works in.',
+        description:
+          'The project this conversation is about — the repository you can read. A run starts ' +
+          'there and nowhere else. Do not create a git worktree for it: vibe makes one itself ' +
+          'when the project\'s git.worktree setting is on, and keeps the run\'s record in the ' +
+          'repository where pruning the worktree cannot take it.',
       },
       plan_only: {
         type: 'boolean',
@@ -334,16 +403,54 @@ const START_RUN: ToolDef = {
           'true stops after the plan clears critique. false writes code and commits it. There ' +
           'is no default: say which one you mean.',
       },
+      // The composer's overrides block, carried here because the composer no
+      // longer launches (#223). Optional, and absent means the project default:
+      // pass only what the user chose, never the defaults restated.
+      gates: {
+        type: 'object',
+        description:
+          'Gate overrides the user chose, boundary to mode — for example ' +
+          '{"implemented": "stop"}. Only the boundaries they changed. Omit otherwise.',
+        additionalProperties: { type: 'string' },
+      },
+      max_tokens: {
+        type: 'integer',
+        description:
+          'A token ceiling the user chose for this run. 0 turns the ceiling OFF, so never send ' +
+          '0 to mean "unset" — omit the field instead.',
+      },
+      p1_tolerance: {
+        type: 'integer',
+        description:
+          'How many P1 findings a phase may carry rather than fix, if the user chose one. Omit ' +
+          'otherwise.',
+      },
     },
     required: ['task', 'directory', 'plan_only'],
     additionalProperties: false,
   },
-  call: (input) => {
+  call: (input, ctx) => {
     if (!isRecord(input)) return { kind: 'refused', content: 'this call sent no arguments.' };
     const task = text(input, 'task');
     if (bad(task)) return { kind: 'refused', content: task.why };
     const dir = text(input, 'directory');
     if (bad(dir)) return { kind: 'refused', content: dir.why };
+    // **Pinned to the project** (#223). A pilot asked to "use a worktree" made one
+    // by hand and proposed the run inside it, which put the run's record in a
+    // tree somebody is about to prune and filed the run under a project nobody
+    // had added — so it looked missing, and the conversation that proposed it
+    // was lost on the way. Worktrees are vibe's job (`git.worktree`), which keeps
+    // the archive at home; a run started anywhere else is refused with that.
+    if (dirKey(dir) !== dirKey(ctx.dir)) {
+      return {
+        kind: 'refused',
+        content:
+          `a run starts in the project, ${ctx.dir.trim()}, not in ${dir.trim()}. If it should ` +
+          'work in a worktree, do not make one: vibe creates it when the project\'s ' +
+          'git.worktree setting is on (Settings, under git). Propose the run with ' +
+          `"directory": "${ctx.dir.trim()}".`,
+      };
+    }
     const planOnly = input['plan_only'];
     // Refused rather than defaulted, and this is the one that matters. A default
     // here would be the app deciding whether a pilot-drafted run writes code,
@@ -356,7 +463,9 @@ const START_RUN: ToolDef = {
           'that commits, so there is no default for it.',
       };
     }
-    const argv = launchArgv(task, dir, planOnly);
+    const over = overridesOf(input);
+    if (typeof over === 'string') return { kind: 'refused', content: over };
+    const argv = launchArgv(task, dir, planOnly, over);
     return {
       kind: 'proposes',
       summary: planOnly
@@ -584,6 +693,12 @@ const RUN_COMMAND: ToolDef = {
         type: 'string',
         description: 'One line on what this is for. The user reads it beside the command.',
       },
+      directory: {
+        type: 'string',
+        description:
+          'Where to run it, if not the repository. Absolute, and only inside the repository or a ' +
+          'directory the user has allowed in Settings. Omit to run in the repository.',
+      },
     },
     required: ['program', 'why'],
     additionalProperties: false,
@@ -622,13 +737,83 @@ const RUN_COMMAND: ToolDef = {
         content: 'no repository is set in this window, so there is nowhere to run a command.',
       };
     }
+    // Another directory, only where the person allowed one (#223). Refused with
+    // the list rather than drawn as a card: a card in a directory nobody allowed
+    // asks the person to make the decision Settings already made.
+    const asked = input['directory'];
+    let where = ctx.dir;
+    if (asked !== undefined) {
+      const named = text(input, 'directory');
+      if (bad(named)) return { kind: 'refused', content: named.why };
+      const access = ctx.access ?? NO_ACCESS;
+      if (!allowedDir(named, ctx.dir, access)) {
+        return {
+          kind: 'refused',
+          content:
+            `${named.trim()} is outside the directories you may run a command in: ` +
+            `${[ctx.dir, ...access.dirs].join(', ')}. The user can add more in Settings.`,
+        };
+      }
+      where = named.trim();
+    }
     return {
       kind: 'proposes',
-      summary: `${why.trim()} — ${[program, ...raw].join(' ')} in ${ctx.dir}`,
-      effect: { kind: 'command', dir: ctx.dir, program, args: raw },
+      summary: `${why.trim()} — ${[program, ...raw].join(' ')} in ${where}`,
+      effect: { kind: 'command', dir: where, program, args: raw },
     };
   },
 };
+
+/**
+ * Reading the disk, on both backends (#223).
+ *
+ * The subscription pilot already had `Read`, `Glob` and `Grep`; the API-backed
+ * one had no filesystem at all, so on that road *"what is in this repository"*
+ * had no answer. These two are the same reach on both roads, and they are what
+ * `ls` and `cat` were asked for — without depending on a shell built-in that does
+ * not exist on Windows. The host answers, inside the repository and the
+ * directories the person allowed (or anywhere, in YOLO), and refuses outside them
+ * with a sentence naming the ones it may read.
+ */
+function readTool(name: string, op: 'list' | 'read', description: string): ToolDef {
+  return {
+    name,
+    description,
+    input_schema: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description:
+            'Relative to the repository, or absolute. Omit (or ".") for the repository itself.',
+        },
+      },
+      additionalProperties: false,
+    },
+    call: (input) => {
+      const asked = isRecord(input) ? input['path'] : undefined;
+      if (asked !== undefined && typeof asked !== 'string') {
+        return { kind: 'refused', content: '"path" has to be a string.' };
+      }
+      return { kind: 'reads', op, path: asked ?? '.' };
+    },
+  };
+}
+
+const LIST_DIR = readTool(
+  'list_dir',
+  'list',
+  'List a directory: each entry with whether it is a file, a directory or a link, and a ' +
+    "file's size. Runs at once, no card. Inside the repository and any directory the user has " +
+    'allowed; outside them you are told which you may read.',
+);
+
+const READ_FILE = readTool(
+  'read_file',
+  'read',
+  "Read a text file. Runs at once, no card. A long file is cut and says so; a binary one is " +
+    'refused. Inside the repository and any directory the user has allowed.',
+);
 
 /**
  * The stop control, as a proposal (#223).
@@ -702,6 +887,8 @@ export const TOOLS: readonly ToolDef[] = [
   READ_RUN,
   READ_OUTPUT,
   READ_COMMAND,
+  LIST_DIR,
+  READ_FILE,
   START_RUN,
   ANSWER_GATE,
   RUN_COMMAND,
@@ -724,10 +911,10 @@ export function declare(): readonly Tool[] {
  * vendors will happily invent a plausible tool when a conversation drifts, and
  * the model can only correct for it if it is told which one it asked for.
  */
-export function execute(
+export function settleCall(
   call: { name: string; input: unknown; unreadable: string | null },
   ctx: ToolContext,
-): Settlement {
+): Outcome {
   if (call.unreadable !== null) {
     return {
       kind: 'refused',
@@ -742,4 +929,21 @@ export function execute(
     };
   }
   return tool.call(call.input, ctx);
+}
+
+/**
+ * Run one call that needs no host (#223).
+ *
+ * `settleCall` with the reads answered as refusals, for a caller with no host to
+ * ask - the pane uses `settleCall` and asks. Kept as its own name so every caller
+ * written before the reads existed still gets an answer it can settle.
+ */
+export function execute(
+  call: { name: string; input: unknown; unreadable: string | null },
+  ctx: ToolContext,
+): Settlement {
+  const out = settleCall(call, ctx);
+  return out.kind === 'reads'
+    ? { kind: 'refused', content: `${call.name} is answered by the host, and there is none here.` }
+    : out;
 }

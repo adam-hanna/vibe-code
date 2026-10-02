@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import type { PilotAccess } from './pilot/access';
 
 /**
  * The webview's end of the wire.
@@ -84,6 +85,40 @@ export interface PilotReply {
 }
 
 /**
+ * A subscription pilot turn that was stopped from the window (#223). Its own
+ * frame because a stopped turn is not a failed one.
+ */
+// What the pilot may do without asking (#223). Declared beside the rule that
+// reads it, in `pilot/access.ts`, so the tool table can name the type without
+// importing the wire.
+export type { PilotAccess } from './pilot/access';
+
+/** Where one CLI is: the settings' path, the environment variable, or the search. */
+export interface CliStatus {
+  configured: string | null;
+  via: 'settings' | 'env' | 'search';
+  found: string | null;
+  /** The resolver's own sentence when it found nothing. */
+  problem: string | null;
+}
+
+/** A listing or a file's text, for `list_dir` and `read_file` (#223). */
+export type FsFrame = { type: 'fs'; id: number } & (
+  | {
+      op: 'list';
+      path: string;
+      entries: readonly { name: string; kind: 'file' | 'dir' | 'link' | 'other'; bytes: number | null }[];
+      truncated: boolean;
+    }
+  | { op: 'read'; path: string; text: string; bytes: number; truncated: boolean }
+);
+
+export interface PilotStopped {
+  type: 'pilot_stopped';
+  id: number;
+}
+
+/**
  * One archive entry, as `listRuns` returned it (#223, `1b`).
  *
  * A transcription of the core's `RunSummary`, and every optional field here is
@@ -140,6 +175,15 @@ export interface ConfigFrame {
   effective: unknown;
   raw: Record<string, unknown>;
   path: string | null;
+  /**
+   * The settings for every project (#223): the file as written, where it lives
+   * (null when the layer is switched off), and the defaults merged with it alone
+   * — what a project that says nothing would get. The form's "all projects"
+   * view draws the last of these rather than computing it.
+   */
+  globalRaw: Record<string, unknown>;
+  globalPath: string | null;
+  globalEffective: unknown;
   gateable: readonly string[];
   modes: readonly string[];
   ungateable: Readonly<Record<string, string>>;
@@ -165,6 +209,17 @@ export interface ConfigFrame {
    * way in for a model that shipped this morning.
    */
   models: Readonly<Record<string, readonly string[]>>;
+  /**
+   * What the pilot may do without asking (#223), resolved by the host from the
+   * settings for all projects. Never a project's: a committed file cannot widen
+   * its own pilot.
+   */
+  pilot: PilotAccess;
+  /**
+   * Where each CLI was found, and by which of the three looks (#223) — for the
+   * settings screen, which explains the search and shows its answer.
+   */
+  clis: Readonly<Record<'claude' | 'codex', CliStatus>>;
 }
 
 /**
@@ -378,6 +433,8 @@ export type Frame =
   | CommandEnded
   | PilotDelta
   | PilotReply
+  | PilotStopped
+  | FsFrame
   | Archive
   | ConfigFrame
   | DiffFrame
@@ -411,6 +468,9 @@ export function isFrame(v: unknown): v is Frame {
     // land in the diagnostics list instead of in the conversation (#193).
     type === 'pilot_delta' ||
     type === 'pilot_reply' ||
+    type === 'pilot_stopped' ||
+    // The pilot's reads (#223), answered for the pane and nothing else.
+    type === 'fs' ||
     // The archive, which the cockpit's reducer also ignores: it describes runs
     // that are over, and `Run` is about the one in progress (#223).
     type === 'archive' ||
@@ -582,12 +642,17 @@ export function cancel(reason: string): Promise<void> {
  * relay cannot, because it does not know whose id it is.
  */
 export async function onPilotFrame(
-  handler: (frame: PilotDelta | PilotReply | HostError) => void,
+  handler: (frame: PilotDelta | PilotReply | PilotStopped | HostError) => void,
 ): Promise<() => void> {
   return listen<unknown>('host://frame', (event) => {
     const frame: unknown = event.payload;
     if (!isFrame(frame)) return;
-    if (frame.type === 'pilot_delta' || frame.type === 'pilot_reply' || frame.type === 'error') {
+    if (
+      frame.type === 'pilot_delta' ||
+      frame.type === 'pilot_reply' ||
+      frame.type === 'pilot_stopped' ||
+      frame.type === 'error'
+    ) {
       handler(frame);
     }
   });
@@ -686,14 +751,28 @@ export async function archive(dir: string): Promise<readonly ArchiveRun[]> {
 export async function config(
   dir: string,
   patch?: Record<string, unknown>,
+  /** Which file a patch goes to. A read answers with both, so it takes none. */
+  scope: 'project' | 'global' = 'project',
 ): Promise<ConfigFrame> {
   const id = nextRequestId();
   return ask<ConfigFrame>(
-    patch === undefined ? { type: 'config', id, dir } : { type: 'config', id, dir, patch },
+    patch === undefined ? { type: 'config', id, dir } : { type: 'config', id, dir, patch, scope },
     id,
     'config',
     'the host did not answer with the configuration',
   );
+}
+
+/**
+ * List a directory or read a file for the pilot (#223).
+ *
+ * Where it may land is the host's decision, made from the settings for all
+ * projects: outside them this rejects with the host's sentence, which names the
+ * directories the pilot may read.
+ */
+export async function fs(op: 'list' | 'read', dir: string, path: string): Promise<FsFrame> {
+  const id = nextRequestId();
+  return ask<FsFrame>({ type: 'fs', id, op, dir, path }, id, 'fs', 'the host did not answer the read');
 }
 
 /**
@@ -901,6 +980,17 @@ export async function runCommand(
 }
 
 /** Stop one this session started. */
+/**
+ * Stop a subscription pilot turn (#223), by the id `pilotTurn` resolved with.
+ *
+ * Not `pilot.cancel`, which is the Rust pilot's and only knows API-backed turns:
+ * a subscription turn is a `claude` child of the host, and asking Rust to cancel
+ * it was refused, silently, so the stop button did nothing at all.
+ */
+export async function stopPilot(turn: number): Promise<void> {
+  await send({ type: 'pilot_stop', id: nextRequestId(), turn });
+}
+
 export async function stopCommand(commandId: string): Promise<void> {
   await send({ type: 'command_stop', id: nextRequestId(), commandId });
 }
@@ -924,6 +1014,8 @@ export async function onCommandFrame(
 
 /** What one subscription-backed pilot turn needs (#193). */
 export interface PilotTurn {
+  /** Which CLI takes it (#223): `claude -p`, or `codex exec`. */
+  agent: 'claude' | 'codex';
   prompt: string;
   system: string;
   model: string;

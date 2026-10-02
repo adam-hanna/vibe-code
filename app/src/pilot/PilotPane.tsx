@@ -6,20 +6,14 @@ import { RoundCard } from './RoundCard';
 import * as host from '../host';
 import * as keys from './keys';
 import * as pilot from './pilot';
-import {
-  BACKEND_NAME,
-  BACKEND_NOTE,
-  BACKENDS,
-  modelsFor,
-  needsKey,
-  SUBSCRIPTION_MODELS,
-} from './backend';
+import { agentOf, BACKEND_NAME, BACKEND_NOTE, backendFor, modelsFor, needsKey, SUBSCRIPTION_MODELS } from './backend';
 import type { Backend } from './backend';
 import { systemPrompt } from './brief';
 import { readEmitted, unique, visible } from './emit';
 import { useFollow } from './follow';
-import { declare, execute } from './tools';
-import { chatKey, chatMove, readChat, worthSaving, writable } from './saved';
+import { autoRun, NO_ACCESS } from './access';
+import { declare, settleCall } from './tools';
+import { chatKey, chatMove, isDraftKey, readChat, worthSaving, writable } from './saved';
 import {
   costOf,
   describeDay,
@@ -34,6 +28,7 @@ import type { Ledger, PilotLimits } from './ledger';
 import {
   answerOf,
   ask,
+  autoRan,
   decide,
   emptyConversation,
   follow,
@@ -49,6 +44,7 @@ import {
 } from './transcript';
 import type { ReactNode } from 'react';
 import type { KeyStatus } from './keys';
+import type { PilotAccess } from './access';
 import type { Effect, Settlement } from './tools';
 import type { Call, Conversation, Reply } from './transcript';
 import type { Launched } from '../cockpit/argv';
@@ -195,6 +191,8 @@ type Action =
   | { type: 'retext'; turn: number; text: string }
   | { type: 'settle'; id: string; settlement: Settlement }
   | { type: 'decide'; id: string; accepted: boolean; note: string }
+  /** A proposal the person's settings ran without a card (#223). */
+  | { type: 'auto'; id: string; why: string }
   | { type: 'unknown' }
   /** A conversation read back from storage, replacing whatever is here (#223). */
   | { type: 'restore'; conversation: Conversation };
@@ -217,6 +215,8 @@ function apply(state: Conversation, action: Action): Conversation {
       return settle(state, action.id, action.settlement);
     case 'decide':
       return decide(state, action.id, action.accepted, action.note);
+    case 'auto':
+      return autoRan(state, action.id, action.why);
     case 'unknown':
       return unrecognised(state);
     // Replaces rather than merges. Two conversations interleaved by arrival
@@ -357,6 +357,11 @@ function CallCard({
       ) : (
         <Answer content={answer} />
       )}
+      {/* What it was, once it has been answered (#223). A command the safe list
+          ran was never drawn as a card, so this is the only place the exact
+          program and arguments appear — and "what runs is what was displayed"
+          has to hold after the fact when it could not hold before. */}
+      {settlement.kind === 'proposes' && <EffectDetail effect={settlement.effect} />}
     </div>
   );
 }
@@ -643,6 +648,12 @@ export interface PilotPaneProps {
    */
   commands: Commands;
   /**
+   * What the pilot may do without asking (#223), as the host resolved it from
+   * the settings for all projects. Null until it has been read, which is the
+   * narrowest answer: every proposal is a card.
+   */
+  access: PilotAccess | null;
+  /**
    * Rendered above the composer while no run exists (#211).
    *
    * A slot rather than the thing itself, so this pane keeps knowing nothing
@@ -699,6 +710,7 @@ export function PilotPane({
   runId,
   opened,
   commands,
+  access,
   onEffect,
   onPending,
   limits,
@@ -709,6 +721,8 @@ export function PilotPane({
   onOpen,
 }: PilotPaneProps) {
   const [conversation, dispatch] = useReducer(apply, undefined, emptyConversation);
+  /** Call ids read back from storage, which never run without a press (#223). */
+  const restored = useRef(new Set<string>());
   /**
    * Which conversation is on screen, so a save cannot land in the wrong one.
    *
@@ -774,6 +788,10 @@ export function PilotPane({
         // delete a real conversation to tidy up after a move.
         const bucket = chatKey(dir, null);
         if (before === bucket) localStorage.removeItem(bucket);
+        // And a draft's, which is the same case one step later (#223): the run
+        // the draft asked for has now started and holds the conversation, so the
+        // draft's copy would only come back as a duplicate.
+        else if (before !== null && isDraftKey(before)) localStorage.removeItem(before);
       } catch {
         // The conversation is still on screen and still correct. What is lost is
         // its return next time.
@@ -781,7 +799,13 @@ export function PilotPane({
       return;
     }
 
-    dispatch({ type: 'restore', conversation: readChat(stored) });
+    const back = readChat(stored);
+    // Every call that came back from storage is one nobody in this session saw
+    // asked for, so none of them may run without a press (#223) — a `git
+    // commit` from yesterday's conversation must not fire because the window
+    // reopened. They still settle, and a proposal among them is a card.
+    for (const reply of back.replies) for (const call of reply.calls) restored.current.add(call.id);
+    dispatch({ type: 'restore', conversation: back });
   }, [dir, runId, opened]);
 
   // Save on every settled change. `live` is dropped by `writable`, so a turn in
@@ -803,7 +827,13 @@ export function PilotPane({
    * that works with nothing configured - the whole point of the issue is that an
    * API key is optional rather than a precondition for the pane doing anything.
    */
-  const [provider, setProvider] = useState<Backend>('subscription');
+  /**
+   * Which vendor this conversation talks to (#223). The conversation picks the
+   * vendor and Settings picks the road — its CLI on the subscription, or the
+   * API — so the backend is derived and never chosen here.
+   */
+  const [vendor, setVendor] = useState<keys.Provider>('anthropic');
+  const provider: Backend = backendFor(vendor, access ?? NO_ACCESS);
   const [model, setModel] = useState<string>(SUBSCRIPTION_MODELS[0] ?? '');
   /**
    * The conversation the CLI is keeping, once it has said what it is (#193).
@@ -814,6 +844,18 @@ export function PilotPane({
    * subscription turn cost nothing in re-sent context.
    */
   const session = useRef<string | null>(null);
+  // A conversation belongs to the backend that is holding it. Carrying a CLI
+  // session id across to a vendor — or back, or from one CLI to the other — would
+  // resume a conversation on a wire that has never heard of it (#193). The
+  // backend moves when the vendor is picked AND when Settings changes the road,
+  // so this follows the derived value rather than the picker.
+  const heldBy = useRef<Backend>(provider);
+  useEffect(() => {
+    if (heldBy.current === provider) return;
+    heldBy.current = provider;
+    session.current = null;
+    setModel(modelsFor(provider, pilot.MODELS)[0] ?? '');
+  }, [provider]);
   /**
    * The host-backed turn whose frames we are listening for, or -1.
    *
@@ -912,25 +954,58 @@ export function PilotPane({
     };
   }, []);
 
-  // Every call that has not been run yet, run. `execute` is pure and `settle`
+  // Every call that has not been run yet, run. `settleCall` is pure and `settle`
   // ignores a call it has already answered, so this is safe to re-enter — which
   // it is, on every heartbeat, since the run it reads changes underneath it.
+  //
+  // Two outcomes are not settled on the spot (#223). A **read** is asked of the
+  // host and settled when it answers, held in `reading` meanwhile so a re-entry
+  // does not ask twice. And a **proposal the person's settings allow** is fired
+  // and answered as having run without asking — through `onEffect`, the road a
+  // pressed one takes, so the safe list changes who presses and never what runs.
+  const reading = useRef(new Set<string>());
+  const granted = access ?? NO_ACCESS;
   useEffect(() => {
     for (const reply of conversation.replies) {
       for (const call of reply.calls) {
-        if (call.settlement === null) {
-          dispatch({
-            type: 'settle',
-            id: call.id,
-            settlement: execute(call, { run, commands, dir }),
-          });
+        if (call.settlement !== null || reading.current.has(call.id)) continue;
+        const out = settleCall(call, { run, commands, dir, access: granted });
+        if (out.kind === 'reads') {
+          reading.current.add(call.id);
+          const id = call.id;
+          void host
+            .fs(out.op, dir, out.path)
+            .then((frame) =>
+              dispatch({ type: 'settle', id, settlement: { kind: 'ran', content: JSON.stringify(frame) } }),
+            )
+            .catch((err: unknown) =>
+              dispatch({
+                type: 'settle',
+                id,
+                settlement: { kind: 'refused', content: err instanceof Error ? err.message : String(err) },
+              }),
+            )
+            .finally(() => reading.current.delete(id));
+          continue;
+        }
+        dispatch({ type: 'settle', id: call.id, settlement: out });
+        const why =
+          out.kind === 'proposes' && !restored.current.has(call.id)
+            ? autoRun(out.effect, dir, granted)
+            : null;
+        if (out.kind === 'proposes' && why !== null) {
+          // The effect first, then the record, for `onDecide`'s reason. The
+          // chain is deliberately NOT reset: nobody pressed anything, so this
+          // is the unattended half `MAX_CHAIN` exists to bound.
+          onEffect(out.effect);
+          dispatch({ type: 'auto', id: call.id, why });
         }
       }
     }
     // `commands` in the deps for the reason `run` is: `read_command` is
     // answered from it, and a call settled against a stale copy would report a
     // dev server as having produced nothing (#211).
-  }, [conversation.replies, run, commands, dir]);
+  }, [conversation.replies, run, commands, dir, granted, onEffect]);
 
   // Each finished turn into the pilot's books, once (#145).
   //
@@ -993,6 +1068,13 @@ export function PilotPane({
         }
         if (frame.type === 'error') {
           dispatch({ type: 'event', event: { kind: 'failed', turn, message: frame.message } });
+          setLive(null);
+          return;
+        }
+        // Stopped from this pane's own button (#223): drawn as stopped, the
+        // vocabulary the API-backed road already uses for the same act.
+        if (frame.type === 'pilot_stopped') {
+          dispatch({ type: 'event', event: { kind: 'cancelled', turn } });
           setLive(null);
           return;
         }
@@ -1095,13 +1177,14 @@ ${frame.text}`, turn, origin.current))) {
         const id = session.current;
         void host
           .pilotTurn({
+            agent: agentOf(provider),
             // A follow-up carries the tool results, because the CLI has no tool
             // role to put them in and is resumed by session id — so everything
             // else said is already there and the results are the only new
             // thing. An empty prompt here used to be sent instead, which asked
             // the model to answer nothing.
             prompt: said ?? trailingResults(messages) ?? '',
-            system: systemPrompt(run, launched, 'emitted'),
+            system: systemPrompt(run, launched, 'emitted', access, provider === 'subscription'),
             model,
             dir,
             sessionId: id ?? crypto.randomUUID(),
@@ -1137,8 +1220,12 @@ ${frame.text}`, turn, origin.current))) {
         // model is only ever sent the most recent one, so there is no earlier
         // description for this to contradict - see `brief.ts` for why that
         // settles the staleness question rather than trading it away.
-        .send({ provider, model, messages, tools: declare(), system: systemPrompt(run, launched) })
+        .send({ provider, model, messages, tools: declare(), system: systemPrompt(run, launched, 'native', access) })
         .then((turn) => {
+          // Rust's turn ids and the host's request ids are two counters, so a
+          // stale host turn could share this number and send the stop button
+          // down the wrong road (#223).
+          hostTurn.current = -1;
           setLive(turn);
           if (said === null) dispatch({ type: 'follow', turn, provider, openedAt });
           else if (woke !== null) dispatch({ type: 'wake', reason: woke, turn, provider, openedAt });
@@ -1154,7 +1241,7 @@ ${frame.text}`, turn, origin.current))) {
           }),
         );
     },
-    [model, provider, run, launched, dir],
+    [model, provider, run, launched, dir, access],
   );
 
   const owed = unanswered(conversation);
@@ -1208,7 +1295,7 @@ ${frame.text}`, turn, origin.current))) {
    */
   const blocked: string | null =
     needsKey(provider) && (statuses === null || !keys.usable(statuses).includes(provider))
-      ? `no ${keys.PROVIDER_NAME[provider]} key — enter one under Keys`
+      ? `no ${keys.PROVIDER_NAME[provider]} key — enter one in Settings, or switch ${keys.PROVIDER_NAME[provider]} to your subscription there`
       : !needsKey(provider) && dir.trim() === ''
         ? 'choose a repository first — this backend runs in one and can read only that one'
         : !verdict.allowed
@@ -1448,20 +1535,13 @@ ${frame.text}`, turn, origin.current))) {
       <div className="v-pilot__controls">
         <select
           className="v-pilot__select"
-          value={provider}
-          onChange={(e) => {
-            const next = e.target.value as Backend;
-            setProvider(next);
-            setModel(modelsFor(next, pilot.MODELS)[0] ?? '');
-            // A conversation belongs to the backend that is holding it. Carrying
-            // a CLI session id across to a vendor - or back - would resume a
-            // conversation on a wire that has never heard of it (#193).
-            session.current = null;
-          }}
+          value={vendor}
+          // The session and the model follow in the effect on `provider`.
+          onChange={(e) => setVendor(e.target.value === 'openai' ? 'openai' : 'anthropic')}
         >
-          {BACKENDS.map((p) => (
-            <option key={p} value={p}>
-              {BACKEND_NAME[p]}
+          {keys.PROVIDERS.map((v) => (
+            <option key={v} value={v}>
+              {BACKEND_NAME[backendFor(v, access ?? NO_ACCESS)]}
             </option>
           ))}
         </select>
@@ -1681,7 +1761,13 @@ ${frame.text}`, turn, origin.current))) {
               // A refusal here means the turn ended between the render and the
               // click. Not worth a message: the terminal event is about to
               // redraw this button anyway.
-              void pilot.cancel(live).catch(() => {});
+              //
+              // **Two roads, and the button has to take the right one** (#223).
+              // A subscription turn is a `claude` child of the HOST; an API turn
+              // is a stream in Rust. Asking Rust to cancel the first was refused
+              // and swallowed, so the button did nothing on the default backend.
+              if (live === hostTurn.current) void host.stopPilot(live).catch(() => {});
+              else void pilot.cancel(live).catch(() => {});
             }}
           >
             ⏹ stop

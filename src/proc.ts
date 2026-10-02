@@ -156,6 +156,16 @@ export interface RunOptions {
    * verdict about a run nobody completed (#135).
    */
   interruptible?: boolean | undefined;
+  /**
+   * Kill THIS child when it fires, and nothing else (#223).
+   *
+   * The pilot's stop button. `interruptible` is the run's latch and kills every
+   * agent child of the run, which is exactly wrong for a chat turn: stopping a
+   * conversation must not stop the run it is about. A signal is one child's own
+   * off switch, held by whoever spawned it. It settles the same way a cancel
+   * does - `Cancelled`, rejected at once rather than left to `close`.
+   */
+  signal?: AbortSignal | undefined;
 }
 
 export interface RunResult {
@@ -272,7 +282,7 @@ export type RunFn = (
  * positional prompt argument.
  */
 export function run(bin: string, args: readonly string[], options: RunOptions = {}): Promise<RunResult> {
-  const { input, cwd, timeoutMs, onLine, onBytes, interruptible } = options;
+  const { input, cwd, timeoutMs, onLine, onBytes, interruptible, signal } = options;
 
   return new Promise<RunResult>((resolve, reject) => {
     // Before the spawn, and the ordering is the fail-closed half of #209. A
@@ -369,6 +379,22 @@ export function run(bin: string, args: readonly string[], options: RunOptions = 
           reject(attachEnding(new Cancelled(cancelRequested() ?? 'asked to stop'), CANCEL_ENDING)),
         );
       });
+    }
+
+    if (signal !== undefined) {
+      const onAbort = (): void => {
+        child.kill('SIGKILL');
+        settle(() => reject(attachEnding(new Cancelled('stopped from the window'), CANCEL_ENDING)));
+      };
+      if (signal.aborted) onAbort();
+      else {
+        signal.addEventListener('abort', onAbort, { once: true });
+        const before = unregister;
+        unregister = () => {
+          before?.();
+          signal.removeEventListener('abort', onAbort);
+        };
+      }
     }
 
     // The accumulated `stdout` dies with this closure, and that is deliberate.

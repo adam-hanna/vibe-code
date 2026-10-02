@@ -55,6 +55,16 @@ import type { RunState } from '@src/types.js';
  * disagree the first time somebody set `git.branchPrefix` or passed
  * `--no-branch`. This decides *where*; `prepareGit` still decides *which
  * branch*, inside it, exactly as it does in a plain checkout.
+ *
+ * **A custom script is told that branch, and it is still one answer** (#223).
+ * Asked for directly — the setup command needed *"a placeholder for the
+ * directory path and branch name"* — because a project's own worktree script
+ * usually wants `git worktree add <dir> <branch>`, not a detached head it then
+ * has to fix up. So the caller computes the branch with `runBranch`, the same
+ * expression `prepareGit` uses, creates the **ref** before the script runs, and
+ * passes it as `VIBE_BRANCH`. `prepareGit` then finds the branch already
+ * existing and adopts it instead of creating it again. The script never names a
+ * branch; it is told one, and only when branch isolation is on.
  */
 
 /** Where worktrees live, relative to the repository. */
@@ -145,6 +155,12 @@ export async function createWorktree(args: {
   /** The user's own command, run instead of `git worktree add`. */
   command: string | null;
   timeoutMs: number;
+  /**
+   * The branch the run will be on, already created as a ref, or null when
+   * branch isolation is off. Passed to a custom script as `VIBE_BRANCH`; the
+   * default `git worktree add --detach` leaves it to `prepareGit` to check out.
+   */
+  branch: string | null;
 }): Promise<WorktreeResult> {
   const dir = worktreePath(args.targetDir, args.id);
 
@@ -219,7 +235,7 @@ export async function createWorktree(args: {
  * a space in it cannot be re-split by the shell into two words.
  */
 async function runSetup(
-  args: { targetDir: string; id: string; timeoutMs: number; command: string | null },
+  args: { targetDir: string; id: string; timeoutMs: number; command: string | null; branch: string | null },
   dir: string,
 ): Promise<WorktreeResult | null> {
   const command = args.command;
@@ -231,8 +247,11 @@ async function runSetup(
     VIBE_WORKTREE: dir,
     VIBE_REPO: args.targetDir,
     VIBE_RUN_ID: args.id,
-    // Deliberately no VIBE_BRANCH: `prepareGit` names the branch, and handing a
-    // script one would be a second answer to that question.
+    // The branch `prepareGit` will use, computed by the same `runBranch` and
+    // already created as a ref, so the script is told the answer rather than
+    // asked for one. Absent when branch isolation is off: an empty string would
+    // be a branch name a script could pass to git.
+    ...(args.branch !== null ? { VIBE_BRANCH: args.branch } : {}),
   }, args.timeoutMs);
   if (result.code === 0) return null;
   return {
@@ -240,7 +259,8 @@ async function runSetup(
     reason:
       `git.worktree.command failed (exit ${result.code === null ? 'none - it was killed' : String(result.code)}): ` +
       `${result.output.trim() || 'it printed nothing'}. ` +
-      'The command runs in the repository with VIBE_WORKTREE, VIBE_REPO and VIBE_RUN_ID set, ' +
+      'The command runs in the repository with VIBE_WORKTREE, VIBE_REPO, VIBE_RUN_ID and ' +
+      '(when branch isolation is on) VIBE_BRANCH set, ' +
       'and must leave a git working tree at VIBE_WORKTREE.',
   };
 }

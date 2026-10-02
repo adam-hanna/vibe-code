@@ -24,32 +24,46 @@ import pilotPane from './PilotPane.tsx?raw';
 
 describe('the composer hands the brief to the pilot', () => {
   test('submitting is a conversation, not a run', () => {
-    // Enter in the brief field reaches the submit handler, so that gesture has
-    // to land on the half that spends nothing.
+    // Enter in the brief field reaches the submit handler, and so does the one
+    // button, so that gesture has to land on the half that spends nothing. The
+    // settings go WITH the brief, which is how the overrides block still reaches
+    // a run now that this modal launches nothing itself.
     const onSubmit = composer.slice(
       composer.indexOf('onSubmit={(e) => {'),
       composer.indexOf('}}', composer.indexOf('onSubmit={(e) => {')),
     );
-    expect(onSubmit).toContain('onBrief(task.trim())');
+    expect(onSubmit).toContain('onBrief(briefFor(task, planOnly, overrides), task.trim())');
     expect(onSubmit).not.toContain('onLaunch(');
   });
 
-  test('the direct launch survives, because the pilot cannot express an override', () => {
-    // Not a hedge and not a leftover. `start_run` takes a brief, a directory and
-    // plan-only; `launchArgv`'s gate overrides and caps have no field on that
-    // tool, so a run needing the overrides block has no conversational route.
-    // Removing this button would remove a capability rather than a shortcut —
-    // which is why it is checked for, and checked to be clearly labelled.
-    expect(composer).toContain('onLaunch(argv)');
-    expect(composer).toMatch(/skip the pilot and/);
+  test('there is one way out, and it is not a launch', () => {
+    // **Reversed at the owner's decision**, and the old case is worth stating
+    // because it was right when it was written: `skip the pilot` was kept since
+    // `start_run` could not carry an override, so removing it removed a
+    // capability. Asked for directly — *"There should only be one start button
+    // and it should follow the 'talk it through' path"* — and `start_run` now
+    // takes the overrides, so the capability moved rather than went. What is
+    // pinned is the absence: no launch callback, no argv, nothing a person could
+    // press here that starts a run without the pilot's card in between.
+    expect(composer).not.toMatch(/onLaunch/);
+    expect(composer).not.toMatch(/launchArgv/);
+    // The button's own wording; the comment above `onBrief` names it as history.
+    expect(composer).not.toMatch(/skip the pilot and/);
+    expect(composer).not.toMatch(/v-new__argv/);
+    // And the cockpit no longer hands the composer a way to launch.
+    const wiring = cockpit.slice(
+      cockpit.indexOf('<NewWorkstream'),
+      cockpit.indexOf('/>', cockpit.indexOf('<NewWorkstream')),
+    );
+    expect(wiring).not.toContain('onLaunch');
   });
 
-  test('the primary control is the conversation', () => {
-    // `level="primary"` is the one the eye lands on and the one Enter triggers.
-    // A direct launch wearing it would make "I don't want the run to start
-    // automatically" false again by default.
-    const primary = composer.slice(composer.indexOf('level="primary"'));
-    expect(primary).toContain('talk it through');
+  test('the one control says start', () => {
+    // `level="primary"` is the one the eye lands on and the one Enter triggers,
+    // and it is the only button besides cancel.
+    const foot = composer.slice(composer.indexOf('className="v-new__foot"'));
+    expect(foot).toMatch(/level="primary" type="submit"[^>]*>\s*start\s*</);
+    expect(foot.match(/<Button/g)).toHaveLength(2);
   });
 });
 
@@ -58,8 +72,11 @@ describe('the cockpit carries it across', () => {
     // A conversation nobody is looking at is the same as no conversation: the
     // report was partly that nothing appeared, and the pilot tab not being open
     // is one of the two ways that happens.
-    const handler = cockpit.slice(cockpit.indexOf('onBrief={(task) => {'));
-    expect(handler).toContain('setBrief(task)');
+    // Through `queued`, one commit later, so the pane is already holding the
+    // new draft's conversation when the brief is said into it.
+    const handler = cockpit.slice(cockpit.indexOf('onBrief={(message, task) => {'));
+    expect(handler).toContain('setQueued(message)');
+    expect(cockpit).toContain('setBrief(queued)');
     expect(handler).toContain("open('pilot')");
   });
 

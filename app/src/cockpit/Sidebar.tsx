@@ -16,6 +16,8 @@ import {
   PLACEHOLDER,
   nameOf,
   preview,
+  dirKey,
+  nestProjects,
   projectName,
   readNames,
   readPins,
@@ -25,9 +27,14 @@ import {
   samePin,
   togglePin,
   visible,
+  relativeTo,
+  within,
 } from './projects';
-import type { Pin, RunName } from './projects';
+import type { ReactNode } from 'react';
+import type { Pin, ProjectNode, RunName } from './projects';
 import type { RailRun } from './squares';
+import { draftsIn, settled } from './pending';
+import type { Draft } from './pending';
 import type { ArchiveRun } from '../host';
 
 /**
@@ -279,9 +286,61 @@ function RunRow({
   );
 }
 
+/**
+ * A run that has been asked for and not started yet (#223). See `pending.ts`.
+ *
+ * Drawn among the project's runs, because that is where it will be: the row is
+ * the run as far as the person is concerned, and when the run starts the
+ * archive's row replaces this one rather than appearing beside it. It has one
+ * control besides opening, because a draft is only this window's memory — no
+ * pin (it is already at the top of its project) and no rename (it is named by
+ * its brief until the run exists).
+ */
+function DraftRow({
+  title,
+  launched,
+  current,
+  onOpen,
+  onForget,
+}: {
+  title: string;
+  /** Whether its proposal has been pressed and the run is starting. */
+  launched: boolean;
+  current: boolean;
+  onOpen: () => void;
+  onForget: () => void;
+}) {
+  return (
+    <div className={`v-nav__row${current ? ' v-nav__row--on' : ''}`}>
+      <button className="v-nav__open" onClick={onOpen} title={title}>
+        <span className="v-nav__bullet">◌</span>
+        <span className="v-nav__title">{title}</span>
+        {/* Said rather than styled: a row with no run behind it has to read as
+            one, or the first click on it looks like a run that will not load. */}
+        <span className="v-nav__draft">{launched ? 'starting' : 'drafting'}</span>
+      </button>
+      <button
+        className="v-nav__act v-nav__act--danger"
+        onClick={onForget}
+        title="Discard this draft and its conversation"
+      >
+        −
+      </button>
+    </div>
+  );
+}
+
 function Project({
   dir,
+  label,
   current,
+  holds,
+  nested,
+  drafts,
+  draftId,
+  onDraft,
+  onForgetDraft,
+  onSettled,
   currentId,
   pins,
   names,
@@ -297,8 +356,27 @@ function Project({
   onForget,
 }: {
   dir: string;
+  /** What the row is called: the folder name, or its path under the parent. */
+  label: string;
   /** Whether this is the project the window is pointed at. */
   current: boolean;
+  /**
+   * Whether the window is pointed here **or inside here** (#223). A run started
+   * in a worktree points the window at the worktree, and the worktree is drawn
+   * under this project — so this section has to open too, or the run is inside a
+   * closed folder exactly as before.
+   */
+  holds: boolean;
+  /** The projects that live inside this one's directory, already drawn. */
+  nested: ReactNode;
+  /** Every draft this window holds; this section draws its own. */
+  drafts: readonly Draft[];
+  /** The draft on screen, if one is. */
+  draftId: string | null;
+  onDraft: (draft: Draft) => void;
+  onForgetDraft: (draft: Draft) => void;
+  /** Drafts whose run this archive now lists, so they can be let go of. */
+  onSettled: (ids: readonly string[]) => void;
   currentId: string | null;
   pins: readonly Pin[];
   names: readonly RunName[];
@@ -317,7 +395,7 @@ function Project({
   // The current project opens on its own, because it is the one whose runs the
   // window is about. Every other one is a click — a sidebar that read four
   // archives at launch would spend four reads on rows nobody asked for.
-  const [open, setOpen] = useState(current);
+  const [open, setOpen] = useState(holds);
   /**
    * …and it opens when it *becomes* current, not only when it starts that way
    * (#223).
@@ -337,14 +415,23 @@ function Project({
    * stayed pointed there — so the rule is that *arriving* opens it and a collapse
    * afterwards is respected.
    */
-  const wasCurrent = useRef(current);
+  const wasCurrent = useRef(holds);
   useEffect(() => {
-    if (current && !wasCurrent.current) setOpen(true);
-    wasCurrent.current = current;
-  }, [current]);
+    if (holds && !wasCurrent.current) setOpen(true);
+    wasCurrent.current = holds;
+  }, [holds]);
   const [more, setMore] = useState(false);
   const { runs, failure, loading } = useArchive(dir, open, currentId, beat);
   const { shown, hidden } = visible(runs, more);
+  // A draft is drawn until the archive lists the run it became, and forgotten
+  // once it does — the archive's row is the run, and two rows for one run is the
+  // report this exists to answer.
+  const archived = runs.map((r) => r.id);
+  const mine = draftsIn(drafts, dir, archived);
+  const done = settled(drafts, dir, archived).join('\n');
+  useEffect(() => {
+    if (done !== '') onSettled(done.split('\n'));
+  }, [done, onSettled]);
 
   return (
     <div className="v-nav__project">
@@ -352,7 +439,7 @@ function Project({
         <button className="v-nav__open" onClick={() => setOpen((o) => !o)} aria-expanded={open}>
           <span className="v-nav__folder">{open ? '▾' : '▸'}</span>
           <span className={`v-nav__title${current ? ' v-nav__title--on' : ''}`}>
-            {projectName(dir)}
+            {label}
           </span>
         </button>
         {/* Right-justified, beside the project it starts a run in. The composer
@@ -380,7 +467,17 @@ function Project({
           {failure === null && loading && runs.length === 0 && (
             <span className="v-nav__note">reading…</span>
           )}
-          {failure === null && !loading && runs.length === 0 && (
+          {mine.map((d) => (
+            <DraftRow
+              key={d.id}
+              title={preview(d.task)}
+              launched={d.launched}
+              current={d.id === draftId}
+              onOpen={() => onDraft(d)}
+              onForget={() => onForgetDraft(d)}
+            />
+          ))}
+          {failure === null && !loading && runs.length === 0 && mine.length === 0 && (
             <span className="v-nav__note">no runs here yet</span>
           )}
           {shown.map((r) => {
@@ -419,6 +516,7 @@ function Project({
               All runs, with status and cost
             </button>
           )}
+          {nested}
         </div>
       )}
     </div>
@@ -428,19 +526,24 @@ function Project({
 /** What a confirmation is about. The two acts are kept apart all the way down. */
 type Pending =
   | { kind: 'run'; dir: string; runId: string; title: string; task: string }
-  | { kind: 'project'; dir: string };
+  | { kind: 'project'; dir: string }
+  | { kind: 'draft'; draft: Draft };
 
 export function Sidebar({
   dir,
   currentId,
   onNew,
   onNewIn,
-  onSwitch,
   onSettings,
   onRuns,
   onShow,
   onProject,
   onDeleted,
+  drafts,
+  draftId,
+  onDraft,
+  onForgetDraft,
+  onSettled,
 }: {
   /** The repository the window is pointed at. Always one of the projects. */
   dir: string;
@@ -448,7 +551,6 @@ export function Sidebar({
   onNew: () => void;
   /** Compose a run in one project, with the directory already settled (#223). */
   onNewIn: (dir: string) => void;
-  onSwitch: () => void;
   onSettings: () => void;
   /** Open `1b` for a project, which is where a lock can be overruled. */
   onRuns: (dir: string) => void;
@@ -457,6 +559,13 @@ export function Sidebar({
   onProject: (dir: string) => void;
   /** A run that is gone, so panes pointed at it can stop reading it. */
   onDeleted: (dir: string, runId: string) => void;
+  /** Runs asked for and not started yet (#223). The cockpit owns them. */
+  drafts: readonly Draft[];
+  draftId: string | null;
+  onDraft: (draft: Draft) => void;
+  /** Discard one, after the confirmation below. */
+  onForgetDraft: (draft: Draft) => void;
+  onSettled: (ids: readonly string[]) => void;
 }) {
   const [projects, setProjects] = useState<readonly string[]>([]);
   const [pins, setPins] = useState<readonly Pin[]>([]);
@@ -627,6 +736,11 @@ export function Sidebar({
   const act = useCallback(() => {
     const at = pending;
     if (at === null) return;
+    if (at.kind === 'draft') {
+      onForgetDraft(at.draft);
+      setPending(null);
+      return;
+    }
     if (at.kind === 'project') {
       setProjects((list) => {
         const next = removeProject(list, at.dir);
@@ -672,7 +786,55 @@ export function Sidebar({
       // a paraphrase would answer neither.
       .catch((err: unknown) => setRefused(err instanceof Error ? err.message : String(err)))
       .finally(() => setDeleting(false));
-  }, [pending, save, onDeleted]);
+  }, [pending, save, onDeleted, onForgetDraft]);
+
+  /**
+   * One project row, and the projects inside its directory beneath it (#223).
+   * See `nestProjects` for why a worktree is drawn here rather than at the top.
+   */
+  const draw = (node: ProjectNode, parent: string | null): ReactNode => {
+    const p = node.dir;
+    return (
+      <Project
+        key={p}
+        dir={p}
+        // A nested project is named by where it sits under its parent, so
+        // `.worktrees/gh-236-…` reads as the worktree it is rather than as a
+        // second repository with a branch for a name.
+        label={parent === null ? projectName(p) : relativeTo(parent, p)}
+        current={dirKey(p) === dirKey(dir)}
+        holds={within(p, dir)}
+        nested={
+          node.children.length > 0 && (
+            <div className="v-nav__nested">
+              {node.children.map((c) => draw(c, p))}
+            </div>
+          )
+        }
+        drafts={drafts}
+        draftId={draftId}
+        onDraft={onDraft}
+        onForgetDraft={(d) => setPending({ kind: 'draft', draft: d })}
+        onSettled={onSettled}
+        currentId={currentId}
+        pins={pins}
+        names={names}
+        beat={beat}
+        renaming={renaming}
+        onShow={onShow}
+        onPin={pin}
+        onRename={(d, runId) => setRenaming({ dir: d, runId })}
+        onRenamed={renamed}
+        onDeleteRun={(d, runId, title, task) => {
+          setRefused(null);
+          setPending({ kind: 'run', dir: d, runId, title, task });
+        }}
+        onAll={onRuns}
+        onNewIn={onNewIn}
+        onForget={(d) => setPending({ kind: 'project', dir: d })}
+      />
+    );
+  };
 
   return (
     <nav className="v-nav" aria-label="projects">
@@ -715,6 +877,21 @@ export function Sidebar({
           }}
         />
       )}
+      {pending !== null && pending.kind === 'draft' && (
+        <Confirm
+          tone="quiet"
+          kicker="deletes a conversation"
+          title={`Discard “${preview(pending.draft.task)}”`}
+          lead="This run was never started, so there is nothing on disk to delete. What goes is the conversation with the pilot about it, which is kept only in this window."
+          facts={[
+            { label: 'asked to', value: pending.draft.task, scroll: true },
+            { label: 'in', value: pending.draft.dir, mono: true },
+          ]}
+          confirm="Discard the draft"
+          onConfirm={act}
+          onCancel={() => setPending(null)}
+        />
+      )}
       {pending !== null && pending.kind === 'project' && (
         <Confirm
           tone="quiet"
@@ -739,9 +916,6 @@ export function Sidebar({
       <div className="v-nav__actions">
         <button className="v-nav__action" onClick={onNew}>
           <span className="v-nav__glyph">＋</span> New run
-        </button>
-        <button className="v-nav__action" onClick={onSwitch}>
-          <span className="v-nav__glyph">⌘K</span> Switch run
         </button>
         <button className="v-nav__action" onClick={onSettings}>
           <span className="v-nav__glyph">⚙</span> Settings
@@ -786,29 +960,7 @@ export function Sidebar({
             None yet. A project is a repository — add the one you want to work in.
           </span>
         )}
-        {projects.map((p) => (
-          <Project
-            key={p}
-            dir={p}
-            current={p === dir}
-            currentId={currentId}
-            pins={pins}
-            names={names}
-            beat={beat}
-            renaming={renaming}
-            onShow={onShow}
-            onPin={pin}
-            onRename={(d, runId) => setRenaming({ dir: d, runId })}
-            onRenamed={renamed}
-            onDeleteRun={(d, runId, title, task) => {
-              setRefused(null);
-              setPending({ kind: 'run', dir: d, runId, title, task });
-            }}
-            onAll={onRuns}
-            onNewIn={onNewIn}
-            onForget={(d) => setPending({ kind: 'project', dir: d })}
-          />
-        ))}
+        {nestProjects(projects).map((node) => draw(node, null))}
 
         {/* The chooser first, the field as the fallback. A path is absolute and
             platform-shaped, and a typo in one does not fail at the field — it

@@ -6,6 +6,7 @@ import {
   EFFORTS,
   environmentStale,
   loadConfig,
+  globalConfigPath,
   withProjectFile,
 } from '@src/config.js';
 import {
@@ -1863,11 +1864,25 @@ export async function runPreflight(
   // before the branch is decided in it, which is the whole arrangement - this
   // decides WHERE, `prepareGit` still decides WHICH BRANCH.
   if (state.worktree === true) {
+    // The branch, as a ref, before the script runs - so `VIBE_BRANCH` names a
+    // branch that exists on a fresh run and on a resume alike, and one line of
+    // script (`git worktree add "$VIBE_WORKTREE" "$VIBE_BRANCH"`) is right for
+    // both. `prepareGit` adopts it. A repository with no commit has no HEAD to
+    // put it at, so the script is told no branch and `prepareGit` makes it as it
+    // always has (#223).
+    let branch = git.runBranch(cfg, state);
+    if (branch !== null && !(await git.branchExists(state.targetDir, branch))) {
+      const head = await git.markBase(state.targetDir);
+      if (head === null || !(await git.createBranchRef(state.targetDir, branch, head)).ok) {
+        branch = null;
+      }
+    }
     const made = await createWorktree({
       targetDir: state.targetDir,
       id: state.id,
       command: cfg.git.worktreeCommand,
       timeoutMs: cfg.git.worktreeTimeoutMs,
+      branch,
     });
     if (!made.ok) {
       log.heading('Preflight');
@@ -2521,6 +2536,11 @@ async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
       `config: ${cfg.configPath ?? 'defaults'}` +
         (moved.length === 0 ? '' : ` (command line also sets ${moved.join(', ')})`),
     );
+    // The global layer, said on its own line so the line above keeps the shape
+    // scripts already read (#223). Only when the file exists: a machine with no
+    // global settings is every machine before this, and does not need telling.
+    const globalAt = globalConfigPath();
+    if (globalAt !== null && existsSync(globalAt)) log.info(`  also your settings for all projects: ${globalAt}`);
     log.info(`  claude ${cfg.claude.model}/${cfg.claude.effort} - codex ${cfg.codex.model}/${cfg.codex.effort}`);
     reportResolvedRoles(cfg);
     log.info(

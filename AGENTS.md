@@ -16,10 +16,16 @@ its own — every external call is a child process.
 npm install
 npm run build       # tsc && tsc-alias — emits to dist/
 npm run typecheck   # tsc --noEmit, no emit, fastest correctness check
-npm test            # builds first (pretest), then node --test dist/tests/**/*.test.js
+npm test            # builds first (pretest), then scripts/test.mjs runs node --test dist/tests/**/*.test.js
 npm run doctor      # builds, then runs `vibe doctor` against this repo
 npm run watch       # tsc --watch
 ```
+
+**`npm test` runs with the global settings layer switched off.** `scripts/test.mjs` sets
+`VIBE_GLOBAL_CONFIG` empty before it starts `node --test`, because `loadConfig` reads
+`~/.config/vibe/config.json` under every project and a suite that read the developer's own file
+would pass or fail by machine. A case about the global layer points the variable at a file of
+its own and puts it back (`global-config.test.ts`). Running `node --test` directly skips this.
 
 **`npm test` runs the compiled output, not the sources.** `pretest` builds, so a stale `dist/`
 is never what you tested — but if you invoke `node --test` directly, build first or you are
@@ -565,22 +571,32 @@ they are waiting on. Four things in it are worth carrying:
 
   The general lesson: **a behaviour is only as real as its route**, and a test
   over a prompt cannot see who is sent it. `frontdoor.test.ts` pins the three
-  hops instead — submit calls `onBrief` and not `onLaunch`, the cockpit carries
-  the brief over and moves the tab with it, and the pane says it as something a
+  hops instead — submit calls `onBrief` and the composer has no `onLaunch` at
+  all, the cockpit carries the brief over and moves the tab with it, and the pane says it as something a
   *person* said rather than as a wake.
 
-  **The direct launch stays, and that is forced rather than chosen.** The pilot's
-  `start_run` takes a brief, a directory and plan-only; `launchArgv`'s gate
-  overrides and caps have no field on that tool, so a run that needs the
-  overrides block in `1b` has no conversational route at all. Deleting the button
-  would delete a capability rather than a shortcut. What changed is which one is
-  **primary** — `talk it through` is what Enter does and what the eye lands on,
-  and the other says `skip the pilot` in those words, because a control that
-  quietly did the old thing would make *"I don't want the run to start
-  automatically"* false again by default. Carrying the overrides into the pilot's
-  proposal was the alternative and is worse: the window would have to merge them
-  into an accepted argv the card never showed, which breaks *what runs is what was
-  displayed* to save a click.
+  **The direct launch went, and the reason it had stayed is what made that
+  possible** (#223). It was kept as *forced rather than chosen*: `start_run`
+  took a brief, a directory and plan-only, so a run needing `1b`'s overrides
+  block had no conversational route, and deleting `skip the pilot` would have
+  deleted a capability. The owner then asked for exactly that — *"There should
+  only be one start button and it should follow the 'talk it through' path"* —
+  so the capability **moved** instead: `start_run` now takes `gates`,
+  `max_tokens` and `p1_tolerance`, built by the same `launchArgv`, and `1b`'s one
+  button is `start`. `briefFor` puts the composer's settings into the message
+  under the brief, where the person can see them, and the pilot passes them on
+  the call.
+
+  The objection recorded against that route — *"the window would have to merge
+  them into an accepted argv the card never showed"* — is answered rather than
+  ignored: nothing is merged. The overrides are fields on the call, so they are
+  in the argv the card **draws**, and *what runs is what was displayed* holds.
+  What it costs is a model in the path between the toggle and the flag, which is
+  why the settings travel as visible text and why `start_run` refuses a malformed
+  one by name rather than coercing it — `--max-tokens 0` turns the ceiling off,
+  so a value nobody meant is the opposite of leaving it alone. The modal's argv
+  preview went with the button: it described a command nothing on that screen
+  runs any more.
 
   **The enforced version was considered and declined**, and the reasoning is
   worth keeping because it is the general case. A gate would refuse `start_run`
@@ -1090,6 +1106,28 @@ they are waiting on. Four things in it are worth carrying:
   secrets** (the pilot's API keys) in the OS keychain — deliberately not the config file,
   which is committed and whose validator reports bad values *by name*.
 
+  **And the project's kind has two files now** (#223). *"Some settings are global, like api
+  keys, etc. Some are project specific, like the worktree command"* — the keys and the window's
+  settings already were machine-wide, and what was missing was a way to say *my models, my
+  budgets, my caps* once rather than in every repository. `globalConfigPath` is
+  `%APPDATA%\vibe\config.json` or `$XDG_CONFIG_HOME/vibe/config.json` (else
+  `~/.config/vibe/`), and it is **the same shape as `vibe.config.json`**, at the owner's
+  decision: any key at either level, and the order is `DEFAULTS` → global → project → flags.
+  A fixed split per key was the alternative and was declined, because which settings are a
+  person's and which are a repository's is not something this file can know for everybody.
+
+  Three things keep it honest. **The CLI reads it too**, through the one `loadConfig`, so a
+  terminal and a window cannot disagree about what a run is configured to do; a resume layers it
+  under the project's file over the run's memory, by `withProjectFile`'s own reasoning. **A
+  global write is validated twice** — alone, so it is legal wherever it is read, and under the
+  project in front of you, so a save cannot leave that project unloadable (`verify.command` in
+  the global file beside a project's `verify.gates` is the case). And **the window computes
+  nothing**: the `config` frame carries `globalRaw`, `globalPath` and `globalEffective` beside
+  `raw` and `effective`, so the "all projects" view draws the defaults plus the global file
+  without merging anything itself, and every value's chip — `default`, `all projects`, `this
+  project overrides it` — reads two files the host sent. The global file is a machine's and is
+  never committed; the project file still is.
+
   **Subscription against keys is two questions about two processes**, and conflating them is
   what made the old `Keys` tab read as though the product needed an API key at all. A run's
   agents are *always* your own subscriptions — `claude` and `codex` are child processes
@@ -1213,6 +1251,58 @@ they are waiting on. Four things in it are worth carrying:
   thing to put in it. One repository typed three ways is one project: `dirKey` normalises case,
   separators and a trailing slash **for comparison only**, because what is stored is what gets
   sent to the host and the host has to open it.
+
+  **A project inside another project's directory is drawn under it** (#223). A run
+  started in a worktree points the window at the worktree, and `rememberRepo` added
+  that path as a top-level project — so the run looked missing: *"it doesn't show
+  up as a run under one of my projects"*, while it sat under a project named after
+  a branch. `nestProjects` draws each one under its **nearest** containing project
+  and changes nothing else: the nested row keeps its own archive, because
+  `.vibe/runs` lives where the run was given, and a parent reading its children's
+  archives would be a second answer to which runs a directory holds. The parent
+  opens on `holds` — pointed here *or inside here* — or the run is in a closed
+  folder exactly as before.
+
+  **And the pilot can no longer make one.** `start_run` refuses any directory but
+  the project's, with a sentence naming `git.worktree`, and the prompt says the
+  same before it is needed. The hand-made worktree was the root of both halves of
+  the report: the run's record landed in a tree somebody is about to prune, and
+  the window followed the run into a directory with no conversation stored under
+  it, so the chat that proposed the run **restored as empty** and the run then
+  adopted nothing. Worktrees are vibe's job, and `src/worktree.ts` already keeps
+  the archive at home. Nesting stays, for the projects an older build added.
+
+- **A run exists from the moment somebody presses start** (#223). The core has
+  nothing until the pilot's proposal is pressed and `createRun` allocates an id,
+  and those two moments are a conversation apart — so the sidebar drew no row,
+  and when the run started it arrived as a new one while the chat vanished:
+  *"The run should appear on the left, under the project directly after hitting
+  start… a new run shouldn't appear, its already there. Also, the previous chat
+  history shouldnt go away."*
+
+  `app/src/cockpit/pending.ts` is a **draft**: this window's memory, the same
+  standing as a pin, never sent to the host and never a run id (`draft-…`). Its
+  conversation is keyed by the draft id through the ordinary `chatKey`. Three
+  rules carry it:
+
+  - **Arriving at a draft is a read and leaving it for its run is a start**, so
+    `opened` is true while a draft is on screen and false the moment it is let
+    go of — which is exactly the pair `chatMove` already distinguishes: a new
+    draft restores its own empty conversation instead of adopting the one on
+    screen, and the run adopts the draft's. Nothing new was added to the rule.
+  - **Only the pilot's `invoke` can claim a draft.** Resume and implement go
+    through `launch` too, so the draft id is passed rather than read, held in a
+    ref, and `bindDraft` refuses a draft that was not launched or is already
+    claimed. A run started some other way never swallows a draft that happened
+    to be open.
+  - **The brief is said one commit later.** Pointing the pane at a new draft
+    makes it load that draft's conversation in a child effect; a brief handed
+    over in the same render would be sent on top of the previous conversation.
+    `queued` holds it until the pane has switched.
+
+  The draft row is drawn until the archive lists the run it became, then
+  forgotten, so there is never a draft and its run side by side. Discarding one
+  confirms, because the conversation is the only copy.
 - **The output is cut into rounds, and every boundary is told.** `1c` asks for output filtered
   by phase, and a *filter* is not a *structure*: it shows one phase by hiding the rest, so
   reading a run end to end meant clicking through every phase and holding the order in your
@@ -1390,8 +1480,8 @@ event type**, never a name of its own: `applyCharge` narrates under `claude_turn
 `codex_turn`, the same string it just recorded, so a host acting on the fact and an archive
 holding it agree about one fact rather than two spellings of it.
 
-**Seven frames are reads, and a read runs beside a run** (#223). `archive`, `config`, `diff`,
-`artifacts`, `artifact`, `prompts` and `replay` answer a question rather than describing something
+**Eight frames are reads, and a read runs beside a run** (#223). `archive`, `config`, `diff`,
+`artifacts`, `artifact`, `prompts`, `replay` and `fs` answer a question rather than describing something
 that happened,
 which is a shape the wire did not have — every other outbound frame is pushed. They are exempt
 from `serve.ts`'s one-at-a-time rule for a stronger reason than the pilot is: that rule exists
@@ -1602,8 +1692,22 @@ Five things are load-bearing:
 - **It is created detached, and `prepareGit` still names the branch.** `git worktree add -b`
   here would be a second answer to a question seven call sites and `run_branch` already settle,
   and the two would disagree the first time somebody set `git.branchPrefix` or passed
-  `--no-branch`. This decides *where*; that decides *which branch*, inside it. The custom script
-  is told `VIBE_WORKTREE`, `VIBE_REPO` and `VIBE_RUN_ID` and deliberately **not** a branch.
+  `--no-branch`. This decides *where*; that decides *which branch*, inside it.
+
+  **The script is told the branch, and it is still one answer** (#223). It was given
+  `VIBE_WORKTREE`, `VIBE_REPO` and `VIBE_RUN_ID` and deliberately no branch, and that left a
+  project's own script unable to do the obvious thing — *"we need to be able to have a
+  placeholder for the directory path and branch name"*. So `runBranch` in `src/git.ts` is the
+  one expression for the run's branch, the worktree site creates it as a **ref** from HEAD
+  before the script runs and passes it as `VIBE_BRANCH`, and `prepareGit`'s fresh path
+  **adopts** a branch that already exists instead of `checkout -b`-ing it again. Creating the
+  ref first is what makes one line of script right on a fresh run and a resume alike: `git
+  worktree add "$VIBE_WORKTREE" "$VIBE_BRANCH"`. With branch isolation off the variable is
+  **unset**, not empty, because an empty string is a name a script could hand to git; a
+  repository with no commit has no HEAD to put the ref at, so it is unset there too and
+  `prepareGit` makes the branch as it always has. They are environment variables rather than
+  `{dir}`-style text substitution because a path pasted into a shell line breaks on a space,
+  and a quoted variable does not.
 - **The script goes through a shell, and that is `verify.command`'s rule rather than a hole in
   `commands.ts`'s.** `verify.ts` states it at the one place a shell is used at all — *"Model-
   authored text is never passed to a shell"* — and this is the same category: a line a **person**
@@ -1671,12 +1775,14 @@ src/similarity.ts    the one similarity metric, its threshold, and the censuses 
 src/questions.ts     when two wordings are one question: the threshold, and REPHRASED.md
 src/raise.ts         what a person does to a run's findings: raise one, move a severity
 src/roles.ts         who does what: the role table, refusals, warnings
-src/config.ts        DEFAULTS, config merge, validation
+src/config.ts        DEFAULTS, config merge, validation, and the global file under the project's
 src/consistency.ts   cross-field rules over status/phase/planOnly, applied by loadRun
 src/types.ts         shared types, including RunState
 src/prompts.ts       every prompt the agents receive
 src/claude.ts        Claude Code adapter (stream-json)
 src/pilotchat.ts     one pilot chat turn on the subscription - a child process, not a client
+src/pilotcodex.ts    the same on the OpenAI subscription - `codex exec`, its own tools switched off
+src/clipaths.ts      where the two CLIs are when the settings say so, and what the search found
 src/codex.ts         Codex adapter (codex exec --json)
 src/appserver.ts     Codex app-server JSON-RPC client (rate limits only)
 src/ratelimits.ts    rate-limit windows and the brake
@@ -1696,6 +1802,7 @@ src/commands.ts      a command a person pressed - no shell, no shim, and where i
 src/ending.ts        how this process ended - the stamp beside the lock
 src/git.ts           branch and commit operations
 src/worktree.ts      a checkout of its own: where the work happens, and where it does not
+src/pilotaccess.ts   what the pilot may do unasked: the safe list, YOLO, its directories, its reads
 tests/               node:test, one file per concern
 
 app/                 the desktop app - Vite + React, its own package.json and gate
@@ -1707,6 +1814,7 @@ app/src/cockpit/Counts.tsx the four severity counts, and the one place they are 
 app/src/cockpit/squares.ts what the navigator may draw, and the two letters standing for a run
 app/src/cockpit/Sidebar.tsx  projects, their runs, and the pins - the rail merged into one
 app/src/cockpit/projects.ts  which repositories are open, which runs are pinned, and renamed
+app/src/cockpit/pending.ts   a run asked for and not started yet - the row between start and run_started
 app/src/cockpit/Confirm.tsx  the dialog in front of anything that cannot be undone
 app/src/cockpit/appearance.ts  how big the product is drawn, and nothing else about the look
 app/src/cockpit/drafts.ts      saved prompt versions - the window's library, not the project's
@@ -1732,8 +1840,9 @@ app/src/cockpit/           the loop column, the running row, the output pane, th
 app/src-tauri/       Rust: window, tray, single instance, spawning and relaying
 app/src/pilot/       credentials, the wire, and the pane - transcript.ts is the pure part
 app/src/pilot/tools.ts     what the pilot may touch: the table, its executors, and propose-only
+app/src/pilot/access.ts    which proposals the person's settings run without a card
 app/src/pilot/ledger.ts    the pilot's own books - the one place a dollar is a dollar
-app/src/cockpit/argv.ts    a form to an argv - the button and the pilot build the same one
+app/src/cockpit/argv.ts    a form to an argv, and the composer's settings as the pilot is told them
 app/src/cockpit/commands.ts  commands this window ran - pure, and not part of any run
 app/src-tauri/src/host.rs    supervising the host process, and the \\?\ path fix
 app/src-tauri/src/reaper.rs  making a killed app take the host with it
@@ -2178,6 +2287,89 @@ frame handler is registered once and reducer state read inside it would be stale
 It feeds the parse only — the pane still shows the final message, because the
 interstitials are the model talking to itself, and `retext` replacing the
 accumulated text is a display decision that was always right.
+
+**The stop button has two roads, because a pilot turn does** (#223). It called
+`pilot.cancel`, the Rust pilot's, which only knows API-backed turns — and the default
+backend's turn is a `claude` child of the **host**. Rust refused, the click handler swallowed
+the refusal by design (*"the turn ended between the render and the click"*), and the child ran
+to completion: *"The stop button on the pilot chat doesn't actually do anything."* A swallowed
+refusal is only safe when the refusal can only mean the benign thing, and this one could also
+mean *wrong road*.
+
+`pilot_stop` names the turn by its request id, and the host holds one `AbortController` per
+turn in flight. `RunOptions.signal` is **one child's own off switch**, deliberately not
+`interruptible`: that is the run's latch and kills every agent child of the run, and stopping
+a conversation must not stop the run it is about. A stopped turn answers `pilot_stopped`, never
+`error`, so the pane draws it as stopped — the word the API road already uses for the same
+act. The pane clears its host turn whenever an API turn starts, because Rust's turn ids and the
+host's request ids are two counters and a stale match would send the button down the wrong road
+again.
+
+**Some commands run without a card, and the line that reverses is narrow** (#223). This file
+said *"'run this program' must never be in reach of it"*, and #211 kept that true by making every
+command a proposal a person presses. Then: *"It's completely safe for it to run 'ls', 'cat',
+'echo', 'git add|commit', etc… we should give it a toggle for 'YOLO' mode… a setting to add dirs
+that it's allowed to operate in."* `src/pilotaccess.ts` and `app/src/pilot/access.ts` are the two
+halves, and four things carry it:
+
+- **The safe list changes who presses, never what runs.** A matching `run_command` is fired through
+  `onEffect`, the road a pressed card takes, into `commands.ts` — so there is still no shell, which
+  is what makes one list mean the same thing on Windows, Linux and macOS. That is also why `ls` and
+  `cat` are not defaults: they are shell built-ins on Windows, and reading has its own tools.
+  `list_dir` and `read_file` are those tools, answered by the host on **both** backends, so the
+  API-backed pilot is no longer without a filesystem. A pattern is a program and its leading
+  arguments as a prefix; a program named by path never matches, and an argument naming a path
+  outside the allowed directories, or a `..`, falls back to a card. `git branch` is listed only in
+  its listing forms because the prefix would otherwise cover `-D`.
+- **It is the machine's setting and never a project's.** `vibe.config.json` is committed, so a
+  repository you clone could otherwise put `rm` on its own safe list or switch YOLO on; `loadConfig`,
+  `withProjectFile` and a project write all refuse a `pilot` key by name. It lives in the global file
+  and is deliberately **not** part of `Config`, because a run's `state.json` stores its config and
+  `ledger.test.ts` pins that `src/types.ts` says nothing about the pilot.
+- **The boundary is the host's.** The subscription pilot gets each allowed directory as `--add-dir`
+  — `--restricted` confines the file tools to the working directories, `--add-dir` included, so
+  this widens the read and nothing else — and YOLO is the root of every disk. Measured rather than
+  assumed: a `Read` outside the cwd came back `DENIED` with no `--add-dir`, and succeeded with the
+  directory or with `/`. The `fs` frame resolves its own roots from the same file, so a window
+  cannot name its way out.
+- **YOLO still leaves two things behind a press**: `start_run` and `answer_gate`, which are not
+  commands, and a run is the most expensive thing in the product. And a conversation **restored from
+  storage never auto-runs anything** — yesterday's `git commit` must not fire because the window
+  reopened. The model is told *"ran without asking"* rather than *"the user accepted this"*, because
+  nobody pressed anything, and the answered card draws the exact command, since an auto-run is the
+  one command that was never displayed before it ran.
+
+**Each vendor has two roads, and Settings picks one** (#223). *"There should be two options
+for both anthropic and openAI: (1) subscription, (2) api key."* The pilot pane used to choose from
+`Claude (subscription) · Anthropic · OpenAI`, a list mixing a CLI with two vendors and offering no
+way to OpenAI without a key. Now the conversation picks the **vendor**, `pilot.anthropic` and
+`pilot.openai` in the settings for all projects pick the **road**, and `backendFor` in
+`app/src/pilot/backend.ts` is the one place the two become a backend. Three things carry it:
+
+- **`src/pilotcodex.ts` is the OpenAI subscription road**, `pilotchat.ts`'s twin on `codex exec`.
+  Codex has no closed tool allow-list, so this one is a deny-list — the shape `pilotchat.ts`
+  replaced — held up by what sits under it: `OFF` switches off the shell, code mode, the browser,
+  apps, plugins, sub-agents and the rest; `web_search="disabled"`; `-s read-only` (and `resume`'s
+  default, which is the same); and `--ignore-user-config`, so no MCP servers. Measured on 0.157.1,
+  the turn is left with `exec` (which fails closed with code mode off), `wait` and
+  `request_user_input`, and cannot read a file — so it reads through `list_dir`/`read_file` like a
+  vendor, inside the host's roots. The system prompt goes in `model_instructions_file`, which
+  replaces Codex's base instructions as `--system-prompt` replaces Claude's (input fell from ~12K to
+  ~7.6K tokens) and is re-read on a resume; a file rather than `-c developer_instructions`, because
+  Windows caps a command line at 32,767 characters. Both a new thread and a resume were run for real
+  while building it, and `pilot-codex.test.ts` pins that shape. `Backend` keeps `subscription` as
+  the Claude CLI's spelling because every saved reply stores it; the Codex one is `codex`.
+- **Where each CLI is can be said, and it is the machine's.** `cli.claude` and `cli.codex` in the
+  global file sit between the environment variable (which still wins — it is the more specific act)
+  and the search. A project file that sets `cli` is refused by name, for `pilot`'s reason and a
+  sharper one: a repository naming the executable every agent turn is spawned from is a repository
+  choosing what runs on your machine. Not cached, so a change in Settings reaches the next turn; only
+  the search is, because it spawns `which`. The `config` frame carries `clis` — what was found, and
+  by which look — so the card can explain the search and show its answer without re-deriving it.
+- **Runs are unchanged.** A run's agents are always the two CLIs on your subscriptions, so the path
+  matters on the API road too, and the card says so in a line. The three paragraphs that used to
+  explain *"two questions about two processes"* became that line: the distinction is still true, and
+  the only part of it a person acts on is where the CLI is.
 
 **The pilot runs in the repository the window named, and that path is a
 permission boundary.** `--restricted` confines `Read`, `Glob` and `Grep` to the

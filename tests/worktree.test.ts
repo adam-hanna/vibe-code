@@ -11,8 +11,13 @@ import {
   worktreePath,
   WORKTREES_DIR,
 } from '@src/worktree.js';
-import { initGit } from './helpers/loop-harness.js';
+import { config, initGit } from './helpers/loop-harness.js';
 import type { RunState } from '@src/types.js';
+import { execFileSync } from 'node:child_process';
+import { execute, REAL_GATE } from '@src/cli.js';
+import { DEFAULTS } from '@src/config.js';
+import { runBranch } from '@src/git.js';
+import { EXIT, prepareGit } from '@src/orchestrator.js';
 
 /**
  * A checkout of its own for the run to work in (#223).
@@ -93,6 +98,7 @@ test('creating one makes a real working tree, detached so prepareGit still owns 
     id: state.id,
     command: null,
     timeoutMs: TIMEOUT,
+    branch: null,
   });
   assert.equal(made.ok, true);
   if (!made.ok) return;
@@ -113,7 +119,7 @@ test('creating one makes a real working tree, detached so prepareGit still owns 
 test('creating one twice is reusing it, because a resume comes through here too', async () => {
   const dir = repo();
   const state = createRun(dir, 'twice', true, { worktree: true });
-  const args = { targetDir: dir, id: state.id, command: null, timeoutMs: TIMEOUT };
+  const args = { targetDir: dir, id: state.id, command: null, timeoutMs: TIMEOUT, branch: null };
   const first = await createWorktree(args);
   assert.equal(first.ok, true);
   const again = await createWorktree(args);
@@ -135,6 +141,7 @@ test('a repository with no commits is refused with the reason rather than a git 
     id: state.id,
     command: null,
     timeoutMs: TIMEOUT,
+    branch: null,
   });
   assert.equal(made.ok, false);
   if (made.ok) return;
@@ -154,7 +161,7 @@ test('the custom command replaces git worktree add, and is told where to put it'
       ? `git worktree add --detach "%VIBE_WORKTREE%" HEAD && echo ${marker}> "%VIBE_WORKTREE%\\setup.txt"`
       : `git worktree add --detach "$VIBE_WORKTREE" HEAD && echo ${marker} > "$VIBE_WORKTREE/setup.txt"`;
 
-  const made = await createWorktree({ targetDir: dir, id: state.id, command, timeoutMs: TIMEOUT });
+  const made = await createWorktree({ targetDir: dir, id: state.id, command, timeoutMs: TIMEOUT, branch: null });
   assert.equal(made.ok, true);
   if (!made.ok) return;
   assert.equal(made.how, 'command');
@@ -172,6 +179,7 @@ test('a command that fails is refused with its own output and what it is given',
     id: state.id,
     command: 'echo deliberate-failure && exit 3',
     timeoutMs: TIMEOUT,
+    branch: null,
   });
   assert.equal(made.ok, false);
   if (made.ok) return;
@@ -195,6 +203,7 @@ test('a command that exits 0 and leaves nothing is refused, not believed', async
     id: state.id,
     command: process.platform === 'win32' ? 'exit /b 0' : 'true',
     timeoutMs: TIMEOUT,
+    branch: null,
   });
   assert.equal(made.ok, false);
   if (made.ok) return;
@@ -223,4 +232,70 @@ test('the path convention is one function, so nothing else may spell it', () => 
   assert.equal(worktreePath('/r', 'run-1'), path.join('/r', WORKTREES_DIR, 'run-1'));
   const state = { targetDir: '/r', id: 'run-1', worktree: true } as RunState;
   assert.equal(workDirOf(state), worktreePath('/r', 'run-1'));
+});
+
+// ---- The branch a setup script is told (#223) --------------------------------
+//
+// Asked for as *"in the worktree command, we need to be able to have a
+// placeholder for the directory path and branch name"*. The core computes the
+// branch with `runBranch`, creates it as a ref before the script runs, passes it
+// as VIBE_BRANCH, and `prepareGit` adopts it - so the script is told one answer
+// and never invents a second.
+
+const onBranch =
+  process.platform === 'win32'
+    ? 'git worktree add "%VIBE_WORKTREE%" "%VIBE_BRANCH%"'
+    : 'git worktree add "$VIBE_WORKTREE" "$VIBE_BRANCH"';
+
+function branchOf(dir: string): string {
+  return execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: dir, encoding: 'utf8' }).trim();
+}
+
+test('a setup command is told the branch, which already exists, and can check it out', async () => {
+  const dir = repo();
+  const state = createRun(dir, 'told the branch', false, { worktree: true });
+  const cfg = config({}, { git: { ...DEFAULTS.git, worktree: true, worktreeCommand: onBranch } });
+  const code = await execute(state, cfg, false, true, REAL_GATE, () => Promise.resolve());
+  assert.notEqual(code, EXIT.PREFLIGHT, 'the setup command must not have been refused');
+  // The same expression `prepareGit` uses, so the two cannot disagree.
+  const branch = runBranch(cfg, state);
+  assert.equal(branch, `${DEFAULTS.git.branchPrefix}${state.id}`);
+  assert.equal(branchOf(workDirOf(state)), branch);
+});
+
+test('prepareGit adopts a branch that already exists rather than creating it again', async () => {
+  const dir = repo();
+  const state = createRun(dir, 'adopted', false, { worktree: true });
+  const cfg = config({}, { git: { ...DEFAULTS.git, worktree: true, worktreeCommand: onBranch } });
+  await execute(state, cfg, false, true, REAL_GATE, () => Promise.resolve());
+  // `checkout -b` on a branch that exists fails, which is what this would do
+  // without the adoption - and on the worktree that the script already put there.
+  await prepareGit(state, cfg, workDirOf(state), false);
+  assert.equal(state.branch, runBranch(cfg, state));
+  assert.equal(branchOf(workDirOf(state)), state.branch);
+});
+
+test('the default detached worktree is put on the pre-made branch by prepareGit', async () => {
+  const dir = repo();
+  const state = createRun(dir, 'detached then adopted', false, { worktree: true });
+  const cfg = config({}, { git: { ...DEFAULTS.git, worktree: true, worktreeCommand: null } });
+  await execute(state, cfg, false, true, REAL_GATE, () => Promise.resolve());
+  await prepareGit(state, cfg, workDirOf(state), false);
+  assert.equal(branchOf(workDirOf(state)), `${DEFAULTS.git.branchPrefix}${state.id}`);
+});
+
+test('with branch isolation off a script is told no branch at all', async () => {
+  const dir = repo();
+  const state = createRun(dir, 'no branch', false, { worktree: true });
+  // An unset variable, not an empty one: an empty string is a name a script
+  // could hand to git.
+  const command =
+    process.platform === 'win32'
+      ? 'git worktree add --detach "%VIBE_WORKTREE%" HEAD && (if defined VIBE_BRANCH (echo set) else (echo unset)) > "%VIBE_WORKTREE%\\branch.txt"'
+      : 'git worktree add --detach "$VIBE_WORKTREE" HEAD && echo "${VIBE_BRANCH-unset}" > "$VIBE_WORKTREE/branch.txt"';
+  const cfg = config({}, {
+    git: { ...DEFAULTS.git, worktree: true, useBranch: false, worktreeCommand: command },
+  });
+  await execute(state, cfg, false, true, REAL_GATE, () => Promise.resolve());
+  assert.match(readFileSync(path.join(workDirOf(state), 'branch.txt'), 'utf8'), /unset/);
 });

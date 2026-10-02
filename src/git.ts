@@ -236,6 +236,23 @@ export async function stashesFor(cwd: string, branch: string): Promise<StashEntr
   return out;
 }
 
+/**
+ * The branch a run is on, or will be on: the one it recorded, else the one a
+ * fresh run gets — or null when branch isolation is off (#223).
+ *
+ * **One expression, two callers.** `prepareGit` creates the branch and the
+ * worktree site tells a setup script its name as `VIBE_BRANCH`; if each spelled
+ * `branchPrefix + id` itself, the script and the loop would disagree the first
+ * time either changed.
+ */
+export function runBranch(
+  cfg: { git: { useBranch: boolean; branchPrefix: string } },
+  state: { id: string; branch: string | null },
+): string | null {
+  if (!cfg.git.useBranch) return null;
+  return state.branch ?? `${cfg.git.branchPrefix}${state.id}`;
+}
+
 export async function createBranch(cwd: string, name: string): Promise<void> {
   await git(cwd, ['checkout', '-b', name]);
   detail(`on branch ${name}`);

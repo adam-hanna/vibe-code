@@ -123,6 +123,73 @@ export function addProject(list: readonly string[], dir: string): readonly strin
   return [...list, trimmed];
 }
 
+/** A project, and the projects that live inside its directory. */
+export interface ProjectNode {
+  dir: string;
+  children: readonly ProjectNode[];
+}
+
+/**
+ * The project list as a tree: a directory inside another project is drawn under it (#223).
+ *
+ * **A worktree is a directory inside the repository it was made from**, and a run
+ * started in one moves the window there — so `rememberRepo` added it to this list
+ * as a project of its own, a top-level row named after a branch nobody added.
+ * Reported as *"when I start a run via the 'talk it through' path, it doesn't
+ * show up as a run under one of my projects"*: the run was there, filed under a
+ * project the person had never seen.
+ *
+ * Nothing is merged and nothing is moved. A nested project keeps its own row and
+ * its own archive, because `.vibe/runs` lives in the directory the run was given
+ * and a parent that read its children's archives would be a second answer to
+ * which runs a directory holds. It is only **drawn** where it lives.
+ *
+ * The parent is the **nearest** containing project, so a worktree inside a repo
+ * inside a workspace lands under the repo. Containment is `dirKey`'s, so the
+ * comparison has the same case and separator rules as every other one in this
+ * file. Order is the list's own, at every level.
+ */
+export function nestProjects(list: readonly string[]): readonly ProjectNode[] {
+  const keys = list.map(dirKey);
+  const parentOf = keys.map((key, i) => {
+    let best = -1;
+    keys.forEach((other, j) => {
+      if (j === i || other === key || !key.startsWith(`${other}/`)) return;
+      if (best === -1 || other.length > (keys[best] ?? '').length) best = j;
+    });
+    return best;
+  });
+  const build = (parent: number): ProjectNode[] =>
+    list.flatMap((dir, i) =>
+      parentOf[i] === parent ? [{ dir, children: build(i) }] : [],
+    );
+  return build(-1);
+}
+
+/** Whether `dir` is `root` or anywhere inside it. */
+export function within(root: string, dir: string): boolean {
+  const r = dirKey(root);
+  const d = dirKey(dir);
+  return d === r || d.startsWith(`${r}/`);
+}
+
+/**
+ * How a nested project is named under its parent: its path below the parent's,
+ * as stored, so `.worktrees/gh-236` rather than a bare branch-shaped folder name.
+ * Falls back to the folder name when the spellings do not line up character for
+ * character, which `dirKey`'s case folding allows — a label is not worth
+ * guessing a slice for.
+ */
+export function relativeTo(parent: string, dir: string): string {
+  const head = parent.trim().replace(/[\\/]+$/, '');
+  const body = dir.trim();
+  if (body.length > head.length && dirKey(body.slice(0, head.length)) === dirKey(head)) {
+    const rest = body.slice(head.length).replace(/^[\\/]+/, '').replace(/[\\/]+$/, '');
+    if (rest !== '') return rest;
+  }
+  return projectName(dir);
+}
+
 export function removeProject(list: readonly string[], dir: string): readonly string[] {
   const key = dirKey(dir);
   return list.filter((d) => dirKey(d) !== key);

@@ -1,6 +1,7 @@
 import { FENCE } from './emit';
 import { declare, describeRun } from './tools';
 import type { Launched } from '../cockpit/argv';
+import type { PilotAccess } from './access';
 import type { Run } from '../cockpit/model';
 
 /**
@@ -60,7 +61,9 @@ const WHO = [
   '',
   'You can read this run and you can propose four things: a launch, an answer to',
   'a gate the loop is holding at, a command to run in the repository, and a stop',
-  'for a command you started. You cannot fire any of them. A proposal is drawn',
+  'for a command you started. You cannot fire any of them yourself, with one',
+  'exception the person sets: commands their settings let run without asking',
+  '(see "What runs without asking" below). Everything else is a proposal drawn',
   'for the person beside you, with the exact argv, decision or command, and they',
   'run it or they do not - so say what you would do and why, and let them press',
   'it. Until they answer, the conversation cannot continue.',
@@ -111,7 +114,8 @@ const WHO = [
  * by hand is a different and much narrower thing than having it.
  */
 const WHAT_YOU_CAN_READ = [
-  'You have the CLI\'s own Read, Glob and Grep, confined to the repository above.',
+  'You have the CLI\'s own Read, Glob and Grep, confined to the repository above',
+  'and to any directory listed under "What runs without asking" below.',
   'That includes .vibe/runs, which is inside it: a past run\'s PLAN.md,',
   'NEEDS-INPUT.md and FOLLOW-UPS.md are ordinary files and reading one is often',
   'the fastest way to find out why an earlier attempt stalled. There is still no',
@@ -240,6 +244,12 @@ const INTAKE = [
   'get to read this chat, and a decision that lives only here is a decision the',
   'run will make again, differently. Say whether it should be plan-only.',
   '',
+  'The run starts in this repository, and only here. Never create a git worktree',
+  'or a branch for it, even when asked to "work in a worktree": vibe makes the',
+  'worktree itself when the project\'s git.worktree setting is on, and keeps the',
+  'run\'s record in the repository, where pruning the worktree cannot take it. If',
+  'the person wants one and the setting is off, say so and point them at Settings.',
+  '',
   'The person still presses the button. What you are deciding is when to put it',
   'in front of them.',
 ].join('\n');
@@ -341,6 +351,52 @@ function howToCall(): string {
 }
 
 /**
+ * What runs without a card, and where the pilot may reach (#223).
+ *
+ * Said every turn, because it is a setting the person can change mid-conversation
+ * and a model that believed `git status` still needed a press would keep asking
+ * for one. Said **as the boundary it is**: a command the list does not cover is
+ * still a proposal, and a model that thought otherwise would describe as done a
+ * command that is waiting on somebody.
+ */
+export function accessNote(access: PilotAccess | null): string {
+  const lines = ['## What runs without asking', ''];
+  if (access === null) {
+    lines.push('Nothing: every command you propose is a card the person presses.');
+    return lines.join('\n');
+  }
+  if (access.yolo) {
+    lines.push(
+      'YOLO mode is on. Every run_command and stop_command runs the moment you call it,',
+      'with no card, and list_dir and read_file reach any directory on this machine.',
+      'start_run and answer_gate are still proposals. Be as careful as a person at a',
+      'terminal would be: nobody is checking a command before it runs.',
+    );
+  } else {
+    lines.push(
+      'These commands run the moment you call run_command with them, with no card - a',
+      'command matches when it starts with one of them, program first:',
+      '',
+      ...(access.safeCommands.length === 0 ? ['(none)'] : access.safeCommands.map((c) => `- ${c}`)),
+      '',
+      'Anything else is a proposal the person presses, and so is a matching command',
+      'that names a path outside the directories below or uses "..". You are told in',
+      'the tool result which of the two happened.',
+    );
+  }
+  lines.push(
+    '',
+    'list_dir and read_file run at once. They, and run_command\'s "directory", reach',
+    access.yolo
+      ? 'anywhere.'
+      : access.dirs.length === 0
+        ? 'the repository and nothing else.'
+        : `the repository and: ${access.dirs.join(', ')}.`,
+  );
+  return lines.join('\n');
+}
+
+/**
  * The system prompt for one turn.
  *
  * Pure, and takes everything it needs as arguments for the same reason `reduce`
@@ -356,6 +412,14 @@ export function systemPrompt(
   run: Run,
   launched: Launched | null,
   channel: 'native' | 'emitted' = 'native',
+  access: PilotAccess | null = null,
+  /**
+   * Whether this backend has file tools of its own (#223). True of the Claude
+   * CLI — `Read`, `Glob`, `Grep` — and of nothing else: the Codex CLI's are
+   * switched off (`src/pilotcodex.ts`) and a vendor's never existed, so both
+   * read through `list_dir` and `read_file`.
+   */
+  ownReads: boolean = channel === 'emitted',
 ): string {
   return [
     WHO,
@@ -378,9 +442,11 @@ export function systemPrompt(
     // themselves, because they *are* different: one has the repository and the
     // other has no filesystem at all. Saying the same sentence to both would
     // make it false for one of them, which is what it was.
-    channel === 'emitted'
+    ownReads
       ? WHAT_YOU_CAN_READ
-      : 'You have no filesystem access at all on this backend: you cannot open a file, and everything you know about this repository is in this prompt or comes back from a tool.',
+      : 'You read the disk through list_dir and read_file and nothing else: there is no other file access on this backend, and no shell.',
+    '',
+    accessNote(access),
     ...(channel === 'emitted' ? ['', howToCall()] : []),
   ].join('\n');
 }

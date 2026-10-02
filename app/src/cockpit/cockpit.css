@@ -370,6 +370,16 @@
   font: var(--type-label);
 }
 
+/* A run asked for and not started yet (#223): the word, on the right of the
+   row, so the row reads as a draft before anybody clicks it. */
+.v-nav__draft {
+  flex: none;
+  margin-left: auto;
+  font: var(--type-label);
+  color: var(--text-tertiary);
+  text-transform: lowercase;
+}
+
 /* The row's controls: pin, rename, delete on a run; new-run and remove on a
    project. Quiet until the row is under the pointer, because a list of twenty
    runs with sixty glyphs down its right edge is a list nobody can scan. */
@@ -432,6 +442,16 @@
   display: flex;
   flex-direction: column;
   padding-left: var(--space-4);
+}
+
+/* A project inside another's directory — a worktree, usually — drawn under it
+   (#223). It inherits the runs' indent, and the rule says the rows beneath
+   belong to the nested project rather than to its parent. */
+.v-nav__nested {
+  display: flex;
+  flex-direction: column;
+  margin-top: var(--space-1);
+  border-left: 1px solid var(--rule-inner);
 }
 
 .v-nav__more {
@@ -3208,19 +3228,6 @@
   gap: var(--space-2);
   font: var(--type-body-sm);
   color: var(--text-secondary);
-}
-
-/* The exact command, because it is the one thing definitely true about what
-   pressing the button will do. */
-.v-new__argv {
-  font: var(--type-mono-sm);
-  color: var(--text-secondary);
-  background: var(--surface-panel);
-  border: 1px solid var(--rule-inner);
-  padding: var(--space-2) var(--space-3);
-  margin: 0;
-  overflow-x: auto;
-  white-space: pre;
 }
 
 .v-new__foot {

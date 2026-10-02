@@ -2162,7 +2162,12 @@ function sayBranch(
   return { id: 'run_branch', data: { branch, why } };
 }
 
-async function prepareGit(
+/**
+ * Exported for `worktree.test.ts` only (#223): the case that a branch made as a
+ * ref before a worktree script ran is adopted rather than re-created needs the
+ * function itself, and the whole loop is a heavy way to reach one branch.
+ */
+export async function prepareGit(
   state: RunState,
   cfg: Config,
   cwd: string,
@@ -2261,8 +2266,28 @@ async function prepareGit(
       );
       return;
     }
-    const branch = `${cfg.git.branchPrefix}${state.id}`;
-    await git.createBranch(cwd, branch);
+    const branch = git.runBranch(cfg, state) ?? `${cfg.git.branchPrefix}${state.id}`;
+    // **It may already exist**, and only for one reason (#223): a run with a
+    // worktree has its branch created as a ref before the setup script runs, so
+    // the script can be told `VIBE_BRANCH` and put the worktree on it. Adopt it
+    // rather than `checkout -b` it again, which would fail on a branch that is
+    // there. Run ids are unique, so nothing else leaves one of these behind.
+    if (await git.branchExists(cwd, branch)) {
+      if ((await git.currentBranch(cwd)) !== branch) {
+        const result = await git.checkoutBranch(cwd, branch);
+        if (!result.ok) {
+          throw new Escalation(
+            EXIT.ERROR,
+            `Run ${state.id} could not be put on its branch "${branch}": ${result.error}\n` +
+              'Nothing has run and no turn was dispatched. If the worktree setup command checked ' +
+              'it out somewhere else, check it out in the worktree instead (git worktree add ' +
+              '"$VIBE_WORKTREE" "$VIBE_BRANCH"), then resume.',
+          );
+        }
+      }
+    } else {
+      await git.createBranch(cwd, branch);
+    }
     state.branch = branch;
     saveState(state);
     log.ok(`Isolated on branch ${branch}`, sayBranch(branch, null));

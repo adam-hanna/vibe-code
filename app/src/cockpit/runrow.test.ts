@@ -208,8 +208,11 @@ describe('the window points at the run it is showing', () => {
     // live run's `.vibe/runs/<id>` was being looked for under whichever project
     // had most recently been clicked — and a pane that finds nothing says *no
     // plans yet*, which is indistinguishable from a planner still working.
+    //
+    // A draft on screen comes before the live run (#223): it has no run yet, and
+    // its project is the one the pilot and the panes belong to while it is open.
     expect(cockpit).toMatch(
-      /const shownDir = viewing\?\.dir \?\? run\.identity\?\.repo \?\? repoDir/,
+      /const shownDir = viewing\?\.dir \?\? drafting\?\.dir \?\? run\.identity\?\.repo \?\? repoDir/,
     );
   });
 
@@ -360,15 +363,20 @@ describe('a project section follows where the window is pointed (#223)', () => {
    * a later edit would get wrong — which is why the negative below matters more
    * than the positive.
    */
+  // Keyed on `holds` rather than `current` since a worktree is drawn inside the
+  // project it was made from: a run started in one points the window at the
+  // worktree, and the parent section has to open too or the run is inside a
+  // closed folder — the same report as before, one level down.
   const effect = sidebar.slice(
-    sidebar.indexOf('const wasCurrent = useRef(current);'),
-    sidebar.indexOf('}, [current]);') + '}, [current]);'.length,
+    sidebar.indexOf('const wasCurrent = useRef(holds);'),
+    sidebar.indexOf('}, [holds]);') + '}, [holds]);'.length,
   );
 
   test('becoming current opens the section, not only starting that way', () => {
-    expect(effect).toContain('useRef(current)');
-    expect(effect).toContain('if (current && !wasCurrent.current) setOpen(true);');
-    expect(effect).toContain('}, [current]);');
+    expect(effect).toContain('useRef(holds)');
+    expect(effect).toContain('if (holds && !wasCurrent.current) setOpen(true);');
+    expect(effect).toContain('}, [holds]);');
+    expect(sidebar).toContain('const [open, setOpen] = useState(holds);');
   });
 
   test('it fires on the transition, so a deliberate collapse is respected', () => {
@@ -376,7 +384,7 @@ describe('a project section follows where the window is pointed (#223)', () => {
     // re-open a section somebody had just collapsed, once a second, for as long as
     // the window stayed pointed at it — a fix that replaces one invisible
     // behaviour with a visibly annoying one.
-    expect(effect).not.toMatch(/setOpen\(current\)/);
+    expect(effect).not.toMatch(/setOpen\((current|holds)\)/);
     // And it only ever opens. Nothing here closes a section on the way out, because
     // leaving a project is not a request to hide its runs.
     expect(effect).not.toMatch(/setOpen\(false\)/);
