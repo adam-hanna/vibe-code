@@ -59,6 +59,24 @@ describe('the safe list', () => {
     expect(safeMatch('git', ['status'], '/elsewhere', REPO, SAFE)).toBeNull();
   });
 
+  test('nothing under .git runs without a card, so a copy cannot plant a hook', () => {
+    // `cp evil.sh .git/hooks/pre-commit`, then a safe-listed `git commit`, would
+    // run code nobody approved (#223).
+    const files: PilotAccess = { ...SAFE, safeCommands: ['cp', 'cat', 'git commit'] };
+    expect(safeMatch('cp', ['evil.sh', '.git/hooks/pre-commit'], REPO, REPO, files)).toBeNull();
+    expect(safeMatch('cp', ['evil.sh', 'sub/.GIT/hooks/x'], REPO, REPO, files)).toBeNull();
+    expect(safeMatch('cat', ['--file=.git/config'], REPO, REPO, files)).toBeNull();
+    expect(safeMatch('cp', ['a.txt', 'b.txt'], REPO, REPO, files)).toBe('cp');
+    expect(safeMatch('cat', ['.gitignore'], REPO, REPO, files)).toBe('cat');
+  });
+
+  test('the pilot picker names the vendor, and Settings names the road', () => {
+    // *"you don't need to say 'codex (subscription)'… The settings page
+    // dictates if the cli or api key is used"* (#223).
+    const picker = pilotPane.slice(pilotPane.indexOf('{keys.PROVIDERS.map((v) => ('));
+    expect(picker.slice(0, 200)).toContain('{keys.PROVIDER_NAME[v]}');
+  });
+
   test('an empty list runs nothing', () => {
     expect(safeMatch('git', ['status'], REPO, REPO, NO_ACCESS)).toBeNull();
   });

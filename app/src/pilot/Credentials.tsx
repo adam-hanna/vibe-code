@@ -15,11 +15,13 @@ import type { KeyStatus, Provider } from './keys';
  * openAI: (1) subscription, (2) api key"*, so each vendor is a card with that
  * switch, and the card shows what the chosen road needs:
  *
- * - **Subscription** — the CLI you are already logged into: `claude` for
- *   Anthropic, `codex` for OpenAI. Nothing is billed. The card says how vibe
- *   finds it and what it found, and takes a path when the search is wrong.
- * - **API key** — a key from the OS keychain, billed to you. The entry is the one
- *   this file has always had.
+ * - **Subscription** — the CLI's own login: `claude` for Anthropic, `codex` for
+ *   OpenAI. Nothing is billed.
+ * - **API key** — a key from the OS keychain, billed to you, for runs and the
+ *   pilot alike. The entry is the one this file has always had.
+ *
+ * Either way the card says how vibe finds the CLI and what it found, and takes a
+ * path when the search is wrong.
  *
  * ## What the key entry may know
  *
@@ -30,15 +32,21 @@ import type { KeyStatus, Provider } from './keys';
  * edit affordance, because editing implies reading something back and nothing
  * here can.
  *
- * ## The CLI path is not only the pilot's
+ * ## One road per vendor, for everything
  *
- * A run's agents are always these two CLIs, on your subscriptions, whichever road
- * the pilot takes — so the path is shown on the API card too, as a line, because
- * a run that cannot find `codex` fails the same way whether or not the pilot uses
- * a key.
+ * *"If we have api keys set, we should use them everywhere (pilot, runs, etc).
+ * Same for subscriptions."* The road is not the pilot's: it decides how every
+ * `claude` or `codex` child is authenticated as well (`src/auth.ts`). A run is
+ * always one of those two CLIs whichever road is chosen, so where vibe found the
+ * CLI is shown on both.
  */
 
 const CLI_OF: Readonly<Record<Provider, 'claude' | 'codex'>> = { anthropic: 'claude', openai: 'codex' };
+/** The variable a run's CLI is handed the key in (see `src/auth.ts`). */
+const KEY_VAR: Readonly<Record<Provider, string>> = {
+  anthropic: 'ANTHROPIC_API_KEY',
+  openai: 'CODEX_API_KEY',
+};
 const ENV_OF: Readonly<Record<Provider, string>> = {
   anthropic: 'VIBE_CLAUDE_BIN',
   openai: 'VIBE_CODEX_BIN',
@@ -201,31 +209,35 @@ export function Vendor({ vendor, route, onRoute, cli, onCliPath, status, onKeysC
       </div>
 
       {route === 'subscription' ? (
-        <>
-          <div className="v-cred__note">
-            The pilot runs on the <code>{bin}</code> CLI you are already logged into, and nothing is
-            billed. vibe looks for it in this order: <code>{ENV_OF[vendor]}</code> if that is set,
-            then the path below if you give one, then your <code>PATH</code> — preferring a real
-            executable over a script shim — then the places {bin} usually installs to. If it found
-            the wrong one, or none, give the path to the executable.
-          </div>
-          <Found cli={cli} />
-          <PathEntry cli={cli} disabled={disabled} onSave={onCliPath} />
-        </>
+        <div className="v-cred__note">
+          Everything vibe does with {name} — every run turn and the pilot — goes through the{' '}
+          <code>{bin}</code> CLI you are already logged into, and nothing is billed. An API key in
+          your environment is removed from what <code>{bin}</code> sees, so it cannot quietly take
+          over from the login.
+        </div>
       ) : (
         <>
           <div className="v-cred__note">
-            For the API-backed pilot only, billed to your key. Keys are held in the OS keychain and
-            never written to a project; nothing in this window can read one back, because the
-            request is made by the app itself.
+            Everything vibe does with {name} is billed to this key: every run turn goes through{' '}
+            <code>{bin}</code> with the key as <code>{KEY_VAR[vendor]}</code>, and the pilot calls
+            the API with it directly. Keys are held in the OS keychain and never written to a
+            project; nothing in this window can read one back. With no key stored here, a{' '}
+            <code>{KEY_VAR[vendor]}</code> already in vibe&apos;s environment is used instead.
           </div>
           {status === null ? null : <KeyEntry status={status} onChanged={onKeysChanged} />}
-          <div className="v-cred__note">
-            Runs still use the <code>{bin}</code> CLI on your subscription
-            {cli.found === null ? ', and it was not found — switch to subscription to give its path.' : <> — found at <code>{cli.found}</code>.</>}
-          </div>
         </>
       )}
+
+      {/* The CLI on both roads: a run is always a `claude` or `codex` child,
+          and the road only decides how that child is authenticated. */}
+      <div className="v-cred__note">
+        vibe looks for <code>{bin}</code> in this order: <code>{ENV_OF[vendor]}</code> if that is
+        set, then the path below if you give one, then your <code>PATH</code> — preferring a real
+        executable over a script shim — then the places {bin} usually installs to. If it found the
+        wrong one, or none, give the path to the executable.
+      </div>
+      <Found cli={cli} />
+      <PathEntry cli={cli} disabled={disabled} onSave={onCliPath} />
     </div>
   );
 }

@@ -6,6 +6,7 @@ import corePackage from '../../../package.json?raw';
 import coreLock from '../../../package-lock.json?raw';
 import rust from '../../src-tauri/src/keys.rs?raw';
 import lib from '../../src-tauri/src/lib.rs?raw';
+import hostRs from '../../src-tauri/src/host.rs?raw';
 import defaultCapability from '../../src-tauri/capabilities/default.json?raw';
 import pick from '../cockpit/pick.ts?raw';
 import pilotMod from '../../src-tauri/src/pilot/mod.rs?raw';
@@ -112,6 +113,20 @@ describe('the webview can store a key and can never read one', () => {
     const callers = [...pilotMod.matchAll(/keys::read\(/g)];
     expect(callers.length).toBe(1);
     expect(pilotMod).toContain('fn drive(');
+  });
+
+  test('the second reader hands the keys to the host, and only there', () => {
+    // The question the test above says to ask, asked (#223): the key HAS grown a
+    // second lifetime, because runs are billed to it too — *"If we have api keys
+    // set, we should use them everywhere"* — and a run is a child of the host.
+    // So the one other caller is `send_keys`, writing to the host's stdin
+    // beside a secret the window never sees, and it logs nothing.
+    const callers = [...hostRs.matchAll(/keys::read\(/g)];
+    expect(callers.length).toBe(1);
+    const fn = hostRs.slice(hostRs.indexOf('pub fn send_keys('));
+    const body = fn.slice(0, fn.indexOf('\n    }\n'));
+    expect(body).toContain('"secret": running.secret');
+    expect(body).not.toMatch(/applog|emit\(/);
   });
 
   test('every tool is a host request this window already makes', () => {

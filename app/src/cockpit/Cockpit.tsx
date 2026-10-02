@@ -391,6 +391,18 @@ export function Cockpit() {
     // output pane has nothing in it before a run anyway.
   >('pilot');
   /**
+   * Which settings the settings screen is showing (#223): the left bar's ⚙ is
+   * every project's, a project row's ⚙ is that project's own. Two doors to one
+   * screen rather than a switch on it — *"I want the global settings to be
+   * accessed via the 'settings' on the left bar… a settings icon on the
+   * project dropdown row… where project level settings live."*
+   */
+  const [settingsScope, setSettingsScope] = useState<'global' | 'project'>('global');
+  const openSettings = useCallback((scope: 'global' | 'project') => {
+    setSettingsScope(scope);
+    setTab('settings');
+  }, []);
+  /**
    * The round a navigation asked for, or null (#223).
    *
    * **Beside the tab rather than folded into it**, because they answer two
@@ -1172,8 +1184,8 @@ export function Cockpit() {
               </button>
               <button
                 className="v-side__tool"
-                onClick={() => setTab('settings')}
-                title="Project settings"
+                onClick={() => openSettings('global')}
+                title="Settings for all projects"
               >
                 ⚙
               </button>
@@ -1203,7 +1215,13 @@ export function Cockpit() {
               rememberRepo(next);
               setComposing({ dir: next, locked: true });
             }}
-            onSettings={() => setTab('settings')}
+            onSettings={() => openSettings('global')}
+            // Points the window at the project first, so the settings shown are
+            // the ones for the row that was pressed.
+            onProjectSettings={(next) => {
+              rememberRepo(next);
+              openSettings('project');
+            }}
             // `1b` in the main pane, which is where a lock can be overruled with
             // a confirmation. A sidebar row must not be a second way to force.
             onRuns={(next) => {
@@ -1428,6 +1446,10 @@ export function Cockpit() {
           )}
           {tab === 'settings' && (
             <Settings
+              // Remounted per file, so nothing typed into one form survives
+              // into the other.
+              key={`${settingsScope}:${repoDir}`}
+              scope={settingsScope}
               dir={repoDir}
               scale={scale}
               onScale={rescale}

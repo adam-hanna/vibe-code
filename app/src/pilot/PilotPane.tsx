@@ -1539,9 +1539,12 @@ ${frame.text}`, turn, origin.current))) {
           // The session and the model follow in the effect on `provider`.
           onChange={(e) => setVendor(e.target.value === 'openai' ? 'openai' : 'anthropic')}
         >
+          {/* The vendor alone (#223): *"you don't need to say 'codex
+              (subscription)'… The settings page dictates if the cli or api key
+              is used."* Which road is said once, in Settings, not twice. */}
           {keys.PROVIDERS.map((v) => (
             <option key={v} value={v}>
-              {BACKEND_NAME[backendFor(v, access ?? NO_ACCESS)]}
+              {keys.PROVIDER_NAME[v]}
             </option>
           ))}
         </select>

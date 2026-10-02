@@ -1,6 +1,7 @@
 import { attachSpend } from '@src/charge.js';
 import { attachEnding, describeEnding, resolveBin, run } from '@src/proc.js';
 import { configuredBin } from '@src/clipaths.js';
+import { agentEnv } from '@src/auth.js';
 import type { ChildEnding, RunFn } from '@src/proc.js';
 import { detail, warn } from '@src/log.js';
 import { createHeartbeat, parseClaudeLine, withHeartbeat } from '@src/progress.js';
@@ -216,6 +217,8 @@ export async function claudeTurn(
       input: prompt,
       cwd,
       timeoutMs,
+      // Billed to the road Settings names for Anthropic (#223).
+      env: agentEnv('claude'),
       // One of the two children a person may stop mid-flight (#209). Off by
       // default everywhere else on purpose: `git`, the verification gate and
       // the app-server client all come through the same `run()`, and none of

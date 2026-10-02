@@ -4,6 +4,7 @@ import { refused as commandRefused, startCommand, stopAllCommands, stopCommand }
 import { pilotChat } from '@src/pilotchat.js';
 import { pilotCodex } from '@src/pilotcodex.js';
 import { cliStatus } from '@src/clipaths.js';
+import { acceptKeys } from '@src/heldkeys.js';
 import { pilotFs, pilotRoots, readPilotAccess, resolvedAccess } from '@src/pilotaccess.js';
 import type { PilotAccess } from '@src/pilotaccess.js';
 import { promptBlocks } from '@src/prompts.js';
@@ -374,6 +375,23 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
   };
 
   const receive = (line: string): void => {
+    // The app's keychain read, before `decode` and outside the protocol (#223):
+    // it carries no id, answers nothing and is never echoed - a refusal says
+    // only that it was refused, because the line holds a key. See `heldkeys.ts`.
+    if (line.includes('"keys"')) {
+      let parsed: unknown = null;
+      try {
+        parsed = JSON.parse(line) as unknown;
+      } catch {
+        parsed = null;
+      }
+      if (typeof parsed === 'object' && parsed !== null && (parsed as Record<string, unknown>)['type'] === 'keys') {
+        if (!acceptKeys(parsed as Record<string, unknown>)) {
+          send({ type: 'error', id: null, message: 'a keys frame was refused' });
+        }
+        return;
+      }
+    }
     const read = decode(line);
     if (!read.ok) {
       send({ type: 'error', id: read.id, message: read.reason });

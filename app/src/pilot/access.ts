@@ -95,6 +95,9 @@ export function safeMatch(
     // `--output=/x` names a path too, so the part after `=` is read as well.
     for (const part of [arg, arg.slice(arg.indexOf('=') + 1)]) {
       if (/(^|[\\/])\.\.([\\/]|$)/.test(part)) return null;
+      // Nothing under `.git` (#223): `cp evil.sh .git/hooks/pre-commit` and
+      // then a safe-listed `git commit` would run code nobody approved.
+      if (/(^|[\\/])\.git([\\/]|$)/i.test(part)) return null;
       if (absolute(part) && !allowedDir(part, dir, access)) return null;
     }
   }

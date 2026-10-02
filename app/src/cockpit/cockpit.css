@@ -2861,6 +2861,14 @@
   gap: var(--space-2);
 }
 
+/* Which settings these are (#223): the screen is reached from two doors, and
+   this is what says which one. */
+.v-set__title {
+  font: var(--type-title);
+  color: var(--text-primary);
+  margin: 0;
+}
+
 .v-set__h {
   font: var(--type-section);
   letter-spacing: var(--track-section);

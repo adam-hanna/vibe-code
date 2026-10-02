@@ -180,11 +180,13 @@ test('the cli section is validated by name, and a project file may not set it', 
   assert.throws(() => writeConfigPatch(fresh, { cli: { codex: '/x' } }, 'project'), /sets cli/);
 });
 
-test('a pilot route that is not one of the two is refused', () => {
+test('a route that is not one of the two is refused', () => {
+  // The routes moved from `pilot` to `auth` when they began to cover runs as
+  // well (#223); the claim - only the two values, refused by name - is unchanged.
   const dir = mkdtempSync(path.join(os.tmpdir(), 'vibe-route-'));
   const global = path.join(dir, 'g.json');
   withEnv({ VIBE_GLOBAL_CONFIG: global }, () => {
-    writeConfigPatch(dir, { pilot: { openai: 'api' } }, 'global');
-    assert.throws(() => writeConfigPatch(dir, { pilot: { anthropic: 'keys' } }, 'global'), /pilot\.anthropic must be/);
+    writeConfigPatch(dir, { auth: { openai: 'api' } }, 'global');
+    assert.throws(() => writeConfigPatch(dir, { auth: { anthropic: 'keys' } }, 'global'), /auth\.anthropic must be/);
   });
 });

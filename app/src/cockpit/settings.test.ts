@@ -2,6 +2,7 @@ import { describe, expect, test } from 'vitest';
 import cockpit from './Cockpit.tsx?raw';
 import settings from './Settings.tsx?raw';
 import footer from './Footer.tsx?raw';
+import sidebar from './Sidebar.tsx?raw';
 import credentials from '../pilot/Credentials.tsx?raw';
 import { MAX, MIN, STEPS, readScale, writable } from './appearance';
 import { implementArgv } from './argv';
@@ -62,20 +63,22 @@ describe('how big the product is drawn', () => {
   });
 });
 
-describe('subscription against keys, which is two questions about two processes', () => {
-  test('a run’s agents are stated as always the subscription CLIs', () => {
-    // They are child processes inheriting your own logins, and vibe holds no
-    // credential for either. What became configurable (#223) is only WHERE the
-    // CLI is, asked for as *"give them an option to provide a path"* — so the
-    // screen still says no key reaches a run, and still points at the check.
-    expect(settings).toMatch(/Runs always use the <code>claude<\/code> and <code>codex<\/code> CLIs on your own/);
+describe('subscription against keys, one road per vendor', () => {
+  test('the road covers runs as well as the pilot', () => {
+    // Rewritten (#223). These pinned *"Runs always use the CLIs on your own
+    // subscriptions"* and a key *"for the API-backed pilot only"*, and that
+    // stopped being the contract at the owner's word: *"If we have api keys
+    // set, we should use them everywhere (pilot, runs, etc). Same for
+    // subscriptions."* What still holds is kept: the screen says what a road
+    // reaches, and still points at the check.
+    expect(settings).toMatch(/for runs and the pilot alike/);
     expect(settings).toMatch(/vibe doctor/);
-    expect(credentials).toMatch(/Runs still use the <code>\{bin\}<\/code> CLI on your subscription/);
+    expect(credentials).toMatch(/every run turn and the pilot/);
+    expect(credentials).toMatch(/billed to this key: every run turn goes through/);
   });
 
-  test('the keys are named as the pilot’s, and only on the API road', () => {
-    expect(settings).toMatch(/the pilot works with none of them/);
-    expect(credentials).toMatch(/For the API-backed pilot only/);
+  test('the road is saved where only this machine can set it', () => {
+    expect(settings).toContain('write({ auth: { [vendor]: next } }, \'global\')');
   });
 
   test('no key never reads as “the pilot cannot run”', () => {
@@ -223,5 +226,45 @@ describe('one form, pointed at one of two files (#223)', () => {
     const block = settings.slice(settings.indexOf('where the run does its work'));
     expect(block).toContain('$VIBE_WORKTREE');
     expect(block).toContain('$VIBE_BRANCH');
+  });
+});
+
+describe('which view each setting lives in (#223)', () => {
+  // *"we talked about moving some settings out of global and into project scope
+  // (e.g. test command, whether to use worktrees, etc)"*.
+  const project = settings.indexOf("{scope === 'global' ? (\n        <p className=\"v-set__note\">\n          The test command");
+  const machine = settings.indexOf("{scope === 'project' ? (\n        <p className=\"v-set__note\">\n          How each vendor");
+
+  test('the test command and the worktree are drawn only for this project', () => {
+    expect(project).toBeGreaterThan(-1);
+    const block = settings.slice(project, settings.indexOf('where the loop hands control back'));
+    expect(block).toContain('how the run checks its work');
+    expect(block).toContain('where the run does its work');
+  });
+
+  test('the vendors, the CLIs and the pilot are drawn only for all projects', () => {
+    expect(machine).toBeGreaterThan(-1);
+    const block = settings.slice(machine, settings.indexOf('how many rounds, and what it will accept'));
+    expect(block).toContain('Anthropic and OpenAI');
+    expect(block).toContain('what the pilot may do without asking');
+    expect(block).toContain('how this is drawn');
+  });
+});
+
+
+describe('two doors to the settings, not a switch on one screen (#223)', () => {
+  // *"I want the global settings to be accessed via the 'settings' on the left
+  // bar. Then… a settings icon on the project dropdown row… where project level
+  // settings live."*
+  test('the screen is told which file it edits, and offers no switch', () => {
+    expect(settings).toContain("scope: 'project' | 'global';");
+    expect(settings).not.toMatch(/setScope|label: 'all projects'/);
+  });
+
+  test('the left bar opens every project’s, and a project row opens its own', () => {
+    expect(cockpit).toContain("onSettings={() => openSettings('global')}");
+    expect(cockpit).toMatch(/onProjectSettings=\{\(next\) => \{\s*rememberRepo\(next\);\s*openSettings\('project'\);/);
+    const row = sidebar.slice(sidebar.indexOf('function Project('));
+    expect(row).toContain('onClick={() => onProjectSettings(dir)}');
   });
 });

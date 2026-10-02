@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
-import { Button, MetaChip, Segmented, StateKicker } from '../design';
+import { Button, MetaChip, StateKicker } from '../design';
 import * as host from '../host';
 import { KeychainFailure, Vendor } from '../pilot/Credentials';
 import type { PilotLimits } from '../pilot/ledger';
 import { Confirm } from './Confirm';
 import { Section } from './Disclosure';
 import { STEPS } from './appearance';
+import { projectName } from './projects';
 import { DRAFTS_KEY, draftsFor, readDrafts, removeDraft, saveDraft } from './drafts';
 import type { Draft } from './drafts';
 import type { KeyStatus } from '../pilot/keys';
@@ -36,22 +37,17 @@ import type { ConfigFrame, PromptsFrame } from '../host';
  *   `validateConfig` reports bad values **by name**, which is the one thing that
  *   must never happen to a secret.
  *
- * ## Subscription against keys, which is the question this screen has to answer
+ * ## Subscription against keys, which is one question per vendor
  *
- * It is not one question, it is two, about two different things, and conflating
- * them is what made the old Keys tab read as though the product needed an API
- * key to work at all:
- *
- * - **A run's agents are always the subscription.** `claude` and `codex` are
- *   child processes that inherit whatever you are already logged into — vibe
- *   installs neither and holds no credential for either. There is no key to
- *   enter and nothing on this screen to set, which is why the section states it
- *   rather than offering a control.
- * - **The pilot chooses, per conversation.** On the subscription it is a
- *   `claude -p` child like any turn, and bills nothing. On an API key it is an
- *   HTTP request this app makes, money moves, and `ledger.ts` is the only place
- *   in the product where a dollar is a dollar. The keys below are for that
- *   second case **only** — the pilot works with none of them.
+ * It used to be two questions about two processes — a run's agents were always
+ * your subscriptions and only the pilot could take a key — and the screen said
+ * so. That was reversed at the owner's word (#223): *"If we have api keys set,
+ * we should use them everywhere (pilot, runs, etc). Same for subscriptions."*
+ * So each vendor has one road, `auth.<vendor>` in the settings for all
+ * projects, and `src/auth.ts` applies it to every `claude` or `codex` child — a
+ * run turn, a preflight probe, the subscription pilot. On a key, the pilot is an
+ * HTTP request this app makes and `ledger.ts` prices it; a run on a key is still
+ * counted in tokens, because the CLI is what reports it.
  *
  * ## Why the gate matrix is the centre of the project section
  *
@@ -551,6 +547,7 @@ function usePromptBlocks(open: boolean): {
   return { blocks, failure, loading, reload: () => setAttempt((n) => n + 1) };
 }
 export function Settings({
+  scope,
   dir,
   scale,
   onScale,
@@ -561,6 +558,13 @@ export function Settings({
   onLimits,
   onSaved,
 }: {
+  /**
+   * Which file this screen edits (#223), decided by the door it was opened
+   * from: the left bar's ⚙ is the settings for every project, a project row's
+   * ⚙ is that project's `vibe.config.json`. It was a switch at the top of one
+   * screen, and the reply was that the two belong in two places.
+   */
+  scope: 'project' | 'global';
   dir: string;
   /** How big the product is drawn. Window state — see `appearance.ts`. */
   scale: number;
@@ -620,15 +624,6 @@ export function Settings({
     }
   }, []);
 
-  /**
-   * Which file this screen is editing (#223): the settings for every project, or
-   * this project's own. *"Some settings are global… some are project specific"*,
-   * and the rule chosen is that any key can be set at either level and the
-   * project wins — so this is one form pointed at one of two files, not two
-   * forms. Not persisted: which file you are editing should be a choice made
-   * while looking at the switch, every time.
-   */
-  const [scope, setScope] = useState<'project' | 'global'>('project');
   /** Whether the dialog in front of switching YOLO on is open (#223). */
   const [askYolo, setAskYolo] = useState(false);
 
@@ -673,7 +668,7 @@ export function Settings({
     },
     [dir, onSaved],
   );
-  /** A save to whichever file the switch names. */
+  /** A save to whichever file this screen was opened for. */
   const save = useCallback((patch: Record<string, unknown>) => write(patch, scope), [write, scope]);
 
   if (frame === null) {
@@ -749,24 +744,16 @@ export function Settings({
 
   return (
     <div className="v-set">
-      {/* **Which file, chosen here and said here** (#223). The switch sits
-          above everything it changes, and the line beside it names the file a
-          save will write, because "all projects" and "this project" are two
-          different files and nothing else on the screen looks different. */}
-      <Segmented
-        cells={[
-          { value: 'project', label: 'this project' },
-          { value: 'global', label: 'all projects', unavailable: frame.globalPath === null },
-        ]}
-        value={scope}
-        onChange={(v) => setScope(v === 'global' ? 'global' : 'project')}
-      />
+      {/* **Which file, said here** (#223). Chosen by the door this screen was
+          opened from, so the heading and the line under it are what tell the two
+          apart — nothing else on the screen looks different. */}
+      <h2 className="v-set__title">
+        {scope === 'global' ? 'Settings for all projects' : `Settings for ${projectName(dir)}`}
+      </h2>
       <p className="v-set__note">
         {scope === 'project'
-          ? 'Settings for this repository. Anything left alone here comes from your settings for all projects, and failing that from vibe’s own default — the chip beside each value says which.'
-          : 'Your settings for every project on this machine. A project that sets a key in its own file wins over what is set here, and the chip says when one does.'}{' '}
-        API keys, the type size and the pilot’s ceilings are this machine’s already and are the
-        same in both views.
+          ? 'This repository’s own settings, in its vibe.config.json. Anything left alone here comes from your settings for all projects, and failing that from vibe’s own default — the chip beside each value says which. The test command and the worktree are only ever set here.'
+          : 'Your settings for every project on this machine. How each vendor is reached, the CLIs and the pilot’s permissions are only ever set here; for the rest, a project that sets a key in its own file wins, and the chip says when one does.'}
       </p>
       <div className="v-set__head">
         <span>
@@ -800,237 +787,249 @@ export function Settings({
         <p className="v-set__note">saved to {saved}, and reread from it.</p>
       )}
 
-      {/* ---- this window ------------------------------------------------- */}
-      <section className="v-set__block">
-        <h3 className="v-set__h">how this is drawn</h3>
+      {/* **Each kind of setting in the one view it belongs to** (#223). This
+          machine's — how the window is drawn, how each vendor is reached, what
+          the pilot may do — appear only under "all projects", and how this
+          repository builds and tests only under "this project". The rest can
+          be set at either level, project winning. */}
+      {scope === 'project' ? (
         <p className="v-set__note">
-          This window, on this machine. It is not written to <code>vibe.config.json</code> — how
-          big you like your text is not a fact about any run, and that file is meant to be
-          committed.
+          How each vendor is reached, where the CLIs are, what the pilot may do without asking and
+          how this window is drawn are this machine&apos;s, for every project — they are under
+          Settings at the foot of the left bar.
         </p>
-        <div className="v-set__scale">
-          {STEPS.map((step) => (
-            <label key={step.scale} className="v-set__radio">
-              <input
-                type="radio"
-                name="type-scale"
-                checked={scale === step.scale}
-                onChange={() => onScale(step.scale)}
+      ) : (
+        <>
+          {/* ---- this window ------------------------------------------------- */}
+          <section className="v-set__block">
+            <h3 className="v-set__h">how this is drawn</h3>
+            <p className="v-set__note">
+              This window, on this machine. It is not written to <code>vibe.config.json</code> — how
+              big you like your text is not a fact about any run, and that file is meant to be
+              committed.
+            </p>
+            <div className="v-set__scale">
+              {STEPS.map((step) => (
+                <label key={step.scale} className="v-set__radio">
+                  <input
+                    type="radio"
+                    name="type-scale"
+                    checked={scale === step.scale}
+                    onChange={() => onScale(step.scale)}
+                  />
+                  <span style={{ fontSize: `calc(var(--size-body) * ${String(step.scale)})` }}>
+                    {step.label}
+                  </span>
+                </label>
+              ))}
+            </div>
+            {/* Every size at once, which is what keeps the ramp the spec chose. A
+                control that moved body text alone would leave headings where they
+                were and break the relationships that make a page readable. */}
+            <p className="v-set__note">
+              Every size moves together, so the proportions the design chose survive being scaled.
+              Nothing else about the look is configurable: there is one palette, and it is the one the
+              contrast gate is measured against.
+            </p>
+          </section>
+
+          {/* ---- how each vendor is reached (#223) ---------------------------- */}
+          <section className="v-set__block">
+            <h3 className="v-set__h">Anthropic and OpenAI</h3>
+            {/* **Two choices per vendor.** *"There should be two options for both
+                anthropic and openAI: (1) subscription, (2) api key."* It replaced
+                three paragraphs explaining that a run's agents and the pilot are two
+                different processes. The choice covers both — *"we should use them
+                everywhere (pilot, runs, etc)"* — and is this machine's, in the
+                settings for all projects; keys stay in the OS keychain. */}
+            <p className="v-set__note">
+              How vibe reaches each vendor — for runs and the pilot alike, in every project on this
+              machine — and where the <code>claude</code> and <code>codex</code> CLIs are when it
+              cannot find them. <code>vibe doctor</code> checks both.
+            </p>
+            <KeychainFailure failure={keyFailure} />
+            {(['anthropic', 'openai'] as const).map((vendor) => (
+              <Vendor
+                key={vendor}
+                vendor={vendor}
+                route={frame.pilot[vendor]}
+                onRoute={(next) => write({ auth: { [vendor]: next } }, 'global')}
+                cli={frame.clis[vendor === 'anthropic' ? 'claude' : 'codex']}
+                onCliPath={(next) =>
+                  write({ cli: { [vendor === 'anthropic' ? 'claude' : 'codex']: next } }, 'global')
+                }
+                status={statuses?.find((st) => st.provider === vendor) ?? null}
+                onKeysChanged={onKeysChanged}
+                disabled={busy || frame.globalPath === null}
               />
-              <span style={{ fontSize: `calc(var(--size-body) * ${String(step.scale)})` }}>
-                {step.label}
+            ))}
+            <h4 className="v-set__h4">the pilot&apos;s own ceiling</h4>
+            {/* **Moved here from beside the conversation** (#145 built it there,
+                #223 moved it): *"move pilot tokens and pilot $/day out of pilot chat
+                and into the same settings group"*. A ceiling is a setting, and this
+                was the only one in the product with no home on this screen. What
+                stays in the pane is the *reading* — what today has cost — because
+                that is about the conversation in front of you.
+
+                It is a **third** kind of setting on a screen that already names
+                three, and it lands in the second: this window's, in `localStorage`,
+                this machine only. Not the project's file, which is committed, and
+                not the keychain, which holds one kind of secret. */}
+            <div className="v-set__fact">
+              <span className="v-set__factname">not the run&apos;s</span>
+              <span>
+                These bound the <strong>conversation</strong>, not the loop. A pilot turn on an API key
+                is the one place in this product where a dollar is a dollar — money moves and the vendor
+                publishes the usage — where the run&apos;s two ceilings above are work-volume brakes on a
+                subscription that bills nothing. The two never sum, and a run is never stopped by these.
+                <span className="v-set__inline">
+                  <NumberField
+                    id="pilot-dailyTokens"
+                    value={limits.dailyTokens ?? undefined}
+                    disabled={false}
+                    onSave={(n) => onLimits({ ...limits, dailyTokens: n > 0 ? n : null })}
+                  />
+                  <span className="v-set__unit">tokens/day</span>
+                  <NumberField
+                    id="pilot-dailyUsd"
+                    value={limits.dailyUsd ?? undefined}
+                    disabled={false}
+                    onSave={(n) => onLimits({ ...limits, dailyUsd: n > 0 ? n : null })}
+                  />
+                  <span className="v-set__unit">$/day</span>
+                </span>
               </span>
-            </label>
-          ))}
-        </div>
-        {/* Every size at once, which is what keeps the ramp the spec chose. A
-            control that moved body text alone would leave headings where they
-            were and break the relationships that make a page readable. */}
-        <p className="v-set__note">
-          Every size moves together, so the proportions the design chose survive being scaled.
-          Nothing else about the look is configurable: there is one palette, and it is the one the
-          contrast gate is measured against.
-        </p>
-      </section>
+            </div>
+            <div className="v-set__fact">
+              <span className="v-set__factname">blank is no ceiling</span>
+              <span>
+                Both are off by default, and that is deliberate: a hard default cap on a conversation
+                stops you mid-sentence for no good reason. <strong>Per day</strong> rather than per
+                session, because a conversation has no natural end and a day is the window both
+                vendors&apos; own dashboards use. It gates the tool loop as well as the composer — a
+                chain answering itself is the unattended half, which is the half a spend limit is for.
+              </span>
+            </div>
+          </section>
 
-      {/* ---- how each vendor is reached (#223) ---------------------------- */}
-      <section className="v-set__block">
-        <h3 className="v-set__h">Anthropic and OpenAI</h3>
-        {/* **Two choices per vendor.** *"There should be two options for both
-            anthropic and openAI: (1) subscription, (2) api key."* It replaced
-            three paragraphs explaining that a run's agents and the pilot are two
-            different processes — true, and the card now carries the one part of
-            it a person acts on: runs always use the CLI, so its path is shown on
-            both roads. The choice is the pilot's and is this machine's, in the
-            settings for all projects; keys stay in the OS keychain. */}
-        <p className="v-set__note">
-          Runs always use the <code>claude</code> and <code>codex</code> CLIs on your own
-          subscriptions. This chooses how the pilot reaches each vendor, for every project on this
-          machine — and tells vibe where the CLIs are when it cannot find them. <code>vibe doctor</code>{' '}
-          checks both.
-        </p>
-        <KeychainFailure failure={keyFailure} />
-        {(['anthropic', 'openai'] as const).map((vendor) => (
-          <Vendor
-            key={vendor}
-            vendor={vendor}
-            route={frame.pilot[vendor]}
-            onRoute={(next) => write({ pilot: { [vendor]: next } }, 'global')}
-            cli={frame.clis[vendor === 'anthropic' ? 'claude' : 'codex']}
-            onCliPath={(next) =>
-              write({ cli: { [vendor === 'anthropic' ? 'claude' : 'codex']: next } }, 'global')
-            }
-            status={statuses?.find((st) => st.provider === vendor) ?? null}
-            onKeysChanged={onKeysChanged}
-            disabled={busy || frame.globalPath === null}
-          />
-        ))}
-        <h4 className="v-set__h4">the pilot&apos;s own ceiling</h4>
-        {/* **Moved here from beside the conversation** (#145 built it there,
-            #223 moved it): *"move pilot tokens and pilot $/day out of pilot chat
-            and into the same settings group"*. A ceiling is a setting, and this
-            was the only one in the product with no home on this screen. What
-            stays in the pane is the *reading* — what today has cost — because
-            that is about the conversation in front of you.
-
-            It is a **third** kind of setting on a screen that already names
-            three, and it lands in the second: this window's, in `localStorage`,
-            this machine only. Not the project's file, which is committed, and
-            not the keychain, which holds one kind of secret. */}
-        <div className="v-set__fact">
-          <span className="v-set__factname">not the run&apos;s</span>
-          <span>
-            These bound the <strong>conversation</strong>, not the loop. A pilot turn on an API key
-            is the one place in this product where a dollar is a dollar — money moves and the vendor
-            publishes the usage — where the run&apos;s two ceilings above are work-volume brakes on a
-            subscription that bills nothing. The two never sum, and a run is never stopped by these.
-            <span className="v-set__inline">
-              <NumberField
-                id="pilot-dailyTokens"
-                value={limits.dailyTokens ?? undefined}
-                disabled={false}
-                onSave={(n) => onLimits({ ...limits, dailyTokens: n > 0 ? n : null })}
-              />
-              <span className="v-set__unit">tokens/day</span>
-              <NumberField
-                id="pilot-dailyUsd"
-                value={limits.dailyUsd ?? undefined}
-                disabled={false}
-                onSave={(n) => onLimits({ ...limits, dailyUsd: n > 0 ? n : null })}
-              />
-              <span className="v-set__unit">$/day</span>
-            </span>
-          </span>
-        </div>
-        <div className="v-set__fact">
-          <span className="v-set__factname">blank is no ceiling</span>
-          <span>
-            Both are off by default, and that is deliberate: a hard default cap on a conversation
-            stops you mid-sentence for no good reason. <strong>Per day</strong> rather than per
-            session, because a conversation has no natural end and a day is the window both
-            vendors&apos; own dashboards use. It gates the tool loop as well as the composer — a
-            chain answering itself is the unattended half, which is the half a spend limit is for.
-          </span>
-        </div>
-      </section>
-
-      {/* ---- what the pilot may do without asking (#223) ------------------ */}
-      <section className="v-set__block">
-        <h3 className="v-set__h">what the pilot may do without asking</h3>
-        {/* **Always the settings for all projects, whichever file the switch
-            names.** A project's `vibe.config.json` is committed, so a repository
-            you clone could otherwise put `rm` on its own pilot's safe list or
-            switch YOLO on for itself; the core refuses a project file that sets
-            any of this, by name. */}
-        <p className="v-set__note">
-          These are this machine&apos;s, for every project, whichever file the switch above names —
-          a project&apos;s own file is committed, so a repository you clone cannot widen what its
-          pilot may do. Everything here still runs without a shell: one program and its arguments,
-          the same on Windows, Linux and macOS.
-        </p>
-        {frame.globalPath === null ? (
-          <p className="v-set__note">Global settings are switched off, so none of this can be set.</p>
-        ) : (
-          <>
-            <div className="v-set__row">
-              <label className="v-set__label" htmlFor="pilot-yolo">
-                YOLO mode
-              </label>
-              <select
-                id="pilot-yolo"
-                value={frame.pilot.yolo ? 'on' : 'off'}
-                disabled={busy}
-                onChange={(e) => {
-                  // Switching it on confirms; switching it off never does,
-                  // because narrowing what runs unasked costs nothing.
-                  if (e.target.value === 'on') setAskYolo(true);
-                  else write({ pilot: { yolo: false } }, 'global');
+          {/* ---- what the pilot may do without asking (#223) ------------------ */}
+          <section className="v-set__block">
+            <h3 className="v-set__h">what the pilot may do without asking</h3>
+            {/* **Only ever the settings for all projects.** A project's `vibe.config.json` is committed, so a repository
+                you clone could otherwise put `rm` on its own pilot's safe list or
+                switch YOLO on for itself; the core refuses a project file that sets
+                any of this, by name. */}
+            <p className="v-set__note">
+              These are this machine&apos;s, for every project — a project&apos;s own file is committed, so a repository you clone cannot widen what its
+              pilot may do. Everything here still runs without a shell: one program and its arguments,
+              the same on Windows, Linux and macOS.
+            </p>
+            {frame.globalPath === null ? (
+              <p className="v-set__note">Global settings are switched off, so none of this can be set.</p>
+            ) : (
+              <>
+                <div className="v-set__row">
+                  <label className="v-set__label" htmlFor="pilot-yolo">
+                    YOLO mode
+                  </label>
+                  <select
+                    id="pilot-yolo"
+                    value={frame.pilot.yolo ? 'on' : 'off'}
+                    disabled={busy}
+                    onChange={(e) => {
+                      // Switching it on confirms; switching it off never does,
+                      // because narrowing what runs unasked costs nothing.
+                      if (e.target.value === 'on') setAskYolo(true);
+                      else write({ pilot: { yolo: false } }, 'global');
+                    }}
+                  >
+                    <option value="off">off — the safe list below, and a card for everything else</option>
+                    <option value="on">on — every command runs, and the whole disk is readable</option>
+                  </select>
+                </div>
+                <div className="v-set__row">
+                  <label className="v-set__label" htmlFor="pilot-safe">
+                    commands that run without a card
+                    {/* `source` answers correctly in both views: a project file can
+                        never set this, so "this project overrides it" never shows. */}
+                    {source('pilot', 'safeCommands')}
+                  </label>
+                  <ListField
+                    id="pilot-safe"
+                    value={frame.pilot.safeCommands}
+                    placeholder="one per line, such as git status"
+                    disabled={busy || frame.pilot.yolo}
+                    onSave={(next) => write({ pilot: { safeCommands: next } }, 'global')}
+                  />
+                </div>
+                <p className="v-set__note">
+                  One per line: a program and the arguments it starts with, so <code>git commit</code>{' '}
+                  covers <code>git commit -m &quot;…&quot;</code>. A matching command still gets a card
+                  if it names a path outside the directories below, or anything under <code>.git</code>.{' '}
+                  <code>git commit</code> runs the repository&apos;s own hooks, which can be any code.{' '}
+                  <code>ls</code>, <code>cat</code>, <code>cp</code> and the rest are the ordinary
+                  programs, with no shell: Linux and macOS have them all, and Windows has them only
+                  where something like Git for Windows put them on <code>PATH</code>.
+                </p>
+                <div className="v-set__promptrow">
+                  <Button
+                    level="secondary"
+                    disabled={
+                      busy ||
+                      // Null is the default too: it is what this button writes.
+                      ((frame.globalRaw['pilot'] as Record<string, unknown> | undefined)?.['safeCommands'] ??
+                        null) === null
+                    }
+                    // Null clears it to the default, which then follows the
+                    // product forward when the default changes.
+                    onClick={() => write({ pilot: { safeCommands: null } }, 'global')}
+                  >
+                    use the default list
+                  </Button>
+                </div>
+                <div className="v-set__row">
+                  <label className="v-set__label" htmlFor="pilot-dirs">
+                    directories it may also read and run in
+                  </label>
+                  <ListField
+                    id="pilot-dirs"
+                    value={
+                      ((frame.globalRaw['pilot'] as Record<string, unknown> | undefined)?.['dirs'] as
+                        | readonly string[]
+                        | undefined) ?? []
+                    }
+                    placeholder="one absolute path per line, such as ~/code/shared"
+                    disabled={busy || frame.pilot.yolo}
+                    onSave={(next) => write({ pilot: { dirs: next } }, 'global')}
+                  />
+                </div>
+                <p className="v-set__note">
+                  The project it is talking about is always readable. These are added to it, for every
+                  project. YOLO mode replaces both with every disk on this machine.
+                </p>
+              </>
+            )}
+            {askYolo && (
+              <Confirm
+                kicker="YOLO mode"
+                title="Let the pilot run anything, anywhere?"
+                lead="Every command the pilot asks for runs the moment it asks, with no card, and it can read any file on this machine. Nobody checks a command before it runs."
+                facts={[
+                  { label: 'still needs your press', value: 'starting a run, and answering a gate' },
+                  { label: 'applies to', value: 'every project on this machine' },
+                  { label: 'still true', value: 'no shell — one program and its arguments per command' },
+                ]}
+                confirm="turn YOLO on"
+                onConfirm={() => {
+                  setAskYolo(false);
+                  write({ pilot: { yolo: true } }, 'global');
                 }}
-              >
-                <option value="off">off — the safe list below, and a card for everything else</option>
-                <option value="on">on — every command runs, and the whole disk is readable</option>
-              </select>
-            </div>
-            <div className="v-set__row">
-              <label className="v-set__label" htmlFor="pilot-safe">
-                commands that run without a card
-                {/* `source` answers correctly in both views: a project file can
-                    never set this, so "this project overrides it" never shows. */}
-                {source('pilot', 'safeCommands')}
-              </label>
-              <ListField
-                id="pilot-safe"
-                value={frame.pilot.safeCommands}
-                placeholder="one per line, such as git status"
-                disabled={busy || frame.pilot.yolo}
-                onSave={(next) => write({ pilot: { safeCommands: next } }, 'global')}
+                onCancel={() => setAskYolo(false)}
               />
-            </div>
-            <p className="v-set__note">
-              One per line: a program and the arguments it starts with, so <code>git commit</code>{' '}
-              covers <code>git commit -m &quot;…&quot;</code>. A matching command still gets a card
-              if it names a path outside the directories below. <code>git commit</code> runs the
-              repository&apos;s own hooks, which can be any code. <code>ls</code> and{' '}
-              <code>cat</code> are not on the default list because Windows has neither — the pilot
-              reads files with its own tools instead — but they work here wherever they exist.
-            </p>
-            <div className="v-set__promptrow">
-              <Button
-                level="secondary"
-                disabled={
-                  busy ||
-                  // Null is the default too: it is what this button writes.
-                  ((frame.globalRaw['pilot'] as Record<string, unknown> | undefined)?.['safeCommands'] ??
-                    null) === null
-                }
-                // Null clears it to the default, which then follows the
-                // product forward when the default changes.
-                onClick={() => write({ pilot: { safeCommands: null } }, 'global')}
-              >
-                use the default list
-              </Button>
-            </div>
-            <div className="v-set__row">
-              <label className="v-set__label" htmlFor="pilot-dirs">
-                directories it may also read and run in
-              </label>
-              <ListField
-                id="pilot-dirs"
-                value={
-                  ((frame.globalRaw['pilot'] as Record<string, unknown> | undefined)?.['dirs'] as
-                    | readonly string[]
-                    | undefined) ?? []
-                }
-                placeholder="one absolute path per line, such as ~/code/shared"
-                disabled={busy || frame.pilot.yolo}
-                onSave={(next) => write({ pilot: { dirs: next } }, 'global')}
-              />
-            </div>
-            <p className="v-set__note">
-              The project it is talking about is always readable. These are added to it, for every
-              project. YOLO mode replaces both with every disk on this machine.
-            </p>
-          </>
-        )}
-        {askYolo && (
-          <Confirm
-            kicker="YOLO mode"
-            title="Let the pilot run anything, anywhere?"
-            lead="Every command the pilot asks for runs the moment it asks, with no card, and it can read any file on this machine. Nobody checks a command before it runs."
-            facts={[
-              { label: 'still needs your press', value: 'starting a run, and answering a gate' },
-              { label: 'applies to', value: 'every project on this machine' },
-              { label: 'still true', value: 'no shell — one program and its arguments per command' },
-            ]}
-            confirm="turn YOLO on"
-            onConfirm={() => {
-              setAskYolo(false);
-              write({ pilot: { yolo: true } }, 'global');
-            }}
-            onCancel={() => setAskYolo(false)}
-          />
-        )}
-      </section>
+            )}
+          </section>
+        </>
+      )}
 
       {/* ---- how hard it tries, and what it will accept ------------------- */}
       <section className="v-set__block">
@@ -1291,191 +1290,201 @@ export function Settings({
         </table>
       </section>
 
-      <section className="v-set__block">
-        <h3 className="v-set__h">how the run checks its work</h3>
-        {/* **A required gate with nothing to run ends a finished run as
-            unverified** (#223). The core auto-detects only `npm test` from a
-            `package.json`, so on a Bazel or Make project the gate had no command,
-            the run spent two and a half hours and 42M tokens, and it ended exit 7
-            with nothing having tested the change. This field was reachable only
-            by hand-editing `vibe.config.json`. */}
+      {scope === 'global' ? (
         <p className="v-set__note">
-          After every implementation and fix round the loop runs this command and treats a
-          non-zero exit as a failure to fix. Left empty, vibe looks for a <code>test</code> script
-          in <code>package.json</code> and runs <code>npm test</code> — and finds nothing on any
-          other kind of project, which ends the run <em>unverified</em> (exit 7) after all the work
-          is done. Set it to whatever your suite is: <code>bazel test //tests/...</code>,{' '}
-          <code>make test</code>, <code>pytest</code>, <code>cargo test</code>.
+          The test command and the worktree settings are set per project, because how a repository
+          is built and tested is a fact about that repository — they are under the ⚙ on that
+          project&apos;s row in the left bar.
         </p>
-        <div className="v-set__row">
-          <label className="v-set__label" htmlFor="verify-enabled">
-            verify each round
-            {source('verify', 'enabled')}
-          </label>
-          <select
-            id="verify-enabled"
-            value={verify['enabled'] === false ? 'off' : 'on'}
-            disabled={busy}
-            onChange={(e) => save({ verify: { enabled: e.target.value === 'on' } })}
-          >
-            <option value="on">on — run the command after every round</option>
-            <option value="off">off — nothing checks the code</option>
-          </select>
-        </div>
-        {listsGates ? (
-          <p className="v-set__note">
-            This project lists its gates under <code>verify.gates</code> in{' '}
-            <code>vibe.config.json</code>, each with its own command, so they are edited there.
-          </p>
-        ) : (
-          <div className="v-set__row">
-            <label className="v-set__label" htmlFor="verify-command">
-              test command
-              {source('verify', 'command', 'auto-detect')}
-            </label>
-            <TextField
-              id="verify-command"
-              value={typeof verify['command'] === 'string' ? verify['command'] : ''}
-              placeholder="empty — npm test, if package.json has a test script"
-              disabled={busy}
-              // Empty is null, which is auto-detect — never an empty command,
-              // which the core refuses by name.
-              onSave={(next) => save({ verify: { command: next === '' ? null : next } })}
-            />
-          </div>
-        )}
-        <div className="v-set__row">
-          <label className="v-set__label" htmlFor="verify-runs">
-            times it must pass
-            {source('verify', 'runs')}
-          </label>
-          <NumberField
-            id="verify-runs"
-            value={typeof verify['runs'] === 'number' ? verify['runs'] : undefined}
-            disabled={busy}
-            onSave={(next) => save({ verify: { runs: next } })}
-          />
-        </div>
-        <div className="v-set__row">
-          <label className="v-set__label" htmlFor="verify-timeout">
-            how long one run may take, in minutes
-            {source('verify', 'timeoutMs')}
-          </label>
-          <NumberField
-            id="verify-timeout"
-            value={
-              typeof verify['timeoutMs'] === 'number'
-                ? Math.round(verify['timeoutMs'] / 60_000)
-                : undefined
-            }
-            disabled={busy}
-            onSave={(next) => save({ verify: { timeoutMs: next * 60_000 } })}
-          />
-        </div>
-        <p className="v-set__note">
-          It runs through a shell in the directory the run works in — the worktree, when that is
-          on below — so a worktree has to be able to build. That is what the worktree&apos;s setup
-          command is for. More than one pass is how a flaky suite is told from a broken one; a
-          suite that takes long can be set to one.
-        </p>
-      </section>
+      ) : (
+        <>
+          <section className="v-set__block">
+            <h3 className="v-set__h">how the run checks its work</h3>
+            {/* **A required gate with nothing to run ends a finished run as
+                unverified** (#223). The core auto-detects only `npm test` from a
+                `package.json`, so on a Bazel or Make project the gate had no command,
+                the run spent two and a half hours and 42M tokens, and it ended exit 7
+                with nothing having tested the change. This field was reachable only
+                by hand-editing `vibe.config.json`. */}
+            <p className="v-set__note">
+              After every implementation and fix round the loop runs this command and treats a
+              non-zero exit as a failure to fix. Left empty, vibe looks for a <code>test</code> script
+              in <code>package.json</code> and runs <code>npm test</code> — and finds nothing on any
+              other kind of project, which ends the run <em>unverified</em> (exit 7) after all the work
+              is done. Set it to whatever your suite is: <code>bazel test //tests/...</code>,{' '}
+              <code>make test</code>, <code>pytest</code>, <code>cargo test</code>.
+            </p>
+            <div className="v-set__row">
+              <label className="v-set__label" htmlFor="verify-enabled">
+                verify each round
+                {source('verify', 'enabled')}
+              </label>
+              <select
+                id="verify-enabled"
+                value={verify['enabled'] === false ? 'off' : 'on'}
+                disabled={busy}
+                onChange={(e) => save({ verify: { enabled: e.target.value === 'on' } })}
+              >
+                <option value="on">on — run the command after every round</option>
+                <option value="off">off — nothing checks the code</option>
+              </select>
+            </div>
+            {listsGates ? (
+              <p className="v-set__note">
+                This project lists its gates under <code>verify.gates</code> in{' '}
+                <code>vibe.config.json</code>, each with its own command, so they are edited there.
+              </p>
+            ) : (
+              <div className="v-set__row">
+                <label className="v-set__label" htmlFor="verify-command">
+                  test command
+                  {source('verify', 'command', 'auto-detect')}
+                </label>
+                <TextField
+                  id="verify-command"
+                  value={typeof verify['command'] === 'string' ? verify['command'] : ''}
+                  placeholder="empty — npm test, if package.json has a test script"
+                  disabled={busy}
+                  // Empty is null, which is auto-detect — never an empty command,
+                  // which the core refuses by name.
+                  onSave={(next) => save({ verify: { command: next === '' ? null : next } })}
+                />
+              </div>
+            )}
+            <div className="v-set__row">
+              <label className="v-set__label" htmlFor="verify-runs">
+                times it must pass
+                {source('verify', 'runs')}
+              </label>
+              <NumberField
+                id="verify-runs"
+                value={typeof verify['runs'] === 'number' ? verify['runs'] : undefined}
+                disabled={busy}
+                onSave={(next) => save({ verify: { runs: next } })}
+              />
+            </div>
+            <div className="v-set__row">
+              <label className="v-set__label" htmlFor="verify-timeout">
+                how long one run may take, in minutes
+                {source('verify', 'timeoutMs')}
+              </label>
+              <NumberField
+                id="verify-timeout"
+                value={
+                  typeof verify['timeoutMs'] === 'number'
+                    ? Math.round(verify['timeoutMs'] / 60_000)
+                    : undefined
+                }
+                disabled={busy}
+                onSave={(next) => save({ verify: { timeoutMs: next * 60_000 } })}
+              />
+            </div>
+            <p className="v-set__note">
+              It runs through a shell in the directory the run works in — the worktree, when that is
+              on below — so a worktree has to be able to build. That is what the worktree&apos;s setup
+              command is for. More than one pass is how a flaky suite is told from a broken one; a
+              suite that takes long can be set to one.
+            </p>
+          </section>
 
-      <section className="v-set__block">
-        <h3 className="v-set__h">where the run does its work</h3>
-        {/* **A worktree is a thing AGENTS.md tells a human to do**, and doing it
-            by hand is four commands and a cleanup nobody remembers. Asked for as
-            *"the pilot should automatically start a worktree for the vibe session
-            to run in"*.
+          <section className="v-set__block">
+            <h3 className="v-set__h">where the run does its work</h3>
+            {/* **A worktree is a thing AGENTS.md tells a human to do**, and doing it
+                by hand is four commands and a cleanup nobody remembers. Asked for as
+                *"the pilot should automatically start a worktree for the vibe session
+                to run in"*.
 
-            The section says what it costs as well as what it buys, because the
-            cost is disk and nothing in the product reclaims it. */}
-        <p className="v-set__note">
-          With this on, a run works in <code>.worktrees/&lt;run-id&gt;</code> instead of in the
-          repository — so the tree being edited is not the tree you are sitting in, and several
-          runs can exist side by side on their own branches. The run&apos;s record stays in the
-          repository either way: an archive written into a worktree is one the next run&apos;s
-          planner cannot read.
-        </p>
-        <p className="v-set__note">
-          Nothing removes them. One worktree per run, and a checkout that has built a large
-          project is gigabytes — they are named after the run so the ones worth deleting can be
-          told apart.
-        </p>
-        <div className="v-set__row">
-          <label className="v-set__label" htmlFor="git-worktree">
-            work in a worktree
-            {source('git', 'worktree')}
-          </label>
-          {/* A two-option select rather than a checkbox, and that is a design
-              decision rather than laziness: this screen has no checkbox, and an
-              unstyled `input[type=checkbox]` takes the platform's own light
-              control on a dark window — which is precisely the class of defect
-              `audit:contrast` §9 exists to catch. The selects here are already
-              styled. */}
-          <select
-            id="git-worktree"
-            value={git['worktree'] === true ? 'on' : 'off'}
-            disabled={busy}
-            onChange={(e) => save({ git: { worktree: e.target.value === 'on' } })}
-          >
-            <option value="off">off — run in the repository</option>
-            <option value="on">on — a worktree per run</option>
-          </select>
-        </div>
-        <div className="v-set__row">
-          <label className="v-set__label" htmlFor="git-worktree-command">
-            how to make one
-            {source('git', 'worktreeCommand')}
-          </label>
-          <TextField
-            id="git-worktree-command"
-            value={typeof git['worktreeCommand'] === 'string' ? git['worktreeCommand'] : ''}
-            placeholder={'git worktree add "$VIBE_WORKTREE" "$VIBE_BRANCH" && cd "$VIBE_WORKTREE" && make deps'}
-            disabled={busy}
-            onSave={(next) => save({ git: { worktreeCommand: next === '' ? null : next } })}
-          />
-        </div>
-        <p className="v-set__note">
-          Left empty, vibe runs <code>git worktree add --detach</code> and nothing else — which
-          gives you a checkout with no dependencies installed, so on most projects the
-          verification gate cannot run in it. That is what this field is for. It runs through a
-          shell in the repository, so it can be a sequence, and these are its placeholders —
-          environment variables, so quote them:
-        </p>
-        <ul className="v-set__note">
-          <li>
-            <code>$VIBE_WORKTREE</code> — the directory the worktree must be created at
-          </li>
-          <li>
-            <code>$VIBE_BRANCH</code> — the run&apos;s branch, already created from HEAD, so{' '}
-            <code>git worktree add &quot;$VIBE_WORKTREE&quot; &quot;$VIBE_BRANCH&quot;</code> puts
-            the worktree on it. Not set when branch isolation is off.
-          </li>
-          <li>
-            <code>$VIBE_REPO</code> — the repository, and <code>$VIBE_RUN_ID</code> — the run
-          </li>
-        </ul>
-        <p className="v-set__note">
-          On Windows they are <code>%VIBE_WORKTREE%</code> and so on. It must leave a git working
-          tree at the worktree path; if it does not, the run refuses before spending anything.
-        </p>
-        <div className="v-set__row">
-          <label className="v-set__label" htmlFor="git-worktree-timeout">
-            how long that may take, in minutes
-            {source('git', 'worktreeTimeoutMs')}
-          </label>
-          <NumberField
-            id="git-worktree-timeout"
-            value={
-              typeof git['worktreeTimeoutMs'] === 'number'
-                ? Math.round(git['worktreeTimeoutMs'] / 60_000)
-                : undefined
-            }
-            disabled={busy}
-            onSave={(next) => save({ git: { worktreeTimeoutMs: next * 60_000 } })}
-          />
-        </div>
-      </section>
+                The section says what it costs as well as what it buys, because the
+                cost is disk and nothing in the product reclaims it. */}
+            <p className="v-set__note">
+              With this on, a run works in <code>.worktrees/&lt;run-id&gt;</code> instead of in the
+              repository — so the tree being edited is not the tree you are sitting in, and several
+              runs can exist side by side on their own branches. The run&apos;s record stays in the
+              repository either way: an archive written into a worktree is one the next run&apos;s
+              planner cannot read.
+            </p>
+            <p className="v-set__note">
+              Nothing removes them. One worktree per run, and a checkout that has built a large
+              project is gigabytes — they are named after the run so the ones worth deleting can be
+              told apart.
+            </p>
+            <div className="v-set__row">
+              <label className="v-set__label" htmlFor="git-worktree">
+                work in a worktree
+                {source('git', 'worktree')}
+              </label>
+              {/* A two-option select rather than a checkbox, and that is a design
+                  decision rather than laziness: this screen has no checkbox, and an
+                  unstyled `input[type=checkbox]` takes the platform's own light
+                  control on a dark window — which is precisely the class of defect
+                  `audit:contrast` §9 exists to catch. The selects here are already
+                  styled. */}
+              <select
+                id="git-worktree"
+                value={git['worktree'] === true ? 'on' : 'off'}
+                disabled={busy}
+                onChange={(e) => save({ git: { worktree: e.target.value === 'on' } })}
+              >
+                <option value="off">off — run in the repository</option>
+                <option value="on">on — a worktree per run</option>
+              </select>
+            </div>
+            <div className="v-set__row">
+              <label className="v-set__label" htmlFor="git-worktree-command">
+                how to make one
+                {source('git', 'worktreeCommand')}
+              </label>
+              <TextField
+                id="git-worktree-command"
+                value={typeof git['worktreeCommand'] === 'string' ? git['worktreeCommand'] : ''}
+                placeholder={'git worktree add "$VIBE_WORKTREE" "$VIBE_BRANCH" && cd "$VIBE_WORKTREE" && make deps'}
+                disabled={busy}
+                onSave={(next) => save({ git: { worktreeCommand: next === '' ? null : next } })}
+              />
+            </div>
+            <p className="v-set__note">
+              Left empty, vibe runs <code>git worktree add --detach</code> and nothing else — which
+              gives you a checkout with no dependencies installed, so on most projects the
+              verification gate cannot run in it. That is what this field is for. It runs through a
+              shell in the repository, so it can be a sequence, and these are its placeholders —
+              environment variables, so quote them:
+            </p>
+            <ul className="v-set__note">
+              <li>
+                <code>$VIBE_WORKTREE</code> — the directory the worktree must be created at
+              </li>
+              <li>
+                <code>$VIBE_BRANCH</code> — the run&apos;s branch, already created from HEAD, so{' '}
+                <code>git worktree add &quot;$VIBE_WORKTREE&quot; &quot;$VIBE_BRANCH&quot;</code> puts
+                the worktree on it. Not set when branch isolation is off.
+              </li>
+              <li>
+                <code>$VIBE_REPO</code> — the repository, and <code>$VIBE_RUN_ID</code> — the run
+              </li>
+            </ul>
+            <p className="v-set__note">
+              On Windows they are <code>%VIBE_WORKTREE%</code> and so on. It must leave a git working
+              tree at the worktree path; if it does not, the run refuses before spending anything.
+            </p>
+            <div className="v-set__row">
+              <label className="v-set__label" htmlFor="git-worktree-timeout">
+                how long that may take, in minutes
+                {source('git', 'worktreeTimeoutMs')}
+              </label>
+              <NumberField
+                id="git-worktree-timeout"
+                value={
+                  typeof git['worktreeTimeoutMs'] === 'number'
+                    ? Math.round(git['worktreeTimeoutMs'] / 60_000)
+                    : undefined
+                }
+                disabled={busy}
+                onSave={(next) => save({ git: { worktreeTimeoutMs: next * 60_000 } })}
+              />
+            </div>
+          </section>
+        </>
+      )}
 
       <section className="v-set__block">
         <h3 className="v-set__h">where the loop hands control back</h3>

@@ -6,6 +6,10 @@ import os from 'node:os';
 // `cancel.ts` is a leaf that imports only this module's types, so the kill
 // mechanism lives beside the spawn rather than being threaded down to it.
 import { Cancelled, CANCEL_ENDING, cancelRequested, registerInterruptible } from '@src/cancel.js';
+// The other exception: what a child prints is redacted of every key this
+// process could have put in its environment (#223) - a vendor's 401 quotes the
+// key it was sent, and everything below hands stdout and stderr to a log.
+import { redact, secrets } from '@src/heldkeys.js';
 
 const isWin = process.platform === 'win32';
 
@@ -166,6 +170,12 @@ export interface RunOptions {
    * does - `Cancelled`, rejected at once rather than left to `close`.
    */
   signal?: AbortSignal | undefined;
+  /**
+   * The child's whole environment, when it is not this process's (#223). The
+   * agent adapters pass `agentEnv`, which is how a run turn is billed to the
+   * route Settings names rather than to whatever the shell happened to hold.
+   */
+  env?: NodeJS.ProcessEnv | undefined;
 }
 
 export interface RunResult {
@@ -282,7 +292,9 @@ export type RunFn = (
  * positional prompt argument.
  */
 export function run(bin: string, args: readonly string[], options: RunOptions = {}): Promise<RunResult> {
-  const { input, cwd, timeoutMs, onLine, onBytes, interruptible, signal } = options;
+  const { input, cwd, timeoutMs, onLine, onBytes, interruptible, signal, env } = options;
+  const keys = secrets();
+  const clean = (text: string): string => (keys.length === 0 ? text : redact(text, keys));
 
   return new Promise<RunResult>((resolve, reject) => {
     // Before the spawn, and the ordering is the fail-closed half of #209. A
@@ -299,6 +311,7 @@ export function run(bin: string, args: readonly string[], options: RunOptions = 
     const needsShell = isWin && /\.(cmd|bat)$/i.test(bin);
     const child = spawn(bin, [...args], {
       ...(cwd === undefined ? {} : { cwd }),
+      ...(env === undefined ? {} : { env }),
       shell: needsShell,
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -318,7 +331,7 @@ export function run(bin: string, args: readonly string[], options: RunOptions = 
     const emitLine = (line: string): void => {
       if (settled || onLine === undefined || line === '') return;
       try {
-        onLine(line);
+        onLine(clean(line));
       } catch {
         // A progress hook must never take down a run.
       }
@@ -433,7 +446,7 @@ export function run(bin: string, args: readonly string[], options: RunOptions = 
       // still reach the hook, while on the timeout path `settled` is already
       // true and this emits nothing.
       drain(true);
-      settle(() => resolve({ code, signal, stdout, stderr }));
+      settle(() => resolve({ code, signal, stdout: clean(stdout), stderr: clean(stderr) }));
     });
 
     if (input !== undefined) child.stdin.write(input, 'utf8');

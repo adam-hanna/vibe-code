@@ -1,4 +1,5 @@
 import { claudeBin, detectRateLimit, extractTokens } from '@src/claude.js';
+import { agentEnv } from '@src/auth.js';
 import { attachEnding, describeEnding, run } from '@src/proc.js';
 import type { ChildEnding, RunFn } from '@src/proc.js';
 import type { TokenUsage } from '@src/types.js';
@@ -290,6 +291,7 @@ export async function pilotChat(
       cwd: options.cwd,
       timeoutMs: options.timeoutMs,
       signal: options.signal,
+      env: agentEnv('claude'),
       onLine: (line: string) => {
         const delta = readDelta(line);
         if (delta === null) return;

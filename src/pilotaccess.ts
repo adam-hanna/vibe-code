@@ -1,5 +1,7 @@
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
+import { readRoutes } from '@src/auth.js';
+import type { Route } from '@src/auth.js';
 import { expandHome } from '@src/proc.js';
 
 /**
@@ -50,24 +52,36 @@ import { expandHome } from '@src/proc.js';
  */
 
 /**
- * How the pilot reaches one vendor (#223): on the CLI you are logged into, or
- * over the API with a key from the keychain. Chosen per vendor in Settings; the
- * conversation then only picks the vendor.
+ * How each vendor is reached (#223) - for runs as well as the pilot, so it lives
+ * in `auth.ts` and its own `auth` section. Carried on `PilotAccess` because the
+ * window picks the pilot's backend from it.
  */
-export type Route = 'subscription' | 'api';
+export type { Route } from '@src/auth.js';
 
 export interface PilotAccess {
   yolo: boolean;
   safeCommands: readonly string[];
   dirs: readonly string[];
-  /** Anthropic: `claude -p` on the subscription, or the API. */
+  /** Anthropic: `claude` on the subscription, or the API key (`auth.anthropic`). */
   anthropic: Route;
-  /** OpenAI: `codex exec` on the subscription, or the API. */
+  /** OpenAI: `codex` on the subscription, or the API key (`auth.openai`). */
   openai: Route;
 }
 
 /**
- * The default safe list: git that reads, plus staging and committing.
+ * The default safe list: the everyday file commands, git that reads, plus
+ * staging and committing.
+ *
+ * **The file commands were asked for by name** - *"ls, cat, cp, etc"* - and
+ * they are the POSIX programs, which is the cross-platform catch stated rather
+ * than hidden: Linux and macOS have every one of them, and Windows has them only
+ * where something like Git for Windows put them on PATH. There is no shell, so
+ * there is no `dir` or `type` to translate to, and a command that is not there
+ * fails as not found rather than running something else. `list_dir` and
+ * `read_file` are the pilot's own, and work everywhere.
+ *
+ * `cp` and `mkdir` write, inside the directories the pilot may use; `rm`, `mv`
+ * and `find` (which has `-delete` and `-exec`) are deliberately not here.
  *
  * `add` and `commit` because they were asked for by name, and with the cost
  * said rather than hidden: **`git commit` runs the repository's own hooks**,
@@ -78,6 +92,17 @@ export interface PilotAccess {
  * `git branch` would also cover `git branch -D`.
  */
 export const DEFAULT_SAFE_COMMANDS: readonly string[] = [
+  'ls',
+  'cat',
+  'echo',
+  'pwd',
+  'head',
+  'tail',
+  'wc',
+  'grep',
+  'diff',
+  'cp',
+  'mkdir',
   'git status',
   'git diff',
   'git log',
@@ -116,23 +141,21 @@ function isRecord(v: unknown): v is Record<string, unknown> {
  */
 export function readPilotAccess(globalRaw: Readonly<Record<string, unknown>>): PilotAccess {
   const section = globalRaw['pilot'];
-  if (section === undefined) return PILOT_ACCESS_DEFAULTS;
+  const routes = readRoutes(globalRaw);
+  if (section === undefined) return { ...PILOT_ACCESS_DEFAULTS, ...routes };
   if (!isRecord(section)) throw new Error('pilot must be an object');
-  const known = new Set(['yolo', 'safeCommands', 'dirs', 'anthropic', 'openai']);
+  const known = new Set(['yolo', 'safeCommands', 'dirs']);
   for (const key of Object.keys(section)) {
     // By name, for `mergeSection`'s silent-drop reason: a misspelt key is a
     // setting somebody believes is on.
+    if (key === 'anthropic' || key === 'openai') {
+      // Where these lived for one unreleased build, before they covered runs.
+      throw new Error(`pilot.${key} has moved to auth.${key}, because it now covers runs as well`);
+    }
     if (!known.has(key)) {
       throw new Error(`pilot.${key} is not a setting; they are ${[...known].join(', ')}`);
     }
   }
-  const route = (vendor: 'anthropic' | 'openai'): Route => {
-    const value = section[vendor] ?? PILOT_ACCESS_DEFAULTS[vendor];
-    if (value !== 'subscription' && value !== 'api') {
-      throw new Error(`pilot.${vendor} must be "subscription" or "api"`);
-    }
-    return value;
-  };
   const yolo = section['yolo'] ?? PILOT_ACCESS_DEFAULTS.yolo;
   if (typeof yolo !== 'boolean') throw new Error('pilot.yolo must be true or false');
 
@@ -166,7 +189,7 @@ export function readPilotAccess(globalRaw: Readonly<Record<string, unknown>>): P
     }
     dirs.push(entry.trim());
   }
-  return { yolo, safeCommands, dirs, anthropic: route('anthropic'), openai: route('openai') };
+  return { yolo, safeCommands, dirs, ...routes };
 }
 
 /**

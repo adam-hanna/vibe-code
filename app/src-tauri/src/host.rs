@@ -222,6 +222,23 @@ struct Running {
     pid: u32,
     /// When this host was spawned, on a monotonic clock (#201).
     started: Instant,
+    /// What a `keys` frame must carry for the host to take it (#223). Put in
+    /// the host's environment at spawn and never sent to the window, so the
+    /// window - which can write frames - cannot forge one.
+    secret: String,
+}
+
+/// A secret for one host's lifetime: 128 bits from the OS, through the random
+/// keys every `RandomState` is seeded with - std has no other source, and this
+/// guards a pipe between two of our own processes rather than anything at rest.
+fn keys_secret() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let half = || {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u128(Instant::now().elapsed().as_nanos());
+        h.finish()
+    };
+    format!("{:016x}{:016x}", half(), half())
 }
 
 /// Where the two staged pieces ended up in the bundle.
@@ -281,9 +298,11 @@ impl HostProcess {
             .home_dir()
             .unwrap_or_else(|_| PathBuf::from("."));
 
+        let secret = keys_secret();
         let mut command = Command::new(&node);
         command
             .arg(&entry)
+            .env("VIBE_HOST_KEYS_SECRET", &secret)
             .current_dir(&cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -405,8 +424,39 @@ impl HostProcess {
             stdin,
             pid,
             started: Instant::now(),
+            secret,
         });
+        drop(guard);
+        // First thing on the wire, so a run started the moment the window is up
+        // is already billed the way Settings says.
+        let _ = self.send_keys();
         Ok(pid)
+    }
+
+    /// Hand the host both API keys from the keychain (#223).
+    ///
+    /// Runs use them as well as the pilot - *"If we have api keys set, we
+    /// should use them everywhere"* - and a run is a `claude` or `codex` child of
+    /// the host, so the host has to hold them. This is the one place a key
+    /// leaves this crate other than a request header: written straight to the
+    /// host's stdin, never logged, never emitted, and an absent or unreadable
+    /// key travels as null. Sent at spawn and again whenever a key changes.
+    pub fn send_keys(&self) -> Result<(), String> {
+        let read = |p: crate::keys::Provider| crate::keys::read(p).ok();
+        let mut guard = self.inner.lock().map_err(|_| "host lock poisoned")?;
+        let running = guard.as_mut().ok_or("the host is not running")?;
+        let frame = serde_json::json!({
+            "type": "keys",
+            "secret": running.secret,
+            "anthropic": read(crate::keys::Provider::Anthropic),
+            "openai": read(crate::keys::Provider::Openai),
+        });
+        running
+            .stdin
+            .write_all(format!("{frame}\n").as_bytes())
+            .and_then(|()| running.stdin.flush())
+            // The error describes the pipe, never the frame.
+            .map_err(|e| format!("could not hand the keys to the host: {e}"))
     }
 
     /// Wait for a host whose output has ended, and clear it. Returns its code.

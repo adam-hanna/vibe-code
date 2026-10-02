@@ -353,6 +353,7 @@ function Project({
   onDeleteRun,
   onAll,
   onNewIn,
+  onProjectSettings,
   onForget,
 }: {
   dir: string;
@@ -390,6 +391,8 @@ function Project({
   onAll: (dir: string) => void;
   /** Start a run in THIS project, with its directory already settled. */
   onNewIn: (dir: string) => void;
+  /** This project's own settings — its `vibe.config.json` (#223). */
+  onProjectSettings: (dir: string) => void;
   onForget: (dir: string) => void;
 }) {
   // The current project opens on its own, because it is the one whose runs the
@@ -445,6 +448,19 @@ function Project({
         {/* Right-justified, beside the project it starts a run in. The composer
             it opens has no repository field at all — the project is the answer,
             and offering it again would be the second spelling #211 warns about. */}
+        {/* **This project's settings live on its row** (#223): *"I want the
+            global settings to be accessed via the 'settings' on the left bar.
+            Then… a settings icon on the project dropdown row… where project
+            level settings live."* On the right with the row's other actions,
+            because the arrow on the left is the disclosure and a second control
+            there would be a second thing that opens the section. */}
+        <button
+          className="v-nav__act"
+          onClick={() => onProjectSettings(dir)}
+          title={`Settings for ${projectName(dir)}`}
+        >
+          ⚙
+        </button>
         <button
           className="v-nav__act"
           onClick={() => onNewIn(dir)}
@@ -535,6 +551,7 @@ export function Sidebar({
   onNew,
   onNewIn,
   onSettings,
+  onProjectSettings,
   onRuns,
   onShow,
   onProject,
@@ -551,7 +568,10 @@ export function Sidebar({
   onNew: () => void;
   /** Compose a run in one project, with the directory already settled (#223). */
   onNewIn: (dir: string) => void;
+  /** The settings for all projects — the left bar's ⚙ (#223). */
   onSettings: () => void;
+  /** One project's settings — the ⚙ on its row. */
+  onProjectSettings: (dir: string) => void;
   /** Open `1b` for a project, which is where a lock can be overruled. */
   onRuns: (dir: string) => void;
   onShow: (dir: string, runId: string, task: string) => void;
@@ -831,6 +851,7 @@ export function Sidebar({
         }}
         onAll={onRuns}
         onNewIn={onNewIn}
+        onProjectSettings={onProjectSettings}
         onForget={(d) => setPending({ kind: 'project', dir: d })}
       />
     );

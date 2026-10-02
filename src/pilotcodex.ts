@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { detectRateLimit } from '@src/claude.js';
 import { codexBin, parseEvents } from '@src/codex.js';
+import { agentEnv } from '@src/auth.js';
 import { attachEnding, describeEnding, run } from '@src/proc.js';
 import type { ChildEnding, RunFn } from '@src/proc.js';
 import type { PilotChatOptions, PilotChatResult } from '@src/pilotchat.js';
@@ -140,6 +141,7 @@ export async function pilotCodex(
       cwd: options.cwd,
       timeoutMs: options.timeoutMs,
       signal: options.signal,
+      env: agentEnv('codex'),
       onLine: (line: string) => {
         const said = readMessage(line);
         if (said === null) return;

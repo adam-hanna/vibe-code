@@ -15,8 +15,9 @@ import {
  * Settings for every project, under each project's own (#223).
  *
  * Asked for as *"Some settings are global, like api keys, etc. Some are project
- * specific, like the worktree command"*, and decided as: any key at either
- * level, project wins. The order is `DEFAULTS` → global → `vibe.config.json` →
+ * specific, like the worktree command"*, and decided as: almost any key at
+ * either level, project wins - all but the test command and the worktree,
+ * which only a project may set. The order is `DEFAULTS` → global → `vibe.config.json` →
  * flags, and these cases pin each step of it plus the two things a global write
  * must never do — leave an invalid file, or leave the project in front of you
  * unloadable.
@@ -121,20 +122,45 @@ test('an invalid global write is refused and nothing is written', () => {
 });
 
 test('a global write that would break the project in front of you is refused', () => {
-  // `verify.command` beside a project's `verify.gates` is refused by name, so a
-  // global command saved over a project that lists gates would leave that
-  // project unloadable.
+  // A project that heartbeats every ten minutes cannot be watched for five
+  // minutes of quiet - `validate` refuses a quiet ceiling shorter than the
+  // interval that measures it - so a global ceiling saved over that project
+  // would leave it unloadable. (This used `verify.command` beside a project's
+  // `verify.gates` until `verify` became project-only, #223.)
   const { dir, global } = scratch();
-  writeFileSync(
-    path.join(dir, 'vibe.config.json'),
-    JSON.stringify({ verify: { gates: [{ name: 'unit', command: 'make test' }] } }),
-  );
+  writeFileSync(path.join(dir, 'vibe.config.json'), JSON.stringify({ progress: { intervalMs: 600_000 } }));
   withGlobal(global, () => {
     assert.throws(
-      () => writeConfigPatch(dir, { verify: { command: 'bazel test //...' } }, 'global'),
-      /verify\.command and verify\.gates/,
+      () => writeConfigPatch(dir, { progress: { maxQuietMs: 300_000 } }, 'global'),
+      /progress\.maxQuietMs is 300000ms, shorter than/,
     );
     assert.equal(existsSync(global), false);
+  });
+});
+
+test('the test command and the worktree settings belong to the project alone', () => {
+  // *"moving some settings out of global and into project scope (e.g. test
+  // command, whether to use worktrees, etc)"* (#223).
+  const { dir, global } = scratch();
+  withGlobal(global, () => {
+    assert.throws(
+      () => writeConfigPatch(dir, { verify: { command: 'make test' } }, 'global'),
+      /sets verify, which only a project's own vibe\.config\.json can/,
+    );
+    assert.throws(
+      () => writeConfigPatch(dir, { git: { worktree: true, worktreeCommand: 'x' } }, 'global'),
+      /sets git\.worktree, git\.worktreeCommand/,
+    );
+    assert.equal(existsSync(global), false);
+    // The rest of `git` is still either level's.
+    writeConfigPatch(dir, { git: { commitEachRound: false } }, 'global');
+    // And a global file written by hand is refused where it is read.
+    writeFileSync(global, JSON.stringify({ verify: { command: 'make test' } }));
+    assert.throws(() => loadConfig(dir), /sets verify/);
+    // The project may set all of it.
+    writeFileSync(global, '{}');
+    writeConfigPatch(dir, { verify: { command: 'make test' }, git: { worktree: true } }, 'project');
+    assert.equal(loadConfig(dir).git.worktree, true);
   });
 });
 

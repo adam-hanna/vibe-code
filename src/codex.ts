@@ -3,6 +3,7 @@ import path from 'node:path';
 import { attachSpend } from '@src/charge.js';
 import { attachEnding, describeEnding, resolveBin, run } from '@src/proc.js';
 import { configuredBin } from '@src/clipaths.js';
+import { agentEnv } from '@src/auth.js';
 import type { ChildEnding, RunFn } from '@src/proc.js';
 import { detail, warn } from '@src/log.js';
 import { createHeartbeat, parseCodexLine, withHeartbeat } from '@src/progress.js';
@@ -483,7 +484,7 @@ export async function codexTurn(
       const minted = await exec(
         codexBin(),
         wantsJson ? ['exec', 'fork', forkFrom, '--json'] : ['exec', 'fork', forkFrom],
-        { input: '', cwd, timeoutMs },
+        { input: '', cwd, timeoutMs, env: agentEnv('codex') },
       );
       // With `--json` the id arrives as a `thread.started` event; without it,
       // the human-readable banner is all there is, and it is printed to either
@@ -577,6 +578,8 @@ export async function codexTurn(
       input: prompt,
       cwd,
       timeoutMs,
+      // Billed to the road Settings names for OpenAI (#223).
+      env: agentEnv('codex'),
       // The other agent turn a person may stop mid-flight (#209). The `exec
       // fork` call above is deliberately NOT interruptible: it mints a thread
       // id and takes no model turn, so killing it buys nothing and could leave

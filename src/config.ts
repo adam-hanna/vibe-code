@@ -18,6 +18,7 @@ import { DEFAULT_GATES, validateGates } from '@src/gates.js';
 import { promptBlockNames } from '@src/prompts.js';
 import { readPilotAccess, refuseProjectPilot } from '@src/pilotaccess.js';
 import { readCliPaths, refuseProjectCli } from '@src/clipaths.js';
+import { readRoutes, refuseProjectAuth } from '@src/auth.js';
 import { EFFORTS } from '@src/types.js';
 import type {
   Config,
@@ -516,6 +517,7 @@ export function loadConfig(
   if (isRecord(fromFile)) {
     refuseProjectPilot(fromFile, 'vibe.config.json');
     refuseProjectCli(fromFile, 'vibe.config.json');
+    refuseProjectAuth(fromFile, 'vibe.config.json');
   }
 
   // The global layer sits under the project's file and over the defaults, so a
@@ -918,10 +920,46 @@ export function globalConfigPath(
   return path.join(base, 'vibe', 'config.json');
 }
 
+/**
+ * The keys only a project's own file may set (#223).
+ *
+ * *"Some are project specific, like the worktree command"*, and then, when the
+ * first cut let every key live at either level: *"we talked about moving some
+ * settings out of global and into project scope (e.g. test command, whether to
+ * use worktrees, etc)"*. These describe how one repository is built and tested
+ * - `make test` is right for one checkout and nonsense in the next, and a
+ * worktree that cannot build is a run whose gate cannot run - so a value for all
+ * projects is a value that is wrong for most of them. Every other key may still
+ * be set at either level, project winning.
+ */
+export const PROJECT_ONLY: Readonly<Record<string, readonly string[] | 'all'>> = {
+  verify: 'all',
+  git: ['worktree', 'worktreeCommand', 'worktreeTimeoutMs'],
+};
+
+/** Refuse a global file, or a global write, that sets a project-only key. */
+export function refuseGlobalProjectKeys(raw: Readonly<Record<string, unknown>>, label: string): void {
+  for (const [section, keys] of Object.entries(PROJECT_ONLY)) {
+    const value = raw[section];
+    if (value === undefined) continue;
+    const named =
+      keys === 'all' ? [section] : isRecord(value) ? keys.filter((k) => value[k] !== undefined).map((k) => `${section}.${k}`) : [];
+    if (named.length > 0) {
+      throw new Error(
+        `${label} sets ${named.join(', ')}, which only a project's own vibe.config.json can: ` +
+          'how a repository is built and tested is a fact about that repository',
+      );
+    }
+  }
+}
+
 /** The global file's own contents, or `{}` when there is none or the layer is off. */
 export function readGlobalConfig(): Record<string, unknown> {
   const at = globalConfigPath();
-  return at === null ? {} : readRawFile(at, at);
+  if (at === null) return {};
+  const raw = readRawFile(at, at);
+  refuseGlobalProjectKeys(raw, at);
+  return raw;
 }
 
 /**
@@ -964,6 +1002,7 @@ export function withProjectFile(stored: Config, targetDir: string): Config {
   const project = readRawConfig(targetDir);
   refuseProjectPilot(project, 'vibe.config.json');
   refuseProjectCli(project, 'vibe.config.json');
+  refuseProjectAuth(project, 'vibe.config.json');
   return mergeConfig(mergeConfig(stored, readGlobalConfig()), project);
 }
 
@@ -1007,9 +1046,11 @@ export function writeConfigPatch(
   }
   // Refused before anything is merged, so the sentence is the pilot rule's own
   // rather than whatever the merge would have tripped over (#223).
+  if (scope === 'global') refuseGlobalProjectKeys(patch, 'your settings for all projects');
   if (scope === 'project') {
     refuseProjectPilot(patch, 'vibe.config.json');
     refuseProjectCli(patch, 'vibe.config.json');
+    refuseProjectAuth(patch, 'vibe.config.json');
   }
   const raw = scope === 'global' ? readGlobalConfig() : readRawConfig(targetDir);
   const candidate: Record<string, unknown> = { ...raw };
@@ -1035,6 +1076,7 @@ export function writeConfigPatch(
     // because a write is the one moment a bad value can be refused unwritten.
     readPilotAccess(candidate);
     readCliPaths(candidate);
+    readRoutes(candidate);
     const alone = mergeConfig(DEFAULTS, candidate);
     validateRoles(alone.roles);
     validate(resolveRoleScopedAgents(alone, [candidate]));

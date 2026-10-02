@@ -1112,29 +1112,39 @@ they are waiting on. Four things in it are worth carrying:
   budgets, my caps* once rather than in every repository. `globalConfigPath` is
   `%APPDATA%\vibe\config.json` or `$XDG_CONFIG_HOME/vibe/config.json` (else
   `~/.config/vibe/`), and it is **the same shape as `vibe.config.json`**, at the owner's
-  decision: any key at either level, and the order is `DEFAULTS` → global → project → flags.
-  A fixed split per key was the alternative and was declined, because which settings are a
-  person's and which are a repository's is not something this file can know for everybody.
+  decision: almost any key at either level, and the order is `DEFAULTS` → global → project →
+  flags. A fixed split for **every** key was declined, because which settings are a person's and
+  which are a repository's is not something this file can know for everybody — but the first cut
+  let the test command and the worktree live in the global file too, and the report was *"we
+  talked about moving some settings out of global and into project scope (e.g. test command,
+  whether to use worktrees, etc)"*. `PROJECT_ONLY` in `src/config.ts` is the narrow answer:
+  all of `verify` and the three `git.worktree*` keys describe how one repository builds and
+  tests, so the global file refuses them by name, on read and on write. And the settings screen
+  has **two doors rather than a switch**: *"I want the global settings to be accessed via the
+  'settings' on the left bar… a settings icon on the project dropdown row… where project level
+  settings live."* The left bar's ⚙ opens the settings for all projects, a project row's ⚙ opens
+  that project's `vibe.config.json` (and points the window at it, so the row pressed is the
+  project shown), and each draws only what may be set there — the test command and the worktree
+  for a project, `auth`, `cli`, `pilot` and the type scale for all — with a line saying where the
+  rest live. The ⚙ sits on the right with `＋ −`, because the arrow on the left is the disclosure.
 
   Three things keep it honest. **The CLI reads it too**, through the one `loadConfig`, so a
   terminal and a window cannot disagree about what a run is configured to do; a resume layers it
   under the project's file over the run's memory, by `withProjectFile`'s own reasoning. **A
   global write is validated twice** — alone, so it is legal wherever it is read, and under the
-  project in front of you, so a save cannot leave that project unloadable (`verify.command` in
-  the global file beside a project's `verify.gates` is the case). And **the window computes
+  project in front of you, so a save cannot leave that project unloadable (a global
+  `progress.maxQuietMs` shorter than a project's heartbeat interval is the case). And **the window computes
   nothing**: the `config` frame carries `globalRaw`, `globalPath` and `globalEffective` beside
   `raw` and `effective`, so the "all projects" view draws the defaults plus the global file
   without merging anything itself, and every value's chip — `default`, `all projects`, `this
   project overrides it` — reads two files the host sent. The global file is a machine's and is
   never committed; the project file still is.
 
-  **Subscription against keys is two questions about two processes**, and conflating them is
-  what made the old `Keys` tab read as though the product needed an API key at all. A run's
-  agents are *always* your own subscriptions — `claude` and `codex` are child processes
-  inheriting whatever you are logged into, vibe installs neither and holds no credential for
-  either — so that section **states** it rather than offering a control, and points at `vibe
-  doctor`. Only the pilot chooses, per conversation, and the keys are for its API road alone.
-  `Credentials` said *"no provider configured — the pilot cannot run"* until #223, which
+  **Subscription against keys was two questions about two processes, and is now one per
+  vendor.** It used to be that a run's agents were *always* your own subscriptions and only the
+  pilot could take a key; that was reversed at the owner's word — *"we should use them
+  everywhere"* — and `auth.<vendor>` now decides every child's billing (see the pilot notes
+  below). `Credentials` said *"no provider configured — the pilot cannot run"* until #223, which
   stopped being true the moment the subscription backend landed and would have sent somebody
   to buy a key they do not need.
 - **The type scale is a multiplier over the design's own sizes, not a second set of them.**
@@ -1783,6 +1793,8 @@ src/claude.ts        Claude Code adapter (stream-json)
 src/pilotchat.ts     one pilot chat turn on the subscription - a child process, not a client
 src/pilotcodex.ts    the same on the OpenAI subscription - `codex exec`, its own tools switched off
 src/clipaths.ts      where the two CLIs are when the settings say so, and what the search found
+src/auth.ts          how each vendor is reached, for runs and the pilot: the routes and a child's env
+src/heldkeys.ts      the API keys the app handed the host - in memory, and redacted from everything
 src/codex.ts         Codex adapter (codex exec --json)
 src/appserver.ts     Codex app-server JSON-RPC client (rate limits only)
 src/ratelimits.ts    rate-limit windows and the brake
@@ -2314,9 +2326,15 @@ halves, and four things carry it:
 
 - **The safe list changes who presses, never what runs.** A matching `run_command` is fired through
   `onEffect`, the road a pressed card takes, into `commands.ts` — so there is still no shell, which
-  is what makes one list mean the same thing on Windows, Linux and macOS. That is also why `ls` and
-  `cat` are not defaults: they are shell built-ins on Windows, and reading has its own tools.
-  `list_dir` and `read_file` are those tools, answered by the host on **both** backends, so the
+  is what makes one list mean the same thing on Windows, Linux and macOS. `ls`, `cat`, `cp` and the
+  other file commands **are** defaults, and that reverses the first cut: it left them out because
+  Windows has them only as shell built-ins, and the reply was *"where are commands like ls, cat,
+  cp, etc?"*. They are the POSIX programs, so on Windows they work where something like Git for
+  Windows put them on `PATH` and otherwise fail as not found — never as something else. `cp` and
+  `mkdir` write, which is why **an argument touching `.git` falls back to a card**: `cp evil.sh
+  .git/hooks/pre-commit` followed by a safe-listed `git commit` would otherwise run code nobody
+  approved. `rm`, `mv` and `find` (which has `-delete` and `-exec`) are not on the list.
+  `list_dir` and `read_file` are the pilot's own reading tools, answered by the host on **both** backends, so the
   API-backed pilot is no longer without a filesystem. A pattern is a program and its leading
   arguments as a prefix; a program named by path never matches, and an argument naming a path
   outside the allowed directories, or a `..`, falls back to a card. `git branch` is listed only in
@@ -2342,9 +2360,11 @@ halves, and four things carry it:
 **Each vendor has two roads, and Settings picks one** (#223). *"There should be two options
 for both anthropic and openAI: (1) subscription, (2) api key."* The pilot pane used to choose from
 `Claude (subscription) · Anthropic · OpenAI`, a list mixing a CLI with two vendors and offering no
-way to OpenAI without a key. Now the conversation picks the **vendor**, `pilot.anthropic` and
-`pilot.openai` in the settings for all projects pick the **road**, and `backendFor` in
-`app/src/pilot/backend.ts` is the one place the two become a backend. Three things carry it:
+way to OpenAI without a key. Now the conversation picks the **vendor** — the picker says
+`Anthropic` or `OpenAI` and nothing else, because the road is said once, in Settings —
+`auth.anthropic` and `auth.openai` in the settings for all projects pick the **road**, and
+`backendFor` in `app/src/pilot/backend.ts` is the one place the two become a backend. Three things
+carry it:
 
 - **`src/pilotcodex.ts` is the OpenAI subscription road**, `pilotchat.ts`'s twin on `codex exec`.
   Codex has no closed tool allow-list, so this one is a deny-list — the shape `pilotchat.ts`
@@ -2366,10 +2386,28 @@ way to OpenAI without a key. Now the conversation picks the **vendor**, `pilot.a
   choosing what runs on your machine. Not cached, so a change in Settings reaches the next turn; only
   the search is, because it spawns `which`. The `config` frame carries `clis` — what was found, and
   by which look — so the card can explain the search and show its answer without re-deriving it.
-- **Runs are unchanged.** A run's agents are always the two CLIs on your subscriptions, so the path
-  matters on the API road too, and the card says so in a line. The three paragraphs that used to
-  explain *"two questions about two processes"* became that line: the distinction is still true, and
-  the only part of it a person acts on is where the CLI is.
+- **The road is not the pilot's: it is every child's** (#223). The first cut said *"runs are
+  unchanged — a run's agents are always the two CLIs on your subscriptions"*, and the reply was
+  *"If we have api keys set, we should use them everywhere (pilot, runs, etc). Same for
+  subscriptions."* So the routes moved from `pilot` to their own global-only `auth` section, and
+  `agentEnv` in `src/auth.ts` builds the environment of **every** `claude` and `codex` child — run
+  turns, the fork mint, preflight probes, the app-server, the subscription pilot. Subscription
+  **removes** the vendor's key variables, because both CLIs prefer a key to the login (measured
+  with a bogus key each: `claude` warns that the key takes precedence, `codex exec` answers a 401),
+  so a key lying in a shell would otherwise bill somebody under a setting that says nothing is
+  billed. API sets `ANTHROPIC_API_KEY` or `CODEX_API_KEY` — `codex exec`'s own variable — from the
+  app's key, else from the process's own environment, which is a terminal user's road; with
+  neither, the turn is refused before the spawn rather than quietly falling back to the login.
+
+  **The key now reaches Node, and how is the part to keep.** The keychain is still read only by
+  Rust and never by the window. `HostProcess::send_keys` writes a `keys` line to the host's stdin
+  at spawn and after every `key_set`/`key_clear`, carrying a secret put in the host's environment
+  at spawn and never sent to the window — so the window, which can write frames, cannot forge one.
+  `serve.ts` takes it **before** `decode`, answers nothing and never echoes it, and the secret is
+  deleted from `process.env` on first read so no child inherits it. The keys live in
+  `src/heldkeys.ts`, a leaf because `proc.ts` redacts with it: `run()` replaces every key it could
+  have handed a child in that child's stdout, stderr and lines, because Codex's 401 quotes the key
+  in full and every caller hands stderr to a log. `keys.test.ts` pins the second reader.
 
 **The pilot runs in the repository the window named, and that path is a
 permission boundary.** `--restricted` confines `Read`, `Glob` and `Grep` to the
