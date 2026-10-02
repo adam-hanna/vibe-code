@@ -1202,12 +1202,9 @@ export function Cockpit() {
           <StateKicker tone="alarm">no host</StateKicker> {wire.failure}
         </div>
       )}
-      {wire.uncontained !== null && wire.connected && (
-        <div className="v-cockpit__alarm">
-          <StateKicker tone="quiet">uncontained</StateKicker> {wire.uncontained} — the run stays
-          resumable, but it keeps spending until you stop it.
-        </div>
-      )}
+      {/* `Status.uncontained` is no longer drawn here: a permanent banner on
+          every Linux and macOS launch was removed at the owner's request. The
+          field is still read, so it can move into the diagnostics popover. */}
 
       <div className="v-cockpit__body">
         {/* The navigator (#223). **One sidebar, not a rail beside a panel** —

@@ -2600,8 +2600,11 @@ graceful endings by closing stdin; a Windows Job Object with
 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` handles the ones that run no user code at all — `End
 task`, `Stop-Process -Force`, a panic. There is nothing to hook for those by design, so the
 mechanism has to be declared in advance and left to the OS. macOS and Linux have no
-equivalent yet and **say so** through `Status.uncontained`, which the window shows: an
-unenforced guarantee nobody can see is the same as no guarantee.
+equivalent yet and **say so** through `Status.uncontained`. The window drew it as a
+permanent banner until the owner asked for it gone, since on Linux and macOS it showed on
+every launch and said nothing actionable. The field is still on `Status`; if it is drawn
+again, the diagnostics popover is the place, beside the other facts that matter only
+when something has gone wrong.
 
 **A closed stdin means the supervisor has gone, and that is stronger than a `shutdown`**
 (#206). Both used to call the same thing, and the equivalence was wrong in a way that made

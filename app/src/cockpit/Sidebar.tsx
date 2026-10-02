@@ -1105,7 +1105,7 @@ export function Sidebar({
         <button className="v-nav__action" onClick={onSettings}>
           <span className="v-nav__glyph"><Icon name="settings" size={17} /></span> Settings
         </button>
-        <p>{host.inShell() ? 'A second perspective, by design.' : 'Preview mode · run agents in the desktop app.'}</p>
+        {!host.inShell() && <p>Preview mode · run agents in the desktop app.</p>}
       </div>
     </nav>
   );
