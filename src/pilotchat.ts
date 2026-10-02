@@ -1,4 +1,5 @@
 import { claudeBin, detectRateLimit, extractTokens } from '@src/claude.js';
+import { agentEnv } from '@src/auth.js';
 import { attachEnding, describeEnding, run } from '@src/proc.js';
 import type { ChildEnding, RunFn } from '@src/proc.js';
 import type { TokenUsage } from '@src/types.js';
@@ -120,7 +121,19 @@ export interface PilotChatOptions {
    * beats inheriting whatever the host happened to be started in.
    */
   cwd: string;
+  /**
+   * Directories beyond `cwd` the turn may read (#223), as `--add-dir`.
+   *
+   * `--restricted` confines the file tools to the working directories, and
+   * `--add-dir` is what that sentence counts as one - so this widens the read and
+   * nothing else. The list is computed by the host from the settings for all
+   * projects (`pilotRoots`), never taken off the frame, so a window cannot ask
+   * for a directory the person did not allow. YOLO is the root of every disk.
+   */
+  addDirs?: readonly string[] | undefined;
   timeoutMs: number;
+  /** The stop button (#223). Kills this turn's child and only it; see `RunOptions.signal`. */
+  signal?: AbortSignal | undefined;
   /**
    * Called with each fragment of the reply as it arrives, in order.
    *
@@ -190,6 +203,10 @@ export function pilotChatArgs(options: PilotChatOptions): readonly string[] {
   // history into a new id, which is a thing a run does when it branches and a
   // thing a chat has no use for.
   args.push(options.resume ? '--resume' : '--session-id', options.sessionId);
+  // Variadic too, so it sits in front of a flag that ends it. An absolute path
+  // never starts with `-`, so nothing after it can be mistaken for one.
+  const extra = (options.addDirs ?? []).filter((d) => d !== options.cwd);
+  if (extra.length > 0) args.push('--add-dir', ...extra);
   args.push('--model', options.model);
   // Variadic, so last: it greedily consumes the tokens after it. Note this also
   // re-admits anything `--restricted` removed that it names - which is why it
@@ -273,6 +290,8 @@ export async function pilotChat(
       input: options.prompt,
       cwd: options.cwd,
       timeoutMs: options.timeoutMs,
+      signal: options.signal,
+      env: agentEnv('claude'),
       onLine: (line: string) => {
         const delta = readDelta(line);
         if (delta === null) return;

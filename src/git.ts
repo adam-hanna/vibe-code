@@ -236,6 +236,23 @@ export async function stashesFor(cwd: string, branch: string): Promise<StashEntr
   return out;
 }
 
+/**
+ * The branch a run is on, or will be on: the one it recorded, else the one a
+ * fresh run gets — or null when branch isolation is off (#223).
+ *
+ * **One expression, two callers.** `prepareGit` creates the branch and the
+ * worktree site tells a setup script its name as `VIBE_BRANCH`; if each spelled
+ * `branchPrefix + id` itself, the script and the loop would disagree the first
+ * time either changed.
+ */
+export function runBranch(
+  cfg: { git: { useBranch: boolean; branchPrefix: string } },
+  state: { id: string; branch: string | null },
+): string | null {
+  if (!cfg.git.useBranch) return null;
+  return state.branch ?? `${cfg.git.branchPrefix}${state.id}`;
+}
+
 export async function createBranch(cwd: string, name: string): Promise<void> {
   await git(cwd, ['checkout', '-b', name]);
   detail(`on branch ${name}`);
@@ -431,6 +448,42 @@ export async function diffSinceWithLimit(
   return { patch, truncated: patch.length > maxChars };
 }
 
+/**
+ * One round's diff: what the tree became, against what it was (#223).
+ *
+ * **A separate function rather than a third parameter on `diffSince`**, and the
+ * reason is that they answer different questions with different failure modes.
+ * `diffSince` is *the change so far* and is written to be useful when it is
+ * given nothing - no base means stage the working tree, an empty range means
+ * fall back to `git diff HEAD` - because the reviewer must be handed something.
+ * Neither of those fallbacks is wanted here: a round that changed nothing is a
+ * measurement, and answering it with the working tree would show a person the
+ * edits they made themselves and call them a round's output.
+ *
+ * So both ends are required, it runs exactly one command, and an empty result
+ * comes back empty.
+ *
+ * `from` may be null, which is the first commit in a repository that had none.
+ * `git diff <empty-tree>..<sha>` is the whole of that commit, which is the true
+ * answer rather than a special case: `EMPTY_TREE` is git's own constant for it
+ * and is the same in every repository.
+ */
+const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+
+export async function diffRange(
+  cwd: string,
+  from: string | null,
+  to: string,
+  options: { maxChars?: number } = {},
+): Promise<{ patch: string; truncated: boolean }> {
+  const maxChars = options.maxChars ?? DIFF_MAX_CHARS;
+  const { stdout } = await git(cwd, ['diff', `${from ?? EMPTY_TREE}..${to}`]);
+  if (stdout.length > maxChars) {
+    return { patch: stdout.slice(0, maxChars) + truncationMarker(maxChars), truncated: true };
+  }
+  return { patch: stdout, truncated: false };
+}
+
 /** One reviewer turn's worth of the change: whole files, in git's order. */
 export interface DiffChunk {
   files: string[];
@@ -461,16 +514,83 @@ export interface DiffChunk {
 async function resolveDiffMode(
   cwd: string,
   baseSha: string | null,
+  options: { revealUntracked?: boolean } = {},
 ): Promise<{ prefix: string[]; whole: string }> {
   if (baseSha) {
     let { stdout: whole } = await git(cwd, ['diff', `${baseSha}..HEAD`]);
     if (whole) return { prefix: ['diff', `${baseSha}..HEAD`], whole };
+    // **The round is uncommitted, and `git diff HEAD` cannot see a file git has
+    // never seen.** This fallback exists for `git.commitEachRound: false`, where
+    // the implementation stays in the working tree - and an implementation is
+    // mostly *new files*, every one of them untracked and therefore invisible
+    // here. A round that only added files produced an empty diff and the
+    // reviewer was handed nothing, which is the same defect the no-base branch
+    // below had by a different route.
+    //
+    // `add -N` is intent-to-add: it registers the paths so a diff can describe
+    // them and stages **no content** - measured, `git diff --cached` stays empty
+    // after it. That matters because this is somebody's working tree.
+    //
+    // Only when the caller says so, and only `diffChunks` does. `diffSince` is
+    // what the `diff` read frame reaches, and a read frame that touched the
+    // index would be the surprise `protocol.ts` refuses a null base to avoid.
+    if (options.revealUntracked === true) {
+      await git(cwd, ['add', '-N', '.'], { allowFail: true });
+    }
     ({ stdout: whole } = await git(cwd, ['diff', 'HEAD']));
     return { prefix: ['diff', 'HEAD'], whole };
   }
   await git(cwd, ['add', '-A'], { allowFail: true });
-  const { stdout: whole } = await git(cwd, ['diff', '--cached']);
-  return { prefix: ['diff', '--cached'], whole };
+  // **Against the empty tree, not against HEAD.** `git diff --cached` alone
+  // compares the index to HEAD, and falls back to the empty tree only while
+  // there is no HEAD - so the moment the implement round committed, a greenfield
+  // run's review diff became EMPTY. Measured on a run of 2026-09-15: 40 files
+  // and 5,915 insertions committed as `ceba37d`, and `git diff --cached`
+  // returned 0 characters, while the same command against the empty tree
+  // returned 210,111. The reviewer was handed nothing, said so in its own
+  // summary, went looking through the tree by hand and then stalled.
+  //
+  // Naming the base explicitly is safe here and nowhere else, and `markBase` is
+  // why: it returns null if and only if the repository had **no commits** when
+  // the implement phase began. So with no base, everything from the empty tree
+  // onward is this run's own work - there is no earlier history for this to
+  // sweep up. In a repository that had commits, `baseSha` is a sha and the
+  // branch above is taken.
+  //
+  // It covers both `git.commitEachRound` settings in one command rather than
+  // branching on whether a commit happened: `git add -A` has just staged
+  // everything, so the index holds the round's work whether or not it was
+  // committed, and the empty tree is the right left-hand side either way.
+  const empty = await emptyTree(cwd);
+  const prefix = empty === null ? ['diff', '--cached'] : ['diff', '--cached', empty];
+  const { stdout: whole } = await git(cwd, prefix);
+  return { prefix, whole };
+}
+
+/**
+ * The name of the empty tree in this repository, or null if git will not say.
+ *
+ * **Asked for rather than hardcoded.** `4b825dc…` is the SHA-1 spelling and is
+ * the one nearly every reference gives, but a repository created with
+ * `--object-format=sha256` has a different empty tree - so a constant here would
+ * be right on this machine and silently wrong on somebody else's. `hash-object`
+ * computes it from the repository's own object format, which is the only answer
+ * that cannot go stale.
+ *
+ * `/dev/null` rather than empty stdin because `git()` spawns without one, and
+ * Git for Windows maps that path itself - measured working on this platform.
+ *
+ * Null on any failure, and the caller falls back to the plain `--cached` form:
+ * that is the behaviour every run had before this, so a git that will not answer
+ * leaves the review exactly as it was rather than failing the phase.
+ */
+async function emptyTree(cwd: string): Promise<string | null> {
+  const { code, stdout } = await git(cwd, ['hash-object', '-t', 'tree', '/dev/null'], {
+    allowFail: true,
+  });
+  if (code !== 0) return null;
+  const sha = stdout.trim();
+  return /^[0-9a-f]{40,64}$/.test(sha) ? sha : null;
 }
 
 /**
@@ -502,7 +622,10 @@ export async function diffChunks(
   options: { maxChars?: number } = {},
 ): Promise<{ chunks: DiffChunk[]; files: string[] }> {
   const maxChars = options.maxChars ?? DIFF_MAX_CHARS;
-  const { prefix, whole } = await resolveDiffMode(cwd, baseSha);
+  // `revealUntracked` because this is the REVIEW's read: a round that only added
+  // files must not look empty to the reviewer. `diffSince` has its own reader and
+  // is what the read frame reaches, so nothing there touches the index.
+  const { prefix, whole } = await resolveDiffMode(cwd, baseSha, { revealUntracked: true });
 
   // Before the size branch, not after it: both paths return this list, and the
   // caller needs it for the prompt and for the coverage record even when there

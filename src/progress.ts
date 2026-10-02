@@ -1,3 +1,7 @@
+import { requestCancel } from '@src/cancel.js';
+// No `fmtTokens` import: this module already has one, and it is the one the
+// heartbeat line renders with - so the ceiling's sentence and the beat that
+// preceded it spell the same number the same way.
 import { detail } from '@src/log.js';
 import type { Meta } from '@src/log.js';
 import { markActivity, measuredWindow } from '@src/run.js';
@@ -17,7 +21,19 @@ import type { Config, InFlightTurn, RunState, TurnActivity } from '@src/types.js
  * Since #66 that last sentence has one exception, and it is deliberately narrow:
  * the per-turn *tally* gathered here (`items`, `toolItems`) is carried out
  * through `Heartbeat.activity` and does reach a decision - `downgradeInert` in
- * evidence.ts. Everything else remains display.
+ * evidence.ts.
+ *
+ * **#211 adds the second, and it is narrower still.** `onSpend` reports this
+ * turn's running token total after each beat, and `progressOptions` wires it to
+ * `guardTurnSpend`, which can cancel the turn. That is a decision about a run
+ * made from here, and it is here because this is the only thing that watches a
+ * turn *while* it spends: `applyCharge` enforces `budget.maxTokens` between
+ * turns, and an implement turn that ran to 8.8M tokens against a 25M ceiling
+ * never returned to be charged at all. The measurement stays in this module and
+ * the arithmetic stays in `guardTurnSpend` beside the config it reads, so the
+ * heartbeat itself still decides nothing.
+ *
+ * Everything else remains display.
  */
 
 export interface ProgressSnapshot {
@@ -72,6 +88,28 @@ export interface ProgressSnapshot {
    * tokens are in", one for "it is in the tally" (#66).
    */
   itemisedMessages: Set<string>;
+  /**
+   * What the model has said since the last line was drained (#223).
+   *
+   * **The agent's own prose, which nothing on this stream carried before.**
+   * `lastActivity` is a tool name — `Read src/gates.ts` — so the output pane
+   * could say what vibe was doing and what tools were used, and never what the
+   * model was actually reasoning about. Reported exactly: *"Output needs to be
+   * more verbose about the model and what it's thinking. Right now it's more
+   * like what vibe is doing. I want to see the actual model output."*
+   *
+   * **A buffer rather than a call**, because `LineParser` is a mutator that
+   * tests drive directly and `onLine` is documented as the only site that
+   * emits — a parser that narrated would put a side effect in the one function
+   * in this file that is safe to call in a loop.
+   *
+   * **Uncapped, at the owner's decision.** A block is passed through whole: a
+   * model that writes four thousand words puts four thousand words in the pane
+   * and the transcript. The alternative needed a character limit, which is a
+   * number with nothing behind it, and a truncated thought is the half that is
+   * not worth reading.
+   */
+  said: string[];
 }
 
 export function emptySnapshot(): ProgressSnapshot {
@@ -84,6 +122,7 @@ export function emptySnapshot(): ProgressSnapshot {
     promptTokens: 0,
     countedMessages: new Set(),
     itemisedMessages: new Set(),
+    said: [],
   };
 }
 
@@ -172,7 +211,24 @@ export const parseClaudeLine: LineParser = (snapshot, line) => {
   const content = message['content'];
   if (Array.isArray(content)) {
     for (const block of content) {
-      if (!isRecord(block) || block['type'] !== 'tool_use') continue;
+      if (!isRecord(block)) continue;
+      // The model's own prose (#223). Collected on the same walk the tools are
+      // tallied on, and under the same assumption this loop has always made -
+      // one content block per `assistant` event, which is the module header's
+      // own account of the stream. If that ever stopped being true the tool
+      // tallies would double first, so the two fail together and visibly.
+      if (block['type'] === 'text') {
+        const text = block['text'];
+        // Whitespace-only is not something the model said. Trimmed for the test
+        // and passed through **whole**, because the shape of a paragraph is part
+        // of what makes it readable.
+        if (typeof text === 'string' && text.trim() !== '') {
+          snapshot.said.push(text);
+          recognised = true;
+        }
+        continue;
+      }
+      if (block['type'] !== 'tool_use') continue;
       const name = typeof block['name'] === 'string' ? block['name'] : 'tool';
       const target = toolTarget(block['input']);
       snapshot.activities += 1;
@@ -280,6 +336,19 @@ export const parseCodexLine: LineParser = (snapshot, line) => {
     // has no reason to double it the way the liveness counter must (#66).
     if (type === 'item.completed' && typeof itemType === 'string' && itemType !== '') {
       tally(snapshot, itemType, !NON_TOOL_CODEX_ITEMS.has(itemType));
+      // Codex's half of #223. `agent_message` is the model talking - it is in
+      // `NON_TOOL_CODEX_ITEMS` for exactly that reason - and `item.completed` is
+      // where the whole text has arrived. Reading it on `item.started` would
+      // collect a partial message and then the same message again.
+      //
+      // **Only `agent_message`.** `reasoning` is the other non-tool kind and is
+      // deliberately left alone: it has never been seen carrying text on this
+      // stream, and a field read from an item this repo has not observed is a
+      // guess at a shape rather than a reading of one.
+      if (itemType === 'agent_message' && isRecord(item)) {
+        const text = item['text'];
+        if (typeof text === 'string' && text.trim() !== '') snapshot.said.push(text);
+      }
     }
     return true;
   }
@@ -341,6 +410,40 @@ export interface HeartbeatLine {
    */
   intervalMs?: number | undefined;
   sinceOutputMs?: number | undefined;
+  /**
+   * How much memory **this process** is holding, in bytes (#211).
+   *
+   * Not the agent's: the child is its own process and its footprint is its own
+   * business. This is the loop's, and it is here because a host died mid-turn
+   * with no stack, no narration and nothing on stderr - `host exited with code
+   * -1` and a lock with no `ending.json` beside it, which is #131's signature
+   * for terminated-from-outside and says nothing about what did the
+   * terminating.
+   *
+   * The turn it died in had run 27 minutes and reported **8.8M tokens**, and
+   * `proc.ts` accumulates a child's whole stdout into one string. That makes
+   * memory the first thing worth being able to look at, and there was no way to
+   * look at it: a run that dies leaves its last heartbeat, and the last
+   * heartbeat said nothing about this.
+   *
+   * **A measurement, with no threshold attached.** Nothing here decides that a
+   * number is too big, because nothing has measured what too big is on this
+   * platform - `budget.maxTokens` earned its 25M from a census and this has no
+   * equivalent. What it buys is that the next silent death has a curve behind
+   * it instead of a guess.
+   */
+  rssBytes?: number | undefined;
+  /**
+   * How much of the child's output the parent is holding, in bytes (#211).
+   *
+   * The specific suspect beside the general measurement. `run()` builds `stdout`
+   * by concatenation and every parse of it - `finalResult`, `parseClaudeLine`'s
+   * caller - splits it again, so a turn that talks for 27 minutes is holding at
+   * least two copies of everything it said. Reported separately from `rssBytes`
+   * because "the process is large" and "the process is large *because of this*"
+   * are different findings and only the second names a fix.
+   */
+  outputBytes?: number | undefined;
 }
 
 /**
@@ -362,6 +465,7 @@ export interface HeartbeatLine {
  */
 export function heartbeatData(args: HeartbeatLine): Record<string, unknown> {
   const { label, elapsedMs, snapshot, unit, contextWindow, intervalMs, sinceOutputMs } = args;
+  const { rssBytes, outputBytes } = args;
   const data: Record<string, unknown> = {
     label,
     elapsedMs,
@@ -377,8 +481,31 @@ export function heartbeatData(args: HeartbeatLine): Record<string, unknown> {
   // zero would say the opposite of what is true.
   if (intervalMs !== undefined && intervalMs > 0) data['intervalMs'] = intervalMs;
   if (sinceOutputMs !== undefined) data['sinceOutputMs'] = sinceOutputMs;
+  // Omitted rather than zeroed, as everything else here is: a build that did not
+  // measure and a process holding nothing are different facts, and only one of
+  // them is possible.
+  if (rssBytes !== undefined) data['rssBytes'] = rssBytes;
+  if (outputBytes !== undefined) data['outputBytes'] = outputBytes;
   return data;
 }
+
+/**
+ * How many missed ticks make a turn quiet rather than merely slow.
+ *
+ * **Three, and the number is a shape rather than a duration** — the same answer,
+ * for the same reason, as `MISSED_TICKS` in `app/src/cockpit/model.ts`, which
+ * decides when `7c` calls a run stale. The design's one open judgement there is
+ * how stale is stale, and its own answer is that this is a question about vibe's
+ * heartbeat cadence, so the threshold is expressed in ticks and multiplied by
+ * the cadence the run configured. At the default 30-second interval that is 90
+ * seconds; a run configured slower moves with it, which a hardcoded 90_000 would
+ * not.
+ *
+ * It is duplicated across the two packages rather than shared, exactly as the
+ * markers in `src/raise.ts` and `app/src/cockpit/raise.ts` are, and for the same
+ * reason: they are two packages. Both comments name the other.
+ */
+export const MISSED_TICKS = 3;
 
 /**
  * One heartbeat line.
@@ -386,10 +513,37 @@ export function heartbeatData(args: HeartbeatLine): Record<string, unknown> {
  * Every segment except elapsed time is omitted when the stream has not supplied
  * a number for it. That is what lets the sparser Codex stream degrade to
  * elapsed-only rather than reporting invented figures.
+ *
+ * **The quiet segment is the one that is drawn by its absence** (#223). A beat
+ * fires on its own timer whether or not the child said anything, so a line
+ * arriving proves *vibe* is alive and proves nothing about the turn — and for 40
+ * minutes of a run on 2026-09-15 this printed `review-0: 23m30s · 32 events ·
+ * command_execution` every thirty seconds while the child had not written a byte
+ * since 17:45:33. The one number that had stopped moving was the event count,
+ * and reading it required diffing two lines by eye. `sinceOutputMs` was on the
+ * record the whole time and was simply not in the sentence.
+ *
+ * It appears only once the gap is at least `MISSED_TICKS` beats, so a healthy
+ * turn never carries it: measured across the six healthy turns of that run, the
+ * longest any went without new activity was 3m30 on a 12m30 critique, and an
+ * 11m30 implement turn never went more than 32 seconds.
  */
 export function formatHeartbeat(args: HeartbeatLine): string {
-  const { label, elapsedMs, snapshot, unit, contextWindow } = args;
+  const { label, elapsedMs, snapshot, unit, contextWindow, intervalMs, sinceOutputMs } = args;
   const parts: string[] = [formatElapsed(elapsedMs)];
+
+  // Second, right after elapsed, because it is the thing a person scanning a
+  // stalled run is looking for. Both halves have to be real: without a cadence
+  // there is nothing to derive the threshold from, and a turn whose child has
+  // never written has no gap rather than a gap of zero.
+  if (
+    intervalMs !== undefined &&
+    intervalMs > 0 &&
+    sinceOutputMs !== undefined &&
+    sinceOutputMs >= intervalMs * MISSED_TICKS
+  ) {
+    parts.push(`quiet ${formatElapsed(sinceOutputMs)}`);
+  }
 
   if (snapshot.activities > 0) {
     parts.push(`${snapshot.activities} ${unit}${snapshot.activities === 1 ? '' : 's'}`);
@@ -497,6 +651,50 @@ export interface ProgressOptions {
   scope?: object | undefined;
   /** Called once per observation. See the ownership rule in createHeartbeat. */
   onActivity?: ((observation: ActivityObservation) => void) | undefined;
+  /**
+   * This process's resident memory, in bytes, or absent (#211).
+   *
+   * Injected rather than read here for the reason `now` is: a module that calls
+   * `process.memoryUsage()` cannot be driven by a test, and this one is
+   * otherwise pure of the process it runs in. `progressOptions` supplies the
+   * real reader.
+   */
+  measure?: (() => number) | undefined;
+  /**
+   * How many bytes of the child's output the parent is holding, or absent.
+   *
+   * Supplied by the adapter, which is the only layer that has the buffer. See
+   * `HeartbeatLine.outputBytes` for why this is reported apart from `measure`.
+   */
+  held?: (() => number) | undefined;
+  /**
+   * Called with this turn's running token total after each beat (#211).
+   *
+   * **The seam that lets a ceiling reach a turn already in flight.** `applyCharge`
+   * enforces `budget.maxTokens` *between* turns, which cannot stop the turn that
+   * is spending: a single implement turn ran to 8.8M tokens against a 25M
+   * ceiling and the run never got the chance to notice. The heartbeat is the
+   * only thing that sees a turn's spend while it is happening.
+   *
+   * It returns nothing and decides nothing. What to do about a number is the
+   * loop's business - `orchestrator.ts` wires this to the budget and to
+   * `requestCancel`, so the module that owns money owns the decision and this
+   * one stays a measurement.
+   */
+  onSpend?: ((tokens: number) => void) | undefined;
+  /**
+   * How long the child has been silent, reported each beat (#223).
+   *
+   * Beside `onSpend` and for the same reason: the heartbeat is the only thing
+   * watching a turn *while* it runs, so a ceiling that is not enforced from here
+   * is one that cannot fire until the turn returns - and a stalled turn is
+   * exactly the turn that does not return.
+   *
+   * Called only when there is a gap to report. A turn whose child has written
+   * nothing at all has no gap rather than a gap of zero, which is the same
+   * distinction `sinceOutputMs` draws on the line itself.
+   */
+  onQuiet?: ((quietMs: number) => void) | undefined;
   now?: (() => number) | undefined;
   /**
    * Where a heartbeat goes. Defaults to `log.detail`, which since #133 carries
@@ -614,6 +812,10 @@ export function createHeartbeat(
     intervalMs,
     contextWindow,
     onActivity,
+    measure,
+    held,
+    onSpend,
+    onQuiet,
     parse,
     unit,
     provider,
@@ -665,10 +867,32 @@ export function createHeartbeat(
         // nothing has no gap, and a zero would claim it had just written.
         intervalMs,
         ...(lastLineAt === null ? {} : { sinceOutputMs: Math.max(0, lastEmitAt - lastLineAt) }),
+        // What this process is holding, and how much of it is the child's output
+        // (#211). Both omitted when the caller did not supply a way to measure
+        // them, which is every test and every embedder that does not care.
+        ...(measure === undefined ? {} : { rssBytes: measure() }),
+        ...(held === undefined ? {} : { outputBytes: held() }),
       };
       emit(formatHeartbeat(line), { id: 'heartbeat', data: heartbeatData(line) });
     } catch {
       // A broken sink must not take down a run.
+    }
+    // **After the emit and outside its try**, which is the ordering that matters
+    // (#211). A ceiling that fired but left no line behind would end a turn with
+    // nothing on screen to explain it, and a sink that threw must not be able to
+    // take the ceiling with it - those are the two ways this goes wrong and they
+    // want opposite placements.
+    try {
+      onSpend?.(snapshot.tokens);
+      // Same placement and the same reason: after the line that explains it, so
+      // a stop always has the `quiet Xm` beat sitting above it on screen. Only
+      // when the child has written at least once - a turn with no line yet has
+      // no gap, and treating that as an infinite one would stop every turn
+      // before it had begun.
+      if (lastLineAt !== null) onQuiet?.(Math.max(0, lastEmitAt - lastLineAt));
+    } catch {
+      // Same rule as the sink: a guard that throws must not kill the turn it
+      // was watching. What it decided is the loop's to record, not this one's.
     }
     return true;
   };
@@ -731,6 +955,25 @@ export function createHeartbeat(
       parse(snapshot, line);
     } catch {
       // A malformed line is not a run-ending event.
+    }
+    // What the model said on this line, straight through (#223). Drained here
+    // because `onLine` is documented as the only site that emits, and drained
+    // **completely** so a block can never be said twice.
+    //
+    // `detail` is the level: it is the agent's own prose rather than the loop
+    // reporting on itself, so it reads dimmed beside the loop's steps and a
+    // terminal can tell the two apart at a glance. It is narration with no
+    // event - the agent's words are already in the session the provider holds,
+    // and `state.events` is not a transcript (#133).
+    if (snapshot.said.length > 0) {
+      const said = snapshot.said.splice(0, snapshot.said.length);
+      for (const text of said) {
+        try {
+          detail(text, { id: 'model_said', data: { label, text } });
+        } catch {
+          // Same rule as the parse above: narration must never end a turn.
+        }
+      }
     }
     // The first line that puts a figure on this turn is written immediately,
     // once. Everything after it rides the ordinary throttle: writing per usage
@@ -852,6 +1095,24 @@ export function rememberContextWindow(model: string, contextWindow: number): voi
   if (contextWindow > 0) windows.set(model, contextWindow);
 }
 
+/**
+ * A window this process has not measured, from somewhere that did.
+ *
+ * **Only where nothing is known**, which is the whole difference from
+ * `rememberContextWindow`: a figure a turn in this process measured describes the
+ * conversation now running, and must never be replaced by an older one from
+ * anywhere else. So this fills a gap and never overwrites.
+ *
+ * The gap it fills is real and was reported as a defect: the window arrives on a
+ * turn's *result* envelope, so the first Claude turn of a run has none - which is
+ * the planner, every time, on the first run in a process. `ctx%` therefore
+ * appeared from the second Claude turn onwards and the plan round it matters most
+ * on had nothing.
+ */
+export function seedContextWindow(model: string, contextWindow: number): void {
+  if (contextWindow > 0 && !windows.has(model)) windows.set(model, contextWindow);
+}
+
 export function progressOptions(
   state: RunState,
   cfg: Config,
@@ -898,5 +1159,101 @@ export function progressOptions(
     // Omitting the segment is always preferable to a number that cannot be
     // justified.
     ...(contextWindow === undefined ? {} : { contextWindow }),
+    // This process's own footprint (#211). Read here rather than in the module
+    // so the heartbeat itself stays free of the process it runs in, and so a
+    // test drives it without one.
+    measure: () => process.memoryUsage.rss(),
+    // The ceiling, reaching a turn that is already spending. `applyCharge`
+    // enforces `maxTokens` between turns and cannot stop the one in flight: an
+    // implement turn ran to 8.8M tokens under a 25M ceiling and the run never
+    // got to notice, because the turn never returned to be charged.
+    onSpend: (tokens) => guardTurnSpend(state, cfg, label, tokens),
+    // The other ceiling on a turn in flight, and the one the turn ceiling cannot
+    // cover: `codex.timeoutMs` bounds how long a turn may take, this bounds how
+    // long it may say nothing while taking it.
+    onQuiet: (quietMs) => guardTurnQuiet(cfg, label, quietMs),
   };
+}
+
+/**
+ * Stop a turn that has spent past what the run has left (#211).
+ *
+ * **The ceiling was always between turns, and that is where it stops working.**
+ * `applyCharge` raises `EXIT.BUDGET` when a turn's spend takes the run past
+ * `budget.maxTokens` - after the turn has returned and been paid for. A single
+ * turn that runs away is invisible to it, and one did: 27 minutes, 8.8M tokens,
+ * against a 25M ceiling, and the host died before the turn ever returned, so
+ * that spend is not in `state.json` at all.
+ *
+ * Three things about how it stops:
+ *
+ * - **It cancels, it does not throw.** `requestCancel` is #209's latch: the
+ *   child dies, the error travels up through the retry logic as a `Cancelled`,
+ *   and the loop turns it into the ending a round cap already takes. Throwing
+ *   from inside a timer callback would have no caller to catch it.
+ * - **Only what may be killed dies.** `cancel.ts` kills interruptible children
+ *   only - never `git`, never the verification gate, which is the user's own
+ *   command. That rule is already there and this inherits it.
+ * - **The projection is the run's own arithmetic, not a new one.** What the run
+ *   has already spent plus what this turn has spent so far, against the same
+ *   `maxTokens` `applyCharge` reads. No new number is introduced, which is why
+ *   there is no threshold to justify: the ceiling is the user's.
+ *
+ * Disabled with the ceiling: `maxTokens: 0` means no limit, and it means no
+ * limit here too.
+ */
+function guardTurnSpend(state: RunState, cfg: Config, label: string, tokens: number): void {
+  const ceiling = cfg.budget.maxTokens;
+  if (ceiling <= 0) return;
+  const spent = state.tokensUsed + tokens;
+  if (spent < ceiling) return;
+  // Named with both figures, because "over budget" without them is the sentence
+  // nobody can check. `requestCancel` is idempotent, so a second beat crossing
+  // the same line does not stack a second reason.
+  requestCancel(
+    `the ${label} turn took this run to ${fmtTokens(spent)} tokens, at or past the ceiling of ` +
+      `${fmtTokens(ceiling)} in budget.maxTokens. The turn was stopped mid-flight; its spend is ` +
+      'charged and the run can be resumed with a higher ceiling.',
+  );
+}
+
+/**
+ * Stop a turn that has gone silent (#223).
+ *
+ * **The turn ceiling cannot do this job, and a run of 2026-09-15 is the
+ * evidence.** A review turn wrote its last line at 17:45:33 and was killed at
+ * 18:24:50 when `codex.timeoutMs` expired — 39 minutes 17 seconds during which
+ * the heartbeat fired seventy-eight times, each reporting the same 32 events,
+ * and nothing acted on it. Raising that ceiling would have bought a longer hang.
+ * The two limits answer different questions: one is how long a turn may *take*,
+ * this is how long it may say *nothing* while taking it.
+ *
+ * It is `guardTurnSpend`'s shape exactly, and inherits all three of its rules:
+ *
+ * - **It cancels, it does not throw.** `requestCancel` is #209's latch — the
+ *   child dies, the error travels up as a `Cancelled`, and the loop turns it
+ *   into the ending a round cap already takes. A throw from a timer callback has
+ *   no caller to catch it.
+ * - **Only what may be killed dies.** `cancel.ts` kills interruptible children
+ *   only, never `git` and never the verification gate, which is the user's own
+ *   command and is entitled to be silent for as long as it likes.
+ * - **The measurement is the one already on the beat.** `sinceOutputMs` has been
+ *   carried since #223 and is what the line now prints; nothing new is measured
+ *   here, and the ceiling is the user's.
+ *
+ * Disabled with the ceiling and with progress itself: `maxQuietMs: 0` means no
+ * limit, and `progress.enabled: false` means no beats to measure from.
+ */
+function guardTurnQuiet(cfg: Config, label: string, quietMs: number): void {
+  const ceiling = cfg.progress.maxQuietMs;
+  if (ceiling <= 0) return;
+  if (quietMs < ceiling) return;
+  // Named with both figures and with the setting, because "stalled" without them
+  // is the sentence nobody can check or change. `requestCancel` is idempotent,
+  // so a later beat past the same line does not stack a second reason.
+  requestCancel(
+    `the ${label} turn produced no output for ${formatElapsed(quietMs)}, at or past the ceiling ` +
+      `of ${formatElapsed(ceiling)} in progress.maxQuietMs. The turn was stopped mid-flight; the ` +
+      'run can be resumed, and the ceiling raised or switched off with 0 if the turn was working.',
+  );
 }

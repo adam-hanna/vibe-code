@@ -125,10 +125,11 @@ pub fn clear(provider: Provider) -> Result<(), String> {
 /// point - the pilot's HTTP adapters call this, and nothing reachable from the
 /// webview can.
 ///
-/// Its one caller is `pilot::drive`, which reads a key at the last possible
-/// moment, hands it straight to a request header, and drops it. The key is
-/// never emitted, never logged, never returned to the window and never written
-/// down anywhere else in this crate.
+/// Two callers. `pilot::drive` reads a key at the last possible moment, hands it
+/// straight to a request header, and drops it. `HostProcess::send_keys` writes
+/// both to the host's stdin, because runs are billed to the key too (#223) and
+/// the host is what spawns them. The key is never emitted, never logged, never
+/// returned to the window and never written down anywhere else in this crate.
 pub(crate) fn read(provider: Provider) -> Result<String, String> {
     match entry(provider)?.get_password() {
         Ok(key) => Ok(key),
@@ -171,14 +172,25 @@ pub fn status() -> Vec<KeyStatus> {
         .collect()
 }
 
+/// Store or forget a key, then hand the host the new pair (#223), because runs
+/// use the key too and the host is what spawns them. A host that is not running
+/// is told when it starts.
 #[tauri::command]
-pub fn key_set(provider: Provider, key: String) -> Result<(), String> {
-    set(provider, &key)
+pub fn key_set(
+    provider: Provider,
+    key: String,
+    host: tauri::State<'_, crate::host::HostProcess>,
+) -> Result<(), String> {
+    set(provider, &key)?;
+    let _ = host.send_keys();
+    Ok(())
 }
 
 #[tauri::command]
-pub fn key_clear(provider: Provider) -> Result<(), String> {
-    clear(provider)
+pub fn key_clear(provider: Provider, host: tauri::State<'_, crate::host::HostProcess>) -> Result<(), String> {
+    clear(provider)?;
+    let _ = host.send_keys();
+    Ok(())
 }
 
 #[tauri::command]

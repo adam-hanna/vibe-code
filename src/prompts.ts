@@ -608,7 +608,7 @@ The plan must cover:
 
 Do not inflate either list. A plan with fifteen trivial questions is as unreviewable as one with none.
 
-${RESPOND_WITH_JSON}`;
+${block(BLOCK.json, RESPOND_WITH_JSON)}`;
 }
 
 /**
@@ -698,7 +698,7 @@ This is the plan's own definition of done, and it is yours to attack. Two questi
 
 Nothing executes a criterion in this run, so do not raise findings about running them. Cite one by its \`id\` where it makes a finding concrete.
 
-${REVIEW_BREADTH}
+${block(BLOCK.review, REVIEW_BREADTH)}
 
 ## The plan
 
@@ -710,7 +710,7 @@ ${formatAssumptions(assumptions)}
 
 Scrutinise these specifically. An assumption that is wrong, or one whose blast radius is understated, is a P1.
 
-${RESPOND_WITH_JSON}`;
+${block(BLOCK.json, RESPOND_WITH_JSON)}`;
 }
 
 export function answerPrompt(questions: readonly OpenQuestion[], planMd: string): string {
@@ -726,6 +726,8 @@ Questions are marked **blocking** or **advisory**. Answer both with the same car
 
 Answer every question in the list, including ones you decline - echo the question and set \`defer_to_human: true\`.
 
+**Copy the question verbatim into \`question\`** - only the numbered line itself, not the \`(kind, tag)\` line under it and not the fallback answer. That string is what pairs your answer back to the question that was asked; a paraphrase or an extra suffix and the pairing is guesswork.
+
 ## Questions
 
 ${questions.map(formatQuestion).join('\n\n')}
@@ -734,7 +736,7 @@ ${questions.map(formatQuestion).join('\n\n')}
 
 ${planMd}
 
-${RESPOND_WITH_JSON}`;
+${block(BLOCK.json, RESPOND_WITH_JSON)}`;
 }
 
 export interface RevisePlanArgs {
@@ -779,7 +781,7 @@ ${findings.map(formatFinding).join('\n\n')}${deferralNote(findings, 'planner')}
 
 For each P1: fix the plan, or, if you believe the finding is wrong, say so explicitly in the plan with your reasoning. Do not silently ignore one.
 
-${FIX_BREADTH}`);
+${block(BLOCK.fix, FIX_BREADTH)}`);
   }
 
   if (answers && answers.length > 0) {
@@ -804,7 +806,7 @@ ${formatAcceptanceCriteria(acceptanceCriteria)}
 
   parts.push(
     'Return the **complete revised plan**, not a diff or a summary of changes - the plan is consumed standalone by the implementer. Keep `assumptions` current: remove any that were resolved, add any the revision introduced.',
-    RESPOND_WITH_JSON,
+    block(BLOCK.json, RESPOND_WITH_JSON),
   );
 
   return parts.join('\n\n');
@@ -1083,7 +1085,7 @@ This is the bar the plan was approved against - the conditions the change claime
 
 There is no per-criterion verdict to report and no field to set. Your findings and their severities are the only signal this loop reads, exactly as before; the criteria are something a finding may cite, not a second scoreboard.
 
-${REVIEW_BREADTH}
+${block(BLOCK.review, REVIEW_BREADTH)}
 ${chunk === undefined ? '' : chunkNote(chunk)}${reportSection(report)}
 ## Files changed
 
@@ -1099,7 +1101,7 @@ ${diff || '(empty diff)'}
 
 ${planMd}
 
-${RESPOND_WITH_JSON}`;
+${block(BLOCK.json, RESPOND_WITH_JSON)}`;
 }
 
 export function fixPrompt(
@@ -1123,7 +1125,7 @@ Resolve **every P1**. Address P2s where the fix is contained and low-risk; skip 
 
 ${findings.map(formatFinding).join('\n\n')}${deferralNote(findings, 'fixer')}
 
-${FIX_BREADTH}
+${block(BLOCK.fix, FIX_BREADTH)}
 
 Re-run the project's tests after fixing. If you believe a finding is incorrect, fix nothing for it but explain why in your final message - do not silently skip it.
 
@@ -1389,7 +1391,7 @@ function formatFinding(f: Finding): string {
   // - the schema requires it - so no existing prompt changes.
   const fix = f.suggested_fix.trim() === '' ? '' : `\n\n*Suggested fix:* ${f.suggested_fix}`;
   return `### [${f.severity}] ${f.title}  \`${f.id}\`
-${f.detail}${fix}${citation(f, '\n')}${raisedNote(f)}${movedNote(f)}${provenNote(f)}${f.defer === true ? `\n\n${DEFERRED_MARK}` : ''}`;
+${f.detail}${fix}${citation(f, '\n')}${raisedNote(f)}${movedNote(f)}${provenNote(f)}${f.defer === true ? `\n\n${block(BLOCK.deferred, DEFERRED_MARK)}` : ''}`;
 }
 
 /**
@@ -1425,14 +1427,166 @@ function formatAssumptions(assumptions: readonly Assumption[]): string {
     .join('\n');
 }
 
+/**
+ * One question, with nothing on the question's own line but the question.
+ *
+ * The decoration used to sit immediately after it - `**text** *(technical,
+ * advisory)*` - and the answerer, told to echo the question, echoed the line it
+ * was shown. `pairAnswers` handles that now, but a format that invites the
+ * mistake is a format that will find the next way to make it: the tag moves to
+ * its own line so the thing to copy is unambiguous, and the instruction below
+ * says which part to copy.
+ */
 function formatQuestion(q: OpenQuestion, i: number): string {
   const opts = q.options.length > 0 ? `\n   Options: ${q.options.join(' | ')}` : '';
   const tag = q.blocking ? 'blocking' : 'advisory';
-  return `${i + 1}. **${q.question}** *(${q.kind}, ${tag})*${opts}\n   Planner's fallback answer: ${q.recommended}`;
+  return (
+    `${i + 1}. ${q.question}\n` +
+    `   (${q.kind}, ${tag})${opts}\n` +
+    `   Planner's fallback answer: ${q.recommended}`
+  );
 }
 
 function formatAnswer(a: Answer): string {
   return `**Q: ${a.question}**
 A: ${a.answer}
 *(confidence: ${a.confidence}${a.rationale ? ` - ${a.rationale}` : ''})*`;
+}
+
+// ---- overrides --------------------------------------------------------------
+
+/**
+ * The blocks this run replaces, installed once before the loop starts (#223).
+ *
+ * **A module latch rather than a parameter, and the reason is written all over
+ * this file.** Every builder here takes a long positional list, and three of
+ * them carry a comment saying an inserted parameter *"would silently
+ * reinterpret"* an existing call - so threading a config through `planPrompt`,
+ * `critiquePrompt`, `implementPrompt`, `reviewPrompt`, `fixPrompt`,
+ * `answerPrompt` and `revisePlanPrompt` is the change most likely to go wrong
+ * quietly. `src/cancel.ts` takes the same shape for the same trade, and it is
+ * safe for the same reason it states: **one run per process**, which
+ * `src/lock.ts` is written expecting and `serve.ts` enforces.
+ *
+ * `execute` installs and clears it, so a latch never survives into the next run
+ * in the same process - exactly as `clearCancel()` does.
+ */
+/**
+ * The names an override is keyed by, spelled once.
+ *
+ * The same strings `promptBlocks()` reports and a `vibe.config.json` holds, so
+ * the settings screen, the file and the interpolation site cannot disagree about
+ * which block is which. Written as a table rather than repeated at each site
+ * because a typo in one of the ten would be an override that silently does
+ * nothing - the block would render its default and nobody would be told.
+ */
+const BLOCK = {
+  json: 'respond with JSON',
+  review: 'review breadth',
+  fix: 'fix breadth',
+  deferred: 'a deferred finding',
+} as const;
+
+let installed: Readonly<Record<string, string>> = {};
+
+export function installPromptOverrides(overrides: Readonly<Record<string, string>>): void {
+  installed = { ...overrides };
+}
+
+export function clearPromptOverrides(): void {
+  installed = {};
+}
+
+/**
+ * The text a block renders as: the project's, or the product's.
+ *
+ * Keyed by the same name `promptBlocks()` reports, so the settings screen, the
+ * config file and the interpolation site cannot disagree about which block is
+ * which. An override that is blank or whitespace is IGNORED rather than sent: a
+ * person clearing the box means "give me the default back", and an empty
+ * standing instruction is not a weaker instruction, it is a missing one.
+ */
+function block(name: string, fallback: string): string {
+  const override = installed[name];
+  return override !== undefined && override.trim() !== '' ? override : fallback;
+}
+
+/**
+ * The instruction blocks every turn of a kind is given, verbatim (#223).
+ *
+ * Asked for from the settings screen — *"The prompts being used for each turn
+ * should also go there"* — and what it can honestly answer is exactly this much.
+ * A prompt here is a **function of the run**: `planPrompt` takes the task and
+ * the prior-run index, `critiquePrompt` takes the plan it is judging,
+ * `fixPrompt` takes the findings and the diff. There is no such thing as "the
+ * implement prompt" outside a run, and rendering one from invented inputs would
+ * be the fabrication this repo refuses everywhere else.
+ *
+ * What there *is* is the part that does not vary: the shared blocks that go into
+ * every turn of a kind unchanged, which are the parts a person reading a
+ * settings screen is actually asking about — *what standing instructions is the
+ * reviewer under*. Those are returned as themselves, byte for byte, from the
+ * same constants the prompts interpolate. A screen drawing this is quoting the
+ * product rather than describing it.
+ *
+ * `usedBy` names the turns each block reaches, and it is written beside the
+ * block rather than derived, because the interpolation sites are in five
+ * different template literals and a reader has no way to check a claim about
+ * them. `prompt-blocks.test.ts` is what keeps the list true: it reads this file
+ * as source and fails on a block that is named as reaching a turn it no longer
+ * reaches.
+ */
+export interface PromptBlock {
+  name: string;
+  /** Which turns include it. The loop's own role names, as `roles.ts` has them. */
+  usedBy: readonly string[];
+  /** The block as it will RENDER: the project's override, or the product's. */
+  text: string;
+  /**
+   * The product's own text, always, whether or not it is what renders.
+   *
+   * Sent beside `text` rather than instead of it so a screen can offer *revert
+   * to default* without holding a second copy of the constant — which would be
+   * the app owning a fact about the loop, going stale on the release that edits
+   * one. Equal to `text` when nothing is overridden.
+   */
+  fallback: string;
+  /** Whether this project replaces it. Told, so a screen never infers it. */
+  overridden: boolean;
+}
+
+export function promptBlocks(): readonly PromptBlock[] {
+  const of = (
+    name: string,
+    usedBy: readonly string[],
+    fallback: string,
+  ): PromptBlock => ({
+    name,
+    usedBy,
+    text: block(name, fallback),
+    fallback,
+    overridden: block(name, fallback) !== fallback,
+  });
+  return [
+    of(BLOCK.json, ['planner', 'critic', 'answerer', 'reviewer'], RESPOND_WITH_JSON),
+    of(BLOCK.review, ['critic', 'reviewer'], REVIEW_BREADTH),
+    of(BLOCK.fix, ['planner', 'implementer'], FIX_BREADTH),
+    // Through `formatFinding`, so it reaches exactly the two turns that are
+    // GIVEN a findings list - the planner revising against a critique and the
+    // implementer fixing against a review. The reviewer produces findings and
+    // is never shown a deferral mark, which is what the test caught when this
+    // line claimed otherwise.
+    of(BLOCK.deferred, ['planner', 'implementer'], DEFERRED_MARK),
+  ];
+}
+
+/**
+ * Every block name, for the config validator.
+ *
+ * Derived from `promptBlocks()` rather than written twice: a second list is one
+ * that can disagree, and the disagreement would refuse a key that is real or
+ * accept one that is not.
+ */
+export function promptBlockNames(): readonly string[] {
+  return promptBlocks().map((b) => b.name);
 }

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Button, MetaChip, Modal, StateKicker } from '../design';
 import * as host from '../host';
-import { launchArgv } from './argv';
+import { briefFor } from './argv';
 import { pickDirectory } from './pick';
 import type { Overrides } from './argv';
 import type { ConfigFrame } from '../host';
@@ -33,9 +33,14 @@ import type { ConfigFrame } from '../host';
  *   name and no branch — so a field here would be typed into and ignored.
  * - **The base-branch picker with fetch freshness.** No flag, and no frame that
  *   would report freshness.
- * - **The setup preview.** Worktree scripts do not exist (#208): vibe cannot
- *   create the worktree it insists you already have, so there is nothing to
- *   preview and no `create the worktree but hold` to offer.
+ * - **The setup preview.** This was *"worktree scripts do not exist (#208):
+ *   vibe cannot create the worktree it insists you already have"*, and half of
+ *   that stopped being true in #223 - `git.worktree` and `git.worktreeCommand`
+ *   are settings now, and the loop makes the worktree itself. What is still
+ *   absent is a **preview**, and deliberately: the script is a line somebody
+ *   wrote in `vibe.config.json` and rendering what it would do means running it,
+ *   which is the one thing a modal must not do before anybody has pressed
+ *   anything. The settings screen is where that line is read and edited.
  *
  * Each is stated on the frame rather than left out, because a modal that showed
  * only what it had would read as the whole of what a run can be configured to
@@ -48,15 +53,51 @@ type Gates = Readonly<Record<string, string>>;
 export function NewWorkstream({
   dir,
   onDir,
-  onLaunch,
+  onBrief,
   onClose,
   busy,
+  locked = false,
 }: {
   dir: string;
   onDir: (dir: string) => void;
-  onLaunch: (argv: readonly string[]) => void;
+  /**
+   * Hand the brief to the pilot instead of starting a run (#223).
+   *
+   * **The only way out of this modal**, and the reason it exists: a run is long
+   * and expensive and converges or stalls on the brief it was given, so the
+   * useful thing to do with a freshly typed one is interrogate it. Asked for as
+   * *"I don't want the run to start automatically. Rather, I want the user
+   * message to be fed into the pilot chat."*
+   *
+   * It used to be one of two. `skip the pilot` built an argv here and started
+   * the run, and was kept because the overrides block had no other road to a
+   * run; it went at the owner's decision — *"There should only be one start
+   * button and it should follow the 'talk it through' path"* — and the overrides
+   * travel in the message instead, which `start_run` can now carry. See
+   * `briefFor`.
+   */
+  /**
+   * `message` is what the pilot is told; `task` is the brief alone, which is
+   * what the sidebar's draft row is called until the run exists.
+   */
+  onBrief: (message: string, task: string) => void;
   onClose: () => void;
   busy: boolean;
+  /**
+   * Whether the repository is already settled, because a project chose it (#223).
+   *
+   * **Opened from a project's `＋`, there is nothing left to ask.** Reported in
+   * as many words — *"In this window, I shouldn't have to select the project
+   * folder, it's already known"* — and it is the same rule that took the
+   * repository field out of the pilot last commit: a project **is** a
+   * repository, so a second control setting `repoDir` is the third spelling
+   * #211 warns about, and the one to keep is the one with a list beside it.
+   *
+   * The path is still **shown**, because which repository a run will write to is
+   * the one fact about it that cannot be taken back later. It is stated rather
+   * than offered.
+   */
+  locked?: boolean;
 }) {
   const [task, setTask] = useState('');
   const [planOnly, setPlanOnly] = useState(true);
@@ -98,7 +139,6 @@ export function NewWorkstream({
     (tolerance.trim() !== '' && !Number.isFinite(Number(tolerance)));
 
   const ready = task.trim() !== '' && dir.trim() !== '' && !badNumber;
-  const argv = launchArgv(task, dir, planOnly, overrides);
 
   const choose = () => {
     void pickDirectory()
@@ -110,13 +150,16 @@ export function NewWorkstream({
   };
 
   return (
-    <Modal width={680}>
+    <Modal width={680} onDismiss={onClose}>
       <form
         className="v-new"
         onSubmit={(e) => {
           e.preventDefault();
           if (!ready || busy) return;
-          onLaunch(argv);
+          // **Submit is the conversation, not the run.** Enter in the brief field
+          // reaches here, and so does the one button. The settings go with the
+          // brief, in the message, so the pilot can carry them on `start_run`.
+          onBrief(briefFor(task, planOnly, overrides), task.trim());
           onClose();
         }}
       >
@@ -132,27 +175,38 @@ export function NewWorkstream({
           className="v-new__task"
           rows={5}
           value={task}
-          placeholder="the brief, in full — the runs that converge state the decisions already made and say not to re-derive them"
+          placeholder="The brief, in full"
           onChange={(e) => setTask(e.target.value)}
         />
 
-        <label className="v-new__label" htmlFor="newdir">
+        <label className="v-new__label" htmlFor={locked ? undefined : 'newdir'}>
           repository
         </label>
-        <div className="v-new__row">
-          <input
-            id="newdir"
-            className="v-new__dir"
-            value={dir}
-            placeholder="an absolute path to a git worktree"
-            onChange={(e) => onDir(e.target.value)}
-          />
-          <Button type="button" onClick={choose} disabled={busy}>
-            choose…
-          </Button>
-        </div>
-        {pickFailed !== null && (
-          <p className="v-new__note">the chooser did not open: {pickFailed} — type or paste</p>
+        {locked ? (
+          // Stated, not offered. The project answered this, and a field here
+          // would be a second way to answer it. See `locked` above.
+          <div className="v-new__row">
+            <code className="v-new__fixed">{dir}</code>
+            <MetaChip>from the project</MetaChip>
+          </div>
+        ) : (
+          <>
+            <div className="v-new__row">
+              <input
+                id="newdir"
+                className="v-new__dir"
+                value={dir}
+                placeholder="an absolute path to a git worktree"
+                onChange={(e) => onDir(e.target.value)}
+              />
+              <Button type="button" onClick={choose} disabled={busy}>
+                choose…
+              </Button>
+            </div>
+            {pickFailed !== null && (
+              <p className="v-new__note">the chooser did not open: {pickFailed} — type or paste</p>
+            )}
+          </>
         )}
 
         <details className="v-new__over" open={differing.length > 0}>
@@ -254,10 +308,9 @@ export function NewWorkstream({
         {/* Named rather than omitted. A modal showing only what it had would
             read as the whole of what a run can be configured to do. */}
         <p className="v-new__note">
-          No name, branch or worktree field: <code>vibe</code> names its own branch after the run
-          id it allocates, and the CLI takes neither. No setup preview and no{' '}
-          <em>create the worktree but hold</em>, because vibe cannot create a worktree yet (#208)
-          — this runs in one you already have.
+          No name or branch field: <code>vibe</code> names its own branch after the run id it
+          allocates. Whether the run works in a worktree is a project setting rather than a
+          per-run one — it is under Settings, with the command that makes one.
         </p>
 
         <label className="v-new__toggle">
@@ -269,16 +322,15 @@ export function NewWorkstream({
           </span>
         </label>
 
-        {/* The exact command, because it is the one thing that is definitely
-            true about what pressing this will do. */}
-        <pre className="v-new__argv">vibe {argv.join(' ')}</pre>
-
+        {/* No argv here any more. The command is drawn on the pilot's
+            proposal card, which is where it is pressed — an argv in this modal
+            would describe a command nothing on this screen runs. */}
         <div className="v-new__foot">
           <Button type="button" onClick={onClose}>
             cancel
           </Button>
           <Button level="primary" type="submit" disabled={!ready || busy}>
-            {planOnly ? 'create & plan' : 'create & run'}
+            start
           </Button>
         </div>
       </form>

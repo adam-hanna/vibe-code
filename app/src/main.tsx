@@ -1,5 +1,6 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
+import { Boundary } from './Boundary';
 import { Cockpit } from './cockpit/Cockpit';
 import './cockpit/cockpit.css';
 import './pilot/pilot.css';
@@ -23,14 +24,18 @@ async function render(into: HTMLElement): Promise<void> {
     const { Gallery } = await import('./Gallery');
     createRoot(into).render(
       <StrictMode>
-        <Gallery />
+        <Boundary>
+          <Gallery />
+        </Boundary>
       </StrictMode>,
     );
     return;
   }
   createRoot(into).render(
     <StrictMode>
-      <Cockpit />
+      <Boundary>
+        <Cockpit />
+      </Boundary>
     </StrictMode>,
   );
 }

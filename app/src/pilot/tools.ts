@@ -1,5 +1,11 @@
 import { launchArgv } from '../cockpit/argv';
+import type { Overrides } from '../cockpit/argv';
+import { dirKey } from '../cockpit/projects';
+import { line, outcome, tail } from '../cockpit/commands';
 import { OUTPUT_KEEP } from '../cockpit/model';
+import type { Command, Commands } from '../cockpit/commands';
+import { allowedDir, NO_ACCESS } from './access';
+import type { PilotAccess } from './access';
 import type { Tool } from './pilot';
 import type { Run } from '../cockpit/model';
 
@@ -63,6 +69,38 @@ export type Effect =
   /** Start or resume a run. `argv` is what `main()` takes and `parseArgs` defines. */
   | { kind: 'invoke'; argv: readonly string[] }
   /**
+   * Run a command in the repository (#211).
+   *
+   * **The third kind, and the first one that is not a frame the app already
+   * sent.** `keys.test.ts` pinned exactly two for #144's reason: every pilot
+   * capability should be a host request the window also makes, so that a pilot
+   * power the UI lacks is a missing control rather than a special ability. That
+   * property is kept - the window has its own command bar and sends the same
+   * frame - but the frame itself is new, and the rule it tested is genuinely
+   * wider than it was. Recorded here rather than quietly widened.
+   *
+   * `program` and `args` stay separate the whole way down. There is no shell,
+   * so there is no line for a `;` to be in.
+   */
+  | { kind: 'command'; dir: string; program: string; args: readonly string[] }
+  /**
+   * Stop a command this session started (#223).
+   *
+   * **The fourth kind, and it is the other half of the third.** The pilot could
+   * start a dev server and could not stop one, and what it did instead is the
+   * evidence: asked to stop the server, it said *"I have no tool that kills a
+   * command"* and proposed `npx kill-port 5173 4000` — which killed a stale
+   * process on a port it had guessed from `package.json`, left the real server
+   * running on the port Vite had actually fallen back to, and took an unrelated
+   * `node --watch` down with it. A capability with no off switch is not a
+   * narrower capability; it is one whose off switch gets improvised.
+   *
+   * It names a command by the id `read_command` reports, so what is killed is
+   * something this window started and is holding a handle to — never a pid, and
+   * never a port, which is what made the improvised version dangerous.
+   */
+  | { kind: 'stop_command'; commandId: string }
+  /**
    * Answer a waiting gate.
    *
    * `decision` is passed to the wire unnarrowed, exactly as the footer's is:
@@ -91,9 +129,36 @@ export type Settlement =
   /** It could not be run at all, and the model is told why. */
   | { kind: 'refused'; content: string };
 
+/**
+ * A read the host has to answer (#223), which a pure function cannot.
+ *
+ * Not a `Settlement`, because it is not an answer yet: the pane asks the host
+ * and settles the call with what came back — `ran` with the listing or the
+ * text, `refused` with the host's own sentence. The boundary is the host's to
+ * decide, so nothing here checks the path.
+ */
+export interface Read {
+  kind: 'reads';
+  op: 'list' | 'read';
+  path: string;
+}
+
+/** What running a call produced, including a read still to be made. */
+export type Outcome = Settlement | Read;
+
 /** What a read may see: the run as the window holds it, and nothing else. */
 export interface ToolContext {
   run: Run;
+  /** Commands this window started, so `read_command` has something to read. */
+  commands: Commands;
+  /** The repository: where a command runs unless it names another directory. */
+  dir: string;
+  /**
+   * What the pilot may do without asking, and the directories beyond `dir` it
+   * may work in (#223). Optional so a read-only caller need not invent one;
+   * absent is the narrowest — the repository and nothing else.
+   */
+  access?: PilotAccess;
 }
 
 export interface ToolDef {
@@ -102,7 +167,7 @@ export interface ToolDef {
   /** JSON Schema, passed to the vendor verbatim by whichever adapter is seated. */
   readonly input_schema: Record<string, unknown>;
   /** Pure: what the model asked for and the run, in; what happened, out. */
-  readonly call: (input: unknown, ctx: ToolContext) => Settlement;
+  readonly call: (input: unknown, ctx: ToolContext) => Outcome;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -150,6 +215,21 @@ function bad(v: string | { why: string }): v is { why: string } {
 export function describeRun(run: Run): Record<string, unknown> {
   return {
     protocol: run.protocol,
+    /**
+     * What earlier sessions of this run did, when it is a resume (#211).
+     *
+     * **Without it the pilot describes a run that has done nothing**, because
+     * everything below is folded from narration and narration only covers the
+     * session the window is watching. A run picked up at review round 3 has
+     * `cycles: []` here, and a model reading that concluded - reasonably - that
+     * nothing had happened yet.
+     *
+     * Labelled `before this session` rather than merged into the fields below,
+     * for the reason the reducer keeps it separate: those describe what this
+     * window watched, and a total that silently included work it did not see
+     * would make `cycles` and `spend` disagree about the same run.
+     */
+    before: run.from,
     running:
       run.running === null
         ? null
@@ -253,13 +333,55 @@ const READ_OUTPUT: ToolDef = {
   },
 };
 
+/**
+ * `start_run`'s optional overrides, or the sentence refusing them.
+ *
+ * Refused rather than coerced, field by field and by name, for the reason
+ * `NewWorkstream` refuses a number that is not one: `--max-tokens 0` turns the
+ * ceiling OFF, so a value nobody meant reaching the argv is the opposite of
+ * leaving it alone. The boundary and mode NAMES are not checked here — the core
+ * refuses an unknown one by name when the run starts, and a second list of them
+ * in the window is one that can disagree.
+ */
+function overridesOf(input: Readonly<Record<string, unknown>>): Overrides | string {
+  const over: { gates?: Record<string, string>; maxTokens?: number; p1Tolerance?: number } = {};
+  const gates = input['gates'];
+  if (gates !== undefined) {
+    if (!isRecord(gates)) return '"gates" has to be an object of boundary to mode.';
+    const out: Record<string, string> = {};
+    for (const [boundary, mode] of Object.entries(gates)) {
+      if (typeof mode !== 'string' || mode.trim() === '') {
+        return `"gates.${boundary}" has to be a mode name, such as "step" or "stop".`;
+      }
+      out[boundary] = mode.trim();
+    }
+    over.gates = out;
+  }
+  for (const [field, key] of [
+    ['max_tokens', 'maxTokens'],
+    ['p1_tolerance', 'p1Tolerance'],
+  ] as const) {
+    const value = input[field];
+    if (value === undefined) continue;
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+      return `"${field}" has to be a whole number of zero or more. Omit it to keep the project default.`;
+    }
+    over[key] = value;
+  }
+  return over;
+}
+
 const START_RUN: ToolDef = {
   name: 'start_run',
   description:
     'Propose starting a run. This does NOT start one: it puts the exact command in front of the ' +
-    'user, who runs it or does not. Write the brief in full and state the decisions already made ' +
-    '— the runs that converge say "do not re-derive them"; the ones that stall leave the design ' +
-    'open.',
+    'user, who runs it or does not. Call it when the brief is settled, not when the request ' +
+    'arrives — a run is long and expensive and converges or stalls on what it was given, so ' +
+    'reading the request properly is the job that comes first. Write the brief in FULL: the ' +
+    'decisions as settled, what was ruled out and why, what "done" means, and what you found in ' +
+    'the repository. The planner never sees this conversation, so anything settled here and left ' +
+    'out of the brief is a decision the run makes again, differently. The runs that converge say ' +
+    '"do not re-derive them"; the ones that stall leave the design open.',
   input_schema: {
     type: 'object',
     properties: {
@@ -269,7 +391,11 @@ const START_RUN: ToolDef = {
       },
       directory: {
         type: 'string',
-        description: 'An absolute path to the git worktree the run works in.',
+        description:
+          'The project this conversation is about — the repository you can read. A run starts ' +
+          'there and nowhere else. Do not create a git worktree for it: vibe makes one itself ' +
+          'when the project\'s git.worktree setting is on, and keeps the run\'s record in the ' +
+          'repository where pruning the worktree cannot take it.',
       },
       plan_only: {
         type: 'boolean',
@@ -277,16 +403,54 @@ const START_RUN: ToolDef = {
           'true stops after the plan clears critique. false writes code and commits it. There ' +
           'is no default: say which one you mean.',
       },
+      // The composer's overrides block, carried here because the composer no
+      // longer launches (#223). Optional, and absent means the project default:
+      // pass only what the user chose, never the defaults restated.
+      gates: {
+        type: 'object',
+        description:
+          'Gate overrides the user chose, boundary to mode — for example ' +
+          '{"implemented": "stop"}. Only the boundaries they changed. Omit otherwise.',
+        additionalProperties: { type: 'string' },
+      },
+      max_tokens: {
+        type: 'integer',
+        description:
+          'A token ceiling the user chose for this run. 0 turns the ceiling OFF, so never send ' +
+          '0 to mean "unset" — omit the field instead.',
+      },
+      p1_tolerance: {
+        type: 'integer',
+        description:
+          'How many P1 findings a phase may carry rather than fix, if the user chose one. Omit ' +
+          'otherwise.',
+      },
     },
     required: ['task', 'directory', 'plan_only'],
     additionalProperties: false,
   },
-  call: (input) => {
+  call: (input, ctx) => {
     if (!isRecord(input)) return { kind: 'refused', content: 'this call sent no arguments.' };
     const task = text(input, 'task');
     if (bad(task)) return { kind: 'refused', content: task.why };
     const dir = text(input, 'directory');
     if (bad(dir)) return { kind: 'refused', content: dir.why };
+    // **Pinned to the project** (#223). A pilot asked to "use a worktree" made one
+    // by hand and proposed the run inside it, which put the run's record in a
+    // tree somebody is about to prune and filed the run under a project nobody
+    // had added — so it looked missing, and the conversation that proposed it
+    // was lost on the way. Worktrees are vibe's job (`git.worktree`), which keeps
+    // the archive at home; a run started anywhere else is refused with that.
+    if (dirKey(dir) !== dirKey(ctx.dir)) {
+      return {
+        kind: 'refused',
+        content:
+          `a run starts in the project, ${ctx.dir.trim()}, not in ${dir.trim()}. If it should ` +
+          'work in a worktree, do not make one: vibe creates it when the project\'s ' +
+          'git.worktree setting is on (Settings, under git). Propose the run with ' +
+          `"directory": "${ctx.dir.trim()}".`,
+      };
+    }
     const planOnly = input['plan_only'];
     // Refused rather than defaulted, and this is the one that matters. A default
     // here would be the app deciding whether a pilot-drafted run writes code,
@@ -299,7 +463,9 @@ const START_RUN: ToolDef = {
           'that commits, so there is no default for it.',
       };
     }
-    const argv = launchArgv(task, dir, planOnly);
+    const over = overridesOf(input);
+    if (typeof over === 'string') return { kind: 'refused', content: over };
+    const argv = launchArgv(task, dir, planOnly, over);
     return {
       kind: 'proposes',
       summary: planOnly
@@ -384,14 +550,350 @@ const ANSWER_GATE: ToolDef = {
   },
 };
 
+const READ_COMMAND: ToolDef = {
+  name: 'read_command',
+  description:
+    'What the commands you have run are doing: the command line, whether it is still running, ' +
+    'how it ended, and its output. Call this after a run_command proposal is accepted, and ' +
+    'again while a long-running one is up — a dev server keeps writing. Every answer carries a ' +
+    '"cursor"; pass it back as "since" on the next call to read only what is new, which is how ' +
+    'you tail a server rather than re-reading its whole log.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      id: {
+        type: 'string',
+        description:
+          'One command, by the id read_command reports. Omit for every command in this session.',
+      },
+      since: {
+        type: 'integer',
+        minimum: 0,
+        description:
+          'The "cursor" from your last read of this command. Returns only what has been written ' +
+          'since. Omit to read everything the window still holds.',
+      },
+    },
+    additionalProperties: false,
+  },
+  call: (input, ctx) => {
+    const wanted = isRecord(input) ? input['id'] : undefined;
+    const asked = isRecord(input) ? input['since'] : undefined;
+    // Refused rather than coerced, the same rule `lines` follows above: a model
+    // that sent a string cursor is reasoning about a different answer shape, and
+    // reading it as 0 would hand back the whole log under the name of a tail.
+    if (asked !== undefined && (typeof asked !== 'number' || !Number.isInteger(asked) || asked < 0)) {
+      return {
+        kind: 'refused',
+        content: '"since" has to be a whole number — the "cursor" from your last read of this command.',
+      };
+    }
+    const since = typeof asked === 'number' ? asked : null;
+    const all = ctx.commands.all;
+    if (wanted !== undefined) {
+      if (typeof wanted !== 'string') {
+        return { kind: 'refused', content: '"id" has to be a string.' };
+      }
+      const one = all.find((c) => c.id === wanted);
+      // Refused by name with the list, exactly as an unknown tool is: a model
+      // that asked about a command that does not exist can only correct itself
+      // if it is told which ones do.
+      if (one === undefined) {
+        return {
+          kind: 'refused',
+          content:
+            `there is no command "${wanted}" in this session. ` +
+            (all.length === 0
+              ? 'Nothing has been run yet.'
+              : `Running and finished: ${all.map((c) => c.id).join(', ')}.`),
+        };
+      }
+      return { kind: 'ran', content: JSON.stringify(describeCommand(one, since)) };
+    }
+    // A `since` with no `id` is refused rather than applied to all of them: one
+    // cursor cannot describe several commands, and quietly using it on each
+    // would report one server's position as another's.
+    if (since !== null) {
+      return {
+        kind: 'refused',
+        content:
+          '"since" is a cursor into one command, so it needs an "id" as well. Omit both to see ' +
+          'every command, then read one back with its own cursor.',
+      };
+    }
+    return {
+      kind: 'ran',
+      content: JSON.stringify({
+        commands: all.map((c) => describeCommand(c, null)),
+        // Said rather than left to be inferred from an empty list, which a model
+        // would otherwise read as "the commands failed".
+        note:
+          all.length === 0
+            ? 'Nothing has been run in this session. Propose a run_command if you need to.'
+            : null,
+      }),
+    };
+  },
+};
+
+/**
+ * One command as a model reads it. Output last, because it is the long part.
+ *
+ * **`cursor` is on every answer, including the ones that did not ask for a
+ * tail**, because the first read is where a reader learns the position exists.
+ * A model handed a cursor only once it had already asked for one would have no
+ * way to discover tailing at all.
+ */
+function describeCommand(command: Command, since: number | null): Record<string, unknown> {
+  const read = tail(command, since);
+  return {
+    id: command.id,
+    command: line(command),
+    resolved: command.resolved,
+    dir: command.dir,
+    // Absent while running rather than a zero: `outcome` is null until it ends,
+    // and a model reading `exit 0` on a live dev server would report it finished.
+    outcome: outcome(command),
+    running: command.endedAt === null,
+    // The position to pass back as `since`. Unchanged between two reads means
+    // the command has written nothing in between - which is a real answer about
+    // a server that has finished starting, and is not the same as "it is gone".
+    cursor: read.cursor,
+    since,
+    // Kept for the reason the window keeps it: a tail presented as the whole is
+    // the one thing a bounded buffer must never do.
+    truncated: command.truncated,
+    missed: read.missed,
+    output: read.text,
+  };
+}
+
+const RUN_COMMAND: ToolDef = {
+  name: 'run_command',
+  description:
+    'Propose running a command in the repository. This does NOT run it: the exact program and ' +
+    'arguments are put in front of the user, who runs it or does not. Use it to check what a ' +
+    'run produced — install, build, test, start the app. There is no shell, so no pipes, no ' +
+    'redirection, no && and no globbing: name one program and its arguments. Long-running ' +
+    'commands are fine and keep running; read them back with read_command.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      program: {
+        type: 'string',
+        description:
+          'One program, e.g. "npm" or "node". Not a command line: no arguments in here.',
+      },
+      args: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Its arguments, one per entry, e.g. ["run", "dev"].',
+      },
+      why: {
+        type: 'string',
+        description: 'One line on what this is for. The user reads it beside the command.',
+      },
+      directory: {
+        type: 'string',
+        description:
+          'Where to run it, if not the repository. Absolute, and only inside the repository or a ' +
+          'directory the user has allowed in Settings. Omit to run in the repository.',
+      },
+    },
+    required: ['program', 'why'],
+    additionalProperties: false,
+  },
+  call: (input, ctx) => {
+    if (!isRecord(input)) return { kind: 'refused', content: 'this call sent no arguments.' };
+    const program = text(input, 'program');
+    if (bad(program)) return { kind: 'refused', content: program.why };
+    const why = text(input, 'why');
+    if (bad(why)) return { kind: 'refused', content: why.why };
+
+    const raw: unknown = input['args'] ?? [];
+    if (!Array.isArray(raw) || !raw.every((a): a is string => typeof a === 'string')) {
+      return {
+        kind: 'refused',
+        content: '"args" has to be an array of strings, one argument per entry.',
+      };
+    }
+    // The shell characters, refused **with the reason** rather than stripped.
+    // There is no shell here, so `npm test && npm run build` would be handed to
+    // a program called `npm` as literal arguments and fail confusingly - and a
+    // model told that gets to send two calls instead of guessing.
+    const shellish = [program, ...raw].find((part) => /[;&|><`$\n]/.test(part));
+    if (shellish !== undefined) {
+      return {
+        kind: 'refused',
+        content:
+          `"${shellish}" looks like shell syntax, and there is no shell here — the program and ` +
+          'its arguments are passed straight to the OS. Run one program per call, and use ' +
+          'read_command to see what it produced before deciding the next one.',
+      };
+    }
+    if (ctx.dir.trim() === '') {
+      return {
+        kind: 'refused',
+        content: 'no repository is set in this window, so there is nowhere to run a command.',
+      };
+    }
+    // Another directory, only where the person allowed one (#223). Refused with
+    // the list rather than drawn as a card: a card in a directory nobody allowed
+    // asks the person to make the decision Settings already made.
+    const asked = input['directory'];
+    let where = ctx.dir;
+    if (asked !== undefined) {
+      const named = text(input, 'directory');
+      if (bad(named)) return { kind: 'refused', content: named.why };
+      const access = ctx.access ?? NO_ACCESS;
+      if (!allowedDir(named, ctx.dir, access)) {
+        return {
+          kind: 'refused',
+          content:
+            `${named.trim()} is outside the directories you may run a command in: ` +
+            `${[ctx.dir, ...access.dirs].join(', ')}. The user can add more in Settings.`,
+        };
+      }
+      where = named.trim();
+    }
+    return {
+      kind: 'proposes',
+      summary: `${why.trim()} — ${[program, ...raw].join(' ')} in ${where}`,
+      effect: { kind: 'command', dir: where, program, args: raw },
+    };
+  },
+};
+
+/**
+ * Reading the disk, on both backends (#223).
+ *
+ * The subscription pilot already had `Read`, `Glob` and `Grep`; the API-backed
+ * one had no filesystem at all, so on that road *"what is in this repository"*
+ * had no answer. These two are the same reach on both roads, and they are what
+ * `ls` and `cat` were asked for — without depending on a shell built-in that does
+ * not exist on Windows. The host answers, inside the repository and the
+ * directories the person allowed (or anywhere, in YOLO), and refuses outside them
+ * with a sentence naming the ones it may read.
+ */
+function readTool(name: string, op: 'list' | 'read', description: string): ToolDef {
+  return {
+    name,
+    description,
+    input_schema: {
+      type: 'object',
+      properties: {
+        path: {
+          type: 'string',
+          description:
+            'Relative to the repository, or absolute. Omit (or ".") for the repository itself.',
+        },
+      },
+      additionalProperties: false,
+    },
+    call: (input) => {
+      const asked = isRecord(input) ? input['path'] : undefined;
+      if (asked !== undefined && typeof asked !== 'string') {
+        return { kind: 'refused', content: '"path" has to be a string.' };
+      }
+      return { kind: 'reads', op, path: asked ?? '.' };
+    },
+  };
+}
+
+const LIST_DIR = readTool(
+  'list_dir',
+  'list',
+  'List a directory: each entry with whether it is a file, a directory or a link, and a ' +
+    "file's size. Runs at once, no card. Inside the repository and any directory the user has " +
+    'allowed; outside them you are told which you may read.',
+);
+
+const READ_FILE = readTool(
+  'read_file',
+  'read',
+  "Read a text file. Runs at once, no card. A long file is cut and says so; a binary one is " +
+    'refused. Inside the repository and any directory the user has allowed.',
+);
+
+/**
+ * The stop control, as a proposal (#223).
+ *
+ * **Propose-only, exactly like the tool that starts one**, and the symmetry is
+ * the point rather than caution for its own sake: killing a process somebody is
+ * using is as consequential as starting one, and the only honest place to draw
+ * the line is in front of a person. The card names the command line, so what is
+ * stopped is what was read.
+ *
+ * It refuses a command that has already ended, with the outcome, because
+ * "stopped" and "exited on its own" are different facts about a process and a
+ * model told the second will not report the first.
+ */
+const STOP_COMMAND: ToolDef = {
+  name: 'stop_command',
+  description:
+    'Propose stopping a command this session started, by its id. This does NOT stop it: the ' +
+    'user sees which command and presses. Use it for a dev server you brought up and are done ' +
+    'with — never a port-killer or a process-name kill, which take down whatever else happens ' +
+    'to be listening.',
+  input_schema: {
+    type: 'object',
+    properties: {
+      id: {
+        type: 'string',
+        description: 'The command id, as read_command reports it.',
+      },
+    },
+    required: ['id'],
+    additionalProperties: false,
+  },
+  call: (input, ctx) => {
+    if (!isRecord(input)) return { kind: 'refused', content: 'this call sent no arguments.' };
+    const id = text(input, 'id');
+    if (bad(id)) return { kind: 'refused', content: id.why };
+    const all = ctx.commands.all;
+    const one = all.find((c) => c.id === id);
+    if (one === undefined) {
+      return {
+        kind: 'refused',
+        content:
+          `there is no command "${id}" in this session. ` +
+          (all.length === 0
+            ? 'Nothing has been run yet, so there is nothing to stop.'
+            : `Running and finished: ${all.map((c) => c.id).join(', ')}.`),
+      };
+    }
+    if (one.endedAt !== null) {
+      return {
+        kind: 'refused',
+        content: `"${id}" (${line(one)}) has already ended — ${outcome(one) ?? 'no outcome recorded'}.`,
+      };
+    }
+    return {
+      kind: 'proposes',
+      summary: `stop ${line(one)} (${id})`,
+      effect: { kind: 'stop_command', commandId: one.id },
+    };
+  },
+};
+
 /**
  * The table.
  *
- * Reads first, then the two that need a person, which is also the order they are
- * useful in: a model that proposes before it has looked is proposing about a run
- * it has not read.
+ * Reads first, then the four that need a person, which is also the order they
+ * are useful in: a model that proposes before it has looked is proposing about a
+ * run it has not read.
  */
-export const TOOLS: readonly ToolDef[] = [READ_RUN, READ_OUTPUT, START_RUN, ANSWER_GATE];
+export const TOOLS: readonly ToolDef[] = [
+  READ_RUN,
+  READ_OUTPUT,
+  READ_COMMAND,
+  LIST_DIR,
+  READ_FILE,
+  START_RUN,
+  ANSWER_GATE,
+  RUN_COMMAND,
+  STOP_COMMAND,
+];
 
 /** The table as the vendor is told it — the executors stripped off. */
 export function declare(): readonly Tool[] {
@@ -409,10 +911,10 @@ export function declare(): readonly Tool[] {
  * vendors will happily invent a plausible tool when a conversation drifts, and
  * the model can only correct for it if it is told which one it asked for.
  */
-export function execute(
+export function settleCall(
   call: { name: string; input: unknown; unreadable: string | null },
   ctx: ToolContext,
-): Settlement {
+): Outcome {
   if (call.unreadable !== null) {
     return {
       kind: 'refused',
@@ -427,4 +929,21 @@ export function execute(
     };
   }
   return tool.call(call.input, ctx);
+}
+
+/**
+ * Run one call that needs no host (#223).
+ *
+ * `settleCall` with the reads answered as refusals, for a caller with no host to
+ * ask - the pane uses `settleCall` and asks. Kept as its own name so every caller
+ * written before the reads existed still gets an answer it can settle.
+ */
+export function execute(
+  call: { name: string; input: unknown; unreadable: string | null },
+  ctx: ToolContext,
+): Settlement {
+  const out = settleCall(call, ctx);
+  return out.kind === 'reads'
+    ? { kind: 'refused', content: `${call.name} is answered by the host, and there is none here.` }
+    : out;
 }

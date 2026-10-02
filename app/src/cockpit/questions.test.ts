@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'vitest';
-import { emptyRun, reduce } from './model';
+// `?raw`, the way `raise.test.ts` reads `src/raise.ts` — this app has no
+// `@types/node`, and Vite's own loader is the seam that already exists for
+// reading a source file as a string.
+import paneSource from './QuestionsPane.tsx?raw';
+import { emptyRun, latestQuestions, reduce } from './model';
 import type { Run } from './model';
 import type { Frame } from '../host';
 
@@ -31,6 +35,56 @@ const opened = (...qs: readonly Record<string, unknown>[]): Frame =>
     questions: qs,
   });
 
+describe('the pane reports a decline and never authors one (#211)', () => {
+  /**
+   * Read as source, the way `raise.test.ts` reads `src/raise.ts`, because there
+   * is no DOM in this suite and the claim is about what the file says rather
+   * than about what React does with it.
+   *
+   * The report: three questions declined for three different reasons were read
+   * as *"all declined with the same reason"*. They were not — but the only
+   * sentence identical across the three was the one the pane wrote itself and
+   * put in front of the model's own words, so it was the sentence being
+   * compared.
+   */
+  // Comments are where the history of this is explained, including the removed
+  // sentence quoted verbatim. What must not come back is the rendered text.
+  const rendered = paneSource.replace(/\/\*[\s\S]*?\*\//g, '');
+
+  test('no sentence is put in front of the answerer’s reason', () => {
+    expect(rendered).not.toMatch(/would not guess/);
+    // And not the role that does not exist. `roles.ts` names the seat
+    // `answerer`; `adversary` is the design corpus's word for the judging half
+    // of a round and belongs in comments, not on a card.
+    expect(rendered).not.toMatch(/adversary/i);
+  });
+
+  test('a decline with no reason says that, rather than being given one', () => {
+    // The absence rule, on prose. `It gave no reason.` was previously appended
+    // to an authored sentence, so a rationale-less decline and a rationale-full
+    // one opened identically.
+    expect(rendered).toMatch(/declined without giving a reason/);
+  });
+
+  test('the consequence of a decline is stated once, not once per card', () => {
+    // It is a function of `blocking` alone, and `blocking` is already a chip at
+    // the top of every card - so on a card it was a third copy of something the
+    // card said twice, and three copies of one consequence beside three
+    // different reasons is what made the reasons look identical.
+    //
+    // **Counted on the sentence rather than on `NEEDS-INPUT.md` (#223).** That
+    // filename was the proxy this used, and it stopped being one the moment the
+    // answer form arrived: the pane now names the same file for an unrelated
+    // reason - it is what a person's answers are written into - so a count of it
+    // measures two things at once. The claim is unchanged and is asserted
+    // directly: the decline consequence appears once, and not inside the card.
+    const occurrences = rendered.match(/A declined <strong>blocking<\/strong> question/g) ?? [];
+    expect(occurrences).toHaveLength(1);
+    const card = rendered.slice(rendered.indexOf('function One('), rendered.indexOf('function Recorded'));
+    expect(card).not.toMatch(/NEEDS-INPUT/);
+  });
+});
+
 describe('the questions arrive with their answers', () => {
   test('an answer is matched onto its question by the text, as the loop matches it', () => {
     const run = fold([
@@ -49,7 +103,7 @@ describe('the questions arrive with their answers', () => {
         declined: [],
       }),
     ]);
-    const q = run.questions?.open[0];
+    const q = latestQuestions(run)?.open[0];
     expect(q?.answer).toBe('sqlite');
     // The field `1f` draws its policy on - escalate on low - so a pane that
     // could not see it could not explain its own behaviour.
@@ -77,7 +131,7 @@ describe('the questions arrive with their answers', () => {
         ],
       }),
     ]);
-    const q = run.questions?.open[0];
+    const q = latestQuestions(run)?.open[0];
     expect(q?.declined).toBe(true);
     expect(q?.answer).toBeNull();
     expect(q?.rationale).toMatch(/product intent/);
@@ -96,22 +150,73 @@ describe('the questions arrive with their answers', () => {
         declined: [],
       }),
     ]);
-    expect(run.questions?.open[0]?.answer).toBe('yes');
+    expect(latestQuestions(run)?.open[0]?.answer).toBe('yes');
     // Unanswered and answered are the two states this pane exists to tell apart.
-    expect(run.questions?.open[1]?.answer).toBeNull();
-    expect(run.questions?.open[1]?.declined).toBe(false);
+    expect(latestQuestions(run)?.open[1]?.answer).toBeNull();
+    expect(latestQuestions(run)?.open[1]?.declined).toBe(false);
   });
 
   test('blocking fails closed on a field this build cannot read', () => {
     // An advisory question shown as blocking is somebody looking at it sooner
     // than they had to. The other way round is a run ending unexplained.
     const run = fold([opened({ question: 'A', kind: 'product' })]);
-    expect(run.questions?.open[0]?.blocking).toBe(true);
+    expect(latestQuestions(run)?.open[0]?.blocking).toBe(true);
   });
 
   test('answers with no round open are dropped rather than inventing one', () => {
     const run = fold([say('questions_answered', { answered: 1, answers: [{ question: 'A' }] })]);
-    expect(run.questions).toBeNull();
+    // Empty rather than null since `Run.questions` became a list (#223). The
+    // claim is unchanged and is the one that matters: an answer that cannot be
+    // attributed to a round creates no round to hold it.
+    expect(run.questions).toEqual([]);
+  });
+
+  test('every round keeps its own questions, and a second does not erase the first', () => {
+    // **The defect the list is for.** The field held one round, so the second
+    // `questions_opened` of a run destroyed the first - its counts, its cap and
+    // every question in it - and the column could only ever draw the last one.
+    // Reported as *"only plan round 2 has full details... they all should"*: a
+    // run with three question rounds showed one.
+    const run = fold([
+      opened({ question: 'Which database?', kind: 'technical', blocking: true }),
+      say('questions_answered', {
+        answered: 1,
+        total: 1,
+        answers: [{ question: 'Which database?', answer: 'sqlite', confidence: 'high' }],
+        declined: [],
+      }),
+      opened({ question: 'Which migration tool?', kind: 'technical', blocking: false }),
+    ]);
+
+    expect(run.questions).toHaveLength(2);
+    // The first round still holds its own question AND the answer it got, which
+    // is the half that was silently lost: the round was not merely stale, it
+    // was gone, and nothing on screen said a round had had any.
+    expect(run.questions[0]?.open[0]?.question).toBe('Which database?');
+    expect(run.questions[0]?.open[0]?.answer).toBe('sqlite');
+    expect(run.questions[1]?.open[0]?.question).toBe('Which migration tool?');
+    // And "the round the loop is on" is the newest, which is what the footer
+    // and the tab badge both read.
+    expect(latestQuestions(run)?.open[0]?.question).toBe('Which migration tool?');
+  });
+
+  test('an answer lands on the round that is open, not on an earlier one', () => {
+    // The answerer takes its turn on the questions just raised, so there is
+    // exactly one round an answer can belong to. Matching on a `round` number
+    // would look safer and be worse: the frame need not carry one, and a null
+    // would then match whichever earlier round also had none.
+    const run = fold([
+      opened({ question: 'A', kind: 'product', blocking: true }),
+      opened({ question: 'B', kind: 'product', blocking: true }),
+      say('questions_answered', {
+        answered: 1,
+        total: 1,
+        answers: [{ question: 'B', answer: 'yes', confidence: 'high' }],
+        declined: [],
+      }),
+    ]);
+    expect(run.questions[0]?.open[0]?.answer).toBeNull();
+    expect(run.questions[1]?.open[0]?.answer).toBe('yes');
   });
 });
 

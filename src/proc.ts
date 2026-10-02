@@ -6,6 +6,10 @@ import os from 'node:os';
 // `cancel.ts` is a leaf that imports only this module's types, so the kill
 // mechanism lives beside the spawn rather than being threaded down to it.
 import { Cancelled, CANCEL_ENDING, cancelRequested, registerInterruptible } from '@src/cancel.js';
+// The other exception: what a child prints is redacted of every key this
+// process could have put in its environment (#223) - a vendor's 401 quotes the
+// key it was sent, and everything below hands stdout and stderr to a log.
+import { redact, secrets } from '@src/heldkeys.js';
 
 const isWin = process.platform === 'win32';
 
@@ -53,7 +57,20 @@ export function resolveBin(name: string, options: ResolveOptions = {}): string {
   const finder = isWin
     ? path.join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'where.exe')
     : 'which';
-  const found = spawnSync(finder, [name], { encoding: 'utf8' });
+  // `windowsHide` here as well as on the long-lived spawns, and it is not
+  // cosmetic since #223. The host is spawned `DETACHED_PROCESS`, so it holds no
+  // console at all - which means a console-subsystem child spawned WITHOUT this
+  // flag allocates a fresh console of its own, and a fresh console comes with a
+  // visible window. `where.exe` runs for a few milliseconds and the window
+  // flashes for exactly that long, once per binary this resolves. Reported as
+  // *"there are a whole bunch of windows that popup and quickly disappear when
+  // I run"*, which is precisely the count: claude, codex, git, node.
+  //
+  // Before the detach it inherited the host's own (window-less) console and
+  // nothing showed, so this is the second half of that change rather than a new
+  // defect - the same reasoning `host.rs` records for why `CREATE_NO_WINDOW` is
+  // the wrong flag there and the right one here.
+  const found = spawnSync(finder, [name], { encoding: 'utf8', windowsHide: true });
   const allHits =
     found.status === 0
       ? found.stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
@@ -117,6 +134,21 @@ export interface RunOptions {
    */
   onLine?: ((line: string) => void) | undefined;
   /**
+   * How many bytes of this child's stdout the parent is now holding (#211).
+   *
+   * **Not a limit and not a stream - a measurement of a buffer that only
+   * grows.** `stdout` here is built by concatenation and every reader of it
+   * splits it again, so a turn that talks for half an hour is holding at least
+   * two copies of everything it said. A 27-minute implement turn reporting 8.8M
+   * tokens is what made that worth being able to see: the host died during it
+   * with no stack, no narration and nothing on stderr, and its last heartbeat
+   * had nothing to say about memory at all.
+   *
+   * Reported rather than acted on. Nothing here decides a buffer is too large,
+   * because nothing has measured what too large is on this platform.
+   */
+  onBytes?: ((bytes: number) => void) | undefined;
+  /**
    * Whether a cancel may kill this child (#209).
    *
    * **Off by default, and the default is the safe one.** The two agent adapters
@@ -128,6 +160,22 @@ export interface RunOptions {
    * verdict about a run nobody completed (#135).
    */
   interruptible?: boolean | undefined;
+  /**
+   * Kill THIS child when it fires, and nothing else (#223).
+   *
+   * The pilot's stop button. `interruptible` is the run's latch and kills every
+   * agent child of the run, which is exactly wrong for a chat turn: stopping a
+   * conversation must not stop the run it is about. A signal is one child's own
+   * off switch, held by whoever spawned it. It settles the same way a cancel
+   * does - `Cancelled`, rejected at once rather than left to `close`.
+   */
+  signal?: AbortSignal | undefined;
+  /**
+   * The child's whole environment, when it is not this process's (#223). The
+   * agent adapters pass `agentEnv`, which is how a run turn is billed to the
+   * route Settings names rather than to whatever the shell happened to hold.
+   */
+  env?: NodeJS.ProcessEnv | undefined;
 }
 
 export interface RunResult {
@@ -244,7 +292,9 @@ export type RunFn = (
  * positional prompt argument.
  */
 export function run(bin: string, args: readonly string[], options: RunOptions = {}): Promise<RunResult> {
-  const { input, cwd, timeoutMs, onLine, interruptible } = options;
+  const { input, cwd, timeoutMs, onLine, onBytes, interruptible, signal, env } = options;
+  const keys = secrets();
+  const clean = (text: string): string => (keys.length === 0 ? text : redact(text, keys));
 
   return new Promise<RunResult>((resolve, reject) => {
     // Before the spawn, and the ordering is the fail-closed half of #209. A
@@ -261,6 +311,7 @@ export function run(bin: string, args: readonly string[], options: RunOptions = 
     const needsShell = isWin && /\.(cmd|bat)$/i.test(bin);
     const child = spawn(bin, [...args], {
       ...(cwd === undefined ? {} : { cwd }),
+      ...(env === undefined ? {} : { env }),
       shell: needsShell,
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -280,7 +331,7 @@ export function run(bin: string, args: readonly string[], options: RunOptions = 
     const emitLine = (line: string): void => {
       if (settled || onLine === undefined || line === '') return;
       try {
-        onLine(line);
+        onLine(clean(line));
       } catch {
         // A progress hook must never take down a run.
       }
@@ -302,6 +353,10 @@ export function run(bin: string, args: readonly string[], options: RunOptions = 
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', (d: string) => {
       stdout += d;
+      // Per chunk, not per line: chunks arrive in tens of kilobytes and lines in
+      // thousands, and this is a measurement nobody is watching closely enough
+      // to want at line resolution (#211).
+      if (onBytes !== undefined) onBytes(stdout.length);
       if (onLine === undefined) return;
       pending += d;
       drain(false);
@@ -337,6 +392,22 @@ export function run(bin: string, args: readonly string[], options: RunOptions = 
           reject(attachEnding(new Cancelled(cancelRequested() ?? 'asked to stop'), CANCEL_ENDING)),
         );
       });
+    }
+
+    if (signal !== undefined) {
+      const onAbort = (): void => {
+        child.kill('SIGKILL');
+        settle(() => reject(attachEnding(new Cancelled('stopped from the window'), CANCEL_ENDING)));
+      };
+      if (signal.aborted) onAbort();
+      else {
+        signal.addEventListener('abort', onAbort, { once: true });
+        const before = unregister;
+        unregister = () => {
+          before?.();
+          signal.removeEventListener('abort', onAbort);
+        };
+      }
     }
 
     // The accumulated `stdout` dies with this closure, and that is deliberate.
@@ -375,7 +446,7 @@ export function run(bin: string, args: readonly string[], options: RunOptions = 
       // still reach the hook, while on the timeout path `settled` is already
       // true and this emits nothing.
       drain(true);
-      settle(() => resolve({ code, signal, stdout, stderr }));
+      settle(() => resolve({ code, signal, stdout: clean(stdout), stderr: clean(stderr) }));
     });
 
     if (input !== undefined) child.stdin.write(input, 'utf8');

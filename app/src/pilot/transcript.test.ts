@@ -6,10 +6,12 @@ import {
   follow,
   reduce,
   refuse,
+  retext,
   settle,
   spendParts,
   unanswered,
   unrecognised,
+  wake,
 } from './transcript';
 import type { Conversation } from './transcript';
 import type { PilotEvent, Usage } from './pilot';
@@ -38,6 +40,172 @@ function fold(events: readonly PilotEvent[], turn = 1): Conversation {
     ask(emptyConversation(), 'hello', turn, 'anthropic'),
   );
 }
+
+describe('what you typed is on the turn it opened', () => {
+  test('a message reaches the reply as well as the wire', () => {
+    // The pane draws replies and never drew messages, so what a person typed
+    // was invisible: send, the composer empties, and the next thing on screen
+    // is an answer to a question that is not there. Carried on the reply rather
+    // than interleaved from `messages`, so the order cannot be got wrong.
+    const asked = ask(emptyConversation(), 'what is this run doing?', 1, 'anthropic');
+    expect(asked.live?.asked).toBe('what is this run doing?');
+    // And `messages` is untouched: it is what goes on the wire, and the wire
+    // has not changed.
+    expect(asked.messages).toEqual([{ role: 'user', content: 'what is this run doing?' }]);
+  });
+
+  test('it survives onto the finished reply, where the pane reads it', () => {
+    const done = fold([{ kind: 'ended', turn: 1, stop: 'end_turn' }]);
+    expect(done.replies[0]?.asked).toBe('hello');
+  });
+
+  test('a turn nobody typed has none', () => {
+    // A tool follow-up appends no message and opens no question: `follow` is
+    // the other half of a loop, and drawing an empty line above it would be a
+    // message nobody wrote.
+    expect(follow(emptyConversation(), 2, 'anthropic').live?.asked).toBeNull();
+    // A wake carries a message because a vendor needs something to answer, and
+    // it is deliberately NOT `asked` - drawing it as typed would be the app
+    // putting words in somebody's mouth.
+    const woken = wake(emptyConversation(), 'the loop stopped at a gate', 3, 'anthropic');
+    expect(woken.live?.asked).toBeNull();
+    expect(woken.live?.woke).toBe('the loop stopped at a gate');
+  });
+
+  test('a refused turn still shows what did not go', () => {
+    // It matters more here than anywhere: this is the card saying the request
+    // failed, so the thing that failed has to be on it.
+    const refused = refuse(emptyConversation(), 'do the thing', 'anthropic', 'no key');
+    expect(refused.replies[0]?.asked).toBe('do the thing');
+    expect(refuse(emptyConversation(), null, 'anthropic', 'x').replies[0]?.asked).toBeNull();
+  });
+});
+
+describe('an open turn says it is open, and for how long (#211)', () => {
+  /**
+   * The report this answers: between pressing send and the first token there
+   * was a two-word kicker and nothing else, and it was repeatedly read as a
+   * stall. The fix is a wave plus an elapsed - and the elapsed is the half that
+   * can be wrong, so it is the half with cases.
+   */
+
+  test('every way a turn opens carries when it opened', () => {
+    // All three, because a wait is the same wait however it started - and the
+    // subscription path's `follow` is the one that opens with no text at all,
+    // which is exactly the card with nothing else on it to look at.
+    const at = 1_700_000_000_000;
+    expect(ask(emptyConversation(), 'hello', 1, 'anthropic', at).live?.startedAt).toBe(at);
+    expect(wake(emptyConversation(), 'a gate', 2, 'anthropic', at).live?.startedAt).toBe(at);
+    expect(follow(emptyConversation(), 3, 'anthropic', { startedAt: at }).live?.startedAt).toBe(at);
+  });
+
+  test('a caller that does not say gets null, never a zero', () => {
+    // The absence rule on a duration. Zero would render as an elapsed counted
+    // from 1970 - an eight-week wait on a turn that took four seconds - and it
+    // is also what every reply made by a build older than this field has.
+    expect(ask(emptyConversation(), 'hello', 1, 'anthropic').live?.startedAt).toBeNull();
+    expect(follow(emptyConversation(), 2, 'anthropic').live?.startedAt).toBeNull();
+  });
+
+  test('a turn that never started has no start', () => {
+    // `refuse` is the one outcome that never reaches the wire. Stamping it with
+    // the instant of the refusal would put a duration on a wait nobody had.
+    const at = 1_700_000_000_000;
+    const refused = refuse(emptyConversation(), 'do the thing', 'anthropic', 'no key');
+    expect(refused.replies[0]?.startedAt).toBeNull();
+    expect(refused.replies[0]?.startedAt).not.toBe(at);
+  });
+
+  test('the start survives every delta, and the settled reply keeps it', () => {
+    // The elapsed ticks for as long as the turn is open, so the field has to
+    // survive `reduce` - a spread that dropped it would show the counter
+    // vanishing the moment the first token landed, which is the worst possible
+    // second for it to go.
+    const at = 1_700_000_000_000;
+    let conversation = ask(emptyConversation(), 'hello', 1, 'anthropic', at);
+    conversation = reduce(conversation, { kind: 'text', turn: 1, delta: 'hi' });
+    expect(conversation.live?.startedAt).toBe(at);
+    conversation = reduce(conversation, { kind: 'ended', turn: 1, stop: 'end_turn' });
+    expect(conversation.replies[0]?.startedAt).toBe(at);
+  });
+
+  test('what the pane calls it depends on whether anything has come back', () => {
+    // `streaming` was drawn from the instant the turn opened, including for the
+    // whole wait before a single byte - when nothing was streaming. The text
+    // being empty is the whole of the distinction, and it is asserted here
+    // rather than in a component because it is the claim, not the markup.
+    const opened = ask(emptyConversation(), 'hello', 1, 'anthropic', 1);
+    expect(opened.live?.text).toBe('');
+    expect(opened.live?.outcome).toBeNull();
+    const streaming = reduce(opened, { kind: 'text', turn: 1, delta: 'once' });
+    expect(streaming.live?.text).not.toBe('');
+    expect(streaming.live?.outcome).toBeNull();
+  });
+});
+
+describe('a turn the run caused is not a turn somebody typed', () => {
+  test('the reason reaches the model as the message and the reader as the kicker', () => {
+    // One sentence for both, so the message being answered and the label above
+    // the answer cannot disagree about why the turn happened.
+    const reason = '[the app woke you] the loop stopped at "plan-approved"';
+    const woken = wake(emptyConversation(), reason, 1, 'anthropic');
+
+    // A vendor needs something in `messages` to answer, so there is a user
+    // message either way. `woke` is the only thing that tells the two apart.
+    expect(woken.messages).toEqual([{ role: 'user', content: reason }]);
+    expect(woken.live?.woke).toBe(reason);
+    expect(ask(emptyConversation(), 'hello', 1, 'anthropic').live?.woke).toBeNull();
+  });
+
+  test('it survives to the finished reply, which is where the pane reads it', () => {
+    const reason = 'woken';
+    const done = [
+      { kind: 'text', turn: 1, delta: 'here is what I would do' } as const,
+      { kind: 'ended', turn: 1, stop: 'end_turn' } as const,
+    ].reduce<Conversation>(
+      (state, event) => reduce(state, event),
+      wake(emptyConversation(), reason, 1, 'anthropic'),
+    );
+    expect(done.replies[0]?.woke).toBe(reason);
+  });
+
+  test('a wake refused on its way out still says what set it off', () => {
+    // It records how the turn STARTED, not how it ended. Without this a refused
+    // wake draws as the pilot failing spontaneously, which is the one thing an
+    // unattended turn must not look like.
+    const refused = refuse(emptyConversation(), 'woken', 'anthropic', 'no key', 'woken');
+    expect(refused.replies[0]?.woke).toBe('woken');
+    expect(refuse(emptyConversation(), 'hi', 'anthropic', 'no key').replies[0]?.woke).toBeNull();
+  });
+});
+
+describe('the final message wins over the deltas, where there are two answers', () => {
+  test('the CLI-reported reply replaces the blocks that streamed on the way to it', () => {
+    // The subscription backend is the only one with two answers to "what did it
+    // say". `claude -p` streams every assistant block in the turn - including
+    // what it writes between its own Read and Glob calls - and reports the final
+    // message separately. Concatenating the deltas kept all of it, run together
+    // with no separator, because a block boundary is not a `text_delta`.
+    const streamed = fold([
+      { kind: 'text', turn: 1, delta: 'Let me look at the directory itself.' },
+      { kind: 'text', turn: 1, delta: 'Three prior attempts are sitting in .vibe/runs' },
+    ]);
+    expect(streamed.live?.text).toBe(
+      'Let me look at the directory itself.Three prior attempts are sitting in .vibe/runs',
+    );
+
+    const settled = retext(streamed, 1, 'Three prior attempts are sitting in .vibe/runs');
+    expect(settled.live?.text).toBe('Three prior attempts are sitting in .vibe/runs');
+  });
+
+  test('it names the turn, so a late reply cannot rewrite the one that followed it', () => {
+    // The rule `reduce` follows for an event about the wrong turn, for the same
+    // reason: a fact that cannot be attributed is not recorded.
+    const live = fold([{ kind: 'text', turn: 1, delta: 'mine' }]);
+    expect(retext(live, 2, 'somebody else’s').live?.text).toBe('mine');
+    expect(retext(emptyConversation(), 1, 'anything')).toEqual(emptyConversation());
+  });
+});
 
 describe('a reply is assembled from deltas and from nothing else', () => {
   test('the text is the deltas, in order, concatenated', () => {
@@ -390,6 +558,16 @@ describe('propose only, enforced by the data rather than by a component (#144)',
           calls: [],
           usage: null,
           outcome: { kind: 'ended', stop: 'end_turn' },
+          // A turn somebody typed, which is what this case is about: the
+          // proposal is still waiting while an ordinary conversation carries on
+          // around it.
+          asked: 'and another thing',
+          woke: null,
+          // Null rather than a time: this fixture is a turn that has already
+          // ended, and nothing here is about how long it took. It also stands
+          // for the replies every build before #211 produced, none of which
+          // carry one.
+          startedAt: null,
         },
       ],
     };

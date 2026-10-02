@@ -1,20 +1,39 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { LivenessDot, MetaChip, StateKicker } from '../design';
 import * as host from '../host';
-import { Credentials } from '../pilot/Credentials';
 import * as keys from '../pilot/keys';
 import type { KeyStatus } from '../pilot/keys';
 // `PilotPane`, not `Pilot`: `pilot.ts` beside it is the wire, and two files
 // differing only in case is a compile error on Windows and macOS both.
 import { PilotPane } from '../pilot/PilotPane';
+import { noCommands, reduceCommands, running } from './commands';
+import { CommandsPane } from './CommandsPane';
+import { CodePane } from './CodePane';
 import { Diagnostics } from './Diagnostics';
-import { DiffPane } from './DiffPane';
-import { FindingsPane } from './FindingsPane';
 import { Footer } from './Footer';
-import { Launch } from './Launch';
+import { PlansPane } from './PlansPane';
+import { ReportPane } from './ReportPane';
+import { Kickoff } from './Kickoff';
+import { preview } from './projects';
+import {
+  DRAFTS_KEY,
+  addDraft,
+  bindDraft,
+  markLaunched,
+  newDraft,
+  readDrafts,
+  removeDraft,
+} from './pending';
+import type { Draft } from './pending';
+import { chatKey } from '../pilot/saved';
+import { useReplay } from './useReplay';
+
 import { LoopColumn } from './LoopColumn';
 import { NewWorkstream } from './NewWorkstream';
 import { OutputPane } from './OutputPane';
+import { Sidebar } from './Sidebar';
+import { initials } from './squares';
+import { SidePanel } from './SidePanel';
 import { QuestionsPane } from './QuestionsPane';
 import { RateLimitStrip } from './RateLimit';
 import { Settings } from './Settings';
@@ -25,9 +44,15 @@ import { Switcher } from './Switcher';
 import { Workstreams } from './Workstreams';
 import { VerifyPane } from './VerifyPane';
 import { StalenessStrip } from './Staleness';
-import { blocking, emptyRun, nextRun, reduce, staleness } from './model';
-import { readLaunchArgv, resumeArgv } from './argv';
-import type { Launched } from './argv';
+import { NEEDS_HUMAN, tokens as fmtTokens } from './format';
+import { emptyRun, foldReplay, forResume, latestQuestions, nextRun, reduce, staleness } from './model';
+import { rounds } from './rounds';
+import { implementArgv, readLaunchArgv, resumeArgv } from './argv';
+import { SCALE_KEY, SCALE_VAR, readScale, writable } from './appearance';
+import { readLimits, writeLimits } from '../pilot/ledger';
+import type { PilotLimits } from '../pilot/ledger';
+import type { Launched, Raise } from './argv';
+import type { Caps } from './Footer';
 import type { Effect } from '../pilot/tools';
 import type { Frame } from '../host';
 import type { Run } from './model';
@@ -35,10 +60,23 @@ import type { Run } from './model';
 /**
  * The cockpit, at the slice #159 scopes it to.
  *
- * Three of `3a`'s four regions - loop column, output pane, footer - plus the
- * minimum launch input needed to have anything to watch. **The left rail is
- * absent** because projects and workstreams need the archive reader (#114), and
- * `serve.ts` allows one run at a time anyway.
+ * All four of `3a`'s regions — rail, loop column, output pane, footer — plus the
+ * pilot, which since #211 is where you land and where a run is started from.
+ *
+ * ## The left rail, and what changed about the argument against it
+ *
+ * It was absent for two stated reasons and only one of them survived. The first
+ * — *"projects and workstreams need the archive reader (#114)"* — stopped being
+ * true when the `archive` frame landed. The second was that **`serve.ts` runs
+ * one run at a time**, so there is never a second live workstream to switch
+ * between, and a rail over the *archive* is `1b` in a sidebar.
+ *
+ * That is still true, and it is why the rail's squares **navigate rather than
+ * reopen** (see `Rail.tsx`). What it does not justify is having no rail: the
+ * design puts `＋`, ⌘K and `⚙` on it in every frame, and with nowhere for them
+ * to live they were pushed into the tab bar — which is how that bar came to have
+ * twelve tabs against the design's seven. `design/AUDIT.md` §1.1 and §1.2 are
+ * one finding, and this is the half that fixes both.
  *
  * Everything on screen comes from a frame. There is no state here that was
  * inferred: `reduce` is the only thing that decides what the run looks like, and
@@ -75,8 +113,15 @@ export function Cockpit() {
     // `Date.now()` here rather than inside `reduce`: the model takes the arrival
     // time as an argument so it stays pure and testable, and this is the one
     // place a real clock is read.
-    (state: Run, action: Frame | { type: 'reset' }) =>
-      action.type === 'reset' ? nextRun(state) : reduce(state, action, Date.now()),
+    (state: Run, action: Frame | { type: 'reset' } | { type: 'seed'; run: Run }) => {
+      if (action.type === 'reset') return nextRun(state);
+      // **A resume's column, before the loop adds to it** (#223). The run the
+      // replay folded IS a `Run`, so this replaces rather than merges - there is
+      // nothing to merge with, because `resume` seeds before it sends the
+      // invoke and no live frame can have arrived yet.
+      if (action.type === 'seed') return { ...action.run, protocol: state.protocol, seq: state.seq };
+      return reduce(state, action, Date.now());
+    },
     undefined,
     emptyRun,
   );
@@ -89,12 +134,102 @@ export function Cockpit() {
     log: [],
     unknown: [],
   });
+  /**
+   * How big the product is drawn (#223).
+   *
+   * Held here rather than in `Settings`, because the setting outlives the screen
+   * that changes it: the pane is conditional and unmounts the moment you look at
+   * anything else, so a scale that lived in it would snap back to 1 on every
+   * navigation. The effect below is the one place `--type-scale` is written.
+   */
+  const [scale, setScale] = useState(() => {
+    try {
+      return readScale(localStorage.getItem(SCALE_KEY));
+    } catch {
+      // Storage can be unavailable. Text at the size it was designed is a
+      // smaller failure than a window that will not render.
+      return 1;
+    }
+  });
+  useEffect(() => {
+    document.documentElement.style.setProperty(SCALE_VAR, String(scale));
+  }, [scale]);
+  const rescale = useCallback((next: number) => {
+    setScale(readScale(String(next)));
+    try {
+      localStorage.setItem(SCALE_KEY, writable(next));
+    } catch {
+      // It still applies for this session. See above.
+    }
+  }, []);
+
+
+  /**
+   * The pilot's own daily ceiling (#223).
+   *
+   * **Owned here so the control and the enforcement can be in different
+   * places.** It is set on the settings screen — *"move pilot tokens and pilot
+   * $/day out of pilot chat and into the same settings group"* — and enforced in
+   * the pilot pane, which is where a turn is about to be spent. Two siblings, so
+   * the state is one level up, exactly as the type scale is and for the same
+   * reason: a change in Settings has to reach a pane that is already open.
+   *
+   * `localStorage` and not `vibe.config.json`, unchanged: this is the *pilot's*
+   * ceiling, it is this machine's, and the run's two ceilings are the project's.
+   */
+  const [limits, setLimits] = useState<PilotLimits>(readLimits);
+  const relimit = useCallback((next: PilotLimits) => {
+    setLimits(next);
+    writeLimits(next);
+  }, []);
   /** Whether the diagnostics popover is open (#201, #204). ⌘⇧D toggles it. */
   const [diagnostics, setDiagnostics] = useState(false);
+  /**
+   * Whether each side column is open (#223).
+   *
+   * **Both start open, and neither is persisted.** A collapse is a gesture — put
+   * the runs away to read a diff — not a decision, and a window that opened three
+   * days later still folded would be answering a question nobody asked twice.
+   * `localStorage` holds the repository and the pilot's spend ceiling because
+   * those are decisions.
+   */
+  const [showRuns, setShowRuns] = useState(true);
+  const [showLoop, setShowLoop] = useState(true);
+  /**
+   * A past run this window is reading, or null for the live one (#223).
+   *
+   * **Opening a run is not starting one, and that separation is the whole
+   * feature.** A row in the sidebar used to resume: probe both CLIs, take the
+   * lock, run a turn. Reported at once — *"clicking on a run automatically kicks
+   * off the pre-flight. I don't want that."* — and it is the sharper form of the
+   * rule the rail already had: a click must not silently **spend**. Browsing an
+   * archive has to be free.
+   *
+   * So this is where the window is *pointed*, and every pane that reads a run's
+   * own directory follows it: the plans, the two reports, the questions, the
+   * code and the transcript are all files on disk, and reading them takes no
+   * lock and starts nothing.
+   *
+   * **It is deliberately not a `Run`.** `reduce` builds one from frames, and a
+   * finished run's frames were narrated to a process that has exited — synthesising
+   * them would report finished work as running, which is the fabrication this
+   * whole model is arranged against. The loop column and the spend readout stay
+   * with the live run and say which run they are about.
+   */
+  const [viewing, setViewing] = useState<{ dir: string; runId: string; task: string } | null>(null);
   /** Whether the ⌘K switcher is open (`5f`, #223). */
   const [switching, setSwitching] = useState(false);
-  /** Whether `4a`'s modal is open. The only modal in the product. */
-  const [composing, setComposing] = useState(false);
+  /**
+   * The composer, and which repository it is composing for (#223).
+   *
+   * **A directory rather than a boolean**, because `4a` is now reachable two
+   * ways and they answer the repository question differently. Opened from the
+   * sidebar's `＋ New run` it is about wherever the window is pointed, and the
+   * field is live. Opened from a **project's** `＋` the answer is the project —
+   * *"In this window, I shouldn't have to select the project folder, it's
+   * already known"* — so the path is stated and there is nothing to pick.
+   */
+  const [composing, setComposing] = useState<{ dir: string; locked: boolean } | null>(null);
   /**
    * The repository this window is pointed at (#223).
    *
@@ -149,18 +284,239 @@ export function Cockpit() {
    * which the prompt says out loud rather than papering over.
    */
   const [sentLaunch, setSentLaunch] = useState<Launched | null>(null);
+  // There is deliberately no `opening` here any more (#211). It existed to
+  // prefill a launch bar with the first thing said to the pilot, and the launch
+  // bar is gone: the pilot proposes the run itself, so nothing in this window
+  // needs to remember the conversation on its behalf.
+  /**
+   * The round and token caps in force, or null (#223, `4d`).
+   *
+   * Read here because a halt banner offering *"+2 rounds and resume"* has to
+   * know what it is adding two to. Written as an absolute `7` it would assume
+   * the default of 5 and **silently lower** a project configured to 10 — so the
+   * offer does not exist until this does, which is the fail-closed direction.
+   */
+  const [caps, setCaps] = useState<Caps | null>(null);
+  /** The gate matrix in force, so `3a`'s footer can say where the run holds. */
+  const [gates, setGates] = useState<Readonly<Record<string, string>> | null>(null);
+  /**
+   * The boundaries in the loop's own order, as `src/gates.ts` declares them.
+   *
+   * Carried rather than written here, and that is what makes the footer's *next
+   * hold* a fact rather than a guess: `GATEABLE`'s comment says *"Order is the
+   * loop's, not the alphabet's"*, so a copy on this side would be a second
+   * sequence that could disagree with the one the run actually walks.
+   */
+  const [order, setOrder] = useState<readonly string[]>([]);
+  /**
+   * What the pilot may do without asking (#223), from the same read. Null until
+   * it arrives, which the pane treats as the narrowest answer: everything is a
+   * card.
+   */
+  const [access, setAccess] = useState<host.PilotAccess | null>(null);
+  /**
+   * Bumped by every save in Settings, so a change there reaches this read —
+   * including the pilot's safe list, which an open conversation acts on.
+   */
+  const [configEpoch, setConfigEpoch] = useState(0);
+  useEffect(() => {
+    if (repoDir.trim() === '' || !host.inShell()) return;
+    let cancelled = false;
+    void host
+      .config(repoDir)
+      .then((frame) => {
+        const effective = frame.effective as {
+          loop?: Partial<Caps>;
+          gates?: Record<string, string>;
+        };
+        if (cancelled) return;
+        setAccess(frame.pilot);
+        if (effective.gates !== undefined) setGates(effective.gates);
+        setOrder(frame.gateable);
+        const loop = effective.loop;
+        if (loop === undefined) return;
+        const { maxPlanRounds, maxReviewRounds, maxTokens } = loop;
+        // All three or none: a partial set would let one button be relative and
+        // another be a guess, which is the worse of the two failures.
+        if (
+          typeof maxPlanRounds === 'number' &&
+          typeof maxReviewRounds === 'number' &&
+          typeof maxTokens === 'number'
+        ) {
+          setCaps({ maxPlanRounds, maxReviewRounds, maxTokens });
+        }
+      })
+      // Left null. The banner says it did not read them rather than offering a
+      // raise against a number it invented.
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [repoDir, configEpoch]);
   const [tab, setTab] = useState<
     | 'output'
     | 'pilot'
-    | 'keys'
+    // The four artifact panes (#223). `plans`, `critique` and `review` are what
+    // the dashed `Versions` tab was standing in for, and `code` is what `diff`
+    // became once a round's own range was on the wire.
+    //
+    // **`findings` and `diff` are gone rather than kept beside them.** The
+    // Findings tab showed the latest round of whichever judge spoke last, from
+    // the four counts and a title the wire carries - so a reader asking *why did
+    // the loop fix again* got half the evidence and no way to reach the rest. It
+    // is one round of `critique` or `review`, both of which now read the report
+    // itself. The Diff tab is `code`'s first section, unchanged and still first,
+    // because *what has this changed altogether* is a real question - it was
+    // just the wrong answer to *what did this round do*.
+    | 'plans'
+    | 'critique'
+    | 'review'
+    | 'code'
     | 'verify'
-    | 'findings'
     | 'spend'
     | 'questions'
+    // `runs` is `1b`, and it has **no button in the bar** — the same arrangement
+    // `settings` has had since the rail landed. It is reached from a project in
+    // the sidebar, because what it is *for* is the decision a sidebar row must
+    // not make: it states a lock's verdict and confirms a force. Navigation is
+    // the sidebar's job and overruling a lock is this screen's, and the reason
+    // they are apart is that two places able to force is one too many.
     | 'runs'
+    | 'commands'
     | 'settings'
-    | 'diff'
-  >('output');
+    // **The pilot, not the output pane** (#211). The complaint was exact: *"I
+    // thought my initial prompt would be given to the pilot and the pilot would
+    // take control"*, and the app answered it with a form and a tab beside the
+    // log. The composer is the front door, so this is where you land — and the
+    // output pane has nothing in it before a run anyway.
+  >('pilot');
+  /**
+   * Which settings the settings screen is showing (#223): the left bar's ⚙ is
+   * every project's, a project row's ⚙ is that project's own. Two doors to one
+   * screen rather than a switch on it — *"I want the global settings to be
+   * accessed via the 'settings' on the left bar… a settings icon on the
+   * project dropdown row… where project level settings live."*
+   */
+  const [settingsScope, setSettingsScope] = useState<'global' | 'project'>('global');
+  const openSettings = useCallback((scope: 'global' | 'project') => {
+    setSettingsScope(scope);
+    setTab('settings');
+  }, []);
+  /**
+   * The round a navigation asked for, or null (#223).
+   *
+   * **Beside the tab rather than folded into it**, because they answer two
+   * different questions and one of them is allowed to be absent: pressing the
+   * `Plans` tab is *show me the plans* and the pane's own answer to which one is
+   * right — the newest. Clicking a round card is *show me round 2*, and the pane
+   * has to be told which.
+   *
+   * A round number rather than a filename, for the reason on `OpenAt`: both ends
+   * already hold the round, and a filename would be a third copy of the loop's
+   * naming convention in the one process that cannot be kept in step with it.
+   */
+  const [openAt, setOpenAt] = useState<number | null>(null);
+  const open = useCallback((next: string, round?: number | null) => {
+    setTab(next as typeof tab);
+    setOpenAt(round ?? null);
+  }, []);
+  /**
+   * A brief typed in `1b`, on its way to the pilot (#223).
+   *
+   * **The composer was the front door and it skipped the pilot entirely**, so a
+   * brief typed into it built an argv and started a run: *"in the pilot chat, my
+   * request didn't show up and the pilot isn't doing anything."* The intake
+   * doctrine existed and nothing was routed through it.
+   *
+   * Held here because this is the component that owns both — the modal and the
+   * pane — and cleared by the pane the moment it has said it, so the same brief
+   * cannot be sent twice.
+   */
+  const [brief, setBrief] = useState<string | null>(null);
+  /**
+   * Runs asked for and not started yet, and the one on screen (#223).
+   *
+   * **Pressing start is where a run begins as far as anybody can see**, so the
+   * row appears then, under its project, and the conversation that follows is
+   * that row's. When the pilot's proposal is pressed and the run says
+   * `run_started`, the draft is bound to it and the run adopts the conversation —
+   * one row that turns into the run, rather than a second row arriving while the
+   * chat that decided it disappeared. See `pending.ts`.
+   */
+  const [drafts, setDrafts] = useState<readonly Draft[]>(() => {
+    try {
+      return readDrafts(localStorage.getItem(DRAFTS_KEY));
+    } catch {
+      return [];
+    }
+  });
+  const saveDrafts = useCallback((change: (list: readonly Draft[]) => readonly Draft[]) => {
+    setDrafts((list) => {
+      const next = change(list);
+      try {
+        localStorage.setItem(DRAFTS_KEY, JSON.stringify(next));
+      } catch {
+        // The drafts still work for this session; they will not be back next time.
+      }
+      return next;
+    });
+  }, []);
+  const [draftId, setDraftId] = useState<string | null>(null);
+  const drafting = drafts.find((d) => d.id === draftId) ?? null;
+  /**
+   * The draft whose proposal was pressed, so only ITS run can claim it.
+   *
+   * A ref rather than a field read off `drafting`, because the thing being
+   * guarded against is a run started some other way — a resume from the footer,
+   * a run continued into implementation — arriving while a draft happens to be
+   * open. Only the pilot's `invoke` sets this, and every other launch clears it.
+   */
+  const launchedFrom = useRef<string | null>(null);
+  /**
+   * A brief waiting for its draft's conversation to be on screen.
+   *
+   * **One commit later, on purpose.** Pointing the pane at a new draft makes it
+   * load that draft's (empty) conversation, and a brief handed over in the same
+   * render would be sent on top of whatever conversation was on screen before —
+   * so the previous chat would ride into the new run's first message. The pane's
+   * load runs in a child effect, before this one, so by the time `brief` is set
+   * the pane is already holding the right conversation.
+   */
+  const [queued, setQueued] = useState<string | null>(null);
+  useEffect(() => {
+    if (queued === null || drafting === null) return;
+    setBrief(queued);
+    setQueued(null);
+  }, [queued, drafting]);
+  /** Discard a draft and the conversation kept under it. Nothing on disk. */
+  const forgetDraft = useCallback(
+    (d: Draft) => {
+      saveDrafts((list) => removeDraft(list, d.id));
+      try {
+        localStorage.removeItem(chatKey(d.dir, d.id));
+      } catch {
+        // Storage off: the conversation was never kept either.
+      }
+      setDraftId((at) => (at === d.id ? null : at));
+    },
+    [saveDrafts],
+  );
+  /** Let go of drafts whose run the archive now draws. Their chat moved already. */
+  const settleDrafts = useCallback(
+    (ids: readonly string[]) => saveDrafts((list) => list.filter((d) => !ids.includes(d.id))),
+    [saveDrafts],
+  );
+  // The run a draft's proposal started has said who it is: bind the draft to it
+  // and let go of the draft, which moves the pilot pane onto the run's key — and
+  // that move is a start rather than a click, so the run adopts the conversation.
+  const startedId = run.identity?.runId ?? null;
+  useEffect(() => {
+    if (startedId === null || drafting === null) return;
+    if (launchedFrom.current !== drafting.id) return;
+    launchedFrom.current = null;
+    saveDrafts((list) => bindDraft(list, drafting.id, startedId));
+    setDraftId(null);
+  }, [startedId, drafting, saveDrafts]);
   /** Pilot proposals waiting on a person, so a hidden tab can say so (#144). */
   const [proposals, setProposals] = useState(0);
   /**
@@ -216,7 +572,7 @@ export function Cockpit() {
       if (event.key === 'Escape') {
         setDiagnostics(false);
         setSwitching(false);
-        setComposing(false);
+        setComposing(null);
         return;
       }
       if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.code === 'KeyD') {
@@ -327,16 +683,50 @@ export function Cockpit() {
    * a pilot feature.
    */
   const launch = useCallback(
-    (argv: readonly string[]) => {
+    // `fromDraft` is the draft whose proposal this is, and only the pilot's
+    // `invoke` passes one: a resume or an implement is not the run a draft asked
+    // for, and must not be the run that claims it (#223).
+    (argv: readonly string[], fromDraft: string | null = null) => {
+      launchedFrom.current = fromDraft;
+      if (fromDraft !== null) saveDrafts((list) => markLaunched(list, fromDraft));
       // A new run is a new column. Appending to the previous one's cycles would
       // draw a single loop out of two runs.
       dispatch({ type: 'reset' });
+      // **Point the window at the run it is starting** (#223). `viewing` is
+      // where the panes are aimed, and starting a run used to leave it aimed
+      // wherever it already was — so a person who had opened a past run from the
+      // sidebar and then started a new one got six panes reading the old run
+      // while the column narrated the new one. That is exactly what was
+      // reported: *"the planner is currently running plan 0, but I see nothing
+      // in the output tab… there is nothing under the plan and critiques tabs!
+      // No questions either, even though it says three raised."* The Questions
+      // **tab** counts the live run and the **pane** was forced to null by
+      // `past`, which is why the badge and the pane disagreed.
+      setViewing(null);
+      setOpenAt(null);
       setLaunched(true);
-      setSentLaunch(readLaunchArgv(argv));
+      const sent = readLaunchArgv(argv);
+      setSentLaunch(sent);
+      // **And at the repository it is starting in**, which is the same rule one
+      // field along (#223). `viewing` was moved above and `repoDir` was not, so a
+      // run started somewhere the window was not pointed left the sidebar showing
+      // a different project — and since a project section only reads its archive
+      // while it is open, that run was not merely in the wrong place in the list,
+      // it was never fetched. The pilot's `start_run` carries the directory it
+      // was given, so this is the case where the two could differ: open a past
+      // run in project B, type a brief, and the run starts in B while the sidebar
+      // is still on A.
+      //
+      // Taken from the argv rather than from a parameter, because the argv is
+      // what was actually sent — a second source would be a second answer to
+      // which repository this run is in. A null parse leaves it alone: that is an
+      // argv this build cannot read, and guessing a directory out of one is worse
+      // than pointing at nothing.
+      if (sent !== null) rememberRepo(sent.dir);
       requests.current += 1;
       void send({ type: 'invoke', id: requests.current, argv });
     },
-    [send],
+    [send, rememberRepo, saveDrafts],
   );
 
   /**
@@ -346,8 +736,85 @@ export function Cockpit() {
    * and the one-at-a-time rule keep exactly one definition each, which is the
    * same reason the pilot's `start_run` proposal comes through there (#144).
    */
+  /**
+   * Take a finished plan-only run into implementation (#223).
+   *
+   * Through `launch` like every other way a run starts, so the request-id
+   * allocation and the one-at-a-time rule keep one definition each. It is a
+   * RESUME of that run and not a new one - the core refuses it unless the plan
+   * actually cleared critique, and everything the plan phase settled travels
+   * with it.
+   */
+  const implement = useCallback(
+    (runId: string, dir: string) => launch(implementArgv(runId, dir)),
+    [launch],
+  );
+
+  /**
+   * Pick a halted run back up, with the column it already had (#223).
+   *
+   * **A resumed run used to start from an empty column, and that is what was
+   * reported:** *"the previous plan, critique, code, etc rounds don't show up on
+   * the right bar. I want it to look as I just left it when I stopped the run."*
+   * `reduce` builds a `Run` from the frames *this process* narrates, and a
+   * resume narrates only what happens from the resume onwards — so a run three
+   * plan rounds deep came back showing one, and every earlier round, census and
+   * turn was simply gone from the window.
+   *
+   * So the column is **seeded** with the run's own narration before the loop
+   * starts adding to it. The ordering is what makes this safe rather than racy:
+   * the replay is fetched and folded *before* the `invoke` is sent, so there are
+   * no live frames yet to arrive out of order, and the seed can never land on
+   * top of something the loop has already said.
+   *
+   * The ending is deliberately **not** applied. `useReplay` applies it because a
+   * run you opened has ended and must say so; a run you are resuming has not,
+   * and seeding `completed` would draw a halt banner over a run that is starting.
+   *
+   * A replay that fails costs nothing but the history: the resume goes ahead on
+   * an empty column, which is exactly what it did before. Losing the seed must
+   * never cost somebody the resume.
+   */
   const resume = useCallback(
-    (runId: string, dir: string) => launch(resumeArgv(runId, dir)),
+    // `force` last and defaulting to false, so every existing caller sends the
+    // ordinary resume: taking a lock somebody may still hold is a decision, and
+    // the one screen that can see the lock's verdict is the one that offers it.
+    (runId: string, dir: string, raise?: Raise, force = false) => {
+      const argv = resumeArgv(runId, dir, raise ?? {}, force);
+      if (!host.inShell()) {
+        launch(argv);
+        return;
+      }
+      setBusy(true);
+      let seed: Run | null = null;
+      void host
+        .replay(dir, runId)
+        .then((got) => {
+          // Stripped of the previous ending: a resume has not stopped, and
+          // seeding one would draw a halt banner over a run that is starting.
+          seed = forResume(foldReplay(got.steps));
+        })
+        .catch(() => {
+          // Deliberately silent. The run is about to start either way, and a
+          // failure here means the column begins empty - which is what every
+          // resume did until now, not a new failure worth a banner.
+        })
+        .finally(() => {
+          setBusy(false);
+          // **`launch` first, and the order is the whole of it.** `launch` opens
+          // with `dispatch({ type: 'reset' })`, so a seed dispatched before it
+          // is thrown away by the very next action - which is what happened on
+          // the first cut of this, and it is invisible because an empty column
+          // is exactly what the bug looked like anyway. Both dispatches land in
+          // one batch and the reducer applies them in order: reset, then seed.
+          //
+          // Still before any frame can arrive: `launch` ends at `void send(...)`
+          // and the wire delivers asynchronously, so nothing the loop says can
+          // be overwritten by this.
+          launch(argv);
+          if (seed !== null) dispatch({ type: 'seed', run: seed });
+        });
+    },
     [launch],
   );
 
@@ -401,21 +868,158 @@ export function Cockpit() {
   }, [run.gate]);
 
   /**
+   * Commands this window started (#211).
+   *
+   * **Held here rather than on `Run`, and the reason is lifetime.** A command is
+   * not part of a run: it is started when there is no run at all - *"does the
+   * thing you just built start"* is asked after one finishes - and a dev server
+   * left up outlives several. On `Run` it would be destroyed by `nextRun`, which
+   * would take the card of a process still listening on 5173 with it.
+   */
+  const [commands, setCommands] = useState(noCommands);
+  useEffect(() => {
+    let stop: (() => void) | null = null;
+    let cancelled = false;
+    void (async () => {
+      stop = await host.onCommandFrame((frame) => {
+        setCommands((prev) => reduceCommands(prev, frame));
+      });
+      if (cancelled) stop?.();
+    })();
+    return () => {
+      cancelled = true;
+      stop?.();
+    };
+  }, []);
+
+  /**
+   * Run one, in the repository this window is pointed at.
+   *
+   * The **one** sender, exactly as `launch` is: the pilot's accepted proposal
+   * and the command bar's own button both arrive here, so a pilot capability the
+   * window lacks would be a missing control rather than a special ability
+   * (#144). The directory is not a parameter - a command runs where the window
+   * is pointed, and letting a caller name one would be a second answer to which
+   * repository this is.
+   */
+  const runCommand = useCallback(
+    (program: string, args: readonly string[]) => {
+      if (repoDir.trim() === '') {
+        note('log', 'no repository is set, so there is nowhere to run a command');
+        return;
+      }
+      void host
+        .runCommand(repoDir, program, args)
+        .then((frame) => setCommands((prev) => reduceCommands(prev, frame)))
+        .catch((err: unknown) => note('log', String(err)));
+    },
+    [repoDir, note],
+  );
+
+  const stopCommand = useCallback(
+    (commandId: string) => {
+      void host.stopCommand(commandId).catch((err: unknown) => note('log', String(err)));
+    },
+    [note],
+  );
+
+  /**
    * Fire a proposal the user accepted.
    *
    * Nothing here decides anything: the effect was built by `tools.ts` from what
    * the model asked for, and a person pressed a button. This is the routing, and
-   * it routes to the same two functions the buttons call.
+   * it routes to the same functions the buttons call.
    */
   const onEffect = useCallback(
     (effect: Effect) => {
-      if (effect.kind === 'invoke') launch(effect.argv);
+      if (effect.kind === 'invoke') launch(effect.argv, draftId);
+      else if (effect.kind === 'command') runCommand(effect.program, effect.args);
+      else if (effect.kind === 'stop_command') stopCommand(effect.commandId);
       else answer(effect.askId, effect.decision);
     },
-    [launch, answer],
+    [draftId, launch, answer, runCommand, stopCommand],
   );
 
   const outside = !host.inShell();
+  /**
+   * The run every disk-reading pane is about.
+   *
+   * One expression, used by all six, so they cannot disagree about which run is
+   * on screen. The live run is the default and an opened one overrides it —
+   * and when the live run *is* the opened one, `viewing` is simply redundant
+   * rather than wrong.
+   */
+  // A draft on screen has no run yet, so the panes read nothing rather than
+  // whichever run the column happens to hold (#223).
+  const shownRunId = viewing?.runId ?? (drafting !== null ? null : (run.identity?.runId ?? null));
+  /**
+   * The question round the loop is on, through `model.ts` rather than by index.
+   *
+   * The badge on the Questions tab and the pane behind it read the **same**
+   * expression, which is the thing that broke the last time they did not: the
+   * tab counted the live run while the pane had been forced to null, so a badge
+   * and the pane behind it disagreed about one run and it was reported as two
+   * separate bugs.
+   */
+  const openQuestions = latestQuestions(run);
+  /**
+   * Which repository those panes read in.
+   *
+   * **The run's own repository, and `repoDir` only as the last answer.**
+   * `run_started` carries `repo` (#223) and it is the authoritative one: it is
+   * where the run actually is. `repoDir` is where the *window* is pointed, and
+   * the sidebar moves it — opening a run in another project, or adding one,
+   * repoints it — so a live run's artifacts were being looked for under
+   * whichever project had most recently been clicked. Reading `.vibe/runs/<live
+   * id>` under the wrong repository finds nothing, and the pane that finds
+   * nothing says *no plans yet*, which is indistinguishable from a planner that
+   * has not finished.
+   */
+  const shownDir = viewing?.dir ?? drafting?.dir ?? run.identity?.repo ?? repoDir;
+  /**
+   * The live run's repository, for the one pane that is always about it.
+   *
+   * `CodePane` diffs the shas on `Run`, so it has to run those commands in the
+   * repository **those shas are in** — `shownDir` would point it at an opened
+   * run's repository while it asked about the live run's commits, which is a
+   * `git diff` against two objects that are not there.
+   */
+  const liveRepo = run.identity?.repo ?? repoDir;
+  /** Whether what is on screen is a run this window did not narrate. */
+  const past = viewing !== null && viewing.runId !== run.identity?.runId;
+  // The round cards, built once here and handed to the surfaces that draw them.
+  // `rounds()` is a re-shaping of what is already on `Run` - it measures nothing
+  // and infers nothing - and one call is what keeps the pilot's log, the report
+  // panes and the Code tab from disagreeing about which round a thing arrived in.
+  const cards = rounds(run);
+  /**
+   * The opened run, said again, for the column beside the panes (#223).
+   *
+   * Asked for only when the window is pointed at a run it is **not** narrating:
+   * for the live one the window already has the narration this reconstructs.
+   * `run.artifacts.length` re-reads it for the same reason every artifact pane
+   * uses it — it counts what the run said it wrote, so a re-read happens because
+   * something landed on disk and never on a timer.
+   */
+  const opened = useReplay(
+    past && viewing !== null ? viewing.dir : '',
+    past && viewing !== null ? viewing.runId : null,
+    run.artifacts.length,
+  );
+  /**
+   * The run the loop column, the round cards and the footer are about.
+   *
+   * **One expression, so they cannot disagree**, and it is the same `Run` type
+   * either way — which is the whole correction to the first attempt at this. A
+   * replayed run goes through `reduce` exactly as a live one does, so the column
+   * draws it with the same components and *"as if I had run it myself"* is true
+   * by construction rather than by resemblance.
+   *
+   * The live run is what is drawn until the replay arrives, and a replay that
+   * failed leaves it there with the failure said beside it — a column showing
+   * one run while claiming to show another is the confusion this set out to fix.
+   */
+  const columnRun = past && opened.run !== null ? opened.run : run;
 
   return (
     <div className="v-cockpit">
@@ -463,12 +1067,41 @@ export function Cockpit() {
         />
       )}
 
-      {composing && (
+      {composing !== null && (
         <NewWorkstream
-          dir={repoDir}
-          onDir={rememberRepo}
-          onLaunch={launch}
-          onClose={() => setComposing(false)}
+          dir={composing.dir}
+          // A project's `＋` has already settled this, so the composer states it
+          // rather than offering a field. Only the unlocked one can move the
+          // window's own repository.
+          onDir={(next) => {
+            rememberRepo(next);
+            setComposing((at) => (at === null ? at : { ...at, dir: next }));
+          }}
+          locked={composing.locked}
+          // The only way out, and the one that spends nothing: the brief goes to
+          // the pilot, which reads it, asks about what would change the plan and
+          // proposes the run when it is settled (#223). The tab moves with it,
+          // because a conversation nobody is looking at is the same as none.
+          // **And the row appears now, not when the run starts** (#223). The
+          // draft is the run as far as the person is concerned; the core has
+          // nothing until the proposal is pressed, and the draft is what the
+          // sidebar draws in between.
+          onBrief={(message, task) => {
+            const draft = newDraft(
+              composing.dir,
+              task,
+              Date.now(),
+              Math.random().toString(36).slice(2, 8),
+            );
+            saveDrafts((list) => addDraft(list, draft));
+            setDraftId(draft.id);
+            setViewing(null);
+            rememberRepo(draft.dir);
+            setQueued(message);
+            setComposing(null);
+            open('pilot');
+          }}
+          onClose={() => setComposing(null)}
           busy={busy || !wire.connected}
         />
       )}
@@ -497,7 +1130,7 @@ export function Cockpit() {
       {/* `7c`, above everything and below the titlebar. It is a statement about
           the whole window - everything under it is as old as the strip says -
           so it cannot sit inside one column. */}
-      <StalenessStrip state={staleness(run, now)} />
+      <StalenessStrip state={staleness(run, now)} hostPid={wire.hostPid} />
 
       {/* `7e`, above the columns for the same reason: an agent with no headroom
           is a statement about the whole run, not about one pane. Quiet, and
@@ -517,64 +1150,203 @@ export function Cockpit() {
       )}
 
       <div className="v-cockpit__body">
-        <div className="v-cockpit__loop">
-          {/* Offered again once the command has RETURNED, not once the loop
-              said it was done: `serve.ts` runs one at a time and refuses a
-              second invoke until the first settles, so a form shown any earlier
-              would only produce a rejection. */}
-          {(!launched || run.completed !== null) && !outside && (
+        {/* The navigator (#223). **One sidebar, not a rail beside a panel** —
+            the two were the same archive twice, reported as *"there are two Runs
+            bars on the left now"*, and the rail is now this panel's collapsed
+            state. Its `＋ ⌘K ⚙` stay on screen at every width, which is the
+            whole of what `design/AUDIT.md` §1.1 asked for. */}
+        <SidePanel
+          side="left"
+          title="Projects"
+          // The run you are in, in the two letters a 54px strip has room for —
+          // the rail's own idea, in the one place it is still the best available
+          // answer. No run, or a task with nothing legible in it, gets `··` from
+          // `initials` itself: the no-value mark the loop column uses, rather
+          // than a letter picked out of an id.
+          mark={initials(run.identity?.task ?? '')}
+          open={showRuns}
+          onToggle={() => setShowRuns((on) => !on)}
+          shut={
             <>
-              <Launch
-                busy={busy || !wire.connected}
-                onLaunch={launch}
-                dir={repoDir}
-                onDir={rememberRepo}
-              />
-              {/* `4a`, beside the plain form rather than replacing it. The
-                  design's own intent is that the honest path is type → create →
-                  keep talking; the modal is for the one moment somebody is
-                  deciding how THIS run should differ. */}
               <button
-                className="v-launch__more"
-                onClick={() => setComposing(true)}
-                disabled={busy || !wire.connected}
+                className="v-side__tool"
+                onClick={() => setComposing({ dir: repoDir, locked: false })}
+                title="New run"
               >
-                or set this run&apos;s overrides…
+                ＋
+              </button>
+              <button
+                className="v-side__tool"
+                onClick={() => setSwitching(true)}
+                title="Switch run (Ctrl+K)"
+              >
+                ⌘K
+              </button>
+              <button
+                className="v-side__tool"
+                onClick={() => openSettings('global')}
+                title="Settings for all projects"
+              >
+                ⚙
               </button>
             </>
-          )}
-          <LoopColumn run={run} now={now} hostPid={wire.hostPid} />
-          {/* `4g`, and only on the ending that means the loop finished. Every
-              other exit is a halt, and a halt gets the footer's banner and its
-              one action rather than a summary of work that stopped early. */}
-          {run.completed?.exit === 0 && <Summary run={run} />}
-          <Footer
-            run={run}
-            busy={busy}
-            onDecide={answer}
-            onPause={pause}
-            onStop={() => setConfirmStop(true)}
-            onResume={resume}
-            pausing={pausing}
+          }
+        >
+          <Sidebar
+            dir={repoDir}
+            drafts={drafts}
+            draftId={draftId}
+            // Back to a draft's conversation. It has no run to read, so the
+            // panes are pointed at nothing and the pilot tab is where it is.
+            onDraft={(d) => {
+              setViewing(null);
+              setDraftId(d.id);
+              rememberRepo(d.dir);
+              open('pilot');
+            }}
+            onForgetDraft={forgetDraft}
+            onSettled={settleDrafts}
+            currentId={run.identity?.runId ?? null}
+            onNew={() => setComposing({ dir: repoDir, locked: false })}
+            // A run in THIS project, with the repository already answered. It
+            // also points the window there, because the run about to start is
+            // the one the panes should be reading.
+            onNewIn={(next) => {
+              rememberRepo(next);
+              setComposing({ dir: next, locked: true });
+            }}
+            onSettings={() => openSettings('global')}
+            // Points the window at the project first, so the settings shown are
+            // the ones for the row that was pressed.
+            onProjectSettings={(next) => {
+              rememberRepo(next);
+              openSettings('project');
+            }}
+            // `1b` in the main pane, which is where a lock can be overruled with
+            // a confirmation. A sidebar row must not be a second way to force.
+            onRuns={(next) => {
+              rememberRepo(next);
+              setTab('runs');
+            }}
+            // Reads only. Points the window at the run and leaves the loop
+            // alone — no probe, no lock, no turn.
+            onShow={(next, runId, task) => {
+              rememberRepo(next);
+              setDraftId(null);
+              setViewing({ dir: next, runId, task });
+              setOpenAt(null);
+            }}
+            onProject={(next) => {
+              rememberRepo(next);
+              setDraftId(null);
+              // A run in the old project is not a run in this one, and the panes
+              // key off the run id alone. Cleared rather than carried.
+              setViewing(null);
+            }}
+            // A deleted run is one the panes must stop reading. Only when it is
+            // the one on screen: the sidebar can delete any run in any project,
+            // and clearing `viewing` for one nobody was looking at would throw
+            // away a reader's place for no reason.
+            onDeleted={(deletedDir, deletedRunId) => {
+              setViewing((at) =>
+                at !== null && at.runId === deletedRunId && at.dir === deletedDir ? null : at,
+              );
+            }}
           />
-        </div>
+        </SidePanel>
 
         <div className="v-cockpit__pane">
+          {/*
+            Hi-fi 1's bar, in the design's own order. It had twelve tabs against
+            the design's seven, and `design/AUDIT.md` traced most of that to the
+            missing rail rather than to a decision anybody made: `Settings` is
+            the rail's `⚙`, `Runs` is the rail plus ⌘K, and `Spend` is a
+            right-aligned readout in this bar rather than a tab of its own.
+
+            `Pilot` is first and is where the window lands, which hi-fi 5 says in
+            as many words. `Verify`, `Commands` and `Keys` follow the seven: they
+            postdate the artwork, so the design cannot be consulted about where
+            they go, and putting them after the frames it does name is the least
+            it can be wrong by.
+          */}
           <div className="v-cockpit__tabs">
+            {/* The pilot (#143, #144), and hi-fi 5's first tab. The count is
+                proposals waiting on a person, and it is here because a proposal
+                nobody sees blocks the conversation silently. */}
+            <button
+              className={`v-cockpit__tab ${tab === 'pilot' ? 'v-cockpit__tab--on' : ''}`}
+              onClick={() => setTab('pilot')}
+            >
+              Pilot chat{proposals > 0 ? ` · ${String(proposals)}` : ''}
+            </button>
             <button
               className={`v-cockpit__tab ${tab === 'output' ? 'v-cockpit__tab--on' : ''}`}
               onClick={() => setTab('output')}
             >
               Output
             </button>
-            {/* The pilot (#143, #144). It reads this run and proposes; the
-                count is proposals waiting on a person, and it is here because a
-                proposal nobody sees blocks the conversation silently. */}
+            {/* Hi-fi 3, and it is built now (#223). The tooltip on the tab it
+                replaces said *"this window cannot read a run's artifacts"*,
+                which was true until the `artifacts` frame landed - a version
+                history of an artifact needs the artifacts, and #207 was right
+                that reading one is its own decision with #129's link refusal
+                attached to it. Both are now on the core side, where they belong. */}
             <button
-              className={`v-cockpit__tab ${tab === 'pilot' ? 'v-cockpit__tab--on' : ''}`}
-              onClick={() => setTab('pilot')}
+              className={`v-cockpit__tab ${tab === 'plans' ? 'v-cockpit__tab--on' : ''}`}
+              onClick={() => open('plans')}
             >
-              Pilot{proposals > 0 ? ` · ${String(proposals)}` : ''}
+              Plans
+            </button>
+            {/* The four artifact tabs are in `CycleKind`'s order — plan,
+                critique, code, review — which is the loop's own and is the
+                order the column beside them draws. Hi-fi 1 names four positions
+                here (`Versions · Diff · Findings`) and this build has six, so
+                something had to decide the interleaving; making the bar read in
+                the same order as the column is a rule, where "keep Diff where
+                the artwork put it" would be a coincidence to maintain.
+
+                Where a tab carries a count, that count is **how many things are
+                behind it** - rounds, commands, passes. Nothing here badges a
+                property of those things, which is the rule the two report tabs
+                broke. */}
+            {/* **No count on either report tab**, and the reason is what the
+                number turned out to say. `Plan critique · 2` was two blocking
+                findings, and it was read as two critiques — reasonably, since
+                every other count in this bar is how many things are behind the
+                tab. A badge whose unit has to be explained is not a badge; the
+                counts are inside, on the round they belong to, where `Counts`
+                draws all four beside the tolerance that decided them. */}
+            <button
+              className={`v-cockpit__tab ${tab === 'critique' ? 'v-cockpit__tab--on' : ''}`}
+              onClick={() => open('critique')}
+            >
+              Plan critique
+            </button>
+            {/* `1d`, per round. The whole-run diff is this pane's first section
+                and is still what it opens on before any round has committed. */}
+            <button
+              className={`v-cockpit__tab ${tab === 'code' ? 'v-cockpit__tab--on' : ''}`}
+              onClick={() => open('code')}
+            >
+              Code{run.commits.length > 0 ? ` · ${String(run.commits.length)}` : ''}
+            </button>
+            <button
+              className={`v-cockpit__tab ${tab === 'review' ? 'v-cockpit__tab--on' : ''}`}
+              onClick={() => open('review')}
+            >
+              Code review
+            </button>
+            {/* `1f`. The count is blocking questions, not all of them: an
+                advisory question the answerer handled needs nobody, and a
+                badge that included it would train you to ignore the badge. */}
+            <button
+              className={`v-cockpit__tab ${tab === 'questions' ? 'v-cockpit__tab--on' : ''}`}
+              onClick={() => open('questions')}
+            >
+              Questions
+              {openQuestions !== null && openQuestions.blocking > 0
+                ? ` · ${String(openQuestions.blocking)}`
+                : ''}
             </button>
             {/* `5d`. The count is verification passes, not gates: the pane's
                 subject is the decision in front of you and its trend, and a
@@ -585,87 +1357,163 @@ export function Cockpit() {
             >
               Verify{run.verify.length > 0 ? ` · ${String(run.verify.length)}` : ''}
             </button>
-            {/* The pilot's credentials, until Settings exists to put them in. */}
+            {/* The count is what is still RUNNING, not how many have been run
+                (#211). A dev server left up is the fact worth a badge - it is
+                holding a port and it will not stop by itself - and a total that
+                only grew would be the tray-badge failure `4e` names. */}
             <button
-              className={`v-cockpit__tab ${tab === 'keys' ? 'v-cockpit__tab--on' : ''}`}
-              onClick={() => setTab('keys')}
+              className={`v-cockpit__tab ${tab === 'commands' ? 'v-cockpit__tab--on' : ''}`}
+              onClick={() => setTab('commands')}
             >
-              Keys
+              Commands
+              {running(commands).length > 0 ? ` · ${String(running(commands).length)}` : ''}
             </button>
-            {/* `1e`. The count is blocking findings in the latest round, not
-                all of them: that is the number that decides whether the loop
-                fixes again, and a total would move for reasons that change
-                nothing. */}
+
+            {/*
+              `5e`, in the place hi-fi 1 puts it: right-aligned in this bar,
+              always visible, rather than costing a tab. It is the **readout**
+              the design draws and it is also the way in — the pane behind it is
+              the per-phase breakdown, and losing that to match a frame would be
+              deleting a screen to fix a bar.
+
+              Absent rather than `0 tok` before anything is charged. A run that
+              has spent nothing yet has not spent zero; it has not been measured.
+            */}
             <button
-              className={`v-cockpit__tab ${tab === 'findings' ? 'v-cockpit__tab--on' : ''}`}
-              onClick={() => setTab('findings')}
-            >
-              Findings{blocking(run) > 0 ? ` · ${String(blocking(run))}` : ''}
-            </button>
-            {/* `1b`. No count: the number of runs an archive holds is not
-                something to act on, and a badge that grew for ever would be
-                the tray-badge failure `4e` names - one that includes work
-                needing nobody trains you to ignore it. */}
-            <button
-              className={`v-cockpit__tab ${tab === 'runs' ? 'v-cockpit__tab--on' : ''}`}
-              onClick={() => setTab('runs')}
-            >
-              Runs
-            </button>
-            {/* `1f`. The count is blocking questions, not all of them: an
-                advisory question the answerer handled needs nobody, and a
-                badge that included it would train you to ignore the badge. */}
-            <button
-              className={`v-cockpit__tab ${tab === 'questions' ? 'v-cockpit__tab--on' : ''}`}
-              onClick={() => setTab('questions')}
-            >
-              Questions
-              {run.questions !== null && run.questions.blocking > 0
-                ? ` · ${String(run.questions.blocking)}`
-                : ''}
-            </button>
-            {/* `5e`. No count: a token total in a tab label is a number you
-                cannot act on, and the design puts consumption in the tab BAR
-                rather than on the tab - which is a different element this
-                slice does not have. */}
-            <button
-              className={`v-cockpit__tab ${tab === 'spend' ? 'v-cockpit__tab--on' : ''}`}
+              className={`v-cockpit__readout ${tab === 'spend' ? 'v-cockpit__readout--on' : ''}`}
               onClick={() => setTab('spend')}
+              title="what this run has spent"
             >
-              Spend
+              {run.spend.tokens === null
+                ? 'spend · nothing charged yet'
+                : `${fmtTokens(run.spend.tokens)} tok${
+                    run.spend.codexTokens === null
+                      ? ''
+                      : ` · codex ${fmtTokens(run.spend.codexTokens)}`
+                  }`}
             </button>
-            {/* `1h`, and #140's payoff: the gate matrix has been configuration
-                since it landed and there has been no way to configure it. */}
-            <button
-              className={`v-cockpit__tab ${tab === 'settings' ? 'v-cockpit__tab--on' : ''}`}
-              onClick={() => setTab('settings')}
-            >
-              Settings
-            </button>
-            {/* `1d`. Enabled only once the run has a base to diff against: a
-                diff with no base is the request that stages the whole working
-                tree, so there is nothing to offer before then. */}
-            <button
-              className={`v-cockpit__tab ${tab === 'diff' ? 'v-cockpit__tab--on' : ''}`}
-              onClick={() => setTab('diff')}
-            >
-              Diff
-            </button>
-            {/* Named rather than omitted, with the issue that would fill it. A
-                tab bar that showed only what works reads as a finished app. */}
-            <span className="v-cockpit__tab v-cockpit__tab--off" title="#137 — v1.5">
-              Prompt
-            </span>
           </div>
-          {tab === 'output' && <OutputPane lines={run.output} />}
+          {/* **Which run the panes are about, whenever it is not the live one.**
+              The panes and the column both follow an opened run now (#223), so
+              this no longer has to explain a window showing two runs at once —
+              what is left is the one thing that genuinely does not follow: the
+              spend readout in the bar above, which is the live run's, because it
+              is charged as the run goes rather than read off a record. It
+              carries the way back and the way forward: stop reading, or go to
+              `1b`, which is the only place a run is started. */}
+          {past && viewing !== null && (
+            <div className="v-cockpit__viewing">
+              <StateKicker tone="quiet">reading</StateKicker>
+              <span className="v-cockpit__viewingwhat">{viewing.task}</span>
+              <span className="v-cockpit__viewingnote">
+                from disk. The spend in the bar above is the run this window is narrating; what
+                this one spent is in its record, on the right.
+              </span>
+              <button className="v-doc__again" onClick={() => setTab('runs')}>
+                resume it…
+              </button>
+              <button className="v-doc__again" onClick={() => setViewing(null)}>
+                back to the live run
+              </button>
+            </div>
+          )}
+          {tab === 'output' && (
+            <OutputPane
+              lines={run.output}
+              turn={past ? null : run.running}
+              staleness={staleness(run, now)}
+              // A past run's narration is on disk, in its own transcript. The
+              // live run's is on the wire and has never been read from a file.
+              transcript={past && viewing !== null ? viewing : null}
+            />
+          )}
           {tab === 'verify' && <VerifyPane passes={run.verify} />}
-          {tab === 'findings' && <FindingsPane censuses={run.censuses} />}
           {tab === 'spend' && <SpendPane run={run} />}
-          {tab === 'questions' && <QuestionsPane questions={run.questions} />}
-          {tab === 'settings' && <Settings dir={repoDir} />}
-          {tab === 'diff' && <DiffPane dir={repoDir} baseSha={run.baseSha} />}
+          {tab === 'questions' && (
+            <QuestionsPane
+              questions={past ? null : openQuestions}
+              dir={shownDir}
+              runId={shownRunId}
+              revision={run.artifacts.length}
+              // Told by the exit code the run reported, never inferred from the
+              // questions: an advisory question the answerer handled leaves open
+              // questions on a run nobody is waiting on, and a form beside one
+              // would be refused by the core for having no NEEDS-INPUT.md.
+              halted={!past && run.completed?.exit === NEEDS_HUMAN}
+              busy={busy}
+              onResume={resume}
+            />
+          )}
+          {tab === 'settings' && (
+            <Settings
+              // Remounted per file, so nothing typed into one form survives
+              // into the other.
+              key={`${settingsScope}:${repoDir}`}
+              scope={settingsScope}
+              dir={repoDir}
+              scale={scale}
+              onScale={rescale}
+              statuses={keyStatuses}
+              keyFailure={keyFailure}
+              onKeysChanged={refreshKeys}
+              limits={limits}
+              onLimits={relimit}
+              onSaved={() => setConfigEpoch((n) => n + 1)}
+            />
+          )}
+          {/* `1b`, opened from a project in the sidebar. The columns the sidebar
+              has no room for — status, cost, liveness — and the one control that
+              may overrule a lock, which confirms and says what it is overruling. */}
           {tab === 'runs' && (
-            <Workstreams dir={repoDir} onResume={(runId) => resume(runId, repoDir)} />
+            <Workstreams
+              dir={repoDir}
+              onResume={(runId, force) => resume(runId, repoDir, undefined, force)}
+            />
+          )}
+          {/* The four artifact panes. Every one of them reads the run's own
+              directory, so all four take the run id the core stated on
+              `run_started` - there is no way to derive one, and a pane with no
+              run says so rather than showing an empty list. */}
+          {/* `run.artifacts.length` is what makes an open pane live (#223). It
+              counts what the run SAID it wrote, so a re-read happens because a
+              file appeared and never on a timer - and `artifact()` says it after
+              the bytes are on disk, so the re-read cannot beat the write. */}
+          {tab === 'plans' && (
+            <PlansPane
+              dir={shownDir}
+              runId={shownRunId}
+              openAt={openAt}
+              revision={run.artifacts.length}
+            />
+          )}
+          {tab === 'critique' && (
+            <ReportPane
+              dir={shownDir}
+              runId={shownRunId}
+              kind="critique"
+              rounds={past ? [] : cards}
+              openAt={openAt}
+              revision={run.artifacts.length}
+            />
+          )}
+          {tab === 'review' && (
+            <ReportPane
+              dir={shownDir}
+              runId={shownRunId}
+              kind="review"
+              rounds={past ? [] : cards}
+              openAt={openAt}
+              revision={run.artifacts.length}
+            />
+          )}
+          {tab === 'code' && <CodePane run={run} dir={liveRepo} openAt={openAt} />}
+          {tab === 'commands' && (
+            <CommandsPane
+              commands={commands}
+              dir={repoDir}
+              onRun={runCommand}
+              onStop={stopCommand}
+            />
           )}
           {/* Mounted whatever tab is showing, and hidden rather than unmounted.
               A conversation is state nobody can get back, and a proposal waiting
@@ -676,20 +1524,201 @@ export function Cockpit() {
             <PilotPane
               run={run}
               launched={sentLaunch}
+              // **The run's repository, not the window's** (#223). Every other
+              // pane that reads a run moved onto `shownDir` and this one was
+              // missed, which is the second-answer-to-which-repository defect
+              // AGENTS.md already records, one pane later. It is worse here
+              // than on a reader: `dir` is the pilot's PERMISSION BOUNDARY -
+              // the directory `claude -p --restricted` is spawned in and the
+              // only one it can read - and it is where an accepted
+              // `run_command` runs. So opening a run in another project left
+              // the pilot reading a different repository from the one on
+              // screen, and with no project selected at all it was blocked
+              // outright: *"I just tried sending a chat to an old run's pilot
+              // but I can't"*.
+              dir={shownDir}
+              // Which conversation to show. It follows the run the panes are
+              // reading, so opening a finished run brings back the chat about
+              // it — and null, before any run, is the conversation that will
+              // propose one.
+              // A draft's conversation is its own, keyed by the draft id until
+              // the run it asked for starts and adopts it (#223).
+              runId={drafting?.id ?? shownRunId}
+              access={access}
+              // Pointed at rather than started here. `viewing` is set by
+              // clicking a row in the archive, and a click is a read — so the
+              // conversation must not travel with it, which is what adoption
+              // was doing to every run somebody browsed to (#223).
+              // A draft counts as pointed-at too: arriving at one restores ITS
+              // conversation rather than adopting whatever was on screen, which
+              // is what a fresh draft needs. Leaving it for its run is the start.
+              opened={viewing !== null || drafting !== null}
+              commands={commands}
               onEffect={onEffect}
+              ask={brief}
+              onAsked={() => setBrief(null)}
               onPending={setProposals}
+              limits={limits}
               statuses={keyStatuses}
+              // Hi-fi 5's `open verify`. A round card is the round's summary
+              // and the pane beside it holds the detail, so the card links to
+              // it rather than growing a second copy of that screen - and it
+              // names its own round, so the pane opens at the card you clicked
+              // rather than at whichever round happens to be newest (#223).
+              onOpen={open}
+              // The repository, whenever there is no run to watch. Once one is
+              // going the pane is a conversation *about* it, and the field is
+              // settled — the run is already using that directory, and changing
+              // it underneath would point the pilot at a repository the run is
+              // not in.
+              kickoff={
+                (!launched || run.completed !== null) && !outside ? (
+                  <Kickoff dir={repoDir} />
+                ) : undefined
+              }
             />
           </div>
-          {tab === 'keys' && (
-            <Credentials statuses={keyStatuses} failure={keyFailure} onChanged={refreshKeys} />
-          )}
           {wire.unknown.length > 0 && (
             <div className="v-cockpit__unknown">
               {wire.unknown.length} unrecognised frame(s): {wire.unknown[wire.unknown.length - 1]}
             </div>
           )}
         </div>
+
+        {/* `4h`, on the RIGHT since #223. The design puts it on the left and the
+            owner moved it, which is a decision about this window rather than a
+            correction to the frame: the loop names the rounds the pane beside it
+            draws — Plans, Plan critique, Code, Code review — and reading a card
+            and then its artifact is the shortest path in the product. The runs
+            take the left, next to the rail they are drawn from. */}
+        <SidePanel
+          side="right"
+          title="Groups"
+          mark="⋮⋮"
+          open={showLoop}
+          onToggle={() => setShowLoop((on) => !on)}
+        >
+          <div className="v-cockpit__loop">
+            {/* **The column follows the run the window is pointed at** (#223),
+                and it is the SAME column. Opening a run used to change six panes
+                and leave this one on the live run — *"when I click on an existing
+                run, I don't see the right nav update"* — and the first answer to
+                that was a summary, a second screen from a second shape, which
+                was the wrong answer again: *"I want the right panel to look just
+                as it would have when I click on an old run as if I had run it
+                myself."*
+
+                So a finished run is fetched as its own **narration** and folded
+                through `reduce`, and what is drawn below is `LoopColumn` with a
+                `Run` — the same component, the same type, the same cards. The
+                objection this overrules is answered rather than dropped: a
+                replay would *"report finished work as running"* only if a turn
+                could still be open, and every turn in an archive is a turn that
+                ended, because `applyCharge` records one when it is charged. */}
+            {past && viewing !== null ? (
+              <div className="v-loop__reading">
+                <StateKicker tone="quiet">reading</StateKicker>
+                <span className="v-loop__readingwhat">{preview(viewing.task)}</span>
+                {opened.loading && opened.run === null && <p>Reading this run…</p>}
+                {/* The core's own sentence, verbatim. A run whose id will not
+                    join onto a path, a directory vibe refuses to follow (#53)
+                    and a `state.json` the validators reject are three findings
+                    needing three responses, and *"could not read the run"*
+                    answers none of them. */}
+                {opened.failure !== null && (
+                  <p className="v-loop__readingwhy">{opened.failure}</p>
+                )}
+                {/* Said once, here, rather than as a blank on every turn row.
+                    `state.turnStartedAt` describes the turn in flight, so the
+                    only starts an archive keeps are the ones a checkpoint froze
+                    — and a duration invented from the gap between two charges
+                    would include every gate the loop held at. */}
+                {opened.run !== null && (
+                  <p className="v-loop__readingwhy">
+                    Some turns have no duration: a run records a turn when it is charged, and only a
+                    checkpoint keeps the moment one began.
+                  </p>
+                )}
+                <button className="v-doc__again" onClick={() => setViewing(null)}>
+                  back to the live run
+                </button>
+              </div>
+            ) : (
+              <>
+                {/* While there is no run, this column is four not-started groups
+                    and a sentence saying what it is waiting for — and what it is
+                    waiting for is a brief, which is composed next door.
+
+                    The launch form used to live here (#211). It has moved into
+                    the pilot pane, because two forms building the same argv is
+                    the third spelling that issue warns against, and because the
+                    front door being a form beside the conversation is the
+                    complaint itself.
+
+                    Offered again once the command has RETURNED, not once the
+                    loop said it was done: `serve.ts` runs one at a time and
+                    refuses a second invoke until the first settles. */}
+                {(!launched || run.completed !== null) && !outside && (
+                  <>
+                    <div className="v-loop__waiting">
+                      <StateKicker tone="quiet">waiting for the brief</StateKicker>
+                      <p>
+                        Say what you want in the conversation — that is the front door. There is no
+                        start button: when the pilot has enough, it <strong>proposes</strong> the
+                        exact command and you press that.
+                      </p>
+                    </div>
+                    {/* `4a`, for the one moment somebody is deciding how THIS run
+                        should differ from the project's defaults. */}
+                    <button
+                      className="v-launch__more"
+                      onClick={() => setComposing({ dir: repoDir, locked: false })}
+                      disabled={busy || !wire.connected}
+                    >
+                      or set this run&apos;s overrides…
+                    </button>
+                  </>
+                )}
+              </>
+            )}
+            {/* The counts in the column are controls, and this is where they
+                go. The same setter the pilot's round cards use, so a severity
+                chip means one thing wherever it is drawn.
+
+                `hostPid` is the live host's, so it is withheld from a run this
+                process is not running: a pid beside a finished run would name a
+                process that has nothing to do with it. */}
+            <LoopColumn
+              run={columnRun}
+              now={now}
+              hostPid={past ? null : wire.hostPid}
+              onOpen={open}
+            />
+            {/* `4g`, and only on the ending that means the loop finished.
+                Every other exit is a halt, and a halt gets the footer's
+                banner and its one action rather than a summary of work that
+                stopped early. */}
+            {columnRun.completed?.exit === 0 && <Summary run={columnRun} />}
+            {/* The same footer, about the same run. Its live controls draw
+                themselves off `run.completed`, which a finished run has set — so
+                stop and pause do not appear beside one, and what remains is the
+                ending, the resume and the plan-only offer, which are exactly the
+                actions an opened run wants. */}
+            <Footer
+              run={columnRun}
+              busy={busy}
+              onDecide={answer}
+              onPause={pause}
+              onStop={() => setConfirmStop(true)}
+              onResume={resume}
+              onImplement={implement}
+              caps={caps}
+              gates={gates}
+              order={order}
+              pausing={pausing}
+            />
+          </div>
+        </SidePanel>
       </div>
     </div>
   );

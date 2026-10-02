@@ -415,12 +415,31 @@ export function freshRun(options: RunOptions = {}): RunState {
   return createRun(dir, options.task ?? 'loop harness', options.planOnly ?? true);
 }
 
-/** A run parked at the review phase, in a repo `git diff` can be asked about. */
-export function reviewingRun(options: RunOptions = {}): RunState {
+/**
+ * A run parked at the review phase, in a repo `git diff` can be asked about.
+ *
+ * **It has to hold a change, and until #223 it did not.** The review phase now
+ * refuses an empty diff rather than spawning a reviewer with nothing — which is
+ * the defect that cost a real run forty-five minutes — so a fixture that parks
+ * here over an untouched tree builds a run the product will not run. That is the
+ * same vacuity `work` already warns about one function below: a fake turn that
+ * changes nothing makes every commit assertion meaningless, and an empty tree
+ * here made every *review* assertion rest on a diff no real run ever has.
+ *
+ * One file, written and left unstaged, because that is the least a real
+ * implement phase leaves behind and `diffChunks` stages before it reads.
+ *
+ * `change: false` is for the cases that write their own tree — the chunking and
+ * coverage ones, which count files and would be measuring this fixture's extra
+ * one. They still get a non-empty diff; they just get it from the files they
+ * put there on purpose.
+ */
+export function reviewingRun(options: RunOptions & { change?: boolean } = {}): RunState {
   const state = freshRun({ ...options, git: options.git ?? true, planOnly: options.planOnly ?? false });
   state.plan = planFixture();
   state.phase = 'reviewing';
   state.baseSha = null;
+  if (options.change !== false) work(state, 'implemented.ts', 'export const implemented = true;\n');
   return state;
 }
 

@@ -589,6 +589,33 @@ function planLine(line: string): string {
 }
 
 /**
+ * Where one line's clauses divide: the punctuation, never a bare word.
+ *
+ * A dash has to be surrounded by spaces to count, so `n/a` and `read-only`
+ * survive whole. Everything else here separates clauses wherever it appears.
+ */
+const CLAUSE = /\s*[—–;,]\s*|\s+-+\s+/;
+
+/**
+ * Is one line a pointer, whole or in parts?
+ *
+ * **Every clause, not the whole line**, and the widening is a measured one: a
+ * plan came back reading `n/a - see below`, which is two pointers joined by a
+ * dash and was matched by neither. Splitting first is what catches it, and the
+ * rule that makes splitting safe is that **all** the parts have to be pointers -
+ * `well-defined approach` divides into two clauses of which neither is one, so a
+ * real line is never refused for containing punctuation.
+ *
+ * It stays exact equality per clause for the reason `POINTER_BODIES` gives: a
+ * real plan may say "see below" in a sentence, and a substring rule would refuse
+ * it.
+ */
+function isPointerLine(line: string): boolean {
+  const clauses = line.split(CLAUSE).filter((c) => c !== '');
+  return clauses.length > 0 && clauses.every((c) => POINTER_BODIES.has(c));
+}
+
+/**
  * Is this body a plan at all, or a note saying where the plan went?
  *
  * True when nothing is left after the scaffolding, or when every line that IS
@@ -599,7 +626,7 @@ function planLine(line: string): string {
 export function isPlaceholderPlan(planMd: string): boolean {
   const lines = planMd.split(/\r?\n/).map(planLine).filter((l) => l !== '');
   if (lines.length === 0) return true;
-  return lines.every((l) => POINTER_BODIES.has(l));
+  return lines.every(isPointerLine);
 }
 
 /**

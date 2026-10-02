@@ -1,8 +1,10 @@
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import { applyCharge, chargeFailure, Escalation, fmtTokens } from '@src/charge.js';
 import { claudeTurn } from '@src/claude.js';
 import type { ClaudeTurnOptions } from '@src/claude.js';
 import * as log from '@src/log.js';
-import { progressOptions, rememberContextWindow } from '@src/progress.js';
+import { progressOptions, rememberContextWindow, seedContextWindow } from '@src/progress.js';
 import { handoffPrompt } from '@src/prompts.js';
 import { modelFor, rolesFor, rotatesConcurrentlyWith, rotatingSlot, ROTATING_ROLE } from '@src/roles.js';
 import type { Role, RoleTable } from '@src/roles.js';
@@ -19,13 +21,17 @@ import {
 import type { SlotName } from '@src/slots.js';
 import {
   artifact,
+  LINKED_STATUS,
+  listRuns,
   measuredRatio,
   recordContextMeasurement,
   recordEvent,
   recordMeasuredWindow,
   resetContextMeasurement,
+  RUNS_DIR,
+  UNVERIFIED_STATUS,
 } from '@src/run.js';
-import type { ClaudeTurnResult, Config, ContextUsage, RunState } from '@src/types.js';
+import type { ClaudeTurnResult, Config, ContextUsage, RunState, RunSummary } from '@src/types.js';
 
 /**
  * Context control for the Claude side of the loop.
@@ -106,6 +112,69 @@ export function recordTurnContext(
   if (usage === null) return;
   recordContextMeasurement(state, model, usage.ratio, usage.contextWindow);
   rememberContextWindow(model, usage.contextWindow);
+}
+
+/**
+ * Give the first Claude turn of a run a window to be a fraction of.
+ *
+ * **The denominator is the only thing borrowed.** `promptTokens` is measured live
+ * off the stream on every beat; the window arrives only on a turn's *result*
+ * envelope, so the first Claude turn of a process has a numerator and nothing to
+ * divide it by - which is the planner, every time, and is why `ctx%` only ever
+ * appeared from the second turn onwards. The complaint was exact: *"why is
+ * context not measured in all phases, like planning?"*
+ *
+ * **It is a measurement, not a derivation**, which is what makes it allowed here
+ * at all. It is not guessed from a model name, not read from a price-style table
+ * and not scaled from another model's window: it is a figure Claude itself
+ * reported on this machine, under this exact model name, recorded by vibe into
+ * `state.json` and read back. The first real turn overwrites it through
+ * `recordTurnContext`, so a window that moved between releases is wrong for at
+ * most one turn.
+ *
+ * **Newest-first, and it stops at the first run that measured anything.** A run
+ * that recorded a measurement is evidence about how this checkout is configured
+ * *now*; if that run named a different model, this one has no evidence and takes
+ * none - the fail-closed reading, and the same one `measuredWindow` applies
+ * within a run. Runs that measured nothing at all (a plan-only run, one that died
+ * in preflight) carry no evidence either way and are stepped over.
+ *
+ * Never throws and never writes, on `listRuns`'s own promise, because this sits
+ * on the path of every run: an unreadable archive simply supplies nothing, and
+ * the run behaves exactly as it did before this existed.
+ */
+export function seedContextWindows(state: RunState): void {
+  let rows: RunSummary[];
+  try {
+    rows = listRuns(state.targetDir);
+  } catch {
+    return;
+  }
+  for (const row of rows) {
+    // This run is already in the archive by the time the loop starts, and it has
+    // measured nothing - skipped by name rather than by position, because
+    // `listRuns` decides the order and this must not depend on it.
+    if (row.id === state.id) continue;
+    // The three verdicts `listRuns` produces for an entry it will not vouch for.
+    // Nothing under a link is read (#53), and an entry `lstat` could not classify
+    // is refused rather than followed (#129).
+    if (row.status === LINKED_STATUS || row.status === UNVERIFIED_STATUS) continue;
+    let raw: unknown;
+    try {
+      raw = JSON.parse(readFileSync(path.join(state.targetDir, RUNS_DIR, row.id, 'state.json'), 'utf8'));
+    } catch {
+      continue;
+    }
+    if (typeof raw !== 'object' || raw === null) continue;
+    const record = raw as Record<string, unknown>;
+    const model = record['contextModel'];
+    const window = record['contextWindow'];
+    if (typeof model !== 'string' || model === '' || typeof window !== 'number' || window <= 0) {
+      continue;
+    }
+    seedContextWindow(model, window);
+    return;
+  }
 }
 
 /**

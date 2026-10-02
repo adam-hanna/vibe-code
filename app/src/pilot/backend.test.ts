@@ -2,7 +2,18 @@ import { expect, test } from 'vitest';
 import keysSource from './keys.ts?raw';
 import serve from '../../../src/serve.ts?raw';
 import protocol from '../../../src/protocol.ts?raw';
-import { BACKEND_NAME, BACKEND_NOTE, BACKENDS, modelsFor, needsKey } from './backend';
+import roles from '../../../src/roles.ts?raw';
+import pilotPane from './PilotPane.tsx?raw';
+import {
+  agentOf,
+  BACKEND_NAME,
+  BACKEND_NOTE,
+  backendFor,
+  BACKENDS,
+  CODEX_SUBSCRIPTION_MODELS,
+  modelsFor,
+  needsKey,
+} from './backend';
 import { costOf } from './ledger';
 import { MODELS } from './pilot';
 import { PROVIDERS } from './keys';
@@ -27,16 +38,24 @@ test('the subscription backend is the one that works with nothing configured', (
   for (const provider of PROVIDERS) expect(needsKey(provider)).toBe(true);
 });
 
-test('every backend has a name and a note saying what it can and cannot do', () => {
-  // The note is not decoration. The subscription backend declares no tools, so
-  // it cannot propose a run, and somebody who was not told would discover it by
-  // asking the pilot to launch something and being ignored.
+test('every backend has a name, and a note only where there is a cost to state', () => {
+  // The note used to describe the *mechanism* — no key needed, a fenced block
+  // rather than a tool call — and this pinned that wording. It is no longer the
+  // contract: the owner removed it, on the grounds that a person choosing a
+  // backend cannot act on any of it and `Claude (subscription)` beside it says
+  // the whole of what they need. The mechanism is still documented, in the file
+  // that implements it.
+  //
+  // What still holds and is still pinned: every backend is nameable, and the two
+  // that spend money say so — which is the fact the selector cannot carry.
   for (const backend of BACKENDS) {
     expect(BACKEND_NAME[backend], `${backend} has no name`).toBeTruthy();
-    expect(BACKEND_NOTE[backend], `${backend} has no note`).toBeTruthy();
   }
-  expect(BACKEND_NOTE.subscription).toMatch(/no key/i);
-  expect(BACKEND_NOTE.subscription).toMatch(/cannot propose a run/i);
+  expect(BACKEND_NOTE.subscription, 'a subscription bills nothing, so it says nothing').toBe('');
+  for (const provider of PROVIDERS) {
+    expect(BACKEND_NOTE[provider]).toMatch(/billed to your key/i);
+    expect(BACKEND_NOTE[provider]).toMatch(/propose/i);
+  }
 });
 
 test('the subscription models are their own list, not a row in the vendor map', () => {
@@ -111,4 +130,45 @@ test('a pilot reply carries no money field, on either side of the wire', () => {
   // loudly if a figure appeared — it would simply be wrong, and believed.
   const reply = /type: 'pilot_reply';[\s\S]*?\}/.exec(protocol)?.[0] ?? '';
   expect(reply).not.toMatch(/cost|usd|price/i);
+});
+
+/**
+ * Two roads per vendor, chosen in Settings (#223).
+ *
+ * *"two options for both anthropic and openAI: (1) subscription, (2) api key"*.
+ * The conversation picks the vendor and the settings pick the road, so the
+ * backend is derived — and `backendFor` is the one place that happens.
+ */
+test('each vendor has a subscription road and a key road', () => {
+  const sub = { anthropic: 'subscription', openai: 'subscription' } as const;
+  const api = { anthropic: 'api', openai: 'api' } as const;
+  expect(backendFor('anthropic', sub)).toBe('subscription');
+  expect(backendFor('openai', sub)).toBe('codex');
+  expect(backendFor('anthropic', api)).toBe('anthropic');
+  expect(backendFor('openai', api)).toBe('openai');
+  expect(agentOf('subscription')).toBe('claude');
+  expect(agentOf('codex')).toBe('codex');
+});
+
+test('the Codex subscription needs no key and bills nothing', () => {
+  expect(needsKey('codex')).toBe(false);
+  expect(BACKEND_NAME.codex).toBe('Codex (subscription)');
+  expect(BACKEND_NOTE.codex).toBe('');
+  const free = costOf('codex', 'gpt-5.6-luna', { input: 10, output: 2, cache_read: null, cache_write: null });
+  expect(free.usd).toBeNull();
+  expect(free.why).toMatch(/bills nothing/);
+});
+
+test("the Codex models are the core's own list, read from the file that defines it", () => {
+  const known = /codex: \[([^\]]*)\]/.exec(roles.slice(roles.indexOf('export const KNOWN_MODELS')));
+  const listed = (known?.[1] ?? '').match(/'[^']+'/g)?.map((m) => m.slice(1, -1)) ?? [];
+  expect(modelsFor('codex', MODELS)).toEqual(listed);
+  expect(CODEX_SUBSCRIPTION_MODELS.length).toBeGreaterThan(0);
+});
+
+test('the pane tells the host which CLI takes a turn, and lets Settings choose the road', () => {
+  expect(pilotPane).toContain('agent: agentOf(provider)');
+  expect(pilotPane).toContain('backendFor(vendor, access ?? NO_ACCESS)');
+  // Only the Claude CLI has file tools of its own; the Codex CLI's are off.
+  expect(pilotPane).toContain("systemPrompt(run, launched, 'emitted', access, provider === 'subscription')");
 });

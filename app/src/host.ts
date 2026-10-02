@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import type { PilotAccess } from './pilot/access';
 
 /**
  * The webview's end of the wire.
@@ -84,6 +85,40 @@ export interface PilotReply {
 }
 
 /**
+ * A subscription pilot turn that was stopped from the window (#223). Its own
+ * frame because a stopped turn is not a failed one.
+ */
+// What the pilot may do without asking (#223). Declared beside the rule that
+// reads it, in `pilot/access.ts`, so the tool table can name the type without
+// importing the wire.
+export type { PilotAccess } from './pilot/access';
+
+/** Where one CLI is: the settings' path, the environment variable, or the search. */
+export interface CliStatus {
+  configured: string | null;
+  via: 'settings' | 'env' | 'search';
+  found: string | null;
+  /** The resolver's own sentence when it found nothing. */
+  problem: string | null;
+}
+
+/** A listing or a file's text, for `list_dir` and `read_file` (#223). */
+export type FsFrame = { type: 'fs'; id: number } & (
+  | {
+      op: 'list';
+      path: string;
+      entries: readonly { name: string; kind: 'file' | 'dir' | 'link' | 'other'; bytes: number | null }[];
+      truncated: boolean;
+    }
+  | { op: 'read'; path: string; text: string; bytes: number; truncated: boolean }
+);
+
+export interface PilotStopped {
+  type: 'pilot_stopped';
+  id: number;
+}
+
+/**
  * One archive entry, as `listRuns` returned it (#223, `1b`).
  *
  * A transcription of the core's `RunSummary`, and every optional field here is
@@ -140,9 +175,51 @@ export interface ConfigFrame {
   effective: unknown;
   raw: Record<string, unknown>;
   path: string | null;
+  /**
+   * The settings for every project (#223): the file as written, where it lives
+   * (null when the layer is switched off), and the defaults merged with it alone
+   * — what a project that says nothing would get. The form's "all projects"
+   * view draws the last of these rather than computing it.
+   */
+  globalRaw: Record<string, unknown>;
+  globalPath: string | null;
+  globalEffective: unknown;
   gateable: readonly string[];
   modes: readonly string[];
   ungateable: Readonly<Record<string, string>>;
+  /**
+   * The role table's vocabulary (`1i`).
+   *
+   * Sent for the same reason `gateable` is: a form built from a list it wrote
+   * itself can offer a role the loop does not have or a provider it cannot seat,
+   * and the refusal would arrive as a validator error on save rather than as a
+   * control that was never offered.
+   */
+  roleNames: readonly string[];
+  providers: readonly string[];
+  efforts: readonly string[];
+  /**
+   * The model names this build knows, per agent (#223).
+   *
+   * **Offered, not enforced**, which is what separates it from the three lists
+   * above. Those are closed sets the validator refuses a value outside of; a
+   * model is any non-empty string, because *"guessing whether a model exists is
+   * the never-invent-a-number rule applied to a name"* — so a row whose model is
+   * not on this list is still shown and still saved, and there is an `other…`
+   * way in for a model that shipped this morning.
+   */
+  models: Readonly<Record<string, readonly string[]>>;
+  /**
+   * What the pilot may do without asking (#223), resolved by the host from the
+   * settings for all projects. Never a project's: a committed file cannot widen
+   * its own pilot.
+   */
+  pilot: PilotAccess;
+  /**
+   * Where each CLI was found, and by which of the three looks (#223) — for the
+   * settings screen, which explains the search and shows its answer.
+   */
+  clis: Readonly<Record<'claude' | 'codex', CliStatus>>;
 }
 
 /**
@@ -162,17 +239,211 @@ export interface DiffFrame {
   truncated: boolean;
 }
 
+/**
+ * What is at an artifact's name (#223).
+ *
+ * **Three answers, kept whole.** `absent` says a file was opened and could not
+ * be used; `linked` says vibe never looked inside it, because it is a symlink or
+ * a junction and vibe writes neither. Collapsing them into a nullable string
+ * would tell a reader a file was unreadable when it was never read, which is the
+ * distinction #53 drew and #129 kept.
+ */
+export type ArtifactRead =
+  | { kind: 'text'; text: string }
+  | { kind: 'absent' }
+  | { kind: 'linked'; reason: string };
+
+/** One entry in a run's directory, as `lstat` classified it. */
+export interface ArtifactEntry {
+  name: string;
+  kind: 'file' | 'directory' | 'link' | 'unknown';
+  /** Null for anything but a plain file: a size nobody measured is not a zero. */
+  bytes: number | null;
+}
+
+/**
+ * What a run's directory holds (#223).
+ *
+ * **This is what stops the window predicting filenames.** Drawing a plan round's
+ * plan means naming a file, and the alternative to being told is composing
+ * `plan-${round}.json` here — a copy of the loop's naming convention, living in
+ * a process that cannot be kept in step with it, going stale on the release that
+ * renames one. `listRunArtifacts` reads the directory instead.
+ */
+export interface ArtifactsFrame {
+  type: 'artifacts';
+  id: number;
+  dir: string;
+  runId: string;
+  entries: readonly ArtifactEntry[];
+}
+
+/**
+ * What a `questions_answered` reply says (#223).
+ *
+ * `filled` and `open` rather than a boolean, because *some of them* is the
+ * common case and the two need different next actions: a resume with a question
+ * still open spends a preflight and halts on the same question, so the window
+ * says so before any of that.
+ */
+export interface QuestionsAnswered {
+  type: 'questions_answered';
+  id: number;
+  dir: string;
+  runId: string;
+  filled: number;
+  unmatched: readonly string[];
+  open: readonly string[];
+}
+
+/**
+ * A finished run, said again (#223).
+ *
+ * **Not a second shape, which is the whole point.** The first answer to *"when I
+ * click on an existing run, I don't see the right nav update"* was a summary —
+ * a different screen drawn from a different record — and the report on it was
+ * exact: *"I want the right panel to look just as it would have when I click on
+ * an old run as if I had run it myself."*
+ *
+ * So the core sends back the **narration**, and the window folds it through the
+ * same `reduce` a live run goes through. The column, the round cards and the log
+ * are then the same components rendering the same `Run`. There is no second
+ * builder, so there is nothing to disagree with the first.
+ *
+ * Each step carries its own `at` from the run's record: stamping a replay with
+ * arrival time would date a week-old run to this afternoon, and every duration
+ * on it would be the time it took to send.
+ */
+export interface ReplayFrame {
+  type: 'replay';
+  id: number;
+  dir: string;
+  runId: string;
+  steps: readonly {
+    at: number;
+    narration: { level: Level; message: string; id: string | null; data: Record<string, unknown> | null };
+  }[];
+  /**
+   * The exit code the run reported, or null when its record does not say.
+   *
+   * Beside the steps rather than among them, because a `result` is not
+   * narration — it is the frame that answers a request. Null rather than a
+   * guessed zero: a status this build does not recognise has not said the run
+   * succeeded, and the footer draws an unknown code as the number rather than as
+   * a phrase invented for it.
+   */
+  exit: number | null;
+}
+/**
+ * The standing instruction blocks each turn is given (#223).
+ *
+ * Verbatim, never summarised. A prompt is a function of the run — the task, the
+ * plan, the findings, the diff — so what a settings screen can honestly show is
+ * the part that does not vary, and showing it means quoting it.
+ */
+export interface PromptsFrame {
+  type: 'prompts';
+  id: number;
+  blocks: readonly {
+    name: string;
+    usedBy: readonly string[];
+    /** As it will RENDER: this project's override, or the product's own. */
+    text: string;
+    /** The product's own, always — so a screen can offer *revert* without
+     *  holding a second copy of a constant it does not own. */
+    fallback: string;
+    /** Whether this project replaces it. Told, so a screen never infers it. */
+    overridden: boolean;
+  }[];
+}
+
+/**
+ * A run that is gone, in reply to a `delete_run` request (#223).
+ *
+ * `removed` is the directory the core actually deleted, which is the one thing
+ * worth carrying back: it is checkable, where a file count or a size would be a
+ * measurement taken so it could be shown once. A refusal never arrives here — it
+ * is an `error` frame carrying the core's own sentence.
+ */
+export interface RunDeleted {
+  type: 'run_deleted';
+  id: number;
+  dir: string;
+  runId: string;
+  removed: string;
+}
+
+/** One artifact's contents, in reply to an `artifact` request (#223). */
+export interface ArtifactFrame {
+  type: 'artifact';
+  id: number;
+  dir: string;
+  runId: string;
+  name: string;
+  read: ArtifactRead;
+}
+
+/**
+ * A command started, or was refused (#211).
+ *
+ * `command` and `refused` are exclusive: a refusal started nothing, so there is
+ * no id to report output against, and drawing a card from one would be drawing
+ * a process that does not exist.
+ */
+export interface CommandStarted {
+  type: 'command_started';
+  id: number;
+  command: {
+    id: string;
+    program: string;
+    args: readonly string[];
+    /** What was actually spawned. `npm` resolves to `node .../npm-cli.js`. */
+    resolved: string;
+    dir: string;
+    startedAt: number;
+  } | null;
+  refused: string | null;
+}
+
+/** Output from a running command, in the order it arrived. */
+export interface CommandOutput {
+  type: 'command_output';
+  commandId: string;
+  chunk: string;
+}
+
+/** A command ended. `stopped` is what the exit code cannot carry on Windows. */
+export interface CommandEnded {
+  type: 'command_ended';
+  commandId: string;
+  code: number | null;
+  signal: string | null;
+  stopped: boolean;
+  endedAt: number;
+}
+
 export type Frame =
   | Ready
   | Narration
   | Ask
   | Result
   | HostError
+  | CommandStarted
+  | CommandOutput
+  | CommandEnded
   | PilotDelta
   | PilotReply
+  | PilotStopped
+  | FsFrame
   | Archive
   | ConfigFrame
-  | DiffFrame;
+  | DiffFrame
+  | ArtifactsFrame
+  | ArtifactFrame
+  | RunDeleted
+  | PromptsFrame
+  | ReplayFrame
+  | QuestionsAnswered;
 
 /**
  * Whether a value is a frame this version recognises.
@@ -197,11 +468,39 @@ export function isFrame(v: unknown): v is Frame {
     // land in the diagnostics list instead of in the conversation (#193).
     type === 'pilot_delta' ||
     type === 'pilot_reply' ||
+    type === 'pilot_stopped' ||
+    // The pilot's reads (#223), answered for the pane and nothing else.
+    type === 'fs' ||
     // The archive, which the cockpit's reducer also ignores: it describes runs
     // that are over, and `Run` is about the one in progress (#223).
     type === 'archive' ||
     type === 'config' ||
-    type === 'diff'
+    type === 'diff' ||
+    // The two artifact reads (#223), ignored by the cockpit's reducer for the
+    // archive's reason: they describe what a run WROTE, which is on disk, and
+    // `Run` is assembled from what a run is doing.
+    type === 'artifacts' ||
+    type === 'artifact' ||
+    // A run that was deleted, ignored by the cockpit's reducer for the same
+    // reason: it is a fact about the archive, and the run it names is by
+    // construction not the one being narrated — the core refuses to delete a
+    // run whose lock is live.
+    type === 'run_deleted' ||
+    // The standing prompt blocks, ignored by the cockpit's reducer for the same
+    // reason: they are the same in every run, so they say nothing about the one
+    // being narrated.
+    type === 'prompts' ||
+    // A past run's narration, ignored by THIS reducer for a sharper version of
+    // the same reason: it describes a run this process is NOT narrating, and
+    // folding it into the live run is exactly the confusion it exists to end.
+    type === 'replay' ||
+    type === 'questions_answered' ||
+    // The command runner's three (#211). Also ignored by the cockpit's reducer:
+    // a command is not part of a run - it outlives one, and it happens when
+    // there is none - so `Cockpit` folds them with `reduceCommands` instead.
+    type === 'command_started' ||
+    type === 'command_output' ||
+    type === 'command_ended'
   );
 }
 
@@ -343,12 +642,17 @@ export function cancel(reason: string): Promise<void> {
  * relay cannot, because it does not know whose id it is.
  */
 export async function onPilotFrame(
-  handler: (frame: PilotDelta | PilotReply | HostError) => void,
+  handler: (frame: PilotDelta | PilotReply | PilotStopped | HostError) => void,
 ): Promise<() => void> {
   return listen<unknown>('host://frame', (event) => {
     const frame: unknown = event.payload;
     if (!isFrame(frame)) return;
-    if (frame.type === 'pilot_delta' || frame.type === 'pilot_reply' || frame.type === 'error') {
+    if (
+      frame.type === 'pilot_delta' ||
+      frame.type === 'pilot_reply' ||
+      frame.type === 'pilot_stopped' ||
+      frame.type === 'error'
+    ) {
       handler(frame);
     }
   });
@@ -447,14 +751,28 @@ export async function archive(dir: string): Promise<readonly ArchiveRun[]> {
 export async function config(
   dir: string,
   patch?: Record<string, unknown>,
+  /** Which file a patch goes to. A read answers with both, so it takes none. */
+  scope: 'project' | 'global' = 'project',
 ): Promise<ConfigFrame> {
   const id = nextRequestId();
   return ask<ConfigFrame>(
-    patch === undefined ? { type: 'config', id, dir } : { type: 'config', id, dir, patch },
+    patch === undefined ? { type: 'config', id, dir } : { type: 'config', id, dir, patch, scope },
     id,
     'config',
     'the host did not answer with the configuration',
   );
+}
+
+/**
+ * List a directory or read a file for the pilot (#223).
+ *
+ * Where it may land is the host's decision, made from the settings for all
+ * projects: outside them this rejects with the host's sentence, which names the
+ * directories the pilot may read.
+ */
+export async function fs(op: 'list' | 'read', dir: string, path: string): Promise<FsFrame> {
+  const id = nextRequestId();
+  return ask<FsFrame>({ type: 'fs', id, op, dir, path }, id, 'fs', 'the host did not answer the read');
 }
 
 /**
@@ -469,10 +787,18 @@ export async function config(
 export async function diff(
   dir: string,
   baseSha: string,
+  headSha?: string,
 ): Promise<{ patch: string; truncated: boolean }> {
   const id = nextRequestId();
   const frame = await ask<DiffFrame>(
-    { type: 'diff', id, dir, baseSha },
+    // `headSha` closes the range, which is what makes a diff ONE ROUND rather
+    // than the whole change (#223). Both shas come from `round_committed`, which
+    // reads HEAD before it commits — so a round's `from` is measured rather than
+    // paired off the previous commit, which is a derivation that silently goes
+    // wrong the first time a run is resumed.
+    headSha === undefined
+      ? { type: 'diff', id, dir, baseSha }
+      : { type: 'diff', id, dir, baseSha, headSha },
     id,
     'diff',
     'the host did not answer with the diff',
@@ -480,11 +806,228 @@ export async function diff(
   return { patch: frame.patch, truncated: frame.truncated };
 }
 
+/**
+ * What a run's directory holds (#223).
+ *
+ * The listing rather than a guess, for the reason on `ArtifactsFrame`: a window
+ * that composed `plan-${round}.json` would be holding a second copy of the
+ * loop's naming convention with no way to keep it in step.
+ */
+export async function artifacts(dir: string, runId: string): Promise<readonly ArtifactEntry[]> {
+  const id = nextRequestId();
+  const frame = await ask<ArtifactsFrame>(
+    { type: 'artifacts', id, dir, runId },
+    id,
+    'artifacts',
+    "the host did not answer with the run's artifacts",
+  );
+  return frame.entries;
+}
+
+/**
+ * One artifact's contents (#223).
+ *
+ * The three-answer read is returned whole rather than reduced to `string |
+ * null`: a pane has to be able to tell a reader *this was never written*, *this
+ * could not be read* and *vibe refused to look inside this*, and those need
+ * different sentences. A run id or a name the core will not join onto a path
+ * comes back as a rejection carrying its refusal, which is not the same event as
+ * a file that is not there.
+ */
+export async function artifact(
+  dir: string,
+  runId: string,
+  name: string,
+): Promise<ArtifactRead> {
+  const id = nextRequestId();
+  const frame = await ask<ArtifactFrame>(
+    { type: 'artifact', id, dir, runId, name },
+    id,
+    'artifact',
+    'the host did not answer with the artifact',
+  );
+  return frame.read;
+}
+
+/**
+ * One finished run, said again (#223).
+ *
+ * **What makes opening a run change the column beside the panes.** The six
+ * artifact panes already followed the opened run, because each reads a file that
+ * run wrote; the loop column had nothing to follow with and stayed on the live
+ * run, saying so in a strip. That was honest and was still the wrong answer.
+ *
+ * The steps are narration, and the caller folds them through the **same**
+ * `reduce` a live run goes through — so this returns no shape of its own to
+ * render, which is the difference between this and the summary it replaced.
+ *
+ * A failure is a rejection carrying the core's own sentence, never an empty
+ * replay: a run whose id will not join onto a path, a directory vibe refuses to
+ * follow (#53) and a `state.json` the validators reject are three findings
+ * needing three responses, and an empty replay would say the run did nothing.
+ */
+export async function replay(dir: string, runId: string): Promise<{
+  steps: ReplayFrame['steps'];
+  exit: number | null;
+}> {
+  const id = nextRequestId();
+  const frame = await ask<ReplayFrame>(
+    { type: 'replay', id, dir, runId },
+    id,
+    'replay',
+    'the host did not answer with the run',
+  );
+  return { steps: frame.steps, exit: frame.exit };
+}
+
+/**
+ * The standing instruction blocks each turn is given (#223).
+ *
+ * The only read in this file that names neither a repository nor a run, and the
+ * absence is the point: these blocks are the same in every run, which is what
+ * makes them a **setting** rather than a fact about one. A `dir` here would be a
+ * field nobody reads and a later reader has to work out is unused.
+ */
+export async function prompts(): Promise<PromptsFrame['blocks']> {
+  const id = nextRequestId();
+  const frame = await ask<PromptsFrame>(
+    { type: 'prompts', id },
+    id,
+    'prompts',
+    'the host did not answer with the prompt blocks',
+  );
+  return frame.blocks;
+}
+
+/**
+ * Answer a halted run's questions, without resuming it (#223).
+ *
+ * **Two acts, in this order, and the split is deliberate.** This writes into the
+ * run's own `NEEDS-INPUT.md` — the same file a text editor would fill in, so the
+ * resume that follows is the ordinary one and `parseHumanAnswers` stays the
+ * single definition of what an answer is. A frame that also resumed would be a
+ * write nobody could take back, and would put spending behind a Save button.
+ *
+ * Every refusal is the core's: a run that is not stopped on a question, one
+ * whose lock names a live process, and an id it will not join onto a path.
+ */
+export async function answerQuestions(
+  dir: string,
+  runId: string,
+  answers: readonly { question: string; answer: string }[],
+): Promise<{ filled: number; unmatched: readonly string[]; open: readonly string[] }> {
+  const id = nextRequestId();
+  const frame = await ask<QuestionsAnswered>(
+    { type: 'answer_questions', id, dir, runId, answers },
+    id,
+    'questions_answered',
+    'the host did not say whether the answers were written',
+  );
+  return { filled: frame.filled, unmatched: frame.unmatched, open: frame.open };
+}
+
+/**
+ * Delete a run from the archive (#223).
+ *
+ * **The only function in this file that destroys anything**, and the only
+ * protection the window offers is the confirmation in front of it — every guard
+ * that matters is the core's, because the core is the process holding the
+ * filesystem. It refuses a run whose lock names a live process, refuses one
+ * whose lock it cannot read, refuses an id that is not a single entry under
+ * `.vibe/runs`, and refuses a run directory that is a link (#53).
+ *
+ * All four arrive here as a rejection carrying the core's own sentence, and the
+ * caller shows it rather than paraphrasing it: *"it is running, stop it first"*
+ * and *"vibe will not follow a link to delete"* are things a person acts on
+ * differently, and a window that collapsed them into *"could not delete"* would
+ * be answering neither.
+ */
+export async function deleteRun(dir: string, runId: string): Promise<string> {
+  const id = nextRequestId();
+  const frame = await ask<RunDeleted>(
+    { type: 'delete_run', id, dir, runId },
+    id,
+    'run_deleted',
+    'the host did not say whether the run was deleted',
+  );
+  return frame.removed;
+}
+
+/**
+ * Run a command, and answer with what started or why nothing did (#211).
+ *
+ * **`program` and `args` are separate all the way down** and are never joined
+ * into a line: the one invariant of `src/commands.ts` is that what runs is what
+ * was displayed, and a string would put a `;` back within reach of text a model
+ * wrote.
+ *
+ * The output does not come back from here. It arrives as `command_output` and
+ * `command_ended`, the way a run's narration does, because the interesting
+ * commands are the ones that have not finished.
+ */
+export async function runCommand(
+  dir: string,
+  program: string,
+  args: readonly string[],
+): Promise<CommandStarted> {
+  const id = nextRequestId();
+  return ask<CommandStarted>(
+    { type: 'command', id, dir, program, args },
+    id,
+    'command_started',
+    'the host did not say whether the command started',
+  );
+}
+
+/** Stop one this session started. */
+/**
+ * Stop a subscription pilot turn (#223), by the id `pilotTurn` resolved with.
+ *
+ * Not `pilot.cancel`, which is the Rust pilot's and only knows API-backed turns:
+ * a subscription turn is a `claude` child of the host, and asking Rust to cancel
+ * it was refused, silently, so the stop button did nothing at all.
+ */
+export async function stopPilot(turn: number): Promise<void> {
+  await send({ type: 'pilot_stop', id: nextRequestId(), turn });
+}
+
+export async function stopCommand(commandId: string): Promise<void> {
+  await send({ type: 'command_stop', id: nextRequestId(), commandId });
+}
+
+/**
+ * Listen for the command runner's frames (#211).
+ *
+ * A third listener on the same event, beside `connect` and `onPilotFrame`, for
+ * the reason that one exists: the cockpit reads run frames, the pilot pane
+ * reads pilot frames, and neither has to know about commands.
+ */
+export async function onCommandFrame(
+  handler: (frame: CommandOutput | CommandEnded) => void,
+): Promise<() => void> {
+  return listen<unknown>('host://frame', (event) => {
+    const frame: unknown = event.payload;
+    if (!isFrame(frame)) return;
+    if (frame.type === 'command_output' || frame.type === 'command_ended') handler(frame);
+  });
+}
+
 /** What one subscription-backed pilot turn needs (#193). */
 export interface PilotTurn {
+  /** Which CLI takes it (#223): `claude -p`, or `codex exec`. */
+  agent: 'claude' | 'codex';
   prompt: string;
   system: string;
   model: string;
+  /**
+   * The repository the turn runs in, and the only one it can read.
+   *
+   * `--restricted` confines the pilot's file tools to the child's working
+   * directory, so this is the permission boundary and not an incidental cwd.
+   * The host refuses a frame without it rather than falling back to its own
+   * directory, which under the app is whatever Rust spawned it in.
+   */
+  dir: string;
   sessionId: string;
   resume: boolean;
 }

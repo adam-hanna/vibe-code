@@ -1,4 +1,5 @@
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import {
   DEFAULT_ROLE_PROVIDERS,
@@ -14,12 +15,17 @@ import type { Role, RoleProviders, RolePatches, RoleTable } from '@src/roles.js'
 import { setOwn } from '@src/runtime.js';
 import type { AgentProvider, ToolchainContract, ToolRequirement, Phase } from '@src/runtime.js';
 import { DEFAULT_GATES, validateGates } from '@src/gates.js';
+import { promptBlockNames } from '@src/prompts.js';
+import { readPilotAccess, refuseProjectPilot } from '@src/pilotaccess.js';
+import { readCliPaths, refuseProjectCli } from '@src/clipaths.js';
+import { readRoutes, refuseProjectAuth } from '@src/auth.js';
 import { EFFORTS } from '@src/types.js';
 import type {
   Config,
   ConfigOverrides,
   GatesConfig,
   LoadedConfig,
+  PromptOverrides,
   Sandbox,
   VerifyConfig,
 } from '@src/types.js';
@@ -133,14 +139,23 @@ export const DEFAULTS: Config = {
     useBranch: true,
     branchPrefix: 'vibe/',
     commitEachRound: true,
+    // Off, because a bare worktree has no node_modules and the verification gate
+    // could not run in one - see `GitConfig.worktree`.
+    worktree: false,
+    worktreeCommand: null,
+    // `verify.timeoutMs`'s figure, borrowed rather than invented: the same kind
+    // of command, on the same machine, and `npm ci` cold is the case that
+    // decides it.
+    worktreeTimeoutMs: 15 * 60 * 1000,
   },
   context: {
     enabled: true,
     compactAboveRatio: 0.5,
     compactDuringCodex: true,
   },
-  // Every row `step`, which is what the loop did before there was a table -
-  // see DEFAULT_GATES for why that, and not the default anyone would choose.
+  // Holds where the run's cost or its output changes hands, and runs through
+  // the two planning rounds the loop settles with another turn - see
+  // DEFAULT_GATES for where that line falls and why (#211).
   gates: DEFAULT_GATES,
   verify: {
     enabled: true,
@@ -181,7 +196,21 @@ export const DEFAULTS: Config = {
     // an implement turn that changed nothing new in sixty seconds has not moved
     // far enough for a second reading to differ.
     workIntervalMs: 60_000,
+    // 10 minutes. The owner's figure, taken against a measured separation rather
+    // than in the abstract: across the six healthy turns of the 2026-09-15 run
+    // the longest gap without new activity was 3m30 (a 12m30 critique), an
+    // 11m30 implement turn never exceeded 32 seconds, and the stall that
+    // prompted this ran 39m17s without a byte. Ten minutes is about three times
+    // the worst healthy gap and a quarter of the stall.
+    //
+    // Not a census, and it is not presented as one: this is one run, and the
+    // number is a setting precisely so it can move when somebody has watched
+    // more of them.
+    maxQuietMs: 600_000,
   },
+  // Empty: a project that overrides no prompt is byte-identical to one that
+  // predates the key, which is what makes this safe to add to every config.
+  prompts: {},
   toolchain: {
     // Deliberately minimal. `git` is needed in every phase because vibe commits
     // per round; node and npm only matter once something is being built or
@@ -272,7 +301,7 @@ function mergeGates(base: GatesConfig, override: unknown): GatesConfig {
   return out as unknown as GatesConfig;
 }
 
-function mergeConfig(base: Config, override: unknown): Config {
+export function mergeConfig(base: Config, override: unknown): Config {
   if (!isRecord(override)) return base;
   return {
     roles: mergeRoles(base.roles, override['roles']),
@@ -287,6 +316,7 @@ function mergeConfig(base: Config, override: unknown): Config {
     verify: mergeSection(base.verify, override['verify']),
     progress: mergeSection(base.progress, override['progress']),
     toolchain: mergeToolchain(base.toolchain, override['toolchain']),
+    prompts: mergePrompts(base.prompts, override['prompts']),
   };
 }
 
@@ -305,6 +335,25 @@ function mergeToolchain(base: ToolchainContract, override: unknown): ToolchainCo
     // user's own tool names, so `__proto__` is reachable, and a swallowed entry
     // would skip `validateToolchain` instead of being reported by name.
     if (isRecord(requirement)) setOwn(out, tool, requirement as unknown as ToolRequirement);
+  }
+  return out;
+}
+
+/**
+ * Prompt overrides, merged per block rather than per known key (#223).
+ *
+ * `mergeToolchain`'s shape and `mergeToolchain`'s reason: the keys are block
+ * names rather than a fixed set this file owns, so `mergeSection` - which
+ * iterates the *base's* keys - would silently discard every one of them, since
+ * the base is empty. Through `setOwn` for the same reason both of those are:
+ * the keys come from a user's file, `__proto__` is reachable, and a swallowed
+ * entry would skip validation instead of being reported by name.
+ */
+function mergePrompts(base: PromptOverrides, override: unknown): PromptOverrides {
+  if (!isRecord(override)) return base;
+  const out: Record<string, string> = { ...base };
+  for (const [block, text] of Object.entries(override)) {
+    if (typeof text === 'string') setOwn(out, block, text);
   }
   return out;
 }
@@ -417,6 +466,7 @@ const SECTIONS = [
   'gates',
   'verify',
   'progress',
+  'prompts',
 ] as const;
 
 /**
@@ -462,7 +512,22 @@ export function loadConfig(
     }
   }
 
-  const merged = withRolePatches(mergeConfig(mergeConfig(DEFAULTS, fromFile), overrides), roles);
+  // The pilot's permissions are the machine's alone (#223), so a project file
+  // naming them is refused here, on every road that reads one.
+  if (isRecord(fromFile)) {
+    refuseProjectPilot(fromFile, 'vibe.config.json');
+    refuseProjectCli(fromFile, 'vibe.config.json');
+    refuseProjectAuth(fromFile, 'vibe.config.json');
+  }
+
+  // The global layer sits under the project's file and over the defaults, so a
+  // project that says nothing about a key inherits the person's own choice and
+  // one that does say wins (#223).
+  const fromGlobal = readGlobalConfig();
+  const merged = withRolePatches(
+    mergeConfig(mergeConfig(mergeConfig(DEFAULTS, fromGlobal), fromFile), overrides),
+    roles,
+  );
   // Order matters. `resolveRoleScopedAgents` reads the table, so a bad role
   // value checked afterwards would surface as an empty `toolchain.node.agents`
   // - a toolchain error for what is a `roles` mistake.
@@ -470,7 +535,7 @@ export function loadConfig(
   // No prior table, unlike `applyOverrides`: these layers are raw file and flag
   // input, so any `agents` in one is a contract the user wrote by hand and keeps
   // winning over the role table, exactly as it did before per-role flags.
-  const cfg = resolveRoleScopedAgents(merged, [fromFile, overrides]);
+  const cfg = resolveRoleScopedAgents(merged, [fromGlobal, fromFile, overrides]);
   validate(cfg);
   return { ...cfg, configPath: existsSync(configPath) ? configPath : null };
 }
@@ -615,6 +680,25 @@ function validate(cfg: Config): void {
     const v = cfg.loop[key];
     if (!Number.isInteger(v) || v < 1) throw new Error(`loop.${key} must be a positive integer`);
   }
+  // The worktree keys (#223). Refused by name for the reason every other key in
+  // this function is: `validateConfig` reporting the key is the only way somebody
+  // who believes they configured something finds out they did not.
+  if (typeof cfg.git.worktree !== 'boolean') {
+    throw new Error('git.worktree must be true or false');
+  }
+  if (
+    cfg.git.worktreeCommand !== null &&
+    (typeof cfg.git.worktreeCommand !== 'string' || cfg.git.worktreeCommand.trim() === '')
+  ) {
+    throw new Error(
+      'git.worktreeCommand must be a non-empty command string, or null to use git worktree add. ' +
+        'A blank string is not "no command" - it would reach a shell, exit 0 and leave no ' +
+        'worktree behind.',
+    );
+  }
+  if (!Number.isFinite(cfg.git.worktreeTimeoutMs) || cfg.git.worktreeTimeoutMs <= 0) {
+    throw new Error('git.worktreeTimeoutMs must be a positive number');
+  }
   // Zero is meaningful here, unlike the round caps: it demands a spotless verdict.
   if (!Number.isInteger(cfg.loop.p1Tolerance) || cfg.loop.p1Tolerance < 0) {
     throw new Error('loop.p1Tolerance must be zero or a positive integer');
@@ -676,7 +760,22 @@ function validate(cfg: Config): void {
   if (!Number.isFinite(cfg.progress.workIntervalMs) || cfg.progress.workIntervalMs < 5000) {
     throw new Error('progress.workIntervalMs must be at least 5000ms');
   }
+  // 0 disables, exactly as `budget.maxTokens: 0` does, so the off switch is the
+  // same shape wherever a ceiling appears. Above zero it must clear one full
+  // heartbeat interval: a ceiling shorter than the gap between the beats that
+  // measure it could fire on a turn that had simply not been looked at yet.
+  if (!Number.isFinite(cfg.progress.maxQuietMs) || cfg.progress.maxQuietMs < 0) {
+    throw new Error('progress.maxQuietMs must be 0 (no limit) or a positive number of ms');
+  }
+  if (cfg.progress.maxQuietMs > 0 && cfg.progress.maxQuietMs < cfg.progress.intervalMs) {
+    throw new Error(
+      `progress.maxQuietMs is ${cfg.progress.maxQuietMs}ms, shorter than the ` +
+        `${cfg.progress.intervalMs}ms progress.intervalMs that measures it. A turn cannot be ` +
+        'observed quiet for less time than the gap between observations.',
+    );
+  }
   validateToolchain(cfg.toolchain);
+  validatePrompts(cfg.prompts);
 }
 
 const PHASES: readonly Phase[] = ['plan', 'implement', 'review'];
@@ -771,18 +870,140 @@ function artifactSegments(entry: string): string[] {
  * nothing. An unreadable file **throws**, exactly as `loadConfig` does, because
  * a form that treated one as empty would offer to overwrite it.
  */
+
 export function readRawConfig(targetDir: string): Record<string, unknown> {
-  const configPath = path.join(targetDir, 'vibe.config.json');
+  return readRawFile(path.join(targetDir, 'vibe.config.json'), 'vibe.config.json');
+}
+
+/** A config file's own contents, or `{}` when there is none. Refuses, never repairs. */
+function readRawFile(configPath: string, label: string): Record<string, unknown> {
   if (!existsSync(configPath)) return {};
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(configPath, 'utf8')) as unknown;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`Invalid vibe.config.json: ${message}`);
+    throw new Error(`Invalid ${label}: ${message}`);
   }
-  if (!isRecord(parsed)) throw new Error('Invalid vibe.config.json: not a JSON object');
+  if (!isRecord(parsed)) throw new Error(`Invalid ${label}: not a JSON object`);
   return parsed;
+}
+
+/**
+ * Where the settings for every project live, or null when they are switched off (#223).
+ *
+ * **A second file of the same shape, not a second kind of setting.** Asked for
+ * as *"Some settings are global… some are project specific"*, and the answer
+ * chosen was that any key may be set at either level and the project wins: the
+ * order is `DEFAULTS` → this file → `vibe.config.json` → flags. So somebody's
+ * models, budgets and round caps are written once, and a project that needs
+ * something different says so in its own file — which is still the one meant to
+ * be committed, while this one is a machine's and is not.
+ *
+ * The platform's own config directory: `%APPDATA%\vibe` on Windows, and
+ * `$XDG_CONFIG_HOME/vibe` (else `~/.config/vibe`) elsewhere. `VIBE_GLOBAL_CONFIG`
+ * overrides it, and **empty switches the layer off** — which is what `npm test`
+ * sets, because a suite that read the developer's own settings would pass or
+ * fail according to whose machine it ran on.
+ */
+export function globalConfigPath(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+  home: string = os.homedir(),
+): string | null {
+  const forced = env['VIBE_GLOBAL_CONFIG'];
+  if (forced !== undefined) return forced.trim() === '' ? null : forced;
+  const base =
+    platform === 'win32'
+      ? (env['APPDATA'] ?? path.join(home, 'AppData', 'Roaming'))
+      : (env['XDG_CONFIG_HOME'] ?? path.join(home, '.config'));
+  return path.join(base, 'vibe', 'config.json');
+}
+
+/**
+ * The keys only a project's own file may set (#223).
+ *
+ * *"Some are project specific, like the worktree command"*, and then, when the
+ * first cut let every key live at either level: *"we talked about moving some
+ * settings out of global and into project scope (e.g. test command, whether to
+ * use worktrees, etc)"*. These describe how one repository is built and tested
+ * - `make test` is right for one checkout and nonsense in the next, and a
+ * worktree that cannot build is a run whose gate cannot run - so a value for all
+ * projects is a value that is wrong for most of them. Every other key may still
+ * be set at either level, project winning.
+ */
+export const PROJECT_ONLY: Readonly<Record<string, readonly string[] | 'all'>> = {
+  verify: 'all',
+  git: ['worktree', 'worktreeCommand', 'worktreeTimeoutMs'],
+};
+
+/** Refuse a global file, or a global write, that sets a project-only key. */
+export function refuseGlobalProjectKeys(raw: Readonly<Record<string, unknown>>, label: string): void {
+  for (const [section, keys] of Object.entries(PROJECT_ONLY)) {
+    const value = raw[section];
+    if (value === undefined) continue;
+    const named =
+      keys === 'all' ? [section] : isRecord(value) ? keys.filter((k) => value[k] !== undefined).map((k) => `${section}.${k}`) : [];
+    if (named.length > 0) {
+      throw new Error(
+        `${label} sets ${named.join(', ')}, which only a project's own vibe.config.json can: ` +
+          'how a repository is built and tested is a fact about that repository',
+      );
+    }
+  }
+}
+
+/** The global file's own contents, or `{}` when there is none or the layer is off. */
+export function readGlobalConfig(): Record<string, unknown> {
+  const at = globalConfigPath();
+  if (at === null) return {};
+  const raw = readRawFile(at, at);
+  refuseGlobalProjectKeys(raw, at);
+  return raw;
+}
+
+/**
+ * The run's stored settings, brought up to date with the project's file (#223).
+ *
+ * **The file wins over the run's memory, and that reverses a narrower rule.**
+ * `state.config` exists so a resume does not silently revert a setting: a run
+ * started with `--max-question-rounds 5` used to come back at 3 the next time it
+ * was resumed without the flag. That is still true and still matters. What it
+ * also did, because the stored config was the *only* base, was make the settings
+ * screen useless at the one moment it is most wanted — *"if I adjust the number
+ * of maxQuestionRounds, maxPlanRounds, etc, that needs to apply to ALL runs (for
+ * example, if I need to bump that and continue)"*. A run that stopped on a
+ * ceiling could not be resumed past it by raising the ceiling.
+ *
+ * So the order is **stored, then the file, then the flags given now**, and each
+ * layer is a stronger statement of intent than the one under it:
+ *
+ * - The **stored** config is the run's memory, including flags from an earlier
+ *   resume. It still supplies every key nobody has written down since.
+ * - The **file** is a decision somebody wrote into a document their repository
+ *   keeps, so a key it names wins over that memory — including over a flag from
+ *   a previous resume, which was a one-off where this is standing.
+ * - The **flags** on this invocation win over both, unchanged.
+ *
+ * Only keys the file actually names move, because `mergeConfig` merges the raw
+ * object rather than a resolved config: a file that says nothing about
+ * `claude.model` leaves the run on the model it has been using, which is the
+ * property `state.config` was added for.
+ *
+ * Nothing is hidden by it. `configDiff` already compares this base against the
+ * effective config and records `resume_config` naming every key that moved, and
+ * `environmentStale` already clears probed facts when the role table shifts — so
+ * a run whose settings changed underneath it says so in its own record.
+ */
+export function withProjectFile(stored: Config, targetDir: string): Config {
+  // The global file is a written-down decision too, so it outranks the run's
+  // memory for the same reason the project's does - and the project still
+  // outranks it, as it does on a fresh run (#223).
+  const project = readRawConfig(targetDir);
+  refuseProjectPilot(project, 'vibe.config.json');
+  refuseProjectCli(project, 'vibe.config.json');
+  refuseProjectAuth(project, 'vibe.config.json');
+  return mergeConfig(mergeConfig(stored, readGlobalConfig()), project);
 }
 
 /**
@@ -811,8 +1032,27 @@ export function readRawConfig(targetDir: string): Record<string, unknown> {
 export function writeConfigPatch(
   targetDir: string,
   patch: Record<string, unknown>,
+  /**
+   * Which file (#223). `global` writes the settings for every project and is
+   * validated twice: on its own, so it is a legal config wherever it is read,
+   * and under this project's file, so a save cannot leave the project in front
+   * of you unloadable.
+   */
+  scope: 'project' | 'global' = 'project',
 ): { path: string } {
-  const raw = readRawConfig(targetDir);
+  const globalPath = globalConfigPath();
+  if (scope === 'global' && globalPath === null) {
+    throw new Error('global settings are switched off (VIBE_GLOBAL_CONFIG is empty)');
+  }
+  // Refused before anything is merged, so the sentence is the pilot rule's own
+  // rather than whatever the merge would have tripped over (#223).
+  if (scope === 'global') refuseGlobalProjectKeys(patch, 'your settings for all projects');
+  if (scope === 'project') {
+    refuseProjectPilot(patch, 'vibe.config.json');
+    refuseProjectCli(patch, 'vibe.config.json');
+    refuseProjectAuth(patch, 'vibe.config.json');
+  }
+  const raw = scope === 'global' ? readGlobalConfig() : readRawConfig(targetDir);
   const candidate: Record<string, unknown> = { ...raw };
   for (const [key, value] of Object.entries(patch)) {
     const existing = raw[key];
@@ -829,11 +1069,25 @@ export function writeConfigPatch(
   // The same pipeline `loadConfig` runs, in the same order and for the same
   // reasons - `validateRoles` first, because `resolveRoleScopedAgents` reads the
   // table and a bad role checked afterwards surfaces as a toolchain error.
-  const merged = mergeConfig(DEFAULTS, candidate);
+  const project = scope === 'global' ? readRawConfig(targetDir) : candidate;
+  const global = scope === 'global' ? candidate : readGlobalConfig();
+  if (scope === 'global') {
+    // Not part of `Config`, so `validate` never sees it - checked here instead,
+    // because a write is the one moment a bad value can be refused unwritten.
+    readPilotAccess(candidate);
+    readCliPaths(candidate);
+    readRoutes(candidate);
+    const alone = mergeConfig(DEFAULTS, candidate);
+    validateRoles(alone.roles);
+    validate(resolveRoleScopedAgents(alone, [candidate]));
+  }
+  const merged = mergeConfig(mergeConfig(DEFAULTS, global), project);
   validateRoles(merged.roles);
-  validate(resolveRoleScopedAgents(merged, [candidate]));
+  validate(resolveRoleScopedAgents(merged, [global, project]));
 
-  const configPath = path.join(targetDir, 'vibe.config.json');
+  const configPath =
+    scope === 'global' && globalPath !== null ? globalPath : path.join(targetDir, 'vibe.config.json');
+  if (scope === 'global') mkdirSync(path.dirname(configPath), { recursive: true });
   const tmp = `${configPath}.tmp`;
   writeFileSync(tmp, `${JSON.stringify(candidate, null, 2)}\n`, 'utf8');
   renameSync(tmp, configPath);
@@ -1052,6 +1306,36 @@ function validateVerify(verify: VerifyConfig): void {
       if (overlap !== null) throw new Error(`${where}.artifacts: ${overlap}`);
     }
   });
+}
+
+/**
+ * Prompt overrides, checked against the real block list (#223).
+ *
+ * **A key this build does not recognise is refused by name**, and that is the
+ * whole of why this function exists. An unknown key would otherwise be an
+ * override that silently does nothing: `block()` would find no entry, render
+ * the default, and nobody would be told - so somebody who believes they changed
+ * what the reviewer is under finds out by reading a review that ignored them.
+ * The same reasoning `gates.ts` gives for refusing `complete` and `final-fix` by
+ * name rather than letting `mergeSection` drop them.
+ *
+ * The text itself is accepted on trust, exactly as `RoleSetting.model` is: there
+ * is no way to judge whether an instruction is a good one, and a length limit
+ * would be a number with nothing behind it.
+ */
+function validatePrompts(prompts: PromptOverrides): void {
+  const known = new Set(promptBlockNames());
+  for (const [name, text] of Object.entries(prompts)) {
+    if (!known.has(name)) {
+      throw new Error(
+        `prompts."${name}" is not a prompt block this build has. The blocks are: ` +
+          `${[...known].map((n) => `"${n}"`).join(', ')}.`,
+      );
+    }
+    if (typeof text !== 'string') {
+      throw new Error(`prompts."${name}" must be a string`);
+    }
+  }
 }
 
 function validateToolchain(toolchain: ToolchainContract): void {

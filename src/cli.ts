@@ -1,4 +1,4 @@
-import { readFileSync, existsSync, renameSync } from 'node:fs';
+﻿import { readFileSync, existsSync, renameSync } from 'node:fs';
 import path from 'node:path';
 import {
   applyOverrides,
@@ -6,10 +6,13 @@ import {
   EFFORTS,
   environmentStale,
   loadConfig,
+  globalConfigPath,
+  withProjectFile,
 } from '@src/config.js';
 import {
   allocateRun,
   assertUnlinkedRun,
+  continueIntoImplementation,
   createRun,
   listRuns,
   loadRun,
@@ -26,6 +29,7 @@ import {
 import type { AllocatedRun } from '@src/run.js';
 import { acquireLock, describeLiveness } from '@src/lock.js';
 import { cancelRequested, clearCancel } from '@src/cancel.js';
+import { installPromptOverrides } from '@src/prompts.js';
 import { describeEnding as describeProcessEnding, installEndingStamp } from '@src/ending.js';
 import { commitFork, listForkPoints, planFork } from '@src/fork.js';
 import type { Liveness, LockHandle } from '@src/lock.js';
@@ -58,6 +62,7 @@ import { closeCodexRateLimits, describeLimits, readCodexRateLimits } from '@src/
 import { describeGates } from '@src/gates.js';
 import { renderScorecard, scoreArchive } from '@src/scorecard.js';
 import { resolveGates } from '@src/verify.js';
+import { createWorktree, workDirOf } from '@src/worktree.js';
 import type { AgentPreflight } from '@src/preflight.js';
 import * as git from '@src/git.js';
 import * as log from '@src/log.js';
@@ -81,6 +86,7 @@ Usage
   vibe run "<task>" [options]      Plan, critique to zero P1s, implement, review to zero P1s
   vibe plan "<task>" [options]     Stop after the plan is approved; do not implement
   vibe resume <run-id> [--force]   Continue a run that stopped for input
+  vibe resume <run-id> --implement Take a finished plan-only run into implementation
   vibe fork <run-id> --at <n>      Start a new run from a point in an old one
   vibe list                        Show runs in this repo
   vibe stats [--json]              What every run in this repo says about the loop
@@ -190,6 +196,15 @@ interface ParsedArgs {
     blockingQuestionsOnly?: boolean;
     skipProbe?: boolean;
     force?: boolean;
+    /**
+     * Turn a finished plan-only run into an implementing one (#223).
+     *
+     * Resume-only, and it changes what the run IS rather than where it picks
+     * up - so it is a flag somebody types rather than something the loop can
+     * reach on its own. `continueIntoImplementation` holds the rule and every
+     * refusal; this is only how it is asked for.
+     */
+    implement?: boolean;
     noVerify?: boolean;
     verifyCommand?: string;
     verifyRuns?: number;
@@ -331,6 +346,7 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       // describes one invocation's willingness to take a lock, not anything the
       // run should carry forward into the next resume.
       case '--force': out.flags.force = true; break;
+      case '--implement': out.flags.implement = true; break;
       case '--no-verify': out.flags.noVerify = true; break;
       case '--verify-command': out.flags.verifyCommand = next(); break;
       case '--verify-runs': out.flags.verifyRuns = nextNum(); break;
@@ -620,12 +636,42 @@ async function startRun(
   handle: LockHandle,
   loop: RunLoop = orchestrate,
 ): Promise<ExitCode> {
-  const state = createRun(targetDir, task, planOnly, { allocated, config: cfg, extraContext });
+  // The decision is taken here and the directory is made by the preflight gate.
+  // Recorded in the FIRST state write, so a resume cannot come back believing it
+  // has no worktree while its branch is checked out in one (#223).
+  const state = createRun(targetDir, task, planOnly, {
+    allocated,
+    config: cfg,
+    extraContext,
+    worktree: cfg.git.worktree,
+  });
 
   log.attachTranscript(path.join(state.dir, 'transcript.log'));
   log.heading(`Run ${state.id}`, {
+    // `repo` and `task` are the other two thirds of hi-fi 1's identity header
+    // (#223), and both were already certain here. `dir` is the *run's*
+    // directory - where `PLAN.md` and the artifacts live - and it is not the
+    // repository, which is what somebody asking "which project am I looking at"
+    // means. Two facts, two fields, rather than one that has to be guessed from
+    // the other by trimming `.vibe/runs/<id>` off the end.
+    //
+    // The comment sits above the pair rather than between them: `contract.test.ts`
+    // reads this site as source, and its regex walks from the id straight to the
+    // data.
     id: 'run_started',
-    data: { runId: state.id, dir: state.dir, resumed: false },
+    data: {
+      runId: state.id,
+      dir: state.dir,
+      repo: targetDir,
+      // Where the WORK happens, which is the repo unless this run has a worktree
+      // (#223). A fact the run holds and did not say, which is the shape
+      // AGENTS.md calls a screen that cannot be built: the pilot reads the
+      // repository, and with a worktree the code it should be reading sits in a
+      // subdirectory it would otherwise never look in.
+      workDir: workDirOf(state),
+      task,
+      resumed: false,
+    },
   });
   log.info(`Repo:    ${targetDir}`);
   log.info(`Claude:  ${cfg.claude.model} / ${cfg.claude.effort}`);
@@ -696,7 +742,11 @@ export function resumeConfig(targetDir: string, state: RunState, flags: ParsedAr
   const load = (overrides: ConfigOverrides, roles: RolePatches): Config =>
     stored === undefined
       ? loadConfig(targetDir, overrides, roles)
-      : applyOverrides(stored, overrides, roles);
+      // **The project's file on top of the run's memory** (#223). Without it the
+      // settings screen could not reach a run that had already started, so a run
+      // stopped on a ceiling could not be resumed past it by raising that
+      // ceiling - which is the one moment the screen is most wanted.
+      : applyOverrides(withProjectFile(stored, targetDir), overrides, roles);
 
   // What this resume would have run on with no flags at all. Compared against
   // the effective config so the event below records the user's change, and not
@@ -823,6 +873,24 @@ async function resumeRun(
   }
   log.attachTranscript(path.join(state.dir, 'transcript.log'));
 
+  // **Before anything else reads the phase**, because this changes it. A
+  // plan-only run that finished is at `complete`, so every path below - the
+  // answers file, `resumedFrom`, `execute`'s own phase dispatch - would
+  // otherwise be told there is nothing left to do, which is the dead end this
+  // closes. `continueIntoImplementation` holds the rule and refuses with a
+  // sentence; saving here is what makes the conversion survive a process that
+  // dies before the first turn, so a second attempt is a resume rather than a
+  // second conversion.
+  if (flags.implement === true) {
+    continueIntoImplementation(state);
+    saveState(state);
+    log.ok(
+      `Plan-only run ${state.id} is now an implementing run. The approved plan, its frozen ` +
+        'acceptance bar, the P1s it carried and the findings it declined all travel with it - ' +
+        'nothing is re-planned.',
+    );
+  }
+
   const answersFile = path.join(state.dir, 'NEEDS-INPUT.md');
   if (existsSync(answersFile)) {
     const raw = readFileSync(answersFile, 'utf8');
@@ -858,7 +926,15 @@ async function resumeRun(
       renameSync(answersFile, path.join(state.dir, `stalled-${state.planRound}.md`));
       log.heading(`Resuming ${state.id}`, {
         id: 'run_started',
-        data: { runId: state.id, dir: state.dir, resumed: true },
+        data: {
+          runId: state.id,
+          dir: state.dir,
+          repo: targetDir,
+          workDir: workDirOf(state),
+          task: state.task,
+          resumed: true,
+          from: resumedFrom(state),
+        },
       });
       return execute(state, cfg, true, flags.skipProbe === true, REAL_GATE, loop, handle);
     }
@@ -900,9 +976,70 @@ async function resumeRun(
   // one thing that differs (#207).
   log.heading(`Resuming ${state.id}`, {
     id: 'run_started',
-    data: { runId: state.id, dir: state.dir, resumed: true },
+    data: {
+      runId: state.id,
+      dir: state.dir,
+      repo: targetDir,
+      workDir: workDirOf(state),
+      task: state.task,
+      resumed: true,
+      from: resumedFrom(state),
+    },
   });
   return execute(state, cfg, true, flags.skipProbe === true, REAL_GATE, loop, handle);
+}
+
+/**
+ * Where a resume is picking the run up from (#211).
+ *
+ * **A window that resumes a run starts from an empty column**, because the
+ * narration it receives is only what happens from now on - the rounds, turns
+ * and spend of every earlier session were narrated to a process that has since
+ * exited. So a run resumed at review round 3 drew as though it were beginning,
+ * and the pilot, whose picture of the run is `describeRun`, described a run
+ * that had done nothing. Reported as *"when I resume a past run, the pilot et
+ * al should be brought back to wherever we're resuming from."*
+ *
+ * **Read from state, not replayed as narration.** The tempting fix is to
+ * re-emit `phase_started` and `turn_started` for the history so the column
+ * fills in - and it would be a lie in the exact shape this repo refuses: those
+ * turns are not starting, and a card drawn from them would report work as
+ * happening now. This is one frame that says what the earlier sessions left
+ * behind, and a window draws it as history because it is labelled as history.
+ *
+ * Every field is one the run already recorded. Nothing here is derived, and
+ * nothing is filled in: a run with no `phase` yet reports null rather than a
+ * guess, which is the same rule `GateContext` follows for the same field.
+ */
+function resumedFrom(state: RunState): Record<string, unknown> {
+  return {
+    // Where the loop is about to pick up. `status` is what the last session
+    // ended as - `needs-input`, `error` - and the phase is where in the loop
+    // that happened; a reader wants both, because "stopped for input" and
+    // "stopped for input during review" are different situations.
+    status: state.status,
+    phase: state.phase ?? null,
+    planRound: state.planRound,
+    questionRound: state.questionRound,
+    reviewRound: state.reviewRound,
+    verifyRound: state.verifyRound,
+    // What earlier sessions already spent. The window's own totals start at
+    // zero on every invoke, so without this a resumed run reports the cost of
+    // its last leg as the cost of the whole thing.
+    tokensUsed: state.tokensUsed,
+    costUsd: state.costUsd,
+    codexTokens: state.codexTokens,
+    // What is still open. A resume exists to deal with these, so a screen that
+    // does not show them is missing the reason the run is being resumed.
+    //
+    // The phase travels with the count because `PendingFindings` carries it and
+    // the two answer different questions: how many are outstanding, and which
+    // reviewer raised them. Null when there are none at all, rather than a
+    // phase with a zero beside it.
+    pendingFindings: state.pendingFindings?.findings.length ?? 0,
+    pendingFrom: state.pendingFindings?.phase ?? null,
+    carried: state.carried?.length ?? 0,
+  };
 }
 
 /**
@@ -1417,6 +1554,13 @@ export async function execute(
   // cancel that survived into it would kill its first agent turn instantly -
   // reported as the run being stopped by somebody who stopped a different one.
   clearCancel();
+  // The prompt overrides this run's config asks for (#223), installed in the
+  // same breath and for the same reason the latch above is cleared: it is a
+  // module latch, one run per process, and one left standing from a previous
+  // run would put a different project's standing instructions into this one's
+  // reviewer. Installed unconditionally, so an empty table is what clears it -
+  // there is no path that leaves the previous run's overrides in place.
+  installPromptOverrides(cfg.prompts);
   const started = Date.now();
   const recovery = emptyRecovery();
   let reported = false;
@@ -1513,11 +1657,34 @@ export async function execute(
           'state.json was repaired on load. See OUTSTANDING.md for what was actually carried.',
       );
     } else if (incomplete === null) {
-      log.ok(
-        state.planOnly
-          ? 'Plan cleared critique with zero P1s. Not implemented (plan-only run).'
-          : 'Plan and implementation both cleared review with zero P1s.',
-      );
+      // **A plan-only run carries its P1s in `carried`, not in `outstanding`.**
+      // The guard above is the implementation-side one: `outstanding` is written
+      // by the final fix round, which a plan-only run never reaches, so it is
+      // empty on every one of them and the branch fell through to "zero P1s"
+      // over a plan the tolerance had let through with findings open. Reported
+      // exactly - *"It says I did plan only mode but then it seemed to stop,
+      // even though it still had p1 issues"* - and the narration contradicted
+      // itself in the same run: `Plan accepted with 1 P1(s) carried into
+      // implementation` four lines above `Plan cleared critique with zero P1s`.
+      //
+      // The comment on `left` above already stated the rule this breaks -
+      // *"Never claim a spotless finish when a P1 was carried"* - so this is the
+      // same rule reaching the one path that was not checking it.
+      const tolerated = state.planOnly ? (state.carried ?? []) : [];
+      if (tolerated.length > 0) {
+        log.warn(
+          `Plan-only run finished with ${tolerated.length} P1(s) carried on tolerance: ` +
+            `${tolerated.map((f) => f.id).join(', ')}. The plan was accepted DESPITE them, not ` +
+            'without them - they are stated in the implementation prompt, so whatever implements ' +
+            'this plan is told about them.',
+        );
+      } else {
+        log.ok(
+          state.planOnly
+            ? 'Plan cleared critique with zero P1s. Not implemented (plan-only run).'
+            : 'Plan and implementation both cleared review with zero P1s.',
+        );
+      }
     }
     // Here rather than in `summary()`, and here rather than only in a log line
     // emitted forty minutes ago: the run may exit 0 with a gate that never ran,
@@ -1682,9 +1849,69 @@ export async function runPreflight(
   // its own blast radius, and this is the half that must not over-refuse.
   const ahead: readonly Phase[] = resumePhase(state) === 'complete' ? [] : phases;
 
+  // **The worktree, before anything is spent and before `prepareGit` runs** (#223).
+  //
+  // One creation site, and it is here rather than beside `createRun` for two
+  // reasons. A **resume** reaches it too, so a run whose worktree was pruned
+  // between sessions gets it back instead of failing one git command at a time
+  // with nothing naming the cause. And this gate is already the place that
+  // refuses a directory which cannot host the phases ahead - `gitPrecondition`
+  // is four lines below - so the refusal has a home, an exit code and a
+  // sentence, rather than a third mechanism beside them.
+  //
+  // Ordering is what makes it correct: `execute` awaits this gate before it
+  // calls the loop, and `runPhases` opens with `prepareGit`. So the tree exists
+  // before the branch is decided in it, which is the whole arrangement - this
+  // decides WHERE, `prepareGit` still decides WHICH BRANCH.
+  if (state.worktree === true) {
+    // The branch, as a ref, before the script runs - so `VIBE_BRANCH` names a
+    // branch that exists on a fresh run and on a resume alike, and one line of
+    // script (`git worktree add "$VIBE_WORKTREE" "$VIBE_BRANCH"`) is right for
+    // both. `prepareGit` adopts it. A repository with no commit has no HEAD to
+    // put it at, so the script is told no branch and `prepareGit` makes it as it
+    // always has (#223).
+    let branch = git.runBranch(cfg, state);
+    if (branch !== null && !(await git.branchExists(state.targetDir, branch))) {
+      const head = await git.markBase(state.targetDir);
+      if (head === null || !(await git.createBranchRef(state.targetDir, branch, head)).ok) {
+        branch = null;
+      }
+    }
+    const made = await createWorktree({
+      targetDir: state.targetDir,
+      id: state.id,
+      command: cfg.git.worktreeCommand,
+      timeoutMs: cfg.git.worktreeTimeoutMs,
+      branch,
+    });
+    if (!made.ok) {
+      log.heading('Preflight');
+      log.fail(made.reason, { id: 'run_failed', data: { code: EXIT.PREFLIGHT, reason: made.reason } });
+      state.status = 'error';
+      recordEvent(state, 'preflight-failed', { reasons: [made.reason] });
+      return EXIT.PREFLIGHT;
+    }
+    // Said rather than left to be inferred from a path, and only when something
+    // happened: a resume that found its worktree already there has nothing to
+    // announce. `how` is the half a reader cannot see from the directory - a
+    // tree made by `git worktree add` and one made by somebody's own script look
+    // identical afterwards, and which it was decides where to look when the
+    // contents are wrong.
+    if (made.created) {
+      log.step(`Working in ${made.dir}`, {
+        id: 'worktree_created',
+        data: { dir: made.dir, how: made.how },
+      });
+    }
+  }
+
   // Before the probes, so a refusal costs nothing: the run that produced #71
   // spent 30M tokens before the review phase found this out for itself.
-  const blocked = await gitPrecondition(state.targetDir, ahead);
+  // The tree the run will WRITE in, which is the worktree when it has one (#223).
+  // Asking this of `targetDir` would check the repository's cleanliness and then
+  // let the loop write somewhere else - a precondition about the wrong directory
+  // is worse than none, because it passes.
+  const blocked = await gitPrecondition(workDirOf(state), ahead);
   if (blocked !== null) {
     log.heading('Preflight');
     log.fail(blocked, { id: 'run_failed', data: { code: EXIT.PREFLIGHT, reason: blocked } });
@@ -2309,6 +2536,11 @@ async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
       `config: ${cfg.configPath ?? 'defaults'}` +
         (moved.length === 0 ? '' : ` (command line also sets ${moved.join(', ')})`),
     );
+    // The global layer, said on its own line so the line above keeps the shape
+    // scripts already read (#223). Only when the file exists: a machine with no
+    // global settings is every machine before this, and does not need telling.
+    const globalAt = globalConfigPath();
+    if (globalAt !== null && existsSync(globalAt)) log.info(`  also your settings for all projects: ${globalAt}`);
     log.info(`  claude ${cfg.claude.model}/${cfg.claude.effort} - codex ${cfg.codex.model}/${cfg.codex.effort}`);
     reportResolvedRoles(cfg);
     log.info(

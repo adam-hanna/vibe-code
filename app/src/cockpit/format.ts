@@ -158,6 +158,131 @@ export function boundary(name: string): string {
 }
 
 /**
+ * What a gate is actually asking, in three parts (#211).
+ *
+ * `boundary()` names where the loop stopped and that turned out not to be
+ * enough. Reported from a manual pass at `plan-round`, and the question is the
+ * whole of it: *"It's holding at the end of a plan round, why? What am I
+ * supposed to do, what am I supposed to inspect?"* The footer said `holding at
+ * the end of a plan round`, listed three round counters, and offered two
+ * buttons. Everything a person needs in order to press one deliberately —
+ * what just finished, where to look at it, what continuing buys — was absent
+ * from every boundary.
+ *
+ * **`cost` is the part that stops a gate being a reflex.** Continuing is never
+ * free: at `plan-approved` it starts writing code, at `review-round` it buys an
+ * implement-sized fix turn. A card that says only *continue* is a card that gets
+ * pressed without the decision being made.
+ *
+ * A closed map, and an unknown boundary gets **no card at all** rather than a
+ * generic sentence — the rule `ending()` and `boundary()` already follow. A
+ * confident description of a boundary this build does not know would be worse
+ * than the silence it replaced.
+ */
+export interface Hold {
+  /** What has just finished. The reason it is holding here rather than anywhere. */
+  what: string;
+  /** Where to look before deciding, in the words of the thing to open. */
+  inspect: string;
+  /** What pressing continue spends. Never "carries on". */
+  cost: string;
+}
+
+const HOLDS: Readonly<Record<string, Hold>> = {
+  'plan-round': {
+    what: 'The planner has just rewritten the plan — because the critic objected, or because a question round came back with answers.',
+    // **Not PLAN.md.** `planPhase` writes that file only after the critique
+    // loop breaks on approval, so at this boundary it does not exist yet — a
+    // card sending somebody to open it would be sending them to a missing file
+    // on the screen built to tell them where to look. `plan-<round>.json` is
+    // this revision and `FOLLOW-UPS.md` is rewritten beside it every time.
+    inspect:
+      'plan-<round>.json is the plan as it now stands — the highest-numbered one — and plan-critique-<round>.json beside it is what the critic objected to, if this revision was answering one. FOLLOW-UPS.md is what the plan decided to leave out. There is no PLAN.md yet: that is written only once the plan is approved.',
+    cost: 'Continuing sends it to the critic, which is one Codex turn. The plan is not approved yet, and this round counts against the plan-round cap.',
+  },
+  'question-round': {
+    what: 'The planner raised questions it could not settle from the brief, and the answerer has already taken its turn on them.',
+    inspect:
+      "The questions and what came back for each are listed below, and in the Questions tab. answers-<round>.json in the run directory is the answerer's reply as it arrived.",
+    cost: 'Continuing accepts those answers and spends a planner turn revising the plan with them.',
+  },
+  'plan-approved': {
+    what: 'The critic cleared the plan. This is the last gate before anything is written.',
+    inspect:
+      'PLAN.md, and the last plan-critique-<round>.json beside it — that file is what the critic actually said, including what it let through.',
+    cost: 'Continuing starts the implementer: it writes code in your worktree and commits it. This is the expensive one, and the only gate after which the tree changes.',
+  },
+  implemented: {
+    what: 'The implementer finished writing and committing. Nothing has checked it yet.',
+    inspect: 'The Diff tab has what changed, against the commit the phase started from.',
+    cost: 'Continuing runs your verification gates, then hands the diff to the reviewer — a Codex turn over the whole change.',
+  },
+  'verify-round': {
+    what: 'A verification gate did not pass.',
+    inspect: 'The Verify tab has each gate, how many of its runs failed, and whether it was deterministic.',
+    cost: 'Continuing sends the round to FIX, which is a full implement turn.',
+  },
+  'review-round': {
+    what: 'The reviewer has reported on the diff.',
+    inspect:
+      'The Findings tab has this round\'s findings with their severities, and code-review-<round>.json in the run directory is the report itself.',
+    cost: 'Continuing buys a fix round — an implement-sized turn — and counts against the review-round cap.',
+  },
+};
+
+/** Null for a boundary this build has no description of. The caller draws nothing. */
+export function hold(name: string): Hold | null {
+  return HOLDS[name] ?? null;
+}
+
+/**
+ * The next boundary that can hold this run (#223, hi-fi 1).
+ *
+ * `3a`'s footer is a **mode readout** — `mode · auto ● · step · next stop:
+ * verify gate` — and the app's said only where the loop had *already* stopped.
+ * Those are different claims and the design's is the one that is useful while
+ * nothing is holding, which is most of the time.
+ *
+ * ## Why this is not the derivation the footer refused to make
+ *
+ * The old comment said naming a next stop *"would need a phase-to-boundary
+ * ordering written here, and a wrong one is a promise the app cannot keep"*.
+ * Both halves are still true and neither applies:
+ *
+ * - **The ordering is told.** `order` is `GATEABLE` off the `config` frame, and
+ *   `src/gates.ts` says of it in as many words: *"Order is the loop's, not the
+ *   alphabet's."* Nothing about the sequence is written on this side.
+ * - **The position is told.** `since` is the last boundary that actually held,
+ *   recorded from an `ask`. No phase is mapped onto anything.
+ *
+ * ## What it can still be wrong about, and how the wording covers it
+ *
+ * The loop can pass a boundary without reaching it: a plan the critic clears on
+ * the first read never has a second `plan-round`. So the answer is *the earliest
+ * boundary ahead that holds* — the first one it **can** stop at — and the caller
+ * words it that way. It is never a prediction that the run will stop there.
+ *
+ * Wrapping is correct rather than a fallback: cycle 2 re-opens on every review
+ * fix, so from `review-round` the next hold really is `implemented` again. A run
+ * whose every row is `auto` returns null, which the footer already has a
+ * sentence for.
+ */
+export function nextHold(
+  order: readonly string[],
+  gates: Readonly<Record<string, string>>,
+  since: string | null,
+): string | null {
+  const holding = order.filter((b) => (gates[b] ?? 'auto') !== 'auto');
+  if (holding.length === 0) return null;
+  const at = since === null ? -1 : order.indexOf(since);
+  // Before any gate has held, and for a boundary this build's order does not
+  // contain, the answer is simply the first one that holds.
+  if (at < 0) return holding[0] ?? null;
+  const ahead = holding.find((b) => order.indexOf(b) > at);
+  return ahead ?? holding[0] ?? null;
+}
+
+/**
  * How a run ended, in the footer's words.
  *
  * `tone` follows the design's own reading of the three kickers: `alarm` for a
@@ -208,7 +333,13 @@ const ENDINGS: Readonly<Record<number, Ending>> = {
     tone: 'accent',
     kicker: 'needs you',
     detail: 'the run stopped on a question it could not answer for itself.',
-    next: 'Answer the questions in NEEDS-INPUT.md, then resume the run — it picks up from here.',
+    // The Questions tab, not the file (#223). It was the CLI's own instruction,
+    // correct there and absurd in a window that is already displaying the
+    // questions: *"It says I need to answer the questions in needs-input.md but
+    // thats crazy, I should answer directly in the app on the questions page."*
+    // The file is still what gets written and still what the resume reads - the
+    // window fills it in - so answering either way is the same act.
+    next: 'Answer them on the Questions tab, and it resumes from here. Editing NEEDS-INPUT.md by hand still works and is the same file.',
   },
   3: {
     tone: 'alarm',
@@ -245,4 +376,39 @@ const ENDINGS: Readonly<Record<number, Ending>> = {
 /** Null for a code this build has no phrase for. The caller shows the number. */
 export function ending(exit: number): Ending | null {
   return ENDINGS[exit] ?? null;
+}
+
+/**
+ * The exit code a run takes when it stops on a question (#223).
+ *
+ * `EXIT.NEEDS_HUMAN` in `src/charge.ts`, named here rather than written as `2`
+ * at the one site that reads it: a bare number in a JSX condition is the kind of
+ * thing that gets copied to a second site and then only half-updated, and this
+ * is the code the whole answer form is gated on.
+ */
+export const NEEDS_HUMAN = 2;
+
+/**
+ * An absolute moment from a stored ISO timestamp — `14 Sep, 15:33`.
+ *
+ * **Date as well as time, which is what separates it from `clock`.** That one
+ * renders a moment inside the run you are watching, where the date is today by
+ * construction; this renders one off a record that may be a week old, and
+ * `15:33` alone would be a time with no day attached — read as this afternoon
+ * every time.
+ *
+ * An unparseable value is said to be unrecorded rather than rendered. `Invalid
+ * Date` sitting where a timestamp goes reads as something somebody measured, and
+ * these strings come from a file another process wrote.
+ */
+export function recorded(iso: string | null): string {
+  if (iso === null) return 'not recorded';
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return 'not recorded';
+  return at.toLocaleString(undefined, {
+    day: 'numeric',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
 }

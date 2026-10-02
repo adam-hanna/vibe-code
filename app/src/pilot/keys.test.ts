@@ -6,6 +6,7 @@ import corePackage from '../../../package.json?raw';
 import coreLock from '../../../package-lock.json?raw';
 import rust from '../../src-tauri/src/keys.rs?raw';
 import lib from '../../src-tauri/src/lib.rs?raw';
+import hostRs from '../../src-tauri/src/host.rs?raw';
 import defaultCapability from '../../src-tauri/capabilities/default.json?raw';
 import pick from '../cockpit/pick.ts?raw';
 import pilotMod from '../../src-tauri/src/pilot/mod.rs?raw';
@@ -114,22 +115,68 @@ describe('the webview can store a key and can never read one', () => {
     expect(pilotMod).toContain('fn drive(');
   });
 
+  test('the second reader hands the keys to the host, and only there', () => {
+    // The question the test above says to ask, asked (#223): the key HAS grown a
+    // second lifetime, because runs are billed to it too — *"If we have api keys
+    // set, we should use them everywhere"* — and a run is a child of the host.
+    // So the one other caller is `send_keys`, writing to the host's stdin
+    // beside a secret the window never sees, and it logs nothing.
+    const callers = [...hostRs.matchAll(/keys::read\(/g)];
+    expect(callers.length).toBe(1);
+    const fn = hostRs.slice(hostRs.indexOf('pub fn send_keys('));
+    const body = fn.slice(0, fn.indexOf('\n    }\n'));
+    expect(body).toContain('"secret": running.secret');
+    expect(body).not.toMatch(/applog|emit\(/);
+  });
+
   test('every tool is a host request this window already makes', () => {
     // #144's one sentence, checked as a boundary. The table may declare what it
-    // likes; what it may not do is reach the loop another way. Every effect is
-    // an `invoke` or an `answer` - the two inbound frames in `src/protocol.ts` -
-    // so a third `kind` here is a third definition of what a legal run is, and
-    // this is the commit it would fail on.
+    // likes; what it may not do is reach the loop another way.
+    //
+    // **This pinned two kinds, then three, and now pins four.** `invoke` and
+    // `answer` were the two inbound frames that existed; #211 added `command`
+    // along with the frame it sends and the window's own control that sends it;
+    // and #223 added `stop_command`, which is the same frame's other half —
+    // `Cockpit.stopCommand` already existed for the card's own stop control, so
+    // this widens what the pilot may *propose* and adds nothing to the wire.
+    //
+    // The claim has never been "there are N". It is that **each one is a request
+    // the window also makes**, and that is still true of all four. A fifth is
+    // still a decision somebody takes on purpose, which is what this fails for.
     const effect = tools.slice(
       tools.indexOf('export type Effect ='),
       tools.indexOf('export const ORIGIN'),
     );
     const kinds = [...effect.matchAll(/kind: '(\w+)'/g)].map((m) => m[1]);
-    expect([...new Set(kinds)].sort()).toEqual(['answer', 'invoke']);
-    // And no other way out. The pane hands an accepted effect UP to the cockpit,
-    // which owns the one `host.send` in the window; a tool module that imported
-    // the wire could send its own frame past the launch and gate controls.
+    expect([...new Set(kinds)].sort()).toEqual([
+      'answer',
+      'command',
+      'invoke',
+      'stop_command',
+    ]);
+    // The structural half, and it is the one that did NOT move. The pane hands
+    // an accepted effect UP to the cockpit, which owns the one `host.send` in
+    // the window; a tool module that imported the wire could send its own frame
+    // past the launch, gate and command controls. Nothing about #211 touches
+    // this, which is what keeps the widening narrow.
     expect(tools).not.toMatch(/from '\.\.\/host'/);
+  });
+
+  test('a command is proposed and never run by the tool that asks for it', () => {
+    // The rule the command runner is allowed to exist under (#211). `run_command`
+    // is the most consequential thing in the table - it starts a process on the
+    // machine - and it settles the same way `start_run` does: a proposal, with
+    // the exact program and arguments drawn, that a person presses.
+    //
+    // Read from the source rather than by calling it, for the reason the effect
+    // list above is: what matters is that no future edit gives this executor a
+    // `ran` path, and a passing call today would not catch that.
+    const runCommand = tools.slice(
+      tools.indexOf("name: 'run_command'"),
+      tools.indexOf('The table.'),
+    );
+    expect(runCommand).toContain("kind: 'proposes'");
+    expect(runCommand).not.toMatch(/kind: 'ran'/);
   });
 
   test('the pilot cannot reach a credential, and does not have to be trusted not to', () => {
@@ -150,8 +197,22 @@ describe('the webview can store a key and can never read one', () => {
     // Config (decision 3, answered no) and the run archive (decision 4, yes but
     // #114 first). An absence is only a decision if something fails when it
     // stops being one.
+    //
+    // The table grew by two in #211 - `read_command` and `run_command` - and by
+    // one more in #223, `stop_command`, which is the off switch the runner had
+    // no tool for. The list moves with it, which is the point of spelling it out
+    // rather than counting. **No refusal moved**: there is still no config tool
+    // and no archive tool, and the second assertion is the one that says so.
     const declared = [...tools.matchAll(/^ {2}name: '(\w+)',$/gm)].map((m) => m[1] ?? '');
-    expect(declared.sort()).toEqual(['answer_gate', 'read_output', 'read_run', 'start_run']);
+    expect(declared.sort()).toEqual([
+      'answer_gate',
+      'read_command',
+      'read_output',
+      'read_run',
+      'run_command',
+      'start_run',
+      'stop_command',
+    ]);
     expect(declared.filter((n) => /config|archive|runs/.test(n))).toEqual([]);
   });
 

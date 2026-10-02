@@ -1,4 +1,4 @@
-import type { Frame, Level } from '../host';
+import type { Frame, Level, Narration } from '../host';
 
 /**
  * The run, assembled from frames and from nothing else (#159).
@@ -28,20 +28,37 @@ import type { Frame, Level } from '../host';
  * authoritative one always wins.
  */
 
-/** The three convergence cycles. Not three stages - see the domain model. */
-export type CycleKind = 'plan' | 'code' | 'review';
-
 /**
- * Which cycle a phase belongs to.
+ * The four groups the loop column draws.
  *
- * `critique` is in the plan cycle rather than beside it because a plan round IS
- * the pair: the planner produces a version, the critic judges it. `verify` has
- * no `phase_started` of its own - it announces itself with `verify_started` -
- * and belongs to the code cycle.
+ * **Producer and judge are separate groups, and that is a decision rather than a
+ * derivation.** The convergence model says a round is the *pair* - the planner
+ * produces a version, the critic judges it - and this file said so for a year,
+ * with `critique` folded into the plan cycle for exactly that reason. What the
+ * folding cost was legibility: the column read `PLAN · CODE · REVIEW`, and the
+ * critique - which is half the plan cycle's work and every one of its Codex
+ * turns - had no heading anywhere on screen. Asked directly where plan critique
+ * lived, and the honest answer was *"inside cycle 1, as a row"*, which is not an
+ * answer somebody should have to be given.
+ *
+ * So the judge gets a group of its own, at the owner's decision, and the cost is
+ * written down rather than argued away: **four peer groups read as four stages**,
+ * and the loop is not a pipeline. Two things carry that weight instead -
+ * `v-cycle__status` says `re-runs on every fix` where a group re-opens, and the
+ * pilot's round card still draws the pair, because hi-fi 5 draws it that way
+ * (`plan v.b · accepted after 1 critique`). `rounds.ts` is where the pair
+ * survives; this is where the column's headings live.
+ *
+ * `verify` has no `phase_started` of its own - it announces itself with
+ * `verify_started` - so it stays inside the code group rather than becoming a
+ * fifth, which would be a heading with no frame behind it.
  */
+export type CycleKind = 'plan' | 'critique' | 'code' | 'review';
+
+/** Which group a phase belongs to. One phase, one group, no inference. */
 export const CYCLE_OF: Readonly<Record<string, CycleKind>> = {
   planning: 'plan',
-  critique: 'plan',
+  critique: 'critique',
   implementing: 'code',
   review: 'review',
 };
@@ -271,6 +288,33 @@ export interface FindingRow {
    * both and eventually disagreeing with itself.
    */
   severityChanges: readonly { from: string; to: string; by?: string; reason?: string }[] | null;
+  /**
+   * What the reviewer's own test observed, or null (#113, #223).
+   *
+   * Hi-fi 9's third case — *grounded but uncheckable* — is what this makes
+   * drawable, and it is a genuinely different state from the other four: the
+   * claim names a real place, the reviewer wrote a test to make it fail, and
+   * nothing could be concluded from running it. Before this the pane had no way
+   * to tell that apart from a finding nobody tried to prove.
+   *
+   * **Null means no reproducer, which is not a failure.** Requiring one would
+   * mean a reviewer that cannot write a failing test loses its finding, and
+   * #113 is explicit that a finding with none behaves exactly as every finding
+   * did before the field existed.
+   *
+   * The whole list, because the same test is run at `review` and again after the
+   * final fix and they answer two different questions.
+   */
+  reproducer: readonly { verdict: string; at: string; reason: string | null }[] | null;
+  /**
+   * The reviewer declining to have it fixed in this change.
+   *
+   * Real, worth doing, separate work. A deferred finding is non-blocking by
+   * definition — `parseFindings` refuses a deferred P0 or P1 — so this is never
+   * the reason a gate blocked, and the pane draws it as disposition rather than
+   * as severity.
+   */
+  deferred: boolean;
 }
 
 /** A round's findings, and what the gate made of them. */
@@ -368,6 +412,53 @@ export interface Question {
   declined: boolean;
 }
 
+/**
+ * A compaction, which is the moment the agent starts forgetting (`5e`).
+ *
+ * **It cannot be silent**, which is the design's own reason for putting it on
+ * this screen, and the wire has carried it since #133 — `session_compacting` is
+ * narrated by `context.ts`. Nothing drew it, which is the #198 failure exactly:
+ * the mechanism landed and nothing connected the two halves.
+ *
+ * Claude only, and that is not a gap. Codex reports no per-request usage, so
+ * there is nothing to measure an occupancy against and no rotation driven by one.
+ */
+export interface Compaction {
+  /** Which session slot rotated: `main`, `judge`, `review`. */
+  slot: string;
+  model: string | null;
+  /**
+   * The occupancy it fired at, or null.
+   *
+   * Null on the baseline branch and reported as null rather than as a ratio
+   * nobody took — the same rule `context.ts` applies to the sentence it prints.
+   */
+  measured: number | null;
+  at: number;
+}
+
+/**
+ * What one round put in the history, and the range that is (#223).
+ *
+ * **Both ends, measured, and neither derived.** `round_committed` reads HEAD
+ * *before* it commits, so `since` is what the tree actually was rather than the
+ * previous commit paired off this list — and that difference is not theoretical:
+ * a resumed run's earlier commits were narrated to a process that has exited, so
+ * a window pairing consecutive arrivals would show round 3's card a cumulative
+ * diff and label it as one round.
+ *
+ * `since` is null for a first commit in a repository that had none, which is a
+ * real state and reads as *everything up to here*.
+ */
+export interface Commit {
+  sha: string;
+  since: string | null;
+  /** The commit message, which names what the round was. */
+  message: string | null;
+  /** When it reached us, so a round can be found by arrival. */
+  at: number;
+}
+
 /** A boundary the loop is holding at, waiting to be told what to do. */
 export interface Gate {
   /** The id to answer. Allocated by the host, not by us. */
@@ -412,14 +503,66 @@ export interface OutputLine {
    * preflight and the run announcement genuinely belong to no phase.
    */
   phase: string | null;
+  /**
+   * The round the loop had announced for that phase, or null (#223).
+   *
+   * Stamped from the last `phase_started`, exactly as `phase` is, and for the
+   * same reason: it is what makes `Plan 0` and `Plan 1` two headings rather than
+   * one. Grouping on the phase alone would put every plan round of a long run
+   * under one collapsed section, which is the endless stream `1c` objects to
+   * wearing a heading.
+   */
+  round: number | null;
   /** The role that was running, on the same terms. Null between turns. */
   role: string | null;
 }
 
+/**
+ * One question round, as the window holds it (#223).
+ *
+ * Its own interface because `Run.questions` is a **list** now and a list wants a
+ * name for its element. The move is the same one `verify` and `censuses` already
+ * made, for the same reason and after the same defect: one field holding "the
+ * latest" cannot draw a history, and this column is a history.
+ */
+export interface QuestionRound {
+  total: number;
+  blocking: number;
+  /** Which question round this is, or null on a core that did not say (#223). */
+  round: number | null;
+  /** `loop.maxQuestionRounds`, so the group can say `2/3` rather than `2`. */
+  cap: number | null;
+  open: readonly Question[];
+  /**
+   * When the round opened, on this window's arrival clock.
+   *
+   * What attaches the round to the phase it belongs under. Without it the
+   * column drew the questions at the foot of the whole `PLAN` group, so round
+   * 1's questions appeared beneath round 2 the moment a second plan round
+   * started - reported as *"the questions from the first round appeared under
+   * THIS round, not the ROUND 1"*. The same clock `during()` compares, so the
+   * comparison is like with like.
+   */
+  at: number;
+}
+
 export interface Run {
   cycles: readonly Cycle[];
-  /** The question loop, nested inside cycle 1. Null until one opens. */
-  questions: { total: number; blocking: number; open: readonly Question[] } | null;
+  /**
+   * Every question round, oldest first (#223, `7a`).
+   *
+   * **A list rather than the latest, and the single field is what broke.** It
+   * held one round and each `questions_opened` replaced the one before, so a run
+   * that asked three rounds of questions could only ever draw the third —
+   * reported as *"only plan round 2 has full details... they all should"*. The
+   * counts on rounds 1 and 2 were not stale, they were **gone**, and nothing on
+   * screen said a round had had any.
+   *
+   * It is the same shape `verify` and `censuses` already have and it is the same
+   * argument: a column that reads as a history cannot be built out of fields
+   * that remember only the most recent thing. Empty until a round opens.
+   */
+  questions: readonly QuestionRound[];
   /**
    * The rate-limit wait in flight, or the last one, or null (`7e`).
    *
@@ -447,6 +590,8 @@ export interface Run {
   censuses: readonly Census[];
   /** What the run has spent, from the one seam every token goes through. */
   spend: Spend;
+  /** Every compaction, oldest first. Empty until one happens (`5e`). */
+  compactions: readonly Compaction[];
   /**
    * The commit every diff in this run is taken against, or null (#223, `1d`).
    *
@@ -458,9 +603,57 @@ export interface Run {
    * whole working tree.
    */
   baseSha: string | null;
+  /**
+   * Every commit this run made, oldest first (#223).
+   *
+   * A list rather than the latest, because the Code tab's subject is *what each
+   * round changed* and that is one entry per round. Empty on a run with
+   * `git.commitEachRound` off, on a directory that is not a repository, and on
+   * every round that changed nothing — three different reasons for the same
+   * emptiness, and the pane says the honest common part rather than picking one.
+   */
+  commits: readonly Commit[];
+  /**
+   * Every artifact the run has said it wrote, in order (#223).
+   *
+   * **The signal that a pane reading the run's directory has gone stale**, and
+   * the only honest one there is. A pane that re-read on `findings_reported`
+   * would be deciding that a narration id implies a filename, which is the
+   * loop's naming convention living in the one process that cannot be kept in
+   * step with it. `artifact()` says this after the bytes are on disk, so a
+   * re-read triggered by it cannot beat the write.
+   *
+   * The names rather than a counter, because a re-read is a listing and this is
+   * what says whether the listing is worth taking. Empty on a core that predates
+   * the id, which is a pane that behaves exactly as it did before.
+   */
+  artifacts: readonly string[];
+  /**
+   * That this run was plan-only and has stopped, or null (#223).
+   *
+   * **Null on every other run, including a plan-only one still planning.** It is
+   * set by `plan_only_stopped`, which the loop narrates at the one place it
+   * decides there is no next phase — so it says *this run produced a plan and
+   * built nothing from it*, which is the state that needs an offer nothing else
+   * on screen was making.
+   *
+   * `carried` is how many P1s the tolerance let the plan through with. Told, not
+   * counted here: the window has no findings list for a plan round, and a zero
+   * derived from not having one would read as a spotless plan.
+   */
+  plannedOnly: { carried: number } | null;
   /** The turn with no `endedAt`, if any. */
   running: Turn | null;
   gate: Gate | null;
+  /**
+   * The last boundary that held, or null before any has (#223).
+   *
+   * Kept after the gate is released, which `gate` is not — so the footer can say
+   * which hold is next without asking the loop where it is. It is a boundary
+   * rather than a phase on purpose: the ordering the answer needs is
+   * `GATEABLE`'s, and a phase would have to be mapped onto it here.
+   */
+  lastGate: string | null;
   output: readonly OutputLine[];
   /** Set when the run ended, with how. Null while it is going. */
   ended: { how: 'approved' | 'stopped'; detail: string } | null;
@@ -504,8 +697,66 @@ export interface Run {
    * reading an artifact is a separate decision with `#129`'s link refusal
    * attached to it. It is here because "which run" and "where is it" are the
    * same question to the person asking, and the host is holding both.
+   *
+   * `repo` and `task` are the other two thirds of hi-fi 1's identity header
+   * (#223) and are separately nullable: they were added to `run_started` after
+   * the frame existed, so a run narrated by an older core has neither and the
+   * header names what it was not told rather than going missing.
    */
-  identity: { runId: string; dir: string; resumed: boolean; at: number } | null;
+  identity: {
+    runId: string;
+    dir: string;
+    /** The repository, which is NOT `dir` — that is `.vibe/runs/<id>`. */
+    repo: string | null;
+    /**
+     * Where the work happens, which is `repo` unless the run has a worktree.
+     *
+     * **Carried because something else reads a directory** (#223). With
+     * `git.worktree` on, the loop writes in `<repo>/.worktrees/<run-id>` and the
+     * repository root still holds whatever was there before — so a reader
+     * pointed at the root describes a tree the run is not touching, and reports
+     * that nothing is happening while a great deal is. Null on every core that
+     * predates the field, which reads as "the repository", because that is what
+     * it was.
+     */
+    workDir: string | null;
+    /** The brief, as the run recorded it. The workstream's name. */
+    task: string | null;
+    resumed: boolean;
+    at: number;
+  } | null;
+  /**
+   * The branch this run's commits land on, or null with the reason (#223).
+   *
+   * **Null is a real answer.** Branch isolation off, `--no-branch`, a directory
+   * that is not a repository, or a recorded branch that has since been deleted
+   * all mean one thing to a reader — commits go to whatever is checked out —
+   * and `why` says which of them it was. `null` for the whole field is the
+   * different fact that nothing has said yet, which is every run narrated by a
+   * core older than `run_branch`.
+   */
+  branch: { name: string | null; why: string | null } | null;
+  /**
+   * What earlier sessions of this run already did, or null (#211).
+   *
+   * **A resumed run's column starts empty, and that is not a bug in the
+   * column.** Narration describes what is happening now; the rounds, turns and
+   * spend of every previous session were narrated to a process that has since
+   * exited. So a run picked up at review round 3 drew as though it were
+   * beginning, and the pilot - whose picture is `describeRun` - described a run
+   * that had done nothing.
+   *
+   * This is the one frame that says otherwise, read from `state.json` by the
+   * core and **labelled as history**. It is deliberately not a replay: re-
+   * emitting `phase_started` for turns that already happened would fill the
+   * column at the cost of reporting finished work as running, which is the
+   * fabrication this whole model is arranged against.
+   *
+   * Null on a fresh run and on a resume from a core too old to send it. Both
+   * mean the same thing to a reader - there is no history to show - so they
+   * collapse honestly.
+   */
+  from: ResumedFrom | null;
   /** The step before the first phase, while it is running and after it (#205). */
   preflight: Preflight | null;
   /**
@@ -523,20 +774,27 @@ export interface Run {
 export function emptyRun(): Run {
   return {
     cycles: [],
-    questions: null,
+    questions: [],
     rateLimit: null,
     verify: [],
     censuses: [],
     spend: { tokens: null, costUsd: null, codexTokens: null, charges: [] },
+    compactions: [],
     baseSha: null,
+    commits: [],
+    artifacts: [],
+    plannedOnly: null,
     running: null,
     gate: null,
+    lastGate: null,
     output: [],
     ended: null,
     reason: null,
     completed: null,
     protocol: null,
     identity: null,
+    branch: null,
+    from: null,
     preflight: null,
     seq: 0,
   };
@@ -559,6 +817,59 @@ export const OUTPUT_KEEP = 500;
 
 function num(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+
+/**
+ * What earlier sessions of a resumed run left behind (#211).
+ *
+ * Every field nullable and every field read: this arrives from a core that may
+ * be older than the window, and a missing round drawn as `round 0` would say
+ * the run had done none - the opposite of what the frame exists to correct.
+ */
+export interface ResumedFrom {
+  status: string | null;
+  phase: string | null;
+  planRound: number | null;
+  questionRound: number | null;
+  reviewRound: number | null;
+  verifyRound: number | null;
+  tokensUsed: number | null;
+  costUsd: number | null;
+  codexTokens: number | null;
+  pendingFindings: number | null;
+  /** Which reviewer raised what is outstanding: `plan` or `review`. */
+  pendingFrom: string | null;
+  carried: number | null;
+}
+
+/**
+ * Read it, or null when the frame carried none.
+ *
+ * **Null when nothing usable is there, never a shell of nulls.** A card drawn
+ * from an object whose every field is absent says "resumed from nothing", and
+ * a run being resumed is by definition not nothing - so an unreadable payload
+ * is reported as no history rather than as an empty one.
+ */
+function readResumedFrom(v: unknown): ResumedFrom | null {
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) return null;
+  const d = v as Record<string, unknown>;
+  const from: ResumedFrom = {
+    status: str(d['status']),
+    phase: str(d['phase']),
+    planRound: num(d['planRound']),
+    questionRound: num(d['questionRound']),
+    reviewRound: num(d['reviewRound']),
+    verifyRound: num(d['verifyRound']),
+    tokensUsed: num(d['tokensUsed']),
+    costUsd: num(d['costUsd']),
+    codexTokens: num(d['codexTokens']),
+    pendingFindings: num(d['pendingFindings']),
+    pendingFrom: str(d['pendingFrom']),
+    carried: num(d['carried']),
+  };
+  // At least one thing has to have been legible for this to be history rather
+  // than a payload nobody could read.
+  return Object.values(from).some((x) => x !== null) ? from : null;
 }
 
 function str(v: unknown): string | null {
@@ -663,6 +974,29 @@ function readChanges(v: unknown): FindingRow['severityChanges'] {
 }
 
 /**
+ * What running a reproducer observed (#113).
+ *
+ * Whole-list, like `readAttempts` and unlike `readFindings`: these are two
+ * observations of one test at two moments, and half of that pair is a claim
+ * nobody made. An entry missing its verdict makes the whole list null, which
+ * the pane draws as *no reproducer* — the same thing a finding without one gets,
+ * because to a reader they are the same fact.
+ */
+function readReproducer(v: unknown): FindingRow['reproducer'] {
+  if (!Array.isArray(v)) return null;
+  const out: { verdict: string; at: string; reason: string | null }[] = [];
+  for (const item of v as unknown[]) {
+    if (typeof item !== 'object' || item === null) return null;
+    const row = item as Record<string, unknown>;
+    const verdict = str(row['verdict']);
+    const at = str(row['at']);
+    if (verdict === null || at === null) return null;
+    out.push({ verdict, at, reason: str(row['reason']) });
+  }
+  return out.length === 0 ? null : out;
+}
+
+/**
  * The findings a census listed.
  *
  * Per-entry rather than whole-list, unlike `readAttempts`: a finding missing its
@@ -689,6 +1023,11 @@ function readFindings(v: unknown): FindingRow[] {
       evidence: num(row['evidence']) ?? 0,
       downgraded: readDowngrade(row['downgraded']),
       severityChanges: readChanges(row['severityChanges']),
+      reproducer: readReproducer(row['reproducer']),
+      // `=== true`, so a core that does not send the field is not read as
+      // having said no. It happens to mean the same thing here, and the
+      // coercion is still the one that cannot be wrong later.
+      deferred: row['deferred'] === true,
     });
   }
   return out;
@@ -799,6 +1138,44 @@ function withPhase(cycles: readonly Cycle[], kind: CycleKind, phase: PhaseGroup)
 }
 
 /**
+ * Is this `phase_started` the same round re-entering the phase it is already in?
+ *
+ * **A plan round that answers its own questions is one round and must be one
+ * card** (#223). The loop announces `planning` again when it revises against the
+ * answers, so the column and the pilot's log each drew a second `plan · round 1`
+ * — and the report was exact: *"there are now TWO boxes for Plan Round 1 …
+ * rather than continuing with the existing box, it created a new box after
+ * answering the questions."* Splitting a round in half is the mirror of the bug
+ * the merged card had, where a round's two halves hid inside one entry.
+ *
+ * The test is deliberately narrow, and every clause is load-bearing:
+ *
+ * - **The most recently opened group**, not any group with a matching round. A
+ *   fix round re-enters `implementing` at the same review round, and between the
+ *   two there is a `review` group — so the newest is `review` and nothing merges.
+ *   Two groups of one phase with anything at all between them stay two.
+ * - **Both rounds stated.** A null round is the loop declining to number the
+ *   phase, and two unnumbered groups are not evidence of one round. Requiring
+ *   the number is the direction that leaves an older core drawing exactly what
+ *   it drew before.
+ *
+ * What the merged card gains is the whole question round: the answerer's turn,
+ * the revision it produced and the original draft all sit in one group, which is
+ * the shape the loop actually has.
+ */
+function reEntered(cycles: readonly Cycle[], phase: string, round: number | null): PhaseGroup | null {
+  if (round === null) return null;
+  let newest: PhaseGroup | null = null;
+  for (const cycle of cycles) {
+    for (const group of cycle.phases) {
+      if (newest === null || group.id > newest.id) newest = group;
+    }
+  }
+  if (newest === null) return null;
+  return newest.phase === phase && newest.round === round ? newest : null;
+}
+
+/**
  * Apply `f` to the most recently opened phase, wherever it sits.
  *
  * By `id` rather than by array position: cycles are stored in the order they
@@ -896,17 +1273,22 @@ const unsettled =
  * so the newest phase is not necessarily in the last cycle.
  */
 function currentPhase(run: Run): string | null {
-  let newest = -1;
-  let name: string | null = null;
+  return newestPhase(run)?.phase ?? null;
+}
+
+/** The round of that same phase, so a line can be filed under `Plan 1`. */
+function currentRound(run: Run): number | null {
+  return newestPhase(run)?.round ?? null;
+}
+
+function newestPhase(run: Run): PhaseGroup | null {
+  let newest: PhaseGroup | null = null;
   for (const cycle of run.cycles) {
     for (const phase of cycle.phases) {
-      if (phase.id > newest) {
-        newest = phase.id;
-        name = phase.phase;
-      }
+      if (newest === null || phase.id > newest.id) newest = phase;
     }
   }
-  return name;
+  return newest;
 }
 
 /** Close the running turn, if there is one. */
@@ -959,6 +1341,12 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
         verifyRound: frame.context.verifyRound,
         turnId: settled === null ? null : settled.id,
       },
+      // Where the run has got to, for the footer's *next hold* (#223, hi-fi 1).
+      // The last boundary that actually held is the only position signal on this
+      // wire that is a boundary: a phase name would need a phase-to-boundary map
+      // written in the window, which is the derivation the footer has always
+      // declined to make.
+      lastGate: frame.context.boundary,
     };
   }
 
@@ -990,6 +1378,12 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
       frame.id === 'phase_started'
         ? (str((frame.data ?? {})['phase']) ?? currentPhase(run))
         : currentPhase(run),
+    // The same correction, on the same id, for the same reason: the line that
+    // opens a round belongs to that round rather than to the one before it.
+    round:
+      frame.id === 'phase_started'
+        ? (num((frame.data ?? {})['round']) ?? currentRound(run))
+        : currentRound(run),
     role: run.running?.role ?? null,
   };
   const output = [...run.output, line].slice(-OUTPUT_KEEP);
@@ -1010,16 +1404,25 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
         // narrate a turn ending, so the next thing starting is the signal - and
         // it is a true one, because turns within a run never overlap.
         const closed = endRunning(next, at);
+        const round = num(data['round']);
+        // Kept when a later phase carries none, rather than cleared: the base is
+        // established once, by the implement phase, and every phase after it
+        // diffs against the same commit.
+        const baseSha = str(data['baseSha']) ?? closed.baseSha;
+        // The same round re-entering the phase it is already in - a plan round
+        // revising against its own answers. One round, one group, and the
+        // group's `startedAt` stays where it was: a card is dated from when the
+        // round began, not from its second turn.
+        if (reEntered(closed.cycles, phase, round) !== null) {
+          return { ...closed, baseSha };
+        }
         return {
           ...closed,
-          // Kept when a later phase carries none, rather than cleared: the base
-          // is established once, by the implement phase, and every phase after
-          // it diffs against the same commit.
-          baseSha: str(data['baseSha']) ?? closed.baseSha,
+          baseSha,
           cycles: withPhase(closed.cycles, kind, {
             id: id(),
             phase,
-            round: num(data['round']),
+            round,
             startedAt: at,
             turns: [],
             gates: [],
@@ -1140,8 +1543,84 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
         // `at` is when the core said this, which is the honest answer to *when
         // did the task reach the core* - the window's own send time would be
         // when it asked, not when anything happened (hi-fi 16).
-        return { ...next, identity: { runId, dir, resumed: data['resumed'] === true, at } };
+        return {
+          ...next,
+          identity: {
+            runId,
+            dir,
+            // Independently nullable, and not gated on each other the way
+            // `runId` and `dir` are: these arrived later than the frame did
+            // (#223), so a run narrated by an older core has an identity with
+            // neither and a header that says so rather than one that is absent.
+            repo: str(data['repo']),
+            workDir: str(data['workDir']),
+            task: str(data['task']),
+            resumed: data['resumed'] === true,
+            at,
+          },
+          // What earlier sessions of this run already did (#211). Null on a
+          // fresh run, and null on a resume from a core too old to send it -
+          // both mean "there is no history to show", which is the only claim
+          // the column may make without it.
+          from: readResumedFrom(data['from']),
+        };
       }
+
+      // Which branch the commits land on (#223, hi-fi 1). `prepareGit` says this
+      // at each of the seven places it settles the question, so the window is
+      // told rather than deriving `vibe/<run-id>` from the run id - which is a
+      // convention `git.branchPrefix` can change and `--no-branch` can remove.
+      case 'run_branch':
+        return { ...next, branch: { name: str(data['branch']), why: str(data['why']) } };
+
+      /**
+       * What a round put in the history (#223).
+       *
+       * `sha` is required and `since` is not: a first commit in a repository
+       * that had none has no left-hand end, and that is a real range rather than
+       * a missing field. A frame with no `sha` is dropped — a commit with no id
+       * is not a commit anybody can diff.
+       */
+      case 'round_committed': {
+        const sha = str(data['sha']);
+        if (sha === null) return next;
+        return {
+          ...next,
+          commits: [
+            ...next.commits,
+            { sha, since: str(data['since']), message: str(data['message']), at },
+          ],
+        };
+      }
+
+      /**
+       * A file the run just wrote (#223).
+       *
+       * Appended rather than de-duplicated: a plan round that answers its own
+       * questions rewrites `plan-<n>.json` in place, and the second write is
+       * exactly the event a pane holding the first one needs to hear about.
+       */
+      case 'artifact_written': {
+        const name = str(data['name']);
+        if (name === null) return next;
+        return { ...next, artifacts: [...next.artifacts, name] };
+      }
+
+      /**
+       * A plan-only run reached its end (#223).
+       *
+       * **The one thing a completed plan-only run and every other completed run
+       * did not differ by on screen**, and they want opposite next actions: one
+       * is finished, the other has an approved plan and nothing built from it.
+       * `planOnly` has been durable since `createRun` and was never narrated, so
+       * the window could not tell them apart — and the only path back to the
+       * plan was a new run that re-derived it.
+       *
+       * `carried` is what the tolerance let through, counted. It is a fact about
+       * the plan being offered, not a judgement about whether to implement it.
+       */
+      case 'plan_only_stopped':
+        return { ...next, plannedOnly: { carried: num(data['carried']) ?? 0 } };
 
       case 'verify_started': {
         const gate = str(data['gate']);
@@ -1254,6 +1733,21 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
         };
       }
 
+      case 'session_compacting': {
+        const slot = str(data['slot']);
+        // A compaction that cannot say which session it compacted cannot be
+        // attributed, and a measurement that cannot be attributed is not
+        // recorded - the same rule the heartbeat follows.
+        if (slot === null) return next;
+        return {
+          ...next,
+          compactions: [
+            ...next.compactions,
+            { slot, model: str(data['model']), measured: num(data['measured']), at },
+          ],
+        };
+      }
+
       case 'findings_reported': {
         const phase = str(data['phase']);
         // Only the two the loop reports, and an unrecognised one is dropped
@@ -1280,41 +1774,85 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
         };
       }
 
+      /**
+       * A round opened. **Appended, never replacing the one before it.**
+       *
+       * This is the whole of the fix: the field held one round, so the second
+       * `questions_opened` of a run silently destroyed the first — its counts,
+       * its cap and every question in it — and the column could only ever draw
+       * the last one. A run that asked three rounds showed one.
+       *
+       * Appended plainly, the way `artifacts` appends a name written twice: two
+       * frames are two events, and collapsing them here would be this window
+       * deciding that a round it was told about twice happened once.
+       */
       case 'questions_opened':
         return {
           ...next,
-          questions: {
-            total: num(data['total']) ?? 0,
-            blocking: num(data['blocking']) ?? 0,
-            open: readQuestions(data['questions']),
-          },
+          questions: [
+            ...next.questions,
+            {
+              total: num(data['total']) ?? 0,
+              blocking: num(data['blocking']) ?? 0,
+              // Hi-fi 14's nested counter, or null on a core that predates it
+              // (#223). Both or neither would be wrong here: a round with no cap
+              // is still a position worth drawing, and the group says `round 2`
+              // rather than `round 2/3` rather than saying nothing.
+              round: num(data['round']),
+              cap: num(data['cap']),
+              open: readQuestions(data['questions']),
+              at,
+            },
+          ],
         };
 
       /**
        * The answers, matched back onto the questions by their text (#223, `1f`).
        *
-       * **Matched, not appended.** The answerer is given the questions and
-       * returns answers keyed by the question string - which is exactly how the
-       * core pairs them, in `matches()` - so this is the same join rather than a
-       * second one. A question with no matching answer keeps its null, because
-       * an unanswered question and an answered one are the two states the pane
-       * exists to distinguish.
+       * **Matched, not appended**, and the key is the question as the *planner*
+       * wrote it. That is now true by construction rather than by hope: the
+       * pairing happens in the core, in `pairAnswers`, and `questions_answered`
+       * carries the planner's wording on every row - so the string on this frame
+       * and the string on `questions_opened` are one string.
+       *
+       * **It was not, and the failure was silent** (#211). The answerer is asked
+       * to echo the question and echoed what it was shown, which the prompt
+       * rendered with the kind and blocking tag after it, so this exact match
+       * failed on every answer and the pane drew "No answer yet" over two
+       * answered questions. The window is the wrong place to fix that: it has no
+       * `similarity` and no threshold, and a second fuzzy matcher here would
+       * drift from the core's on the first wording either side did not expect.
+       *
+       * So this stays exact on purpose. A question with no matching answer keeps
+       * its null, because an unanswered question and an answered one are the two
+       * states the pane exists to distinguish - and an answer matching no
+       * question is dropped here rather than attached to the nearest one, having
+       * already been reported by the core that could not place it either.
        */
       case 'questions_answered': {
-        const before = next.questions;
-        if (before === null) return next;
+        // **The round the loop is on**, which is the last one opened. The
+        // answerer takes its turn on the questions that were just raised, so
+        // there is exactly one round an answer can belong to and it is this one.
+        // Searching the list for a matching `round` would look safer and would
+        // be worse: the frame need not carry one, and a null would then match
+        // whichever earlier round also had none.
+        const before = next.questions[next.questions.length - 1];
+        if (before === undefined) return next;
         const answers = readAnswers(data['answers'], false);
         const declined = readAnswers(data['declined'], true);
         const found = [...answers, ...declined];
         return {
           ...next,
-          questions: {
-            ...before,
-            open: before.open.map((q) => {
-              const a = found.find((x) => x.question.trim() === q.question.trim());
-              return a === undefined ? q : { ...q, ...a };
-            }),
-          },
+          questions: [
+            ...next.questions.slice(0, -1),
+            {
+              ...before,
+              open: before.open.map((q) => {
+                const a = found.find((x) => x.question.trim() === q.question.trim());
+                return a === undefined ? q : { ...q, ...a };
+              }),
+            },
+          ],
         };
       }
 
@@ -1487,6 +2025,48 @@ export function staleness(run: Run, now: number): Staleness {
 }
 
 /**
+ * How many consecutive rounds each finding in the latest census has survived
+ * (`4c`).
+ *
+ * **The state the design says matters**: *"a finding surviving a fix round is
+ * the loop arguing with itself, and it is what the oscillation guard counts."*
+ * Without it `4c`'s timeline stops at *fixer claims resolved* and never reaches
+ * the interesting end of it.
+ *
+ * ## This is a count of appearances, and it is not the loop's verdict
+ *
+ * `persistentStreak` in `src/run.ts` is the authority, it runs over
+ * `state.roundHistory`, and **that is not on the wire**. So this counts
+ * something narrower and says so wherever it is drawn: *this id was in the
+ * previous round's census as well.* Same phase only — a plan finding and a
+ * review finding sharing an id are two claims about two artifacts.
+ *
+ * It is a set operation over two things the loop stated, not a quantity computed
+ * out of two others, which is the line `model.ts` is written to. A window that
+ * printed the word *persisted* on its own authority would be claiming the
+ * guard's judgement; a window that says *seen in the last 3 rounds* is reporting
+ * what it was told, twice.
+ */
+export function persistence(censuses: readonly Census[]): ReadonlyMap<string, number> {
+  const latest = censuses[censuses.length - 1];
+  const out = new Map<string, number>();
+  if (latest === undefined) return out;
+
+  // Only this cycle's rounds, newest first, so a gap in one round ends a streak
+  // rather than being counted through.
+  const sameCycle = censuses.filter((c) => c.phase === latest.phase);
+  for (const finding of latest.findings) {
+    let rounds = 0;
+    for (let i = sameCycle.length - 1; i >= 0; i -= 1) {
+      if (!(sameCycle[i]?.findings.some((f) => f.id === finding.id) ?? false)) break;
+      rounds += 1;
+    }
+    out.set(finding.id, rounds);
+  }
+  return out;
+}
+
+/**
  * How many findings are blocking in the most recent round, or zero.
  *
  * **In the model rather than in the tab bar**, which is the rule this file
@@ -1503,6 +2083,15 @@ export function blocking(run: Run): number {
   if (latest === undefined) return 0;
   return (latest.counts['P0'] ?? 0) + (latest.counts['P1'] ?? 0);
 }
+
+/*
+ * There was a `blockingIn(run, phase)` here and it is gone with the badge it was
+ * written for. `Plan critique · 2` meant two blocking findings and was read as
+ * two critiques - reasonably, because every other count in that bar is how many
+ * things are behind the tab. The fix is not a better badge: the four counts and
+ * the tolerance that decided them are already drawn on the round they belong to,
+ * which is the only place they mean anything specific.
+ */
 
 /**
  * What the running row can say, and what it cannot.
@@ -1606,6 +2195,75 @@ export function runningRow(turn: Turn, now: number): RunningRow {
     // no frame carries it here, which is a different sentence and the one a
     // reader of this row needs.
     comparable:
-      'no comparable turns — vibe scorecard reads the archive, but no frame carries it here (#114)',
+      'no comparable turns — vibe scorecard reads the archive, but no frame carries it here',
   };
+}
+
+/**
+ * The question round the loop is on, or null (#223).
+ *
+ * **One expression, because three surfaces ask it** — the Questions tab's badge,
+ * the halt banner in the footer and the pane itself — and three spellings of
+ * "the latest one" is how a badge and the pane behind it come to disagree about
+ * one run, which is a defect this window has already had once.
+ *
+ * The **last** rather than the last with open questions: a round whose answers
+ * all came back is still the round the loop is on, and a banner that skipped
+ * back to an earlier one would be pointing at questions that were settled.
+ */
+export function latestQuestions(run: Run): QuestionRound | null {
+  return run.questions[run.questions.length - 1] ?? null;
+}
+
+/**
+ * A run's own narration, folded into the `Run` it describes (#223).
+ *
+ * **One fold, two callers, and that is the point.** `useReplay` uses it to draw
+ * a run somebody opened; `Cockpit` uses it to *seed* a resume, so the column
+ * starts with what the run already did instead of with an empty one. Two copies
+ * of this loop would be two answers to "what did this run look like", which is
+ * the mistake the replay was built to avoid in the first place.
+ *
+ * Each step is folded at **its own** time rather than at arrival: a replay
+ * stamped with `Date.now()` would date a week-old run to this afternoon and give
+ * every turn a duration of nothing.
+ *
+ * It deliberately does not apply the ending. A `result` is a frame the caller
+ * applies, and the two callers want opposite things from it — a run you opened
+ * has ended and should say so, and a run you are **resuming** has not.
+ */
+export function foldReplay(
+  steps: readonly { at: number; narration: Omit<Narration, 'type'> }[],
+): Run {
+  let built = emptyRun();
+  for (const step of steps) {
+    built = reduce(built, { type: 'narration', ...step.narration }, step.at);
+  }
+  return built;
+}
+
+/**
+ * A replayed run, made ready to be carried on with (#223).
+ *
+ * **The ending has to go, and leaving it on was a real defect.** `foldReplay`
+ * folds the narration as it happened, which includes `run_escalated` or
+ * `run_failed` — so seeding a resume with it put the *previous* stop's reason on
+ * a run that was starting, and the footer correctly drew what it was given:
+ * `ENDING — the run is stopping`, quoting a stop from an hour ago, exactly where
+ * the pause and stop controls should have been.
+ *
+ * Three fields and each is an ending in its own right: `reason` is why the loop
+ * is giving up, `ended` is the verdict it reached, and `completed` is the exit
+ * code the command returned. A resume has none of them yet, and saying so is the
+ * difference between a run that is starting and one that has stopped.
+ *
+ * `running` goes too. Nothing is executing at the moment a resume is seeded —
+ * the first turn has not been announced — and a live card left over from the
+ * replay would pulse for a turn that ended hours ago.
+ *
+ * What stays is everything the resume is being given back: the cycles, their
+ * turns, the censuses, the spend, the commits and the artifacts.
+ */
+export function forResume(run: Run): Run {
+  return { ...run, reason: null, ended: null, completed: null, running: null };
 }

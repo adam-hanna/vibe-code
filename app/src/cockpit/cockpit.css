@@ -42,28 +42,475 @@
   flex: none;
 }
 
+/* Which run the panes are about, whenever it is not the live one. Quiet ground
+   rather than the alarm's: reading a finished run is a normal thing to be doing,
+   and the strip is here to answer "which run is this" rather than to warn. */
+.v-cockpit__viewing {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+  background: var(--surface-chrome);
+  border-bottom: 1px solid var(--rule-inner);
+  padding: var(--space-2) var(--space-5);
+  flex: none;
+}
+
+.v-cockpit__viewingwhat {
+  color: var(--text-emphasis);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 40%;
+}
+
+.v-cockpit__viewingnote {
+  color: var(--text-tertiary);
+}
+
 .v-cockpit__body {
   display: flex;
   flex: 1;
   min-height: 0;
 }
 
-/* 364px, fixed. The loop column earns its width; nothing else here does. */
+/*
+ * The loop column, now inside a `SidePanel` on the RIGHT (#223).
+ *
+ * The width is still 364px and it is still the one column that earns one; what
+ * moved is the edge and the ownership. `.v-side` holds the width, the ground and
+ * the rule now, because the runs pane on the left needs exactly the same three
+ * and two columns disagreeing about the width of a column is the kind of thing
+ * that is only visible with both open.
+ */
 .v-cockpit__loop {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/*
+ * `min-height: 0` is the whole of why the artifact panes would not scroll.
+ *
+ * Every one of them sets `flex: 1; min-height: 0; overflow-y: auto` on itself
+ * and none of it did anything, because a flex item's default `min-height` is
+ * `auto` — so this column grew to fit a nine-page plan instead of holding its
+ * height and letting the child scroll inside it. The column beside it had the
+ * line from the day it was written, which is why one side scrolled and the other
+ * did not.
+ */
+.v-cockpit__pane {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ---- the two side panels --------------------------------------------------- */
+
+/*
+ * One component, both edges (`SidePanel.tsx`). The runs pane and the loop column
+ * are standing context rather than work surfaces, and they share a width, a
+ * ground and a rule so that the window reads as three columns rather than as two
+ * different ideas either side of one.
+ */
+.v-side {
   width: 364px;
   flex: none;
   display: flex;
   flex-direction: column;
-  background: var(--surface-column);
-  border-right: 1px solid var(--rule-structure);
   min-height: 0;
+  background: var(--surface-column);
 }
 
-.v-cockpit__pane {
+.v-side--left {
+  border-right: 1px solid var(--rule-structure);
+}
+
+.v-side--right {
+  border-left: 1px solid var(--rule-structure);
+}
+
+/* Shut: a strip, never a gap. The way back is where the panel was. */
+.v-side--shut {
+  width: var(--dim-rail);
+}
+
+.v-side__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--rule-structure);
+  flex: none;
+}
+
+.v-side__title {
+  font: var(--type-label);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.v-side__toggle,
+.v-side__grip {
+  font: var(--type-label);
+  color: var(--text-tertiary);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: var(--space-1);
+}
+
+.v-side__toggle:hover,
+.v-side__grip:hover {
+  color: var(--text-emphasis);
+}
+
+.v-side__toggle:focus-visible,
+.v-side__grip:focus-visible {
+  outline: 2px solid var(--accent-solid);
+  outline-offset: 2px;
+}
+
+/* The whole strip is the control, so there is no small target to find. */
+.v-side__grip {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) 0;
+}
+
+.v-side__mark {
+  font: var(--type-mono-sm);
+  color: var(--text-secondary);
+}
+
+/* Read down the strip rather than one letter per line: a rotated name is still
+   the name, and a stack of letters is a puzzle. */
+.v-side__vertical {
+  writing-mode: vertical-rl;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.v-side__body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* A shut strip that carries controls gives them the room: the grip stops
+   filling the column and becomes just the expand affordance at the top. */
+.v-side--tools .v-side__grip {
+  flex: none;
+}
+
+.v-side__stub {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+}
+
+.v-side__tool {
+  font: var(--type-label);
+  color: var(--text-tertiary);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: var(--space-1) var(--space-2);
+}
+
+.v-side__tool:hover {
+  color: var(--text-emphasis);
+}
+
+.v-side__tool:focus-visible {
+  outline: 2px solid var(--accent-solid);
+  outline-offset: 2px;
+}
+
+/* ---- the navigator: projects, their runs, and pins -------------------------- */
+
+.v-nav {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-2);
+}
+
+.v-nav__actions {
+  display: flex;
+  flex-direction: column;
+}
+
+.v-nav__action {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  font: var(--type-body);
+  color: var(--text-primary);
+  background: none;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  padding: var(--space-2);
+}
+
+.v-nav__action:hover {
+  background: var(--surface-active-hdr);
+  color: var(--text-emphasis);
+}
+
+/* Fixed width so the labels line up down the column, which is what makes the
+   glyphs read as a set rather than as three unrelated marks. */
+.v-nav__glyph {
+  width: var(--dim-nav-glyph);
+  flex: none;
+  color: var(--text-tertiary);
+  font: var(--type-label);
+}
+
+.v-nav__section {
+  display: flex;
+  flex-direction: column;
+}
+
+.v-nav__heading {
+  font: var(--type-label);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin: 0;
+  padding: var(--space-1) var(--space-2);
+}
+
+/* A row is a navigation control and a pin, side by side. The pin appears on
+   hover and whenever it is set, so an unpinned list is not a column of marks. */
+.v-nav__row {
+  display: flex;
+  align-items: center;
+}
+
+.v-nav__row:hover {
+  background: var(--surface-active-hdr);
+}
+
+.v-nav__row--on {
+  background: var(--surface-active);
+}
+
+.v-nav__open {
   flex: 1;
   min-width: 0;
   display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font: var(--type-body);
+  color: var(--text-secondary);
+  background: none;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  padding: var(--space-2);
+}
+
+.v-nav__open:hover:not(:disabled) {
+  color: var(--text-emphasis);
+}
+
+/* A run held by a live process. Not a control, and it says why on hover. */
+.v-nav__open:disabled {
+  cursor: default;
+  color: var(--text-tertiary);
+}
+
+.v-nav__open:focus-visible,
+.v-nav__act:focus-visible,
+.v-nav__more:focus-visible {
+  outline: 2px solid var(--accent-solid);
+  outline-offset: -2px;
+}
+
+.v-nav__title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.v-nav__title--on {
+  color: var(--text-emphasis);
+}
+
+.v-nav__row--project .v-nav__open {
+  color: var(--text-primary);
+}
+
+.v-nav__folder,
+.v-nav__bullet {
+  width: var(--dim-nav-glyph);
+  flex: none;
+  color: var(--text-tertiary);
+  font: var(--type-label);
+}
+
+/* A run asked for and not started yet (#223): the word, on the right of the
+   row, so the row reads as a draft before anybody clicks it. */
+.v-nav__draft {
+  flex: none;
+  margin-left: auto;
+  font: var(--type-label);
+  color: var(--text-tertiary);
+  text-transform: lowercase;
+}
+
+/* The row's controls: pin, rename, delete on a run; new-run and remove on a
+   project. Quiet until the row is under the pointer, because a list of twenty
+   runs with sixty glyphs down its right edge is a list nobody can scan. */
+.v-nav__act {
+  font: var(--type-label);
+  color: var(--text-tertiary);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: var(--space-1) var(--space-2);
+  flex: none;
+  opacity: 0;
+}
+
+.v-nav__row:hover .v-nav__act,
+.v-nav__row:focus-within .v-nav__act,
+.v-nav__act:focus-visible,
+.v-nav__act--on {
+  opacity: 1;
+}
+
+/* A project's are always drawn. There are few of them, and `＋` is the one
+   control somebody is looking for rather than discovering. */
+.v-nav__row--project .v-nav__act {
+  opacity: 1;
+}
+
+.v-nav__act--on {
+  color: var(--accent-solid);
+}
+
+.v-nav__act:hover {
+  color: var(--text-emphasis);
+}
+
+/* No red anywhere in this palette — `--text-emphasis` is what it reserves for
+   alarm, so a destructive control is emphasised rather than coloured. */
+.v-nav__act--danger:hover {
+  color: var(--text-emphasis);
+}
+
+/* The rename box takes the row it replaces, so nothing below it moves. */
+.v-nav__row--rename {
+  gap: var(--space-1);
+  padding: var(--space-1) 0;
+}
+
+.v-nav__row--rename .v-nav__field {
+  flex: 1;
+  min-width: 0;
+}
+
+.v-nav__row--rename .v-nav__act {
+  opacity: 1;
+}
+
+/* Indented under the project it belongs to, which is the only thing saying the
+   nesting is real rather than two lists that happen to be adjacent. */
+.v-nav__runs {
+  display: flex;
   flex-direction: column;
+  padding-left: var(--space-4);
+}
+
+/* A project inside another's directory — a worktree, usually — drawn under it
+   (#223). It inherits the runs' indent, and the rule says the rows beneath
+   belong to the nested project rather than to its parent. */
+.v-nav__nested {
+  display: flex;
+  flex-direction: column;
+  margin-top: var(--space-1);
+  border-left: 1px solid var(--rule-inner);
+}
+
+.v-nav__more {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  background: none;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  padding: var(--space-2);
+}
+
+.v-nav__more:hover {
+  color: var(--text-emphasis);
+}
+
+.v-nav__note {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  padding: var(--space-2);
+}
+
+/* A duplicate project, or a chooser that would not open. Said rather than
+   absorbed: a button that adds no row has ignored the person who pressed it. */
+.v-nav__note--alarm {
+  color: var(--text-primary);
+  background: var(--surface-alarm);
+}
+
+.v-nav__dismiss {
+  font: var(--type-label);
+  color: var(--text-tertiary);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0 var(--space-1);
+  text-decoration: underline;
+}
+
+.v-nav__dismiss:hover {
+  color: var(--text-emphasis);
+}
+
+.v-nav__add {
+  padding: var(--space-1) var(--space-2);
+}
+
+.v-nav__field {
+  width: 100%;
+  font: var(--type-mono-sm);
+  color: var(--text-primary);
+  background: var(--surface-card);
+  border: 1px solid var(--rule-control);
+  padding: var(--space-2);
+}
+
+.v-nav__field:focus-visible {
+  outline: 2px solid var(--accent-solid);
+  outline-offset: 1px;
 }
 
 .v-cockpit__tabs {
@@ -102,15 +549,15 @@
 }
 
 /*
- * A tab whose data does not exist yet. Dashed and NEVER dimmed - the design's
- * rule for unavailable, because dimming reads as "disabled for you" where dashed
- * reads as "nothing has filled this in".
+ * There is no `--off` tab any more (#223). It dressed one placeholder - `Prompt`,
+ * dashed, with "not built yet" on its tooltip - and what that stood for is now a
+ * section of Settings, so the last tab in the bar with nothing behind it is gone
+ * and the rule went with it.
+ *
+ * The rule it carried is the one worth keeping in mind if another placeholder is
+ * ever needed: dashed and NEVER dimmed, because dimming reads as "disabled for
+ * you" where dashed reads as "nothing has filled this in".
  */
-.v-cockpit__tab--off {
-  color: var(--text-tertiary);
-  border-bottom: 1px dashed var(--rule-control-dim);
-  padding-bottom: var(--space-1);
-}
 
 .v-cockpit__unknown {
   font: var(--type-mono-sm);
@@ -337,6 +784,102 @@
 /* The primary sits last, so the destructive action is not what the eye or the
    pointer lands on first. */
 .v-stop__actions .v-btn:last-child {
+  margin-left: auto;
+}
+
+/* ------------------------------------------------------------------- confirm
+ * The dialog in front of anything that cannot be undone (#223). It borrows
+ * `StopConfirm`'s shape deliberately — same head, same fact rows, same
+ * primary-is-the-safe-one footer — because the two are one kind of moment and a
+ * second visual language for it would make the rarer one look like a different
+ * product.
+ */
+.v-confirm__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+/* Bounded as well as previewed, and the two are not redundant. `preview()` cuts
+   the text and this cuts the layout — a 72-character preview is still three
+   lines at `--type-title` in a narrow window, and the clamp is what makes the
+   heading a heading at every width rather than only at the one it was seen in. */
+.v-confirm__title {
+  font: var(--type-title);
+  color: var(--text-display);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.v-confirm__lead {
+  font: var(--type-lead);
+  color: var(--text-primary);
+  margin: 0 0 var(--space-4);
+}
+
+/* One fact per row: what goes, where from, and what survives. A path and an id
+   are strings to recognise rather than read, which is what the mono is for. */
+.v-confirm__fact {
+  display: grid;
+  grid-template-columns: 9rem 1fr;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--rule-inner);
+}
+
+.v-confirm__label {
+  font: var(--type-label);
+  letter-spacing: 0.08em;
+  color: var(--text-tertiary);
+}
+
+.v-confirm__value {
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+.v-confirm__value--mono {
+  font: var(--type-mono-sm);
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+/* The whole of a long value, in a box of its own. `pre-wrap` because a brief has
+   its own line breaks and they are how it is read; `max-height` because the row
+   is the only one in the dialog whose content is a document, and a document in a
+   fact row is what took the Cancel button off the screen. */
+.v-confirm__value--scroll {
+  max-height: 11rem;
+  overflow-y: auto;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--rule-inner);
+  white-space: pre-wrap;
+}
+
+/* The core's own refusal, on the dialog rather than instead of it: a window that
+   closed on "it is still running" would look exactly like one that succeeded. */
+.v-confirm__problem {
+  font: var(--type-body-sm);
+  color: var(--text-primary);
+  background: var(--surface-alarm);
+  padding: var(--space-3);
+  margin: var(--space-4) 0 0;
+}
+
+.v-confirm__actions {
+  display: flex;
+  gap: var(--space-3);
+  margin-top: var(--space-5);
+}
+
+/* The primary sits last, so the destructive action is not what the eye or the
+   pointer lands on first. */
+.v-confirm__actions .v-btn:last-child {
   margin-left: auto;
 }
 
@@ -621,19 +1164,48 @@
   );
 }
 
+/* A button, because the whole head opens and closes the group. Reset to the
+   block it already was: a full-width flex row that inherits its own colour, so
+   the disclosure gesture costs the design nothing. */
 .v-cycle__head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
   gap: var(--space-3);
+  width: 100%;
   padding: var(--space-3) var(--space-4);
+  border: none;
   border-bottom: 1px solid var(--rule-inner);
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 
+.v-cycle__head:hover {
+  background: var(--surface-active-hdr);
+}
+
+.v-cycle--closed .v-cycle__head {
+  border-bottom: none;
+}
+
+/* The caret. `ch` rather than a pixel width so the two glyphs occupy exactly the
+   same space and a group does not shift sideways when it opens. */
+.v-disclose {
+  display: inline-block;
+  width: 1.2ch;
+  flex: none;
+  color: var(--text-tertiary);
+}
+
+/* `auto` rather than `space-between` on the parent: the row is three children
+   now, and spreading them would push the caret away from the title it opens. */
 .v-cycle__title {
   font: var(--type-label);
   letter-spacing: 0.08em;
   color: var(--text-emphasis);
+  margin-right: auto;
 }
 
 .v-cycle__status {
@@ -650,11 +1222,29 @@
   border-bottom: none;
 }
 
+/* The same disclosure as the group header, one level in. */
 .v-phase__head {
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  width: 100%;
   margin-bottom: var(--space-2);
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.v-phase__head:hover .v-phase__name {
+  color: var(--text-emphasis);
+}
+
+/* A closed round keeps its head and gives up the space its body had, so a long
+   run folds down to a readable list of round headings. */
+.v-phase--closed .v-phase__head {
+  margin-bottom: 0;
 }
 
 .v-phase__name {
@@ -812,11 +1402,13 @@
 
 /* -------------------------------------------------------------- questions */
 
-/* Nested inside cycle 1 with a left rule, because that is what it is. */
+/* Nested inside the round that opened it, with a left rule, because that is what
+   it is. The margin is smaller than it was: this now sits inside a round row
+   rather than at the foot of the whole group. */
 .v-questions {
-  margin: 0 var(--space-4) var(--space-4) var(--space-6);
+  margin: var(--space-2) 0 var(--space-2) var(--space-3);
   border-left: 2px solid var(--accent-border-dim);
-  padding: var(--space-2) var(--space-4);
+  padding: var(--space-2) var(--space-3);
 }
 
 .v-questions__head {
@@ -825,9 +1417,64 @@
   color: var(--text-tertiary);
 }
 
+/* A count, and the count is the control. The question text lives in the
+   Questions pane: this column is 364px wide and a list of paragraphs in it
+   pushed every later round off the screen. */
 .v-questions__body {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-1) 0;
   font: var(--type-body-sm);
   color: var(--text-primary);
+  border: none;
+  background: none;
+  text-align: left;
+}
+
+/* The whole box is the control, not the count inside it. Only the count
+   navigated, which is the same finding the severity chips one level up already
+   earned: the largest thing on the surface was inert while something smaller
+   beside it did the navigating. */
+.v-questions--link {
+  cursor: pointer;
+}
+
+.v-questions--link:hover {
+  background: var(--surface-active-hdr);
+}
+
+.v-questions--link:hover .v-questions__n {
+  color: var(--accent-solid);
+  text-decoration: underline;
+}
+
+/* `role="button"` carries no focus ring of its own, and the box holds the
+   answerer's turn rows - so it cannot be a real `<button>` without putting a
+   control inside a control. This is the ring it would have had. */
+.v-questions--link:focus-visible {
+  outline: 1px solid var(--accent-solid);
+  outline-offset: 1px;
+}
+
+.v-questions__n {
+  color: var(--text-primary);
+}
+
+.v-questions__sub {
+  color: var(--text-tertiary);
+}
+
+.v-questions__waiting {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+  margin-top: var(--space-1);
 }
 
 .v-questions__note {
@@ -922,12 +1569,79 @@
   overflow-y: auto;
   background: var(--surface-page);
   padding: var(--space-3) var(--space-5);
+  display: flex;
+  flex-direction: column;
 }
 
 .v-output__lines {
   list-style: none;
   margin: 0;
   padding: 0;
+}
+
+/* ---- output, cut into the rounds the loop announced ------------------------ */
+
+/* `flex: none` for the reason `.v-sect` has it: this is a flex item inside a
+   scrolling column, and its `overflow: hidden` would otherwise resolve its
+   automatic minimum size to zero and let it clip instead of the pane scrolling. */
+.v-og {
+  flex: none;
+  border-bottom: 1px solid var(--rule-inner);
+  overflow: hidden;
+}
+
+.v-og__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-2) 0;
+  border: none;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.v-og__head:hover {
+  background: var(--surface-active-hdr);
+}
+
+.v-og__head:focus-visible {
+  outline: 2px solid var(--accent-solid);
+  outline-offset: -2px;
+}
+
+.v-og__caret {
+  width: var(--dim-nav-glyph);
+  flex: none;
+  color: var(--text-tertiary);
+  font: var(--type-label);
+}
+
+.v-og__title {
+  font: var(--type-kicker);
+  color: var(--text-emphasis);
+}
+
+.v-og__count {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  margin-left: auto;
+}
+
+/* The agent's own prose (#223). A rule down the left and the paragraph shape
+   kept, because this is the one thing in the pane that is a quotation: the loop
+   reports on itself in single lines, and the model writes paragraphs. Drawn
+   from the narration id, never from the sentence. */
+.v-output__line--said {
+  border-left: 2px solid var(--rule-inner);
+  padding-left: var(--space-3);
+  margin: var(--space-2) 0;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  display: block;
 }
 
 .v-output__line {
@@ -1113,7 +1827,19 @@
 
 /* ------------------------------------------------------------ findings pane (1e / 4c) */
 
-.v-find {
+/* ------------------------------------------------ the four artifact panes (#223)
+
+   Plans, Plan critique, Code review and Code are one layout with four subjects:
+   a list of sections, one per round, each of which opens onto what the run
+   actually wrote. `.v-doc` is the shell they share, `.v-sect` is the section, and
+   `.v-rep` is the one thing only the two report panes need - a finding that
+   opens.
+
+   These replace `.v-find__*`, which styled a pane that could show one round of
+   one judge from the four counts the wire carries. Every rule that survived the
+   move is here; nothing was dropped for being inconvenient. */
+
+.v-doc {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
@@ -1121,102 +1847,258 @@
   padding: var(--space-4) var(--space-5);
   display: flex;
   flex-direction: column;
-  gap: var(--space-5);
+  gap: var(--space-3);
 }
 
-.v-find--empty {
+.v-doc--empty {
   color: var(--text-secondary);
   font: var(--type-body);
   gap: var(--space-2);
   align-items: flex-start;
 }
 
-.v-find__gate {
+.v-doc__head {
   display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-
-.v-find__round {
-  font: var(--type-section);
-  letter-spacing: var(--track-section);
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  font: var(--type-label);
+  letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--text-tertiary);
-  margin: 0;
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
 }
 
-/* Four chips, zeros shown - a gate decision is being made here. */
-.v-find__chips {
-  display: flex;
-  gap: var(--space-2);
-  flex-wrap: wrap;
+.v-doc__again {
+  font: var(--type-label);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  background: none;
+  border: 1px solid var(--rule-control);
+  padding: var(--space-1) var(--space-2);
+  cursor: pointer;
 }
 
-.v-find__tolerance,
-.v-find__trend,
-.v-find__none {
+.v-doc__again:hover {
+  color: var(--text-emphasis);
+  border-color: var(--rule-strong);
+}
+
+.v-doc__note {
   font: var(--type-body-sm);
   color: var(--text-tertiary);
   margin: 0;
 }
 
-/* The consequence, not just the counts. */
-.v-find__consequence {
-  font: var(--type-lead);
-  color: var(--text-primary);
-  margin: 0;
+/* The file's own name, which is what makes a section and the artifact behind it
+   checkable against each other. Monospace because it is a string somebody may
+   go and type. */
+.v-doc__file {
+  font: var(--type-mono-sm);
+  color: var(--text-tertiary);
 }
 
-.v-find__list {
+/* A document, as it is on disk. `pre` because a plan IS markdown and rendering
+   it would mean shipping a parser to make prose prettier - the thing a person
+   reads a plan version for is the exact words the critic was shown. */
+.v-doc__text {
+  font: var(--type-mono-sm);
+  color: var(--text-secondary);
+  background: var(--surface-card);
+  border: 1px solid var(--rule-card);
+  margin: 0;
+  padding: var(--space-4);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ---- a section that opens -------------------------------------------------- */
+
+/*
+ * `flex: none` is what makes an opened section scrollable, and the reason is
+ * `overflow: hidden` two lines below it.
+ *
+ * A section is a flex item in `.v-doc`'s column. A flex item's automatic minimum
+ * size is normally its content, which is what stops it being squashed - but the
+ * spec resolves that minimum to **zero** when `overflow` is anything other than
+ * `visible`. So a section holding a nine-page plan shrank to whatever height was
+ * left and clipped the rest, and the pane never overflowed, so the pane never
+ * scrolled. Reported exactly that way: *"Plan Round 1 worked, however, it's not
+ * scrollable"*, and the same for critiques and code reviews, because all three
+ * are this component.
+ *
+ * The `overflow: hidden` stays - it is what clips the head's hover ground to the
+ * border - and this says the section keeps its content height regardless.
+ */
+.v-sect {
+  flex: none;
+  border: 1px solid var(--rule-card);
+  background: var(--surface-card);
+  overflow: hidden;
+}
+
+/* The whole head is the control, never a caret with a title beside it: a hit
+   target smaller than the thing it opens is the reason nobody finds it. */
+.v-sect__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-3) var(--space-4);
+  border: none;
+  background: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.v-sect__head:hover {
+  background: var(--surface-active-hdr);
+}
+
+.v-sect--open .v-sect__head {
+  border-bottom: 1px solid var(--rule-inner);
+}
+
+.v-sect__title {
+  font: var(--type-kicker);
+  color: var(--text-emphasis);
+}
+
+/* `auto` rather than `space-between` on the parent: the row is three children
+   and spreading them would push the caret away from the title it opens. */
+.v-sect__meta {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.v-sect__body {
+  padding: var(--space-4);
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
 }
 
-.v-find__row {
-  display: block;
-  width: 100%;
-  text-align: left;
-  background: none;
-  border: 0;
-  padding: 0;
-  color: inherit;
-  font: inherit;
-  cursor: pointer;
+/* ---- one finding, opened ---------------------------------------------------- */
+
+.v-rep__finding {
+  border: 1px solid var(--rule-inner);
+  background: var(--surface-panel);
 }
 
-.v-find__head {
+.v-rep__head {
   display: flex;
   align-items: baseline;
   gap: var(--space-3);
   flex-wrap: wrap;
+  width: 100%;
+  padding: var(--space-3);
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 
-.v-find__title {
+.v-rep__head:hover .v-rep__title {
+  color: var(--text-display);
+}
+
+.v-rep__title {
   font: var(--type-title);
   letter-spacing: var(--track-title);
   color: var(--text-primary);
 }
 
-.v-find__id {
+.v-rep__id {
   margin-left: auto;
   font: var(--type-mono-sm);
   color: var(--text-tertiary);
 }
 
-.v-find__meta {
+.v-rep__body {
+  padding: 0 var(--space-3) var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.v-rep__meta {
   display: flex;
   gap: var(--space-2);
   flex-wrap: wrap;
-  margin-top: var(--space-2);
 }
 
-.v-find__history {
+/* The three headings behind the fold. Label weight, because they are captions
+   over prose rather than titles of their own. */
+.v-rep__label {
+  font: var(--type-label);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin: var(--space-2) 0 0;
+}
+
+.v-rep__prose {
+  font: var(--type-body);
+  color: var(--text-secondary);
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+/* A field the report did not carry. Named as absent rather than left blank: an
+   empty block under a heading reads as a rendering bug. */
+.v-rep__absent {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  margin: 0;
+}
+
+.v-rep__cites {
   list-style: none;
-  margin: var(--space-3) 0 0;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+.v-rep__excerpt {
+  font: var(--type-mono-sm);
+  color: var(--text-tertiary);
+  background: var(--surface-card);
+  border-left: 2px solid var(--rule-inner);
+  margin: var(--space-1) 0 0;
+  padding: var(--space-2) var(--space-3);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* The loop's own sentence where it blocked, never one composed from the counts. */
+.v-rep__verdict {
+  font: var(--type-lead);
+  color: var(--text-primary);
+  margin: 0;
+}
+
+/* The judge's account of the round, which no frame has ever carried. */
+.v-rep__summary {
+  font: var(--type-body);
+  color: var(--text-secondary);
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.v-rep__history {
+  list-style: none;
+  margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
@@ -1539,6 +2421,76 @@
   margin: var(--space-2) 0 0;
 }
 
+/* Answering, on the page already showing the questions. A bordered block rather
+   than loose fields, because it is a different act from reading: everything
+   above it is the record and this is the one part that writes. */
+.v-q__answer {
+  margin-top: var(--space-5);
+  padding: var(--space-4);
+  border: 1px solid var(--accent-border);
+  background: var(--surface-accent-tint);
+}
+
+.v-q__answerhead {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+.v-q__field {
+  display: block;
+  margin-bottom: var(--space-4);
+}
+
+.v-q__fieldq {
+  display: block;
+  font: var(--type-body);
+  color: var(--text-emphasis);
+  margin-bottom: var(--space-1);
+}
+
+/* Whether leaving it blank ends the run or leaves a fallback in place. Not what
+   the planner would answer - the wire does not carry that. */
+.v-q__fielddefault {
+  display: block;
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  margin-bottom: var(--space-2);
+}
+
+.v-q__fieldbox {
+  width: 100%;
+  font: var(--type-body);
+  color: var(--text-primary);
+  background: var(--surface-card);
+  border: 1px solid var(--rule-control);
+  padding: var(--space-2) var(--space-3);
+  resize: vertical;
+}
+
+.v-q__fieldbox:focus-visible {
+  outline: 2px solid var(--accent-solid);
+  outline-offset: 1px;
+}
+
+.v-q__actions {
+  display: flex;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+}
+
+/* The primary sits last, matching every other action row in the product. */
+.v-q__actions .v-btn:last-child {
+  margin-left: auto;
+}
+
+.v-q__note--alarm {
+  color: var(--text-primary);
+}
+
 /* ------------------------------------------------------------ all workstreams (1b) */
 
 .v-ws {
@@ -1596,6 +2548,189 @@
   border: 1px solid var(--accent-border);
   padding: var(--space-1) var(--space-2);
   cursor: pointer;
+}
+
+/* ------------------------------------------------------- commands (#211) */
+
+.v-cmds {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  overflow-y: auto;
+}
+
+.v-cmds__form {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.v-cmds__label {
+  font: var(--type-label);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.v-cmds__prog,
+.v-cmds__args {
+  font: var(--type-mono-sm);
+  color: var(--text-primary);
+  background: var(--surface-panel);
+  border: 1px solid var(--rule-inner);
+  padding: var(--space-2);
+}
+
+.v-cmds__prog {
+  width: 8rem;
+}
+
+.v-cmds__args {
+  flex: 1;
+  min-width: 12rem;
+}
+
+.v-cmds__note,
+.v-cmds__empty p {
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+.v-cmds__refused {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  font: var(--type-body-sm);
+  color: var(--text-emphasis);
+  background: var(--surface-alarm);
+  padding: var(--space-2) var(--space-3);
+}
+
+.v-cmds__empty {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/*
+ * One command. The live one takes the accent rule, which is the same signal a
+ * running turn takes in the loop column - a process holding a port is the thing
+ * on this screen most worth noticing.
+ */
+.v-cmd {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  border-left: 2px solid var(--rule-card);
+  padding-left: var(--space-3);
+}
+
+.v-cmd--live {
+  border-left-color: var(--accent-border);
+}
+
+.v-cmd__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.v-cmd__line {
+  font: var(--type-mono-sm);
+  color: var(--text-primary);
+}
+
+.v-cmd__meta {
+  display: flex;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+.v-cmd__resolved {
+  font: var(--type-mono-sm);
+}
+
+.v-cmd__quiet {
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+.v-cmd__output {
+  font: var(--type-mono-sm);
+  color: var(--text-secondary);
+  background: var(--surface-panel);
+  border: 1px solid var(--rule-inner);
+  padding: var(--space-2) var(--space-3);
+  margin: 0;
+  max-height: 22rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/*
+ * What a resumed run did before this window was watching (#211).
+ *
+ * Above the cycles and visibly not one of them: it is a summary read off
+ * `state.json`, not a card built from narration, and drawing it like a phase
+ * would claim finished work is running.
+ */
+.v-resumed {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--rule-inner);
+  background: var(--surface-panel);
+}
+
+.v-resumed__head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.v-resumed__where {
+  font: var(--type-body-sm);
+  color: var(--text-primary);
+}
+
+.v-resumed__line {
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+.v-resumed__note {
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+/*
+ * The confirm that appears in the row when reopening has to take a lock (#211).
+ *
+ * In the cell rather than in a modal: what is being overruled is a fact about
+ * *this* run, and a dialog would separate the sentence from the row it is about.
+ * Wraps, because the reason is a sentence and not a label.
+ */
+.v-ws__force {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  max-width: 28rem;
+}
+
+.v-ws__why {
+  font: var(--type-body-sm);
+  color: var(--text-emphasis);
 }
 
 /* ------------------------------------------------------------ the switcher (5f) */
@@ -1726,6 +2861,14 @@
   gap: var(--space-2);
 }
 
+/* Which settings these are (#223): the screen is reached from two doors, and
+   this is what says which one. */
+.v-set__title {
+  font: var(--type-title);
+  color: var(--text-primary);
+  margin: 0;
+}
+
 .v-set__h {
   font: var(--type-section);
   letter-spacing: var(--track-section);
@@ -1799,7 +2942,160 @@
   padding: var(--space-3);
   margin: 0;
   max-height: 30vh;
+  /* A prompt block is prose with its own line breaks, and they are how it is
+     read. `pre-wrap` rather than the default `pre`, so a long instruction wraps
+     in the pane instead of scrolling sideways out of it. */
+  white-space: pre-wrap;
   overflow: auto;
+}
+
+/* The appearance steps, each drawn AT the size it would set — a radio labelled
+   "large" beside four identical labels says nothing, and the point of the
+   control is what the text will look like. */
+
+/* A saved-on-blur number. Narrow, because every one of them is a small count
+   and a wide box invites a paragraph. */
+.v-set__num {
+  width: 5rem;
+  font: var(--type-mono-sm);
+  color: var(--text-primary);
+  background: var(--surface-card);
+  border: 1px solid var(--rule-control);
+  padding: var(--space-2);
+}
+
+/* A model name, which is long and unpredictable — the one field on this screen
+   whose legal values nothing in the product enumerates. */
+.v-set__text {
+  width: 100%;
+  min-width: 10rem;
+  font: var(--type-mono-sm);
+  color: var(--text-primary);
+  background: var(--surface-card);
+  border: 1px solid var(--rule-control);
+  padding: var(--space-2);
+}
+
+.v-set__num:focus-visible,
+.v-set__text:focus-visible {
+  outline: 2px solid var(--accent-solid);
+  outline-offset: 1px;
+}
+
+.v-set__num:disabled,
+.v-set__text:disabled {
+  border-style: dashed;
+  color: var(--text-tertiary);
+}
+
+/* A sub-heading inside a section, for the one section that has two subjects:
+   how many rounds, and what verdict ends them. */
+.v-set__h4 {
+  font: var(--type-kicker);
+  letter-spacing: var(--track-kicker);
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  margin: var(--space-5) 0 var(--space-2);
+}
+
+/* A control sitting in the middle of the sentence that explains it, which is
+   where the P1 tolerance belongs: the number means nothing without the clause. */
+.v-set__inline {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-left: var(--space-2);
+}
+.v-set__scale {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-5);
+  align-items: baseline;
+  padding: var(--space-3) 0;
+}
+
+/* A statement rather than a control, for the settings that have no control:
+   a run's agents are your own logins and there is nothing here to set. */
+.v-set__fact {
+  display: grid;
+  grid-template-columns: 9rem 1fr;
+  gap: var(--space-3);
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--rule-inner);
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+.v-set__factname {
+  font: var(--type-label);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+/* One standing prompt block: its name, who gets it, and the text verbatim. */
+.v-set__prompt {
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--rule-inner);
+}
+
+.v-set__promptname {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+  font: var(--type-section);
+  color: var(--text-emphasis);
+}
+
+/* The editable block. Monospace and tall, because it is a standing instruction
+   somebody is going to read line by line before deciding to change it. */
+.v-set__promptbox {
+  width: 100%;
+  font: var(--type-mono-sm);
+  color: var(--text-primary);
+  background: var(--surface-panel);
+  border: 1px solid var(--rule-control);
+  padding: var(--space-3);
+  resize: vertical;
+}
+
+.v-set__promptbox:focus-visible {
+  outline: 2px solid var(--accent-solid);
+  outline-offset: 1px;
+}
+
+.v-set__promptrow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+
+/* The library. Loading one fills the box and changes nothing — the row above is
+   where a version becomes what a turn is told. */
+.v-set__drafts {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--rule-inner);
+}
+
+.v-set__draft {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  border: 1px solid var(--rule-inner);
+  padding: 0 var(--space-1);
+}
+
+.v-set__draft .v-nav__act {
+  opacity: 1;
 }
 
 .v-set__again {
@@ -1862,6 +3158,16 @@
 .v-new__dir {
   flex: 1;
   font: var(--type-mono-sm);
+}
+
+/* The repository when a project already answered it: stated, not offered. Same
+   monospace as the field it replaces, so the path reads the same either way. */
+.v-new__fixed {
+  flex: 1;
+  font: var(--type-mono-sm);
+  color: var(--text-primary);
+  padding: var(--space-2) 0;
+  overflow-wrap: anywhere;
 }
 
 /* The overrides block: only what differs, and the count says how much. */
@@ -1930,19 +3236,6 @@
   gap: var(--space-2);
   font: var(--type-body-sm);
   color: var(--text-secondary);
-}
-
-/* The exact command, because it is the one thing definitely true about what
-   pressing the button will do. */
-.v-new__argv {
-  font: var(--type-mono-sm);
-  color: var(--text-secondary);
-  background: var(--surface-panel);
-  border: 1px solid var(--rule-inner);
-  padding: var(--space-2) var(--space-3);
-  margin: 0;
-  overflow-x: auto;
-  white-space: pre;
 }
 
 .v-new__foot {
@@ -2089,4 +3382,605 @@
   padding: var(--space-1) var(--space-2);
   cursor: pointer;
   flex: none;
+}
+
+/* ------------------------------------------------------------ the front door (#211) */
+
+.v-kick {
+  border-top: 1px solid var(--rule-inner);
+  background: var(--surface-chrome);
+  padding: var(--space-3) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* The repository the pilot is confined to. Monospace because it is a path, and
+   a path is a string somebody checks character by character. The field and the
+   chooser that were here went to the sidebar, where the list of projects is. */
+.v-kick__where {
+  font: var(--type-mono-sm);
+  color: var(--text-secondary);
+}
+
+.v-kick__brief {
+  font: var(--type-body);
+  color: var(--text-primary);
+  background: var(--surface-card);
+  border: 1px solid var(--rule-control);
+  padding: var(--space-2);
+  resize: vertical;
+  width: 100%;
+}
+
+.v-kick__start {
+  border: 1px solid var(--accent-border-dim);
+  padding: var(--space-2) var(--space-3);
+}
+
+.v-kick__start[open] {
+  border-color: var(--accent-border);
+}
+
+.v-kick__start summary {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  cursor: pointer;
+}
+
+.v-kick__start > * + * {
+  margin-top: var(--space-2);
+}
+
+.v-kick__summary,
+.v-kick__note {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  margin: 0;
+}
+
+.v-kick__toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+.v-kick__argv {
+  font: var(--type-mono-sm);
+  color: var(--text-secondary);
+  background: var(--surface-panel);
+  border: 1px solid var(--rule-inner);
+  padding: var(--space-2);
+  margin: 0;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.v-kick__foot {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+/* The loop column while nothing has run (4h). */
+.v-loop__waiting {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  align-items: flex-start;
+  padding: var(--space-4);
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+.v-loop__waiting p {
+  margin: 0;
+}
+
+/* ------------------------------------------------------------ the gate card (5d) */
+
+.v-footer__verify {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  border-left: 2px solid var(--accent-border);
+  padding-left: var(--space-3);
+  margin-bottom: var(--space-2);
+  /* A question round can raise more than fits. Capped and scrolled so the two
+     buttons below it never leave the screen — a decision you have to scroll
+     past to reach is one people stop reading. */
+  max-height: 18rem;
+  overflow-y: auto;
+}
+
+/*
+ * What the gate is asking: what finished, what to read, what continuing costs.
+ *
+ * Shares the verify card's left rule so the two read as one block when both are
+ * drawn — the shared answer above the boundary-specific detail.
+ */
+.v-footer__hold {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  border-left: 2px solid var(--accent-border);
+  padding-left: var(--space-3);
+  margin-bottom: var(--space-2);
+}
+
+/*
+ * One question at the question-round gate, with what came back for it.
+ *
+ * Scrolled rather than paged: a planner raising fifteen questions is a real
+ * round, and a footer that grew to fill the window would push the two buttons
+ * off the bottom - which is the one thing this card exists to get pressed
+ * deliberately.
+ */
+.v-footer__q {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--rule-inner);
+}
+
+.v-footer__q-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.v-footer__q-ask {
+  font: var(--type-body-sm);
+  color: var(--text-primary);
+}
+
+.v-footer__q-answer {
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+  padding-left: var(--space-3);
+}
+
+.v-footer__q-answer--declined {
+  color: var(--text-emphasis);
+}
+
+.v-footer__path {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.v-footer__path code {
+  font: var(--type-mono-sm);
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.v-footer__copy {
+  font: var(--type-label);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--accent-on-tint);
+  background: none;
+  border: 1px solid var(--accent-border);
+  padding: var(--space-1) var(--space-2);
+  cursor: pointer;
+  flex: none;
+}
+
+/* The demoted choice on a halt banner: never a peer of the primary (4d). */
+.v-footer__demoted {
+  font: var(--type-label);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--accent-on-tint);
+  background: none;
+  border: 0;
+  border-bottom: 1px solid var(--accent-border);
+  padding: var(--space-1) 0;
+  cursor: pointer;
+  flex: none;
+}
+
+.v-footer__demoted:disabled {
+  cursor: default;
+  opacity: 0.72;
+}
+
+/* ------------------------------------------------------- the window that threw
+ *
+ * `Boundary`'s fallback (#211). Not a designed screen and deliberately plain:
+ * it is reached only when the design system's own components may be what threw,
+ * so it leans on tokens and nothing else. Everything is selectable and every
+ * value is monospace, because these are strings destined for a bug report -
+ * the same reasoning as the diagnostics popover.
+ */
+.v-crash {
+  padding: var(--space-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  overflow-y: auto;
+  height: 100vh;
+  background: var(--surface-app);
+}
+.v-crash__head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.v-crash__kicker {
+  font: var(--type-kicker);
+  letter-spacing: var(--tracking-kicker);
+  text-transform: uppercase;
+  color: var(--text-alarm);
+}
+.v-crash__title {
+  font: var(--type-body);
+  color: var(--text-emphasis);
+  max-width: 76ch;
+}
+.v-crash__label {
+  font: var(--type-kicker);
+  letter-spacing: var(--tracking-kicker);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin-top: var(--space-3);
+}
+.v-crash__pre {
+  font: var(--type-mono-sm);
+  color: var(--text-primary);
+  background: var(--surface-inset);
+  border: 1px solid var(--rule-inner);
+  padding: var(--space-3);
+  white-space: pre-wrap;
+  overflow-x: auto;
+  margin: 0;
+}
+.v-crash__reload {
+  align-self: flex-start;
+  font: var(--type-control);
+  color: var(--text-emphasis);
+  background: var(--surface-control);
+  border: 1px solid var(--rule-control);
+  padding: var(--space-2) var(--space-4);
+  cursor: pointer;
+}
+.v-crash__note {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  max-width: 76ch;
+  margin: 0;
+}
+
+/*
+ * The left rail (hi-fi 1, hi-fi 5).
+ *
+ * 54px, which is `--dim-rail` - the token layer has held that value since the
+ * design system was transcribed, a year before anything drew a rail. It is the
+ * chrome surface, like the titlebar and the tab bar, because that is what it is:
+ * navigation around the window rather than content in it.
+ */
+.v-rail {
+  width: var(--dim-rail);
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) 0;
+  background: var(--surface-chrome);
+  border-right: 1px solid var(--rule-structure);
+  min-height: 0;
+}
+
+.v-rail__all {
+  font: var(--type-label);
+  letter-spacing: 0.08em;
+  color: var(--text-tertiary);
+  background: none;
+  cursor: pointer;
+}
+
+.v-rail__all:hover {
+  color: var(--text-primary);
+}
+
+/* Scrolls rather than truncating. An archive grows without limit and a rail
+   that dropped the oldest squares would be a list that silently stopped being
+   the whole list - the overclaim `scorecard.ts` exists to prevent, in a strip. */
+.v-rail__list {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  width: 100%;
+}
+
+.v-rail__square {
+  position: relative;
+  width: 34px;
+  height: 34px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-card);
+  border: 1px solid var(--rule-card);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.v-rail__square:hover {
+  border-color: var(--rule-control);
+  color: var(--text-primary);
+}
+
+/* The design's rail selection, and the one place `--accent-base` is used: the
+   token names it *"Industry's own steel, rail selection"*, so this is the value
+   it was chosen for. */
+.v-rail__square--on {
+  background: var(--surface-active);
+  border-color: var(--accent-base);
+  color: var(--text-emphasis);
+}
+
+.v-rail__mark {
+  font: var(--type-tab);
+  letter-spacing: 0.04em;
+}
+
+/* Top-right of the square, `4e`'s needs-you position. */
+.v-rail__dot {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+}
+
+.v-rail__none {
+  font: var(--type-tab);
+  color: var(--text-tertiary);
+}
+
+.v-rail__foot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+  border-top: 1px solid var(--rule-structure);
+  padding-top: var(--space-3);
+  width: 100%;
+}
+
+.v-rail__control {
+  font: var(--type-tab);
+  color: var(--text-tertiary);
+  background: none;
+  cursor: pointer;
+  padding: var(--space-1) var(--space-2);
+}
+
+.v-rail__control:hover {
+  color: var(--text-emphasis);
+}
+
+/*
+ * `5e` in the place hi-fi 1 draws it: right-aligned in the tab bar, always
+ * visible. `margin-left: auto` is what makes it right-aligned without the bar
+ * needing a second flex container.
+ *
+ * Not uppercase and not `--type-tab`: it is a measurement sitting among
+ * navigation, and it has to read as one. Tabular figures because it changes
+ * while you are looking at it.
+ */
+.v-cockpit__readout {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+  background: none;
+  cursor: pointer;
+}
+
+.v-cockpit__readout:hover {
+  color: var(--text-primary);
+}
+
+.v-cockpit__readout--on {
+  color: var(--text-emphasis);
+}
+
+/*
+ * The loop column's identity header (hi-fi 1).
+ *
+ * Three lines above the cycles: the workstream, the branch, the repository. The
+ * name takes the title tier and the two below take the label tier and the mono
+ * face, because a branch and a path are strings you copy rather than prose you
+ * read - the same reason the diagnostics panel is monospace throughout.
+ *
+ * `overflow-wrap: anywhere` on the paths: a worktree path is longer than 364px
+ * and a header that pushed the column wider would move the whole cockpit.
+ */
+.v-ident {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-4) var(--space-5) var(--space-3);
+  border-bottom: 1px solid var(--rule-structure);
+  flex: none;
+}
+
+/* Two lines, then an ellipsis. `task` is a brief and not a name — AGENTS.md
+   tells you to write it to a file and pass it in full — so an unclamped header
+   put an entire prompt across the top of the column. The whole string is on the
+   element's title, and the run's own artifacts have it verbatim. */
+.v-ident__name {
+  font: var(--type-section);
+  color: var(--text-display);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.v-ident__line {
+  font: var(--type-mono-sm);
+  color: var(--text-tertiary);
+  overflow-wrap: anywhere;
+}
+
+/* A fact nobody sent, drawn as absent WITH its reason rather than as a blank.
+   Dashed for the same reason an unavailable tab is: dimming reads as "disabled
+   for you", dashed reads as "nothing has filled this in". */
+.v-ident__absent {
+  border-bottom: 1px dashed var(--rule-control-dim);
+  color: var(--text-tertiary);
+}
+
+/*
+ * Hi-fi 1's turn strip, above the output pane.
+ *
+ * The sub-bar tier - `--dim-sub-bar` is 34px and this is what that token was
+ * transcribed for. Column surface rather than chrome, because it describes the
+ * content below it rather than navigating around it.
+ */
+.v-turnstrip {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: var(--dim-sub-bar);
+  padding: 0 var(--space-5);
+  background: var(--surface-column);
+  border-bottom: 1px solid var(--rule-structure);
+  flex: none;
+  flex-wrap: wrap;
+}
+
+.v-turnstrip__who {
+  font: var(--type-body-sm);
+  color: var(--text-emphasis);
+}
+
+/* Pushed right, and tabular because it re-renders every second. */
+.v-turnstrip__live {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+}
+
+/* What this pane is not showing, and why. A footnote tier: it is a statement
+   about the pane rather than anything in it, so it takes the floor colour and
+   sits under the scroll rather than in it. */
+.v-output__unbuilt {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  border-top: 1px solid var(--rule-inner);
+  padding: var(--space-2) var(--space-5);
+  flex: none;
+}
+
+/*
+ * Hi-fi 2's severity row, wherever it is drawn.
+ *
+ * One rule for the loop column, the findings pane and the pilot's round card,
+ * because it is one component. The design says why the row is repeated at all:
+ * it is for the peripheral scan, where a run in trouble should look different
+ * from across the room before any text is read.
+ *
+ * As a button it keeps exactly the same geometry. The click target is the row,
+ * and the only thing that changes on hover is the cursor and a hairline — a
+ * count that grew a background on hover would flicker during the peripheral
+ * scan the row exists for.
+ */
+.v-counts {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-wrap: wrap;
+  margin: var(--space-1) 0;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  text-align: left;
+}
+
+.v-counts--link {
+  cursor: pointer;
+  border-bottom: 1px solid transparent;
+}
+
+.v-counts--link:hover {
+  border-bottom-color: var(--rule-control);
+}
+
+/* Hi-fi 13's two clocks, on the stale strip as well as the quiet one. Mono and
+   tabular because they are the two numbers the code branched on, and a reader
+   is checking the app's arithmetic against them. */
+.v-stale__clocks {
+  display: flex;
+  gap: var(--space-4);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+}
+
+/* The model cell's two states, when `other…` has revealed the text box. Its own
+   class rather than `.v-set__inline`, which is a control sitting *inside* a
+   sentence and carries the left margin that goes with that. */
+.v-set__model {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+/* The column's head while it is showing a run this window did not narrate
+   (#223). Not a different column — `LoopColumn` draws the same cards below it —
+   just the strip that says which run, and the one thing an archive cannot say. */
+.v-loop__reading {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  align-items: flex-start;
+  padding: var(--space-4);
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+}
+
+.v-loop__readingwhat {
+  font: var(--type-body);
+  color: var(--text-primary);
+}
+
+.v-loop__reading p {
+  margin: 0;
+}
+
+.v-loop__readingwhy {
+  color: var(--text-tertiary);
+}
+
+/* The unit beside a number field, where the file's unit and the screen's differ
+   — minutes typed, milliseconds stored. */
+.v-set__unit {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
 }

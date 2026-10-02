@@ -362,6 +362,61 @@ export interface GitConfig {
   useBranch: boolean;
   branchPrefix: string;
   commitEachRound: boolean;
+  /**
+   * Run in a git worktree of its own rather than in the repository (#223).
+   *
+   * **Off by default, and that is not timidity.** A bare `git worktree add`
+   * produces a checkout with no `node_modules` and nothing built, so on most
+   * projects the verification gate cannot run in it — which means turning this on
+   * without `worktreeCommand` would break runs that work today. The feature is
+   * only useful *with* its setup command, so the default cannot be on; AGENTS.md
+   * states the same rule generally as *"groundwork ships separately, with no
+   * behaviour change"*.
+   *
+   * What it buys is what AGENTS.md already tells a human to do by hand: the tree
+   * being edited is not the tree you are working in, several runs can exist side
+   * by side, and a run's branch is checked out somewhere that is not your
+   * desk. What it costs is disk — a worktree per run, and AGENTS.md measures a
+   * built one at gigabytes — so nothing here deletes them and nothing pretends
+   * to: `.worktrees/<run-id>` is named after the run precisely so the ones worth
+   * pruning can be identified.
+   */
+  worktree: boolean;
+  /**
+   * The user's own command, run instead of `git worktree add` (#223).
+   *
+   * **The main path rather than an exotic escape hatch.** A worktree that cannot
+   * build is not useful, so the real shape of this setting is
+   * `git worktree add --detach "$VIBE_WORKTREE" HEAD && cd "$VIBE_WORKTREE" && npm ci`,
+   * and the default path exists mostly so the setting means something before
+   * anybody has written one.
+   *
+   * It runs through a shell, which is allowed for exactly the reason
+   * `verify.command` is: it is a line a **person** wrote into a file they commit,
+   * and being a sequence is the whole point of it. `runUserCommand` in
+   * `verify.ts` is shared rather than copied so "a shell is used in one place"
+   * stays true — and no model can reach this key, since there is no config tool
+   * (#144 decision 3).
+   *
+   * It is told `VIBE_WORKTREE`, `VIBE_REPO` and `VIBE_RUN_ID` through the
+   * environment rather than as arguments, so a path with a space in it cannot be
+   * re-split into two words, and it must leave a working tree at
+   * `VIBE_WORKTREE` — checked afterwards, because a script that exits 0 and
+   * leaves nothing behind would otherwise fail one git command at a time with
+   * nothing naming the cause. Deliberately **not** told a branch: `prepareGit`
+   * names that, and a second answer to it is how the two come to disagree.
+   */
+  worktreeCommand: string | null;
+  /**
+   * How long that command may take.
+   *
+   * **Borrowed from `verify.timeoutMs` rather than chosen**, and the borrowing is
+   * the honest part: this is the same kind of thing — the user's own command,
+   * doing project work on this machine — and `npm ci` on a cold cache is the case
+   * that decides it. Nothing here has measured a setup script, so taking a figure
+   * that was measured for a comparable command beats inventing one.
+   */
+  worktreeTimeoutMs: number;
 }
 
 export interface ContextConfig {
@@ -500,6 +555,32 @@ export interface ProgressConfig {
    * either.
    */
   workIntervalMs: number;
+  /**
+   * How long a turn may produce nothing at all before it is stopped. 0 disables.
+   *
+   * **A ceiling on silence, which is a different question from the turn ceiling
+   * beside it.** `codex.timeoutMs` and `claude.*TimeoutMs` bound how long a turn
+   * may *take*; this bounds how long it may say nothing while taking it. A run
+   * on 2026-09-15 shows why both are needed: a review turn went silent 5m14s in
+   * and was killed 39m17s later at the 45-minute Codex ceiling, having done
+   * nothing for the whole of it. Raising that ceiling would only have made it
+   * hang for longer.
+   *
+   * **Silence is measured from the child's last line**, not from its last
+   * completed item, because that is the finer of the two signals `progress.ts`
+   * holds and the one a stall trips first.
+   *
+   * The default is the owner's, taken with the separation in front of them: the
+   * longest any healthy turn in that run went without speaking was 3m30, on a
+   * 12m30 critique, and an 11m30 implement turn never went more than 32 seconds
+   * - so ten minutes is roughly three times the worst observed and an order of
+   * magnitude under the stall. It is a decision rather than a census, which is
+   * why it is a setting and why the number is here to be changed.
+   *
+   * Off with `enabled: false`, like `workIntervalMs`: a run that does not want
+   * progress does not want this either, and there is no second switch.
+   */
+  maxQuietMs: number;
 }
 
 /**
@@ -612,7 +693,33 @@ export interface Config {
    * review loop, where they consumed a round as a plan-stage P1.
    */
   toolchain: ToolchainContract;
+  /**
+   * Prompt blocks this project replaces, by the name `promptBlocks()` gives them.
+   *
+   * **A reversal, and the reasoning it reverses is recorded rather than quietly
+   * dropped** (#223). The settings screen said these were *"deliberately not
+   * configuration: they are the product's behaviour, and a per-project override
+   * would mean two runs of the same version could not be compared."* That cost
+   * is real and is now paid on purpose: *"We need to be able to edit the
+   * prompts."* An owner who wants a reviewer under different standing
+   * instructions has no other way to get one, and telling them the product knows
+   * better is not an answer.
+   *
+   * What keeps the cost visible rather than merely accepted: an overridden block
+   * is **named on the run's own config** - `configDiff` reports `prompts.<block>`
+   * like any other setting - so a run whose reviewer was told something
+   * different says so in its record, which is the half that makes two runs
+   * comparable again.
+   *
+   * Empty by default, so a project that sets none is byte-identical to one that
+   * predates this key.
+   */
+  prompts: PromptOverrides;
 }
+
+/** Block name to replacement text. Open-ended keys, checked against the real list. */
+export type PromptOverrides = Readonly<Record<string, string>>;
+
 
 export interface LoadedConfig extends Config {
   configPath: string | null;
@@ -1369,7 +1476,43 @@ export interface ForkPendingEntry {
 export interface RunState {
   id: string;
   dir: string;
+  /**
+   * The repository this run belongs to.
+   *
+   * **Where the archive is, which since #223 is not necessarily where the work
+   * happens.** `dir` is `<targetDir>/.vibe/runs/<id>`, the lock sits inside that,
+   * and `listRuns` reads `<targetDir>/.vibe/runs` for the planner's past-run
+   * index — so this is the run's *home*. When `worktree` is set the loop's git
+   * operations, verification gate and agent children all run in a separate
+   * checkout instead, and `workDirOf` is the one place that difference is
+   * resolved.
+   *
+   * Keeping the archive here rather than in the worktree is the decision that
+   * makes auto-worktrees usable at all: a record written into a tree somebody is
+   * about to prune is a record the next run's planner cannot read, and
+   * `AGENTS.md` has a hand-written `cp -r` recipe for exactly that problem.
+   */
   targetDir: string;
+  /**
+   * Whether this run works in a git worktree of its own (#223).
+   *
+   * **A decision, not a path, and that split is the design.** The path is
+   * `worktreePath(targetDir, id)` — derived, never stored — for the same reason
+   * `loadRun` re-derives `dir` and `targetDir`: a repository legitimately moves,
+   * and a stored absolute path is the thing that breaks when it does. What
+   * cannot be re-derived is whether this run was *started* with worktrees on,
+   * because the setting may have been toggled since; so that is what is kept.
+   *
+   * It also means vibe owns the location rather than a custom script choosing
+   * one. A script that printed its own path would be a path this field would
+   * have to store, and a resume after a move would then look in a place that no
+   * longer exists.
+   *
+   * Absent on every run that predates this and on every run with the setting
+   * off, which is what makes `workDirOf` collapse to `targetDir` — so a run that
+   * never had a worktree behaves exactly as it did.
+   */
+  worktree?: boolean;
   task: string;
   /**
    * The Claude conversation's id - `SLOTS.main`'s storage. Minted before the
@@ -1850,6 +1993,42 @@ export interface RunState {
    */
   pendingFindings?: PendingFindings | null;
   extraContext: string | null;
+}
+
+/**
+ * What is at an artifact's name: its text, nothing usable, or a link.
+ *
+ * Three answers rather than two, and the third exists for the distinction #53
+ * drew and #102 kept: `absent` says a file was opened and could not be used,
+ * `linked` says vibe never looked inside it. A caller that narrates must be able
+ * to tell a reader which of those happened, and a reader must never be told a
+ * file was unreadable when it was never read.
+ *
+ * Here rather than in `run.ts` beside `readArtifact`, because `protocol.ts`
+ * carries one on a frame and that file is a leaf on purpose: the vocabulary two
+ * processes agree on should not have to import the loop to be read.
+ */
+export type ArtifactRead =
+  | { kind: 'text'; text: string }
+  | { kind: 'absent' }
+  | { kind: 'linked'; reason: string };
+
+/**
+ * One entry in a run directory, as `lstat` classified it.
+ *
+ * `kind` rather than a filter, because a run directory legitimately holds things
+ * that are not files - `gate-artifacts-<n>/` is a directory #111 writes - and an
+ * entry silently missing from a listing reads as an artifact that was never
+ * produced. A link is reported as one for the same reason `readArtifact` refuses
+ * rather than following: vibe never creates one, so its presence is the finding.
+ *
+ * `bytes` is null for anything but a plain file. A size for a thing that has no
+ * meaningful size is a number nobody measured.
+ */
+export interface RunArtifact {
+  name: string;
+  kind: 'file' | 'directory' | 'link' | 'unknown';
+  bytes: number | null;
 }
 
 export interface RunSummary {

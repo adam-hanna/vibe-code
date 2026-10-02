@@ -38,7 +38,9 @@ function fold(frames: readonly Frame[], t0 = 1_000_000): Run {
 
 /** The nine-id clean pass the core pins, in order. */
 const CLEAN: readonly Frame[] = [
-  say('phase_started', { phase: 'planning' }),
+  // `round` on `planning` since #223: it was the one phase in the plan cycle
+  // that carried none, which the fixture faithfully reproduced.
+  say('phase_started', { phase: 'planning', round: 0 }),
   say('turn_started', { role: 'planner', kind: 'plan' }),
   say('phase_started', { phase: 'critique', round: 0 }),
   say('turn_started', { role: 'critic', kind: 'critique', round: 0 }),
@@ -50,14 +52,22 @@ const CLEAN: readonly Frame[] = [
 ];
 
 describe('the loop column is built from ids and never from sentences', () => {
-  test('a clean pass fills three cycles in the order the phases arrived', () => {
+  // Found by kind rather than by position, so a change to the order these
+  // groups first appear in does not fail four tests about something else.
+  const group = (run: Run, kind: string) => run.cycles.find((c) => c.kind === kind);
+
+  test('a clean pass fills four groups in the order the phases arrived', () => {
     const run = fold(CLEAN);
-    expect(run.cycles.map((c) => c.kind)).toEqual(['plan', 'code', 'review']);
-    // Planning and critique are the SAME cycle - a plan round is the pair, the
-    // planner producing a version and the critic judging it.
-    expect(run.cycles[0]?.phases.map((p) => p.phase)).toEqual(['planning', 'critique']);
-    expect(run.cycles[1]?.phases.map((p) => p.phase)).toEqual(['implementing']);
-    expect(run.cycles[2]?.phases.map((p) => p.phase)).toEqual(['review']);
+    expect(run.cycles.map((c) => c.kind)).toEqual(['plan', 'critique', 'code', 'review']);
+    // **The judge has a group of its own.** A round is still the pair - the
+    // planner produces a version and the critic judges it - and `rounds()` is
+    // where that survives, because hi-fi 5's card draws the pair. What the
+    // column draws is four peer headings, so the critique has a name on screen
+    // instead of being a row inside cycle 1 that nobody could find.
+    expect(group(run, 'plan')?.phases.map((p) => p.phase)).toEqual(['planning']);
+    expect(group(run, 'critique')?.phases.map((p) => p.phase)).toEqual(['critique']);
+    expect(group(run, 'code')?.phases.map((p) => p.phase)).toEqual(['implementing']);
+    expect(group(run, 'review')?.phases.map((p) => p.phase)).toEqual(['review']);
   });
 
   test('a turn lands in the phase that was open when it started', () => {
@@ -67,20 +77,24 @@ describe('the loop column is built from ids and never from sentences', () => {
     // The implementing phase is the empty one, and deliberately: it has never
     // had a `log.step`, so `phase_started` IS its turn's announcement. #152
     // pinned that in the core as a decision rather than a gap.
-    expect(run.cycles[1]?.phases[0]?.turns).toEqual([]);
+    expect(group(run, 'code')?.phases[0]?.turns).toEqual([]);
   });
 
   test('the round a phase carries is the archive number, not the display one', () => {
     // The heading says "round 1" because humans count from one; the artifact is
     // `plan-critique-0.json`. The column has to carry the one that names a file.
-    const run = fold(CLEAN);
-    const critique = run.cycles[0]?.phases[1];
-    expect(critique?.round).toBe(0);
+    expect(group(fold(CLEAN), 'critique')?.phases[0]?.round).toBe(0);
+  });
+
+  test('the producer half carries the round too, so the two groups pair by eye', () => {
+    // `planning` carried no round at all until #223, which was invisible while
+    // it sat in the same group as its critique and is not once they are peers:
+    // the chip is the only thing saying which critique judged which draft.
+    expect(group(fold(CLEAN), 'plan')?.phases[0]?.round).toBe(0);
   });
 
   test('a verify gate attaches to the phase that opened it', () => {
-    const run = fold(CLEAN);
-    expect(run.cycles[1]?.phases[0]?.gates).toEqual(['verification']);
+    expect(group(fold(CLEAN), 'code')?.phases[0]?.gates).toEqual(['verification']);
   });
 
   test('an id from a newer core reaches the output pane and moves nothing', () => {
@@ -201,12 +215,79 @@ describe('which run this is', () => {
     expect(run.identity).toEqual({
       runId: '20260907-031221-a-task',
       dir: '/repo/.vibe/runs/20260907-031221-a-task',
+      // The frame above is what a core older than #223 sends, and all three of
+      // the facts added after it come back null rather than being filled in from
+      // what is here - the repository is NOT `dir` with `.vibe/runs/<id>`
+      // trimmed off, the task is not the run id with its stamp removed, and the
+      // work directory is not assumed to be the repository just because that is
+      // what it used to be. A null here reads as "nobody said", which every
+      // reader of it already handles.
+      repo: null,
+      workDir: null,
+      task: null,
       resumed: false,
       // When the CORE said this, which is the honest answer to "when did the
       // task reach the core". The window's own send time would be when it
       // asked, not when anything happened (hi-fi 16).
       at: 1_000_000,
     });
+  });
+
+  test('the repository and the task are carried when the core sends them (#223)', () => {
+    // Hi-fi 1's identity header: workstream, branch, repository. Two of the
+    // three ride here; the third is `run_branch`.
+    const run = fold([
+      say('run_started', {
+        runId: 'r',
+        dir: '/repo/.vibe/runs/r',
+        repo: '/repo',
+        task: 'build a todo app',
+        resumed: false,
+      }),
+    ]);
+    expect(run.identity?.repo).toBe('/repo');
+    expect(run.identity?.task).toBe('build a todo app');
+  });
+
+  test('the branch is told, and a run with none says which kind of none', () => {
+    // Null for the whole field is "nothing has said" - an older core. A named
+    // branch of null with a reason is a run that HAS no branch, which is a
+    // different fact and the header words it differently.
+    expect(emptyRun().branch).toBeNull();
+    expect(fold([say('run_branch', { branch: 'vibe/r', why: null })]).branch).toEqual({
+      name: 'vibe/r',
+      why: null,
+    });
+    expect(
+      fold([say('run_branch', { branch: null, why: 'branch isolation is off' })]).branch,
+    ).toEqual({ name: null, why: 'branch isolation is off' });
+  });
+
+  test('a commit carries both ends of its range, and neither is derived (#223)', () => {
+    // The Code tab shows one round's diff, which needs `from` and `to`.
+    // `round_committed` reads HEAD before it commits, so both are measured - the
+    // alternative is pairing consecutive commits here, which is correct until a
+    // run is resumed and the earlier commits were narrated to a process that has
+    // exited, at which point round 3 silently shows a cumulative diff.
+    const run = fold([
+      say('round_committed', { sha: 'aaa', since: 'bbb', message: 'vibe: implement' }),
+      say('round_committed', { sha: 'ccc', since: 'aaa', message: 'vibe: fix round 1' }),
+    ]);
+    expect(run.commits.map((c) => [c.since, c.sha])).toEqual([
+      ['bbb', 'aaa'],
+      ['aaa', 'ccc'],
+    ]);
+    expect(run.commits[1]?.message).toBe('vibe: fix round 1');
+  });
+
+  test('a first commit in an empty repository has no parent, and says so', () => {
+    // `markBase` answers null in a repository with no commits yet. Null is a
+    // real answer - "everything up to here" - and not a missing field.
+    expect(fold([say('round_committed', { sha: 'aaa' })]).commits[0]?.since).toBeNull();
+  });
+
+  test('a commit with no sha is dropped: it is not a commit anybody can diff', () => {
+    expect(fold([say('round_committed', { since: 'bbb' })]).commits).toEqual([]);
   });
 
   test('a resume is the same id, saying so', () => {
@@ -365,7 +446,7 @@ describe('the running row reports absence as absence', () => {
     expect(row.activities).toEqual({ count: 47, unit: 'event' });
   });
 
-  test('the line with no source still names the issue that would supply it', () => {
+  test('the line with no source says what is missing, in words a user can act on', () => {
     // Drawn as absent with a reason rather than as a blank or a zero. `6a` has
     // failed three times by inventing a denominator; this says why it is missing
     // instead.
@@ -376,8 +457,14 @@ describe('the running row reports absence as absence', () => {
     // the row still says it does not would have been pinning the defect. The
     // part that still holds - a missing measurement is absent WITH A REASON - is
     // kept here and asserted of the diffstat's own absence below.
+    //
+    // **It used to assert the issue number was in the sentence, and that is the
+    // part that moved.** An end user cannot act on `#114`; the actionable half
+    // is the statement that no frame carries the figure. The number stays in the
+    // source comment, where the next reader of this module is.
     const row = runningRow(started.running!, 0);
-    expect(row.comparable).toMatch(/#114/);
+    expect(row.comparable).toMatch(/no frame carries it/);
+    expect(row.comparable).not.toMatch(/#\d/);
   });
 
   test('a turn with no reading says which turns get one, rather than looking late', () => {
@@ -691,5 +778,94 @@ describe('reduce is pure', () => {
     const snapshot = JSON.stringify(before);
     reduce(before, CLEAN[0]!, 1);
     expect(JSON.stringify(before)).toBe(snapshot);
+  });
+});
+
+describe('a round that re-enters its phase is one group, not two (#223)', () => {
+  // The report: *"There are now TWO boxes for Plan Round 1. It looks like
+  // questions were answered, but rather than continuing with the existing box,
+  // it created a new box after answering the questions."* The loop announces
+  // `planning` again when it revises against its own answers, which is correct -
+  // a phase did start - and drawing it as a second round is not.
+  const questionRound: readonly Frame[] = [
+    say('phase_started', { phase: 'planning', round: 1 }),
+    say('turn_started', { role: 'planner', kind: 'revise' }),
+    say('questions_opened', { total: 3, blocking: 2, round: 1, cap: 3 }),
+    say('turn_started', { role: 'answerer', kind: 'answers' }),
+    // The revision against the answers. Same phase, same round: this is the
+    // frame that used to open a second group.
+    say('phase_started', { phase: 'planning', round: 1 }),
+    say('turn_started', { role: 'planner', kind: 'revise' }),
+  ];
+
+  test('one group, and every turn of the round is in it', () => {
+    const run = fold(questionRound);
+    const plan = run.cycles.find((c) => c.kind === 'plan');
+    expect(plan?.phases).toHaveLength(1);
+    // All three turns - the draft, the answerer and the revision - which is the
+    // shape the loop actually has and the reason the merge is right rather than
+    // merely tidier.
+    expect(plan?.phases[0]?.turns.map((t) => t.role)).toEqual([
+      'planner',
+      'answerer',
+      'planner',
+    ]);
+  });
+
+  test('the group keeps the time the round began', () => {
+    // A card is dated from when the round started, not from its second turn. Had
+    // the merge taken the later `startedAt`, a plan round that spent ten minutes
+    // on questions would report the two minutes after them.
+    const run = fold(questionRound, 500_000);
+    expect(run.cycles[0]?.phases[0]?.startedAt).toBe(500_000);
+  });
+
+  test('a different round is a new group, and so is a re-entry with a gap', () => {
+    const advanced = fold([
+      say('phase_started', { phase: 'planning', round: 0 }),
+      say('phase_started', { phase: 'planning', round: 1 }),
+    ]);
+    expect(advanced.cycles[0]?.phases).toHaveLength(2);
+
+    // The fix round: `implementing` re-opens at the same review round, and the
+    // review that asked for it is in between. Merging here would fold a fix into
+    // the round it was fixing, so the rule is the *most recently opened* group
+    // and never any group with a matching number.
+    const fix = fold([
+      say('phase_started', { phase: 'implementing', round: 0 }),
+      say('phase_started', { phase: 'review', round: 0 }),
+      say('phase_started', { phase: 'implementing', round: 0 }),
+    ]);
+    expect(fix.cycles.find((c) => c.kind === 'code')?.phases).toHaveLength(2);
+  });
+
+  test('two unnumbered phases stay two, because nothing said they were one round', () => {
+    // A null round is the loop declining to number the phase, not evidence that
+    // two groups are one. Requiring the number is what leaves a core older than
+    // `round`-on-`planning` drawing exactly what it drew before.
+    const run = fold([
+      say('phase_started', { phase: 'planning', round: null }),
+      say('phase_started', { phase: 'planning', round: null }),
+    ]);
+    expect(run.cycles[0]?.phases).toHaveLength(2);
+  });
+});
+
+describe('an artifact the run wrote is what makes a pane live (#223)', () => {
+  test('every write is appended, rewrites of one name included', () => {
+    // Appended rather than de-duplicated: a plan round that answers its own
+    // questions replaces `plan-1.json` under the name it already had, and that
+    // second write is exactly the event a pane holding the first needs.
+    const run = fold([
+      say('artifact_written', { name: 'plan-1.json' }),
+      say('artifact_written', { name: 'answers-1.json' }),
+      say('artifact_written', { name: 'plan-1.json' }),
+    ]);
+    expect(run.artifacts).toEqual(['plan-1.json', 'answers-1.json', 'plan-1.json']);
+  });
+
+  test('a frame with no name is dropped, and an old core simply has none', () => {
+    expect(fold([say('artifact_written', {})]).artifacts).toEqual([]);
+    expect(fold(CLEAN).artifacts).toEqual([]);
   });
 });

@@ -603,6 +603,72 @@ to report, not that the record is incomplete.
 
 Drop `vibe.config.json` in the target repo; CLI flags override it. See `vibe.config.example.json`.
 
+**Settings for every project** go in a file of the same shape at `~/.config/vibe/config.json`
+(`$XDG_CONFIG_HOME/vibe/config.json` if that is set, `%APPDATA%\vibe\config.json` on Windows).
+Almost any key may go in either file — the exceptions are below. The order is the defaults, then that file, then the project's
+`vibe.config.json`, then flags — so put your own models, budgets and round caps there once, and
+let a repository's file say only what is different about it. `vibe doctor` names the file when
+there is one, and in the desktop app the ⚙ Settings at the foot of the left bar edits it, while the ⚙ on a
+project's row edits that project's `vibe.config.json`. Set `VIBE_GLOBAL_CONFIG` to use
+another path, or to an empty string to ignore it.
+
+**Some keys belong only to a project's own file**: all of `verify` (the test command and its
+gates) and `git.worktree`, `git.worktreeCommand` and `git.worktreeTimeoutMs`. How a repository is
+built and tested is a fact about that repository, so the settings for all projects refuse them by
+name.
+
+**Three sections belong only in the settings for all projects** — `auth`, `pilot` and `cli` — and a
+project's `vibe.config.json` that sets one is refused, because that file is committed: a repository
+you clone must not be able to choose who is billed, widen its own pilot, or pick the executable
+every turn runs.
+
+**`auth`** is how vibe reaches each vendor, for **everything** it does there — every run turn, every
+preflight probe and the pilot:
+
+```json
+{ "auth": { "anthropic": "subscription", "openai": "subscription" } }
+```
+
+- **`"subscription"`** (the default) uses the CLI's own login and bills nothing. An API key in the
+  environment (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `OPENAI_API_KEY`, `CODEX_API_KEY`) is
+  removed from what the CLI sees, because both CLIs prefer a key to the login when one is set.
+- **`"api"`** bills that vendor's key: `claude` is run with it as `ANTHROPIC_API_KEY`, `codex` with
+  it as `CODEX_API_KEY`, and the desktop pilot calls the API with it directly. The key comes from
+  the desktop app's keychain, or — from a terminal — from `ANTHROPIC_API_KEY` / `CODEX_API_KEY`
+  (or `OPENAI_API_KEY`). With neither, the turn is refused before anything is spawned. Anything a
+  CLI prints is redacted of the key, because a vendor's 401 quotes the key it was sent.
+
+**`pilot`** is what the desktop app's pilot may do without asking:
+
+```json
+{
+  "pilot": {
+    "yolo": false,
+    "safeCommands": ["ls", "cat", "echo", "pwd", "head", "tail", "wc", "grep", "diff", "cp", "mkdir",
+                     "git status", "git diff", "git log", "git show", "git add", "git commit",
+                     "git branch --list", "git branch --show-current", "git rev-parse", "git ls-files"],
+    "dirs": []
+  }
+}
+```
+
+- **`safeCommands`** run as soon as the pilot asks, with no card. Each is a program and the
+  arguments it starts with, so `git commit` covers `git commit -m "…"`. There is no shell, so a
+  command is one program and its arguments on every platform — and the file commands are the
+  ordinary programs, which Linux and macOS have and Windows has only where something like Git for
+  Windows put them on `PATH`. A matching command still gets a card if an argument reaches outside
+  the allowed directories or touches `.git`. `git commit` runs the repository's own hooks.
+- **`dirs`** are absolute directories, beyond the project, that the pilot may read and run a
+  command in.
+- **`yolo`** runs every command without a card and makes every disk readable. Starting a run and
+  answering a gate still need your press.
+On the subscription the pilot is `claude -p`, or `codex exec` with its own tools switched off.
+
+**`cli`** is for when vibe cannot find a CLI: `{"cli": {"claude": "/path/to/claude",
+"codex": "/path/to/codex"}}`. vibe looks at `VIBE_CLAUDE_BIN` /
+`VIBE_CODEX_BIN` first, then this, then your `PATH` (preferring a real executable over a script
+shim), then the usual install locations. Leave a key out, or set it to `null`, to search.
+
 Every key below is shown at its default, so this block is a complete statement of the
 defaults rather than a sample — omit any section and you get exactly what is printed here.
 

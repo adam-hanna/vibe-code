@@ -1704,6 +1704,22 @@ const READERS = {
   createdAt: (raw, ctx) => refusedTimestamp('createdAt', raw, ctx),
   status: (raw, ctx) => refusedEnum('status', raw, STATUSES, ctx),
   planOnly: (raw, ctx) => refusedBool('planOnly', raw, ctx),
+  /**
+   * Whether this run works in a worktree of its own (#223).
+   *
+   * **Optional, so it fails to absent, and that is the safe direction.** An
+   * unreadable value becomes "no worktree", which means the run works in the
+   * repository — where its archive, its lock and the branch's refs already are,
+   * so it degrades to exactly what every run did before this field existed, and
+   * `repairs.replaced` reports that it happened rather than letting it pass.
+   *
+   * The other direction would be the dangerous one and is worth stating: reading
+   * absent as *true* would point a resume at a directory that may never have been
+   * created. Even that fails loudly rather than quietly — git refuses to check
+   * out a branch that is checked out in another worktree — but a refusal nobody
+   * can explain is a worse outcome than the honest degrade.
+   */
+  worktree: (raw, ctx) => optionalBool('worktree', raw, ctx),
   costUsd: (raw, ctx) =>
     refusedNumber('costUsd', raw, ctx, isMoney, 'a number of dollars', CEILING_NOTE),
   tokensUsed: (raw, ctx) =>

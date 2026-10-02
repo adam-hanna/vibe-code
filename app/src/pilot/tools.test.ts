@@ -1,9 +1,10 @@
 import { describe, expect, test } from 'vitest';
 import { launchArgv } from '../cockpit/argv';
+import { noCommands } from '../cockpit/commands';
 import { emptyRun, OUTPUT_KEEP, reduce } from '../cockpit/model';
 import { declare, execute, ORIGIN, TOOLS } from './tools';
 import type { Run } from '../cockpit/model';
-import type { Settlement } from './tools';
+import type { Settlement, ToolContext } from './tools';
 
 /**
  * What the pilot may touch, and what happens when it asks wrongly (#144).
@@ -40,6 +41,22 @@ function ran(settlement: Settlement): Record<string, unknown> {
 
 const call = (name: string, input: unknown) => ({ name, input, unreadable: null });
 
+/**
+ * A tool context around one run.
+ *
+ * `ToolContext` gained `commands` and `dir` when the pilot learned to propose a
+ * command (#211), and both are **required** rather than optional on purpose: an
+ * optional `dir` defaulting to empty would let a wiring mistake in the product
+ * read as "no repository is set", which is a legitimate state and would
+ * therefore never be noticed. The cost is this helper.
+ */
+const ctx = (run: Run, over: Partial<ToolContext> = {}): ToolContext => ({
+  run,
+  commands: noCommands(),
+  dir: 'C:/repo',
+  ...over,
+});
+
 describe('the table is what it says it is', () => {
   test('a declaration carries no executor across the wire', () => {
     // The vendor is told the name, the description and the schema. `call` is the
@@ -55,7 +72,7 @@ describe('the table is what it says it is', () => {
   test('a tool this build does not have is refused by name', () => {
     // Both vendors will invent a plausible tool when a conversation drifts, and
     // the model can only correct for it if it is told which one it asked for.
-    const settlement = execute(call('delete_everything', {}), { run: emptyRun() });
+    const settlement = execute(call('delete_everything', {}), ctx(emptyRun()));
     expect(settlement.kind).toBe('refused');
     expect(settlement.kind === 'refused' && settlement.content).toContain('delete_everything');
   });
@@ -63,7 +80,7 @@ describe('the table is what it says it is', () => {
   test('arguments that did not parse never reach an executor', () => {
     const settlement = execute(
       { name: 'read_run', input: undefined, unreadable: 'Unexpected end of JSON input' },
-      { run: emptyRun() },
+      ctx(emptyRun()),
     );
     expect(settlement.kind).toBe('refused');
   });
@@ -77,7 +94,7 @@ describe('reading is immediate; acting is not', () => {
       narration('turn_started', { role: 'planner', kind: 'plan', round: 0 }),
       narration('heartbeat', { elapsedMs: 42_000, activities: 3, unit: 'tool use' }),
     );
-    const seen = ran(execute(call('read_run', {}), { run: state }));
+    const seen = ran(execute(call('read_run', {}), ctx(state)));
 
     expect(seen['protocol']).toBe(1);
     expect(seen['running']).toMatchObject({ role: 'planner', kind: 'plan', elapsedMs: 42_000 });
@@ -91,7 +108,7 @@ describe('reading is immediate; acting is not', () => {
     // is true whenever it is read; a turn nobody has measured is not a turn that
     // has taken no time.
     const state = run(narration('turn_started', { role: 'planner', kind: 'plan' }));
-    const seen = ran(execute(call('read_run', {}), { run: state }));
+    const seen = ran(execute(call('read_run', {}), ctx(state)));
     expect(seen['running']).toMatchObject({ elapsedMs: null, lastActivity: null });
   });
 
@@ -100,7 +117,7 @@ describe('reading is immediate; acting is not', () => {
       narration('phase_started', { phase: 'planning' }, 'first'),
       narration('turn_started', { role: 'planner', kind: 'plan' }, 'second'),
     );
-    const seen = ran(execute(call('read_output', { lines: 1 }), { run: state }));
+    const seen = ran(execute(call('read_output', { lines: 1 }), ctx(state)));
     expect(seen['returned']).toBe(1);
     // Both numbers, because "1 of 1" and "1 of 2" are different facts and only
     // one of them means there is more to ask for.
@@ -112,18 +129,18 @@ describe('reading is immediate; acting is not', () => {
     // A model that asked for 5000 was reasoning about a window that does not
     // exist, and silently handing it 500 leaves that belief in place.
     for (const lines of [0, -1, 2.5, OUTPUT_KEEP + 1, 'forty']) {
-      const settlement = execute(call('read_output', { lines }), { run: emptyRun() });
+      const settlement = execute(call('read_output', { lines }), ctx(emptyRun()));
       expect(settlement.kind).toBe('refused');
     }
-    expect(execute(call('read_output', {}), { run: emptyRun() }).kind).toBe('ran');
+    expect(execute(call('read_output', {}), ctx(emptyRun())).kind).toBe('ran');
   });
 });
 
 describe('start_run proposes, and never starts', () => {
-  const good = { task: 'do the thing', directory: '/repo', plan_only: true };
+  const good = { task: 'do the thing', directory: 'C:/repo', plan_only: true };
 
   test('it builds the argv the launch form builds, and stops there', () => {
-    const settlement = execute(call('start_run', good), { run: emptyRun() });
+    const settlement = execute(call('start_run', good), ctx(emptyRun()));
     expect(settlement.kind).toBe('proposes');
     if (settlement.kind !== 'proposes') return;
     // The same function the button uses. Two spellings of form-to-argv would
@@ -131,15 +148,15 @@ describe('start_run proposes, and never starts', () => {
     // one definition of a legal invocation.
     expect(settlement.effect).toEqual({
       kind: 'invoke',
-      argv: launchArgv('do the thing', '/repo', true),
+      argv: launchArgv('do the thing', 'C:/repo', true),
     });
   });
 
   test('plan_only has no default, because that is not a fallback-value decision', () => {
     // The difference between a plan and a run that writes code and commits.
     const settlement = execute(
-      call('start_run', { task: 'x', directory: '/repo' }),
-      { run: emptyRun() },
+      call('start_run', { task: 'x', directory: 'C:/repo' }),
+      ctx(emptyRun()),
     );
     expect(settlement.kind).toBe('refused');
     expect(settlement.kind === 'refused' && settlement.content).toContain('plan_only');
@@ -147,19 +164,77 @@ describe('start_run proposes, and never starts', () => {
 
   test('a field of the wrong type is refused by name, not coerced', () => {
     for (const input of [
-      { task: 7, directory: '/repo', plan_only: true },
+      { task: 7, directory: 'C:/repo', plan_only: true },
       { task: 'x', directory: '', plan_only: true },
-      { task: '   ', directory: '/repo', plan_only: false },
+      { task: '   ', directory: 'C:/repo', plan_only: false },
       'not an object',
     ]) {
-      expect(execute(call('start_run', input), { run: emptyRun() }).kind).toBe('refused');
+      expect(execute(call('start_run', input), ctx(emptyRun())).kind).toBe('refused');
     }
   });
 
-  test('a full run says so in the summary, because that one commits', () => {
-    const settlement = execute(call('start_run', { ...good, plan_only: false }), {
-      run: emptyRun(),
+  test('the composer\'s overrides reach the argv the card shows (#223)', () => {
+    // `1b`'s direct launch went, so `start_run` is the only road from the
+    // overrides block to a run. Built by the same `launchArgv`, so what the card
+    // draws is exactly what the button would have sent.
+    const settlement = execute(
+      call('start_run', {
+        ...good,
+        gates: { implemented: 'stop' },
+        max_tokens: 40_000_000,
+        p1_tolerance: 1,
+      }),
+      ctx(emptyRun()),
+    );
+    expect(settlement.kind).toBe('proposes');
+    if (settlement.kind !== 'proposes') return;
+    expect(settlement.effect).toEqual({
+      kind: 'invoke',
+      argv: launchArgv('do the thing', 'C:/repo', true, {
+        gates: { implemented: 'stop' },
+        maxTokens: 40_000_000,
+        p1Tolerance: 1,
+      }),
     });
+  });
+
+  test('an override of the wrong shape is refused by name, never coerced', () => {
+    // `--max-tokens 0` turns the ceiling OFF, so a value nobody meant reaching
+    // the argv is the opposite of leaving it alone.
+    for (const [input, named] of [
+      [{ ...good, max_tokens: -1 }, 'max_tokens'],
+      [{ ...good, max_tokens: 2.5 }, 'max_tokens'],
+      [{ ...good, max_tokens: '25M' }, 'max_tokens'],
+      [{ ...good, p1_tolerance: 'one' }, 'p1_tolerance'],
+      [{ ...good, gates: 'implemented=stop' }, 'gates'],
+      [{ ...good, gates: { implemented: 3 } }, 'gates.implemented'],
+    ] as const) {
+      const settlement = execute(call('start_run', input), ctx(emptyRun()));
+      expect(settlement.kind).toBe('refused');
+      expect(settlement.kind === 'refused' && settlement.content).toContain(named);
+    }
+  });
+
+  test('a run starts in the project and nowhere else (#223)', () => {
+    // A pilot told to "use a worktree" made one by hand and proposed the run in
+    // it: the record landed in a tree about to be pruned and the run was filed
+    // under a project nobody added. Worktrees are vibe's job, so the refusal
+    // says where the run goes and that the setting is what makes one.
+    const settlement = execute(
+      call('start_run', { ...good, directory: 'C:/repo/.worktrees/gh-236' }),
+      ctx(emptyRun()),
+    );
+    expect(settlement.kind).toBe('refused');
+    expect(settlement.kind === 'refused' && settlement.content).toContain('git.worktree');
+    expect(settlement.kind === 'refused' && settlement.content).toContain('"directory": "C:/repo"');
+    // The same project spelled differently is the same project.
+    expect(execute(call('start_run', { ...good, directory: 'c:\\repo\\' }), ctx(emptyRun())).kind).toBe(
+      'proposes',
+    );
+  });
+
+  test('a full run says so in the summary, because that one commits', () => {
+    const settlement = execute(call('start_run', { ...good, plan_only: false }), ctx(emptyRun()));
     expect(settlement.kind === 'proposes' && settlement.summary).toContain('commits');
   });
 });
@@ -179,7 +254,7 @@ describe('answer_gate proposes a decision the core will judge', () => {
   });
 
   test('a continue carries the gate id the host allocated, and who asked', () => {
-    const settlement = execute(call('answer_gate', { decision: 'continue' }), { run: holding });
+    const settlement = execute(call('answer_gate', { decision: 'continue' }), ctx(holding));
     expect(settlement.kind).toBe('proposes');
     if (settlement.kind !== 'proposes') return;
     expect(settlement.effect).toEqual({
@@ -194,9 +269,7 @@ describe('answer_gate proposes a decision the core will judge', () => {
   test('a stop with no reason carries null, not a sentence nobody wrote', () => {
     // `holdAt` has its own wording for a stop with no reason, and it reaches
     // NEEDS-INPUT.md. Inventing one here would put words in that file.
-    const settlement = execute(call('answer_gate', { decision: 'stop', reason: '  ' }), {
-      run: holding,
-    });
+    const settlement = execute(call('answer_gate', { decision: 'stop', reason: '  ' }), ctx(holding));
     expect(settlement.kind === 'proposes' && settlement.effect).toEqual({
       kind: 'answer',
       askId: 9,
@@ -208,16 +281,12 @@ describe('answer_gate proposes a decision the core will judge', () => {
     // Refused with the state rather than proposed into the void: `serve.ts`
     // rejects an answer to a gate nobody is waiting on, and finding that out
     // after a person pressed a button is finding it out in the wrong place.
-    const settlement = execute(call('answer_gate', { decision: 'continue' }), {
-      run: emptyRun(),
-    });
+    const settlement = execute(call('answer_gate', { decision: 'continue' }), ctx(emptyRun()));
     expect(settlement.kind).toBe('refused');
   });
 
   test('a decision the loop does not understand is refused here rather than read as a stop', () => {
-    const settlement = execute(call('answer_gate', { decision: 'implement anyway' }), {
-      run: holding,
-    });
+    const settlement = execute(call('answer_gate', { decision: 'implement anyway' }), ctx(holding));
     expect(settlement.kind).toBe('refused');
   });
 });

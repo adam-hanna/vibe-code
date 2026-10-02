@@ -75,6 +75,51 @@ export interface Reply {
   usage: Usage | null;
   /** Null while the turn is still streaming. */
   outcome: Outcome | null;
+  /**
+   * What the person typed to open this turn, or null (#211).
+   *
+   * **The pane draws replies and it never drew messages, so what you typed was
+   * invisible.** You pressed send, your text vanished from the composer, and the
+   * next thing on screen was an answer to a question that was not there.
+   * Reported in one sentence - *"when I type into the pilot, my text never
+   * appears in the chat window"* - and true since the pane was built.
+   *
+   * Carried on the reply rather than fixed by rendering `messages` beside it,
+   * because that is the version that cannot get the order wrong: a message and
+   * the turn it opened are one thing here, so there is no interleaving to
+   * compute and nothing to keep in step. `messages` stays exactly what it is -
+   * what goes on the wire - and this is what a reader sees.
+   *
+   * Null on a turn nobody typed: a tool follow-up, or a `wake`, which says what
+   * set it off in `woke` instead.
+   */
+  asked: string | null;
+  /**
+   * Why this turn happened when nobody typed anything, or null (#211).
+   *
+   * **The pane draws replies and not messages**, so a turn the app started would
+   * otherwise appear as the pilot speaking unprompted, with nothing on screen
+   * saying what set it off. That is the one thing an unattended turn must not
+   * look like: a reader has to be able to tell what they asked for from what the
+   * run caused.
+   *
+   * Null on every turn a person sent, which is all of them unless the gate
+   * watcher is switched on.
+   */
+  woke: string | null;
+  /**
+   * When this turn was opened, or null if nobody said (#211).
+   *
+   * Passed in rather than read here, because this module is pure and a clock is
+   * the one thing that would stop it being testable without a fake. The caller
+   * has a real `Date.now()` and this has the field.
+   *
+   * **Null is the honest answer, not a zero.** A reply reconstructed by a build
+   * older than this field has no start time, and the pane draws no elapsed
+   * rather than counting from the epoch - which would render as an eight-week
+   * wait on a turn that took four seconds.
+   */
+  startedAt: number | null;
 }
 
 /**
@@ -138,11 +183,15 @@ export function ask(
   content: string,
   turn: number,
   provider: Backend,
+  startedAt: number | null = null,
 ): Conversation {
   return follow(
     { ...conversation, messages: [...conversation.messages, { role: 'user', content }] },
     turn,
     provider,
+    // On the reply as well as in `messages`, because the two are read by
+    // different things: the wire takes the message, and the pane takes this.
+    { asked: content, startedAt },
   );
 }
 
@@ -158,11 +207,62 @@ export function follow(
   conversation: Conversation,
   turn: number,
   provider: Backend,
+  /**
+   * What opened this turn, when a person or the run did.
+   *
+   * An object rather than two more positional arguments: the pair is going to
+   * grow again - it already went from none to `woke` to `asked` in one issue -
+   * and a fourth boolean-shaped parameter is how a call site eventually passes
+   * one in the other's place.
+   */
+  opened: { asked?: string | null; woke?: string | null; startedAt?: number | null } = {},
 ): Conversation {
   return {
     ...conversation,
-    live: { turn, provider, model: null, text: '', calls: [], usage: null, outcome: null },
+    live: {
+      turn,
+      provider,
+      model: null,
+      text: '',
+      calls: [],
+      usage: null,
+      outcome: null,
+      asked: opened.asked ?? null,
+      woke: opened.woke ?? null,
+      startedAt: opened.startedAt ?? null,
+    },
   };
+}
+
+/**
+ * A turn the run caused rather than a person (#211).
+ *
+ * The gate watcher's entry point, and it is deliberately **not** `ask`. A vendor
+ * needs something in `messages` to answer, so there is a user message either
+ * way — but a message nobody typed, rendered as one somebody did, is the app
+ * putting words in a person's mouth in the one record of what was asked. `woke`
+ * is what tells the two apart, and the pane draws it.
+ *
+ * `reason` is both: it goes to the model as the message and to the reader as the
+ * kicker, so there is one sentence rather than two that could disagree about why
+ * this turn happened.
+ */
+export function wake(
+  conversation: Conversation,
+  reason: string,
+  turn: number,
+  provider: Backend,
+  startedAt: number | null = null,
+): Conversation {
+  return follow(
+    { ...conversation, messages: [...conversation.messages, { role: 'user', content: reason }] },
+    turn,
+    provider,
+    // `woke` and not `asked`: the message exists because a vendor needs
+    // something to answer, and drawing it as something the person typed is the
+    // one thing this function exists to avoid.
+    { woke: reason, startedAt },
+  );
 }
 
 /**
@@ -184,6 +284,8 @@ export function refuse(
   content: string | null,
   provider: Backend,
   message: string,
+  /** Set when the turn that was refused is one the run caused, not a person. */
+  woke: string | null = null,
 ): Conversation {
   const reply: Reply = {
     // Negative, so it can never collide with an id Rust handed out — those
@@ -196,6 +298,17 @@ export function refuse(
     calls: [],
     usage: null,
     outcome: { kind: 'failed', message },
+    // A refused turn shows what was typed for the same reason a successful one
+    // does, and it matters more here: this is the card that says the request
+    // did not go, so the thing that did not go has to be on it.
+    asked: content,
+    // This records how the turn STARTED, not how it ended, so a wake refused
+    // before it left the window still says what set it off - otherwise it draws
+    // as the pilot failing spontaneously.
+    woke,
+    // A turn that never started has no start. Null rather than the instant of
+    // the refusal, which would be a duration for a wait nobody had.
+    startedAt: null,
   };
   return {
     ...conversation,
@@ -390,6 +503,90 @@ export function decide(
     ...conversation,
     messages: [...conversation.messages, { role: 'tool', id, name: call.name, content }],
   };
+}
+
+/**
+ * A proposal that ran without a card, because the person's settings said it
+ * could (#223).
+ *
+ * `decide`'s shape with a different sentence, and the sentence is the point:
+ * *"the user accepted this"* would be false — nobody pressed anything — and a
+ * model told that would describe a person's choice that never happened. `why`
+ * names the setting (the safe-list pattern, or YOLO), so what the model reports
+ * is the reason it actually ran.
+ */
+export function autoRan(conversation: Conversation, id: string, why: string): Conversation {
+  if (answerOf(conversation, id) !== null) return conversation;
+  const call = conversation.replies.flatMap((reply) => reply.calls).find((c) => c.id === id);
+  if (call === undefined || call.settlement?.kind !== 'proposes') return conversation;
+  return {
+    ...conversation,
+    messages: [
+      ...conversation.messages,
+      { role: 'tool', id, name: call.name, content: `${why} The request was sent.` },
+    ],
+  };
+}
+
+/**
+ * Replace the live turn's text with the reply the CLI says it made (#211).
+ *
+ * **Only the subscription backend has two answers to "what did it say", and this
+ * is which one wins.** A vendor streams one assistant message and the deltas are
+ * it. `claude -p` streams *every* assistant block in the turn — including the
+ * interstitials it writes between its own Read and Glob calls — and then reports
+ * the final message separately in the `result` envelope. Concatenating the
+ * deltas therefore produced the reply with all the thinking-out-loud still stuck
+ * to the front of it, run together with no separator, because a block boundary
+ * is not a `text_delta` and nothing was inserting one.
+ *
+ * A manual pass is what surfaced it: *"Let me look at the directory
+ * itself.Three prior attempts at this exact app are sitting in .vibe/runs"* —
+ * two blocks, one sentence, and one of them about a call the model then said
+ * out loud was redundant.
+ *
+ * The deltas keep their job, which is that the pane fills in as the reply
+ * arrives rather than sitting blank for a minute. They are a progress signal;
+ * this is the record. Applied only to the live turn, for the reason `reduce`
+ * drops an event that names another one.
+ */
+export function retext(conversation: Conversation, turn: number, text: string): Conversation {
+  const live = conversation.live;
+  if (live === null || live.turn !== turn) return conversation;
+  return { ...conversation, live: { ...live, text } };
+}
+
+/**
+ * The tool results at the end of the conversation, as one message to send back
+ * on a backend that has no tool role (#211).
+ *
+ * The two wires carry a result differently and this is the difference, in one
+ * function. A vendor gets the whole `messages` array with `role: 'tool'` entries
+ * in it, because that is the shape its API defines. The subscription CLI is
+ * resumed by session id — it already holds everything said — so the only thing
+ * to send is what came back, and it goes as the next user turn because that is
+ * the only role `claude -p` has.
+ *
+ * The **trailing** run rather than all of them: everything earlier has already
+ * been sent on a previous turn, and re-sending it would have the model answer
+ * results it has already acted on.
+ *
+ * Null when the conversation does not end in results, which is the case where
+ * there is nothing to say and a turn should not be taken at all.
+ */
+export function trailingResults(messages: readonly Message[]): string | null {
+  let from = messages.length;
+  while (from > 0 && messages[from - 1]?.role === 'tool') from -= 1;
+  if (from === messages.length) return null;
+  const lines = messages.slice(from).map((message) => {
+    if (message.role !== 'tool') return '';
+    return `### ${message.name === '' ? message.id : message.name}\n${message.content}`;
+  });
+  return [
+    'Results of the tool calls you made. Nothing else has happened since.',
+    '',
+    ...lines,
+  ].join('\n');
 }
 
 /** Note an event this build did not recognise. Shown, never discarded. */

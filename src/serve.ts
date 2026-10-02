@@ -1,14 +1,38 @@
 import { requestCancel } from '@src/cancel.js';
 import { main } from '@src/cli.js';
+import { refused as commandRefused, startCommand, stopAllCommands, stopCommand } from '@src/commands.js';
 import { pilotChat } from '@src/pilotchat.js';
+import { pilotCodex } from '@src/pilotcodex.js';
+import { cliStatus } from '@src/clipaths.js';
+import { acceptKeys } from '@src/heldkeys.js';
+import { pilotFs, pilotRoots, readPilotAccess, resolvedAccess } from '@src/pilotaccess.js';
+import type { PilotAccess } from '@src/pilotaccess.js';
+import { promptBlocks } from '@src/prompts.js';
 import * as log from '@src/log.js';
 import { createLineReader, decode, encode, PROTOCOL_VERSION } from '@src/protocol.js';
 import { orchestrate } from '@src/orchestrator.js';
-import { listRuns } from '@src/run.js';
-import { loadConfig, readRawConfig, writeConfigPatch } from '@src/config.js';
+import {
+  answerQuestions,
+  deleteRun,
+  listRunArtifacts,
+  listRuns,
+  readRunArtifact,
+  readRunReplay,
+} from '@src/run.js';
+import {
+  DEFAULTS,
+  globalConfigPath,
+  loadConfig,
+  mergeConfig,
+  readGlobalConfig,
+  readRawConfig,
+  writeConfigPatch,
+} from '@src/config.js';
 import { GATEABLE, GATE_MODES, UNGATEABLE } from '@src/gates.js';
-import { diffSinceWithLimit } from '@src/git.js';
-import type { LoadedConfig } from '@src/types.js';
+import { diffRange, diffSinceWithLimit } from '@src/git.js';
+import { KNOWN_MODELS, PROVIDERS, ROLE_NAMES } from '@src/roles.js';
+import { EFFORTS } from '@src/types.js';
+import type { ArtifactRead, LoadedConfig, RunArtifact } from '@src/types.js';
 import type { RunLoop } from '@src/cli.js';
 import type { GateContext, Host } from '@src/host.js';
 import type { Narration } from '@src/log.js';
@@ -166,6 +190,8 @@ export interface SessionDeps {
    * an `error` rather than an empty reply.
    */
   pilot?: (options: PilotChatOptions) => Promise<PilotChatResult>;
+  /** What runs one Codex pilot turn. Defaults to `pilotCodex` (#223). */
+  pilotCodex?: (options: PilotChatOptions) => Promise<PilotChatResult>;
   /**
    * What reads the archive. Defaults to `listRuns` (#223).
    *
@@ -187,19 +213,74 @@ export interface SessionDeps {
    * refused while a run is going, and that a refusal from the validator becomes
    * an `error` carrying the validator's own sentence.
    */
-  writeConfig?: (dir: string, patch: Record<string, unknown>) => { path: string };
+  writeConfig?: (
+    dir: string,
+    patch: Record<string, unknown>,
+    scope: 'project' | 'global',
+  ) => { path: string };
   /** What reads a diff. Defaults to `diffSince` (#223), which shells out to git. */
-  diff?: (dir: string, baseSha: string) => Promise<{ patch: string; truncated: boolean }>;
+  diff?: (
+    dir: string,
+    baseSha: string,
+    headSha?: string,
+  ) => Promise<{ patch: string; truncated: boolean }>;
+  /**
+   * What lists a run's artifacts. Defaults to `listRunArtifacts` (#223).
+   *
+   * A seam for `archive`'s reason and it is the same point one level down: that
+   * function is where "what is in a run directory" is decided, including which
+   * entries it refuses to offer at all, so a test substituting it substitutes
+   * the definition rather than a fixture around one.
+   */
+  artifacts?: (dir: string, runId: string) => RunArtifact[];
+  /** What reads one artifact. Defaults to `readRunArtifact` (#223). */
+  artifact?: (dir: string, runId: string, name: string) => ArtifactRead;
+  /**
+   * What deletes a run. Defaults to `deleteRun` (#223).
+   *
+   * A seam for a stronger reason than the reads above have one: the default
+   * **removes a directory recursively**, and a test that had to build a real run
+   * archive in order to check that a refusal becomes an `error` frame would be
+   * testing the filesystem rather than the framing. The guards themselves are
+   * `deleteRun`'s and are tested against real directories there, which is the
+   * split the other seams already make.
+   */
+  deleteRun?: (dir: string, runId: string) => { runId: string; dir: string };
+  /**
+   * What the pilot may do without asking (#223). Defaults to the settings for
+   * all projects. Read on every use rather than once, so a change in Settings
+   * reaches the next turn without a restart - and a seam because the default
+   * reads a file under the developer's home.
+   */
+  pilotAccess?: () => PilotAccess;
 }
 
 export function createSession(send: Send, deps: SessionDeps = {}): Session {
   const invoke = deps.invoke ?? ((argv, loop) => main(argv, loop));
   const chat = deps.pilot ?? pilotChat;
+  const chatCodex = deps.pilotCodex ?? pilotCodex;
+  /** Subscription pilot turns in flight, by request id, so `pilot_stop` can reach one. */
+  const pilotTurns = new Map<number, AbortController>();
   const archive = deps.archive ?? ((dir: string) => listRuns(dir));
   const readConfig = deps.config ?? ((dir: string) => loadConfig(dir));
   const writeConfig = deps.writeConfig ?? writeConfigPatch;
+  // `head` is what makes this one round rather than the whole change. Undefined
+  // takes `diffSince`, which is `1d`'s original question - everything since the
+  // base - and a named head takes `diffRange`, which runs one command and
+  // answers an empty round emptily rather than falling back to the working tree.
   const readDiff =
-    deps.diff ?? ((dir: string, baseSha: string) => diffSinceWithLimit(dir, baseSha));
+    deps.diff ??
+    ((dir: string, baseSha: string, head?: string) =>
+      head === undefined
+        ? diffSinceWithLimit(dir, baseSha)
+        : diffRange(dir, baseSha, head));
+  const listArtifacts =
+    deps.artifacts ?? ((dir: string, runId: string) => listRunArtifacts(dir, runId));
+  const readOneArtifact =
+    deps.artifact ??
+    ((dir: string, runId: string, name: string) => readRunArtifact(dir, runId, name));
+  const removeRun = deps.deleteRun ?? ((dir: string, runId: string) => deleteRun(dir, runId));
+  const access = deps.pilotAccess ?? (() => readPilotAccess(readGlobalConfig()));
 
   /**
    * Gates awaiting an answer, by the id this process allocated for them.
@@ -294,6 +375,23 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
   };
 
   const receive = (line: string): void => {
+    // The app's keychain read, before `decode` and outside the protocol (#223):
+    // it carries no id, answers nothing and is never echoed - a refusal says
+    // only that it was refused, because the line holds a key. See `heldkeys.ts`.
+    if (line.includes('"keys"')) {
+      let parsed: unknown = null;
+      try {
+        parsed = JSON.parse(line) as unknown;
+      } catch {
+        parsed = null;
+      }
+      if (typeof parsed === 'object' && parsed !== null && (parsed as Record<string, unknown>)['type'] === 'keys') {
+        if (!acceptKeys(parsed as Record<string, unknown>)) {
+          send({ type: 'error', id: null, message: 'a keys frame was refused' });
+        }
+        return;
+      }
+    }
     const read = decode(line);
     if (!read.ok) {
       send({ type: 'error', id: read.id, message: read.reason });
@@ -309,6 +407,23 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       // for it.
       send({ type: 'result', id: msg.id, exit: 0 });
       settleIfDone();
+      return;
+    }
+
+    if (msg.type === 'fs') {
+      // A read, beside a run, for `archive`'s reason: it writes nothing. The
+      // boundary is decided here from the machine's settings, so a window - or
+      // a model talking through one - cannot name its way outside it (#223).
+      try {
+        const answer = pilotFs(msg.op, msg.dir, msg.path, pilotRoots(msg.dir, access()));
+        send(
+          'refused' in answer
+            ? { type: 'error', id: msg.id, message: answer.refused }
+            : { type: 'fs', id: msg.id, ...answer },
+        );
+      } catch (err: unknown) {
+        send({ type: 'error', id: msg.id, message: err instanceof Error ? err.message : String(err) });
+      }
       return;
     }
 
@@ -337,12 +452,162 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       return;
     }
 
+    if (msg.type === 'artifacts' || msg.type === 'artifact') {
+      // Reads, beside a run, exactly as the archive is - both open files under
+      // `.vibe/runs` and write nothing - and beside a run is where they are
+      // wanted: the plan somebody asks to read is usually the plan the run in
+      // flight is working from.
+      //
+      // Synchronous for `archive`'s reason: both read a directory and parse what
+      // they find, and wrapping a sync call in a promise to look asynchronous
+      // adds a tick between the request and the answer for no gain.
+      //
+      // **The throw is the refusal, not a failure.** `readRunArtifact` throws a
+      // `StoredStateError` for a run id or a name this process will not join
+      // onto a path, and that sentence is the whole answer - so it reaches the
+      // sender as an `error` frame naming what was refused, rather than as an
+      // empty read that would look like a missing file.
+      try {
+        if (msg.type === 'artifacts') {
+          send({
+            type: 'artifacts',
+            id: msg.id,
+            dir: msg.dir,
+            runId: msg.runId,
+            entries: listArtifacts(msg.dir, msg.runId),
+          });
+        } else {
+          send({
+            type: 'artifact',
+            id: msg.id,
+            dir: msg.dir,
+            runId: msg.runId,
+            name: msg.name,
+            read: readOneArtifact(msg.dir, msg.runId, msg.name),
+          });
+        }
+      } catch (err: unknown) {
+        send({
+          type: 'error',
+          id: msg.id,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+      return;
+    }
+
+    if (msg.type === 'replay') {
+      // A read like the four above it, and the last of them to be built. It is
+      // exempt from the one-at-a-time rule for `archive`'s reason and a
+      // narrower one of its own: `loadRun` opens one file and writes nothing,
+      // and the run somebody opens while another is going is by definition not
+      // the run in flight.
+      //
+      // **The throw is the refusal.** `loadRun` throws a `StoredStateError` for
+      // an id it will not join onto a path, a run directory it will not follow
+      // (#53) and a `state.json` its validators reject — three different
+      // findings with three different sentences, and each is the whole answer.
+      // An empty replay would say a run did nothing.
+      try {
+        send({
+          type: 'replay',
+          id: msg.id,
+          dir: msg.dir,
+          runId: msg.runId,
+          ...readRunReplay(msg.dir, msg.runId),
+        });
+      } catch (err: unknown) {
+        send({
+          type: 'error',
+          id: msg.id,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+      return;
+    }
+
+    if (msg.type === 'prompts') {
+      // A read like the four above it and the simplest of them: `promptBlocks`
+      // opens nothing, reads no directory and returns the same four constants
+      // every time. It is answerable beside a run for the strongest version of
+      // the reason the others are - it cannot even observe one.
+      send({ type: 'prompts', id: msg.id, blocks: promptBlocks() });
+      return;
+    }
+
+    if (msg.type === 'answer_questions') {
+      // A write, beside a run, and its own guard is what makes that safe: it
+      // refuses a run whose lock names a live process and refuses one whose lock
+      // it cannot read, so the run in flight is the one run this frame cannot
+      // reach - the same reasoning `delete_run` rests on.
+      //
+      // It does not resume. The caller sends the resume argv as a separate
+      // `invoke`, which is what keeps this a write nobody has spent anything on
+      // yet and keeps the resume itself the ordinary one.
+      try {
+        const placed = answerQuestions(msg.dir, msg.runId, msg.answers);
+        send({
+          type: 'questions_answered',
+          id: msg.id,
+          dir: msg.dir,
+          runId: msg.runId,
+          filled: placed.filled,
+          unmatched: placed.unmatched,
+          open: placed.open,
+        });
+      } catch (err: unknown) {
+        send({
+          type: 'error',
+          id: msg.id,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+      return;
+    }
+
+    if (msg.type === 'delete_run') {
+      // **Beside a run, and that is a claim about the guards rather than about
+      // this frame being harmless.** The reads above are exempt from the
+      // one-at-a-time rule because they write nothing; this writes, so it needs
+      // its own reason, and the reason is that `deleteRun` refuses a run whose
+      // lock names a live process and refuses one whose lock it cannot read.
+      // The run in flight is therefore the one run this cannot reach, and every
+      // other entry in the archive is a directory nothing is working on.
+      //
+      // Synchronous, for the reason the reads are: it is one `rmSync` behind
+      // three checks, and wrapping it to look asynchronous would put a tick
+      // between the request and the answer for no gain.
+      //
+      // **The throw is the refusal.** A live lock, an unreadable one, an id
+      // that is not a single entry under `.vibe/runs` and a run directory that
+      // is a link all arrive here as a `StoredStateError` whose message is the
+      // whole answer - so it reaches the sender as an `error` frame naming what
+      // it refused and why, which is the only form a person can act on.
+      try {
+        const gone = removeRun(msg.dir, msg.runId);
+        send({
+          type: 'run_deleted',
+          id: msg.id,
+          dir: msg.dir,
+          runId: msg.runId,
+          removed: gone.dir,
+        });
+      } catch (err: unknown) {
+        send({
+          type: 'error',
+          id: msg.id,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+      return;
+    }
+
     if (msg.type === 'diff') {
       // A read, beside a run, like the archive - `git diff <base>..HEAD` writes
       // nothing. The `git add -A` path in `diffSince` is unreachable from here
       // because `decode` refuses a request with no base.
       const id = msg.id;
-      void readDiff(msg.dir, msg.baseSha)
+      void readDiff(msg.dir, msg.baseSha, msg.headSha)
         .then(({ patch, truncated }) => {
           // `truncated` as a flag rather than a marker in the text: the design's
           // truncation band is a judgement about what the reviewer READ, and a
@@ -379,7 +644,8 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
         return;
       }
       try {
-        const path = msg.patch === undefined ? null : writeConfig(msg.dir, msg.patch).path;
+        const path =
+          msg.patch === undefined ? null : writeConfig(msg.dir, msg.patch, msg.scope ?? 'project').path;
         // The config that RESULTED, whether this was a read or a write, so a
         // form never has to assume its own save took effect.
         const loaded = readConfig(msg.dir);
@@ -389,10 +655,21 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
           dir: msg.dir,
           effective: loaded,
           raw: readRawConfig(msg.dir),
-          path: path ?? loaded.configPath,
+          // The project's path even after a global write: `path` has always
+          // meant the project's file, and the global one has its own field.
+          path: msg.scope === 'global' ? loaded.configPath : (path ?? loaded.configPath),
+          globalRaw: readGlobalConfig(),
+          globalPath: globalConfigPath(),
+          globalEffective: mergeConfig(DEFAULTS, readGlobalConfig()),
           gateable: GATEABLE,
           modes: GATE_MODES,
           ungateable: UNGATEABLE,
+          roleNames: ROLE_NAMES,
+          providers: PROVIDERS,
+          efforts: EFFORTS,
+          models: KNOWN_MODELS,
+          pilot: resolvedAccess(access()),
+          clis: { claude: cliStatus('claude'), codex: cliStatus('codex') },
         });
       } catch (err: unknown) {
         // `validate`'s own message, naming the field - which is what lets a
@@ -404,6 +681,70 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
           message: err instanceof Error ? err.message : String(err),
         });
       }
+      return;
+    }
+
+    if (msg.type === 'command') {
+      // **Outside the one-at-a-time rule, like the pilot and the three reads.**
+      // That rule is about *runs*: `src/lock.ts` expects one process per run and
+      // two runs would interleave their narration. A command takes no lock,
+      // writes no state and narrates nothing into the run - and checking whether
+      // the thing a run just built starts is most wanted the moment the run has
+      // finished, which is exactly when a `finished()` gate would refuse it.
+      //
+      // Deliberately not awaited. A dev server does not exit, and that is the
+      // point of it: `command_started` answers now, output arrives as it comes,
+      // and `command_ended` lands whenever it lands.
+      const started = startCommand({
+        program: msg.program,
+        args: msg.args,
+        dir: msg.dir,
+        onOutput: (commandId, chunk) => send({ type: 'command_output', commandId, chunk }),
+        onEnd: (record) =>
+          send({
+            type: 'command_ended',
+            commandId: record.id,
+            code: record.code,
+            signal: record.signal,
+            stopped: record.stopped,
+            endedAt: record.endedAt ?? Date.now(),
+          }),
+      });
+      send(
+        commandRefused(started)
+          ? { type: 'command_started', id: msg.id, command: null, refused: started.refused }
+          : {
+              type: 'command_started',
+              id: msg.id,
+              command: {
+                id: started.id,
+                program: started.program,
+                args: started.args,
+                resolved: started.resolved,
+                dir: started.dir,
+                startedAt: started.startedAt,
+              },
+              refused: null,
+            },
+      );
+      return;
+    }
+
+    if (msg.type === 'pilot_stop') {
+      // A turn that has already ended is not an error: the click raced the
+      // reply, and the reply is what the pane is about to draw anyway.
+      pilotTurns.get(msg.turn)?.abort();
+      send({ type: 'result', id: msg.id, exit: 0 });
+      return;
+    }
+
+    if (msg.type === 'command_stop') {
+      // No reply beyond the ordinary `result`: the kill is observable as the
+      // `command_ended` the close event produces, and a second answer saying it
+      // was asked for would be a claim about a process rather than about the
+      // request.
+      stopCommand(msg.commandId);
+      send({ type: 'result', id: msg.id, exit: 0 });
       return;
     }
 
@@ -419,14 +760,36 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       // wait on a chat turn, and #206 already decided that a supervisor going
       // away abandons work rather than finishing it.
       const id = msg.id;
-      void chat({
+      // Where the turn may read, from the machine's settings and never the
+      // frame (#223). A section that does not parse refuses the turn with its
+      // own sentence rather than running it under a guess.
+      let addDirs: string[];
+      try {
+        addDirs = pilotRoots(msg.dir, access());
+      } catch (err: unknown) {
+        send({ type: 'error', id, message: err instanceof Error ? err.message : String(err) });
+        return;
+      }
+      // This turn's own off switch (#223), held until it settles either way.
+      const stopper = new AbortController();
+      pilotTurns.set(id, stopper);
+      void (msg.agent === 'codex' ? chatCodex : chat)({
         prompt: msg.prompt,
         system: msg.system,
         model: msg.model,
         sessionId: msg.sessionId,
         resume: msg.resume,
-        cwd: process.cwd(),
+        // **The repository the window named, never this process's cwd.** Under
+        // the app the host is spawned by Rust and inherits whatever directory
+        // that spawn had - which in a manual pass was a home directory, so the
+        // pilot's `Glob` walked the whole of it and timed out at 20s on every
+        // search. `--restricted` confines the file tools to *this* path, so it
+        // is the permission boundary rather than an incidental working
+        // directory, and the frame is refused without it.
+        cwd: msg.dir,
+        addDirs,
         timeoutMs: PILOT_TIMEOUT_MS,
+        signal: stopper.signal,
         onDelta: (text: string) => {
           send({ type: 'pilot_delta', id, text });
         },
@@ -441,6 +804,11 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
           });
         })
         .catch((err: unknown) => {
+          // Stopped from the window: said as itself, never as a failure.
+          if (stopper.signal.aborted) {
+            send({ type: 'pilot_stopped', id });
+            return;
+          }
           // An `error` rather than an empty `pilot_reply`: a reply with no text
           // would look like a model that had nothing to say, and this is a turn
           // that did not happen. `RateLimitError` arrives here as itself, which
@@ -450,6 +818,9 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
             id,
             message: err instanceof Error ? err.message : String(err),
           });
+        })
+        .finally(() => {
+          pilotTurns.delete(id);
         });
       return;
     }
@@ -629,6 +1000,14 @@ export async function serve(): Promise<void> {
   // Those children are not killed here. On Windows the job object in
   // `reaper.rs` takes them with the app; where it cannot, `Status.uncontained`
   // already says so rather than the app pretending otherwise.
+  //
+  // **Commands are killed here, and the asymmetry is deliberate** (#211). A run's
+  // agent children are work a person launched and a resume picks up; a dev
+  // server a person started from this window is not something anything picks
+  // up, and one left listening on 5173 after its window has gone is a port
+  // nobody can find the owner of. `process.exit` runs no `close` handler, so
+  // this is the last point at which anything can ask.
+  stopAllCommands();
   process.exitCode = HOST_EXIT_ABANDONED;
   process.exit(HOST_EXIT_ABANDONED);
 }

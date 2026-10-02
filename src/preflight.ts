@@ -5,6 +5,7 @@ import { claudeBin, parseProbeTurn } from '@src/claude.js';
 import { codexBin, parseProbeStream } from '@src/codex.js';
 import * as git from '@src/git.js';
 import { hostExecutableFor } from '@src/hosttools.js';
+import { agentEnv } from '@src/auth.js';
 import { run } from '@src/proc.js';
 import { codexProbeSandbox, enabledRolesFor, providerAccess, rolesFor } from '@src/roles.js';
 import type { Access, RoleTable } from '@src/roles.js';
@@ -328,7 +329,8 @@ async function preflightClaude(
         ...args,
         '--tools', 'Bash',
       ],
-      { input: prompt, cwd, timeoutMs },
+      // The probe is billed the way the turns it stands for will be (#223).
+      { input: prompt, cwd, timeoutMs, env: agentEnv('claude') },
     );
 
     const turn = parseProbeTurn(result.stdout);
@@ -418,7 +420,7 @@ async function preflightCodex(
         cwd,
         '-',
       ],
-      { input: prompt, cwd, timeoutMs },
+      { input: prompt, cwd, timeoutMs, env: agentEnv('codex') },
     );
 
     const stream = parseProbeStream(result.stdout);

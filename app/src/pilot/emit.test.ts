@@ -1,0 +1,292 @@
+import { describe, expect, test } from 'vitest';
+import { FENCE, UNNAMED, readEmitted, unique, visible } from './emit';
+import { noCommands } from '../cockpit/commands';
+import { execute } from './tools';
+import { emptyConversation, follow, reduce, settle, trailingResults } from './transcript';
+import { emptyRun } from '../cockpit/model';
+import type { Conversation } from './transcript';
+import type { Message } from './pilot';
+
+/**
+ * The tool channel for a backend with no tool API (#211).
+ *
+ * This is the file where a bug would otherwise be invisible: the parse runs
+ * against text a model wrote, and everything it produces is drawn as a card
+ * somebody presses. `readEmitted` and `visible` are pure and this drives them
+ * directly — a block in, a call out.
+ *
+ * The claim worth the most is the one about **failing closed in the direction
+ * that costs nothing**. A block that cannot be read must never become a call
+ * that looks fine; it becomes one that says it cannot be run, which the pane
+ * already draws and the model is already told.
+ */
+
+const block = (body: string): string => ['```' + FENCE, body, '```'].join('\n');
+
+describe('reading a call out of prose', () => {
+  test('a well-formed block becomes the call a vendor would have streamed', () => {
+    const text = [
+      'I think this is ready. Here is what I would run:',
+      '',
+      block('{ "tool": "start_run", "input": { "task": "do it", "directory": "/r", "plan_only": true } }'),
+      '',
+      'Press it if you agree.',
+    ].join('\n');
+
+    const calls = readEmitted(text, 4, 'w1');
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.name).toBe('start_run');
+    // The arguments are JSON text, exactly as a vendor streams them, so
+    // `readCall` and `execute` below take the same path on both backends.
+    expect(JSON.parse(calls[0]?.arguments ?? 'null')).toEqual({
+      task: 'do it',
+      directory: '/r',
+      plan_only: true,
+    });
+  });
+
+  test('the ids are unique within a turn and cannot collide with a vendor id', () => {
+    // A reducer keyed on ids handed two calls sharing one would answer the
+    // first and leave the second unanswered for ever, which is unsendable.
+    const text = [block('{ "tool": "read_run" }'), block('{ "tool": "read_output" }')].join('\n\n');
+    const ids = readEmitted(text, 7, 'w1').map((c) => c.id);
+    expect(new Set(ids).size).toBe(2);
+    for (const id of ids) expect(id).toMatch(/^emit:w1:7:/);
+  });
+
+  test('a tool with no arguments is not a broken call', () => {
+    // `read_run` takes none, so the model writes no `input`. An empty argument
+    // string is what `readCall` already treats as "a tool that takes no input".
+    expect(readEmitted(block('{ "tool": "read_run" }'), 1, 'w1')[0]?.arguments).toBe('');
+  });
+
+  test('a block that is not JSON is kept as a call that cannot be run', () => {
+    // Kept rather than dropped. A model emits truncated JSON when a turn runs
+    // out of room, and the only way it corrects itself is being told.
+    const calls = readEmitted(block('{ "tool": "start_run", "input": {'), 1, 'w1');
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse.bind(JSON, calls[0]?.arguments ?? '')).toThrow();
+  });
+
+  test('a block that names no tool is refused by name, listing the ones that exist', () => {
+    const calls = readEmitted(block('{ "input": { "task": "x" } }'), 1, 'w1');
+    expect(calls[0]?.name).toBe(UNNAMED);
+    const settlement = execute(
+      { name: calls[0]?.name ?? '', input: {}, unreadable: null },
+      // The refusal path returns before it reads any of this, which is the
+      // point: a tool name this build does not have is refused by name, and the
+      // run it was asked about never comes into it.
+      { run: {} as never, commands: noCommands(), dir: 'C:/repo' },
+    );
+    expect(settlement.kind).toBe('refused');
+    expect(settlement.kind === 'refused' && settlement.content).toContain('start_run');
+  });
+
+  test('an ordinary fenced code block is not a call', () => {
+    // The whole reason the info string is specific. A pilot that explains a
+    // snippet of JSON must not have that snippet run.
+    const text = ['```json', '{ "tool": "start_run" }', '```'].join('\n');
+    expect(readEmitted(text, 1, 'w1')).toHaveLength(0);
+  });
+
+  test('an unterminated block is not a call', () => {
+    // Half a call is not a call: a turn that ran out of room mid-block would
+    // otherwise propose an argv that was still being written.
+    expect(readEmitted('```' + FENCE + '\n{ "tool": "start_run"', 1, 'w1')).toHaveLength(0);
+  });
+});
+
+describe('what a person reads', () => {
+  test('the block is taken out of the prose and the prose is kept', () => {
+    const text = ['Here is the run.', '', block('{ "tool": "read_run" }'), '', 'Have a look.'].join(
+      '\n',
+    );
+    // The blank lines the model left around the block are collapsed, so the
+    // reply does not read as one with a hole in it.
+    expect(visible(text)).toBe('Here is the run.\n\nHave a look.');
+    expect(visible(text)).not.toContain('read_run');
+  });
+
+  test('a half-written block is hidden while it streams rather than spilling JSON', () => {
+    const partial = 'One moment.\n\n```' + FENCE + '\n{ "tool": "start_ru';
+    expect(visible(partial)).toBe('One moment.');
+  });
+
+  test('a reply that is only a call renders as nothing rather than as an empty card', () => {
+    expect(visible(block('{ "tool": "read_run" }'))).toBe('');
+  });
+});
+
+describe('answering a call on a backend with no tool role', () => {
+  const tool = (id: string, name: string, content: string): Message => ({
+    role: 'tool',
+    id,
+    name,
+    content,
+  });
+
+  test('only the trailing results go back, because the rest were already sent', () => {
+    const messages: readonly Message[] = [
+      { role: 'user', content: 'hello' },
+      { role: 'assistant', content: 'first' },
+      tool('a', 'read_run', 'OLD'),
+      { role: 'assistant', content: 'second' },
+      tool('b', 'read_output', 'NEW'),
+    ];
+    const sent = trailingResults(messages);
+    expect(sent).toContain('NEW');
+    // Re-sending it would have the model answer results it has already acted on.
+    expect(sent).not.toContain('OLD');
+    expect(sent).toContain('read_output');
+  });
+
+  test('a conversation that does not end in results has nothing to send', () => {
+    // Which is the case where no turn should be taken at all — the empty prompt
+    // that used to be sent instead asked the model to answer nothing.
+    expect(trailingResults([{ role: 'user', content: 'hi' }])).toBeNull();
+    expect(trailingResults([])).toBeNull();
+  });
+});
+
+describe('an id has to outlive the window that made it', () => {
+  /**
+   * The defect this file's ids had, reproduced end to end (#223).
+   *
+   * **A turn id is unique within one window session; a conversation is not.**
+   * `nextRequestId` restarts at 0 on every launch, `saved.ts` restores the
+   * conversation with its tool results, and `settle` correctly refuses to answer
+   * a call that already has a result. So a new call landing on a restored id was
+   * never settled at all: the pane drew `waiting to be run` for ever, the model
+   * was told nothing, and there was no error anywhere.
+   *
+   * It is driven through `settle` rather than asserted on the string, because
+   * the string is not the claim — the claim is that the call gets an answer.
+   */
+  const emitted = (text: string, turn: number, origin: string): Conversation => {
+    const opened = follow(emptyConversation(), turn, 'subscription');
+    const withCalls = readEmitted(text, turn, origin).reduce(
+      (state, call) =>
+        reduce(state, {
+          kind: 'tool_call',
+          turn,
+          id: call.id,
+          name: call.name,
+          arguments: call.arguments,
+        }),
+      opened,
+    );
+    return reduce(withCalls, { kind: 'ended', turn, stop: null });
+  };
+
+  const settleAll = (conversation: Conversation): Conversation =>
+    conversation.replies
+      .flatMap((reply) => reply.calls)
+      .reduce(
+        (state, call) =>
+          call.settlement === null
+            ? settle(state, call.id, execute(call, { run: emptyRun(), commands: noCommands(), dir: 'C:/r' }))
+            : state,
+        conversation,
+      );
+
+  const said = block('{ "tool": "read_command" }');
+
+  test('a second window session answers its own call rather than inheriting an old one', () => {
+    // Session one asks, and is answered.
+    const first = settleAll(emitted(said, 3, 'w1'));
+    expect(first.messages.filter((m) => m.role === 'tool')).toHaveLength(1);
+
+    // The window is relaunched: the counter restarts, so this turn is 3 again,
+    // and the stored conversation comes back with session one's result in it.
+    const restored: Conversation = { ...first, live: null };
+    const again = settleAll({
+      ...emitted(said, 3, 'w2'),
+      messages: [...restored.messages],
+      replies: [...restored.replies, ...emitted(said, 3, 'w2').replies],
+    });
+
+    // Both calls have a settlement, and each has its own result.
+    const calls = again.replies.flatMap((reply) => reply.calls);
+    expect(calls).toHaveLength(2);
+    for (const call of calls) expect(call.settlement).not.toBeNull();
+    expect(new Set(calls.map((c) => c.id)).size).toBe(2);
+    expect(again.messages.filter((m) => m.role === 'tool')).toHaveLength(2);
+  });
+
+  test('the same origin and turn is still one id, which is what settle relies on', () => {
+    // The guard being kept: settling one call twice must not put two results on
+    // the wire for it, which both vendors reject.
+    const one = settleAll(emitted(said, 3, 'w1'));
+    const twice = settleAll(one);
+    expect(twice.messages.filter((m) => m.role === 'tool')).toHaveLength(1);
+  });
+});
+
+describe('a call written before the model finished reading is still a call (#223)', () => {
+  /**
+   * **The worst failure this channel has had, because it is silent on both
+   * sides.** `readDelta` yields every assistant block in a turn — including the
+   * interstitials between the model's own `Read` and `Glob` calls — while
+   * `result.result` is only the final message. The parse read the final message
+   * alone, so a model that wrote a block, went on reading files and then
+   * summarised had its call thrown away: no card, no refusal, nothing on screen.
+   *
+   * And the model cannot tell. It says what it did — *"I put up two `gh` cards
+   * and you want the second one"* — over a transcript containing no cards, and
+   * the person reading it has no way to know which of the two is lying.
+   */
+  const turnOf = (...blocks: string[]) => blocks.join('\n\nthinking out loud\n\n');
+
+  test('a block in an interstitial message survives the summary that follows it', () => {
+    const interstitial = block('{ "tool": "run_command", "input": { "program": "gh" } }');
+    const whole = turnOf('Let me look at the issue.', interstitial, 'Here is what I found.');
+    const calls = unique(readEmitted(whole, 4, 'w1'));
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.name).toBe('run_command');
+  });
+
+  test('two different calls to one tool both survive, which is the case that happened', () => {
+    // The pilot put up two `gh` cards — one with an empty `--repo ""` that would
+    // only error, one correct — and said which to press. Collapsing them by tool
+    // name would have hidden the one it was pointing at.
+    const broken = block('{ "tool": "run_command", "input": { "args": ["issue", "view", "--repo", ""] } }');
+    const good = block('{ "tool": "run_command", "input": { "args": ["issue", "view", "236"] } }');
+    const calls = unique(readEmitted(turnOf(broken, good), 4, 'w1'));
+    expect(calls).toHaveLength(2);
+    expect(calls[0]?.arguments).toContain('--repo');
+    expect(calls[1]?.arguments).toContain('236');
+  });
+
+  test('a model repeating its own block in the summary proposes once, not twice', () => {
+    // Each card is a proposal that has to be answered before the conversation can
+    // be sent, and the second would be a command somebody runs twice.
+    const same = block('{ "tool": "read_run", "input": {} }');
+    const calls = unique(readEmitted(turnOf(same, same), 4, 'w1'));
+    expect(calls).toHaveLength(1);
+  });
+
+  test('the first occurrence is the one kept, so the id is where it was first written', () => {
+    const same = block('{ "tool": "read_run", "input": {} }');
+    const other = block('{ "tool": "read_output", "input": {} }');
+    const calls = unique(readEmitted(turnOf(same, other, same), 4, 'w1'));
+    expect(calls.map((c) => c.id)).toEqual(['emit:w1:4:0', 'emit:w1:4:1']);
+  });
+
+  test('a block split across two deltas is one block once they are joined', () => {
+    // The old reason for reading only the final message, and it is kept rather
+    // than traded away: concatenating the deltas satisfies it too.
+    const half = '```' + FENCE + '\n{ "tool": "read_run"';
+    const rest = ', "input": {} }\n```';
+    const calls = unique(readEmitted(half + rest, 4, 'w1'));
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.name).toBe('read_run');
+  });
+
+  test('two tools with identical arguments are two calls, not one', () => {
+    // The key is the pair. `read_run` and `read_output` both take no arguments,
+    // so keying on the arguments alone would silently drop one.
+    const a = block('{ "tool": "read_run" }');
+    const b = block('{ "tool": "read_output" }');
+    expect(unique(readEmitted(turnOf(a, b), 4, 'w1'))).toHaveLength(2);
+  });
+});

@@ -1,6 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import path from 'node:path';
+import { agentEnv } from '@src/auth.js';
 
 const isWin = process.platform === 'win32';
 
@@ -379,6 +380,8 @@ function killTree(child: ChildProcess): void {
 export function spawnCodexAppServer(bin: string, cwd: string): AppServerTransport {
   const child = spawn(bin, ['app-server'], {
     cwd,
+    // The same account the turns it watches are billed to (#223).
+    env: agentEnv('codex'),
     shell: isWin && /\.(cmd|bat)$/i.test(bin),
     windowsHide: true,
     stdio: ['pipe', 'pipe', 'pipe'],

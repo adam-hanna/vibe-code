@@ -12,10 +12,11 @@ import type { Outbound } from '@src/protocol.js';
 /**
  * Configuration, over the wire and onto disk (#223, `1h`).
  *
- * #140 made the gate matrix configuration, and `DEFAULT_GATES` says in its own
- * comment that every row being `step` *"is very probably not the default anyone
- * wants to keep - but changing it is a decision for whoever has the settings
- * screen in front of them"*. This is the machinery under that screen.
+ * #140 made the gate matrix configuration and left every row `step`, saying in
+ * `DEFAULT_GATES`'s own comment that this was *"very probably not the default
+ * anyone wants to keep - but changing it is a decision for whoever has the
+ * settings screen in front of them"*. This is the machinery under that screen;
+ * #211 is the decision itself, and it moved the two planning rounds to `auto`.
  *
  * The claim that matters most is **refuse, never repair**, and it matters more
  * here than anywhere else this rule is applied: what is being written is a file

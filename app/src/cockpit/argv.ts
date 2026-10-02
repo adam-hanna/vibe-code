@@ -8,8 +8,10 @@
  * second definition of the form, drifting from the button's on the next flag
  * anybody adds (#144).
  *
- * So the button and the tool build the same argv here, and a test that pins the
- * shape pins both.
+ * So every launch builds its argv here, and a test that pins the shape pins all
+ * of them. The composer's button is gone (#223) — `1b` hands its settings to the
+ * pilot through `briefFor` — so `start_run` is now the only road from a form to
+ * a new run, and it takes the overrides this file has always been able to send.
  */
 /**
  * What `4a`'s overrides block can express, and nothing it cannot.
@@ -64,6 +66,43 @@ export function launchArgv(
 }
 
 /**
+ * What the composer says to the pilot: the brief, and the settings beside it (#223).
+ *
+ * **`1b` has one way out now, and it is the conversation.** It used to have two —
+ * `talk it through`, and `skip the pilot`, which built an argv from this form
+ * and started the run — and the second was kept because the overrides block had
+ * no other road to a run. Asked to go in as many words: *"There should only be
+ * one start button and it should follow the 'talk it through' path."*
+ *
+ * So the settings travel **in the message**, where the person can see them, and
+ * `start_run` takes the same fields `launchArgv` does, so the proposal card shows
+ * them in the exact argv before anybody presses it. Nothing is merged into an
+ * accepted argv behind the card's back: what runs is still what was displayed.
+ *
+ * Plan-only is always stated, because the toggle always has a value and
+ * `start_run` refuses to guess it. The overrides are stated only when there are
+ * any — a list of the project's defaults would read as choices somebody made.
+ */
+export function briefFor(task: string, planOnly: boolean, over: Overrides = {}): string {
+  const lines = [
+    `- plan_only: ${planOnly ? 'true — stop after the plan clears critique' : 'false — a full run that writes code and commits'}`,
+  ];
+  const gates = Object.entries(over.gates ?? {}).sort();
+  if (gates.length > 0) {
+    lines.push(`- gates: ${gates.map(([b, m]) => `${b}=${m}`).join(', ')}`);
+  }
+  if (typeof over.maxTokens === 'number') lines.push(`- max_tokens: ${over.maxTokens}`);
+  if (typeof over.p1Tolerance === 'number') lines.push(`- p1_tolerance: ${over.p1Tolerance}`);
+  return [
+    task.trim(),
+    '',
+    '---',
+    'Settings I chose for this run in the composer. Pass them on start_run when you propose it:',
+    ...lines,
+  ].join('\n');
+}
+
+/**
  * Pick a halted run back up (`4d`, #223).
  *
  * **The one action a halt banner can actually offer**, and it is what makes the
@@ -78,8 +117,76 @@ export function launchArgv(
  * id is the one #207 put on the wire, so this is the window repeating a fact it
  * was told rather than reconstructing a path.
  */
-export function resumeArgv(runId: string, dir: string): readonly string[] {
-  return ['resume', runId.trim(), '-C', dir.trim()];
+export function resumeArgv(
+  runId: string,
+  dir: string,
+  raise: Raise = {},
+  /**
+   * Take the lock even though one is already held (#211).
+   *
+   * **Only for a lock whose holder is gone.** `--force` describes one
+   * invocation's willingness to take a lock and is deliberately not a config
+   * setting; here it is deliberately not a default either, because two writers
+   * on one run is the state `src/lock.ts` exists to prevent and a window that
+   * always forced would defeat it.
+   *
+   * The caller offers it on `liveness: 'interrupted'` - a dead pid with no
+   * `ending.json` beside it - which is exactly the state a killed host leaves
+   * and the only one where nothing is being overruled. Before this the app had
+   * no way to send it at all, so a run whose host was killed could not be
+   * reopened from the window that killed it.
+   */
+  force = false,
+): readonly string[] {
+  const argv = ['resume', runId.trim(), '-C', dir.trim()];
+  // Before the raises, so the argv a person reads groups the thing that changes
+  // *whether* this runs ahead of the things that change what it may spend.
+  if (force) argv.push('--force');
+  // Sorted for the reason `launchArgv`'s overrides are: the same choice must
+  // always build the same command, or the one in a bug report is not the one
+  // that ran.
+  for (const [flag, value] of Object.entries(raise).sort()) {
+    if (typeof value === 'number') argv.push(`--${flag}`, String(value));
+  }
+  return argv;
+}
+
+/**
+ * Take a finished plan-only run into implementation (#223).
+ *
+ * **A resume with one flag, and deliberately not a new run.** Reported as a dead
+ * end — *"after it stopped, I SHOULD have been able to continue… When I asked
+ * the pilot, it kicked off another run from scratch"* — and a new run is exactly
+ * the wrong answer: it re-derives a plan that already exists, and it has none of
+ * what the plan phase settled, so the P1s the tolerance carried and the findings
+ * the approving round declined are simply lost.
+ *
+ * Every refusal lives in `continueIntoImplementation` on the core side, which is
+ * what keeps this a *form to an argv* rather than a second opinion about when a
+ * run may change shape. A plan that has not cleared critique, a run that was
+ * never plan-only and a run with no stored plan all come back as the core's own
+ * sentence.
+ */
+export function implementArgv(runId: string, dir: string): readonly string[] {
+  return ['resume', runId.trim(), '-C', dir.trim(), '--implement'];
+}
+
+/**
+ * What a halt banner may raise on the way back in (`4d`, #223).
+ *
+ * `4d` gives every halt a choice — `+2 rounds`, `+2M and resume` — and each of
+ * those is a **cap raised on the resume**, which is exactly what AGENTS.md
+ * already tells a human to do by hand: *"`vibe resume <run-id>`, usually with a
+ * raised `--max-tokens`."* So the button does the documented thing rather than a
+ * new one.
+ *
+ * The keys are flag names without their dashes, so nothing here can name a flag
+ * `parseArgs` does not take without it being visible at the call site.
+ */
+export interface Raise {
+  'max-plan-rounds'?: number;
+  'max-review-rounds'?: number;
+  'max-tokens'?: number;
 }
 
 /** What a launch asked for. Every field came out of the argv that was sent. */

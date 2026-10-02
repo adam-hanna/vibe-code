@@ -114,12 +114,32 @@ function muted<T>(body: () => Promise<T>): Promise<T> {
 
 // ---- the table itself -------------------------------------------------------
 
-test('the default table is what the loop did before there was a table', () => {
-  // The groundwork bar, stated as a fact about the default rather than left to
-  // be inferred from the behaviour cases below. Every gateable boundary `step`
-  // means: a host is asked at all of them, exactly as #134 shipped, and a
-  // terminal is asked at none of them, exactly as every CLI run has behaved.
-  for (const boundary of GATEABLE) assert.equal(DEFAULT_GATES[boundary], 'step', boundary);
+test('the default holds where the run changes hands, and not mid-argument', () => {
+  // This asserted every gateable boundary was `step` - the groundwork bar, and
+  // exactly what the loop did before there was a table. That claim is no longer
+  // the contract (#211). `DEFAULT_GATES` said so itself from the day it landed:
+  // *"very probably not the default anyone wants to keep... changing it is a
+  // decision for whoever has the settings screen in front of them"*, and the
+  // report when somebody had one was "remove the holding at the end of a plan
+  // round".
+  //
+  // Pinned per row rather than as "not all step", because *which* two moved is
+  // the decision. The planning pair is the loop arguing with itself and is
+  // followed by the critic reading the result; the other four are where code
+  // gets written, a diff appears, a gate fails, or findings buy a fix turn.
+  assert.deepEqual(DEFAULT_GATES, {
+    'plan-round': 'auto',
+    'question-round': 'auto',
+    'plan-approved': 'step',
+    implemented: 'step',
+    'verify-round': 'step',
+    'review-round': 'step',
+  });
+  // Nothing became `stop` by default, which is the sharper half: `step` holds
+  // and asks, and a terminal runs through it, so a wrong `step` costs a pause a
+  // person can release. A `stop` ENDS the run, whoever is listening, and a
+  // default that did that would end CLI runs nobody was watching.
+  for (const boundary of GATEABLE) assert.notEqual(DEFAULT_GATES[boundary], 'stop', boundary);
   assert.deepEqual(DEFAULTS.gates, DEFAULT_GATES);
   assert.deepEqual([...GATEABLE], [
     'plan-round',
@@ -194,8 +214,16 @@ test('a config file is refused the same way, and by the same sentence', () => {
   assert.throws(() => loadConfig(project({ gates: { implemented: 'never' } })), /gates\.implemented must be one of/);
   // A partial table is the ordinary way to write one: the rows named override,
   // the rest keep the default, and nothing is "missing" until the merge is done.
+  //
+  // The unnamed row is checked against `DEFAULT_GATES` rather than against a
+  // literal. What this case is about is that the merge KEEPS a row nobody wrote,
+  // and spelling the default here made it fail when the default moved (#211) -
+  // which is a test failing for something it was not guarding.
   assert.equal(loadConfig(project({ gates: { implemented: 'stop' } })).gates.implemented, 'stop');
-  assert.equal(loadConfig(project({ gates: { implemented: 'stop' } })).gates['plan-round'], 'step');
+  assert.equal(
+    loadConfig(project({ gates: { implemented: 'stop' } })).gates['plan-round'],
+    DEFAULT_GATES['plan-round'],
+  );
 });
 
 test('a config written before gates existed still loads, with the default table', () => {
@@ -335,7 +363,7 @@ test('question-round is holdable, and the context says which round it is', async
         {
           claude: (label) =>
             label === 'plan' ? planFixture({ open_questions: [questionFixture()] }) : planFixture(),
-          codex: (label) => (label === 'answers-0' ? answersReport([{}]) : report([])),
+          codex: (label) => (label.startsWith('answers-') ? answersReport([{}]) : report([])),
         },
         [],
       ),
@@ -348,6 +376,49 @@ test('question-round is holdable, and the context says which round it is', async
   // Beside it and unchanged: the counter is added to the context, not swapped in.
   assert.equal(typeof host.asked[0]?.planRound, 'number');
   assert.equal(typeof host.asked[0]?.reviewRound, 'number');
+});
+
+test('stopping at a question round hands back the questions to answer', async () => {
+  // The gap this closes, and it is the one that made `continue` the only usable
+  // button. `writeEscalation` renders a *Your answer:* block per question and
+  // the resume parses them back - but the gate's own stop carried no questions,
+  // so `NEEDS-INPUT.md` omitted the section entirely at the one boundary whose
+  // whole subject is questions. Stopping to answer them yourself produced a
+  // document with nothing to answer.
+  //
+  // Not new machinery: `resolveQuestions` already throws with `[...blockers]`
+  // when the answerer is off. This is the same field on the same error, reached
+  // the other way.
+  const state = freshRun({ prefix: 'vibe-gates-question-stop-', task: 'gate matrix' });
+  const asked = questionFixture();
+
+  const err = await muted(() =>
+    orchestrate(
+      state,
+      config({}, { gates: matrix({ 'question-round': 'stop' }) }),
+      false,
+      agents(
+        {
+          claude: (label) =>
+            label === 'plan' ? planFixture({ open_questions: [asked] }) : planFixture(),
+          codex: (label) => (label.startsWith('answers-') ? answersReport([{}]) : report([])),
+        },
+        [],
+      ),
+    ).then(
+      () => null,
+      (e: unknown) => e,
+    ),
+  );
+
+  assert.ok(err instanceof Escalation, String(err));
+  assert.equal(err.code, EXIT.NEEDS_HUMAN);
+  assert.match(err.message, /Stopped at the question-round boundary/);
+  // The questions the round put, carried on the error that ends the run.
+  assert.deepEqual(
+    (err.questions ?? []).map((q) => q.question),
+    [asked.question],
+  );
 });
 
 // ---- with no host, which is every run from a terminal ------------------------
@@ -510,11 +581,16 @@ test('doctor names the rows that will stop you, and the ones that will not', () 
   assert.match(mixed[1] ?? '', /use stop for a halt you can resume/);
 
   // Loop order, not alphabetical: it is what a reader is matching against the
-  // run they just watched.
-  assert.match(
-    describeGates(DEFAULT_GATES)[0] ?? '',
-    /step at plan-round, question-round, plan-approved, implemented, verify-round, review-round/,
-  );
+  // run they just watched. Built from `DEFAULT_GATES` rather than spelled out,
+  // so this keeps checking the ORDER - which is the claim - when the table
+  // changes, instead of failing because it did (#211).
+  const stepping = GATEABLE.filter((b) => DEFAULT_GATES[b] === 'step');
+  assert.ok(stepping.length > 0, 'the default holds nowhere, so this case proves nothing');
+  assert.match(describeGates(DEFAULT_GATES)[0] ?? '', new RegExp(`step at ${stepping.join(', ')}`));
+  // And the rows that run through are not listed as holding anywhere.
+  for (const boundary of GATEABLE.filter((b) => DEFAULT_GATES[b] === 'auto')) {
+    assert.doesNotMatch(describeGates(DEFAULT_GATES).join('\n'), new RegExp(`\\b${boundary}\\b`));
+  }
 });
 
 test('--gate reaches the config, last wins, and a bad one is refused there', () => {

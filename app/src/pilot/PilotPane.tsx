@@ -1,49 +1,55 @@
-import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
-import { Button, MetaChip, StateKicker } from '../design';
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
+import { Button, MetaChip, StateKicker, ThinkingWave } from '../design';
+import { elapsed } from '../cockpit/format';
+import { logOf } from './log';
+import { RoundCard } from './RoundCard';
 import * as host from '../host';
 import * as keys from './keys';
 import * as pilot from './pilot';
-import {
-  BACKEND_NAME,
-  BACKEND_NOTE,
-  BACKENDS,
-  modelsFor,
-  needsKey,
-  SUBSCRIPTION_MODELS,
-} from './backend';
+import { agentOf, BACKEND_NAME, BACKEND_NOTE, backendFor, modelsFor, needsKey, SUBSCRIPTION_MODELS } from './backend';
 import type { Backend } from './backend';
 import { systemPrompt } from './brief';
-import { declare, execute } from './tools';
+import { readEmitted, unique, visible } from './emit';
+import { useFollow } from './follow';
+import { autoRun, NO_ACCESS } from './access';
+import { declare, settleCall } from './tools';
+import { chatKey, chatMove, isDraftKey, readChat, worthSaving, writable } from './saved';
 import {
   costOf,
   describeDay,
   formatUsd,
   limitVerdict,
   readLedger,
-  readLimits,
   record,
   today,
   writeLedger,
-  writeLimits,
 } from './ledger';
 import type { Ledger, PilotLimits } from './ledger';
 import {
   answerOf,
   ask,
+  autoRan,
   decide,
   emptyConversation,
   follow,
   reduce,
   refuse,
+  retext,
   settle,
   spendParts,
+  trailingResults,
   unanswered,
   unrecognised,
+  wake,
 } from './transcript';
+import type { ReactNode } from 'react';
 import type { KeyStatus } from './keys';
+import type { PilotAccess } from './access';
 import type { Effect, Settlement } from './tools';
 import type { Call, Conversation, Reply } from './transcript';
 import type { Launched } from '../cockpit/argv';
+import { line, outcome } from '../cockpit/commands';
+import type { Command, Commands } from '../cockpit/commands';
 import type { Run } from '../cockpit/model';
 
 /**
@@ -76,31 +82,147 @@ import type { Run } from '../cockpit/model';
 /** Turns the pilot may take on its own before a person has to speak again. */
 const MAX_CHAIN = 8;
 
+/**
+ * How long a running command has to stay quiet before it counts as up (#223).
+ *
+ * **A shape rather than a duration**, the same standing as `MISSED_TICKS` in the
+ * core: what is being detected is a process that has finished saying what it
+ * says on startup, and every dev server here does that in one burst — Vite
+ * prints its banner and stops, `node --watch` prints ready and stops. Two
+ * seconds is long enough that a burst arriving in several chunks is one event
+ * and short enough that the answer arrives while somebody is still looking.
+ *
+ * It is not a claim that the server is *working*. It is a claim that it has
+ * stopped writing, which is the measurable half, and the wake says exactly that
+ * rather than "it started".
+ */
+const SETTLED_MS = 2_000;
+
+/**
+ * What a command has done that is worth waking the pilot for.
+ *
+ * Two states and not one, because they need opposite readings: a command that
+ * **ended** has an exit code and is over, and one that has gone **quiet** is
+ * still running and has finished starting up. A dev server only ever reaches the
+ * second, and it is the one that answers *"did it start?"*.
+ */
+type CommandNews = 'ended' | 'quiet';
+
+function commandWake(command: Command, news: CommandNews): string {
+  const head =
+    news === 'ended'
+      ? `[the app woke you — nobody typed this] The command "${line(command)}" (${command.id}) has ended — ${outcome(command) ?? 'no outcome recorded'}.`
+      : `[the app woke you — nobody typed this] The command "${line(command)}" (${command.id}) is still running and has written nothing for ${String(SETTLED_MS / 1000)}s, which usually means it has finished starting up.`;
+  return [
+    head,
+    '',
+    'Read it with read_command before you say anything about it — this message',
+    'carries no output, deliberately, so that what you report is what you read.',
+    'Take the "cursor" from the answer and pass it back as "since" next time, so',
+    'a later read gives you only what is new.',
+    '',
+    news === 'quiet'
+      ? 'Say whether it came up, and name the port or URL from what it actually printed rather than from a config file. If it did not come up, say what the output shows and what you would try.'
+      : 'Say what it did, and whether that is what was wanted. If it failed, quote the part of the output that says why.',
+  ].join('\n');
+}
+
+/** Where the gate watcher's switch is remembered. See `watching` below. */
+const WATCH_KEY = 'vibe.pilot.watchGates';
+
+/**
+ * Whether the pilot takes a turn when the loop stops at a gate (#211).
+ *
+ * **Off unless somebody turned it on**, and it is remembered because a setting
+ * that reset every launch is one nobody uses. `localStorage` for the reason the
+ * spend ceiling is there: it is this window's preference, not a project fact,
+ * and `vibe.config.json` is a file meant to be committed.
+ */
+function readWatch(): boolean {
+  try {
+    return localStorage.getItem(WATCH_KEY) === 'on';
+  } catch {
+    // Storage can be unavailable. Falling back to off is the fail-closed
+    // direction: the cost of a wrong default here is unattended spend.
+    return false;
+  }
+}
+
+/**
+ * What the pilot is told when the run wakes it, and what the reader is shown.
+ *
+ * One sentence for both, so the message the model answers and the kicker above
+ * its reply cannot disagree about why the turn happened. It says plainly that
+ * nobody typed it — a model that believed a person had just asked would answer
+ * a question nobody put.
+ */
+function wakeReason(gate: NonNullable<Run['gate']>): string {
+  const round =
+    gate.reviewRound ?? gate.planRound ?? gate.verifyRound ?? null;
+  return [
+    `[the app woke you — nobody typed this] The loop has stopped at the "${gate.boundary}" gate` +
+      (round === null ? '' : `, round ${String(round)}`) +
+      ' and is waiting for a decision.',
+    '',
+    'The run block above is current as of this message. Read the narration with',
+    'read_output before you say anything about what the loop just did.',
+    '',
+    'Say what you would do and why. If you want to propose the answer, call',
+    'answer_gate — it still has to be pressed by the person, and if the right move',
+    'is something other than continue or stop, say that instead of proposing.',
+  ].join('\n');
+}
+
 type Action =
-  | { type: 'ask'; content: string; turn: number; provider: Backend }
-  | { type: 'follow'; turn: number; provider: Backend }
-  | { type: 'refuse'; content: string | null; provider: Backend; message: string }
+  // `openedAt` on all three, because all three open a turn and a turn's wait is
+  // the same wait however it was started. Carried on the action rather than read
+  // in `apply`, so the reducer stays a pure function of what it was handed.
+  | { type: 'ask'; content: string; turn: number; provider: Backend; openedAt: number }
+  | { type: 'wake'; reason: string; turn: number; provider: Backend; openedAt: number }
+  | { type: 'follow'; turn: number; provider: Backend; openedAt: number }
+  | {
+      type: 'refuse';
+      content: string | null;
+      provider: Backend;
+      message: string;
+      woke: string | null;
+    }
   | { type: 'event'; event: pilot.PilotEvent }
+  | { type: 'retext'; turn: number; text: string }
   | { type: 'settle'; id: string; settlement: Settlement }
   | { type: 'decide'; id: string; accepted: boolean; note: string }
-  | { type: 'unknown' };
+  /** A proposal the person's settings ran without a card (#223). */
+  | { type: 'auto'; id: string; why: string }
+  | { type: 'unknown' }
+  /** A conversation read back from storage, replacing whatever is here (#223). */
+  | { type: 'restore'; conversation: Conversation };
 
 function apply(state: Conversation, action: Action): Conversation {
   switch (action.type) {
     case 'ask':
-      return ask(state, action.content, action.turn, action.provider);
+      return ask(state, action.content, action.turn, action.provider, action.openedAt);
+    case 'wake':
+      return wake(state, action.reason, action.turn, action.provider, action.openedAt);
     case 'follow':
-      return follow(state, action.turn, action.provider);
+      return follow(state, action.turn, action.provider, { startedAt: action.openedAt });
     case 'refuse':
-      return refuse(state, action.content, action.provider, action.message);
+      return refuse(state, action.content, action.provider, action.message, action.woke);
     case 'event':
       return reduce(state, action.event);
+    case 'retext':
+      return retext(state, action.turn, action.text);
     case 'settle':
       return settle(state, action.id, action.settlement);
     case 'decide':
       return decide(state, action.id, action.accepted, action.note);
+    case 'auto':
+      return autoRan(state, action.id, action.why);
     case 'unknown':
       return unrecognised(state);
+    // Replaces rather than merges. Two conversations interleaved by arrival
+    // would be a transcript of a discussion that never happened.
+    case 'restore':
+      return action.conversation;
   }
 }
 
@@ -115,6 +237,25 @@ function EffectDetail({ effect }: { effect: Effect }) {
         {effect.argv.map((arg, i) => `${i === 0 ? '' : '  '}${arg}`).join('\n')}
       </pre>
     );
+  }
+  if (effect.kind === 'command') {
+    // The command as it will be spawned, and **where**. The directory is on the
+    // card because it is half of what the command does: `npm install` is a
+    // different act in two repositories, and this is the one thing a person
+    // cannot check from the command line alone (#211).
+    return (
+      <pre className="v-proposal__argv">
+        {[effect.program, ...effect.args].join(' ')}
+        {'\n'}
+        {`in ${effect.dir}`}
+      </pre>
+    );
+  }
+  if (effect.kind === 'stop_command') {
+    // The id alone, because that is what is being acted on. The summary above
+    // the card already carries the command line, and repeating it here as if it
+    // were the argv would draw a command about to be *run*.
+    return <pre className="v-proposal__argv">{`stop ${effect.commandId}`}</pre>;
   }
   return (
     <pre className="v-proposal__argv">{JSON.stringify(effect.decision, null, 2)}</pre>
@@ -214,12 +355,44 @@ function CallCard({
       {settlement.kind === 'refused' ? (
         <span className="v-pilot__why">{settlement.content}</span>
       ) : (
-        // What was actually sent back, not a paraphrase. A read's result is JSON
-        // and can be long, so the pane shows that it happened and the answer is
-        // one line down rather than the whole payload inline.
-        <span className="v-pilot__note">{answer ?? 'read'}</span>
+        <Answer content={answer} />
       )}
+      {/* What it was, once it has been answered (#223). A command the safe list
+          ran was never drawn as a card, so this is the only place the exact
+          program and arguments appear — and "what runs is what was displayed"
+          has to hold after the fact when it could not hold before. */}
+      {settlement.kind === 'proposes' && <EffectDetail effect={settlement.effect} />}
     </div>
+  );
+}
+
+/**
+ * What a read sent back: that it happened, and the payload behind a disclosure.
+ *
+ * **The result is the model's, not the reader's**, and this pane was printing it
+ * whole. `read_run` returns the entire `describeRun` object and `read_output`
+ * returns up to 500 narration lines, so two ordinary calls put several hundred
+ * characters of JSON in the middle of a conversation — reported from a manual
+ * pass as simply *"what is all of this text?"*, which is the correct question.
+ *
+ * It is **not truncated**, because a result that has been cut is a result nobody
+ * can check against what the model was actually told, and that is the one thing
+ * this card exists to make checkable. It is folded, and the summary says how much
+ * is behind the fold so the size itself stays visible.
+ */
+function Answer({ content }: { content: string | null }) {
+  if (content === null) return <span className="v-pilot__note">read</span>;
+  // Short enough to read in place. A threshold rather than always folding: a
+  // one-line refusal or a small object behind a disclosure is a click for
+  // nothing, and most of what makes this unreadable is the big two.
+  if (content.length <= 160) return <span className="v-pilot__note">{content}</span>;
+  return (
+    <details className="v-pilot__answer">
+      <summary className="v-pilot__note">
+        answered with {content.length.toLocaleString()} characters — the model has all of it
+      </summary>
+      <pre className="v-pilot__payload v-selectable">{content}</pre>
+    </details>
   );
 }
 
@@ -252,83 +425,100 @@ function TurnPrice({ reply }: { reply: Reply }) {
 }
 
 /**
- * The pilot's own ceiling, set here and nowhere else (#145).
+ * How long this turn has been open, on a card that has not settled (#211).
  *
- * **Two fields, both blank by default, and blank means no ceiling.** A hard
- * default cap on a conversation is the kind of thing that stops you mid-sentence
- * for no good reason - but this is the first real spend in the product, and a
- * runaway loop in a chat is as possible as one anywhere else, so it exists and
- * is off.
+ * **The part of the thinking indicator a person can actually judge.** The wave
+ * beside it says only that this window is still rendering — it would wave just
+ * as busily at a vendor that had silently stopped answering — so on its own it
+ * replaces one wrong impression with another. `4s` and `3m20s` are different
+ * situations, and the number is what tells them apart.
  *
- * Per day rather than per session: a conversation has no natural end, so
- * `maxTokens`' shape does not transfer, and a day is the window both vendors'
- * own dashboards use. The labels say *pilot* because the run has two ceilings of
- * its own and a user must never wonder which one they just changed.
+ * Relative rather than absolute, which is the opposite of hi-fi 17's rule for a
+ * *settled* card, and for the reason that rule gives: a relative time is a claim
+ * that has to keep being true, and this one is re-rendered every second for
+ * exactly as long as it is. When the turn ends the whole element goes, so it
+ * never ages into a lie the way `last activity 5h39m ago` did.
+ *
+ * Absent, never zero, when the reply carries no start.
  */
-function PilotLimitFields({
-  limits,
-  onChange,
-}: {
-  limits: PilotLimits;
-  onChange: (limits: PilotLimits) => void;
-}) {
-  // A blank field is no ceiling, and a value that is not a positive number is
-  // also no ceiling - refusing to store a ceiling nobody could have meant,
-  // rather than storing a zero that would stop everything.
-  const read = (raw: string): number | null => {
-    const n = Number(raw);
-    return raw.trim() !== '' && Number.isFinite(n) && n > 0 ? n : null;
-  };
-  return (
-    <span className="v-pilot__limits">
-      <label className="v-pilot__limit">
-        pilot tokens/day
-        <input
-          className="v-pilot__limit-input"
-          type="number"
-          min="1"
-          placeholder="no limit"
-          value={limits.dailyTokens ?? ''}
-          onChange={(e) => onChange({ ...limits, dailyTokens: read(e.target.value) })}
-        />
-      </label>
-      <label className="v-pilot__limit">
-        pilot $/day
-        <input
-          className="v-pilot__limit-input"
-          type="number"
-          min="0.01"
-          step="0.01"
-          placeholder="no limit"
-          value={limits.dailyUsd ?? ''}
-          onChange={(e) => onChange({ ...limits, dailyUsd: read(e.target.value) })}
-        />
-      </label>
-    </span>
-  );
+function TurnElapsed({ startedAt, now }: { startedAt: number | null; now: number }) {
+  if (startedAt === null) return null;
+  return <span className="v-pilot__elapsed">{elapsed(Math.max(0, now - startedAt))}</span>;
 }
+
 
 function ReplyCard({
   reply,
   conversation,
   onDecide,
   busy,
+  now,
 }: {
   reply: Reply;
   conversation: Conversation;
   onDecide: (id: string, accepted: boolean, note: string) => void;
   busy: boolean;
+  /**
+   * The clock, passed in rather than read here.
+   *
+   * One ticking value for the whole pane: a card reading `Date.now()` itself
+   * would only re-render when something else made it, so the elapsed would
+   * freeze at whatever second the last token arrived - which is precisely the
+   * moment it starts mattering.
+   */
+  now: number;
 }) {
   const outcome = reply.outcome;
   return (
-    <div className="v-pilot__reply">
-      <div className="v-pilot__meta">
+    <div className="v-pilot__turn">
+      {/* What you said, above the answer to it (#211). The pane drew replies
+          and never messages, so this was missing entirely: you pressed send,
+          the composer emptied, and the next thing on screen was an answer to a
+          question that was not there.
+
+          Read off the reply rather than interleaved from `messages`, so the
+          order cannot be got wrong - a message and the turn it opened are one
+          thing here. */}
+      {/* **Labelled, because the reply beside it is.** The pilot's half carries a
+          chip naming the backend and yours carried nothing but a 2px rule, so in
+          a long log the two ran together: *"we need to more easily differentiate
+          between my message and the pilot's messages. Right now, its too hard for
+          me to tell which is which."* The chip is the same vocabulary the answer
+          uses rather than a second one, and the ground is what makes the two
+          scannable apart without reading either. */}
+      {reply.asked !== null && (
+        <div className="v-pilot__you">
+          <MetaChip>you</MetaChip>
+          <div className="v-pilot__asked v-selectable">{reply.asked}</div>
+        </div>
+      )}
+      <div className="v-pilot__reply">
+        <div className="v-pilot__meta">
+        {/* The pane draws replies and not messages, so without this a woken
+            turn is the pilot speaking unprompted with nothing saying why. A
+            reader has to be able to tell what they asked for from what the run
+            caused (#211). */}
+        {reply.woke !== null && <StateKicker tone="quiet">woke at a gate</StateKicker>}
         <MetaChip>{BACKEND_NAME[reply.provider]}</MetaChip>
         {/* What ANSWERED, not what was asked for: an alias resolves to a dated
             version, and the resolved one is the fact worth showing. Absent until
             the vendor says so, rather than filled in from the request. */}
         {reply.model !== null && <MetaChip kind="checkable">{reply.model}</MetaChip>}
-        {outcome === null && <StateKicker tone="accent">streaming</StateKicker>}
+        {/* **Three states, not one.** `streaming` was drawn from the instant the
+            turn opened, including for the whole wait before a single byte came
+            back — when nothing was streaming — and it is a two-word label with
+            no motion, which is what was being read as a stall.
+
+            `thinking` is the honest word for *sent, nothing back yet*; once
+            text is arriving the text itself is the evidence and the label says
+            so. The wave is on both, because both are open turns. */}
+        {outcome === null && (
+          <>
+            <ThinkingWave label={reply.text === '' ? 'thinking' : 'streaming'} />
+            <StateKicker tone="accent">{reply.text === '' ? 'thinking' : 'streaming'}</StateKicker>
+            <TurnElapsed startedAt={reply.startedAt} now={now} />
+          </>
+        )}
         {/* The vendor's own word — `end_turn`, `stop`, `max_tokens`, `length`.
             Not translated into a shared spelling, because a shared spelling
             would claim a shared meaning nobody has established. */}
@@ -337,7 +527,13 @@ function ReplyCard({
         {outcome?.kind === 'failed' && <StateKicker tone="alarm">failed</StateKicker>}
       </div>
 
-      {reply.text !== '' && <div className="v-pilot__text">{reply.text}</div>}
+      {/* `visible`, not the raw text: a tool call the subscription backend made
+          arrives as a fenced block inside the prose, and the card two lines down
+          is a better rendering of it than the JSON that produced it. The raw
+          text stays in `Reply.text`, which is the record (#211). */}
+      {visible(reply.text) !== '' && (
+        <div className="v-pilot__text v-selectable">{visible(reply.text)}</div>
+      )}
       {outcome?.kind === 'failed' && <div className="v-pilot__why">{outcome.message}</div>}
 
       {reply.calls.map((call) => (
@@ -364,6 +560,7 @@ function ReplyCard({
           no usage reported — this turn did not get far enough for the vendor to say
         </div>
       )}
+      </div>
     </div>
   );
 }
@@ -396,7 +593,92 @@ export interface PilotPaneProps {
    *
    * One reader, in `Cockpit`, for the same reason it owns the one `host.send`.
    */
+  /**
+   * The pilot's own daily ceiling, owned by `Cockpit` (#223).
+   *
+   * **A prop rather than this pane's own state**, because the control that sets
+   * it moved to Settings — *"move pilot tokens and pilot $/day out of pilot chat
+   * and into the same settings group"*. A ceiling is a setting, and one set
+   * beside the conversation it limits was the only setting in the product with
+   * no home on the settings screen. Lifting it is what lets a change there reach
+   * an open pane, which is the same arrangement the type scale has.
+   */
+  limits: PilotLimits;
   statuses: readonly KeyStatus[] | null;
+  /**
+   * The repository this conversation is about (#211).
+   *
+   * Not decoration and not a display field: the subscription backend spawns
+   * `claude -p` **in** this directory under `--restricted`, which confines its
+   * Read, Glob and Grep to it. So this is the pilot's permission boundary, and
+   * an empty one is refused rather than defaulted — a turn in a directory
+   * nobody chose is what produced a pilot searching a home directory and timing
+   * out on every glob.
+   */
+  dir: string;
+  /**
+   * Which run this conversation is about, or null before one exists (#223).
+   *
+   * **What lets a conversation come back.** Every other pane repopulates from a
+   * file the run wrote; a chat *about* a run is the one thing nothing writes
+   * down, so opening a finished run drew an empty pane beside six full ones.
+   * Keyed with the project, because a run id is unique only inside one archive.
+   *
+   * Null is the conversation that has not launched anything yet — the one that
+   * will propose the run — and it is adopted by the run when one starts.
+   */
+  runId: string | null;
+  /**
+   * Whether `runId` is a run the window was **pointed at** rather than one it
+   * started (#223).
+   *
+   * Only `Cockpit` can answer it — `viewing` is where the window is pointed and
+   * this pane cannot see it — and `chatMove` needs it to tell *adopting* from
+   * *browsing*. Without it, clicking a past run that had no conversation
+   * carried the conversation on screen into it, so the chat never changed and
+   * the exchange was written into the wrong run's key on the way past.
+   */
+  opened: boolean;
+  /**
+   * Commands this window has run, so `read_command` has something to read.
+   *
+   * A prop rather than this pane's own state, for the reason `statuses` is one:
+   * `Cockpit` owns the one sender, and two copies of what has been run would
+   * disagree about whether a dev server is still up.
+   */
+  commands: Commands;
+  /**
+   * What the pilot may do without asking (#223), as the host resolved it from
+   * the settings for all projects. Null until it has been read, which is the
+   * narrowest answer: every proposal is a card.
+   */
+  access: PilotAccess | null;
+  /**
+   * Rendered above the composer while no run exists (#211).
+   *
+   * A slot rather than the thing itself, so this pane keeps knowing nothing
+   * about runs, repositories or argv - `Cockpit` owns all three, and owns the
+   * one `host.send` for the same reason.
+   */
+  kickoff?: ReactNode;
+  /**
+   * A brief somebody typed somewhere else, to be said here (#223).
+   *
+   * **The composer in `1b` is the front door and it was bypassing this pane
+   * entirely.** It built an argv and started a run, so a brief typed into it
+   * never reached the pilot — reported exactly that way: *"in the pilot chat, my
+   * request didn't show up and the pilot isn't doing anything."* The intake
+   * doctrine was written and nothing was routed through it.
+   *
+   * It arrives as a prop rather than a method for the reason `kickoff` is a
+   * slot: `Cockpit` owns what a run is and this pane owns what a conversation
+   * is, and a handle reaching in would be a second way to put words in one.
+   *
+   * Sent as something the PERSON said — not a `wake` — because they typed it.
+   */
+  ask?: string | null | undefined;
+  /** Called once it has been said, so the same brief cannot be sent twice. */
+  onAsked?: (() => void) | undefined;
   /**
    * The launch this window sent, or null if it sent none (#191).
    *
@@ -406,16 +688,152 @@ export interface PilotPaneProps {
    * prompt says which rather than describing a task nobody gave it.
    */
   launched: Launched | null;
+  /**
+   * Take the reader to the tab that has a round's detail (hi-fi 5).
+   *
+   * The design's cards carry `open verify` and the findings themselves, and the
+   * card is a **summary** - the prose lives in the round's artifact and behind
+   * the pane built for it. Optional, and a card drawn without it simply omits
+   * the link rather than drawing a control that does nothing.
+   *
+   * The **round** travels with the tab (#223): a card summarises one round, so a
+   * link that opened the pane at whichever round was newest would be the wrong
+   * one every time but the last.
+   */
+  onOpen?: (tab: string, round?: number | null) => void;
 }
 
-export function PilotPane({ run, launched, onEffect, onPending, statuses }: PilotPaneProps) {
+export function PilotPane({
+  run,
+  launched,
+  dir,
+  runId,
+  opened,
+  commands,
+  access,
+  onEffect,
+  onPending,
+  limits,
+  statuses,
+  kickoff,
+  ask,
+  onAsked,
+  onOpen,
+}: PilotPaneProps) {
   const [conversation, dispatch] = useReducer(apply, undefined, emptyConversation);
+  /** Call ids read back from storage, which never run without a press (#223). */
+  const restored = useRef(new Set<string>());
+  /**
+   * Which conversation is on screen, so a save cannot land in the wrong one.
+   *
+   * The key is read back **at save time** rather than closed over by the effect
+   * that writes, because the two move independently: a run starting changes the
+   * key while the conversation is unchanged, and a reply arriving changes the
+   * conversation while the key is not. Holding it in a ref means the writer
+   * always uses the key the loader last settled on, so the two cannot cross.
+   */
+  const chat = useRef<string | null>(null);
+  /**
+   * What is on screen, for the loader to read without depending on it.
+   *
+   * The loader must fire on the **key** alone — a conversation in its deps would
+   * re-run it on every reply, and a loader that runs mid-conversation is a
+   * conversation that gets replaced by itself-from-disk. It still needs to see
+   * the current one for the adoption case below, so it reads it through here.
+   */
+  const held = useRef(conversation);
+  held.current = conversation;
+
+  // Load when the window is pointed at a different run, and only then.
+  useEffect(() => {
+    const key = chatKey(dir, runId);
+    const before = chat.current;
+    let stored: string | null = null;
+    try {
+      stored = localStorage.getItem(key);
+    } catch {
+      // Storage can be switched off. Treated as nothing stored, which sends the
+      // decision down the `restore` road and lands on an empty conversation —
+      // a smaller failure than a window that will not render.
+    }
+    const move = chatMove({
+      from: before,
+      to: key,
+      intoRun: runId !== null,
+      // Pointed at, rather than started here. Adoption is for the run this
+      // conversation PROPOSED; opening one from the sidebar is a read, and it
+      // used to carry the chat along with it (#223).
+      opened,
+      stored: stored !== null,
+      holding: worthSaving(held.current),
+    });
+    if (move === 'stay') return;
+    chat.current = key;
+
+    // **Adoption.** A run is *proposed* by a conversation, so when one starts,
+    // the exchange that decided what to build is the one already on screen —
+    // wherever it happened to be typed. That last clause is the fix: it used to
+    // adopt only out of the project bucket, so a brief typed while a past run
+    // was open went to *that* run's key and the run it proposed started empty.
+    //
+    // It never adopts over a conversation the target already has, which is what
+    // keeps a **resume** safe: that run has its own exchange and it is the one
+    // worth keeping.
+    if (move === 'adopt') {
+      try {
+        localStorage.setItem(key, writable(held.current));
+        // Cleared, so the next run in this project starts from nothing rather
+        // than inheriting the conversation that launched the previous one. Only
+        // the project bucket is cleared: taking a *run's* key away here would
+        // delete a real conversation to tidy up after a move.
+        const bucket = chatKey(dir, null);
+        if (before === bucket) localStorage.removeItem(bucket);
+        // And a draft's, which is the same case one step later (#223): the run
+        // the draft asked for has now started and holds the conversation, so the
+        // draft's copy would only come back as a duplicate.
+        else if (before !== null && isDraftKey(before)) localStorage.removeItem(before);
+      } catch {
+        // The conversation is still on screen and still correct. What is lost is
+        // its return next time.
+      }
+      return;
+    }
+
+    const back = readChat(stored);
+    // Every call that came back from storage is one nobody in this session saw
+    // asked for, so none of them may run without a press (#223) — a `git
+    // commit` from yesterday's conversation must not fire because the window
+    // reopened. They still settle, and a proposal among them is a card.
+    for (const reply of back.replies) for (const call of reply.calls) restored.current.add(call.id);
+    dispatch({ type: 'restore', conversation: back });
+  }, [dir, runId, opened]);
+
+  // Save on every settled change. `live` is dropped by `writable`, so a turn in
+  // flight is not stored half-streamed and a window killed mid-turn leaves a
+  // conversation that ends at the last complete reply.
+  useEffect(() => {
+    const key = chat.current;
+    if (key === null || !worthSaving(conversation)) return;
+    try {
+      localStorage.setItem(key, writable(conversation));
+    } catch {
+      // Quota, or storage switched off. The conversation still works for this
+      // session; what is lost is its return next time, which is not worth an
+      // error in the middle of one.
+    }
+  }, [conversation]);
   /**
    * Where turns run (#193). **Subscription by default**, because it is the one
    * that works with nothing configured - the whole point of the issue is that an
    * API key is optional rather than a precondition for the pane doing anything.
    */
-  const [provider, setProvider] = useState<Backend>('subscription');
+  /**
+   * Which vendor this conversation talks to (#223). The conversation picks the
+   * vendor and Settings picks the road — its CLI on the subscription, or the
+   * API — so the backend is derived and never chosen here.
+   */
+  const [vendor, setVendor] = useState<keys.Provider>('anthropic');
+  const provider: Backend = backendFor(vendor, access ?? NO_ACCESS);
   const [model, setModel] = useState<string>(SUBSCRIPTION_MODELS[0] ?? '');
   /**
    * The conversation the CLI is keeping, once it has said what it is (#193).
@@ -426,6 +844,18 @@ export function PilotPane({ run, launched, onEffect, onPending, statuses }: Pilo
    * subscription turn cost nothing in re-sent context.
    */
   const session = useRef<string | null>(null);
+  // A conversation belongs to the backend that is holding it. Carrying a CLI
+  // session id across to a vendor — or back, or from one CLI to the other — would
+  // resume a conversation on a wire that has never heard of it (#193). The
+  // backend moves when the vendor is picked AND when Settings changes the road,
+  // so this follows the derived value rather than the picker.
+  const heldBy = useRef<Backend>(provider);
+  useEffect(() => {
+    if (heldBy.current === provider) return;
+    heldBy.current = provider;
+    session.current = null;
+    setModel(modelsFor(provider, pilot.MODELS)[0] ?? '');
+  }, [provider]);
   /**
    * The host-backed turn whose frames we are listening for, or -1.
    *
@@ -434,16 +864,69 @@ export function PilotPane({ run, launched, onEffect, onPending, statuses }: Pilo
    * like a message count on the frame after somebody changed either.
    */
   const hostTurn = useRef(-1);
+  /**
+   * What makes this window's emitted call ids its own (#223).
+   *
+   * **A turn id is unique within one window session; a conversation is not.**
+   * `nextRequestId` restarts at 0 on every launch and `saved.ts` restores the
+   * conversation — tool results and all — so `emit:<turn>:<n>` from this session
+   * could land on an id a *previous* session had already answered. `settle`
+   * correctly refuses to answer a call twice, so the new one was never settled
+   * at all and the pane drew **waiting to be run** for ever, with nothing
+   * anywhere saying why. That is the defect behind *"I asked the pilot to start
+   * the app"* and three dead reads in a row.
+   *
+   * Random, and deliberately so: the axis the collision is on is *which window
+   * session produced this*, and there is no monotonic source that survives a
+   * relaunch to count it with. It is generated **here**, at the one place whose
+   * lifetime is the window's, and passed into `readEmitted`, which stays pure.
+   */
+  const origin = useRef(crypto.randomUUID().slice(0, 8));
+  /**
+   * Everything the model has said this turn, for the tool parse (#223).
+   *
+   * A ref rather than reducer state because the frame handler is registered once
+   * and would otherwise close over a stale conversation - the same reason
+   * `hostTurn` is one. Keyed by turn so a new turn starts from nothing rather
+   * than inheriting the last one's prose, which would re-raise its calls.
+   */
+  const whole = useRef<{ turn: number; text: string }>({ turn: -1, text: '' });
   const [entry, setEntry] = useState('');
   const [live, setLive] = useState<number | null>(null);
   // The pilot's own books (#145). Read from `localStorage` at mount, because a
   // per-day ceiling that reset when the app restarted would not be a ceiling.
   const [ledger, setLedger] = useState<Ledger>(readLedger);
-  const [limits, setLimits] = useState<PilotLimits>(readLimits);
   /** Turns already in the books, so a re-render cannot bill one twice. */
   const counted = useRef<Set<number>>(new Set());
   /** The chain ran out and the pilot is holding for a person. */
   const [stalled, setStalled] = useState(false);
+  /**
+   * The conversation follows its own bottom until you scroll away from it.
+   *
+   * Deliberately not driven by anything this component knows - not `live`, not
+   * the reply count - because the question it answers is *where is the reader
+   * looking*, and only the reader can move that.
+   */
+  const log = useFollow<HTMLDivElement>();
+  /**
+   * The clock behind the elapsed on an open turn (#211).
+   *
+   * **It ticks only while one is open.** A conversation sitting idle re-renders
+   * for nothing otherwise, and there is nothing on a settled card that a second
+   * passing changes — every measurement on one is fixed at the moment it ended.
+   * `conversation.live` is the condition for the same reason it is the condition
+   * for drawing the wave: they are the same claim.
+   */
+  const [now, setNow] = useState(() => Date.now());
+  const open = conversation.live !== null;
+  useEffect(() => {
+    if (!open) return;
+    setNow(Date.now());
+    const tick = setInterval(() => setNow(Date.now()), 1000);
+    return () => {
+      clearInterval(tick);
+    };
+  }, [open]);
 
   // Two refs rather than state, because neither is drawn and both must survive
   // StrictMode's double-invoked effects without causing a render.
@@ -471,18 +954,58 @@ export function PilotPane({ run, launched, onEffect, onPending, statuses }: Pilo
     };
   }, []);
 
-  // Every call that has not been run yet, run. `execute` is pure and `settle`
+  // Every call that has not been run yet, run. `settleCall` is pure and `settle`
   // ignores a call it has already answered, so this is safe to re-enter — which
   // it is, on every heartbeat, since the run it reads changes underneath it.
+  //
+  // Two outcomes are not settled on the spot (#223). A **read** is asked of the
+  // host and settled when it answers, held in `reading` meanwhile so a re-entry
+  // does not ask twice. And a **proposal the person's settings allow** is fired
+  // and answered as having run without asking — through `onEffect`, the road a
+  // pressed one takes, so the safe list changes who presses and never what runs.
+  const reading = useRef(new Set<string>());
+  const granted = access ?? NO_ACCESS;
   useEffect(() => {
     for (const reply of conversation.replies) {
       for (const call of reply.calls) {
-        if (call.settlement === null) {
-          dispatch({ type: 'settle', id: call.id, settlement: execute(call, { run }) });
+        if (call.settlement !== null || reading.current.has(call.id)) continue;
+        const out = settleCall(call, { run, commands, dir, access: granted });
+        if (out.kind === 'reads') {
+          reading.current.add(call.id);
+          const id = call.id;
+          void host
+            .fs(out.op, dir, out.path)
+            .then((frame) =>
+              dispatch({ type: 'settle', id, settlement: { kind: 'ran', content: JSON.stringify(frame) } }),
+            )
+            .catch((err: unknown) =>
+              dispatch({
+                type: 'settle',
+                id,
+                settlement: { kind: 'refused', content: err instanceof Error ? err.message : String(err) },
+              }),
+            )
+            .finally(() => reading.current.delete(id));
+          continue;
+        }
+        dispatch({ type: 'settle', id: call.id, settlement: out });
+        const why =
+          out.kind === 'proposes' && !restored.current.has(call.id)
+            ? autoRun(out.effect, dir, granted)
+            : null;
+        if (out.kind === 'proposes' && why !== null) {
+          // The effect first, then the record, for `onDecide`'s reason. The
+          // chain is deliberately NOT reset: nobody pressed anything, so this
+          // is the unattended half `MAX_CHAIN` exists to bound.
+          onEffect(out.effect);
+          dispatch({ type: 'auto', id: call.id, why });
         }
       }
     }
-  }, [conversation.replies, run]);
+    // `commands` in the deps for the reason `run` is: `read_command` is
+    // answered from it, and a call settled against a stale copy would report a
+    // dev server as having produced nothing (#211).
+  }, [conversation.replies, run, commands, dir, granted, onEffect]);
 
   // Each finished turn into the pilot's books, once (#145).
   //
@@ -533,6 +1056,13 @@ export function PilotPane({ run, launched, onEffect, onPending, statuses }: Pilo
         const turn = frame.id;
         if (turn === null || turn !== hostTurn.current) return;
         if (frame.type === 'pilot_delta') {
+          // Kept for the parse, not for the display (#223). The pane shows the
+          // final message - `retext` below replaces the accumulated text with it
+          // on purpose, because the interstitials are the model talking to itself
+          // between its own file reads. But a tool call written in one of those
+          // is still a tool call, and it used to be dropped.
+          if (whole.current.turn !== turn) whole.current = { turn, text: '' };
+          whole.current.text += frame.text;
           dispatch({ type: 'event', event: { kind: 'text', turn, delta: frame.text } });
           return;
         }
@@ -541,8 +1071,51 @@ export function PilotPane({ run, launched, onEffect, onPending, statuses }: Pilo
           setLive(null);
           return;
         }
+        // Stopped from this pane's own button (#223): drawn as stopped, the
+        // vocabulary the API-backed road already uses for the same act.
+        if (frame.type === 'pilot_stopped') {
+          dispatch({ type: 'event', event: { kind: 'cancelled', turn } });
+          setLive(null);
+          return;
+        }
         // The CLI's id wins over the one we proposed, always.
         session.current = frame.sessionId;
+        // The reply the CLI says it made, over the deltas we accumulated. The
+        // deltas are every assistant block in the turn, interstitials between
+        // its own Read and Glob calls included; this is the final message. Both
+        // came off the wire and this is the one that answers "what did it say".
+        dispatch({ type: 'retext', turn, text: frame.text });
+        /**
+         * The tool calls, lifted out of **everything the model said this turn**.
+         *
+         * Dispatched before the terminal event, because `reduce` drops an event
+         * for a turn that is no longer live and `ended` is what closes it.
+         *
+         * **It used to read `frame.text` alone, and that is the final message
+         * rather than the whole reply** (#223). `readDelta` yields every assistant
+         * block in the turn - including the interstitials between the model's own
+         * `Read` and `Glob` calls - while `result.result` is only the last one. So
+         * a model that wrote a `vibe-tool` block, then went on reading files, then
+         * summarised, had its call silently thrown away: no card, no refusal,
+         * nothing. And the model does not know that, so it says what it did -
+         * *"I put up two `gh` cards and you want the second one"* - over a
+         * transcript with no cards in it, which is as confusing as this product
+         * has been.
+         *
+         * The old comment's reason for using `frame.text` was real and is kept:
+         * a block split across two deltas is one block in the whole. Concatenating
+         * the deltas satisfies that too, which is why this is a strict
+         * improvement rather than a trade - and `unique` handles the one thing it
+         * adds, a model that repeats its own block in the summary.
+         */
+        const said = whole.current.turn === turn ? whole.current.text : '';
+        for (const call of unique(readEmitted(`${said}
+${frame.text}`, turn, origin.current))) {
+          dispatch({
+            type: 'event',
+            event: { kind: 'tool_call', turn, id: call.id, name: call.name, arguments: call.arguments },
+          });
+        }
         dispatch({
           type: 'event',
           event: {
@@ -568,30 +1141,62 @@ export function PilotPane({ run, launched, onEffect, onPending, statuses }: Pilo
   }, []);
 
   const start = useCallback(
-    (messages: readonly pilot.Message[], said: string | null) => {
+    (
+      messages: readonly pilot.Message[],
+      said: string | null,
+      /**
+       * Why this turn is happening with nobody at the keyboard, or null.
+       *
+       * Threaded rather than inferred from `said`, because the two are
+       * independent: a woken turn has text to send (a vendor needs something to
+       * answer) and it was still not typed by anybody.
+       */
+      woke: string | null = null,
+    ) => {
+      /**
+       * When the wait started, taken **here** rather than when the request
+       * resolves (#211).
+       *
+       * The turn does not get an id until `pilotTurn`/`send` comes back, and on
+       * the subscription path that is a `claude` child being spawned - seconds
+       * that are part of the wait a person is sitting through. Stamping the
+       * card at the resolution would restart the count from zero after the
+       * slowest bit, which is the opposite of what the number is for.
+       */
+      const openedAt = Date.now();
+
       // The subscription path. It does not go through Rust at all: the host
       // spawns `claude -p` with the closed read-only allow-list `pilotchat.ts`
       // builds, so there is no key to have and nothing to bill.
       //
-      // It also declares **no tools**. Tool declaration is a vendor-API feature
-      // and the CLI takes no schemas from us, so `declare()` has nowhere to go -
-      // which means no proposals from this backend, said out loud under the
-      // selector rather than left to be discovered.
+      // It declares no tools **over the wire**, because the CLI takes no
+      // schemas from us — so `declare()` goes into the system prompt instead and
+      // the calls come back in a fenced block that `emit.ts` reads (#211). Same
+      // table, same executors, same proposal card; only the channel differs.
       if (!needsKey(provider)) {
         const id = session.current;
         void host
           .pilotTurn({
-            prompt: said ?? '',
-            system: systemPrompt(run, launched),
+            agent: agentOf(provider),
+            // A follow-up carries the tool results, because the CLI has no tool
+            // role to put them in and is resumed by session id — so everything
+            // else said is already there and the results are the only new
+            // thing. An empty prompt here used to be sent instead, which asked
+            // the model to answer nothing.
+            prompt: said ?? trailingResults(messages) ?? '',
+            system: systemPrompt(run, launched, 'emitted', access, provider === 'subscription'),
             model,
+            dir,
             sessionId: id ?? crypto.randomUUID(),
             resume: id !== null,
           })
           .then((turn) => {
             hostTurn.current = turn;
             setLive(turn);
-            if (said === null) dispatch({ type: 'follow', turn, provider });
-            else dispatch({ type: 'ask', content: said, turn, provider });
+            if (said === null) dispatch({ type: 'follow', turn, provider, openedAt });
+            else if (woke !== null)
+              dispatch({ type: 'wake', reason: woke, turn, provider, openedAt });
+            else dispatch({ type: 'ask', content: said, turn, provider, openedAt });
           })
           .catch((err: unknown) =>
             dispatch({
@@ -599,6 +1204,7 @@ export function PilotPane({ run, launched, onEffect, onPending, statuses }: Pilo
               content: said,
               provider,
               message: err instanceof Error ? err.message : String(err),
+              woke,
             }),
           );
         return;
@@ -614,11 +1220,16 @@ export function PilotPane({ run, launched, onEffect, onPending, statuses }: Pilo
         // model is only ever sent the most recent one, so there is no earlier
         // description for this to contradict - see `brief.ts` for why that
         // settles the staleness question rather than trading it away.
-        .send({ provider, model, messages, tools: declare(), system: systemPrompt(run, launched) })
+        .send({ provider, model, messages, tools: declare(), system: systemPrompt(run, launched, 'native', access) })
         .then((turn) => {
+          // Rust's turn ids and the host's request ids are two counters, so a
+          // stale host turn could share this number and send the stop button
+          // down the wrong road (#223).
+          hostTurn.current = -1;
           setLive(turn);
-          if (said === null) dispatch({ type: 'follow', turn, provider });
-          else dispatch({ type: 'ask', content: said, turn, provider });
+          if (said === null) dispatch({ type: 'follow', turn, provider, openedAt });
+          else if (woke !== null) dispatch({ type: 'wake', reason: woke, turn, provider, openedAt });
+          else dispatch({ type: 'ask', content: said, turn, provider, openedAt });
         })
         .catch((err: unknown) =>
           dispatch({
@@ -626,10 +1237,11 @@ export function PilotPane({ run, launched, onEffect, onPending, statuses }: Pilo
             content: said,
             provider,
             message: err instanceof Error ? err.message : String(err),
+            woke,
           }),
         );
     },
-    [model, provider, run, launched],
+    [model, provider, run, launched, dir, access],
   );
 
   const owed = unanswered(conversation);
@@ -663,25 +1275,220 @@ export function PilotPane({ run, launched, onEffect, onPending, statuses }: Pilo
     start(conversation.messages, null);
   }, [owesReply, conversation.messages, start, verdict.allowed]);
 
-  const ready =
-    // The subscription backend needs no key, which is the whole of #193: the
-    // pane does something useful with nothing configured. The key check is for
-    // the two that reach a vendor.
-    (!needsKey(provider) || (statuses !== null && keys.usable(statuses).includes(provider))) &&
-    owed.length === 0 &&
-    // The pilot's own ceiling, which is off unless somebody set one. It gates
-    // the tool loop as well as the composer: a chain of tool calls is exactly
-    // the runaway this exists to stop, and stopping only the human's messages
-    // would guard the half that is already attended.
-    verdict.allowed;
+  /**
+   * Why nothing can be **sent**, or null. Drawn beside the composer, because a
+   * disabled control with no reason beside it is the same defect in every
+   * product — and this one had it three times over.
+   *
+   * **It used to answer for two of the five reasons and disable the textarea
+   * for all of them**, so a pane holding an undecided proposal, or one that had
+   * spent its daily ceiling, was a box that could not be clicked into, under a
+   * placeholder cheerfully inviting you to say what you wanted built. Reported
+   * as *"my pilot chat won't allow me to click inside of it and enter text"* —
+   * which is exactly what it looks like from outside, since a disabled
+   * `textarea` cannot even take focus.
+   *
+   * The **repository** case is the subscription backend's and only its: that
+   * turn is a child process that has to run somewhere, and `--restricted` makes
+   * where it runs the thing it is allowed to read. Refused rather than defaulted
+   * to this window's own directory (#211).
+   */
+  const blocked: string | null =
+    needsKey(provider) && (statuses === null || !keys.usable(statuses).includes(provider))
+      ? `no ${keys.PROVIDER_NAME[provider]} key — enter one in Settings, or switch ${keys.PROVIDER_NAME[provider]} to your subscription there`
+      : !needsKey(provider) && dir.trim() === ''
+        ? 'choose a repository first — this backend runs in one and can read only that one'
+        : !verdict.allowed
+          ? // The ceiling is the pilot's own and is off unless somebody set one,
+            // so the sentence names where it is set. `why` is the ledger's own
+            // wording rather than a second one written here.
+            `${verdict.why ?? "the pilot's daily ceiling is spent"} — raise it under Settings, or wait for tomorrow`
+          : proposals.length > 0
+            ? // The one that is not a fault. A proposal appends no tool result,
+              // so the conversation is unsendable until somebody decides — which
+              // is what makes propose-only structural rather than promised
+              // (#144). Naming it turns a dead box into an instruction.
+              `answer the ${proposals.length === 1 ? 'proposal' : `${String(proposals.length)} proposals`} above first — run it or decline, and the pilot carries on`
+            : owed.length > 0
+              ? // The frame or two between a turn ending and the settle effect
+                // running. It clears itself, so this says so rather than
+                // reading as a state somebody has to get out of.
+                'running what the pilot asked for…'
+              : null;
+
+  const ready = blocked === null;
 
   useEffect(() => {
     onPending?.(proposals.length);
   }, [proposals.length, onPending]);
 
+  /**
+   * The gate watcher (#211).
+   *
+   * **The pilot has always had the run; what it did not have was a reason to
+   * look.** `run` is a prop that updates on every frame and `systemPrompt` is
+   * rebuilt from it on every turn, so the pilot's picture is current the moment
+   * it speaks — it just only ever spoke when somebody typed or when it owed
+   * itself a tool result. Reported from a manual pass as the obvious question:
+   * *"why do I have to tell it when a gate is finished?"*
+   *
+   * Four things about it:
+   *
+   * - **It fires on the transition, keyed by `askId`.** A gate that is still
+   *   open on the next render is not a new gate, and `askId` is the loop's own
+   *   identity for it rather than something derived here. Nothing fires when a
+   *   gate closes: the interesting moment is the one that is waiting.
+   * - **It is off by default**, and this is the first turn in the product that
+   *   nobody asked for. `MAX_CHAIN` and the daily ledger exist to bound
+   *   unattended spend, and a watcher on by default would spend against them
+   *   without anybody choosing to.
+   * - **It goes through `ready`**, so a missing key, a missing repository, an
+   *   outstanding proposal or a spent ceiling all stop it exactly as they stop
+   *   the composer. A wake that fired into a blocked pane would be a failed
+   *   reply nobody could explain.
+   * - **It proposes and never answers.** The turn it takes can call
+   *   `answer_gate`, which is propose-only like everything else — so the run
+   *   still holds until a person presses. This is a second opinion arriving on
+   *   time, not an autopilot.
+   */
+  const [watching, setWatching] = useState(readWatch);
+  /** The gate this pane has already woken for, so an open gate wakes it once. */
+  const seenGate = useRef<number | null>(null);
+  useEffect(() => {
+    const gate = run.gate;
+    if (gate === null) {
+      // Cleared on close, so the *next* gate wakes it even if the loop reuses
+      // an id. Tracking "the last id seen" rather than "every id ever" also
+      // means a conversation started mid-run does not wake for a gate that was
+      // already open when the pane mounted — that one is on screen already.
+      seenGate.current = null;
+      return;
+    }
+    if (!watching || seenGate.current === gate.askId) return;
+    // Recorded before the send, not after: a turn refused on its way out must
+    // not leave the watcher armed to try the same gate on the next render.
+    seenGate.current = gate.askId;
+    if (!ready || live !== null) return;
+    const reason = wakeReason(gate);
+    chain.current = 0;
+    setStalled(false);
+    start([...conversation.messages, { role: 'user' as const, content: reason }], reason, reason);
+  }, [run.gate, watching, ready, live, conversation.messages, start]);
+
+  /**
+   * Say a brief that was typed in the composer (#223).
+   *
+   * **This is what makes the intake doctrine reachable.** Without it the
+   * doctrine was advice to a model nobody was talking to: `1b` went straight to
+   * an argv, so the only way into the conversation was to type into it a second
+   * time.
+   *
+   * Two things keep it from misbehaving. It is keyed on the **value** rather
+   * than on having run, so StrictMode's second pass finds the brief already said
+   * instead of saying it twice. And it **defers rather than drops** when the pane
+   * cannot send — no repository, a proposal outstanding, a spent ceiling — by
+   * leaving `ask` alone until `ready` flips, so the brief is not silently lost
+   * at the one moment somebody is watching for it. The composer already says why
+   * send is off.
+   */
+  const asked = useRef<string | null>(null);
+  useEffect(() => {
+    const want = ask ?? null;
+    if (want === null || want === asked.current) return;
+    if (!ready || live !== null) return;
+    asked.current = want;
+    // A person spoke, so the rope is new - the same reset `submit` does, since
+    // this is the same act arriving through another door.
+    chain.current = 0;
+    setStalled(false);
+    start([...conversation.messages, { role: 'user' as const, content: want }], want);
+    onAsked?.();
+  }, [ask, ready, live, conversation.messages, start, onAsked]);
+
+  /**
+   * The command watcher (#223).
+   *
+   * **The pilot could start a process and then had no way to find out what it
+   * did.** It proposed `npm run dev`, the person pressed it, and the only thing
+   * that could tell the pilot how it went was the pilot asking — so it asked
+   * blind, twice, before the server had written anything, and then reported the
+   * truth: *"my last read didn't come back."* The verdict was exact and is the
+   * whole reason this exists: *"I need it to be able to know when things started
+   * up."*
+   *
+   * Two states wake it, once each per command, and they are different facts. A
+   * command that **ended** has an outcome. A command that is still running and
+   * has gone quiet for `SETTLED_MS` after writing something has **finished
+   * starting up** — which is the only measurable form of "it came up", and the
+   * wake says so in those words rather than claiming the server works.
+   *
+   * ## Why this one is on and the gate watcher is off
+   *
+   * The gate watcher is off by default because a gate opens when the loop
+   * reaches it, possibly hours later with nobody in the room, and AGENTS.md
+   * records it as *"the first turn in the product that nobody asked for"*. This
+   * is the opposite end of that scale: a command exists because somebody pressed
+   * **run it** in this window seconds earlier, on a proposal that usually says
+   * in as many words that the pilot will read it back. Waking to finish the
+   * sentence it started is not an unattended turn; it is the second half of an
+   * attended one.
+   *
+   * It is bounded the same way everything unattended here is — `ready` covers
+   * the ceiling, the key, the repository and any outstanding proposal, and
+   * `MAX_CHAIN` and the ledger bound the chain it starts.
+   *
+   * **It carries no output.** The wake says a command changed state and tells the
+   * model to go and read it, so what the pilot reports is something it read
+   * rather than something the app told it — which is the same reason
+   * `read_output` exists beside the narration the pane already draws.
+   */
+  const woken = useRef<Map<string, CommandNews>>(new Map());
+  useEffect(() => {
+    if (!ready || live !== null) return;
+
+    const say = (command: Command, news: CommandNews): void => {
+      woken.current.set(command.id, news);
+      const reason = commandWake(command, news);
+      chain.current = 0;
+      setStalled(false);
+      start([...conversation.messages, { role: 'user' as const, content: reason }], reason, reason);
+    };
+
+    for (const command of commands.all) {
+      const seen = woken.current.get(command.id);
+      // An end outranks a quiet: a server that came up and then fell over has
+      // two things worth saying and the second is the one that matters.
+      if (command.endedAt !== null) {
+        if (seen !== 'ended') {
+          say(command, 'ended');
+          return;
+        }
+        continue;
+      }
+      // Nothing written yet is a command that has not begun, not one that is
+      // quiet. Waking here would report a process nobody could describe.
+      if (seen !== undefined || command.bytes === 0) continue;
+      // The timer is the measurement. Every new chunk re-renders this effect,
+      // whose cleanup clears the pending one — so the window restarts on each
+      // write and fires only once the writing has actually stopped.
+      const timer = setTimeout(() => {
+        // Re-read at the moment it fires: the run may have moved on, and a
+        // command that ended in the meantime is handled by the branch above on
+        // the render that ending caused.
+        say(command, 'quiet');
+      }, SETTLED_MS);
+      return () => clearTimeout(timer);
+    }
+    return;
+  }, [commands, ready, live, conversation.messages, start]);
+
   const submit = useCallback(() => {
     const content = entry.trim();
-    if (content === '' || live !== null) return;
+    // `ready` is checked HERE as well as on the button, because the field is no
+    // longer disabled: Enter reaches this with a proposal outstanding, and a
+    // send that went anyway would put a message on a conversation both vendors
+    // reject for holding an unanswered tool call.
+    if (content === '' || live !== null || !ready) return;
     setEntry('');
     // A person spoke, so the pilot's rope is new again. The ceiling exists to
     // stop it spending unattended, and it is not unattended now.
@@ -691,7 +1498,7 @@ export function PilotPane({ run, launched, onEffect, onPending, statuses }: Pilo
     // this is the only place that knows both, and sent in full: neither vendor
     // remembers a previous request.
     start([...conversation.messages, { role: 'user' as const, content }], content);
-  }, [conversation.messages, entry, live, start]);
+  }, [conversation.messages, entry, live, ready, start]);
 
   const onDecide = useCallback(
     (id: string, accepted: boolean, note: string) => {
@@ -711,25 +1518,33 @@ export function PilotPane({ run, launched, onEffect, onPending, statuses }: Pilo
     [conversation.replies, onEffect],
   );
 
+  /**
+   * The log: this run's rounds and this conversation, in one scroll (hi-fi 5).
+   *
+   * Memoised on the two things it reads, because `rounds` walks every phase of
+   * every cycle and the pane re-renders once a second while a turn is open —
+   * that is a clock ticking, not a run changing.
+   */
+  const entries = useMemo(
+    () => logOf(run, conversation.replies),
+    [run, conversation.replies],
+  );
+
   return (
     <div className="v-pilot">
       <div className="v-pilot__controls">
         <select
           className="v-pilot__select"
-          value={provider}
-          onChange={(e) => {
-            const next = e.target.value as Backend;
-            setProvider(next);
-            setModel(modelsFor(next, pilot.MODELS)[0] ?? '');
-            // A conversation belongs to the backend that is holding it. Carrying
-            // a CLI session id across to a vendor - or back - would resume a
-            // conversation on a wire that has never heard of it (#193).
-            session.current = null;
-          }}
+          value={vendor}
+          // The session and the model follow in the effect on `provider`.
+          onChange={(e) => setVendor(e.target.value === 'openai' ? 'openai' : 'anthropic')}
         >
-          {BACKENDS.map((p) => (
-            <option key={p} value={p}>
-              {BACKEND_NAME[p]}
+          {/* The vendor alone (#223): *"you don't need to say 'codex
+              (subscription)'… The settings page dictates if the cli or api key
+              is used."* Which road is said once, in Settings, not twice. */}
+          {keys.PROVIDERS.map((v) => (
+            <option key={v} value={v}>
+              {keys.PROVIDER_NAME[v]}
             </option>
           ))}
         </select>
@@ -740,20 +1555,43 @@ export function PilotPane({ run, launched, onEffect, onPending, statuses }: Pilo
             </option>
           ))}
         </select>
-        {/* What this backend can and cannot do. Said here rather than left to be
-            discovered by asking the subscription pilot to launch a run and being
-            ignored - it declares no tools, because tool declaration is a
-            vendor-API feature the CLI takes no schemas for (#193). */}
-        <span className="v-pilot__note">{BACKEND_NOTE[provider]}</span>
-        {/* Names the provider rather than "a key". One provider configured is a
-            supported state, so this is the message for having picked the other -
-            and the subscription backend never reaches it, which is the whole
-            point of the issue. */}
-        {needsKey(provider) && statuses !== null && !keys.usable(statuses).includes(provider) && (
-          <span className="v-pilot__note">
-            no {keys.PROVIDER_NAME[provider]} key — enter one under Keys
-          </span>
+        {/* What this backend costs, when that is not obvious from its name.
+            Empty for the subscription, which is why this is conditional rather
+            than a span that renders a blank. */}
+        {BACKEND_NOTE[provider] !== '' && (
+          <span className="v-pilot__note">{BACKEND_NOTE[provider]}</span>
         )}
+        {/* Names what is missing rather than "not ready". One provider
+            configured is a supported state, and so is a window that has not
+            been pointed at a repository yet - two different absences with two
+            different fixes. */}
+        {blocked !== null && <span className="v-pilot__note">{blocked}</span>}
+        {/* The one switch that lets the pilot spend without anybody typing.
+            It said *"speak up at a gate — one turn each, still proposes only"*,
+            which is three clauses in the product's own vocabulary and answers
+            none of *what happens, when, and what will it cost me*: `gate` is a
+            word from `src/gates.ts`, and *proposes only* is true of every tool
+            the pilot has. The label is now the behaviour and the tooltip is the
+            cost, which is the split the rest of this bar uses. */}
+        <label
+          className="v-pilot__limit"
+          title="One turn each time, and it can only propose — you still press the button."
+        >
+          <input
+            type="checkbox"
+            checked={watching}
+            onChange={(e) => {
+              setWatching(e.target.checked);
+              try {
+                localStorage.setItem(WATCH_KEY, e.target.checked ? 'on' : 'off');
+              } catch {
+                // The switch still works for this session. A preference that
+                // could not be saved is not worth an error in the pane.
+              }
+            }}
+          />
+          <span>Have the pilot weigh in whenever the run stops for you</span>
+        </label>
         {proposals.length > 0 && (
           <span className="v-pilot__note">
             {proposals.length} proposal(s) waiting on you — nothing more can be sent until they are
@@ -767,15 +1605,14 @@ export function PilotPane({ run, launched, onEffect, onPending, statuses }: Pilo
           means two things on one screen — a proxy for work volume beside a run,
           which is not money, and this, which is. Hi-fi 11 solved the harder
           version of the same problem by making the asymmetry the point. */}
+      {/* The books say what the day cost; the CEILING on it moved to Settings
+          (#223). *"Move pilot tokens and pilot $/day out of pilot chat and into
+          the same settings group"* - a ceiling is a setting, and setting one
+          beside the conversation it limits made it the only setting in the
+          product with no home on the settings screen. What stays here is the
+          reading, because that is about this conversation and nothing else. */}
       <div className="v-pilot__books">
         <span className="v-pilot__note">{describeDay(day)}</span>
-        <PilotLimitFields
-          limits={limits}
-          onChange={(next) => {
-            setLimits(next);
-            writeLimits(next);
-          }}
-        />
       </div>
       {!verdict.allowed && verdict.why !== null && (
         <div className="v-pilot__note v-pilot__note--alarm">
@@ -783,28 +1620,79 @@ export function PilotPane({ run, launched, onEffect, onPending, statuses }: Pilo
         </div>
       )}
 
-      <div className="v-pilot__log">
-        {conversation.replies.length === 0 && conversation.live === null && (
+      {/* `v-selectable`, because `base.css` turns selection off on `body` — a
+          drag across the cockpit chrome should not paint half the app blue, and
+          the rule restores it on "anything a user reads or copies". A
+          conversation is the most copied thing in the product and was missed:
+          the first bug report about it arrived as a screenshot of text nobody
+          could select. */}
+      {/* Follows the bottom while you leave it there, and stops the instant you
+          scroll up — see `follow.ts` for why that state belongs to the reader
+          and not to the pane. */}
+      <div className="v-pilot__log v-selectable" ref={log.ref} onScroll={log.onScroll}>
+        {entries.length === 0 && conversation.live === null && (
+          /* **Two different emptinesses, and they were drawn as one.** With no
+             run, this is the conversation that has not started — the front door.
+             Beside a *run*, it means that run has no conversation stored, which
+             is a fact about this window's memory and not about the run: a run
+             started from the CLI never had one here, and one from a build before
+             `saved.ts` did not either. Saying *"nothing yet"* over an opened run
+             reads as the pane having failed to load something, which is exactly
+             how it was reported — *"nor do I see the pilot chat update"*. */
           <div className="v-pilot__note">
-            Nothing yet. The pilot can read this run and propose a launch or a gate answer — it
-            cannot fire either one, edit vibe.config.json, or read the run archive (#114).
+            {runId === null ? (
+              <>
+                {/* **The front door describes the flow, not the permissions
+                    table** (#223). It used to open with what the pilot cannot
+                    do, which is the wrong first sentence for the first thing
+                    anybody reads — and one clause of it was false: the
+                    subscription pilot reads `.vibe/runs` like any other
+                    directory, which is a correction the system prompt already
+                    made and this copy had not. What a person needs here is what
+                    happens when they type, because it is no longer obvious: the
+                    reply is questions rather than a run. */}
+                Say what you want built. The pilot reads this repository, digs into the request and
+                asks about anything that would change the shape of the work — a run is long and
+                expensive, and it converges or stalls on the brief it was given. When the brief is
+                settled it puts the exact command in front of you, and you press it. Nothing here
+                starts a run on its own.
+              </>
+            ) : (
+              <>
+                No conversation was kept for this run. A chat is stored by this window, per run, so
+                a run started from the terminal or by an older build has none — the run itself is
+                unaffected, and its plans, reports and transcript are in the tabs above. Anything
+                you say here is kept with this run from now on.
+              </>
+            )}
           </div>
         )}
-        {conversation.replies.map((reply) => (
-          <ReplyCard
-            key={reply.turn}
-            reply={reply}
-            conversation={conversation}
-            busy={live !== null}
-            onDecide={onDecide}
-          />
-        ))}
+        {/* Hi-fi 5: this is the run's log, not a chat beside one. Rounds and
+            conversation share the scroll, and `interleave` is where the order
+            is decided — a rule that only lived in a `.map` could not be
+            tested, and the one thing it must never do is reorder what somebody
+            said. */}
+        {entries.map((entry) =>
+          entry.kind === 'round' ? (
+            <RoundCard key={`round-${entry.card.key}`} card={entry.card} onOpen={onOpen} />
+          ) : (
+            <ReplyCard
+              key={`reply-${String(entry.reply.turn)}`}
+              reply={entry.reply}
+              conversation={conversation}
+              busy={live !== null}
+              onDecide={onDecide}
+              now={now}
+            />
+          ),
+        )}
         {conversation.live !== null && (
           <ReplyCard
             reply={conversation.live}
             conversation={conversation}
             busy
             onDecide={onDecide}
+            now={now}
           />
         )}
       </div>
@@ -822,16 +1710,47 @@ export function PilotPane({ run, launched, onEffect, onPending, statuses }: Pilo
         </div>
       )}
 
+      {/* `4h`: the repository and the launch bar sit between the conversation
+          and the composer while no run exists. Above the composer rather than
+          below it, because the composer is the front door and must stay the
+          thing your eye lands on last before typing. */}
+      {kickoff}
+
+      {/* **Why send is off, said out loud.** A control that cannot be used and
+          does not say why is the same defect everywhere, and here it was worse
+          than usual: the textarea was disabled too, so the answer to "why can I
+          not type" was not reachable by clicking on anything. */}
+      {blocked !== null && <div className="v-pilot__blocked">{blocked}</div>}
+
       <div className="v-pilot__composer">
         <textarea
           className="v-pilot__entry"
           rows={2}
-          placeholder={ready ? 'say something to the pilot' : 'enter a key first'}
+          placeholder="say what you want built — enter sends, shift+enter is a new line"
           value={entry}
-          disabled={!ready}
+          // **Never disabled.** Composing and sending are two acts, and only the
+          // second of them can be blocked: a proposal waiting to be answered, a
+          // spent ceiling and a missing key are all reasons the message cannot
+          // GO, not reasons it cannot be written. Disabling the field threw away
+          // whatever was half-typed the moment a proposal arrived, and left a
+          // box that could not take focus with no explanation in reach (#223).
           onChange={(e) => setEntry(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) submit();
+            if (e.key !== 'Enter') return;
+            // **Enter sends, Shift+Enter is a newline** — the convention every
+            // chat surface uses, and the one people arrive with.
+            //
+            // `isComposing` is the guard that makes this safe rather than
+            // merely conventional: an IME commits its candidate with Enter, so
+            // without it every Japanese or Chinese word would send the message
+            // half-written. The flag is on the native event, not React's.
+            if (e.nativeEvent.isComposing) return;
+            // Cmd/Ctrl+Enter kept as well. It was the only way to send until
+            // now, so it is muscle memory for anyone who used the old build,
+            // and it costs nothing to honour both.
+            if (e.shiftKey && !(e.metaKey || e.ctrlKey)) return;
+            e.preventDefault();
+            submit();
           }}
         />
         {live === null ? (
@@ -845,7 +1764,13 @@ export function PilotPane({ run, launched, onEffect, onPending, statuses }: Pilo
               // A refusal here means the turn ended between the render and the
               // click. Not worth a message: the terminal event is about to
               // redraw this button anyway.
-              void pilot.cancel(live).catch(() => {});
+              //
+              // **Two roads, and the button has to take the right one** (#223).
+              // A subscription turn is a `claude` child of the HOST; an API turn
+              // is a stream in Rust. Asking Rust to cancel the first was refused
+              // and swallowed, so the button did nothing on the default backend.
+              if (live === hostTurn.current) void host.stopPilot(live).catch(() => {});
+              else void pilot.cancel(live).catch(() => {});
             }}
           >
             ⏹ stop

@@ -67,7 +67,12 @@ function asking(first: string, second?: string): (label: string) => unknown {
     if (label === 'plan') {
       return planFixture({ open_questions: [questionFixture({ question: first })] });
     }
-    if (second !== undefined && (label === 'revise-1' || label === 'revise-2')) {
+    // Any revision, however it is numbered. The two spellings this used to name
+    // were `revise-1` and `revise-2`, which stopped covering the first revision
+    // the moment a question round stopped advancing the plan round - the
+    // answered revision is `revise-q1` now, and a fixture that missed it would
+    // never ask the second question and the guard under test would never run.
+    if (second !== undefined && label.startsWith('revise-')) {
       return planFixture({ open_questions: [questionFixture({ question: second })] });
     }
     return planFixture();
@@ -84,8 +89,19 @@ function answering(over: { defer_to_human?: boolean } = {}) {
   return (label: string, options: unknown): unknown => {
     if (!label.startsWith('answers-')) return report([]);
     const prompt = (options as { prompt: string }).prompt;
-    // `formatQuestion`'s shape: "1. **the question** *(product, blocking)*".
-    const asked = [...prompt.matchAll(/^\d+\. \*\*(.*?)\*\* \*\(/gm)].map((m) => m[1] ?? '');
+    // `formatQuestion`'s shape: the question alone on its numbered line, with
+    // the `(kind, tag)` on the line under it.
+    //
+    // **This fixture was quietly better at echoing than the real answerer**, and
+    // that is why nothing here caught #211. The old shape was
+    // `1. **question** *(product, blocking)*`, and the regex captured only what
+    // was between the asterisks - so the harness always produced a clean echo
+    // while a real Codex turn echoed the whole rendered line, tag included, and
+    // the exact-equality join in the loop failed on it. A fixture that cannot
+    // reproduce the mistake cannot guard against it; the decorated echo is
+    // `question-pairing.test.ts`'s subject, deliberately, so this one stays the
+    // well-behaved case.
+    const asked = [...prompt.matchAll(/^\d+\. (.+)$/gm)].map((m) => m[1] ?? '');
     return answersReport(asked.map((question) => ({ question, ...over })));
   };
 }
@@ -113,7 +129,7 @@ test('a rephrased question is not put to the answerer twice, and the suppression
     agents({ claude: asking(W1, W2), codex: answering() }, calls),
   );
 
-  assert.deepEqual(calls, ['plan', 'answers-0', 'revise-1', 'critique-1']);
+  assert.deepEqual(calls, ['plan', 'answers-1', 'revise-q1', 'critique-0']);
   assert.equal(calls.filter((c) => c.startsWith('answers-')).length, 1, 'one answer turn, not two');
 
   const suppressed = state.suppressedQuestions ?? [];
@@ -178,7 +194,7 @@ test('the suppression is on disk even when the run stops rather than finishing',
             claude: (label) =>
               label === 'plan'
                 ? planFixture({ open_questions: [questionFixture({ question: W1 })] })
-                : label === 'revise-1'
+                : label === 'revise-q1'
                   ? planFixture({
                       open_questions: [
                         questionFixture({ question: W2 }),
@@ -186,8 +202,11 @@ test('the suppression is on disk even when the run stops rather than finishing',
                       ],
                     })
                   : planFixture(),
+            // The SECOND answerer turn defers, which is `answers-2`: the
+            // answerer's label is keyed by the question round now, and the
+            // question rounds are 1 and 2.
             codex: (label, options) =>
-              answering(label === 'answers-1' ? { defer_to_human: true } : {})(label, options),
+              answering(label === 'answers-2' ? { defer_to_human: true } : {})(label, options),
           },
           [],
         ),
@@ -218,9 +237,12 @@ test('a re-punctuated repeat of a suppressed wording is one decision, not two', 
         claude: (label) =>
           label === 'plan'
             ? planFixture({ open_questions: [questionFixture({ question: W1 })] })
-            : label === 'revise-1'
+            // `revise-q1` is the revision that answered the question round, and
+            // `revise-1` the one the critic asked for - two revisions, one plan
+            // round apart rather than two.
+            : label === 'revise-q1'
               ? planFixture({ open_questions: [questionFixture({ question: W2 })] })
-              : label === 'revise-2'
+              : label === 'revise-1'
                 ? planFixture({ open_questions: [questionFixture({ question: shouted })] })
                 : planFixture(),
         codex: (label, options) => {

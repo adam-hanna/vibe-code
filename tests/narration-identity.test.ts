@@ -73,15 +73,42 @@ test('a clean pass is legible as a sequence of ids, with no sentence read', asyn
   assert.deepEqual(
     seen.filter((n) => n.id !== null).map((n) => n.id),
     [
+      // Which branch the commits land on, before any phase (#223). `prepareGit`
+      // has always known this and never said it, so the window could not put a
+      // branch in hi-fi 1's identity header. `state.branch` is already durable,
+      // so nothing new was recorded - this is narration with no event, on the
+      // `findings_reported` precedent.
+      'run_branch',
       'phase_started', // planning
       'turn_started', //  the planner
       'claude_turn', //   what that turn spent (#223)
-      'phase_started', // critique
-      'turn_started', //  the critic
+      // Each file, as `artifact()` finishes writing it. **The only way a window
+      // reading a run's own directory can learn that it changed** - the pane
+      // was otherwise a snapshot taken when the tab was opened, and a critique
+      // round finishing while you watched the critique tab changed nothing on
+      // screen. Narration with no event, and the strongest case of it in this
+      // list: the file IS the durable record, so recording that it was written
+      // would store the same fact twice.
+      //
+      // It appears five times in a clean pass, which is the whole of what a
+      // clean pass writes: the plan, the critique, PLAN.md at approval, the
+      // implementation report, and the review. The files the *implementer*
+      // writes are not among them and must not be - those go into the repository
+      // and are the run's output, where these are the run's record of itself.
+      'artifact_written', // plan-0.json
+      'phase_started', //   critique
+      'turn_started', //    the critic
       'codex_turn',
+      'artifact_written', // plan-critique-0.json
       'findings_reported', // the four counts against the tolerance
       'plan_approved', //    and what the gate made of them
+      'artifact_written', // PLAN.md, written once the plan is approved
       'phase_started', //  implementing
+      // The implementer announcing itself (#223). It did NOT, and the absence was
+      // pinned here as deliberate - see the case below for the evidence that
+      // reversed it. Without this the window drew an idle run for the whole of
+      // the most expensive turn in the product.
+      'turn_started', //   the implementer
       'claude_turn',
       // What the implement turn left in the tree, once, as the turn ended
       // (#136). The sampler's own `work_progress` readings would appear here
@@ -90,11 +117,21 @@ test('a clean pass is legible as a sequence of ids, with no sentence read', asyn
       // cadence being real rather than the case being lucky - a write turn short
       // enough to have no readings is one there was nothing to report about.
       'work_measured',
+      'artifact_written', // implementation-report.md
+      // What the round put in the history, and the range it spans (#223). The
+      // commit has always happened here and `maybeCommit` has always printed
+      // `Committed abc1234`; what it had no id for was the pair of shas, so
+      // nothing watching a run could show one round's diff while the run was
+      // going. Narration with no event, on the same precedent as `run_branch`
+      // above: the sha is durable twice already, in git and in the checkpoint
+      // meta this line is immediately followed by.
+      'round_committed',
       'verify_started',
       'verify_passed', // the verdict, which the run has always recorded (#223)
       'phase_started', // review
       'turn_started', //  the reviewer
       'codex_turn',
+      'artifact_written', // code-review-0.json
       'findings_reported',
       'review_approved',
     ],
@@ -125,6 +162,23 @@ test('the sequence grew by facts the run already recorded, and by nothing else',
   // transcript.
   assert.ok(said.has('findings_reported'));
   assert.equal(recorded.has('findings_reported'), false);
+
+  // The same, and the clearest case of the rule: the artifact IS the durable
+  // record, so an event saying it was written would store one fact twice. It
+  // also carries the name, because a listing is what a reader re-reads and the
+  // name is what says whether the listing is worth taking.
+  assert.ok(said.has('artifact_written'));
+  assert.equal(recorded.has('artifact_written'), false);
+  assert.deepEqual(
+    seen.filter((n) => n.id === 'artifact_written').map((n) => n.data?.['name']),
+    [
+      'plan-0.json',
+      'plan-critique-0.json',
+      'PLAN.md',
+      'implementation-report.md',
+      'code-review-0.json',
+    ],
+  );
 });
 
 test('turn_started names the role, so a host need not infer it from the label', async () => {
@@ -136,11 +190,11 @@ test('turn_started names the role, so a host need not infer it from the label', 
 
   assert.deepEqual(
     seen.filter((n) => n.id === 'turn_started').map((n) => n.data?.['role']),
-    ['planner', 'critic', 'reviewer'],
+    ['planner', 'critic', 'implementer', 'reviewer'],
   );
   assert.deepEqual(
     seen.filter((n) => n.id === 'turn_started').map((n) => n.data?.['kind']),
-    ['plan', 'critique', 'review'],
+    ['plan', 'critique', 'implement', 'review'],
   );
 });
 
@@ -164,24 +218,55 @@ test('the round a card carries is the one that names the artifact behind it', as
   );
 });
 
-test('the implementing phase is announced, and its turn is the phase', async () => {
-  // Worth pinning rather than leaving as a surprise. Every other phase contains
-  // one or more turns that announce themselves; the implementing phase contains
-  // exactly one implementer turn and has never had a `log.step` of its own.
+test('the implementing phase is announced, and so is its turn', async () => {
+  // **Case 2, and the reasoning this reverses is worth keeping.** It used to
+  // assert the opposite — that the implement turn has no `turn_started` and the
+  // phase line stands in for it — on the grounds that *"adding a step line purely
+  // to make the vocabulary symmetrical would change what the terminal prints,
+  // and the CLI's output is a contract; symmetry is not worth that."*
   //
-  // So `phase_started` IS the implement turn's announcement. Adding a step line
-  // purely to make the vocabulary symmetrical would change what the terminal
-  // prints, and the CLI's output is a contract - symmetry is not worth that.
+  // That is sound about symmetry and was never about symmetry. `turn_started` is
+  // the only id `reduce` builds a `Turn` from, and `run.running` is what the
+  // cockpit draws a live card off — so the window showed `IDLE — no turn is
+  // open` for the whole of the implement turn, the CODE group had no row, and
+  // **every heartbeat was discarded**, because a beat with no turn open cannot be
+  // attributed and the reducer drops it.
+  //
+  // The evidence is a run of 2026-09-16. The terminal printed `implement: 14m30s
+  // · 63 tool uses · Write …TodoToggle… · 13.7M tok · ctx 25%` every thirty
+  // seconds; the window showed an idle run; the turn was stopped by hand by
+  // somebody who reasonably concluded it had hung. 14.2M tokens and 50 files of
+  // finished work, thrown away because the product said nothing was happening.
+  // That is "one channel, two renderers" breaking where it costs the most, and
+  // it clears the bar AGENTS.md sets for reopening a settled decision: new
+  // evidence, not a fresh opinion.
+  //
+  // The cost the old note named is real and is accepted rather than dodged: the
+  // terminal gains one line per run. It is not a host-only narration, because
+  // `model_said`'s rule says a transcript that disagreed with the window would
+  // break the same guarantee in the same place.
   const state = cleanRun('vibe-ident-impl-');
   const seen = await pass(state);
 
+  // Unchanged, and still worth pinning: one phase line, not one per turn.
   const implementing = seen.filter(
     (n) => n.id === 'phase_started' && n.data?.['phase'] === 'implementing',
   );
   assert.equal(implementing.length, 1);
-  assert.equal(
-    seen.some((n) => n.id === 'turn_started' && n.data?.['role'] === 'implementer'),
-    false,
+
+  const turns = seen.filter(
+    (n) => n.id === 'turn_started' && n.data?.['role'] === 'implementer',
+  );
+  assert.equal(turns.length, 1, 'the implementing phase holds exactly one implementer turn');
+  assert.equal(turns[0]?.data?.['kind'], 'implement');
+  // The round the CODE group re-opens at, the same field the three fix kinds
+  // carry — a clean pass has had no review round, so it is 0.
+  assert.equal(turns[0]?.data?.['round'], 0);
+  // And it is announced AFTER its phase, so the turn lands inside the group
+  // rather than opening one of its own.
+  assert.ok(
+    seen.indexOf(implementing[0]!) < seen.indexOf(turns[0]!),
+    'the phase opens the group and the turn goes in it',
   );
 });
 

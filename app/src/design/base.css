@@ -196,22 +196,64 @@ button {
 }
 
 /* ---------------------------------------------------------------- scroll track
- * Required wherever a pane clips. 4px, inset 8. */
+ *
+ * **Global, and that is the whole of the change.** This was `.v-scroll`, an
+ * opt-in class, and almost nothing opted in — every pane in the app sets
+ * `overflow-y: auto` on its own — so the product scrolled with the platform's
+ * default scrollbar: a light, chunky gutter down the side of a dark window. It is
+ * the same failure mode `audit:contrast` calls out for the hex check, which walks
+ * `src/` rather than naming files, *"the failure mode of any allow-list somebody
+ * has to remember to extend"*.
+ *
+ * `--dim-scroll-track` is the design's 4px and is honoured as the width of the
+ * **thumb**, not of the gutter: the gutter is twice that, and the extra is a
+ * transparent border clipped away by `background-clip: padding-box`. A bare 4px
+ * thumb is the stated design and is also a 4px hit target, and the two are not in
+ * conflict once the gutter carries the padding.
+ *
+ * The track is transparent rather than `--rule-inner`. A permanently drawn track
+ * is a vertical rule down every pane in the app, which reads as structure — and
+ * on the panes that do not overflow it would be structure that means nothing.
+ */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--rule-control) transparent;
+}
+
+::-webkit-scrollbar {
+  width: calc(var(--dim-scroll-track) * 2);
+  height: calc(var(--dim-scroll-track) * 2);
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--rule-control);
+  border: calc(var(--dim-scroll-track) / 2) solid transparent;
+  background-clip: padding-box;
+  border-radius: var(--dim-scroll-track);
+}
+
+/* Brightened on hover, still inside the border tier — a scrollbar is never text
+   and must never reach a text colour. */
+::-webkit-scrollbar-thumb:hover {
+  background: var(--rule-strong);
+  background-clip: padding-box;
+}
+
+/* Where a vertical and a horizontal gutter meet. Left unset it is painted white
+   by the engine, which is the one square of the default scrollbar that survives
+   styling everything else. */
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Kept, because panes that opt in still want the overflow. The appearance is no
+   longer this class's job. */
 .v-scroll {
   overflow: auto;
-  scrollbar-width: thin;
-  scrollbar-color: var(--rule-control) var(--rule-inner);
-}
-.v-scroll::-webkit-scrollbar {
-  width: var(--dim-scroll-track);
-  height: var(--dim-scroll-track);
-}
-.v-scroll::-webkit-scrollbar-track {
-  background: var(--rule-inner);
-  margin: var(--space-3) 0;
-}
-.v-scroll::-webkit-scrollbar-thumb {
-  background: var(--rule-control);
 }
 
 /* ---------------------------------------------------------------- the one animation */

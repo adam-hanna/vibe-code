@@ -50,7 +50,26 @@ import type { ChildEnding } from '@src/proc.js';
 let reason: string | null = null;
 
 /** Live interruptible children, by the kill they registered. */
+/** Live interruptible children, by the kill they registered. */
 const interruptible = new Set<() => void>();
+
+/**
+ * Waits a cancel should cut short, by the wake they registered (#223).
+ *
+ * **Deliberately not in `interruptible`**, though the shape is the same. That
+ * set is *children*, and `requestCancel` returns how many of them it killed —
+ * a number whose whole meaning is that zero tells somebody the cancel arrived
+ * between turns and no work was discarded. A rate-limit wait IS between turns,
+ * so counting one as a kill would report work destroyed where none was.
+ *
+ * It exists because a wait is the one place a run spends real time with no
+ * child to kill, and that made stop a button that did nothing: the loop sleeps
+ * out a rate-limit window on a bare timer, `serve.ts` holds the one-at-a-time
+ * gate for the whole of `main()`, and so a fifteen-minute wait locked the window
+ * out of starting anything for fifteen minutes. Reported exactly that way —
+ * *"I ended a run, and now I can't create a new one."*
+ */
+const waiting = new Set<() => void>();
 
 /**
  * Ask for the turn in flight to be killed and the run to end.
@@ -72,6 +91,19 @@ export function requestCancel(why: string): number {
       killed += 1;
     } catch {
       // See above. The latch is the mechanism; the kill is the courtesy.
+    }
+  }
+  // Woken after the children are killed and deliberately not counted among
+  // them: a wait is not work, so cutting one short discards nothing. The wake
+  // only ends the sleeping; what ends the *run* is the latch, which every
+  // waiter checks the moment it comes back.
+  for (const wake of [...waiting]) {
+    try {
+      wake();
+    } catch {
+      // Same rule as a kill that failed: the latch is the mechanism and the
+      // wake is the courtesy. A waiter that cannot be woken still finds the
+      // latch set when its timer expires.
     }
   }
   return killed;
@@ -123,4 +155,60 @@ export class Cancelled extends Error {
     super(`the run was stopped: ${why}`);
     this.name = 'Cancelled';
   }
+}
+
+/**
+ * Register a wait a cancel may cut short. Returns its unregister.
+ *
+ * The caller unregisters in a `finally`, exactly as `registerInterruptible`'s
+ * callers do and for a weaker version of the same reason: a stale entry here
+ * wakes nothing rather than signalling a stranger's pid, but it is still a
+ * reference the process holds for no reason.
+ *
+ * **Waking is not ending.** The wake resolves the wait early; the caller then
+ * reads `cancelRequested()` and decides, which keeps the decision in the loop
+ * where every other ending is decided rather than in a timer callback.
+ */
+export function registerWait(wake: () => void): () => void {
+  waiting.add(wake);
+  return () => waiting.delete(wake);
+}
+
+/**
+ * Sleep, unless the run is cancelled first.
+ *
+ * **Here rather than in `orchestrator.ts` because this is where the latch
+ * lives.** The loop's own `sleep` was `new Promise((r) => setTimeout(r, ms))` —
+ * a timer with no way to be woken and no knowledge of the latch — and it is the
+ * one thing in a run that cannot be interrupted while it is happening. That made
+ * `stop` a no-op for the length of a rate-limit window and, because `serve.ts`
+ * holds the one-at-a-time gate for the whole of `main()`, made a new run
+ * impossible to start for exactly as long.
+ *
+ * Returns whether it slept the whole way. A caller that gets `false` has been
+ * cancelled and should read `cancelRequested()` for the reason; it is a return
+ * rather than a throw so the decision stays at the call site, which is the same
+ * arrangement `guardTurnSpend` uses for a ceiling it cannot itself enforce.
+ *
+ * A cancel that is *already* latched returns immediately without sleeping at
+ * all, which is the fail-closed direction: a run being stopped must not spend
+ * fifteen minutes doing nothing first.
+ */
+export function sleepUnlessCancelled(ms: number, timers = globalThis): Promise<boolean> {
+  if (reason !== null) return Promise.resolve(false);
+  return new Promise<boolean>((resolve) => {
+    let done = false;
+    // One settle, whichever arrives first. `clearTimeout` and the unregister are
+    // both safe twice, but `finished` guards the *decision*, so a wake landing
+    // in the same tick as the timer cannot resolve two different answers.
+    const finished = (slept: boolean): void => {
+      if (done) return;
+      done = true;
+      timers.clearTimeout(timer);
+      unregister();
+      resolve(slept);
+    };
+    const timer = timers.setTimeout(() => finished(true), ms);
+    const unregister = registerWait(() => finished(false));
+  });
 }

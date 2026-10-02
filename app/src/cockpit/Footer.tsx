@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { Button, StateKicker } from '../design';
-import { boundary, ending } from './format';
+import { boundary, ending, hold, nextHold } from './format';
+import type { Raise } from './argv';
+import { latestQuestions } from './model';
 import type { Run } from './model';
 
 /**
@@ -35,7 +37,27 @@ export interface FooterProps {
    * says needs its own validator before it is offered. Buttons that produced no
    * frame would be the `proposed` chip shipped as behaviour.
    */
-  onResume: (runId: string, dir: string) => void;
+  onResume: (runId: string, dir: string, raise?: Raise) => void;
+  /** Take a finished plan-only run into implementation (#223). See `implementArgv`. */
+  onImplement: (runId: string, dir: string) => void;
+  /** The caps in force, so a raise can be relative. Null until the config is read. */
+  caps: Caps | null;
+  /**
+   * The gate matrix in force, or null (`3a`).
+   *
+   * A readout, not a control — see the mode note at the bottom of this file.
+   * Null means the config has not been read, and the footer says that rather
+   * than describing a matrix it does not have.
+   */
+  gates: Readonly<Record<string, string>> | null;
+  /**
+   * The boundaries in the loop's own order, from `src/gates.ts` (#223).
+   *
+   * Empty until the config frame arrives, and empty is what makes the *next
+   * hold* line absent rather than wrong: with no order there is no "next", and
+   * the row falls back to listing which boundaries hold.
+   */
+  order: readonly string[];
   /** Whether a pause is armed and waiting for the next boundary. */
   pausing: boolean;
   busy: boolean;
@@ -56,8 +78,92 @@ export interface FooterProps {
  */
 const RESUMABLE: ReadonlySet<number> = new Set([1, 2, 3, 4, 5, 7]);
 
-export function Footer({ run, onDecide, onPause, onStop, onResume, pausing, busy }: FooterProps) {
+/**
+ * What a halt offers beyond a plain resume (`4d`, #223).
+ *
+ * `4d` gives every halt state a choice, marks exactly one primary, and demotes
+ * the lossy option to a link. The choices it names — `+2 rounds`, `+2M and
+ * resume` — are all **caps raised on the way back in**, which is what AGENTS.md
+ * already tells a human to do by hand.
+ *
+ * **Keyed on the exit code, never on the reason sentence.** Two of `4d`'s eight
+ * states share exit 3 — a plan round cap and an oscillation stall — and the only
+ * thing separating them is the prose, so a window that split them would be
+ * matching English to decide which buttons to draw. They get one card, and the
+ * loop's own sentence is on it.
+ *
+ * `4d`'s other states are not here for stated reasons rather than by omission:
+ * **rate limit** is `7e` and is not a halt at all; **app restarted** would need a
+ * drift diff nothing computes; **worktree dirty** and **verify can't run** both
+ * arrive as exit 6, which is refused *before* anything is implemented and so has
+ * no resume to offer.
+ */
+/**
+ * The caps in force, as the config frame reported them, or null.
+ *
+ * **A raise has to be relative to the current value, and the current value is
+ * not guessable.** `+2 rounds` written as an absolute `7` assumes the default of
+ * 5 — and on a project configured to 10 that button would silently *lower* the
+ * cap while claiming to raise it. So the offer only exists once the config has
+ * been read, and a build that could not read it falls back to a plain resume.
+ */
+export interface Caps {
+  maxPlanRounds: number;
+  maxReviewRounds: number;
+  maxTokens: number;
+}
+
+function raiseFor(exit: number, caps: Caps | null): { label: string; note: string; raise: Raise } | null {
+  if (caps === null) return null;
+  if (exit === 3) {
+    return {
+      // `+2` is the design's own figure and it is a suggestion rather than a
+      // measurement, which is why the note says what the button does instead of
+      // implying two is the right number.
+      label: `+2 rounds and resume (${caps.maxPlanRounds} → ${caps.maxPlanRounds + 2})`,
+      note: 'A finding coming back is not evidence it cannot be fixed, so more rounds is a real option — but so is deciding it yourself and stopping the argument.',
+      raise: {
+        'max-plan-rounds': caps.maxPlanRounds + 2,
+        'max-review-rounds': caps.maxReviewRounds + 2,
+      },
+    };
+  }
+  if (exit === 4) {
+    return {
+      label: '+2M tokens and resume',
+      note: 'Raises the ceiling that covers both agents — the only one that bounds Codex work.',
+      raise: { 'max-tokens': caps.maxTokens + 2_000_000 },
+    };
+  }
+  return null;
+}
+
+export function Footer({
+  run,
+  onDecide,
+  onPause,
+  onStop,
+  onResume,
+  onImplement,
+  caps,
+  gates,
+  order,
+  pausing,
+  busy,
+}: FooterProps) {
   const [reason, setReason] = useState('');
+  // The two holding modes, kept apart because the difference is what a hold
+  // costs: `step` is an await and free, `stop` ends the run resumably.
+  const holding = Object.entries(gates ?? {})
+    .filter(([, mode]) => mode !== 'auto')
+    .map(([b]) => b);
+  const stopping = Object.entries(gates ?? {})
+    .filter(([, mode]) => mode === 'stop')
+    .map(([b]) => b);
+  // The earliest boundary ahead that holds. Null with no matrix and no order,
+  // which is the state before the config frame arrives - and the row says which
+  // boundaries hold rather than nothing at all.
+  const next = gates === null ? null : nextHold(order, gates, run.lastGate);
 
   // A waiting gate outranks everything, including a run that has said it is
   // done. `review_approved` fires while the loop is still going - verification,
@@ -65,6 +171,17 @@ export function Footer({ run, onDecide, onPause, onStop, onResume, pausing, busy
   // could hide a gate the run is genuinely blocked on, with no way to answer it.
   if (run.gate !== null) {
     const gate = run.gate;
+    // The gate that failed, from the most recent pass, so `5d`'s card can name
+    // it. Told rather than inferred: the verdict is the loop's word, and a
+    // window recomputing it from the fraction would disagree about flaky.
+    const failing = run.verify[run.verify.length - 1]?.gates.find((g) => g.status === 'failed');
+    // The questions this hold is about: the round the loop is on, through the
+    // same expression the tab badge and the pane use (#223). `Run.questions` is
+    // a list now, so "the latest" is a decision and it is made in one place.
+    const asked = latestQuestions(run);
+    // What this boundary is asking, or null if this build has no description of
+    // it - in which case nothing is drawn rather than something generic.
+    const held = hold(gate.boundary);
     return (
       <div className="v-footer v-footer--holding">
         <div className="v-footer__banner">
@@ -74,10 +191,185 @@ export function Footer({ run, onDecide, onPause, onStop, onResume, pausing, busy
 
         {/* The rounds travel with the boundary because a boundary alone does not
             say where in the run it is: `review-round` is reached up to
-            `maxReviewRounds` times and they are not the same decision. */}
+            `maxReviewRounds` times and they are not the same decision.
+
+            Against the cap where one is known, because "plan 1" is a position
+            and "plan 1 of 5" is a position in something — which is what makes it
+            a fact somebody can act on. Absent rather than guessed when the
+            config has not been read, for `raiseFor`'s reason. */}
         <div className="v-footer__rounds">
-          plan {gate.planRound} · verify {gate.verifyRound} · review {gate.reviewRound}
+          plan {gate.planRound}
+          {caps !== null && ` of ${caps.maxPlanRounds}`} · verify {gate.verifyRound} · review{' '}
+          {gate.reviewRound}
+          {caps !== null && ` of ${caps.maxReviewRounds}`}
         </div>
+
+        {/*
+          What this gate is actually asking, which `boundary()` alone never said
+          (#211). Three sentences: what has just finished, what to look at, and
+          what continuing spends. Absent for a boundary this build has no
+          description of, rather than filled in with something generic — the rule
+          `ending()` follows for an exit code it does not know.
+        */}
+        {held !== null && (
+          <div className="v-footer__hold">
+            <div className="v-footer__note">{held.what}</div>
+            <div className="v-footer__note">
+              <strong>To look at it:</strong> {held.inspect}
+            </div>
+            {/* The run's own directory, which is where PLAN.md, every critique
+                and every report already are. Carried on `run_started` rather
+                than assembled here, and copied rather than opened: the window
+                has no filesystem and #207 keeps reading an artifact a separate
+                decision with #129's link refusal attached. */}
+            {run.identity !== null && (
+              <div className="v-footer__path">
+                <code>{run.identity.dir}</code>
+                <button
+                  className="v-footer__copy"
+                  onClick={() => void navigator.clipboard.writeText(run.identity?.dir ?? '')}
+                >
+                  copy
+                </button>
+              </div>
+            )}
+            <div className="v-footer__note">
+              <strong>Continuing:</strong> {held.cost}
+            </div>
+          </div>
+        )}
+
+        {/*
+          `5d`'s gate card, and it is only reachable because `verify-round` is a
+          real `GateableBoundary` - the loop genuinely stops here when the matrix
+          says `step`. What changes is the wording, because at this one boundary
+          "continue" means something specific and unobvious: it sends the round
+          to FIX, which costs an implementation-sized turn.
+
+          **"Fix myself" is real**, as the design insists, and it turns out to
+          need no mechanism at all: the loop is already waiting, so fixing it
+          yourself is what happens if you simply do not answer. What the app adds
+          is saying so, and giving you the path.
+        */}
+        {gate.boundary === 'verify-round' && (
+          <div className="v-footer__verify">
+            {failing !== undefined && (
+              <div className="v-footer__note">
+                <strong>{failing.name}</strong> failed{' '}
+                {failing.failed === null
+                  ? ''
+                  : `${failing.failed} of ${failing.runs} run${failing.runs === 1 ? '' : 's'}`}
+                {failing.verdict === 'flaky' && ' — and it is not deterministic'}.
+              </div>
+            )}
+            {/* The cost of continuing is on the shared card above. What is here
+                is the option that has no button, because it needs none: the
+                loop is already waiting. */}
+            <div className="v-footer__note">
+              Doing nothing is <strong>fix it yourself</strong>: the loop will keep waiting — edit
+              the worktree, then continue. That path spends no round.
+            </div>
+            {/* Named rather than drawn. A manual re-run would have to re-enter
+                the gate out of band and no frame does that - and the design is
+                explicit that a rerun spends a round, so a button that silently
+                did not would be worse than none. */}
+            <div className="v-footer__note">
+              There is no <em>rerun</em> button: nothing on this wire can re-enter the gate, and
+              a rerun costs one of the verify rounds, which is the scarce thing here.
+            </div>
+          </div>
+        )}
+
+        {/*
+          `1f`'s inbox, at the boundary that is about it.
+
+          The questions have been on the wire since #223 and there is a whole
+          pane for them — but the footer said `holding at question round ·
+          waiting on you` and nothing else, so the only way to find out what was
+          being asked was to know the Questions tab existed. Reported from a
+          manual pass, and the sentence is the whole finding: *"I can't see any
+          questions to help with. I don't know why it's waiting on me. I just
+          always hit continue."*
+
+          Continuing here is not neutral — it accepts the answerer's answers and
+          buys a planner turn to revise the plan with them — so a person pressing
+          it without having read them is agreeing to something they were never
+          shown.
+        */}
+        {gate.boundary === 'question-round' && (
+          <div className="v-footer__verify">
+            {asked === null ? (
+              // A real state, not an error: `questions_opened` is what fills
+              // this, and a build that held here without seeing one says so
+              // rather than drawing an empty inbox as "no questions".
+              <div className="v-footer__note">
+                The loop is holding at a question round, and this window never saw the questions
+                open. They are in <code>.vibe/runs/{'<'}run-id{'>'}/answers-N.json</code>.
+              </div>
+            ) : (
+              <>
+                <div className="v-footer__note">
+                  {asked.total} question{asked.total === 1 ? '' : 's'}
+                  {asked.blocking > 0 && (
+                    <>
+                      , <strong>{asked.blocking} blocking</strong>
+                    </>
+                  )}
+                  :
+                </div>
+                {/* Blocking first, then declines, then the rest: the order is
+                    what a person should read rather than the order they were
+                    asked in. A decline on a blocking question is the one that
+                    ends runs. */}
+                {[...asked.open]
+                  .sort(
+                    (a, b) =>
+                      Number(b.blocking) - Number(a.blocking) ||
+                      Number(b.declined) - Number(a.declined),
+                  )
+                  .map((q) => (
+                    <div className="v-footer__q" key={q.question}>
+                      <div className="v-footer__q-head">
+                        {q.blocking ? (
+                          <StateKicker tone="accent">blocking</StateKicker>
+                        ) : (
+                          <StateKicker tone="quiet">advisory</StateKicker>
+                        )}
+                        <span className="v-footer__q-ask">{q.question}</span>
+                      </div>
+                      {q.declined ? (
+                        <div className="v-footer__q-answer v-footer__q-answer--declined">
+                          declined — {q.rationale ?? 'no reason given'}
+                        </div>
+                      ) : q.answer === null ? (
+                        <div className="v-footer__q-answer">no answer came back for this one</div>
+                      ) : (
+                        <div className="v-footer__q-answer">
+                          <em>{q.confidence ?? 'confidence not stated'}</em> — {q.answer}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                {asked.open.length < asked.total && (
+                  <div className="v-footer__note">
+                    The count is the loop&apos;s; this build could not read every question behind
+                    it. The rest are in the run&apos;s <code>answers-N.json</code>.
+                  </div>
+                )}
+              </>
+            )}
+            {/* The option the shared card does not cover, because it is specific
+                to this boundary: stopping here is how you answer them yourself,
+                and until the questions rode along on the stop it produced a
+                document with nothing in it to answer. */}
+            <div className="v-footer__note">
+              <strong>Stop</strong> ends the run resumably and writes these into{' '}
+              <code>NEEDS-INPUT.md</code> with a blank under each. Answer them on the{' '}
+              <strong>Questions</strong> tab — the window fills in that same file and resumes —
+              and yours are what the planner gets instead of its own defaults.
+            </div>
+          </div>
+        )}
 
         <div className="v-footer__note">
           Nothing further has run. The session is still warm, so continuing re-sends no context.
@@ -85,7 +377,15 @@ export function Footer({ run, onDecide, onPause, onStop, onResume, pausing, busy
 
         <div className="v-footer__actions">
           <Button level="primary" disabled={busy} onClick={() => onDecide(gate.askId, { kind: 'continue' })}>
-            ⏭ continue
+            {/* The label says what pressing it does, at the two boundaries
+                where "continue" is not self-explanatory. Both spend a turn, and
+                naming which one is the difference between a decision and a
+                reflex. */}
+            {gate.boundary === 'verify-round'
+              ? '⏭ let FIX run'
+              : gate.boundary === 'question-round'
+                ? '⏭ accept these answers'
+                : '⏭ continue'}
           </Button>
           <input
             className="v-footer__reason"
@@ -116,6 +416,7 @@ export function Footer({ run, onDecide, onPause, onStop, onResume, pausing, busy
   if (run.completed !== null) {
     const exit = run.completed.exit;
     const how = ending(exit);
+    const raise = raiseFor(exit, caps);
     return (
       <div className={`v-footer v-footer--ended${how?.tone === 'alarm' ? ' v-footer--alarm' : ''}`}>
         <div className="v-footer__banner">
@@ -139,6 +440,54 @@ export function Footer({ run, onDecide, onPause, onStop, onResume, pausing, busy
         )}
 
         {run.reason !== null && <div className="v-footer__why">{run.reason.message}</div>}
+        {/* **A finished plan-only run is the one ending with work left to do**,
+            and until #223 it was the only ending offering nothing. `plan_only_stopped`
+            is what makes it distinguishable: every other exit-0 run built what it
+            planned, and this one has an approved plan and nothing built from it.
+
+            Reported as a dead end in as many words — *"after it stopped, I SHOULD
+            have been able to continue… When I asked the pilot, it kicked off
+            another run from scratch"* — and a new run is the wrong answer rather
+            than a slow one: it re-derives a plan that exists, and it carries none
+            of what the plan phase settled.
+
+            Offered here, beside the ending, rather than as a `RESUMABLE` exit
+            code. Exit 0 is not a halt and must not start reading as one; this is
+            a separate labelled act on a run that finished exactly as asked. */}
+        {run.plannedOnly !== null && run.identity !== null && (
+          <div className="v-footer__actions">
+            <Button
+              level="primary"
+              disabled={busy}
+              onClick={() => {
+                if (run.identity !== null) onImplement(run.identity.runId, run.identity.dir);
+              }}
+            >
+              ▶ implement this plan
+            </Button>
+            <span className="v-footer__note">
+              It continues this run rather than starting one: the approved plan, the acceptance
+              bar the critic passed, the{' '}
+              {run.plannedOnly.carried > 0
+                ? `${run.plannedOnly.carried} P1(s) it carried`
+                : 'findings it carried'}{' '}
+              and the ones it declined all travel with it, and nothing is re-planned.
+            </span>
+          </div>
+        )}
+        {/* Said whether or not the button is pressed, because it changes what
+            the plan means. The tolerance let these through — the plan was
+            accepted DESPITE them — and a reader who thinks the plan is clean is
+            reading the wrong thing. Absent, not zero, when none were carried. */}
+        {run.plannedOnly !== null && run.plannedOnly.carried > 0 && (
+          <div className="v-footer__why">
+            This plan was accepted carrying {run.plannedOnly.carried} P1(s) on tolerance — not
+            without them. They are stated in the implementation prompt, so whatever implements
+            this plan is told about them; the Plan critique tab has each in full.
+          </div>
+        )}
+
+
 
         {how !== null && how.next !== null && <div className="v-footer__note">{how.next}</div>}
 
@@ -148,31 +497,73 @@ export function Footer({ run, onDecide, onPause, onStop, onResume, pausing, busy
           and four equal-weight buttons make them read all four every time.
 
           The action is offered only when the run said which run it is (#207) and
-          only for an ending a resume can actually pick up - so an unknown exit
-          code gets the sentence and no button, rather than a control that might
-          do nothing.
+          where it is (#223), and only for an ending a resume can actually pick
+          up - so an unknown exit code gets the sentence and no button, rather
+          than a control that might do nothing.
+
+          **`repo`, never `dir`, and that distinction cost a resume.** The two
+          are both on `run_started` and they are not interchangeable:
+          `identity.dir` is the run's OWN directory - `<repo>/.vibe/runs/<id>` -
+          and `identity.repo` is the repository. This passed `dir`, so the resume
+          ran with `-C <run dir>` and the core looked for the run *inside
+          itself*, answering `No run "..." under .vibe\runs` about a run that was
+          sitting there intact. `repo` was added to the frame for exactly this
+          reason and this call site was never moved onto it.
         */}
-        {RESUMABLE.has(exit) && run.identity !== null && (
-          <div className="v-footer__actions">
-            <Button
-              level="primary"
-              disabled={busy}
-              onClick={() => {
-                if (run.identity !== null) onResume(run.identity.runId, run.identity.dir);
-              }}
-            >
-              ▶ resume this run
-            </Button>
-            <span className="v-footer__note">
-              It picks up from the last checkpoint on the same agent sessions. Nothing before the
-              halt is redone.
-            </span>
-          </div>
+        {RESUMABLE.has(exit) && run.identity?.repo != null && (
+          <>
+            <div className="v-footer__actions">
+              <Button
+                level="primary"
+                disabled={busy}
+                onClick={() => {
+                  const at = run.identity;
+                  if (at?.repo != null) onResume(at.runId, at.repo);
+                }}
+              >
+                ▶ resume this run
+              </Button>
+              <span className="v-footer__note">
+                It picks up from the last checkpoint on the same agent sessions. Nothing before
+                the halt is redone.
+              </span>
+            </div>
+
+            {/* `4d`'s second choice, and never a peer of the first: exactly one
+                primary, because somebody reading a halt banner is already
+                frustrated and four equal-weight buttons make them read all four
+                every time. */}
+            {raise !== null && (
+              <div className="v-footer__actions">
+                <button
+                  className="v-footer__demoted"
+                  disabled={busy}
+                  onClick={() => {
+                    // The repository, for the reason above: `dir` is the run's
+                    // own directory, and resuming into it looks for the run
+                    // inside itself.
+                    const at = run.identity;
+                    if (at?.repo != null) onResume(at.runId, at.repo, raise.raise);
+                  }}
+                >
+                  {raise.label}
+                </button>
+                <span className="v-footer__note">{raise.note}</span>
+              </div>
+            )}
+            {raise === null && (exit === 3 || exit === 4) && (
+              <div className="v-footer__note">
+                Raising the cap on the way back in is the usual answer here, and this build has
+                not read the project&apos;s current one — so it is not offered rather than
+                offered against a number it guessed. Settings has the caps.
+              </div>
+            )}
+          </>
         )}
-        {RESUMABLE.has(exit) && run.identity === null && (
+        {RESUMABLE.has(exit) && run.identity?.repo == null && (
           <div className="v-footer__note">
-            This run is resumable, but the loop never said which run it is — so there is nothing to
-            point a resume at from here. `vibe list` has the id.
+            This run is resumable, but the loop never said which run it is or which repository it
+            is in — so there is nothing to point a resume at from here. `vibe list` has the id.
           </div>
         )}
       </div>
@@ -229,11 +620,55 @@ export function Footer({ run, onDecide, onPause, onStop, onResume, pausing, busy
             : `${run.running.role} · ${run.running.kind}`}
         </span>
       </div>
+      {/*
+        `3a`'s mode control, and it is a **readout rather than a control**.
+
+        The design asks for the mode to be readable at a glance and says why:
+        *"mode is a mode, not an action."* Editing it belongs in one place, and
+        that place is the gate matrix in Settings — a segmented control here
+        would be a second form over one file, which is how two answers to "where
+        does this run hold" come to exist.
+
+        It says **which boundary comes next** as well as which ones hold. This
+        line used to refuse the first half, on the grounds that it *"would need a
+        phase-to-boundary ordering written here"* — and that objection is
+        answered rather than overruled: the order arrives on the `config` frame
+        as `src/gates.ts` declares it, and the position is the last boundary that
+        actually held. Nothing about either is decided on this side. See
+        `nextHold` for the one thing it can still be wrong about, and why the
+        wording is *can stop* rather than *will*.
+      */}
       <div className="v-footer__note">
-        {/* Not "next stop: verify gate". This slice is not given the gate matrix
-            (#140), so it holds at whatever `serve.ts` reaches - and naming a
-            boundary it might not stop at would be a promise the app cannot keep. */}
-        Every boundary holds. Which ones is configuration this build does not have yet (#140).
+        {gates === null ? (
+          <>Where this run hands control back is in `vibe.config.json`; this build has not read it.</>
+        ) : holding.length === 0 ? (
+          <>
+            No boundary holds — every row is <code>auto</code>, so the loop runs to the end
+            without asking.
+          </>
+        ) : (
+          <>
+            {next !== null && (
+              <>
+                {/* The design's `next stop: verify gate`, worded for what it
+                    is: the earliest boundary ahead that holds. The loop can
+                    pass it without reaching it — a plan the critic clears
+                    first time never has a second plan round — so this says
+                    where it *can* stop, never where it will. */}
+                Next place it can stop: <strong>{boundary(next)}</strong>.{' '}
+              </>
+            )}
+            Holds at {holding.map((b) => boundary(b)).join(', ')}.{' '}
+            {stopping.length > 0 && (
+              <>
+                {/* The difference that costs something. A `step` row is an
+                    await and free; a `stop` row ENDS the run, resumably. */}
+                {stopping.map((b) => boundary(b)).join(', ')}{' '}
+                {stopping.length === 1 ? 'ends' : 'end'} the run there rather than asking.
+              </>
+            )}
+          </>
+        )}
       </div>
 
       {/*

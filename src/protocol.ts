@@ -1,6 +1,16 @@
 import type { Level, Narration } from '@src/log.js';
 import type { GateContext } from '@src/host.js';
-import type { RunSummary } from '@src/types.js';
+import type { ArtifactRead, RunArtifact, RunSummary } from '@src/types.js';
+import type { PromptBlock } from '@src/prompts.js';
+import type { FsAnswer, PilotAccess } from '@src/pilotaccess.js';
+
+/** Where one CLI is, as `config` reports it (#223). */
+export interface CliStatus {
+  configured: string | null;
+  via: 'settings' | 'env' | 'search';
+  found: string | null;
+  problem: string | null;
+}
 
 /**
  * The wire between the loop and whatever is driving it (#153).
@@ -69,8 +79,58 @@ export type Outbound =
    * started".
    */
   | { type: 'error'; id: number | null; message: string }
+  /**
+   * A command started, or was refused (#211).
+   *
+   * `refused` and `command` are exclusive: a refusal never started anything, so
+   * there is no id to report output against, and a started command always has
+   * one. A window drawing a card from a refusal would be drawing a process that
+   * does not exist.
+   */
+  | {
+      type: 'command_started';
+      id: number;
+      command: {
+        id: string;
+        program: string;
+        args: readonly string[];
+        resolved: string;
+        dir: string;
+        startedAt: number;
+      } | null;
+      refused: string | null;
+    }
+  /** Output from a running command, in the order it arrived. */
+  | { type: 'command_output'; commandId: string; chunk: string }
+  /**
+   * A command ended.
+   *
+   * `stopped` is the fact the exit code cannot carry: on Windows a killed
+   * process closes with a code and no signal, so *"a person stopped this"* and
+   * *"it exited"* are indistinguishable from the outside (#131).
+   */
+  | {
+      type: 'command_ended';
+      commandId: string;
+      code: number | null;
+      signal: string | null;
+      stopped: boolean;
+      endedAt: number;
+    }
   /** A fragment of a pilot reply, in order (#193). */
   | { type: 'pilot_delta'; id: number; text: string }
+  /**
+   * A pilot turn that was stopped from the window (#223), answering `pilot_stop`.
+   * Its own frame rather than an `error`, because a turn somebody stopped is not
+   * a turn that failed, and a pane told the second would draw a failure.
+   */
+  | { type: 'pilot_stopped'; id: number }
+  /**
+   * A directory listing or a file's text, for the pilot's `list_dir` and
+   * `read_file` (#223). Answered only inside `pilotRoots`; outside them the
+   * answer is an `error` naming the directories it may read.
+   */
+  | ({ type: 'fs'; id: number } & FsAnswer)
   /**
    * A pilot turn finished.
    *
@@ -125,11 +185,62 @@ export type Outbound =
       effective: unknown;
       raw: Record<string, unknown>;
       path: string | null;
+      /**
+       * The settings for every project, as written, and where they live (#223).
+       * `globalPath` is null when the layer is switched off; `globalRaw` is `{}`
+       * when there is no file yet. Sent beside `raw` so a form can say of each
+       * value whether it is the default, the person's own, or this project's.
+       */
+      globalRaw: Record<string, unknown>;
+      globalPath: string | null;
+      /**
+       * `DEFAULTS` merged with the global file and nothing else: what a project
+       * that says nothing would get. The form's "all projects" view draws this,
+       * and computing it in the window would be a second merge.
+       */
+      globalEffective: unknown;
       /** The boundaries that can hold, and the modes they may take (#140). */
       gateable: readonly string[];
       modes: readonly string[];
       /** The two boundaries with no row, each with its own reason. */
       ungateable: Readonly<Record<string, string>>;
+      /**
+       * The role table's vocabulary (#223, `1i`).
+       *
+       * Sent for the same reason `gateable` is: a form built from a list it
+       * wrote itself can offer a role the loop does not have or a provider it
+       * cannot seat, and the refusal would arrive as a validator error on save
+       * instead of as a control that was never offered.
+       */
+      roleNames: readonly string[];
+      providers: readonly string[];
+      efforts: readonly string[];
+      /**
+       * The model names this build knows, per agent (#223).
+       *
+       * **Not the vocabulary the others are.** `roleNames`, `providers` and
+       * `efforts` are closed sets the validator enforces, and a value outside
+       * one is refused; a model is any non-empty string and stays that way, for
+       * `KNOWN_MODELS`' stated reason. So this is sent as something a form may
+       * *offer*, and a form that showed only these would be claiming a catalogue
+       * nobody here has read. It is carried on this frame rather than composed
+       * in the window because the list has to agree with `DEFAULTS`, and they
+       * are the same file.
+       */
+      models: Readonly<Record<string, readonly string[]>>;
+      /**
+       * What the pilot may do without asking (#223), resolved from the settings
+       * for all projects over the defaults. Carried rather than read by the
+       * window for the reason `globalEffective` is: a merge on that side is a
+       * second answer. Never from a project's file, which may not set it.
+       */
+      pilot: PilotAccess;
+      /**
+       * Where each CLI was found, and how (#223): the settings' path, the
+       * environment variable, or the search. `found` is null with a `problem`
+       * when it could not be found, in the resolver's own sentence.
+       */
+      clis: Readonly<Record<'claude' | 'codex', CliStatus>>;
     }
   /**
    * The diff a run has produced, in reply to a `diff` request (#223, `1d`).
@@ -140,7 +251,111 @@ export type Outbound =
    * about what the reviewer *read*, and it cannot be drawn without knowing that
    * this happened.
    */
-  | { type: 'diff'; id: number; dir: string; patch: string; truncated: boolean };
+  | { type: 'diff'; id: number; dir: string; patch: string; truncated: boolean }
+  /**
+   * What is in a run's directory, in reply to an `artifacts` request.
+   *
+   * **The listing is the half that keeps the reader from guessing.** A window
+   * showing a plan round's plan has to name a file, and the alternative to being
+   * told is `plan-${round}.json` composed on the far side of this wire - a copy
+   * of the loop's naming convention, in a process that cannot be kept in step
+   * with it, going stale on the release that renames one. `listRunArtifacts`
+   * reads the directory instead, and every entry says what `lstat` made of it
+   * rather than being filtered down to the ones that are files.
+   */
+  | { type: 'artifacts'; id: number; dir: string; runId: string; entries: RunArtifact[] }
+  /**
+   * One artifact's contents, in reply to an `artifact` request.
+   *
+   * `read` is `ArtifactRead` verbatim, for the reason `archive` carries
+   * `RunSummary[]` verbatim: those three answers are the whole of what this
+   * repo has decided an artifact read can be, and collapsing `absent` and
+   * `linked` into one nullable string here would tell a reader a file was
+   * unreadable when vibe never looked inside it (#129).
+   */
+  | {
+      type: 'artifact';
+      id: number;
+      dir: string;
+      runId: string;
+      name: string;
+      read: ArtifactRead;
+    }
+  /**
+   * A finished run said again, in reply to a `replay` request (#223).
+   *
+   * **The column's half of opening a run, and it is not a second drawing.**
+   * Six panes already followed the run the window was pointed at, because each
+   * reads a file that run wrote; the loop column beside them had nothing to
+   * follow with and stayed on the live run. The first answer to that was a
+   * *summary* — a different screen, from a different shape — and the report on
+   * it was exact: *"I want the right panel to look just as it would have when I
+   * click on an old run as if I had run it myself."*
+   *
+   * So this carries the **narration**, and the window folds it through the same
+   * `reduce` a live run goes through. The column, the round cards and the log
+   * are then the same components rendering the same `Run`, because there is no
+   * second builder to disagree with the first.
+   *
+   * Every step carries its own `at` from the run's record: a replay stamped
+   * with arrival time would date a week-old run to this afternoon, and the
+   * durations would be the time it took to send.
+   *
+   * `exit` travels beside the steps rather than among them because a `result`
+   * is not narration — it is the frame that answers a request, and the window
+   * applies it as one. Null is a status this build does not recognise, which
+   * has not said the run succeeded.
+   */
+  | {
+      type: 'replay';
+      id: number;
+      dir: string;
+      runId: string;
+      steps: readonly { at: number; narration: Narration }[];
+      exit: number | null;
+    }
+  /**
+   * A run that is gone, in reply to a `delete_run` request (#223).
+   *
+   * **The only frame in this union that reports a destruction**, and it carries
+   * the directory that was removed rather than a byte count or a file list.
+   * Those would be measurements taken so they could be shown once, and what a
+   * caller actually needs to say is *what is gone* - a path is checkable and a
+   * size is not.
+   *
+   * A refusal is an `error` frame, as it is for every read: `deleteRun` throws
+   * a `StoredStateError` naming which of the three guards stopped it, and that
+   * sentence is the whole answer. There is deliberately no "deleted: false"
+   * shape - a window that had to read a boolean to find out whether its own
+   * request happened is one that will eventually forget to.
+   */
+  | { type: 'run_deleted'; id: number; dir: string; runId: string; removed: string }
+  /**
+   * The standing instruction blocks, in reply to a `prompts` request (#223).
+   *
+   * Verbatim, never summarised: the point of showing a prompt is that it is the
+   * text the model was actually given, and a paraphrase of it is a screen
+   * describing the product rather than quoting it.
+   */
+  | { type: 'prompts'; id: number; blocks: readonly PromptBlock[] }
+  /**
+   * What an `answer_questions` request placed, in its own words.
+   *
+   * `filled` is how many questions got text and `open` is which are still
+   * blank - reported rather than assumed, because a resume with a question
+   * still open spends a preflight and halts on the same question, and the
+   * window can say so before any of that. `unmatched` names answers the file
+   * does not ask for; they are never appended.
+   */
+  | {
+      type: 'questions_answered';
+      id: number;
+      dir: string;
+      runId: string;
+      filled: number;
+      unmatched: readonly string[];
+      open: readonly string[];
+    };
 
 /** What the thing driving the loop says. */
 export type Inbound =
@@ -217,15 +432,73 @@ export type Inbound =
    * buys is that **no key is needed** - it runs on the subscription the user
    * already pays for.
    */
+  /**
+   * Run a command a person pressed (#211).
+   *
+   * **`program` and `args` are separate and are never joined.** The one
+   * invariant of `src/commands.ts` is that what runs is what was displayed, and
+   * a single string would put a `;` and a backtick back in reach of text a
+   * model wrote. There is deliberately no `shell` field: there is no shell.
+   *
+   * Reversing part of a rule this file's own neighbours state, so the narrowness
+   * is worth restating: the model cannot send this. It proposes, the proposal is
+   * drawn with the exact program and arguments, and the window sends this only
+   * when somebody presses it - the same road `invoke` takes from `start_run`.
+   */
+  | {
+      type: 'command';
+      id: number;
+      dir: string;
+      program: string;
+      args: readonly string[];
+    }
+  /** Stop a running command. `commandId` is one this session started. */
+  | { type: 'command_stop'; id: number; commandId: string }
+  /**
+   * Stop a subscription pilot turn (#223). `turn` is the id the `pilot` frame
+   * was sent with. The stop button used to call the Rust pilot's cancel, which
+   * only knows API-backed turns, so on the subscription path it was refused and
+   * the refusal was swallowed: the button did nothing and the child ran on.
+   */
+  | { type: 'pilot_stop'; id: number; turn: number }
+  /**
+   * List a directory or read a file for the pilot (#223). `dir` is the project
+   * a relative `path` is resolved against; where it may land is the host's
+   * decision, from the settings for all projects, and never the frame's.
+   */
+  | { type: 'fs'; id: number; op: 'list' | 'read'; dir: string; path: string }
   | {
       type: 'pilot';
       id: number;
       prompt: string;
       system: string;
       model: string;
+      /**
+       * The repository the turn runs in, and the only one it can read.
+       *
+       * **Required, and the reason is the whole of `--restricted`.** That flag
+       * confines `Read`, `Glob` and `Grep` to the child's working directory, so
+       * the cwd is not incidental here the way it is for a process that writes
+       * nothing - it *is* the permission boundary. Before this rode on the
+       * frame, `serve.ts` passed `process.cwd()`, which under the app is
+       * whatever Rust happened to spawn the host in: a manual pass got a pilot
+       * searching a home directory, timing out at 20s on every `Glob`, and
+       * reporting that it could not see the workspace.
+       *
+       * Refused rather than defaulted for the same reason `diff` refuses a
+       * missing base: a directory this process picked is a directory nobody
+       * chose, and pointing a filesystem tool at one is not a repair.
+       */
+      dir: string;
       /** The conversation to continue, or to create on the first turn. */
       sessionId: string;
       resume: boolean;
+      /**
+       * Which CLI takes the turn (#223): `claude -p`, or `codex exec` for the
+       * OpenAI subscription. Absent is `claude`, which is what every window
+       * before the Codex pilot sent.
+       */
+      agent?: 'claude' | 'codex';
     }
   /**
    * Ask what runs the archive holds (#223, `1b`).
@@ -256,7 +529,18 @@ export type Inbound =
    * rule, not this frame's, so there is one definition of a legal config and it
    * is the CLI's.
    */
-  | { type: 'config'; id: number; dir: string; patch?: Record<string, unknown> }
+  | {
+      type: 'config';
+      id: number;
+      dir: string;
+      patch?: Record<string, unknown>;
+      /**
+       * Which file a patch is written to (#223). Absent is the project, which is
+       * what every window before the global layer sent. Meaningless on a read,
+       * which always answers with both.
+       */
+      scope?: 'project' | 'global';
+    }
   /**
    * Read the diff a run has produced (#223, `1d`).
    *
@@ -270,8 +554,103 @@ export type Inbound =
    * The base comes from `phase_started`, which carries it from the moment the
    * implement phase marks it. A window that never saw that frame has no base and
    * cannot ask, which is the honest state rather than a reason to guess one.
+   *
+   * `headSha` closes the range, and only a request that names both ends gets a
+   * per-round answer (#223). With it this is one round's diff, from
+   * `round_committed`'s own two shas; without it, it is everything since the
+   * base, which is what `1d` has always shown. They are different questions and
+   * the frame says which one is being asked rather than defaulting into either.
    */
-  | { type: 'diff'; id: number; dir: string; baseSha: string };
+  | { type: 'diff'; id: number; dir: string; baseSha: string; headSha?: string }
+  /**
+   * Ask what a run's directory holds (#223).
+   *
+   * **A read, beside `archive`, `config` and `diff`, and the same rule applies:**
+   * `listRunArtifacts` reads a directory and writes nothing, so it is answerable
+   * while a run is going - and it has to be, because the run whose plan somebody
+   * wants to read is usually the one that is running.
+   *
+   * `runId` is separate from `dir` and both are required. `dir` is the
+   * repository and `runId` names a directory under its `.vibe/runs`, which is
+   * the pair `assertUsableRunId` is written to check; a single path would be a
+   * caller handing this process somewhere to read, which is the thing the split
+   * exists to prevent.
+   */
+  | { type: 'artifacts'; id: number; dir: string; runId: string }
+  /**
+   * Read one of that run's artifacts.
+   *
+   * **A separate type rather than an optional `name` on the frame above.** A
+   * `name` that could be absent would make "list everything" and "read this
+   * file" one request with two meanings, and a decoder cannot refuse a missing
+   * field it is also allowed to do without - which is how `config` earns its
+   * optional `patch` and why this does not have one: there, absence is a *read*
+   * and the refusal is on the shape of what is present.
+   */
+  | { type: 'artifact'; id: number; dir: string; runId: string; name: string }
+  /**
+   * Ask for one finished run, said again (#223).
+   *
+   * **A read, beside `artifacts` and `artifact`, and the same pair of fields for
+   * the same reason:** `dir` is the repository and `runId` names a directory
+   * under its `.vibe/runs`, which is the pair `assertUsableRunId` checks. A
+   * single path would be a caller handing this process somewhere to read.
+   *
+   * Answerable beside a run, like every other read — `loadRun` opens one file
+   * and writes nothing — and the *live* run is the one case where asking is
+   * pointless rather than refused: the window is already being narrated that
+   * run, so it already has the narration this would reconstruct.
+   */
+  | { type: 'replay'; id: number; dir: string; runId: string }
+  /**
+   * Ask what standing instructions each turn is given (#223).
+   *
+   * A read like the four above it, and the only one that names no run: these
+   * blocks are the same in every run, which is what makes them a SETTING rather
+   * than a fact about one. It takes no `dir` for the same reason - there is
+   * nothing repository-shaped to look in, and a field nobody reads is one a
+   * later reader has to work out is unused.
+   */
+  | { type: 'prompts'; id: number }
+  /**
+   * Delete a run from the archive (#223).
+   *
+   * **The one inbound frame that destroys something a run wrote**, and it is
+   * deliberately not a `Decision`: a decision answers an `ask` that a gate is
+   * holding open, about the run in flight. This is about a run that is over,
+   * asked when nothing is holding, and `src/host.ts`'s rule is the reason the
+   * distinction is kept - every `Decision` member that mutates run state needs
+   * its own validator, and this mutates no run state at all. It removes a
+   * directory.
+   *
+   * It is **not** exempt from anything on the strength of being small. What
+   * makes it answerable beside a run is the same thing that makes a delete safe
+   * at all: `deleteRun` refuses a run whose lock names a live process, and
+   * refuses one whose lock it cannot read. So the run in flight is the one run
+   * this frame can never reach, and every other run in the archive is inert.
+   *
+   * `dir` and `runId` are separate and both required, exactly as they are for
+   * `artifacts` - `dir` is the repository and `runId` names one entry under its
+   * `.vibe/runs`, which is the pair `assertUsableRunId` is written to check. A
+   * single joined path would be a caller handing this process somewhere to
+   * delete, which is the thing the split exists to prevent.
+   */
+  | { type: 'delete_run'; id: number; dir: string; runId: string }
+  /**
+   * Put a person's answers into a halted run's `NEEDS-INPUT.md` (#223).
+   *
+   * **Deliberately does not resume.** Two acts, taken in order by the caller,
+   * because a write that also spent tokens would be one nobody could take back -
+   * and because the resume that follows is the ORDINARY one, which is what keeps
+   * `parseHumanAnswers` the single definition of what an answer is.
+   */
+  | {
+      type: 'answer_questions';
+      id: number;
+      dir: string;
+      runId: string;
+      answers: readonly { question: string; answer: string }[];
+    };
 
 export function encode(msg: Outbound): string {
   return `${JSON.stringify(msg)}\n`;
@@ -349,12 +728,59 @@ export function decode(line: string): Decoded {
       return { ok: true, message: { type: 'shutdown', id } };
     case 'pause':
       return { ok: true, message: { type: 'pause', id } };
+    case 'command': {
+      // Every field checked here, for `pilot`'s reason: there is no `parseArgs`
+      // below this to catch a missing one, and this frame spawns a process.
+      const dir = parsed['dir'];
+      const program = parsed['program'];
+      if (typeof dir !== 'string' || dir === '') {
+        return { ok: false, id, reason: 'command carried no dir' };
+      }
+      if (typeof program !== 'string' || program === '') {
+        return { ok: false, id, reason: 'command carried no program' };
+      }
+      const args: unknown = parsed['args'] ?? [];
+      // An array of strings or nothing. A number where a string was declared is
+      // the shape `tools.ts` documents a model actually sending, and coercing it
+      // would run an argument nobody wrote.
+      if (!Array.isArray(args) || !args.every((a): a is string => typeof a === 'string')) {
+        return { ok: false, id, reason: 'command args held something that was not a string' };
+      }
+      return { ok: true, message: { type: 'command', id, dir, program, args } };
+    }
+    case 'pilot_stop': {
+      const turn = parsed['turn'];
+      if (typeof turn !== 'number' || !Number.isInteger(turn)) {
+        return { ok: false, id, reason: 'pilot_stop named no turn' };
+      }
+      return { ok: true, message: { type: 'pilot_stop', id, turn } };
+    }
+    case 'fs': {
+      const op = parsed['op'];
+      if (op !== 'list' && op !== 'read') {
+        return { ok: false, id, reason: 'fs carried an op that was not "list" or "read"' };
+      }
+      const dir = parsed['dir'];
+      // Required for `archive`'s reason: an empty one would resolve against the
+      // host's cwd, which is a directory nobody chose.
+      if (typeof dir !== 'string' || dir === '') return { ok: false, id, reason: 'fs carried no dir' };
+      const at = parsed['path'];
+      if (typeof at !== 'string') return { ok: false, id, reason: 'fs carried no path' };
+      return { ok: true, message: { type: 'fs', id, op, dir, path: at } };
+    }
+    case 'command_stop': {
+      const commandId = parsed['commandId'];
+      if (typeof commandId !== 'string' || commandId === '') {
+        return { ok: false, id, reason: 'command_stop named no command' };
+      }
+      return { ok: true, message: { type: 'command_stop', id, commandId } };
+    }
     case 'pilot': {
       // Every field required and every one checked, because this one is not
       // argv: an `invoke` hands its strings to `parseArgs`, which is the single
       // definition of a legal invocation, and there is no equivalent below this
       // to catch a missing model or an empty prompt.
-      const fields = ['prompt', 'system', 'model', 'sessionId'] as const;
+      const fields = ['prompt', 'system', 'model', 'sessionId', 'dir'] as const;
       for (const field of fields) {
         const value = parsed[field];
         if (typeof value !== 'string' || value === '') {
@@ -365,6 +791,12 @@ export function decode(line: string): Decoded {
       if (typeof resume !== 'boolean') {
         return { ok: false, id, reason: 'pilot did not say whether it resumes' };
       }
+      // Refused when present and unknown, for `scope`'s reason: a misspelt agent
+      // that fell back to Claude would answer on the wrong vendor and look fine.
+      const agent = parsed['agent'];
+      if (agent !== undefined && agent !== 'claude' && agent !== 'codex') {
+        return { ok: false, id, reason: 'pilot named an agent that was not "claude" or "codex"' };
+      }
       return {
         ok: true,
         message: {
@@ -374,7 +806,9 @@ export function decode(line: string): Decoded {
           system: parsed['system'] as string,
           model: parsed['model'] as string,
           sessionId: parsed['sessionId'] as string,
+          dir: parsed['dir'] as string,
           resume,
+          ...(agent === undefined ? {} : { agent }),
         },
       };
     }
@@ -390,6 +824,87 @@ export function decode(line: string): Decoded {
       }
       return { ok: true, message: { type: 'archive', id, dir } };
     }
+    case 'artifacts':
+    case 'artifact':
+    case 'replay':
+    case 'delete_run': {
+      // Both fields required and both checked here, for `archive`'s reason:
+      // there is no `parseArgs` below this to catch a missing one, and an empty
+      // `dir` would resolve to the host's cwd - a *different repository's*
+      // archive answered as though it were this one, which is the worst way for
+      // a read to fail because it succeeds.
+      const dir = parsed['dir'];
+      const runId = parsed['runId'];
+      if (typeof dir !== 'string' || dir === '') {
+        return { ok: false, id, reason: `${type} carried no dir` };
+      }
+      if (typeof runId !== 'string' || runId === '') {
+        return { ok: false, id, reason: `${type} carried no runId` };
+      }
+      if (type === 'artifacts') {
+        return { ok: true, message: { type: 'artifacts', id, dir, runId } };
+      }
+      // Here for `delete_run`'s reason and not because the three are alike: the
+      // two fields a replay needs are the two checked above, and a case of its
+      // own would be a second copy of the check that stops one repository's
+      // archive being answered as though it were another's.
+      if (type === 'replay') {
+        return { ok: true, message: { type: 'replay', id, dir, runId } };
+      }
+      // Here rather than in a case of its own: the two fields it needs are the
+      // two checked above, and the checks are the point. A separate case would
+      // be a second copy of "an empty dir resolves to the host's cwd" - which
+      // for a delete would be the wrong repository's run, removed successfully.
+      if (type === 'delete_run') {
+        return { ok: true, message: { type: 'delete_run', id, dir, runId } };
+      }
+      // Refused rather than defaulted to a listing. The two requests are
+      // different types precisely so that a `name` nobody sent is a refusal
+      // with a sentence and never a silently different answer.
+      const name = parsed['name'];
+      if (typeof name !== 'string' || name === '') {
+        return { ok: false, id, reason: 'artifact named no artifact' };
+      }
+      return { ok: true, message: { type: 'artifact', id, dir, runId, name } };
+    }
+    case 'answer_questions': {
+      // `dir` and `runId` checked exactly as the reads check them, and for the
+      // stronger version of the same reason: this one WRITES, so an empty `dir`
+      // resolving to the host's cwd would fill in a different repository's
+      // NEEDS-INPUT.md and report success.
+      const dir = parsed['dir'];
+      const runId = parsed['runId'];
+      if (typeof dir !== 'string' || dir === '') {
+        return { ok: false, id, reason: 'answer_questions carried no dir' };
+      }
+      if (typeof runId !== 'string' || runId === '') {
+        return { ok: false, id, reason: 'answer_questions carried no runId' };
+      }
+      const raw = parsed['answers'];
+      if (!Array.isArray(raw)) {
+        return { ok: false, id, reason: 'answer_questions carried no answers' };
+      }
+      // Per entry, dropping what cannot be placed rather than refusing the
+      // whole request: an answer with no question names nothing in the file, and
+      // losing nine good answers to one malformed row is the worse failure. A
+      // request that survives with none is answered with `filled: 0`, which is a
+      // true statement about what happened.
+      const answers: { question: string; answer: string }[] = [];
+      for (const item of raw as unknown[]) {
+        if (typeof item !== 'object' || item === null) continue;
+        const row = item as Record<string, unknown>;
+        const question = row['question'];
+        const answer = row['answer'];
+        if (typeof question !== 'string' || typeof answer !== 'string') continue;
+        answers.push({ question, answer });
+      }
+      return { ok: true, message: { type: 'answer_questions', id, dir, runId, answers } };
+    }
+    case 'prompts':
+      // No fields to check. Every other read names a repository or a run and is
+      // refused without one; this names neither, because the blocks are the
+      // same in every run and in every repository.
+      return { ok: true, message: { type: 'prompts', id } };
     case 'diff': {
       const dir = parsed['dir'];
       if (typeof dir !== 'string' || dir === '') {
@@ -402,7 +917,22 @@ export function decode(line: string): Decoded {
       if (typeof baseSha !== 'string' || baseSha === '') {
         return { ok: false, id, reason: 'diff carried no baseSha, and there is no safe default' };
       }
-      return { ok: true, message: { type: 'diff', id, dir, baseSha } };
+      // Optional, and refused rather than ignored when present but unusable. A
+      // `headSha: 0` silently dropped would answer a request for one round with
+      // the whole run's diff - the same shape as the truncation flag it sits
+      // beside, where presenting a partial answer as a complete one is the
+      // failure the field exists to prevent.
+      const headSha = parsed['headSha'];
+      if (headSha !== undefined && (typeof headSha !== 'string' || headSha === '')) {
+        return { ok: false, id, reason: 'diff carried a headSha that was not a commit' };
+      }
+      return {
+        ok: true,
+        message:
+          headSha === undefined
+            ? { type: 'diff', id, dir, baseSha }
+            : { type: 'diff', id, dir, baseSha, headSha },
+      };
     }
     case 'config': {
       const dir = parsed['dir'];
@@ -417,7 +947,15 @@ export function decode(line: string): Decoded {
       if (!isRecord(patch)) {
         return { ok: false, id, reason: 'config carried a patch that was not an object' };
       }
-      return { ok: true, message: { type: 'config', id, dir, patch } };
+      // Refused rather than defaulted when present and unknown: a misspelt scope
+      // that fell back to the project would write the wrong file and say it had
+      // worked.
+      const scope = parsed['scope'];
+      if (scope === undefined) return { ok: true, message: { type: 'config', id, dir, patch } };
+      if (scope !== 'project' && scope !== 'global') {
+        return { ok: false, id, reason: 'config carried a scope that was not "project" or "global"' };
+      }
+      return { ok: true, message: { type: 'config', id, dir, patch, scope } };
     }
     case 'cancel': {
       // Optional, and refused rather than coerced when present but unusable.

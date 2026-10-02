@@ -20,6 +20,47 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::reaper::Reaper;
 
+/// `DETACHED_PROCESS` — the host gets no console, and so cannot be sent a
+/// console control event.
+///
+/// **This is a lifetime fix, not a cosmetic one.** `node.exe` is a
+/// console-subsystem binary, so spawning it with no creation flags attaches it
+/// to a console: the parent's if there is one, a freshly allocated one if not.
+/// Whichever it lands in, tearing that console down sends `CTRL_CLOSE_EVENT` to
+/// every process attached to it, and libuv delivers that to Node as **SIGHUP** —
+/// which `src/ending.ts` stamps and exits `EXIT_UNRAISED` on, correctly and
+/// fatally.
+///
+/// That is not hypothetical. A run was killed four minutes into a plan turn,
+/// mid-phase, with `ending.json` reading `"how": "signal", "signal": "SIGHUP"`
+/// and the window reporting `host exited with code 1`. Redirecting all three
+/// streams does not prevent the allocation.
+///
+/// **`CREATE_NO_WINDOW` is the wrong flag and was tried first.** It suppresses
+/// the console *window*; the process still holds a console and can still be sent
+/// a control event. Measured with `AttachConsole` against four children spawned
+/// exactly as below, all stdio piped:
+///
+/// | creation flags                | console? |
+/// |------------------------------|----------|
+/// | none                         | yes      |
+/// | `CREATE_NO_WINDOW` (0x0800_0000) | yes  |
+/// | `DETACHED_PROCESS` (0x0000_0008) | **no** |
+/// | both                         | no       |
+///
+/// The two are documented as mutually exclusive — `CREATE_NO_WINDOW` is ignored
+/// beside `DETACHED_PROCESS` — so this is the one flag rather than both, and
+/// there is no window to hide on a process with no console to put one on.
+///
+/// Note what this does *not* say about `src/proc.ts`. That file passes
+/// `windowsHide: true` for `claude` and `codex`, which is Node's name for
+/// `CREATE_NO_WINDOW` — so those children do hold a console. That is fine and
+/// is not the same bug: with the host detached each gets its own fresh,
+/// window-less console rather than sharing one whose teardown would take the
+/// whole run with it.
+#[cfg(windows)]
+const DETACHED_PROCESS: u32 = 0x0000_0008;
+
 /// A line the host process wrote to stdout, on its way to the webview.
 pub const FRAME_EVENT: &str = "host://frame";
 /// A line the host process wrote to stderr, or a line of stdout that was not a
@@ -181,6 +222,23 @@ struct Running {
     pid: u32,
     /// When this host was spawned, on a monotonic clock (#201).
     started: Instant,
+    /// What a `keys` frame must carry for the host to take it (#223). Put in
+    /// the host's environment at spawn and never sent to the window, so the
+    /// window - which can write frames - cannot forge one.
+    secret: String,
+}
+
+/// A secret for one host's lifetime: 128 bits from the OS, through the random
+/// keys every `RandomState` is seeded with - std has no other source, and this
+/// guards a pipe between two of our own processes rather than anything at rest.
+fn keys_secret() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let half = || {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u128(Instant::now().elapsed().as_nanos());
+        h.finish()
+    };
+    format!("{:016x}{:016x}", half(), half())
 }
 
 /// Where the two staged pieces ended up in the bundle.
@@ -240,12 +298,23 @@ impl HostProcess {
             .home_dir()
             .unwrap_or_else(|_| PathBuf::from("."));
 
-        let mut child = Command::new(&node)
+        let secret = keys_secret();
+        let mut command = Command::new(&node);
+        command
             .arg(&entry)
+            .env("VIBE_HOST_KEYS_SECRET", &secret)
             .current_dir(&cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        // No console, so no console control event can reach it. See the constant
+        // for the run this cost.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(DETACHED_PROCESS);
+        }
+        let mut child = command
             .spawn()
             .map_err(|e| format!("could not start {}: {e}", node.display()))?;
 
@@ -355,8 +424,39 @@ impl HostProcess {
             stdin,
             pid,
             started: Instant::now(),
+            secret,
         });
+        drop(guard);
+        // First thing on the wire, so a run started the moment the window is up
+        // is already billed the way Settings says.
+        let _ = self.send_keys();
         Ok(pid)
+    }
+
+    /// Hand the host both API keys from the keychain (#223).
+    ///
+    /// Runs use them as well as the pilot - *"If we have api keys set, we
+    /// should use them everywhere"* - and a run is a `claude` or `codex` child of
+    /// the host, so the host has to hold them. This is the one place a key
+    /// leaves this crate other than a request header: written straight to the
+    /// host's stdin, never logged, never emitted, and an absent or unreadable
+    /// key travels as null. Sent at spawn and again whenever a key changes.
+    pub fn send_keys(&self) -> Result<(), String> {
+        let read = |p: crate::keys::Provider| crate::keys::read(p).ok();
+        let mut guard = self.inner.lock().map_err(|_| "host lock poisoned")?;
+        let running = guard.as_mut().ok_or("the host is not running")?;
+        let frame = serde_json::json!({
+            "type": "keys",
+            "secret": running.secret,
+            "anthropic": read(crate::keys::Provider::Anthropic),
+            "openai": read(crate::keys::Provider::Openai),
+        });
+        running
+            .stdin
+            .write_all(format!("{frame}\n").as_bytes())
+            .and_then(|()| running.stdin.flush())
+            // The error describes the pipe, never the frame.
+            .map_err(|e| format!("could not hand the keys to the host: {e}"))
     }
 
     /// Wait for a host whose output has ended, and clear it. Returns its code.

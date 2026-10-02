@@ -50,7 +50,10 @@ function oversizedTree(state: RunState): void {
 }
 
 function reviewing(task: string): RunState {
-  return reviewingRun({ prefix: 'vibe-chunked-', task });
+  // `change: false` because every case here writes its own tree and then counts
+  // what the reviewer was shown — the fixture's own file would be one more file
+  // in every coverage assertion, measuring the harness rather than the split.
+  return reviewingRun({ prefix: 'vibe-chunked-', task, change: false });
 }
 
 /** Every `code-review-*.json` the run wrote, so "one artifact per round" is observable. */

@@ -63,22 +63,33 @@ test('a question round the answerer answered leaves its own fork point, before t
     agents(
       {
         claude: planner(),
-        codex: (label) => (label === 'answers-0' ? answersReport([{}]) : report([])),
+        codex: (label) => (label.startsWith('answers-') ? answersReport([{}]) : report([])),
       },
       calls,
     ),
   );
 
-  assert.deepEqual(calls, ['plan', 'answers-0', 'revise-1', 'critique-1']);
+  assert.deepEqual(calls, ['plan', 'answers-1', 'revise-q1', 'critique-0']);
 
-  // The order is the claim. `question-round` is written where the answerer's
-  // turn is recorded, and `plan-round` where the revision it caused is - two
-  // snapshots for two pieces of work, rather than one standing for both.
+  // The order is the claim, and it is still two snapshots for two pieces of
+  // work: one where the answerer's turn is recorded, one where the revision it
+  // caused is. What changed is the **name of the second**. It used to be
+  // `plan-round`, which was the round-counting defect written into the record -
+  // a revision answering the planner's own questions is not half of a plan
+  // round, and calling its snapshot one put a plan round in the archive that
+  // `state.planRound` says never happened.
+  //
+  // Two `question-round` entries in a row is the honest shape: both are inside
+  // one question round, and what tells them apart is what they hold - the
+  // second is the only snapshot carrying the revised plan, which is what stops
+  // a fork or a resume buying that planner turn twice.
+  //
   // `complete` rather than `plan-approved` closes the list because these runs
   // are plan-only: `runPhases` advances straight to complete, which is the
   // ordinary shape of `vibe plan` and not a detail of this change.
   const seen = boundaries(state);
-  assert.deepEqual(seen, ['question-round', 'plan-round', 'complete'], seen.join(', '));
+  assert.deepEqual(seen, ['question-round', 'question-round', 'complete'], seen.join(', '));
+  assert.equal(state.planRound, 0, 'a question round must not advance the plan round');
 });
 
 test('a question round the answerer declined leaves one too, which is the hole', async () => {
@@ -96,15 +107,15 @@ test('a question round the answerer declined leaves one too, which is the hole',
       {
         claude: planner(questionFixture({ blocking: false })),
         codex: (label) =>
-          label === 'answers-0' ? answersReport([{ defer_to_human: true }]) : report([]),
+          label.startsWith('answers-') ? answersReport([{ defer_to_human: true }]) : report([]),
       },
       calls,
     ),
   );
 
-  // No `revise-1`: nothing usable came back, so the plan in hand is still the
-  // one the plan turn wrote.
-  assert.deepEqual(calls, ['plan', 'answers-0', 'critique-0']);
+  // No revision at all: nothing usable came back, so the plan in hand is still
+  // the one the plan turn wrote.
+  assert.deepEqual(calls, ['plan', 'answers-1', 'critique-0']);
   assert.equal(state.questionRound, 1);
   assert.equal(state.deferredQuestions.length, 1);
 
@@ -125,7 +136,7 @@ test('the snapshot holds what the round bought, so a fork of it does not ask aga
     false,
     agents({
       claude: planner(),
-      codex: (label) => (label === 'answers-0' ? answersReport([{}]) : report([])),
+      codex: (label) => (label.startsWith('answers-') ? answersReport([{}]) : report([])),
     }, []),
   );
 
@@ -168,10 +179,17 @@ test('a revision the critic asked for is still a plan round, and says nothing ab
 });
 
 test('every checkpoint carries the question counter, so q1 p1 is not p2', async () => {
-  // The fingerprint. Both runs below end with `planRound` at 1 and both took two
-  // planner turns; what tells them apart is the counter, and it is on the meta
-  // rather than only inside the snapshot body because the meta is what a fork
-  // listing and `ForkOrigin` actually read.
+  // The fingerprint. Both runs below take two planner turns and end one critique
+  // apart; what says WHY is the question counter, and it is on the meta rather
+  // than only inside the snapshot body because the meta is what a fork listing
+  // and `ForkOrigin` actually read.
+  //
+  // The premise this was written on has since been corrected and the assertion
+  // below records the correction rather than hiding it: both runs used to end at
+  // `planRound: 1`, because a question round advanced the plan round exactly as
+  // a critique did. That was the blur - two different diagnoses reaching the same
+  // pair of numbers - and the counter was the only thing separating them. Now the
+  // plan round separates them too, and the counter still says which is which.
   const asked = freshRun({ prefix: 'vibe-qcp-fp-asked-', task: 'question checkpoint' });
   await orchestrate(
     asked,
@@ -179,7 +197,7 @@ test('every checkpoint carries the question counter, so q1 p1 is not p2', async 
     false,
     agents({
       claude: planner(),
-      codex: (label) => (label === 'answers-0' ? answersReport([{}]) : report([])),
+      codex: (label) => (label.startsWith('answers-') ? answersReport([{}]) : report([])),
     }, []),
   );
 
@@ -203,9 +221,13 @@ test('every checkpoint carries the question counter, so q1 p1 is not p2', async 
     return end;
   };
 
-  assert.equal(last(asked).planRound, last(critiqued).planRound);
   assert.equal(last(asked).questionRound, 1);
   assert.equal(last(critiqued).questionRound, 0);
+  // The half that used to be equal. A round of answering the planner's own
+  // questions leaves the plan round where it found it; a round of answering the
+  // critic advances it.
+  assert.equal(last(asked).planRound, 0);
+  assert.equal(last(critiqued).planRound, 1);
 });
 
 test('a checkpoint written before this existed is still readable, and says so by omission', () => {

@@ -253,11 +253,22 @@ test('a round that changed nothing records nothing-to-commit', async () => {
   const state = fullRun('empty round');
   // No `work()` at all, and no verification: every turn writes nothing, and
   // `verifying()` would itself put a script in the tree for the round to commit.
-  await orchestrate(
-    state,
-    config({}, committing()),
-    false,
-    agents({ claude: (label) => (label === 'plan' ? planFixture() : `did ${label}`) }, []),
+  //
+  // **The run no longer survives to the end, and that is the point of the case
+  // rather than a problem with it** (#223). A round that changed nothing reaches
+  // the review phase with no diff, and the review phase now refuses rather than
+  // buying a reviewer turn over nothing. The checkpoint this asserts on is
+  // written at the `implemented` boundary, which is before that — so the record
+  // is complete and the ending is the new, correct one.
+  await assert.rejects(
+    () =>
+      orchestrate(
+        state,
+        config({}, committing()),
+        false,
+        agents({ claude: (label) => (label === 'plan' ? planFixture() : `did ${label}`) }, []),
+      ),
+    /no diff to read/,
   );
 
   const implemented = listCheckpoints(state.dir).find((c) => c.meta?.boundary === 'implemented');

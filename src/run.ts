@@ -15,6 +15,15 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import * as log from '@src/log.js';
 import { livenessOf } from '@src/lock.js';
+import { fillAnswers, unanswered } from '@src/answers.js';
+import type { FilledAnswer } from '@src/answers.js';
+import { replayRun } from '@src/replay.js';
+import type {
+  CheckpointView,
+  QuestionRoundSize,
+  Replay,
+  RoundCensus,
+} from '@src/replay.js';
 import type { ActivityObservation } from '@src/progress.js';
 import { initialSlotFields } from '@src/slots.js';
 import { checkStoredConsistency, checkTokenShare } from '@src/consistency.js';
@@ -30,6 +39,7 @@ import {
   validateStoredState,
 } from '@src/stored.js';
 import type {
+  ArtifactRead,
   CheckpointBoundary,
   CheckpointCommitNote,
   Finding,
@@ -39,6 +49,7 @@ import type {
   RoundClaim,
   RoundRecord,
   RunCheckpointMeta,
+  RunArtifact,
   RunPhase,
   RunState,
   RunSummary,
@@ -186,6 +197,22 @@ export interface RunInit {
   allocated?: AllocatedRun | undefined;
   config?: RunState['config'] | undefined;
   extraContext?: string | null | undefined;
+  /**
+   * Whether this run works in a worktree of its own (#223).
+   *
+   * Here rather than assigned afterwards, for the reason this interface exists at
+   * all: `allocateRun`'s comment states that the first persisted state must
+   * already carry everything, because the old order wrote three times and a kill
+   * between the first and the last left a resumable run whose settings were
+   * silently the defaults. A run that came back believing it had no worktree
+   * would work in the repository while its branch is checked out somewhere else,
+   * and git refuses that - so the failure is loud, which is lucky rather than
+   * designed.
+   *
+   * The directory itself is made later, by the preflight gate, which is also
+   * what a resume goes through - so one site covers both.
+   */
+  worktree?: boolean | undefined;
 }
 
 export function createRun(
@@ -200,6 +227,11 @@ export function createRun(
     id,
     dir,
     targetDir,
+    // Spread rather than assigned, because `exactOptionalPropertyTypes` makes
+    // `worktree: undefined` a different thing from an absent key — and absent is
+    // what every run before this field had, which is what keeps `workDirOf`
+    // collapsing to `targetDir` for all of them.
+    ...(init.worktree === true ? { worktree: true } : {}),
     task,
     // Every managed conversation's starting state, stated where the lifecycle
     // is rather than as three literals here.
@@ -1410,6 +1442,18 @@ export function artifact(state: RunState, name: string, content: string | object
   const file = path.join(state.dir, name);
   const body = typeof content === 'string' ? content : JSON.stringify(content, null, 2);
   writeAtomic(state.dir, name, body);
+  // Said **after** the write, so anything acting on it finds the bytes there
+  // (#223). A host reading a run's own directory has no other way to learn that
+  // it changed: the alternative is a window inferring that `findings_reported`
+  // implies `code-review-2.json` now exists, which is the loop's naming
+  // convention copied into a process that cannot be kept in step with it - and
+  // it fails silently, as a pane that stays on the previous round.
+  //
+  // Narration with no event, under `recordAndSay`'s rule: the file IS the
+  // durable record, so recording that it was written would store the same fact
+  // twice. `detail` because a person watching a terminal is watching the run,
+  // not its directory.
+  log.detail(`Wrote ${name}`, { id: 'artifact_written', data: { name } });
   return file;
 }
 
@@ -1486,10 +1530,7 @@ export function linkedArtifactReason(dir: string, name: string): string | null {
  * three, which is the fail-closed direction: a future caller that never heard of
  * this reads no link by default.
  */
-export type ArtifactRead =
-  | { kind: 'text'; text: string }
-  | { kind: 'absent' }
-  | { kind: 'linked'; reason: string };
+export type { ArtifactRead, RunArtifact } from '@src/types.js';
 
 export function readArtifact(state: RunState, name: string): ArtifactRead {
   // Before the read, and before anything that would `stat` through it. #53's
@@ -1521,6 +1562,477 @@ export function readArtifact(state: RunState, name: string): ArtifactRead {
 export function artifactText(state: RunState, name: string): string | null {
   const read = readArtifact(state, name);
   return read.kind === 'text' ? read.text : null;
+}
+
+/**
+ * A name this process will look for inside a run directory.
+ *
+ * **A character whitelist, for the reason `RUN_ID` is one**: `/`, `\`, drive
+ * prefixes and control characters are all excluded at once rather than
+ * blacklisted one separator at a time, with `basename` on both path flavours as
+ * the second belt and the trailing-dot-and-space refusal as the third —
+ * `"foo. "` IS `foo` on Win32, which is the hole `assertUsableRunId` and
+ * `isReportBasename` already close one field along.
+ *
+ * It is deliberately **not** an allow-list of the artifact shapes a run writes.
+ * That list is `plan-<n>.json`, `plan-critique-<n>.json`, `code-review-<n>.json`,
+ * `answers-<n>.json`, `PLAN.md`, `FOLLOW-UPS.md`, `NEEDS-INPUT.md`,
+ * `checkpoint-<n>.json` and half a dozen more, it grows whenever the loop grows,
+ * and a reader holding a copy of it would go stale the release after this one.
+ * The safety this needs is *containment* — nothing outside the run directory —
+ * and a name is contained or it is not regardless of what the loop calls it.
+ * What a caller may usefully ask for is answered by `listRunArtifacts`, which
+ * reads the directory rather than predicting it.
+ */
+const ARTIFACT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+export function isArtifactBasename(v: unknown): v is string {
+  return (
+    typeof v === 'string' &&
+    v !== '' &&
+    v !== '.' &&
+    v !== '..' &&
+    !/[. ]$/.test(v) &&
+    ARTIFACT_NAME.test(v) &&
+    path.basename(v) === v &&
+    path.win32.basename(v) === v
+  );
+}
+
+/**
+ * Where a run's artifacts are, with the run id checked before it is joined.
+ *
+ * `assertUsableRunId` throws, which is what a caller crossing a process boundary
+ * wants: an id that does not name a directory under `.vibe/runs` is a request
+ * this process will not act on, and the sentence it throws is the one to report
+ * back. `linkedRunReason` is asked **before** anything reads through the path,
+ * which is #53's rule and the reason the two are in this order.
+ */
+function runDirFor(targetDir: string, runId: string): string {
+  const root = path.join(targetDir, RUNS_DIR);
+  assertUsableRunId(runId, root);
+  const linked = linkedRunReason(root, runId);
+  if (linked !== null) throw new StoredStateError(linked);
+  return path.join(root, runId);
+}
+
+/**
+ * What is in a run's directory (#223).
+ *
+ * **The listing is what makes reading an artifact safe to offer**, and it is the
+ * half a caller outside this process could not otherwise have: the alternative
+ * is a reader that predicts `plan-3.json` from a round number it saw on a
+ * narration frame, which is a copy of the loop's naming convention living
+ * somewhere it cannot be kept in step. This reads the directory instead.
+ *
+ * Sorted by name so two calls agree, and every entry classified rather than
+ * filtered - see `RunArtifact`. Never throws for an unreadable directory: an
+ * archive that cannot be read is an empty one, exactly as `listRuns` decides for
+ * the runs root above it. It **does** throw for an unusable run id or a linked
+ * run, because those are refusals with a sentence rather than absences.
+ */
+export function listRunArtifacts(targetDir: string, runId: string): RunArtifact[] {
+  const dir = runDirFor(targetDir, runId);
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const out: RunArtifact[] = [];
+  for (const name of names.sort()) {
+    // Anything this process would refuse to read is left out of the list it
+    // offers: a row a caller cannot act on is a row that only produces a
+    // refusal one click later.
+    if (!isArtifactBasename(name)) continue;
+    const full = path.join(dir, name);
+    const linkage = linkageOf(full);
+    if (linkage === 'link' || linkage === 'unknown') {
+      out.push({ name, kind: linkage === 'link' ? 'link' : 'unknown', bytes: null });
+      continue;
+    }
+    try {
+      const stat = statSync(full);
+      out.push(
+        stat.isDirectory()
+          ? { name, kind: 'directory', bytes: null }
+          : { name, kind: 'file', bytes: stat.size },
+      );
+    } catch {
+      out.push({ name, kind: 'unknown', bytes: null });
+    }
+  }
+  return out;
+}
+
+/**
+ * One artifact's text, by run id and name (#223).
+ *
+ * `readArtifact` with the two checks a caller inside this process had already
+ * done for it: the run id names a directory under `.vibe/runs`, and the name is
+ * a basename. Both refuse rather than repair - a request naming a path this
+ * process will not join is not a request to be interpreted.
+ *
+ * The three-answer `ArtifactRead` is kept whole, because the caller has to be
+ * able to tell a reader which of the three happened: `absent` says a file was
+ * opened and could not be used, `linked` says vibe never looked inside it, and
+ * those are not the same notice (#129).
+ */
+export function readRunArtifact(targetDir: string, runId: string, name: string): ArtifactRead {
+  const dir = runDirFor(targetDir, runId);
+  if (!isArtifactBasename(name)) {
+    throw new StoredStateError(
+      `"${name}" is not an artifact name. An artifact is a single file inside a run's ` +
+        'directory - letters, digits, dots, dashes and underscores. Nothing was read.',
+    );
+  }
+  const reason = linkedArtifactReason(dir, name);
+  if (reason !== null) return { kind: 'linked', reason };
+  try {
+    return { kind: 'text', text: readFileSync(path.join(dir, name), 'utf8') };
+  } catch {
+    return { kind: 'absent' };
+  }
+}
+
+
+/**
+ * Put a person's answers into a halted run's `NEEDS-INPUT.md` (#223).
+ *
+ * **The window's road to the same file a text editor writes**, and it stops
+ * there on purpose: the resume that follows is the ordinary one, so
+ * `parseHumanAnswers`, the raise blocks, the severity moves and the
+ * `answered-<n>.md` retirement are all untouched and cannot tell where the text
+ * came from. See `src/answers.ts` for why this is not a frame carrying answers
+ * straight into `state`.
+ *
+ * Refuses rather than repairs, three ways and each with its own sentence:
+ *
+ * - **An unusable run id or a linked run directory**, through `runDirFor`, which
+ *   is the same predicate the reads and the delete go through (#53).
+ * - **A run with no `NEEDS-INPUT.md`** is not waiting on anybody. Writing one
+ *   would invent a halt, and a resume would then consume a file the loop never
+ *   produced.
+ * - **A run whose lock names a live process.** Answering a file a running loop
+ *   is about to read is a second writer on the same run, which is the state
+ *   `src/lock.ts` exists to prevent; and `unknown` refuses too, for the reason
+ *   `deleteRun` refuses it — a lock it cannot read cannot rule one out.
+ *
+ * It does not resume. Two acts, and the caller takes them in order, because a
+ * write that also spent tokens would be one nobody could take back.
+ */
+export function answerQuestions(
+  targetDir: string,
+  runId: string,
+  answers: readonly FilledAnswer[],
+): { filled: number; unmatched: readonly string[]; open: readonly string[] } {
+  const dir = runDirFor(targetDir, runId);
+  const { liveness } = livenessOf(dir);
+  if (liveness === 'running' || liveness === 'unknown') {
+    throw new StoredStateError(
+      `Run "${runId}" ${
+        liveness === 'running'
+          ? 'is running, so it is not waiting for an answer'
+          : 'holds a lock this process cannot read, so it cannot tell whether anything is still ' +
+            'working on it'
+      }. Nothing was written.`,
+    );
+  }
+  const file = path.join(dir, 'NEEDS-INPUT.md');
+  let md: string;
+  try {
+    md = readFileSync(file, 'utf8');
+  } catch {
+    throw new StoredStateError(
+      `Run "${runId}" has no NEEDS-INPUT.md, so it is not stopped on a question. Nothing was ` +
+        'written.',
+    );
+  }
+  const result = fillAnswers(md, answers);
+  // Atomic for the reason every other state write here is: a torn NEEDS-INPUT.md
+  // is one the resume refuses, and the answers would be gone with it.
+  writeAtomic(dir, 'NEEDS-INPUT.md', result.md);
+  return { filled: result.filled, unmatched: result.unmatched, open: unanswered(result.md) };
+}
+
+
+/**
+ * Read a finished run back as the narration it produced (#223).
+ *
+ * **Through `loadRun`, so there is one definition of a legal run.** Every guard
+ * it carries applies unchanged — the usable-id check, the refusal to follow a
+ * link (#53), the stored-state validators — and the sentence it throws is the
+ * whole answer, which is why this does not catch: a caller crossing a process
+ * boundary reports it as an `error` frame naming what was refused, and an empty
+ * replay would be indistinguishable from a run that did nothing.
+ *
+ * What it gathers beyond `state.json` is the three things the events do not
+ * hold and the files do: each checkpoint's frozen `turnStartedAt` (the only
+ * turn durations an archive keeps), each judge round's own report (a census is
+ * narration with no event, so the counting was never durable — the report is),
+ * and each question round's answers. All three are reads, and a file that
+ * cannot be read is simply absent from the reconstruction rather than fatal to
+ * it: a run whose critique artifact was deleted still has its turns.
+ */
+export function readRunReplay(targetDir: string, runId: string): Replay {
+  const state = loadRun(targetDir, runId);
+  const dir = path.join(targetDir, RUNS_DIR, runId);
+  return replayRun(state, {
+    checkpoints: readCheckpointViews(dir),
+    censuses: readRoundCensuses(dir),
+    questions: readQuestionSizes(dir),
+  });
+}
+
+/** One artifact, parsed, or null for every way that can fail. */
+function readJson(dir: string, name: string): unknown {
+  // The link question first, which is #53's rule and the reason this is not
+  // simply `readFileSync`: an artifact that is a link is one vibe never looks
+  // inside, and `existsSync` would follow it to answer.
+  if (linkedArtifactReason(dir, name) !== null) return null;
+  try {
+    return JSON.parse(readFileSync(path.join(dir, name), 'utf8')) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What each checkpoint froze, newest last.
+ *
+ * Sorted by `n` rather than by directory order, because `checkpoint-10.json`
+ * sorts before `checkpoint-2.json` lexically and a timeline out of order would
+ * attribute a turn to the wrong round.
+ */
+function readCheckpointViews(dir: string): CheckpointView[] {
+  const out: CheckpointView[] = [];
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return out;
+  }
+  for (const name of names) {
+    if (!/^checkpoint-\d+\.json$/.test(name)) continue;
+    const parsed = readJson(dir, name);
+    if (!isRecord(parsed)) continue;
+    const meta = parsed['checkpoint'];
+    if (!isRecord(meta)) continue;
+    const n = meta['n'];
+    const at = meta['at'];
+    if (typeof n !== 'number' || typeof at !== 'string') continue;
+    out.push({
+      n,
+      at,
+      boundary: typeof meta['boundary'] === 'string' ? meta['boundary'] : '',
+      phase: typeof meta['phase'] === 'string' ? meta['phase'] : null,
+      planRound: typeof meta['planRound'] === 'number' ? meta['planRound'] : 0,
+      reviewRound: typeof meta['reviewRound'] === 'number' ? meta['reviewRound'] : 0,
+      verifyRound: typeof meta['verifyRound'] === 'number' ? meta['verifyRound'] : 0,
+      questionRound: typeof meta['questionRound'] === 'number' ? meta['questionRound'] : 0,
+      commit: typeof meta['commit'] === 'string' ? meta['commit'] : null,
+      // On the checkpoint's own copy of the state, not on its meta: it is the
+      // turn that was in flight when the snapshot was taken.
+      turnStartedAt: typeof parsed['turnStartedAt'] === 'string' ? parsed['turnStartedAt'] : null,
+    });
+  }
+  return out.sort((a, b) => a.n - b.n);
+}
+
+/** Each judge round's four counts, from the round's own report. */
+function readRoundCensuses(dir: string): RoundCensus[] {
+  const out: RoundCensus[] = [];
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return out;
+  }
+  for (const name of names) {
+    const critique = /^plan-critique-(\d+)\.json$/.exec(name);
+    const review = /^code-review-(\d+)\.json$/.exec(name);
+    const match = critique ?? review;
+    if (match === null) continue;
+    const round = Number.parseInt(match[1] ?? '', 10);
+    if (!Number.isInteger(round)) continue;
+    const parsed = readJson(dir, name);
+    if (!isRecord(parsed)) continue;
+    const findings = parsed['findings'];
+    if (!Array.isArray(findings)) continue;
+    const counts = { p0: 0, p1: 0, p2: 0, p3: 0 };
+    for (const finding of findings as unknown[]) {
+      if (!isRecord(finding)) continue;
+      // Counted by the severity the report recorded. A severity moved
+      // afterwards (#142) is deliberately not applied here: the round's report
+      // is the record of what the judge produced, and rewriting it in the replay
+      // would make the column disagree with the artifact the pane shows.
+      const severity = finding['severity'];
+      if (severity === 'P0') counts.p0 += 1;
+      else if (severity === 'P1') counts.p1 += 1;
+      else if (severity === 'P2') counts.p2 += 1;
+      else if (severity === 'P3') counts.p3 += 1;
+    }
+    out.push({ phase: critique !== null ? 'plan' : 'review', round, counts });
+  }
+  return out;
+}
+
+/** How many questions each question round raised, from its answers artifact. */
+function readQuestionSizes(dir: string): QuestionRoundSize[] {
+  const out: QuestionRoundSize[] = [];
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return out;
+  }
+  for (const name of names) {
+    const match = /^answers-(\d+)\.json$/.exec(name);
+    if (match === null) continue;
+    const round = Number.parseInt(match[1] ?? '', 10);
+    if (!Number.isInteger(round)) continue;
+    const parsed = readJson(dir, name);
+    if (!Array.isArray(parsed)) continue;
+    let blocking = 0;
+    for (const answer of parsed as unknown[]) {
+      // `defer_to_human` is the answerer saying it could not settle this one,
+      // which is precisely what makes a question blocking. Counted rather than
+      // assumed: a round the answerer handled in full blocks nothing.
+      if (isRecord(answer) && answer['defer_to_human'] === true) blocking += 1;
+    }
+    out.push({ round, total: parsed.length, blocking });
+  }
+  return out;
+}
+/** What was removed. The directory rather than a byte count — see `deleteRun`. */
+export interface RunRemoval {
+  runId: string;
+  /** The directory that is gone, so a caller can say what it removed. */
+  dir: string;
+}
+
+/**
+ * Take a run out of the archive, or refuse and say why (#223).
+ *
+ * **The first thing in this file that destroys a run, and the only one.** Every
+ * other write here adds to a run or replaces one of its own files; this removes
+ * the whole record — the plans, both reports, the answers, the checkpoints and
+ * the transcript. It is not recoverable and there is no `vibe undelete`, so the
+ * whole of this function is the two questions that have to be answered before
+ * the `rmSync`, and it refuses on either.
+ *
+ * `runDirFor` is the first and is shared rather than repeated: an id that does
+ * not name a single entry under `.vibe/runs` is refused lexically, and a run
+ * directory that is a symlink or a junction is refused before anything reads or
+ * writes through it (#53). That second one matters more here than anywhere else
+ * in the file — following a link to delete recursively is the worst thing this
+ * process could be talked into doing, and it is the same predicate that already
+ * refuses to *read* through one.
+ *
+ * **A live run is refused, and so is one this process cannot rule out.**
+ * `livenessOf` is the verdict, not a re-derivation: `running` is a lock whose
+ * pid answered, and deleting the directory out from under it would leave a
+ * process writing checkpoints into nothing. `unknown` refuses as well, which is
+ * `src/lock.ts`'s own rule applied to a stronger act — a lock it could not read
+ * *cannot rule out* a live process, and that reasoning licenses a refusal to
+ * delete at least as much as it licenses a refusal to write. `interrupted` is
+ * allowed through deliberately: a dead pid holding a lock is exactly the wreck
+ * somebody is trying to clear out.
+ *
+ * **The recursion never follows a link.** `rmSync(recursive)` unlinks a symlink
+ * rather than descending into it, so an entry inside the run directory that
+ * points elsewhere costs the link and not its target.
+ *
+ * What this does **not** touch is said out loud because a caller has to tell
+ * somebody: the run's branch and every commit on it are in git, not here, and
+ * they survive this untouched.
+ */
+export function deleteRun(targetDir: string, runId: string): RunRemoval {
+  const dir = runDirFor(targetDir, runId);
+  const { liveness } = livenessOf(dir);
+  if (liveness === 'running') {
+    throw new StoredStateError(
+      `Run "${runId}" is running: a lock in its directory names a process that is still ` +
+        'alive. Stop it first. Nothing was deleted.',
+    );
+  }
+  if (liveness === 'unknown') {
+    throw new StoredStateError(
+      `Run "${runId}" holds a lock this process cannot make sense of - it is unreadable, or it ` +
+        'was written by another machine - so vibe cannot tell whether anything is still working ' +
+        'on it. A run it cannot rule out as live is not one it will delete. Nothing was deleted.',
+    );
+  }
+  // `force` so a directory that has already gone is not an error: the caller
+  // asked for it to be absent, and it is. Recursive never follows a link.
+  rmSync(dir, { recursive: true, force: true });
+  return { runId, dir };
+}
+
+/**
+ * Take a finished plan-only run into implementation (#223).
+ *
+ * **The dead end this closes was real and was reported as one:** *"after it
+ * stopped, I SHOULD have been able to continue, either with more planning or
+ * move on to implementation, but it didn't allow that. When I asked the pilot,
+ * it kicked off another run from scratch."* A plan-only run *completes* — exit
+ * 0, `status: 'planned'`, `phase: 'complete'` — so `vibe resume` correctly
+ * reports there is nothing to resume, and the only path left was a new run that
+ * re-derives the plan it already has.
+ *
+ * **It is a separate, named act rather than plan-only becoming resumable**, and
+ * that distinction is the settled one AGENTS.md records: `planOnly` says there
+ * is no next phase, a `stop` gate says a full run halts before implementing, and
+ * folding the first into the second would make `vibe plan` report needing input
+ * on a run that produced exactly what it was asked for. This changes what the
+ * run **is**, on purpose, once — so it is a decision somebody takes rather than
+ * a state the loop can wander into.
+ *
+ * It refuses everything else, and each refusal names what it found:
+ *
+ * - **A run that was never plan-only** has nothing to convert. Its `status`
+ *   already describes a run with an implementation phase.
+ * - **A plan-only run that did not finish planning** — a stall, a round cap, a
+ *   preflight refusal — is an ordinary `vibe resume`, which picks up where it
+ *   stopped and reaches the plan gate on its own. Converting it would skip the
+ *   critique the plan has not passed.
+ * - **A run with no stored plan** cannot implement one. `status: 'planned'`
+ *   without a plan is a repaired state, and a run that implemented from nothing
+ *   would be the fabrication the whole model is arranged against.
+ *
+ * What it keeps is everything the plan phase settled: the approved plan, the
+ * frozen acceptance bar, the P1s `carried` on tolerance and the findings the
+ * approving round `declined`. Those are what make this a continuation rather
+ * than a second run — the implementer is told about all four, exactly as it
+ * would have been had the run never been plan-only.
+ */
+export function continueIntoImplementation(state: RunState): void {
+  if (!state.planOnly) {
+    throw new StoredStateError(
+      `Run "${state.id}" is not a plan-only run, so there is nothing to convert: it already ` +
+        `has an implementation phase. It is at "${state.status}" - resume it normally.`,
+    );
+  }
+  if (state.status !== 'planned') {
+    throw new StoredStateError(
+      `Run "${state.id}" is plan-only but has not finished planning - it is at "${state.status}". ` +
+        'Resume it normally and it will reach the plan gate on its own; converting it now would ' +
+        'skip the critique the plan has not passed yet.',
+    );
+  }
+  if (state.plan === null || state.plan === undefined) {
+    throw new StoredStateError(
+      `Run "${state.id}" reports a finished plan but stored none, so there is nothing to ` +
+        'implement. Nothing was changed.',
+    );
+  }
+  // The conversion itself, and it is three fields. `planOnly` is what
+  // `runPhases` reads to decide there is no next phase, and `status`/`phase` are
+  // where the loop picks up - `advancePhase` is not used because this is not the
+  // loop advancing, it is a person changing what the run is.
+  state.planOnly = false;
+  state.status = 'implementing';
+  state.phase = 'implementing';
 }
 
 /**

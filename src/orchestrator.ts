@@ -6,6 +6,7 @@ import {
   parseStructured,
   RateLimitError,
 } from '@src/claude.js';
+import { Cancelled, cancelRequested, sleepUnlessCancelled } from '@src/cancel.js';
 import { codexTurn } from '@src/codex.js';
 import type { CodexTurnOptions, CodexTurnResult } from '@src/codex.js';
 import { preserveGateArtifacts, sweepGateArtifacts } from '@src/artifacts.js';
@@ -86,6 +87,7 @@ import {
   findRephrase,
   isSameQuestion,
   normalize,
+  pairAnswers,
   reconcileQuestionRecords,
   recordSuppressed,
 } from '@src/questions.js';
@@ -107,6 +109,7 @@ import {
   withConcurrentCompaction,
   recordTurnContext,
   rotateSession,
+  seedContextWindows,
   shouldRotate,
   turnOccupancy,
 } from '@src/context.js';
@@ -169,6 +172,7 @@ export type { ExitCode, TurnCharge, TurnSpend } from '@src/charge.js';
 // One name for both in the file that records the first would be the confusion
 // the pair exists to remove (#131).
 import { describeEnding as describeChildEnding, endingOf, isAbnormal } from '@src/proc.js';
+import { workDirOf } from '@src/worktree.js';
 import { formatWork, withWorkProgress, workData } from '@src/work.js';
 
 /**
@@ -341,6 +345,23 @@ async function holdAt(
   cfg: Config,
   host: Host | undefined,
   boundary: CheckpointBoundary,
+  /**
+   * What a person would have to answer if they stopped here, or none.
+   *
+   * **Only `question-round` has any**, and it is the boundary where stopping is
+   * most obviously a decision to answer something yourself - so it was the one
+   * boundary where stopping produced a `NEEDS-INPUT.md` with no questions in it.
+   * `writeEscalation` renders a *Your answer:* block per question and the resume
+   * parses them back; with the list empty it wrote the section not at all, and
+   * the only thing a person could actually do was press continue.
+   *
+   * Not invented for this: `resolveQuestions` already throws
+   * `new Escalation(EXIT.NEEDS_HUMAN, ..., [...blockers])` when the answerer is
+   * off, and the defer path does the same. This carries the same list through
+   * the same field on the gate's own stop, so both ways of stopping at a
+   * question round hand back the same document.
+   */
+  questions: readonly OpenQuestion[] = [],
 ): Promise<void> {
   const mode = gateMode(cfg.gates, boundary);
 
@@ -370,7 +391,9 @@ async function holdAt(
       // absent origin here would read as an operator whose identity was lost.
       origin: 'gates',
     });
-    throw new Escalation(EXIT.NEEDS_HUMAN, `Stopped at the ${boundary} boundary. ${why}`);
+    throw new Escalation(EXIT.NEEDS_HUMAN, `Stopped at the ${boundary} boundary. ${why}`, [
+      ...questions,
+    ]);
   }
 
   // `step` holds and asks, and asking needs somebody who can answer. A terminal
@@ -448,7 +471,13 @@ async function holdAt(
   // `status: 'needs-input'` -> `vibe resume`. A CLI run has no host to ask, so
   // it never reaches here; an app that stops gets the same durable outcome its
   // user would get from the terminal.
-  throw new Escalation(EXIT.NEEDS_HUMAN, `Stopped at the ${boundary} boundary. ${why}`);
+  //
+  // The questions ride along for the reason the parameter documents: stopping at
+  // a question round is a person saying they will answer these, and the document
+  // they get has to contain them.
+  throw new Escalation(EXIT.NEEDS_HUMAN, `Stopped at the ${boundary} boundary. ${why}`, [
+    ...questions,
+  ]);
 }
 
 export async function orchestrate(
@@ -504,6 +533,12 @@ export async function orchestrate(
     // for ever. Here rather than in `createRun`/`loadRun` because that would put
     // `run.ts` in a cycle with this module's - `artifacts.ts` imports it (#111).
     sweepArtifacts(state);
+    // Before the first turn, because the turn it exists for is the first one:
+    // the context window arrives on a turn's result envelope, so the planner has
+    // never had one to report a `ctx%` against. This borrows the denominator
+    // from the newest archived run that measured it under the same model, and
+    // supplies nothing at all when no such run exists.
+    seedContextWindows(state);
     return await runPhases(state, cfg, resume, turns, host);
   } finally {
     // A `finally`, not a tail call: the phases below return early at the
@@ -550,7 +585,13 @@ async function runPhases(
   turns: AgentTurns,
   host?: Host,
 ): Promise<RunState> {
-  const cwd = state.targetDir;
+  // **Where the work happens, which is not necessarily the run's home** (#223).
+  // `state.targetDir` is the repository the archive and the lock live in;
+  // `workDirOf` is the tree this run writes in, and they differ when the run has
+  // a worktree of its own. Resolved once and threaded, so no step below can
+  // answer "which tree" from a different field while holding a state that says
+  // otherwise - which is the same reason `roles` is resolved here.
+  const cwd = workDirOf(state);
   // Resolved once and threaded, so no step below can answer "who does this job"
   // from the module default while holding a config that says otherwise.
   const roles = rolesFor(cfg);
@@ -579,7 +620,20 @@ async function runPhases(
       state.status = 'planned';
       advancePhase(state, 'complete');
       writeCheckpoint(state, 'complete', NO_COMMIT);
-      log.ok('Plan-only run: stopping before implementation.');
+      // Narrated with an id since #223, and it is the promotion AGENTS.md keeps
+      // describing: `planOnly` is a fact the run has held since `createRun` and
+      // never said, so a window could not tell a plan-only run that FINISHED
+      // from any other run that finished - and the two want opposite next
+      // actions. Without it the only way back to this plan was a new run that
+      // re-derives it, which is what *"it kicked off another run from scratch"*
+      // cost. Narration only: `planOnly` is already durable, so recording it
+      // would store one fact twice.
+      log.ok('Plan-only run: stopping before implementation.', {
+        id: 'plan_only_stopped',
+        // What the plan is carrying, so the offer to implement it can say so.
+        // A count of what the tolerance let through, not a judgement about it.
+        data: { carried: (state.carried ?? []).length },
+      });
       return state;
     }
     advancePhase(state, 'implementing');
@@ -611,6 +665,30 @@ async function runPhases(
     log.heading('Implementing', {
       id: 'phase_started',
       data: { phase: 'implementing', baseSha: state.baseSha },
+    });
+    // **The turn the window could not see** (#223). Every other turn in the loop
+    // announces itself - plan, revise, critique, answer, review, and all three
+    // fix kinds - and the implement turn, which `charge.ts` calls "the single
+    // most expensive step in a run", did not. `reduce` builds a `Turn` and sets
+    // `run.running` from this id and from nothing else, so without it the
+    // cockpit drew `IDLE - no turn is open` for the whole of it, the CODE group
+    // had no row, and - worst - **every heartbeat was dropped**, because a beat
+    // with no turn open cannot be attributed and is discarded by the reducer.
+    //
+    // Measured on a run of 2026-09-16: the terminal printed `implement: 14m30s ·
+    // 63 tool uses · Write …TodoToggle… · 13.7M tok · ctx 25%` every thirty
+    // seconds while the window showed an idle run, so the turn was stopped by
+    // somebody who reasonably concluded it had hung. 14.2M tokens and 50 files
+    // of finished work, killed because the product said nothing was happening.
+    // That is "one channel, two renderers" breaking in the one place it costs
+    // the most.
+    //
+    // `round` is the review round for the reason the fix kinds use it: the CODE
+    // group re-opens on every fix, and the round is what tells one pass through
+    // it from the next.
+    log.step(`${holderLabel('implementer', roles)} is implementing the plan`, {
+      id: 'turn_started',
+      data: { role: 'implementer', kind: 'implement', round: state.reviewRound },
     });
     const impl = await writeTurn(
       state,
@@ -739,6 +817,31 @@ function sayFindings(
           // both is how they come to disagree.
           downgraded: f.downgraded ?? null,
           severityChanges: f.severityChanges ?? null,
+          // What the reviewer's own test observed, if it wrote one (#113,
+          // #223). Hi-fi 9's third case is the one this supplies: a finding that
+          // is grounded and still **uncheckable**, which is a different state
+          // from grounded-and-proved and from ungrounded, and the pane could not
+          // draw it because the verdict never left the archive.
+          //
+          // The whole list, not the latest: the same reproducer is run at
+          // `review` and again after the final fix, and they answer two
+          // different questions - does the defect happen at all, and is it gone.
+          // Collapsing them would throw away the second, which is the only
+          // evidence OUTSTANDING.md has ever had for closing a carried finding.
+          reproducer:
+            f.reproducerOutcomes?.map((o) => ({
+              verdict: o.verdict,
+              at: o.at,
+              // Why it could not tell, which is most of the value of `unproven`.
+              // Null on the two verdicts that observed a run.
+              reason: o.reason,
+            })) ?? null,
+          // The reviewer declining to have it fixed *here*: real, worth doing,
+          // separate work. This is the one field where absent and false say the
+          // same thing to a reader - a report from before the field existed had
+          // no third option to take - so they collapse rather than becoming a
+          // named absence nobody could act on.
+          deferred: f.defer === true,
         })),
       },
     },
@@ -768,7 +871,15 @@ async function planPhase(
   if (state.plan) {
     plan = state.plan;
   } else {
-    log.heading('Planning', { id: 'phase_started', data: { phase: 'planning' } });
+    // The round travels, exactly as the critique heading below carries it, and
+    // for the same reason: this phase writes `plan-${state.planRound}.json`, so
+    // the number is what correlates a card with the file behind it. It was the
+    // one `phase_started` in the plan cycle that carried none, which left the
+    // first row of the loop column unnumbered beside numbered siblings.
+    log.heading('Planning', {
+      id: 'phase_started',
+      data: { phase: 'planning', round: state.planRound },
+    });
     ({ plan, activity: planActivity } = await runPlan(state, cfg, cwd, roles, turns));
   }
 
@@ -885,19 +996,27 @@ async function planPhase(
       // loop that left none - so a fork of that run had to go back to the plan
       // round before it and buy the answerer turn again.
       //
-      // And it is `question-round`, not `plan-round`. `revisePlan` writes its own
-      // checkpoint a moment later on the revising branch, and that one is a plan
-      // round in every mechanical sense - it burns a planner turn, advances
-      // `planRound` and writes `plan-<n>.json`. What was missing is the record of
-      // WHY it happened: a plan revised because the critic objected and a plan
-      // revised because it answered its own questions are different diagnoses,
-      // and they used to share a name.
+      // And it is `question-round`, not `plan-round`, because that is what this
+      // is: a plan revised because the critic objected and a plan revised
+      // because it answered its own questions are different diagnoses, and they
+      // used to share a name.
+      //
+      // They no longer share a counter either. `revisePlan` writes a second
+      // `question-round` checkpoint a moment later on the revising branch and
+      // advances nothing, so this whole round leaves `state.planRound` where it
+      // found it - see `advancesRound`.
       writeCheckpoint(state, 'question-round', NO_COMMIT);
       // Gateable since #140, which is when `GateContext` gained the counter that
       // makes the decision answerable: this is the round of `maxQuestionRounds`
       // a planner is spending on questions it raised itself, and a run doing
       // that for a third time is the one an operator most wants to stop.
-      await holdAt(state, cfg, host, 'question-round');
+      // The round's own questions travel with the hold, so a stop here writes a
+      // `NEEDS-INPUT.md` a person can actually answer. `pending` rather than the
+      // ones the answerer declined: at this boundary the answerer has already
+      // taken its turn, and someone who stops is overriding what it produced -
+      // narrowing the list to the declines would decide for them which answers
+      // were worth revisiting.
+      await holdAt(state, cfg, host, 'question-round', pending);
       // The answerer may have declined every one; only revise if something came
       // back - and when nothing did, the plan and the turn that wrote it are
       // both still the ones already in hand.
@@ -2012,7 +2131,43 @@ async function noticeStrandedWork(state: RunState, cwd: string): Promise<void> {
   });
 }
 
-async function prepareGit(
+/**
+ * Which branch this run's commits will land on, said out loud (#223, hi-fi 1).
+ *
+ * **A promotion, not an invention.** `state.branch` has been durable since the
+ * field existed and `prepareGit` has always known which of its six outcomes it
+ * took; what it never did was say so on a channel a host can read, so the window
+ * could not put the branch in the loop column's identity header the way every
+ * frame of the design draws it.
+ *
+ * Narration with no event, on the `findings_reported` precedent: `state.branch`
+ * is already in `state.json`, a resume re-reads it from there, and recording it
+ * again would be a second copy of one fact.
+ *
+ * **`null` is a real answer and is not "unknown".** Branch isolation off,
+ * `--no-branch`, or a directory that is not a repository all mean the same
+ * thing to a reader — commits land on whatever is checked out — so they collapse
+ * honestly, and `why` carries which of them it was.
+ *
+ * The four sites that already printed keep their level and their wording, so
+ * the terminal does not change on any path that was already saying something.
+ * The three that said nothing take `detail`: a run whose branch isolation is
+ * off does not want a fresh sentence about it every pass, and dim is how this
+ * codebase says *restating what you already know*.
+ */
+function sayBranch(
+  branch: string | null,
+  why: string | null,
+): { id: string; data: Record<string, unknown> } {
+  return { id: 'run_branch', data: { branch, why } };
+}
+
+/**
+ * Exported for `worktree.test.ts` only (#223): the case that a branch made as a
+ * ref before a worktree script ran is adopted rather than re-created needs the
+ * function itself, and the whole loop is a heavy way to reach one branch.
+ */
+export async function prepareGit(
   state: RunState,
   cfg: Config,
   cwd: string,
@@ -2064,6 +2219,15 @@ async function prepareGit(
         error === null
           ? 'Not a git repository - running without branch isolation or commits.'
           : `git could not be run (${error}) - running without branch isolation or commits.`,
+        sayBranch(null, error === null ? 'not a git repository' : `git could not be run: ${error}`),
+      );
+    } else {
+      // A resume said this once already and repeating it would be new output for
+      // an unchanged situation - but a window that connected on this pass has
+      // never been told, so the fact travels at `detail`.
+      log.detail(
+        'Running without branch isolation or commits.',
+        sayBranch(null, error === null ? 'not a git repository' : `git could not be run: ${error}`),
       );
     }
     return;
@@ -2081,7 +2245,13 @@ async function prepareGit(
 
   // With branch isolation off nothing below runs, which is also what makes
   // `vibe resume <id> --no-branch` the documented escape from the refusal.
-  if (!cfg.git.useBranch) return;
+  if (!cfg.git.useBranch) {
+    log.detail(
+      'Branch isolation is off; commits land on whatever is checked out.',
+      sayBranch(null, 'branch isolation is off'),
+    );
+    return;
+  }
 
   if (state.branch === null) {
     // A run that has no branch is one that never got one - it was started with
@@ -2089,12 +2259,38 @@ async function prepareGit(
     // Creating one now would move HEAD on a run that has already done work
     // somewhere else, which is a bigger change than the wrong-branch refusal
     // this function exists to make. Branch creation stays a fresh-run act.
-    if (resume) return;
-    const branch = `${cfg.git.branchPrefix}${state.id}`;
-    await git.createBranch(cwd, branch);
+    if (resume) {
+      log.detail(
+        'This run never had a branch of its own; commits land on whatever is checked out.',
+        sayBranch(null, 'this run never had a branch'),
+      );
+      return;
+    }
+    const branch = git.runBranch(cfg, state) ?? `${cfg.git.branchPrefix}${state.id}`;
+    // **It may already exist**, and only for one reason (#223): a run with a
+    // worktree has its branch created as a ref before the setup script runs, so
+    // the script can be told `VIBE_BRANCH` and put the worktree on it. Adopt it
+    // rather than `checkout -b` it again, which would fail on a branch that is
+    // there. Run ids are unique, so nothing else leaves one of these behind.
+    if (await git.branchExists(cwd, branch)) {
+      if ((await git.currentBranch(cwd)) !== branch) {
+        const result = await git.checkoutBranch(cwd, branch);
+        if (!result.ok) {
+          throw new Escalation(
+            EXIT.ERROR,
+            `Run ${state.id} could not be put on its branch "${branch}": ${result.error}\n` +
+              'Nothing has run and no turn was dispatched. If the worktree setup command checked ' +
+              'it out somewhere else, check it out in the worktree instead (git worktree add ' +
+              '"$VIBE_WORKTREE" "$VIBE_BRANCH"), then resume.',
+          );
+        }
+      }
+    } else {
+      await git.createBranch(cwd, branch);
+    }
     state.branch = branch;
     saveState(state);
-    log.ok(`Isolated on branch ${branch}`);
+    log.ok(`Isolated on branch ${branch}`, sayBranch(branch, null));
     return;
   }
 
@@ -2114,7 +2310,10 @@ async function prepareGit(
           'checked out.',
       );
     }
-    log.warn(`The branch this run recorded ("${branch}") no longer exists - continuing on HEAD.`);
+    log.warn(
+      `The branch this run recorded ("${branch}") no longer exists - continuing on HEAD.`,
+      sayBranch(null, `the recorded branch "${branch}" no longer exists`),
+    );
     return;
   }
 
@@ -2125,6 +2324,7 @@ async function prepareGit(
       delete state.branchPending;
       saveState(state);
     }
+    log.detail(`On branch ${branch}`, sayBranch(branch, null));
     return;
   }
 
@@ -2140,7 +2340,7 @@ async function prepareGit(
     }
     delete state.branchPending;
     saveState(state);
-    log.ok(`On branch ${branch}`);
+    log.ok(`On branch ${branch}`, sayBranch(branch, null));
     return;
   }
 
@@ -2171,6 +2371,18 @@ async function maybeCommit(
 ): Promise<{ sha: string | null; note: CheckpointCommitNote }> {
   if (!cfg.git.commitEachRound) return { sha: null, note: 'commits-disabled' };
   if (!(await git.isRepo(cwd))) return { sha: null, note: 'not-a-repo' };
+  // **Read before the commit, because that is the only moment it is knowable.**
+  // A round's diff is `what HEAD was`..`what HEAD became`, and once the commit
+  // has landed the first half is gone unless something wrote it down. The
+  // alternative a host would be left with is pairing consecutive commits in
+  // narration order - which is a derivation, and one that silently produces a
+  // cumulative diff labelled as a single round the first time a run is resumed
+  // and the earlier commits were narrated to a process that has exited.
+  //
+  // `markBase` rather than a second `rev-parse` spelled out here: it already
+  // answers null in a repository with no commits yet, which is the greenfield
+  // first round and a real state rather than a failure.
+  const since = await git.markBase(cwd);
   const result = await git.commitAll(cwd, message);
   if (result.sha === null) {
     return { sha: null, note: result.why === 'failed' ? 'commit-failed' : 'nothing-to-commit' };
@@ -2181,7 +2393,25 @@ async function maybeCommit(
     log.warn(`git named the new commit "${result.sha}", which is not an object id - not recorded`);
     return { sha: null, note: 'sha-unusable' };
   }
-  log.ok(`Committed ${result.sha.slice(0, 7)}`);
+  /*
+   * What this round put in the history, and the range that is (#223).
+   *
+   * **Narration with no event, on the `recordAndSay` rule**: it is already
+   * durable, twice over - the commit is in git, and the checkpoint this becomes
+   * records the sha in its own meta. What was missing was any way for something
+   * watching the run to learn it *while the run was going*, which is what the
+   * Code tab is: a run can be committing every round for ninety minutes and a
+   * host could not show one of them.
+   *
+   * `since` travels with it because a range with one end is not a range. Null is
+   * a real answer here - a first commit in a repository that had none - and the
+   * honest reading of it is "everything up to this commit", which is exactly
+   * what `git diff` does with an empty tree on the left.
+   */
+  log.ok(`Committed ${result.sha.slice(0, 7)}`, {
+    id: 'round_committed',
+    data: { sha: result.sha, since, message },
+  });
   return { sha: result.sha, note: 'committed' };
 }
 
@@ -3126,7 +3356,20 @@ async function withRateLimitRetry<T>(
           provider,
         },
       );
-      await sleep(waitMs);
+      // **Interruptible since #223.** This used to be a bare `setTimeout`, which
+      // is the one place a run spends real time with nothing to kill - so `stop`
+      // did nothing for the length of the window, and because `serve.ts` holds
+      // the one-at-a-time gate for the whole of `main()`, neither could anything
+      // else be started. A fifteen-minute wait locked the window for fifteen
+      // minutes: *"I ended a run, and now I can't create a new one."*
+      const slept = await sleepUnlessCancelled(waitMs);
+      if (!slept) {
+        // Woken by a cancel. Thrown here rather than letting the next turn's
+        // refusal do it, for two reasons: the loop would otherwise narrate
+        // `rate_limit_resumed` on a wait that did not resume, and it would
+        // announce a turn it is about to refuse to start.
+        throw new Cancelled(cancelRequested() ?? 'the run was stopped during a rate-limit wait');
+      }
       log.step(`Resuming "${label}" after rate-limit wait`, {
         id: 'rate_limit_resumed',
         data: { label },
@@ -3149,7 +3392,6 @@ function describeReset(err: RateLimitError): string {
   return err.resetsAt ? `Resets at ${err.resetsAt.toLocaleString()}.` : 'No reset time reported.';
 }
 
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * What previous runs on this repository decided, for the planner's index (#52).
@@ -3238,6 +3480,35 @@ interface ReviseArgs {
   answers?: readonly Answer[] | undefined;
 }
 
+/**
+ * Whether this revision is a new plan round, or the same one revised.
+ *
+ * **A plan round is the pair — the planner produces a version, the critic judges
+ * it — and only one of the two things that reach here is half of that pair.**
+ * A revision answering the critic's findings is the producer's side of the next
+ * round: something judged version N and this is version N+1, which is exactly
+ * what `maxPlanRounds` counts and what `plan-<n>.json` is numbered by.
+ *
+ * A revision answering the planner's *own* questions is not. Nothing judged
+ * anything: the planner asked, the answerer replied, and the plan was rewritten
+ * before it was ever shown to the critic. The loop column has said so in as many
+ * words since the question group was drawn — *"a question round produces no
+ * critique, so it cannot advance the plan round"* — and the core disagreed with
+ * its own screen, which is how a run came to read *"plan round 0 has a critique,
+ * then plan round 1 asked questions, and when those questions were answered it
+ * moved to plan round 2"*.
+ *
+ * It was not only a renumbering. `guardProgress` measures `state.planRound`
+ * against `loop.maxPlanRounds`, so every question round spent one of the rounds
+ * the run had for *disagreeing with the critic* — a run allowed five plan rounds
+ * and asking three rounds of questions had two critiques left, and nothing said
+ * so. `loop.maxQuestionRounds` already caps the question loop, and it is the cap
+ * that should.
+ */
+function advancesRound(args: ReviseArgs): boolean {
+  return args.findings !== undefined;
+}
+
 async function revisePlan(
   state: RunState,
   cfg: Config,
@@ -3247,12 +3518,56 @@ async function revisePlan(
   turns: AgentTurns,
   host?: Host,
 ): Promise<PlannedTurn> {
-  state.planRound += 1;
+  const advancing = advancesRound(args);
+  if (advancing) state.planRound += 1;
   saveState(state);
-  log.step(`${holderLabel('planner', roles)} is revising the plan (round ${state.planRound})`, {
-    id: 'turn_started',
-    data: { role: 'planner', kind: 'revise', round: state.planRound },
-  });
+  /*
+   * A revision opens a new plan round, and until now it said so to nobody.
+   *
+   * `revisePlan` emitted a `turn_started` and no `phase_started`, so the turn
+   * that produces the *next* version of the plan landed inside whichever phase
+   * group was still open — the **critique that caused it**. The loop column drew
+   * a planner turn under a heading that says `critique`, which is the producer
+   * of round 2 filed under round 1's judge.
+   *
+   * `planning`, not a phase of its own, because it is the same phase: the
+   * planner producing a version of the plan. On the advancing path the round has
+   * just been incremented, so this group and the critique that follows it carry
+   * the same number — which is what lets a reader (and `rounds()`) pair them. On
+   * the non-advancing path it carries the round it is still in, which is the
+   * whole point: the answered revision is drawn under the round that raised the
+   * questions rather than opening one beside it.
+   *
+   * The heading is deliberately still `log.step` below rather than being folded
+   * into this: a `log.heading` here would change what the terminal prints for
+   * every revision, and this is a frame for a host, not a new section for a
+   * person. `phase_started` has never required a heading beside it.
+   */
+  log.info(
+    advancing
+      ? `Plan round ${state.planRound}`
+      : `Revising plan ${state.planRound} against the answers`,
+    {
+      id: 'phase_started',
+      data: { phase: 'planning', round: state.planRound },
+    },
+  );
+  // The label names the round the turn belongs to, and for a non-advancing
+  // revision that is the QUESTION round: `planRound` no longer moves, so two
+  // question rounds under one plan round would otherwise charge two turns under
+  // one label and the archive could not tell them apart.
+  const label = advancing
+    ? `revise-${state.planRound}`
+    : `revise-q${state.questionRound}`;
+  log.step(
+    advancing
+      ? `${holderLabel('planner', roles)} is revising the plan (round ${state.planRound})`
+      : `${holderLabel('planner', roles)} is revising the plan against the answers`,
+    {
+      id: 'turn_started',
+      data: { role: 'planner', kind: 'revise', round: state.planRound },
+    },
+  );
 
   const outcome = await runTurn(
     state,
@@ -3272,7 +3587,7 @@ async function revisePlan(
         round: state.planRound,
       }),
       cwd,
-      label: `revise-${state.planRound}`,
+      label,
     },
     turns,
     roles,
@@ -3291,6 +3606,14 @@ async function revisePlan(
   // rides on this `saveState` and not a later one.
   if (args.findings !== undefined) state.pendingFindings = null;
   saveState(state);
+  // **`plan-<n>.json` is the plan of record for round n, which is the version
+  // the critic will judge** - so a non-advancing revision replaces it rather
+  // than writing beside it, and `refusePlaceholderPlan` goes on citing a file
+  // whose contents are the ones it read. What that costs is the draft that
+  // raised the questions, and the cost is accepted rather than hidden: the
+  // questions and the answers that changed it are both durable, in
+  // `answers-<question-round>.json`, which is the half a reader is actually
+  // asking about when a plan changed between two critiques.
   artifact(state, `plan-${state.planRound}.json`, plan);
   // With the new plan persisted, the follow-ups artifact is reconciled against
   // it immediately - including deleting it when this revision dropped the last
@@ -3299,8 +3622,28 @@ async function revisePlan(
   // After the artifact and its save, so the snapshot describes a round whose
   // record is complete. No commit here: the planning phase does not touch the
   // tree, and the note says that rather than implying a failure.
-  writeCheckpoint(state, 'plan-round', NO_COMMIT);
-  await holdAt(state, cfg, host, 'plan-round');
+  //
+  // **The boundary is the one this revision actually crossed.** A findings-driven
+  // revision closes a plan round and takes `plan-round`, exactly as it always
+  // has. An answers-driven one closes nothing of the sort, and writing a
+  // `plan-round` checkpoint for it would put a plan round in the record that
+  // `state.planRound` says did not happen — the two halves of #139's own
+  // complaint, which is that a plan revised because the critic objected and a
+  // plan revised because it answered its own questions are different diagnoses
+  // that used to share a name.
+  //
+  // It does not hold. The caller inside the question loop has already held at
+  // `question-round` a moment ago, with this round's questions attached, so a
+  // second hold here would stop the same round twice for one decision. The one
+  // caller that reaches this without a hold in front of it is the resume
+  // consuming `NEEDS-INPUT.md`, and a resume that halts again before running
+  // anything is a resume that did not resume.
+  if (advancing) {
+    writeCheckpoint(state, 'plan-round', NO_COMMIT);
+    await holdAt(state, cfg, host, 'plan-round');
+  } else {
+    writeCheckpoint(state, 'question-round', NO_COMMIT);
+  }
   return { plan, ...(outcome.activity === undefined ? {} : { activity: outcome.activity }) };
 }
 
@@ -3747,6 +4090,39 @@ async function runReview(
   });
   const { chunks, files } = await git.diffChunks(cwd, state.baseSha);
 
+  // **An empty diff is refused, not reviewed.** There was a guard for a diff too
+  // BIG for one turn and none at all for one with nothing in it, and
+  // `diffChunks` answers the empty case with a perfectly well-formed result -
+  // one chunk, no files, an empty string - so nothing downstream could tell
+  // "here is the change" from "there is no change to read". The reviewer was
+  // spawned with a prompt that said *here is the diff* followed by nothing.
+  //
+  // Measured on a run of 2026-09-15: it improvised, ran 32 shell commands in
+  // five minutes looking for the change by hand, went silent, and was killed 39
+  // minutes later at the Codex turn ceiling. The run ended `status: error` on a
+  // tree whose implementation was complete and whose verification gate had just
+  // passed three times out of three.
+  //
+  // This is the rule the file above already applies to a directory that is not a
+  // repository, in almost the same words, and it is the same refusal: the
+  // reviewer's only input is a diff produced by git, and there is no second
+  // source for it. `EXIT.PREFLIGHT` because that code is documented for exactly
+  // this - *"the target directory cannot host those phases at all ... whose
+  // review phase has no diff to read"* - and it is resumable, so the round is
+  // still there once the cause is fixed.
+  if (files.length === 0 && chunks.every((c) => c.diff === '')) {
+    throw new Escalation(
+      EXIT.PREFLIGHT,
+      `The review phase has no diff to read: git reported no change ${
+        state.baseSha === null
+          ? 'in this repository at all'
+          : `since ${state.baseSha.slice(0, 7)}`
+      }. The reviewer's only input is a diff, and there is no second source for ` +
+        'it, so no review turn was started and nothing was spent. Either the implement phase ' +
+        'wrote nothing, or its work is somewhere this range cannot see it.',
+    );
+  }
+
   // The round's own report, before the round is bought again. A process that
   // died between the artifact write and `recordPendingFindings` leaves a
   // complete-looking `code-review-<n>.json` for a round the resume is about to
@@ -4096,6 +4472,14 @@ async function resolveQuestions(
       data: {
         total: questions.length,
         blocking: blockingCount,
+        // Hi-fi 14 draws the question loop as a nested group with **its own
+        // counter and its own cap** - `round 2/3` sitting inside `round 1/5` -
+        // and the frame carried neither, so the group could not say where in
+        // its own loop it was. Both, because a position with no cap is a number
+        // and a position in something is a fact somebody can act on: `at the
+        // cap` is the state the frame's whole escalation is about.
+        round: state.questionRound,
+        cap: cfg.loop.maxQuestionRounds,
         // The questions themselves, carried on the frame that already announces
         // them (#223). `1f` is an inbox and cannot be one over two counts - and
         // the alternative was for a window to scrape the `- [kind] text` lines
@@ -4131,14 +4515,22 @@ async function resolveQuestions(
       role: 'answerer',
       prompt: P.answerPrompt(questions, plan.plan_md),
       cwd,
-      label: `answers-${state.planRound}`,
+      // **The question round, not the plan round.** These were keyed by
+      // `planRound` and could be because every question round used to advance it
+      // - which is the defect above, and this is the collision that fell out of
+      // fixing it: two question rounds under one plan round both wrote
+      // `answers-0.json`, and the second silently replaced the first. The
+      // question round is the counting this turn actually belongs to, it is
+      // monotonic for the whole run, and `state.questionRound` was incremented
+      // by the caller before this was reached - so the first is `answers-1`.
+      label: `answers-${state.questionRound}`,
     },
     turns,
     roles,
   );
 
   const { answers } = parseAnswers(readStructured(outcome));
-  artifact(state, `answers-${state.planRound}.json`, answers);
+  artifact(state, `answers-${state.questionRound}.json`, answers);
 
   // Every question asked is marked answered regardless of outcome, so a
   // rephrased repeat in the next revision cannot re-enter this branch.
@@ -4152,12 +4544,40 @@ async function resolveQuestions(
   const usable = answers.filter((a) => !declined(a));
   const refused = answers.filter(declined);
 
-  const matches = (q: OpenQuestion, a: Answer): boolean => a.question.trim() === q.question.trim();
-  const refusedBlocking = questions.filter((q) => q.blocking && refused.some((a) => matches(q, a)));
-  const refusedAdvisory = questions.filter((q) => !q.blocking && refused.some((a) => matches(q, a)));
+  // **The pairing, and it is no longer string equality** (#211). The answerer is
+  // asked to echo the question and echoes what it was shown, which
+  // `formatQuestion` renders with the kind and the blocking tag after it - so a
+  // real run produced `"...untested? *(technical, advisory)*"` against a question
+  // ending at the question mark, and every pair failed. That was not only a pane
+  // drawing "No answer yet" over answered questions: `refusedBlocking` came back
+  // empty, so a declined blocking question would have been counted as answered
+  // and `escalateOnDefer` could not fire.
+  //
+  // `pairAnswers` is the module that already owns "when are two wordings one
+  // question", using the same normalize and the same threshold as the re-ask
+  // guard rather than a second rule that would drift from it.
+  const pairing = pairAnswers(
+    questions,
+    refused,
+    (q) => q.question,
+    (a) => a.question,
+  );
+  const answerFor = (q: OpenQuestion): Answer | undefined =>
+    pairing.paired.find((p) => p.question === q)?.answer;
+  const refusedBlocking = questions.filter((q) => q.blocking && answerFor(q) !== undefined);
+  const refusedAdvisory = questions.filter((q) => !q.blocking && answerFor(q) !== undefined);
+
+  // A decline that paired with nothing. Named rather than dropped and never
+  // attached to the nearest question: this is the answerer refusing to guess,
+  // and losing it in silence is the failure this whole change is about. It does
+  // not escalate, because nothing here can say which question it was about, and
+  // stopping a run over a question nobody can name is worse than saying so.
+  for (const a of pairing.unpaired) {
+    log.warn(`${answerer} declined an answer that matches no question asked: ${a.question}`);
+  }
 
   for (const q of refusedAdvisory) {
-    const reason = refused.find((a) => matches(q, a))?.rationale ?? `${answerer} declined to answer.`;
+    const reason = answerFor(q)?.rationale ?? `${answerer} declined to answer.`;
     state.deferredQuestions.push({
       question: q.question,
       kind: q.kind,
@@ -4177,6 +4597,43 @@ async function resolveQuestions(
     );
   }
 
+  /**
+   * Answers as rows keyed by the question the *planner* wrote.
+   *
+   * The join happens here because this is the only side that has both the
+   * questions and `similarity`. An answer that paired with nothing keeps its own
+   * wording and travels anyway - dropping it would hide what the answerer said,
+   * and attaching it to the nearest question would state that it was about a
+   * question nobody has established it was about.
+   */
+  const asked = (
+    list: readonly Answer[],
+  ): {
+    question: string;
+    answer: string;
+    confidence: string;
+    rationale: string;
+    deferToHuman: boolean;
+  }[] => {
+    const pairs = pairAnswers(
+      questions,
+      list,
+      (q) => q.question,
+      (a) => a.question,
+    );
+    const row = (question: string, a: Answer) => ({
+      question,
+      answer: a.answer,
+      confidence: a.confidence,
+      rationale: a.rationale,
+      deferToHuman: a.defer_to_human,
+    });
+    return [
+      ...pairs.paired.map((p) => row(p.question.question, p.answer)),
+      ...pairs.unpaired.map((a) => row(a.question, a)),
+    ];
+  };
+
   log.ok(`${answerer} answered ${usable.length} of ${questions.length} question(s)`, {
     // The other half of `1f` (#223). The pane is an inbox of open questions with
     // **the adversary's draft and its confidence** beside each, and until now
@@ -4192,17 +4649,21 @@ async function resolveQuestions(
       // Both, and labelled, because they are different outcomes rather than a
       // count and a remainder: a declined answer is the answerer refusing to
       // guess at product intent, which `escalateOnDefer` then acts on.
-      answers: usable.map((a) => ({
-        question: a.question,
-        answer: a.answer,
-        confidence: a.confidence,
-        rationale: a.rationale,
-      })),
-      declined: refused.map((a) => ({
-        question: a.question,
-        confidence: a.confidence,
-        rationale: a.rationale,
-        deferToHuman: a.defer_to_human,
+      //
+      // **Keyed by the question as the PLANNER wrote it**, not as the answerer
+      // echoed it (#211). A window joins these back onto `questions_opened` and
+      // the only string that appears on both frames has to be one string - the
+      // echo is the rendered form, tag and all, and joining on it drew "No
+      // answer yet" over two answered questions. Doing the pairing here rather
+      // than in the window is also what keeps *one* definition of it: the
+      // window has no `similarity`, and a second matcher over there would drift
+      // from this one on the first wording either side did not expect.
+      answers: asked(usable),
+      declined: asked(refused).map((row) => ({
+        question: row.question,
+        confidence: row.confidence,
+        rationale: row.rationale,
+        deferToHuman: row.deferToHuman,
       })),
     },
   });
