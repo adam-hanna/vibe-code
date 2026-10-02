@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import cockpit from './Cockpit.tsx?raw';
 import sidebar from './Sidebar.tsx?raw';
+import settingsSrc from './Settings.tsx?raw';
 import {
   SHOWN,
   addProject,
@@ -282,5 +283,43 @@ describe('a project can be renamed, and only its row changes (#223)', () => {
     const renamed = sidebar.slice(sidebar.indexOf('const renamedProject'), sidebar.indexOf('Do what the open confirmation says'));
     expect(renamed).not.toMatch(/host\./);
     expect(renamed).toContain('save(PROJECT_NAMES_KEY, next)');
+  });
+});
+
+describe('a project can be pointed at another directory (#223)', () => {
+  // *"We need to be able to edit the project root dir in the project settings."*
+  test('everything the window remembers about it follows, and nothing else moves', async () => {
+    const { moveProject } = await import('./projects');
+    const held = {
+      projects: ['/home/me/erm', '/home/me/other'],
+      pins: [
+        { dir: '/home/me/erm/', runId: 'r1', task: 't' },
+        { dir: '/home/me/other', runId: 'r2', task: 't' },
+      ],
+      names: [{ dir: '/home/me/erm', runId: 'r1', name: 'first' }],
+      projectNames: [{ dir: '/home/me/erm', name: 'ERM' }],
+    };
+    const moved = moveProject('/home/me/erm', ' /home/me/erm/erm ', held);
+    expect(moved.ok).toBe(true);
+    if (!moved.ok) return;
+    expect(moved.held.projects).toEqual(['/home/me/erm/erm', '/home/me/other']);
+    expect(moved.held.pins.map((p) => p.dir)).toEqual(['/home/me/erm/erm', '/home/me/other']);
+    expect(moved.held.names[0]?.dir).toBe('/home/me/erm/erm');
+    expect(moved.held.projectNames).toEqual([{ dir: '/home/me/erm/erm', name: 'ERM' }]);
+  });
+
+  test('an empty path, the same path, or another project is refused with a reason', async () => {
+    const { moveProject } = await import('./projects');
+    const held = { projects: ['/a', '/b'], pins: [], names: [], projectNames: [] };
+    expect(moveProject('/a', '  ', held)).toMatchObject({ ok: false, why: expect.stringMatching(/give the directory/) });
+    expect(moveProject('/a', '/a/', held)).toMatchObject({ ok: false, why: expect.stringMatching(/already where/) });
+    expect(moveProject('/a', '/b', held)).toMatchObject({ ok: false, why: '/b is already a project' });
+  });
+
+  test('the field is on the project view only, and the sidebar rereads after a move', () => {
+    expect(settingsSrc).toContain("{scope === 'project' && onRelocate !== undefined && <WhereItIs dir={dir} onRelocate={onRelocate} />}");
+    expect(cockpit).toContain('onRelocate={relocate}');
+    expect(cockpit).toContain('epoch={projectsEpoch}');
+    expect(sidebar).toContain('}, [epoch]);');
   });
 });

@@ -590,6 +590,7 @@ type Pending =
 
 export function Sidebar({
   dir,
+  epoch,
   currentId,
   onNew,
   onNewIn,
@@ -607,6 +608,8 @@ export function Sidebar({
 }: {
   /** The repository the window is pointed at. Always one of the projects. */
   dir: string;
+  /** Bumped when the lists were rewritten elsewhere — a project moved (#223). */
+  epoch: number;
   currentId: string | null;
   onNew: () => void;
   /** Compose a run in one project, with the directory already settled (#223). */
@@ -660,8 +663,9 @@ export function Sidebar({
    */
   const [problem, setProblem] = useState<string | null>(null);
 
-  // Read once. All three lists are this window's own memory, so there is nothing
-  // to re-read them for — every write below goes through the setters.
+  // Read once, and again only when `epoch` says the lists were rewritten from
+  // outside — a project pointed somewhere else from its settings (#223). They
+  // are this window's own memory, so every other write goes through the setters.
   useEffect(() => {
     try {
       setProjects(readProjects(localStorage.getItem(PROJECTS_KEY)));
@@ -672,7 +676,7 @@ export function Sidebar({
       // Storage can be unavailable or full. An empty sidebar is a smaller
       // failure than a window that will not render.
     }
-  }, []);
+  }, [epoch]);
 
   const save = useCallback((key: string, value: unknown) => {
     try {

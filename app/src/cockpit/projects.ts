@@ -428,6 +428,52 @@ export function readProjectNames(raw: string | null): readonly ProjectName[] {
   return out;
 }
 
+/**
+ * Point a project at another directory (#223): *"We need to be able to edit the
+ * project root dir in the project settings."*
+ *
+ * The case it is for is a project added one level off — `~/apps/erm` when the
+ * repository is `~/apps/erm/erm` — and a repository that moved. So everything
+ * this window remembers *about* the project follows it: its place in the list,
+ * its name, its pins and its runs' names. Nothing on disk moves, and nothing is
+ * copied: the settings shown afterwards are the new directory's own
+ * `vibe.config.json`, and its runs are whatever its own `.vibe/runs` holds.
+ *
+ * Refused, with the sentence to show, when the new directory is empty or is
+ * already a project — merging two rows' memories is not what anybody asked for,
+ * and doing it silently would be the duplicate `addAndSay` exists to say out loud.
+ */
+export interface Remembered {
+  projects: readonly string[];
+  pins: readonly Pin[];
+  names: readonly RunName[];
+  projectNames: readonly ProjectName[];
+}
+
+export function moveProject(
+  from: string,
+  to: string,
+  held: Remembered,
+): { ok: true; held: Remembered } | { ok: false; why: string } {
+  const next = to.trim();
+  if (next === '') return { ok: false, why: 'give the directory the project should point at' };
+  if (dirKey(next) === dirKey(from)) return { ok: false, why: 'that is already where this project points' };
+  const already = findProject(held.projects, next);
+  if (already !== null) return { ok: false, why: `${already} is already a project` };
+  const key = dirKey(from);
+  const here = (dir: string): boolean => dirKey(dir) === key;
+  return {
+    ok: true,
+    held: {
+      projects: held.projects.map((d) => (here(d) ? next : d)),
+      pins: held.pins.map((p) => (here(p.dir) ? { ...p, dir: next } : p)),
+      names: held.names.map((n) => (here(n.dir) ? { ...n, dir: next } : n)),
+      projectNames: held.projectNames.map((n) => (here(n.dir) ? { ...n, dir: next } : n)),
+    },
+  };
+}
+
+
 /** Drop every name for a run that is gone, so the list does not grow for ever. */
 export function forgetNames(
   names: readonly RunName[],

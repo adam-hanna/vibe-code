@@ -7,6 +7,7 @@ import type { PilotLimits } from '../pilot/ledger';
 import { Confirm } from './Confirm';
 import { Section } from './Disclosure';
 import { STEPS } from './appearance';
+import { pickDirectory } from './pick';
 import { projectName } from './projects';
 import { DRAFTS_KEY, draftsFor, readDrafts, removeDraft, saveDraft } from './drafts';
 import type { Draft } from './drafts';
@@ -546,8 +547,79 @@ function usePromptBlocks(open: boolean): {
 
   return { blocks, failure, loading, reload: () => setAttempt((n) => n + 1) };
 }
+/**
+ * Where this project is, and the control that points it somewhere else (#223):
+ * *"We need to be able to edit the project root dir in the project settings."*
+ *
+ * The directory is what every request this window sends names, so this is the
+ * one project setting that is not in `vibe.config.json` — it is which
+ * `vibe.config.json` the rest of the screen reads. Changing it moves this
+ * window's memory of the project (its name, pins and drafts) and nothing on
+ * disk; the screen then reads the new directory's own file. Drawn on the empty
+ * screen too, because a project pointed at the wrong place is exactly the one
+ * whose configuration may not read.
+ */
+function WhereItIs({ dir, onRelocate }: { dir: string; onRelocate: (to: string) => string | null }) {
+  const [typed, setTyped] = useState(dir);
+  const [why, setWhy] = useState<string | null>(null);
+  useEffect(() => setTyped(dir), [dir]);
+  const point = (to: string): void => setWhy(onRelocate(to));
+  return (
+    <section className="v-set__block">
+      <h3 className="v-set__h">where this project is</h3>
+      <p className="v-set__note">
+        The repository this project points at. Change it when the project was added one folder off —
+        the parent of the repository rather than the repository — or when the repository moved. The
+        project keeps its name, pins and drafts; the settings below are then read from the new
+        directory&apos;s own <code>vibe.config.json</code>, and its runs from its own{' '}
+        <code>.vibe/runs</code>. Nothing on disk is moved or copied.
+      </p>
+      <form
+        className="v-set__promptrow"
+        onSubmit={(e) => {
+          e.preventDefault();
+          point(typed);
+        }}
+      >
+        <input
+          className="v-set__text"
+          value={typed}
+          spellCheck={false}
+          aria-label="the project's directory"
+          onChange={(e) => setTyped(e.target.value)}
+        />
+        <Button
+          level="secondary"
+          type="button"
+          onClick={() => {
+            void pickDirectory()
+              .then((chosen) => {
+                if (chosen !== null) point(chosen);
+              })
+              .catch((err: unknown) =>
+                setWhy(`the chooser did not open: ${err instanceof Error ? err.message : String(err)} — type a path instead`),
+              );
+          }}
+        >
+          choose…
+        </Button>
+        <Button level="primary" type="submit" disabled={typed.trim() === dir.trim()}>
+          point here
+        </Button>
+      </form>
+      {why !== null && (
+        <div className="v-set__refused">
+          <StateKicker tone="alarm">refused</StateKicker>
+          <span>{why}</span>
+        </div>
+      )}
+    </section>
+  );
+}
+
 export function Settings({
   scope,
+  onRelocate,
   dir,
   scale,
   onScale,
@@ -565,6 +637,8 @@ export function Settings({
    * screen, and the reply was that the two belong in two places.
    */
   scope: 'project' | 'global';
+  /** Point the project at another directory; the refusal, or null (#223). */
+  onRelocate?: (to: string) => string | null;
   dir: string;
   /** How big the product is drawn. Window state — see `appearance.ts`. */
   scale: number;
@@ -683,6 +757,9 @@ export function Settings({
             try again
           </button>
         )}
+        {scope === 'project' && onRelocate !== undefined && failure !== null && (
+          <WhereItIs dir={dir} onRelocate={onRelocate} />
+        )}
       </div>
     );
   }
@@ -755,6 +832,7 @@ export function Settings({
           ? 'This repository’s own settings, in its vibe.config.json. Anything left alone here comes from your settings for all projects, and failing that from vibe’s own default — the chip beside each value says which. The test command and the worktree are only ever set here.'
           : 'Your settings for every project on this machine. How each vendor is reached, the CLIs and the pilot’s permissions are only ever set here; for the rest, a project that sets a key in its own file wins, and the chip says when one does.'}
       </p>
+      {scope === 'project' && onRelocate !== undefined && <WhereItIs dir={dir} onRelocate={onRelocate} />}
       <div className="v-set__head">
         <span>
           {scope === 'global' ? (

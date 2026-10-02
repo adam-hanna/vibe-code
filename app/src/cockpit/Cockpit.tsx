@@ -16,7 +16,19 @@ import { Footer } from './Footer';
 import { PlansPane } from './PlansPane';
 import { ReportPane } from './ReportPane';
 import { Kickoff } from './Kickoff';
-import { preview } from './projects';
+import {
+  NAMES_KEY,
+  PINNED_KEY,
+  PROJECT_NAMES_KEY,
+  PROJECTS_KEY,
+  dirKey,
+  moveProject,
+  preview,
+  readNames,
+  readPins,
+  readProjectNames,
+  readProjects,
+} from './projects';
 import {
   DRAFTS_KEY,
   addDraft,
@@ -452,6 +464,11 @@ export function Cockpit() {
       return [];
     }
   });
+  /**
+   * Bumped when this window's project memory is rewritten outside the sidebar,
+   * so the sidebar reads it again rather than drawing what it held (#223).
+   */
+  const [projectsEpoch, setProjectsEpoch] = useState(0);
   const saveDrafts = useCallback((change: (list: readonly Draft[]) => readonly Draft[]) => {
     setDrafts((list) => {
       const next = change(list);
@@ -463,6 +480,37 @@ export function Cockpit() {
       return next;
     });
   }, []);
+  /**
+   * Point the project on screen at another directory, from its settings (#223).
+   * `moveProject` decides; this writes the four lists it returns, moves any
+   * draft with it, and points the window there. Returns the refusal, or null.
+   */
+  const relocate = useCallback(
+    (to: string): string | null => {
+      let moved: ReturnType<typeof moveProject>;
+      try {
+        moved = moveProject(repoDir, to, {
+          projects: readProjects(localStorage.getItem(PROJECTS_KEY)),
+          pins: readPins(localStorage.getItem(PINNED_KEY)),
+          names: readNames(localStorage.getItem(NAMES_KEY)),
+          projectNames: readProjectNames(localStorage.getItem(PROJECT_NAMES_KEY)),
+        });
+        if (!moved.ok) return moved.why;
+        localStorage.setItem(PROJECTS_KEY, JSON.stringify(moved.held.projects));
+        localStorage.setItem(PINNED_KEY, JSON.stringify(moved.held.pins));
+        localStorage.setItem(NAMES_KEY, JSON.stringify(moved.held.names));
+        localStorage.setItem(PROJECT_NAMES_KEY, JSON.stringify(moved.held.projectNames));
+      } catch (err: unknown) {
+        return `this window could not save that: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      const next = to.trim();
+      saveDrafts((list) => list.map((d) => (dirKey(d.dir) === dirKey(repoDir) ? { ...d, dir: next } : d)));
+      setProjectsEpoch((n) => n + 1);
+      rememberRepo(next);
+      return null;
+    },
+    [repoDir, rememberRepo, saveDrafts],
+  );
   const [draftId, setDraftId] = useState<string | null>(null);
   const drafting = drafts.find((d) => d.id === draftId) ?? null;
   /**
@@ -1203,6 +1251,7 @@ export function Cockpit() {
         >
           <Sidebar
             dir={repoDir}
+            epoch={projectsEpoch}
             drafts={drafts}
             draftId={draftId}
             // Back to a draft's conversation. It has no run to read, so the
@@ -1466,6 +1515,7 @@ export function Cockpit() {
               // into the other.
               key={`${settingsScope}:${repoDir}`}
               scope={settingsScope}
+              onRelocate={relocate}
               dir={repoDir}
               scale={scale}
               onScale={rescale}

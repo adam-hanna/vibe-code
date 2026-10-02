@@ -427,6 +427,17 @@ they are waiting on. Four things in it are worth carrying:
   on hover — so the project row's ✎ is always drawn, like its other actions, and **double-click
   on either title renames it** as a second road.
 
+  **And a project can be pointed somewhere else, from its own settings** (#223): *"We need to
+  be able to edit the project root dir in the project settings."* The case is a project added
+  one folder off — the parent of the repository — or a repository that moved. `moveProject` is
+  pure and moves this window's memory of the project with it (its place in the list, its name,
+  its pins and its runs' names; `Cockpit` moves its drafts) and nothing on disk; the screen then
+  reads the new directory's own `vibe.config.json`. It refuses a path that is already a project
+  rather than merging two rows. The sidebar takes an `epoch` and re-reads its lists when it
+  moves, because those lists are otherwise read once. The field is drawn on the settings
+  screen's empty state too, since a project pointed at the wrong place is the one whose
+  configuration may not read.
+
   **The two deletions say opposite things and the confirmation is the only thing that can tell
   them apart.** Removing a *project* is a row in this window — nothing on disk is touched, and
   adding it back brings every run with it. Deleting a *run* removes `.vibe/runs/<id>` and is
