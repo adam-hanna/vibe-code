@@ -52,10 +52,10 @@ export type OpenAt = (tab: string, round?: number | null) => void;
  * `status()` says `re-runs on every fix` under the two that re-open.
  */
 const TITLE: Readonly<Record<CycleKind, string>> = {
-  plan: 'GROUP 1 · PLAN',
-  critique: 'GROUP 2 · PLAN CRITIQUE',
-  code: 'GROUP 3 · CODE',
-  review: 'GROUP 4 · CODE REVIEW',
+  plan: 'Plan',
+  critique: 'Plan critique',
+  code: 'Code',
+  review: 'Code review',
 };
 
 /**
@@ -736,7 +736,7 @@ export function LoopColumn({
           for IS something happening, and two lines claiming the opposite of each
           other is the disagreement #202 was about. */}
       {run.cycles.length === 0 && run.preflight === null && run.identity === null && (
-        <div className="v-loop__empty">nothing has run yet</div>
+        <div className="v-loop__empty">Your run will take shape here.</div>
       )}
 
       {run.cycles.map((cycle) => {

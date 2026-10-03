@@ -82,6 +82,12 @@ export interface PilotReply {
   /** What the CLI says the conversation is, which is authoritative over ours. */
   sessionId: string;
   tokens: { input: number; output: number; cacheRead: number; cacheCreation: number; total: number };
+  /**
+   * How full the conversation is after this turn (#223) - the last request's
+   * prompt, not `tokens`, which sums every request. Optional because a host
+   * older than the field sends none.
+   */
+  context?: { tokens: number; window: number | null } | null;
 }
 
 /**

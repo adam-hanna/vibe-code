@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { LivenessDot, MetaChip, StateKicker } from '../design';
+import { Icon, VibeMark } from '../design/Icon';
+import { projectName } from './projects';
 import * as host from '../host';
 import * as keys from '../pilot/keys';
 import type { KeyStatus } from '../pilot/keys';
@@ -14,7 +16,19 @@ import { Footer } from './Footer';
 import { PlansPane } from './PlansPane';
 import { ReportPane } from './ReportPane';
 import { Kickoff } from './Kickoff';
-import { preview } from './projects';
+import {
+  NAMES_KEY,
+  PINNED_KEY,
+  PROJECT_NAMES_KEY,
+  PROJECTS_KEY,
+  dirKey,
+  moveProject,
+  preview,
+  readNames,
+  readPins,
+  readProjectNames,
+  readProjects,
+} from './projects';
 import {
   DRAFTS_KEY,
   addDraft,
@@ -274,6 +288,21 @@ export function Cockpit() {
   const [busy, setBusy] = useState(false);
   const [launched, setLaunched] = useState(false);
   /**
+   * The conversation the pilot was showing when a run was launched, held until
+   * that run says who it is (#223).
+   *
+   * Launching points the window at the new run before it has an id, so for the
+   * seconds until `run_started` the pane had no run to key its chat by and fell
+   * back to the project's "before any run" conversation - restoring whatever
+   * stale exchange was stored there, which the new run then **adopted** as its
+   * own. *"The run that starts, the pilot chat, progress etc gets confused with
+   * a previous run. It's like some key isn't unique somewhere."* Holding the key
+   * that proposed the run makes the gap a `stay`, so what the new run adopts is
+   * the conversation that actually proposed it. A draft holds itself already.
+   */
+  const [holdChat, setHoldChat] = useState<{ dir: string; runId: string | null } | null>(null);
+  const pilotAt = useRef<{ dir: string; runId: string | null }>({ dir: '', runId: null });
+  /**
    * The launch this window sent, kept so the pilot can be told about it (#191).
    *
    * **Not a re-derivation.** Every other thing on this screen comes from a frame,
@@ -450,6 +479,13 @@ export function Cockpit() {
       return [];
     }
   });
+  /**
+   * Bumped when this window's project memory is rewritten outside the sidebar,
+   * so the sidebar reads it again rather than drawing what it held (#223).
+   */
+  const [projectsEpoch, setProjectsEpoch] = useState(0);
+  /** The last move, so the new directory's settings can offer the old file. */
+  const [moved, setMoved] = useState<{ from: string; to: string } | null>(null);
   const saveDrafts = useCallback((change: (list: readonly Draft[]) => readonly Draft[]) => {
     setDrafts((list) => {
       const next = change(list);
@@ -461,6 +497,38 @@ export function Cockpit() {
       return next;
     });
   }, []);
+  /**
+   * Point the project on screen at another directory, from its settings (#223).
+   * `moveProject` decides; this writes the four lists it returns, moves any
+   * draft with it, and points the window there. Returns the refusal, or null.
+   */
+  const relocate = useCallback(
+    (to: string): string | null => {
+      let moved: ReturnType<typeof moveProject>;
+      try {
+        moved = moveProject(repoDir, to, {
+          projects: readProjects(localStorage.getItem(PROJECTS_KEY)),
+          pins: readPins(localStorage.getItem(PINNED_KEY)),
+          names: readNames(localStorage.getItem(NAMES_KEY)),
+          projectNames: readProjectNames(localStorage.getItem(PROJECT_NAMES_KEY)),
+        });
+        if (!moved.ok) return moved.why;
+        localStorage.setItem(PROJECTS_KEY, JSON.stringify(moved.held.projects));
+        localStorage.setItem(PINNED_KEY, JSON.stringify(moved.held.pins));
+        localStorage.setItem(NAMES_KEY, JSON.stringify(moved.held.names));
+        localStorage.setItem(PROJECT_NAMES_KEY, JSON.stringify(moved.held.projectNames));
+      } catch (err: unknown) {
+        return `this window could not save that: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      const next = to.trim();
+      saveDrafts((list) => list.map((d) => (dirKey(d.dir) === dirKey(repoDir) ? { ...d, dir: next } : d)));
+      setProjectsEpoch((n) => n + 1);
+      setMoved({ from: repoDir, to: next });
+      rememberRepo(next);
+      return null;
+    },
+    [repoDir, rememberRepo, saveDrafts],
+  );
   const [draftId, setDraftId] = useState<string | null>(null);
   const drafting = drafts.find((d) => d.id === draftId) ?? null;
   /**
@@ -510,6 +578,12 @@ export function Cockpit() {
   // and let go of the draft, which moves the pilot pane onto the run's key — and
   // that move is a start rather than a click, so the run adopts the conversation.
   const startedId = run.identity?.runId ?? null;
+  // The held key goes once the run has an id to adopt into, once it has ended
+  // without one, or as soon as the window is pointed somewhere else on purpose.
+  const launchSettled = startedId !== null || run.completed !== null;
+  useEffect(() => {
+    if (launchSettled || viewing !== null || draftId !== null) setHoldChat(null);
+  }, [launchSettled, viewing, draftId]);
   useEffect(() => {
     if (startedId === null || drafting === null) return;
     if (launchedFrom.current !== drafting.id) return;
@@ -689,6 +763,7 @@ export function Cockpit() {
     (argv: readonly string[], fromDraft: string | null = null) => {
       launchedFrom.current = fromDraft;
       if (fromDraft !== null) saveDrafts((list) => markLaunched(list, fromDraft));
+      else setHoldChat(pilotAt.current);
       // A new run is a new column. Appending to the previous one's cycles would
       // draw a single loop out of two runs.
       dispatch({ type: 'reset' });
@@ -878,6 +953,7 @@ export function Cockpit() {
    */
   const [commands, setCommands] = useState(noCommands);
   useEffect(() => {
+    if (!host.inShell()) return;
     let stop: (() => void) | null = null;
     let cancelled = false;
     void (async () => {
@@ -976,6 +1052,11 @@ export function Cockpit() {
    * has not finished.
    */
   const shownDir = viewing?.dir ?? drafting?.dir ?? run.identity?.repo ?? repoDir;
+  // Which conversation the pilot shows: the one on screen, or the one that
+  // proposed a launch still waiting for its run id (see `holdChat`).
+  const pilotDir = holdChat?.dir ?? shownDir;
+  const pilotRunId = holdChat !== null ? holdChat.runId : (drafting?.id ?? shownRunId);
+  pilotAt.current = { dir: pilotDir, runId: pilotRunId };
   /**
    * The live run's repository, for the one pane that is always about it.
    *
@@ -1024,10 +1105,16 @@ export function Cockpit() {
   return (
     <div className="v-cockpit">
       <header className="v-cockpit__bar">
-        <LivenessDot state={outside ? 'absent' : wire.connected ? 'live' : 'quiet'} />
-        <span className="v-cockpit__title">vibe</span>
+        <div className="v-cockpit__brand"><VibeMark /><span className="v-cockpit__title">vibe<span className="v-cockpit__brand-dot">.</span></span></div>
+        <span className="v-cockpit__breadcrumb">Workspace <span>/</span> <strong>{shownDir.trim() === '' ? 'Your next idea' : projectName(shownDir)}</strong></span>
+        <button className="v-cockpit__search" onClick={() => setSwitching(true)} title="Switch run (Ctrl+K)">
+          <Icon name="search" size={15} /> <span>Find a run</span><kbd>Ctrl K</kbd>
+        </button>
+        <div className="v-cockpit__connection"><LivenessDot state={outside ? 'absent' : wire.connected ? 'live' : 'quiet'} />
+          <span>{outside ? 'Browser preview' : wire.connected ? 'Connected' : 'Connecting'}</span>
+        </div>
         {outside ? (
-          <MetaChip>browser · no shell</MetaChip>
+          null
         ) : (
           <>
             {/* Hi-fi 15: a chip **only when a value is wrong**, and it names the
@@ -1142,12 +1229,9 @@ export function Cockpit() {
           <StateKicker tone="alarm">no host</StateKicker> {wire.failure}
         </div>
       )}
-      {wire.uncontained !== null && wire.connected && (
-        <div className="v-cockpit__alarm">
-          <StateKicker tone="quiet">uncontained</StateKicker> {wire.uncontained} — the run stays
-          resumable, but it keeps spending until you stop it.
-        </div>
-      )}
+      {/* `Status.uncontained` is no longer drawn here: a permanent banner on
+          every Linux and macOS launch was removed at the owner's request. The
+          field is still read, so it can move into the diagnostics popover. */}
 
       <div className="v-cockpit__body">
         {/* The navigator (#223). **One sidebar, not a rail beside a panel** —
@@ -1194,6 +1278,7 @@ export function Cockpit() {
         >
           <Sidebar
             dir={repoDir}
+            epoch={projectsEpoch}
             drafts={drafts}
             draftId={draftId}
             // Back to a draft's conversation. It has no run to read, so the
@@ -1206,7 +1291,11 @@ export function Cockpit() {
             }}
             onForgetDraft={forgetDraft}
             onSettled={settleDrafts}
-            currentId={run.identity?.runId ?? null}
+            // The run ON SCREEN, which is what a highlight means (#223). This
+            // was the live run, so opening a past one left the highlight on the
+            // run you had just left - or on nothing when none was going. A
+            // draft on screen is no run at all.
+            currentId={viewing?.runId ?? (draftId !== null ? null : (run.identity?.runId ?? null))}
             onNew={() => setComposing({ dir: repoDir, locked: false })}
             // A run in THIS project, with the repository already answered. It
             // also points the window there, because the run about to start is
@@ -1255,13 +1344,23 @@ export function Cockpit() {
           />
         </SidePanel>
 
-        <div className="v-cockpit__pane">
+        <div className="v-cockpit__pane" role="main">
+          <header className="v-workspace__head">
+            <div><p className="v-workspace__eyebrow">{viewing !== null ? 'Run archive' : 'Make room for good work'}</p>
+              <h2>{tab === 'pilot' ? 'Your pilot' : tab === 'output' ? 'Activity' : tab === 'plans' ? 'Plans' : tab === 'critique' ? 'Plan critique' : tab === 'code' ? 'Code changes' : tab === 'review' ? 'Code review' : tab === 'verify' ? 'Verification' : tab === 'questions' ? 'Questions' : tab === 'commands' ? 'Commands' : tab === 'spend' ? 'Usage' : tab === 'settings' ? 'Settings' : 'Project runs'}</h2>
+            </div>
+            <button className="v-workspace__usage" onClick={() => setTab('spend')} title="Usage for the live run">
+              <Icon name="loop" size={15} />
+              {run.spend.tokens === null ? 'No usage reported' : `${fmtTokens(run.spend.tokens)} tokens`}
+            </button>
+          </header>
           {/*
             Hi-fi 1's bar, in the design's own order. It had twelve tabs against
             the design's seven, and `design/AUDIT.md` traced most of that to the
             missing rail rather than to a decision anybody made: `Settings` is
             the rail's `⚙`, `Runs` is the rail plus ⌘K, and `Spend` is a
-            right-aligned readout in this bar rather than a tab of its own.
+            readout rather than a tab of its own. The October redesign moves
+            that readout into the canvas heading, leaving more room for tabs.
 
             `Pilot` is first and is where the window lands, which hi-fi 5 says in
             as many words. `Verify`, `Commands` and `Keys` follow the seven: they
@@ -1275,15 +1374,17 @@ export function Cockpit() {
                 nobody sees blocks the conversation silently. */}
             <button
               className={`v-cockpit__tab ${tab === 'pilot' ? 'v-cockpit__tab--on' : ''}`}
+              aria-current={tab === 'pilot' ? 'page' : undefined}
               onClick={() => setTab('pilot')}
             >
-              Pilot chat{proposals > 0 ? ` · ${String(proposals)}` : ''}
+              Pilot{proposals > 0 ? ` · ${String(proposals)}` : ''}
             </button>
             <button
               className={`v-cockpit__tab ${tab === 'output' ? 'v-cockpit__tab--on' : ''}`}
+              aria-current={tab === 'output' ? 'page' : undefined}
               onClick={() => setTab('output')}
             >
-              Output
+              Activity
             </button>
             {/* Hi-fi 3, and it is built now (#223). The tooltip on the tab it
                 replaces said *"this window cannot read a run's artifacts"*,
@@ -1293,6 +1394,7 @@ export function Cockpit() {
                 attached to it. Both are now on the core side, where they belong. */}
             <button
               className={`v-cockpit__tab ${tab === 'plans' ? 'v-cockpit__tab--on' : ''}`}
+              aria-current={tab === 'plans' ? 'page' : undefined}
               onClick={() => open('plans')}
             >
               Plans
@@ -1318,29 +1420,33 @@ export function Cockpit() {
                 draws all four beside the tolerance that decided them. */}
             <button
               className={`v-cockpit__tab ${tab === 'critique' ? 'v-cockpit__tab--on' : ''}`}
+              aria-current={tab === 'critique' ? 'page' : undefined}
               onClick={() => open('critique')}
             >
-              Plan critique
+              Critique
             </button>
             {/* `1d`, per round. The whole-run diff is this pane's first section
                 and is still what it opens on before any round has committed. */}
             <button
               className={`v-cockpit__tab ${tab === 'code' ? 'v-cockpit__tab--on' : ''}`}
+              aria-current={tab === 'code' ? 'page' : undefined}
               onClick={() => open('code')}
             >
               Code{run.commits.length > 0 ? ` · ${String(run.commits.length)}` : ''}
             </button>
             <button
               className={`v-cockpit__tab ${tab === 'review' ? 'v-cockpit__tab--on' : ''}`}
+              aria-current={tab === 'review' ? 'page' : undefined}
               onClick={() => open('review')}
             >
-              Code review
+              Review
             </button>
             {/* `1f`. The count is blocking questions, not all of them: an
                 advisory question the answerer handled needs nobody, and a
                 badge that included it would train you to ignore the badge. */}
             <button
               className={`v-cockpit__tab ${tab === 'questions' ? 'v-cockpit__tab--on' : ''}`}
+              aria-current={tab === 'questions' ? 'page' : undefined}
               onClick={() => open('questions')}
             >
               Questions
@@ -1353,6 +1459,7 @@ export function Cockpit() {
                 gate count would move for a reason nobody cares about. */}
             <button
               className={`v-cockpit__tab ${tab === 'verify' ? 'v-cockpit__tab--on' : ''}`}
+              aria-current={tab === 'verify' ? 'page' : undefined}
               onClick={() => setTab('verify')}
             >
               Verify{run.verify.length > 0 ? ` · ${String(run.verify.length)}` : ''}
@@ -1363,6 +1470,7 @@ export function Cockpit() {
                 only grew would be the tray-badge failure `4e` names. */}
             <button
               className={`v-cockpit__tab ${tab === 'commands' ? 'v-cockpit__tab--on' : ''}`}
+              aria-current={tab === 'commands' ? 'page' : undefined}
               onClick={() => setTab('commands')}
             >
               Commands
@@ -1379,19 +1487,8 @@ export function Cockpit() {
               Absent rather than `0 tok` before anything is charged. A run that
               has spent nothing yet has not spent zero; it has not been measured.
             */}
-            <button
-              className={`v-cockpit__readout ${tab === 'spend' ? 'v-cockpit__readout--on' : ''}`}
-              onClick={() => setTab('spend')}
-              title="what this run has spent"
-            >
-              {run.spend.tokens === null
-                ? 'spend · nothing charged yet'
-                : `${fmtTokens(run.spend.tokens)} tok${
-                    run.spend.codexTokens === null
-                      ? ''
-                      : ` · codex ${fmtTokens(run.spend.codexTokens)}`
-                  }`}
-            </button>
+            {/* Usage now lives in the workspace heading, giving the artifact
+                navigation its full width. The same pane keeps both providers. */}
           </div>
           {/* **Which run the panes are about, whenever it is not the live one.**
               The panes and the column both follow an opened run now (#223), so
@@ -1406,8 +1503,7 @@ export function Cockpit() {
               <StateKicker tone="quiet">reading</StateKicker>
               <span className="v-cockpit__viewingwhat">{viewing.task}</span>
               <span className="v-cockpit__viewingnote">
-                from disk. The spend in the bar above is the run this window is narrating; what
-                this one spent is in its record, on the right.
+                Reading a saved run. Usage above belongs to the live run; this run&apos;s record is in the overview.
               </span>
               <button className="v-doc__again" onClick={() => setTab('runs')}>
                 resume it…
@@ -1450,6 +1546,8 @@ export function Cockpit() {
               // into the other.
               key={`${settingsScope}:${repoDir}`}
               scope={settingsScope}
+              onRelocate={relocate}
+              movedFrom={moved !== null && dirKey(moved.to) === dirKey(repoDir) ? moved.from : null}
               dir={repoDir}
               scale={scale}
               onScale={rescale}
@@ -1536,14 +1634,14 @@ export function Cockpit() {
               // screen, and with no project selected at all it was blocked
               // outright: *"I just tried sending a chat to an old run's pilot
               // but I can't"*.
-              dir={shownDir}
+              dir={pilotDir}
               // Which conversation to show. It follows the run the panes are
               // reading, so opening a finished run brings back the chat about
               // it — and null, before any run, is the conversation that will
               // propose one.
               // A draft's conversation is its own, keyed by the draft id until
               // the run it asked for starts and adopts it (#223).
-              runId={drafting?.id ?? shownRunId}
+              runId={pilotRunId}
               access={access}
               // Pointed at rather than started here. `viewing` is set by
               // clicking a row in the archive, and a click is a read — so the
@@ -1552,7 +1650,7 @@ export function Cockpit() {
               // A draft counts as pointed-at too: arriving at one restores ITS
               // conversation rather than adopting whatever was on screen, which
               // is what a fresh draft needs. Leaving it for its run is the start.
-              opened={viewing !== null || drafting !== null}
+              opened={holdChat === null && (viewing !== null || drafting !== null)}
               commands={commands}
               onEffect={onEffect}
               ask={brief}
@@ -1572,7 +1670,7 @@ export function Cockpit() {
               // it underneath would point the pilot at a repository the run is
               // not in.
               kickoff={
-                (!launched || run.completed !== null) && !outside ? (
+                (!launched || run.completed !== null) && repoDir.trim() !== '' ? (
                   <Kickoff dir={repoDir} />
                 ) : undefined
               }
@@ -1593,7 +1691,7 @@ export function Cockpit() {
             take the left, next to the rail they are drawn from. */}
         <SidePanel
           side="right"
-          title="Groups"
+          title="Run overview"
           mark="⋮⋮"
           open={showLoop}
           onToggle={() => setShowLoop((on) => !on)}
@@ -1663,9 +1761,7 @@ export function Cockpit() {
                     <div className="v-loop__waiting">
                       <StateKicker tone="quiet">waiting for the brief</StateKicker>
                       <p>
-                        Say what you want in the conversation — that is the front door. There is no
-                        start button: when the pilot has enough, it <strong>proposes</strong> the
-                        exact command and you press that.
+                        Describe the work to your pilot. Review the brief, then approve its proposal to begin.
                       </p>
                     </div>
                     {/* `4a`, for the one moment somebody is deciding how THIS run
@@ -1675,7 +1771,7 @@ export function Cockpit() {
                       onClick={() => setComposing({ dir: repoDir, locked: false })}
                       disabled={busy || !wire.connected}
                     >
-                      or set this run&apos;s overrides…
+                      Customize this run
                     </button>
                   </>
                 )}

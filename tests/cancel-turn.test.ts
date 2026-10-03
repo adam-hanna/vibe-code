@@ -272,3 +272,38 @@ test('a latch does not survive into the next run in the same process', async () 
 
   assert.equal(sawLatch, null, 'the new run started already cancelled');
 });
+
+test('a stop pressed during preflight ends the run there, and buys no first turn', async () => {
+  // #223: the probes were not interruptible and nothing checked the latch after
+  // them, so a stop pressed during the minutes between launching a run and its
+  // first turn waited all of that out and ended the run the instant planning
+  // began. Reported as a new run that "sits and stalls forever".
+  clearCancel();
+  const dir = mkdtempSync(path.join(tmpdir(), 'vibe-cancel-preflight-'));
+  initGit(dir);
+  const state = createRun(dir, 'stop me early', false);
+  let looped = false;
+
+  const code = await quiet(() =>
+    execute(
+      state,
+      DEFAULTS,
+      false,
+      true,
+      () => {
+        // A stop arriving while the gate's probes run.
+        requestCancel('stopped during preflight');
+        return Promise.resolve(null);
+      },
+      () => {
+        looped = true;
+        return Promise.resolve();
+      },
+    ),
+  );
+
+  assert.equal(looped, false, 'the loop started after a stop');
+  assert.equal(code, EXIT.NEEDS_HUMAN);
+  assert.equal(state.status, 'needs-input');
+  clearCancel();
+});

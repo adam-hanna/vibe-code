@@ -1,6 +1,7 @@
 import { dirKey } from '../cockpit/projects';
 import { emptyConversation } from './transcript';
-import type { Conversation } from './transcript';
+import type { Conversation, Reply } from './transcript';
+import type { Backend } from './backend';
 import { DRAFT_PREFIX } from '../cockpit/pending';
 
 /**
@@ -33,6 +34,11 @@ import { DRAFT_PREFIX } from '../cockpit/pending';
  */
 
 const PREFIX = 'vibe.chat.';
+
+/** Turn ids restart with the window; the request timestamp keeps them distinct. */
+export function replyKey(reply: Pick<Reply, 'provider' | 'turn' | 'startedAt'>): string {
+  return `${reply.provider}:${String(reply.turn)}:${String(reply.startedAt ?? 'legacy')}`;
+}
 
 /** Where a conversation lives. `none` is the one that has not launched yet. */
 /**
@@ -78,10 +84,27 @@ export function readChat(raw: string | null): Conversation {
       // A count of events THIS window did not recognise. A stored one describes
       // a session that has ended and would be a warning about nothing.
       unknown: 0,
+      // The CLI session that remembers it (#223), so a relaunch resumes the
+      // conversation on screen instead of answering it from nothing. Anything
+      // malformed is no session, which costs the model's memory and nothing else.
+      session: readSession(row['session']),
+      carry: typeof row['carry'] === 'string' ? row['carry'] : null,
     };
   } catch {
     return emptyConversation();
   }
+}
+
+const BACKENDS: readonly string[] = ['subscription', 'codex', 'anthropic', 'openai'];
+
+function readSession(value: unknown): Conversation['session'] {
+  if (typeof value !== 'object' || value === null) return null;
+  const row = value as Record<string, unknown>;
+  const backend = row['backend'];
+  const id = row['id'];
+  if (typeof backend !== 'string' || !BACKENDS.includes(backend)) return null;
+  if (typeof id !== 'string' || id === '') return null;
+  return { backend: backend as Backend, id };
 }
 
 /**
@@ -94,6 +117,8 @@ export function writable(conversation: Conversation): string {
   return JSON.stringify({
     messages: conversation.messages,
     replies: conversation.replies,
+    session: conversation.session,
+    carry: conversation.carry,
   });
 }
 

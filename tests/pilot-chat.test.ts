@@ -205,7 +205,9 @@ test('what the turn moved is reported and what it cost is not', async () => {
     total: 36,
   });
   assert.ok(!('costUsd' in result), 'a money field appeared on a subscription turn');
-  assert.deepEqual(Object.keys(result).sort(), ['sessionId', 'text', 'tokens']);
+  // `context` joined it (#223): an occupancy in tokens, which is a count and
+  // not money. The list stays closed so a cost field still fails here.
+  assert.deepEqual(Object.keys(result).sort(), ['context', 'sessionId', 'text', 'tokens']);
 });
 
 // ---- how it fails ----------------------------------------------------------

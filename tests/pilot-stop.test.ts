@@ -79,7 +79,7 @@ test('stopping a turn that already ended is answered and changes nothing', async
   const sent: Outbound[] = [];
   const session = createSession((m) => void sent.push(m), {
     invoke: () => Promise.resolve(0),
-    pilot: () => Promise.resolve({ text: 'done', sessionId: 's', tokens: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0, total: 2 } }),
+    pilot: () => Promise.resolve({ text: 'done', sessionId: 's', tokens: { input: 1, output: 1, cacheRead: 0, cacheCreation: 0, total: 2 }, context: null }),
   });
   session.receive(line(REQUEST));
   await settle();

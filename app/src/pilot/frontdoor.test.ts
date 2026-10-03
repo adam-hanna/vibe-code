@@ -58,11 +58,13 @@ describe('the composer hands the brief to the pilot', () => {
     expect(wiring).not.toContain('onLaunch');
   });
 
-  test('the one control says start', () => {
+  test('the one control describes the conversation it actually starts', () => {
     // `level="primary"` is the one the eye lands on and the one Enter triggers,
     // and it is the only button besides cancel.
     const foot = composer.slice(composer.indexOf('className="v-new__foot"'));
-    expect(foot).toMatch(/level="primary" type="submit"[^>]*>\s*start\s*</);
+    // A run starts later, on the pilot's proposal. Calling this "start" hid
+    // that distinction; the new wording makes the existing behavior explicit.
+    expect(foot).toMatch(/level="primary" type="submit"[^>]*>\s*Discuss with pilot\s*</);
     expect(foot.match(/<Button/g)).toHaveLength(2);
   });
 });

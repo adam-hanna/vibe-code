@@ -13,5 +13,11 @@ export default defineConfig({
     // readable.
     assetsInlineLimit: 0,
   },
-  server: { port: 1420, strictPort: true },
+  server: {
+    port: 1420,
+    strictPort: true,
+    // Cargo output is not webview source. Watching its locked executables on
+    // Windows can stop Vite while a packaged build is running.
+    watch: { ignored: ['**/src-tauri/**'] },
+  },
 });

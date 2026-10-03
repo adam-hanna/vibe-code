@@ -419,6 +419,32 @@ they are waiting on. Four things in it are worth carrying:
   render time, keyed by `(project, run)` like a pin and a saved conversation, and an empty
   name **clears** rather than storing a blank, because those are one intention.
 
+  **A project is renamed the same way, for the same reason one level up** (#223): *"I'd like
+  to be able to rename projects and runs."* A project *is* its repository and every request
+  names the directory, so `projectLabel` puts a name in front of the folder for display and the
+  path is never touched; keyed through `dirKey`, cleared by an empty box, and forgotten when the
+  project is removed. The run's ✎ had existed all along and was not found, because it shows only
+  on hover — so the project row's ✎ is always drawn, like its other actions, and **double-click
+  on either title renames it** as a second road.
+
+  **And a project can be pointed somewhere else, from its own settings** (#223): *"We need to
+  be able to edit the project root dir in the project settings."* The case is a project added
+  one folder off — the parent of the repository — or a repository that moved. `moveProject` is
+  pure and moves this window's memory of the project with it (its place in the list, its name,
+  its pins and its runs' names; `Cockpit` moves its drafts) and nothing on disk; the screen then
+  reads the new directory's own `vibe.config.json`. It refuses a path that is already a project
+  rather than merging two rows. The sidebar takes an `epoch` and re-reads its lists when it
+  moves, because those lists are otherwise read once. The field is drawn on the settings
+  screen's empty state too, since a project pointed at the wrong place is the one whose
+  configuration may not read.
+
+  **The old `vibe.config.json` is offered, never carried.** After a move, if the new directory
+  has no file and the old one has one, the screen offers to copy it — through the ordinary save,
+  so it is validated like any other — and leaves the old file where it is. Never when the new
+  directory has its own: that file is usually committed and is the repository's, and a move
+  that merged into it would change a tracked file nobody asked to change. An offer rather than
+  a step of the move, because the move otherwise writes nothing to disk.
+
   **The two deletions say opposite things and the confirmation is the only thing that can tell
   them apart.** Removing a *project* is a row in this window — nothing on disk is touched, and
   adding it back brings every run with it. Deleting a *run* removes `.vibe/runs/<id>` and is
@@ -1364,6 +1390,15 @@ they are waiting on. Four things in it are worth carrying:
   Neither is persisted, and that is deliberate — a collapse is a gesture for the next few
   minutes, where `localStorage` holds the repository and the spend ceiling because those are
   decisions.
+
+  **The width is the exception, and it is on the same side of that line** (#223): *"The two
+  side bars (left and right) should be width adjustable when open."* An open panel's inner edge
+  is a handle — drag, arrow keys, double-click for the design's 364px — and the width **is**
+  kept, per edge, because how wide you like a column is a preference set once, like the type
+  scale. This overrides `HANDOFF.md`'s *"364px, fixed"* at the owner's word, so the comments
+  that say *"a 364px column"* describe the default, not a guarantee: anything in a side column
+  must still fit at 240px, the floor. The ceiling is half the window, so the main pane cannot
+  be squeezed out, and a window made narrower pulls a wide panel back with it.
 - **A tab's count is how many things are behind it, and never a property of them.**
   `Plan critique · 2` was two blocking findings and was read as two critiques, which is the
   reasonable reading, since every other count in that bar — Code, Questions, Verify, Commands
@@ -2409,6 +2444,61 @@ carry it:
   have handed a child in that child's stdout, stderr and lines, because Codex's 401 quotes the key
   in full and every caller hands stderr to a log. `keys.test.ts` pins the second reader.
 
+**A launch holds the chat that proposed it until the run has an id** (#223).
+`launch` points the window at the new run before `run_started` has named it, so for
+those seconds the pilot pane had no run id to key its chat by. It fell back to the
+project bucket, `chatKey(dir, null)`, and restored whatever stale exchange was
+stored there. The new run then **adopted that** under the widened rule above. The
+reports were *"the pilot chat, progress etc gets confused with a previous run"* and
+*"it's like some key isn't unique somewhere"*. They were right in spirit: the key
+was unique, but for a moment the pane was using the wrong one. `holdChat` keeps the
+proposing key through the gap, so the gap is a `stay` and the adoption is of the
+right conversation. A draft already held itself, which is why only a non-draft
+launch sets it. When the proposer was a *run's* own chat, that chat keeps its record
+and gives up its CLI session, because two chats resuming one session would each
+answer from the other's messages.
+
+**A stop pressed during preflight ends the run there** (#223). The probes were not
+interruptible and nothing checked the latch after them or after the worktree
+script. So a stop pressed in the minutes between launching and the first turn
+waited all of it out, and the run ended the instant planning began. On screen that
+reads as a run that stalls and then dies on its own. The probes now register as
+interruptible. `stopIfCancelled` runs after the worktree script, after the probes
+and after the gate, and throws `Cancelled` into `execute`'s one handler. The
+worktree script itself is still not killed: it is the person's own command, and a
+half-made tree is what `createWorktree` repairs on resume.
+
+**The pilot reports how full its context is, and can compact or clear it** (#223).
+Asked for as *"report context remaining for the pilot and offer some way to compact
+it"*. Three things are worth keeping:
+
+- **The figure is the last request's prompt, never `tokens`.** The reply already
+  carried `tokens`, and it is what the turn *moved*, summed over every request: a
+  Codex pilot turn measured 40,078 input tokens against a last prompt of 14,280.
+  Claude's comes from the last assistant message plus `modelUsage.contextWindow`
+  (`promptContext`, the arithmetic `extractUsage` already uses). **Codex's comes
+  from its own rollout file**, `$CODEX_HOME/sessions/…/rollout-…-<thread>.jsonl`,
+  because `codex exec --json` says neither the prompt size nor the window. That
+  file's `token_count` event carries both, and its window is the one Codex itself
+  compacts against. It is a format nobody promised, so `rolloutContext` fails
+  closed to *no figure*. The API road has a count and no window, and says so
+  rather than dividing by a guess.
+- **Compaction is session rotation with a handoff, on every backend.** `/compact`
+  does not work headless (settled above), and `codex exec` has nothing like it.
+  So the pilot is asked for its own handoff summary in one turn, and then the
+  wire is replaced. A CLI chat gives up its session and **carries** the summary
+  into the first message of the next one; `carry` is cleared only when a new
+  session has taken it, so a failed turn sends it again. An API chat re-sends
+  only the request and the summary. **The log is never shortened**: `messages` is
+  the wire and `replies` is the record, so both compact and clear change the
+  first and leave the second alone. A clear leaves a divider in the log.
+- **The session moved into the conversation, and that fixed two defects.** It was
+  a ref in the pane. A relaunch therefore restored the transcript and forgot the
+  session, so the pilot answered the next message from nothing. Opening another
+  run's chat kept the ref, so that chat continued inside the previous one's
+  session. `Conversation.session` names its backend and is saved with the chat. A
+  turn on another backend retires it, because that session never saw the turn.
+
 **The pilot runs in the repository the window named, and that path is a
 permission boundary.** `--restricted` confines `Read`, `Glob` and `Grep` to the
 child's working directory, so `cwd` is not incidental the way it is for a process
@@ -2534,8 +2624,11 @@ graceful endings by closing stdin; a Windows Job Object with
 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` handles the ones that run no user code at all — `End
 task`, `Stop-Process -Force`, a panic. There is nothing to hook for those by design, so the
 mechanism has to be declared in advance and left to the OS. macOS and Linux have no
-equivalent yet and **say so** through `Status.uncontained`, which the window shows: an
-unenforced guarantee nobody can see is the same as no guarantee.
+equivalent yet and **say so** through `Status.uncontained`. The window drew it as a
+permanent banner until the owner asked for it gone, since on Linux and macOS it showed on
+every launch and said nothing actionable. The field is still on `Status`; if it is drawn
+again, the diagnostics popover is the place, beside the other facts that matter only
+when something has gone wrong.
 
 **A closed stdin means the supervisor has gone, and that is stronger than a `shutdown`**
 (#206). Both used to call the same thing, and the equivalence was wrong in a way that made

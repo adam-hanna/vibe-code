@@ -440,6 +440,33 @@ function parseStream(stdout: string): StreamParse {
   return { result, lastAssistantUsage };
 }
 
+/**
+ * How full the conversation was at the end of a turn, read off a whole stream.
+ *
+ * `extractUsage`'s arithmetic, and its rule: the prompt of the **last assistant
+ * message**, never the envelope's aggregate. Exported for the pilot (#223),
+ * which wants the size even when the envelope names no window - a count with
+ * no denominator is still a count, where `ContextUsage` needs both because a
+ * rotation decision divides by it.
+ */
+export function promptContext(stdout: string): { tokens: number; window: number | null } | null {
+  const { result, lastAssistantUsage } = parseStream(stdout);
+  if (lastAssistantUsage === null) return null;
+  const tokens =
+    num(lastAssistantUsage['input_tokens']) +
+    num(lastAssistantUsage['cache_read_input_tokens']) +
+    num(lastAssistantUsage['cache_creation_input_tokens']);
+  if (tokens <= 0) return null;
+  let window = 0;
+  const modelUsage = result?.['modelUsage'];
+  if (isRecord(modelUsage)) {
+    for (const entry of Object.values(modelUsage)) {
+      if (isRecord(entry)) window = Math.max(window, num(entry['contextWindow']));
+    }
+  }
+  return { tokens, window: window > 0 ? window : null };
+}
+
 /** What one probe turn reported, beside the text a plain `-p` run would print. */
 export interface ProbeTurnOutput {
   /** The result event's text; the raw stdout when the stream had no result event. */

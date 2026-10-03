@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import cockpit from './Cockpit.tsx?raw';
 import sidebar from './Sidebar.tsx?raw';
+import settingsSrc from './Settings.tsx?raw';
 import {
   SHOWN,
   addProject,
@@ -253,5 +254,83 @@ describe('a project inside another is drawn under it (#223)', () => {
     expect(relativeTo(`${repo}/`, `${tree}/`)).toBe('erm/.worktrees/gh-236');
     // Spellings that do not line up fall back to the folder name, never a guess.
     expect(relativeTo('/elsewhere', tree)).toBe('gh-236');
+  });
+});
+
+describe('a project can be renamed, and only its row changes (#223)', () => {
+  // *"I'd like to be able to rename projects and runs"*.
+  test('a name sits in front of the folder, keyed like a pin, and empty clears it', async () => {
+    const { forgetProjectName, projectLabel, readProjectNames, renameProject } = await import('./projects');
+    const named = renameProject([], 'C:\\Users\\me\\erm', '  ERM  ');
+    expect(projectLabel(named, 'c:/users/me/erm/', 'erm')).toBe('ERM');
+    expect(projectLabel(named, '/elsewhere', 'elsewhere')).toBe('elsewhere');
+    expect(renameProject(named, 'c:/users/me/erm', '   ')).toEqual([]);
+    expect(renameProject(named, 'c:/users/me/erm', 'Risk')).toEqual([{ dir: 'c:/users/me/erm', name: 'Risk' }]);
+    expect(forgetProjectName(named, 'C:\\Users\\me\\erm')).toEqual([]);
+    expect(readProjectNames('[{"dir":"/a","name":"A"},{"dir":"/b","name":""},{"name":"x"}]')).toEqual([
+      { dir: '/a', name: 'A' },
+    ]);
+    expect(readProjectNames('not json')).toEqual([]);
+  });
+
+  test('the row has a rename control, double-click renames both, and the directory is never touched', () => {
+    const row = sidebar.slice(sidebar.indexOf('function Project('));
+    expect(row).toContain('onClick={onRenameProject} title={`Rename ${label}`}');
+    expect(row).toContain('onDoubleClick={onRenameProject}');
+    const run = sidebar.slice(sidebar.indexOf('function RunRow('), sidebar.indexOf('function DraftRow('));
+    expect(run).toContain('onDoubleClick={onRename}');
+    // A rename is this window's memory: no host request carries it.
+    const renamed = sidebar.slice(sidebar.indexOf('const renamedProject'), sidebar.indexOf('Do what the open confirmation says'));
+    expect(renamed).not.toMatch(/host\./);
+    expect(renamed).toContain('save(PROJECT_NAMES_KEY, next)');
+  });
+});
+
+describe('a project can be pointed at another directory (#223)', () => {
+  // *"We need to be able to edit the project root dir in the project settings."*
+  test('everything the window remembers about it follows, and nothing else moves', async () => {
+    const { moveProject } = await import('./projects');
+    const held = {
+      projects: ['/home/me/erm', '/home/me/other'],
+      pins: [
+        { dir: '/home/me/erm/', runId: 'r1', task: 't' },
+        { dir: '/home/me/other', runId: 'r2', task: 't' },
+      ],
+      names: [{ dir: '/home/me/erm', runId: 'r1', name: 'first' }],
+      projectNames: [{ dir: '/home/me/erm', name: 'ERM' }],
+    };
+    const moved = moveProject('/home/me/erm', ' /home/me/erm/erm ', held);
+    expect(moved.ok).toBe(true);
+    if (!moved.ok) return;
+    expect(moved.held.projects).toEqual(['/home/me/erm/erm', '/home/me/other']);
+    expect(moved.held.pins.map((p) => p.dir)).toEqual(['/home/me/erm/erm', '/home/me/other']);
+    expect(moved.held.names[0]?.dir).toBe('/home/me/erm/erm');
+    expect(moved.held.projectNames).toEqual([{ dir: '/home/me/erm/erm', name: 'ERM' }]);
+  });
+
+  test('an empty path, the same path, or another project is refused with a reason', async () => {
+    const { moveProject } = await import('./projects');
+    const held = { projects: ['/a', '/b'], pins: [], names: [], projectNames: [] };
+    expect(moveProject('/a', '  ', held)).toMatchObject({ ok: false, why: expect.stringMatching(/give the directory/) });
+    expect(moveProject('/a', '/a/', held)).toMatchObject({ ok: false, why: expect.stringMatching(/already where/) });
+    expect(moveProject('/a', '/b', held)).toMatchObject({ ok: false, why: '/b is already a project' });
+  });
+
+  test('the field is on the project view only, and the sidebar rereads after a move', () => {
+    expect(settingsSrc).toContain("{scope === 'project' && onRelocate !== undefined && <WhereItIs dir={dir} onRelocate={onRelocate} />}");
+    expect(cockpit).toContain('onRelocate={relocate}');
+    expect(cockpit).toContain('epoch={projectsEpoch}');
+    expect(sidebar).toContain('}, [epoch]);');
+  });
+});
+
+describe('a moved project is offered its old settings, only where there are none (#223)', () => {
+  // *"lets copy it when there isn't already one"*.
+  test('the offer reads the old directory and writes through the ordinary save', () => {
+    const block = settingsSrc.slice(settingsSrc.indexOf('const [carry, setCarry]'));
+    expect(block).toContain("if (scope !== 'project' || movedFrom === null || movedFrom === undefined || !noFileHere) return;");
+    expect(block).toContain('.config(movedFrom)');
+    expect(settingsSrc).toContain("onClick={() => write(carry.raw, 'project')}");
+    expect(cockpit).toContain('setMoved({ from: repoDir, to: next });');
   });
 });

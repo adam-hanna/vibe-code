@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Button, MetaChip, Modal, StateKicker } from '../design';
+import { Button, MetaChip, Modal } from '../design';
 import * as host from '../host';
 import { briefFor } from './argv';
 import { pickDirectory } from './pick';
@@ -150,7 +150,7 @@ export function NewWorkstream({
   };
 
   return (
-    <Modal width={680} onDismiss={onClose}>
+    <Modal width={680} onDismiss={onClose} label="New run">
       <form
         className="v-new"
         onSubmit={(e) => {
@@ -164,23 +164,24 @@ export function NewWorkstream({
         }}
       >
         <div className="v-new__head">
-          <StateKicker tone="accent">new workstream</StateKicker>
+          <p className="v-new__eyebrow">A new beginning</p>
+          <h2 className="v-new__title">What should we work on?</h2>
         </div>
 
         <label className="v-new__label" htmlFor="brief">
-          what are we doing
+          Your brief
         </label>
         <textarea
           id="brief"
           className="v-new__task"
           rows={5}
           value={task}
-          placeholder="The brief, in full"
+          placeholder="Describe the idea, the problem, and what a good result looks like."
           onChange={(e) => setTask(e.target.value)}
         />
 
         <label className="v-new__label" htmlFor={locked ? undefined : 'newdir'}>
-          repository
+          Repository
         </label>
         {locked ? (
           // Stated, not offered. The project answered this, and a field here
@@ -196,11 +197,11 @@ export function NewWorkstream({
                 id="newdir"
                 className="v-new__dir"
                 value={dir}
-                placeholder="an absolute path to a git worktree"
+                placeholder="Path to your project repository"
                 onChange={(e) => onDir(e.target.value)}
               />
               <Button type="button" onClick={choose} disabled={busy}>
-                choose…
+                Browse…
               </Button>
             </div>
             {pickFailed !== null && (
@@ -305,20 +306,17 @@ export function NewWorkstream({
           )}
         </details>
 
-        {/* Named rather than omitted. A modal showing only what it had would
-            read as the whole of what a run can be configured to do. */}
+        {/* Branch naming is automatic and worktree setup belongs to project
+            settings. Neither needs another control in the brief composer. */}
         <p className="v-new__note">
-          No name or branch field: <code>vibe</code> names its own branch after the run id it
-          allocates. Whether the run works in a worktree is a project setting rather than a
-          per-run one — it is under Settings, with the command that makes one.
+          Your pilot helps refine the brief. You review the proposed run before it starts.
         </p>
 
         <label className="v-new__toggle">
           <input type="checkbox" checked={planOnly} onChange={(e) => setPlanOnly(e.target.checked)} />
           <span>
-            plan only — stop after the plan clears critique.{' '}
-            <strong>Leave this on until you mean it:</strong> the other path writes code and
-            commits.
+            <strong>Start with a plan</strong><br />
+            Stop after planning and critique. Turn this off to include code changes and commits.
           </span>
         </label>
 
@@ -327,10 +325,10 @@ export function NewWorkstream({
             would describe a command nothing on this screen runs. */}
         <div className="v-new__foot">
           <Button type="button" onClick={onClose}>
-            cancel
+            Cancel
           </Button>
           <Button level="primary" type="submit" disabled={!ready || busy}>
-            start
+            Discuss with pilot
           </Button>
         </div>
       </form>

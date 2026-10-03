@@ -4,6 +4,7 @@ import { Boundary } from './Boundary';
 import { Cockpit } from './cockpit/Cockpit';
 import './cockpit/cockpit.css';
 import './pilot/pilot.css';
+import './design/workspace.css';
 
 // The cockpit is the window now (#159). The specimen gallery is still the design
 // system's acceptance test and still what `audit:contrast` is written against -

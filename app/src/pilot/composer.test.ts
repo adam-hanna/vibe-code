@@ -37,7 +37,9 @@ describe('the composer', () => {
     // The reason moved out to its own line. A placeholder disappears the moment
     // somebody types, which makes it the wrong place for the one sentence they
     // need while looking at a send button that will not work.
-    expect(entry()).toMatch(/placeholder="say what you want built/);
+    // The redesign uses an invitation; setup errors stay outside the field.
+    expect(entry()).toMatch(/placeholder="What would you like to build, improve, or figure out\?/);
+    expect(entry()).not.toMatch(/placeholder=\{blocked/);
   });
 
   test('send is what refuses, and it refuses on the same value the handler checks', () => {
@@ -58,7 +60,7 @@ describe('the composer', () => {
       pilotPane.indexOf('const ready ='),
     );
     expect(reasons).toMatch(/keys\.PROVIDER_NAME\[provider\]/);
-    expect(reasons).toMatch(/choose a repository first/);
+    expect(reasons).toMatch(/Add a project in the sidebar/);
     expect(reasons).toMatch(/verdict\.why/);
     expect(reasons).toMatch(/proposals\.length/);
     expect(reasons).toMatch(/owed\.length/);

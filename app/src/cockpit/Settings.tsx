@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Button, MetaChip, StateKicker } from '../design';
 import * as host from '../host';
@@ -7,6 +7,7 @@ import type { PilotLimits } from '../pilot/ledger';
 import { Confirm } from './Confirm';
 import { Section } from './Disclosure';
 import { STEPS } from './appearance';
+import { pickDirectory } from './pick';
 import { projectName } from './projects';
 import { DRAFTS_KEY, draftsFor, readDrafts, removeDraft, saveDraft } from './drafts';
 import type { Draft } from './drafts';
@@ -117,6 +118,30 @@ const LIMITS: readonly { key: string; note: string }[] = [
  * specific in three of these five keys, so a cleared field must not arrive as a
  * ceiling nobody typed — the same rule `4a`'s override fields already follow.
  */
+/**
+ * How many saves have been refused on this screen (#223).
+ *
+ * A field re-seeds from what is in force when the saved value changes, and a
+ * refused save changes nothing, so the field went on showing the number that
+ * was typed at it - which read as a save that worked. *"I can't change
+ * maxWaitMinutes in project settings"*: the write was refused because a run
+ * was going, the sentence saying so was at the top of a long page, and the
+ * field beside the cursor said the opposite. Every field resets on this.
+ */
+const Refusals = createContext(0);
+
+/**
+ * The setting's own name, beside its plain-language label (#223).
+ *
+ * The pilot, a stop message and `NEEDS-INPUT.md` all name a setting by its key
+ * - *"set `progress.maxQuietMs` before you press it"* - and a row labelled only
+ * "silence" in minutes left nothing on screen matching that name. The rows that
+ * already lead with the key (the caps, the budget) do not need it.
+ */
+function Key({ name }: { name: string }) {
+  return <code className="v-set__key">{name}</code>;
+}
+
 function NumberField({
   id,
   value,
@@ -129,11 +154,12 @@ function NumberField({
   onSave: (next: number) => void;
 }) {
   const [typed, setTyped] = useState(value === undefined ? '' : String(value));
-  // Re-seeded when the saved value changes, so a refused patch shows what is
-  // actually in force rather than what was typed at it.
+  const refusals = useContext(Refusals);
+  // Re-seeded when the saved value changes, and when a save is refused, so the
+  // field shows what is actually in force rather than what was typed at it.
   useEffect(() => {
     setTyped(value === undefined ? '' : String(value));
-  }, [value]);
+  }, [value, refusals]);
 
   const commit = (): void => {
     const n = Number(typed);
@@ -185,9 +211,10 @@ function TextField({
   onSave: (next: string) => void;
 }) {
   const [typed, setTyped] = useState(value ?? '');
+  const refusals = useContext(Refusals);
   useEffect(() => {
     setTyped(value ?? '');
-  }, [value]);
+  }, [value, refusals]);
 
   return (
     <input
@@ -232,9 +259,10 @@ function ListField({
 }) {
   const joined = value.join('\n');
   const [typed, setTyped] = useState(joined);
+  const refusals = useContext(Refusals);
   useEffect(() => {
     setTyped(joined);
-  }, [joined]);
+  }, [joined, refusals]);
   return (
     <textarea
       id={id}
@@ -546,8 +574,80 @@ function usePromptBlocks(open: boolean): {
 
   return { blocks, failure, loading, reload: () => setAttempt((n) => n + 1) };
 }
+/**
+ * Where this project is, and the control that points it somewhere else (#223):
+ * *"We need to be able to edit the project root dir in the project settings."*
+ *
+ * The directory is what every request this window sends names, so this is the
+ * one project setting that is not in `vibe.config.json` — it is which
+ * `vibe.config.json` the rest of the screen reads. Changing it moves this
+ * window's memory of the project (its name, pins and drafts) and nothing on
+ * disk; the screen then reads the new directory's own file. Drawn on the empty
+ * screen too, because a project pointed at the wrong place is exactly the one
+ * whose configuration may not read.
+ */
+function WhereItIs({ dir, onRelocate }: { dir: string; onRelocate: (to: string) => string | null }) {
+  const [typed, setTyped] = useState(dir);
+  const [why, setWhy] = useState<string | null>(null);
+  useEffect(() => setTyped(dir), [dir]);
+  const point = (to: string): void => setWhy(onRelocate(to));
+  return (
+    <section className="v-set__block">
+      <h3 className="v-set__h">where this project is</h3>
+      <p className="v-set__note">
+        The repository this project points at. Change it when the project was added one folder off —
+        the parent of the repository rather than the repository — or when the repository moved. The
+        project keeps its name, pins and drafts; the settings below are then read from the new
+        directory&apos;s own <code>vibe.config.json</code>, and its runs from its own{' '}
+        <code>.vibe/runs</code>. Nothing on disk is moved or copied.
+      </p>
+      <form
+        className="v-set__promptrow"
+        onSubmit={(e) => {
+          e.preventDefault();
+          point(typed);
+        }}
+      >
+        <input
+          className="v-set__text"
+          value={typed}
+          spellCheck={false}
+          aria-label="the project's directory"
+          onChange={(e) => setTyped(e.target.value)}
+        />
+        <Button
+          level="secondary"
+          type="button"
+          onClick={() => {
+            void pickDirectory()
+              .then((chosen) => {
+                if (chosen !== null) point(chosen);
+              })
+              .catch((err: unknown) =>
+                setWhy(`the chooser did not open: ${err instanceof Error ? err.message : String(err)} — type a path instead`),
+              );
+          }}
+        >
+          choose…
+        </Button>
+        <Button level="primary" type="submit" disabled={typed.trim() === dir.trim()}>
+          point here
+        </Button>
+      </form>
+      {why !== null && (
+        <div className="v-set__refused">
+          <StateKicker tone="alarm">refused</StateKicker>
+          <span>{why}</span>
+        </div>
+      )}
+    </section>
+  );
+}
+
 export function Settings({
   scope,
+  onRelocate,
+  movedFrom,
   dir,
   scale,
   onScale,
@@ -565,6 +665,10 @@ export function Settings({
    * screen, and the reply was that the two belong in two places.
    */
   scope: 'project' | 'global';
+  /** Point the project at another directory; the refusal, or null (#223). */
+  onRelocate?: (to: string) => string | null;
+  /** Where this project pointed before it was moved here, in this session. */
+  movedFrom?: string | null;
   dir: string;
   /** How big the product is drawn. Window state — see `appearance.ts`. */
   scale: number;
@@ -597,6 +701,7 @@ export function Settings({
   const [failure, setFailure] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [refusals, setRefusals] = useState(0);
   /** Whether the prompts section is open, which is what makes its read lazy. */
   const [showPrompts, setShowPrompts] = useState(false);
   const prompts = usePromptBlocks(showPrompts);
@@ -663,11 +768,36 @@ export function Settings({
           // was written, so the screen still shows what is in force.
           setFailure(err instanceof Error ? err.message : String(err));
           setSaved(null);
+          setRefusals((n) => n + 1);
         })
         .finally(() => setBusy(false));
     },
     [dir, onSaved],
   );
+  /**
+   * The old directory's `vibe.config.json`, offered to a project just moved to
+   * a directory that has none (#223): *"lets copy it when there isn't already
+   * one"*. Never when the new directory has its own — that file is usually
+   * committed and belongs to the repository. A copy, so the old file stays.
+   */
+  const [carry, setCarry] = useState<{ path: string; raw: Record<string, unknown> } | null>(null);
+  const noFileHere = frame !== null && frame.path === null;
+  useEffect(() => {
+    setCarry(null);
+    if (scope !== 'project' || movedFrom === null || movedFrom === undefined || !noFileHere) return;
+    let live = true;
+    void host
+      .config(movedFrom)
+      .then((old) => {
+        if (live && old.path !== null && Object.keys(old.raw).length > 0) setCarry({ path: old.path, raw: old.raw });
+      })
+      // An old directory whose file cannot be read has nothing to offer.
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [scope, movedFrom, noFileHere]);
+
   /** A save to whichever file this screen was opened for. */
   const save = useCallback((patch: Record<string, unknown>) => write(patch, scope), [write, scope]);
 
@@ -682,6 +812,9 @@ export function Settings({
           <button className="v-set__again" onClick={load}>
             try again
           </button>
+        )}
+        {scope === 'project' && onRelocate !== undefined && failure !== null && (
+          <WhereItIs dir={dir} onRelocate={onRelocate} />
         )}
       </div>
     );
@@ -743,6 +876,7 @@ export function Settings({
   };
 
   return (
+    <Refusals.Provider value={refusals}>
     <div className="v-set">
       {/* **Which file, said here** (#223). Chosen by the door this screen was
           opened from, so the heading and the line under it are what tell the two
@@ -755,6 +889,28 @@ export function Settings({
           ? 'This repository’s own settings, in its vibe.config.json. Anything left alone here comes from your settings for all projects, and failing that from vibe’s own default — the chip beside each value says which. The test command and the worktree are only ever set here.'
           : 'Your settings for every project on this machine. How each vendor is reached, the CLIs and the pilot’s permissions are only ever set here; for the rest, a project that sets a key in its own file wins, and the chip says when one does.'}
       </p>
+      {scope === 'project' && onRelocate !== undefined && <WhereItIs dir={dir} onRelocate={onRelocate} />}
+      {carry !== null && (
+        <div className="v-set__fact">
+          <span className="v-set__factname">bring the settings</span>
+          <span>
+            This directory has no <code>vibe.config.json</code>, and the one this project pointed at
+            before does: <code>{carry.path}</code>. Copying it writes the same settings here, checked
+            like any other save; the old file is left where it is.
+            <span className="v-set__inline">
+              <Button
+                level="primary"
+                disabled={busy}
+                // The offer goes once the file exists, and stays on a refusal,
+                // which is shown above with the field it named.
+                onClick={() => write(carry.raw, 'project')}
+              >
+                copy it here
+              </Button>
+            </span>
+          </span>
+        </div>
+      )}
       <div className="v-set__head">
         <span>
           {scope === 'global' ? (
@@ -1132,7 +1288,8 @@ export function Settings({
                 onSave={(n) => save({ progress: { maxQuietMs: n * 60_000 } })}
               />
               <span className="v-set__unit">minutes</span>
-              {source('progress', 'maxQuietMs')}
+              <Key name="progress.maxQuietMs" />
+                {source('progress', 'maxQuietMs')}
             </span>
           </span>
         </div>
@@ -1317,6 +1474,7 @@ export function Settings({
             <div className="v-set__row">
               <label className="v-set__label" htmlFor="verify-enabled">
                 verify each round
+                <Key name="verify.enabled" />
                 {source('verify', 'enabled')}
               </label>
               <select
@@ -1338,7 +1496,8 @@ export function Settings({
               <div className="v-set__row">
                 <label className="v-set__label" htmlFor="verify-command">
                   test command
-                  {source('verify', 'command', 'auto-detect')}
+                  <Key name="verify.command" />
+                {source('verify', 'command', 'auto-detect')}
                 </label>
                 <TextField
                   id="verify-command"
@@ -1354,6 +1513,7 @@ export function Settings({
             <div className="v-set__row">
               <label className="v-set__label" htmlFor="verify-runs">
                 times it must pass
+                <Key name="verify.runs" />
                 {source('verify', 'runs')}
               </label>
               <NumberField
@@ -1366,6 +1526,7 @@ export function Settings({
             <div className="v-set__row">
               <label className="v-set__label" htmlFor="verify-timeout">
                 how long one run may take, in minutes
+                <Key name="verify.timeoutMs" />
                 {source('verify', 'timeoutMs')}
               </label>
               <NumberField
@@ -1411,6 +1572,7 @@ export function Settings({
             <div className="v-set__row">
               <label className="v-set__label" htmlFor="git-worktree">
                 work in a worktree
+                <Key name="git.worktree" />
                 {source('git', 'worktree')}
               </label>
               {/* A two-option select rather than a checkbox, and that is a design
@@ -1432,6 +1594,7 @@ export function Settings({
             <div className="v-set__row">
               <label className="v-set__label" htmlFor="git-worktree-command">
                 how to make one
+                <Key name="git.worktreeCommand" />
                 {source('git', 'worktreeCommand')}
               </label>
               <TextField
@@ -1469,6 +1632,7 @@ export function Settings({
             <div className="v-set__row">
               <label className="v-set__label" htmlFor="git-worktree-timeout">
                 how long that may take, in minutes
+                <Key name="git.worktreeTimeoutMs" />
                 {source('git', 'worktreeTimeoutMs')}
               </label>
               <NumberField
@@ -1739,5 +1903,6 @@ export function Settings({
       </section>
 
     </div>
+    </Refusals.Provider>
   );
 }

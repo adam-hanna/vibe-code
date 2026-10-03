@@ -105,16 +105,18 @@ describe('the tab bar the rail emptied', () => {
     expect(cockpit).toMatch(/onRuns=/);
   });
 
-  test('spend is a readout in the bar rather than a tab', () => {
+  test('usage is a readout in the heading rather than an artifact tab', () => {
     // Hi-fi 1 puts `1.9M tok · codex 5h 41%` right-aligned in this bar. The
     // pane behind it survives - the readout is the way in - but it costs no tab.
     expect(bar).not.toMatch(/v-cockpit__tab[^>]*>\s*Spend/);
-    expect(bar).toMatch(/v-cockpit__readout/);
+    // The redesign moves the same readout one row up to give navigation room.
+    expect(cockpit).toMatch(/className="v-workspace__usage" onClick=\{\(\) => setTab\('spend'\)\}/);
+    expect(cockpit.indexOf('className="v-workspace__usage"')).toBeLessThan(from);
   });
 
   test('the readout says nothing rather than zero before anything is charged', () => {
     // A run that has spent nothing has not spent zero; it has not been measured.
-    expect(bar).toMatch(/nothing charged yet/);
+    expect(cockpit).toMatch(/run\.spend\.tokens === null \? 'No usage reported'/);
   });
 
   test('the design’s order, as far as the design names it', () => {
@@ -128,8 +130,9 @@ describe('the tab bar the rail emptied', () => {
     // which is `Plan critique` and `Code review`. What the design names four
     // positions for, this build has six of - so something had to decide the
     // interleaving, and the rule is below.
-    expect(at('Pilot chat')).toBeLessThan(at('Output'));
-    expect(at('Output')).toBeLessThan(at('Plans'));
+    // Labels have changed; the original navigation order is still the contract.
+    expect(at("setTab('pilot')")).toBeLessThan(at("setTab('output')"));
+    expect(at("setTab('output')")).toBeLessThan(at("open('plans')"));
     // The ones that postdate the artwork come after the ones it names, and the
     // readout is last because it is right-aligned.
     //
@@ -146,7 +149,7 @@ describe('the tab bar the rail emptied', () => {
     // first and the readout is last — so it is anchored on the last tab that
     // still exists rather than deleted with the tab it happened to name.
     expect(at('Questions')).toBeLessThan(at('Verify'));
-    expect(at('Commands')).toBeLessThan(at('v-cockpit__readout'));
+    expect(at("setTab('verify')")).toBeLessThan(at("setTab('commands')"));
     // Named absent, so a build that quietly reinstates either fails here. Both
     // are reachable — one from Settings, one as Settings.
     expect(bar).not.toMatch(/>\s*Prompt\s*</);

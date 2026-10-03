@@ -610,6 +610,15 @@ export function Footer({
     );
   }
 
+  // No run means no process to pause or stop. The old footer offered both on
+  // the welcome screen, turning a harmless empty workspace into a control desk.
+  if (run.identity === null && run.preflight === null && run.running === null) {
+    return <div className="v-footer v-footer--welcome">
+      <span className="v-footer__ready">Ready when you are</span>
+      <p>The pilot prepares the brief. You decide when the run begins.</p>
+    </div>;
+  }
+
   return (
     <div className="v-footer">
       <div className="v-footer__banner">
@@ -682,18 +691,17 @@ export function Footer({
       <div className="v-footer__controls">
         <button className="v-control" disabled={busy || pausing} onClick={onPause}>
           <span className="v-control__label">⏸ Pause at the next gate</span>
-          <span className="v-control__cost">
-            {pausing
-              ? 'armed — the loop holds at the next boundary it reaches'
-              : 'lets the turn finish, then holds. Costs nothing.'}
-          </span>
+          {/* Only the armed state keeps a second line: it is the one thing a
+              press changes, and nothing else on screen says it took. */}
+          {pausing && (
+            <span className="v-control__cost">armed — the loop holds at the next boundary it reaches</span>
+          )}
         </button>
         <button className="v-control v-control--grave" disabled={busy} onClick={onStop}>
           <span className="v-control__label">
             ⏹ Stop this turn now
             <StateKicker tone="alarm">ends the run</StateKicker>
           </span>
-          <span className="v-control__cost">kills the agent mid-turn. Confirms first.</span>
         </button>
       </div>
     </div>
