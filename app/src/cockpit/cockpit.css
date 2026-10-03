@@ -2946,7 +2946,13 @@
   max-width: 68ch;
 }
 
+/* Sticky, because a refusal is about the field you just left and that field is
+   usually a long way down the page (#223): at the top of the scroll it was
+   never in view, and the save looked as though it had worked. */
 .v-set__refused {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   display: flex;
   align-items: baseline;
   gap: var(--space-3);

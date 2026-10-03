@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Button, MetaChip, StateKicker } from '../design';
 import * as host from '../host';
@@ -118,6 +118,18 @@ const LIMITS: readonly { key: string; note: string }[] = [
  * specific in three of these five keys, so a cleared field must not arrive as a
  * ceiling nobody typed — the same rule `4a`'s override fields already follow.
  */
+/**
+ * How many saves have been refused on this screen (#223).
+ *
+ * A field re-seeds from what is in force when the saved value changes, and a
+ * refused save changes nothing, so the field went on showing the number that
+ * was typed at it - which read as a save that worked. *"I can't change
+ * maxWaitMinutes in project settings"*: the write was refused because a run
+ * was going, the sentence saying so was at the top of a long page, and the
+ * field beside the cursor said the opposite. Every field resets on this.
+ */
+const Refusals = createContext(0);
+
 function NumberField({
   id,
   value,
@@ -130,11 +142,12 @@ function NumberField({
   onSave: (next: number) => void;
 }) {
   const [typed, setTyped] = useState(value === undefined ? '' : String(value));
-  // Re-seeded when the saved value changes, so a refused patch shows what is
-  // actually in force rather than what was typed at it.
+  const refusals = useContext(Refusals);
+  // Re-seeded when the saved value changes, and when a save is refused, so the
+  // field shows what is actually in force rather than what was typed at it.
   useEffect(() => {
     setTyped(value === undefined ? '' : String(value));
-  }, [value]);
+  }, [value, refusals]);
 
   const commit = (): void => {
     const n = Number(typed);
@@ -186,9 +199,10 @@ function TextField({
   onSave: (next: string) => void;
 }) {
   const [typed, setTyped] = useState(value ?? '');
+  const refusals = useContext(Refusals);
   useEffect(() => {
     setTyped(value ?? '');
-  }, [value]);
+  }, [value, refusals]);
 
   return (
     <input
@@ -233,9 +247,10 @@ function ListField({
 }) {
   const joined = value.join('\n');
   const [typed, setTyped] = useState(joined);
+  const refusals = useContext(Refusals);
   useEffect(() => {
     setTyped(joined);
-  }, [joined]);
+  }, [joined, refusals]);
   return (
     <textarea
       id={id}
@@ -674,6 +689,7 @@ export function Settings({
   const [failure, setFailure] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [refusals, setRefusals] = useState(0);
   /** Whether the prompts section is open, which is what makes its read lazy. */
   const [showPrompts, setShowPrompts] = useState(false);
   const prompts = usePromptBlocks(showPrompts);
@@ -740,6 +756,7 @@ export function Settings({
           // was written, so the screen still shows what is in force.
           setFailure(err instanceof Error ? err.message : String(err));
           setSaved(null);
+          setRefusals((n) => n + 1);
         })
         .finally(() => setBusy(false));
     },
@@ -847,6 +864,7 @@ export function Settings({
   };
 
   return (
+    <Refusals.Provider value={refusals}>
     <div className="v-set">
       {/* **Which file, said here** (#223). Chosen by the door this screen was
           opened from, so the heading and the line under it are what tell the two
@@ -1865,5 +1883,6 @@ export function Settings({
       </section>
 
     </div>
+    </Refusals.Provider>
   );
 }
