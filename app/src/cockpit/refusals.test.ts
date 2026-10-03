@@ -15,3 +15,20 @@ test('every field that saves on blur resets when a save is refused', () => {
   expect(settings).toMatch(/setRefusals\(\(n\) => n \+ 1\)/);
   expect(settings).toMatch(/<Refusals\.Provider value=\{refusals\}>/);
 });
+
+// *"Set `progress.maxQuietMs` before you press it"* - and the screen called it
+// "silence". Every row whose label is prose names its key too.
+test('a setting named by its key in a message can be found by that key here', () => {
+  for (const key of [
+    'progress.maxQuietMs',
+    'verify.enabled',
+    'verify.command',
+    'verify.runs',
+    'verify.timeoutMs',
+    'git.worktree',
+    'git.worktreeCommand',
+    'git.worktreeTimeoutMs',
+  ]) {
+    expect(settings, key).toContain(`<Key name="${key}" />`);
+  }
+});

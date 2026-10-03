@@ -4019,3 +4019,11 @@
   font: var(--type-body-sm);
   color: var(--text-tertiary);
 }
+
+/* A setting's key beside its label (#223), so a name read in a message can be
+   found here. Quieter than the label: it is the reference, not the prose. */
+.v-set__key {
+  margin-left: var(--space-2);
+  font: var(--type-mono-sm);
+  color: var(--text-tertiary);
+}

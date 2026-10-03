@@ -130,6 +130,18 @@ const LIMITS: readonly { key: string; note: string }[] = [
  */
 const Refusals = createContext(0);
 
+/**
+ * The setting's own name, beside its plain-language label (#223).
+ *
+ * The pilot, a stop message and `NEEDS-INPUT.md` all name a setting by its key
+ * - *"set `progress.maxQuietMs` before you press it"* - and a row labelled only
+ * "silence" in minutes left nothing on screen matching that name. The rows that
+ * already lead with the key (the caps, the budget) do not need it.
+ */
+function Key({ name }: { name: string }) {
+  return <code className="v-set__key">{name}</code>;
+}
+
 function NumberField({
   id,
   value,
@@ -1276,7 +1288,8 @@ export function Settings({
                 onSave={(n) => save({ progress: { maxQuietMs: n * 60_000 } })}
               />
               <span className="v-set__unit">minutes</span>
-              {source('progress', 'maxQuietMs')}
+              <Key name="progress.maxQuietMs" />
+                {source('progress', 'maxQuietMs')}
             </span>
           </span>
         </div>
@@ -1461,6 +1474,7 @@ export function Settings({
             <div className="v-set__row">
               <label className="v-set__label" htmlFor="verify-enabled">
                 verify each round
+                <Key name="verify.enabled" />
                 {source('verify', 'enabled')}
               </label>
               <select
@@ -1482,7 +1496,8 @@ export function Settings({
               <div className="v-set__row">
                 <label className="v-set__label" htmlFor="verify-command">
                   test command
-                  {source('verify', 'command', 'auto-detect')}
+                  <Key name="verify.command" />
+                {source('verify', 'command', 'auto-detect')}
                 </label>
                 <TextField
                   id="verify-command"
@@ -1498,6 +1513,7 @@ export function Settings({
             <div className="v-set__row">
               <label className="v-set__label" htmlFor="verify-runs">
                 times it must pass
+                <Key name="verify.runs" />
                 {source('verify', 'runs')}
               </label>
               <NumberField
@@ -1510,6 +1526,7 @@ export function Settings({
             <div className="v-set__row">
               <label className="v-set__label" htmlFor="verify-timeout">
                 how long one run may take, in minutes
+                <Key name="verify.timeoutMs" />
                 {source('verify', 'timeoutMs')}
               </label>
               <NumberField
@@ -1555,6 +1572,7 @@ export function Settings({
             <div className="v-set__row">
               <label className="v-set__label" htmlFor="git-worktree">
                 work in a worktree
+                <Key name="git.worktree" />
                 {source('git', 'worktree')}
               </label>
               {/* A two-option select rather than a checkbox, and that is a design
@@ -1576,6 +1594,7 @@ export function Settings({
             <div className="v-set__row">
               <label className="v-set__label" htmlFor="git-worktree-command">
                 how to make one
+                <Key name="git.worktreeCommand" />
                 {source('git', 'worktreeCommand')}
               </label>
               <TextField
@@ -1613,6 +1632,7 @@ export function Settings({
             <div className="v-set__row">
               <label className="v-set__label" htmlFor="git-worktree-timeout">
                 how long that may take, in minutes
+                <Key name="git.worktreeTimeoutMs" />
                 {source('git', 'worktreeTimeoutMs')}
               </label>
               <NumberField
