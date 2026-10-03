@@ -1264,7 +1264,11 @@ export function Cockpit() {
             }}
             onForgetDraft={forgetDraft}
             onSettled={settleDrafts}
-            currentId={run.identity?.runId ?? null}
+            // The run ON SCREEN, which is what a highlight means (#223). This
+            // was the live run, so opening a past one left the highlight on the
+            // run you had just left - or on nothing when none was going. A
+            // draft on screen is no run at all.
+            currentId={viewing?.runId ?? (draftId !== null ? null : (run.identity?.runId ?? null))}
             onNew={() => setComposing({ dir: repoDir, locked: false })}
             // A run in THIS project, with the repository already answered. It
             // also points the window there, because the run about to start is

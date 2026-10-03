@@ -345,6 +345,20 @@
   background: var(--surface-active);
 }
 
+/* The run on screen (#223): *"I can't tell which run I'm in."* The plain
+   `--on` ground was one step off the panel and darker than the hover, so the
+   selected row read as the unselected one. A run row gets the selection tint
+   and the rail's selection bar; a project row keeps its own border treatment. */
+.v-nav__row--on:not(.v-nav__row--project),
+.v-nav__row--on:not(.v-nav__row--project):hover {
+  background: var(--surface-accent-tint);
+  box-shadow: inset 2px 0 0 var(--accent-base);
+}
+
+.v-nav__row--on:not(.v-nav__row--project) .v-nav__title {
+  color: var(--accent-on-tint);
+}
+
 .v-nav__open {
   flex: 1;
   min-width: 0;
