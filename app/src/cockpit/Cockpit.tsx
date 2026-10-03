@@ -288,6 +288,21 @@ export function Cockpit() {
   const [busy, setBusy] = useState(false);
   const [launched, setLaunched] = useState(false);
   /**
+   * The conversation the pilot was showing when a run was launched, held until
+   * that run says who it is (#223).
+   *
+   * Launching points the window at the new run before it has an id, so for the
+   * seconds until `run_started` the pane had no run to key its chat by and fell
+   * back to the project's "before any run" conversation - restoring whatever
+   * stale exchange was stored there, which the new run then **adopted** as its
+   * own. *"The run that starts, the pilot chat, progress etc gets confused with
+   * a previous run. It's like some key isn't unique somewhere."* Holding the key
+   * that proposed the run makes the gap a `stay`, so what the new run adopts is
+   * the conversation that actually proposed it. A draft holds itself already.
+   */
+  const [holdChat, setHoldChat] = useState<{ dir: string; runId: string | null } | null>(null);
+  const pilotAt = useRef<{ dir: string; runId: string | null }>({ dir: '', runId: null });
+  /**
    * The launch this window sent, kept so the pilot can be told about it (#191).
    *
    * **Not a re-derivation.** Every other thing on this screen comes from a frame,
@@ -563,6 +578,12 @@ export function Cockpit() {
   // and let go of the draft, which moves the pilot pane onto the run's key — and
   // that move is a start rather than a click, so the run adopts the conversation.
   const startedId = run.identity?.runId ?? null;
+  // The held key goes once the run has an id to adopt into, once it has ended
+  // without one, or as soon as the window is pointed somewhere else on purpose.
+  const launchSettled = startedId !== null || run.completed !== null;
+  useEffect(() => {
+    if (launchSettled || viewing !== null || draftId !== null) setHoldChat(null);
+  }, [launchSettled, viewing, draftId]);
   useEffect(() => {
     if (startedId === null || drafting === null) return;
     if (launchedFrom.current !== drafting.id) return;
@@ -742,6 +763,7 @@ export function Cockpit() {
     (argv: readonly string[], fromDraft: string | null = null) => {
       launchedFrom.current = fromDraft;
       if (fromDraft !== null) saveDrafts((list) => markLaunched(list, fromDraft));
+      else setHoldChat(pilotAt.current);
       // A new run is a new column. Appending to the previous one's cycles would
       // draw a single loop out of two runs.
       dispatch({ type: 'reset' });
@@ -1030,6 +1052,11 @@ export function Cockpit() {
    * has not finished.
    */
   const shownDir = viewing?.dir ?? drafting?.dir ?? run.identity?.repo ?? repoDir;
+  // Which conversation the pilot shows: the one on screen, or the one that
+  // proposed a launch still waiting for its run id (see `holdChat`).
+  const pilotDir = holdChat?.dir ?? shownDir;
+  const pilotRunId = holdChat !== null ? holdChat.runId : (drafting?.id ?? shownRunId);
+  pilotAt.current = { dir: pilotDir, runId: pilotRunId };
   /**
    * The live run's repository, for the one pane that is always about it.
    *
@@ -1607,14 +1634,14 @@ export function Cockpit() {
               // screen, and with no project selected at all it was blocked
               // outright: *"I just tried sending a chat to an old run's pilot
               // but I can't"*.
-              dir={shownDir}
+              dir={pilotDir}
               // Which conversation to show. It follows the run the panes are
               // reading, so opening a finished run brings back the chat about
               // it — and null, before any run, is the conversation that will
               // propose one.
               // A draft's conversation is its own, keyed by the draft id until
               // the run it asked for starts and adopts it (#223).
-              runId={drafting?.id ?? shownRunId}
+              runId={pilotRunId}
               access={access}
               // Pointed at rather than started here. `viewing` is set by
               // clicking a row in the archive, and a click is a read — so the
@@ -1623,7 +1650,7 @@ export function Cockpit() {
               // A draft counts as pointed-at too: arriving at one restores ITS
               // conversation rather than adopting whatever was on screen, which
               // is what a fresh draft needs. Leaving it for its run is the start.
-              opened={viewing !== null || drafting !== null}
+              opened={holdChat === null && (viewing !== null || drafting !== null)}
               commands={commands}
               onEffect={onEffect}
               ask={brief}

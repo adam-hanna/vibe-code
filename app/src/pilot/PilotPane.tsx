@@ -846,6 +846,12 @@ export function PilotPane({
         // the draft asked for has now started and holds the conversation, so the
         // draft's copy would only come back as a duplicate.
         else if (before !== null && isDraftKey(before)) localStorage.removeItem(before);
+        // A run's own chat that proposed this one keeps its record but gives
+        // up its CLI session (#223): the new run carries it on, and two chats
+        // resuming one session would each answer from the other's messages.
+        else if (before !== null) {
+          localStorage.setItem(before, writable({ ...held.current, session: null, carry: null }));
+        }
       } catch {
         // The conversation is still on screen and still correct. What is lost is
         // its return next time.

@@ -28,7 +28,7 @@ import {
 } from '@src/run.js';
 import type { AllocatedRun } from '@src/run.js';
 import { acquireLock, describeLiveness } from '@src/lock.js';
-import { cancelRequested, clearCancel } from '@src/cancel.js';
+import { Cancelled, cancelRequested, clearCancel } from '@src/cancel.js';
 import { installPromptOverrides } from '@src/prompts.js';
 import { describeEnding as describeProcessEnding, installEndingStamp } from '@src/ending.js';
 import { commitFork, listForkPoints, planFork } from '@src/fork.js';
@@ -1615,6 +1615,9 @@ export async function execute(
     // gate's deterministic half is not skippable, and only it knows which half
     // is which.
     const gate = await preflightGate(state, cfg, { skipProbe });
+    // Also here, for a gate that returned without checking: a stop that landed
+    // after the last probe must not buy the first turn.
+    stopIfCancelled();
     if (gate !== null) {
       // Summarised, where it used to return in silence. The probes have
       // already been charged through `chargePreflight`, and after a recovery
@@ -1832,6 +1835,21 @@ function environmentFacts(
  * This is also the one place the run path derives `phases` from `planOnly`;
  * both halves read that single derivation rather than each computing its own.
  */
+/**
+ * End the run now if a stop was pressed (#223).
+ *
+ * Preflight is the stretch between launching a run and its first turn - a
+ * worktree script, then two probe turns - and a stop pressed during it set the
+ * latch and then waited: the run carried on for minutes and ended the instant
+ * planning began, which read as a run that had stalled and then died on its
+ * own. Thrown as `Cancelled`, so `execute`'s handler gives it the ending every
+ * other stop takes.
+ */
+function stopIfCancelled(): void {
+  const why = cancelRequested();
+  if (why !== null) throw new Cancelled(why);
+}
+
 export async function runPreflight(
   state: RunState,
   cfg: Config,
@@ -1884,6 +1902,11 @@ export async function runPreflight(
       timeoutMs: cfg.git.worktreeTimeoutMs,
       branch,
     });
+    // The setup script is the person's own and is not killed mid-way (a half
+    // made tree is what `createWorktree` repairs on resume), but a stop pressed
+    // while it ran ends the run the moment it returns rather than after both
+    // probes as well (#223).
+    stopIfCancelled();
     if (!made.ok) {
       log.heading('Preflight');
       log.fail(made.reason, { id: 'run_failed', data: { code: EXIT.PREFLIGHT, reason: made.reason } });
@@ -1968,11 +1991,16 @@ export async function runPreflight(
       log.step(`Probing ${agent}`, { id: 'probe_started', data: { agent } });
     });
   } catch (err) {
+    // A probe killed by a stop is a stopped run, not a broken environment.
+    stopIfCancelled();
     const why = `environment probe failed: ${err instanceof Error ? err.message : String(err)}`;
     log.fail(why, { id: 'run_failed', data: { code: EXIT.PREFLIGHT, reason: why } });
     return EXIT.PREFLIGHT;
   }
 
+  // A probe that was stopped reports a failure of its own, which is not the
+  // finding: the person pressed stop.
+  stopIfCancelled();
   for (const [label, result] of [
     ['claude', report.claude],
     ['codex', report.codex],

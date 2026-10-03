@@ -2444,6 +2444,30 @@ carry it:
   have handed a child in that child's stdout, stderr and lines, because Codex's 401 quotes the key
   in full and every caller hands stderr to a log. `keys.test.ts` pins the second reader.
 
+**A launch holds the chat that proposed it until the run has an id** (#223).
+`launch` points the window at the new run before `run_started` has named it, so for
+those seconds the pilot pane had no run id to key its chat by. It fell back to the
+project bucket, `chatKey(dir, null)`, and restored whatever stale exchange was
+stored there. The new run then **adopted that** under the widened rule above. The
+reports were *"the pilot chat, progress etc gets confused with a previous run"* and
+*"it's like some key isn't unique somewhere"*. They were right in spirit: the key
+was unique, but for a moment the pane was using the wrong one. `holdChat` keeps the
+proposing key through the gap, so the gap is a `stay` and the adoption is of the
+right conversation. A draft already held itself, which is why only a non-draft
+launch sets it. When the proposer was a *run's* own chat, that chat keeps its record
+and gives up its CLI session, because two chats resuming one session would each
+answer from the other's messages.
+
+**A stop pressed during preflight ends the run there** (#223). The probes were not
+interruptible and nothing checked the latch after them or after the worktree
+script. So a stop pressed in the minutes between launching and the first turn
+waited all of it out, and the run ended the instant planning began. On screen that
+reads as a run that stalls and then dies on its own. The probes now register as
+interruptible. `stopIfCancelled` runs after the worktree script, after the probes
+and after the gate, and throws `Cancelled` into `execute`'s one handler. The
+worktree script itself is still not killed: it is the person's own command, and a
+half-made tree is what `createWorktree` repairs on resume.
+
 **The pilot reports how full its context is, and can compact or clear it** (#223).
 Asked for as *"report context remaining for the pilot and offer some way to compact
 it"*. Three things are worth keeping:
