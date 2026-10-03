@@ -476,26 +476,48 @@ function TurnElapsed({ startedAt, now }: { startedAt: number | null; now: number
 }
 
 
+/**
+ * That a turn is open, pinned to the foot of the log (#223).
+ *
+ * It sat in the live card's header, so a reply that streamed more than a
+ * screen pushed it out of view, and so did scrolling up to re-read: *"the
+ * 'Thinking...' needs to always be at the bottom so the user can see it"*. A
+ * direct child of the scrolling log with `position: sticky`, so it holds the
+ * bottom edge wherever the reader is, and drawn only while a turn is open.
+ * It is still the one pulse on screen, and the elapsed still travels with it.
+ */
+function TurnWorking({
+  reply,
+  now,
+}: {
+  reply: Reply;
+  /**
+   * The clock, passed in rather than read here: one ticking value for the
+   * whole pane, so the elapsed does not freeze at the second the last token
+   * arrived - which is precisely the moment it starts mattering.
+   */
+  now: number;
+}) {
+  const word = reply.text === '' ? 'thinking' : 'streaming';
+  return (
+    <div className="v-pilot__working" role="status">
+      <ThinkingWave label={word} />
+      <StateKicker tone="accent">{word}</StateKicker>
+      <TurnElapsed startedAt={reply.startedAt} now={now} />
+    </div>
+  );
+}
+
 function ReplyCard({
   reply,
   conversation,
   onDecide,
   busy,
-  now,
 }: {
   reply: Reply;
   conversation: Conversation;
   onDecide: (id: string, accepted: boolean, note: string) => void;
   busy: boolean;
-  /**
-   * The clock, passed in rather than read here.
-   *
-   * One ticking value for the whole pane: a card reading `Date.now()` itself
-   * would only re-render when something else made it, so the elapsed would
-   * freeze at whatever second the last token arrived - which is precisely the
-   * moment it starts mattering.
-   */
-  now: number;
 }) {
   const outcome = reply.outcome;
   return (
@@ -543,13 +565,9 @@ function ReplyCard({
             `thinking` is the honest word for *sent, nothing back yet*; once
             text is arriving the text itself is the evidence and the label says
             so. The wave is on both, because both are open turns. */}
-        {outcome === null && (
-          <>
-            <ThinkingWave label={reply.text === '' ? 'thinking' : 'streaming'} />
-            <StateKicker tone="accent">{reply.text === '' ? 'thinking' : 'streaming'}</StateKicker>
-            <TurnElapsed startedAt={reply.startedAt} now={now} />
-          </>
-        )}
+        {/* The open turn's indicator is not drawn here any more: it is
+            `TurnWorking`, pinned to the foot of the log, because at the top of a
+            card it scrolled away as soon as the reply grew. */}
         {/* The vendor's own word — `end_turn`, `stop`, `max_tokens`, `length`.
             Not translated into a shared spelling, because a shared spelling
             would claim a shared meaning nobody has established. */}
@@ -1773,7 +1791,6 @@ ${frame.text}`, turn, origin.current))) {
               conversation={conversation}
               busy={live !== null}
               onDecide={onDecide}
-              now={now}
             />
           ),
         )}
@@ -1783,8 +1800,10 @@ ${frame.text}`, turn, origin.current))) {
             conversation={conversation}
             busy
             onDecide={onDecide}
-            now={now}
           />
+        )}
+        {conversation.live !== null && conversation.live.outcome === null && (
+          <TurnWorking reply={conversation.live} now={now} />
         )}
       </div>
 
