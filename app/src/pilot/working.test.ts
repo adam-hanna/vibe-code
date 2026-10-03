@@ -8,7 +8,7 @@ test('the open-turn indicator is drawn once, after the live card, and not inside
   const card = pane.slice(pane.indexOf('function ReplyCard('), pane.indexOf('export interface PilotPaneProps'));
   expect(card).not.toMatch(/<ThinkingWave/);
   expect(pane.match(/<ThinkingWave/g)).toHaveLength(1);
-  const live = pane.lastIndexOf('reply={conversation.live}');
+  const live = pane.lastIndexOf('<ReplyCard');
   const working = pane.indexOf('<TurnWorking');
   expect(working).toBeGreaterThan(live);
   expect(pane.slice(working, pane.indexOf('</div>', working))).not.toMatch(/<ReplyCard/);
