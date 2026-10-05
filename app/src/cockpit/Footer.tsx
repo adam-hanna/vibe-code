@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { Button, StateKicker } from '../design';
+import { Button, LivenessDot, StateKicker } from '../design';
+import { Icon } from '../design/Icon';
 import { boundary, ending, hold, nextHold } from './format';
 import type { Raise } from './argv';
 import { latestQuestions } from './model';
@@ -619,91 +620,49 @@ export function Footer({
     </div>;
   }
 
+  const canControl = run.preflight !== null || run.running !== null;
+  const boundaryTitle = gates === null
+    ? 'Gate settings have not been read yet.'
+    : holding.length === 0
+      ? 'No boundary holds. The loop will run to the end without asking.'
+      : `${next === null ? '' : `Next possible hold: ${boundary(next)}. `}Holds at ${holding.map((b) => boundary(b)).join(', ')}.${stopping.length > 0 ? ` ${stopping.map((b) => boundary(b)).join(', ')} ends the run there.` : ''}`;
+
   return (
-    <div className="v-footer">
-      <div className="v-footer__banner">
-        <StateKicker tone="quiet">{run.running === null ? 'idle' : 'running'}</StateKicker>
-        <span className="v-footer__detail">
-          {run.running === null
-            ? 'no turn is open'
-            : `${run.running.role} · ${run.running.kind}`}
-        </span>
-      </div>
-      {/*
-        `3a`'s mode control, and it is a **readout rather than a control**.
-
-        The design asks for the mode to be readable at a glance and says why:
-        *"mode is a mode, not an action."* Editing it belongs in one place, and
-        that place is the gate matrix in Settings — a segmented control here
-        would be a second form over one file, which is how two answers to "where
-        does this run hold" come to exist.
-
-        It says **which boundary comes next** as well as which ones hold. This
-        line used to refuse the first half, on the grounds that it *"would need a
-        phase-to-boundary ordering written here"* — and that objection is
-        answered rather than overruled: the order arrives on the `config` frame
-        as `src/gates.ts` declares it, and the position is the last boundary that
-        actually held. Nothing about either is decided on this side. See
-        `nextHold` for the one thing it can still be wrong about, and why the
-        wording is *can stop* rather than *will*.
-      */}
-      <div className="v-footer__note">
-        {gates === null ? (
-          <>Where this run hands control back is in `vibe.config.json`; this build has not read it.</>
-        ) : holding.length === 0 ? (
-          <>
-            No boundary holds — every row is <code>auto</code>, so the loop runs to the end
-            without asking.
-          </>
-        ) : (
-          <>
-            {next !== null && (
-              <>
-                {/* The design's `next stop: verify gate`, worded for what it
-                    is: the earliest boundary ahead that holds. The loop can
-                    pass it without reaching it — a plan the critic clears
-                    first time never has a second plan round — so this says
-                    where it *can* stop, never where it will. */}
-                Next place it can stop: <strong>{boundary(next)}</strong>.{' '}
-              </>
-            )}
-            Holds at {holding.map((b) => boundary(b)).join(', ')}.{' '}
-            {stopping.length > 0 && (
-              <>
-                {/* The difference that costs something. A `step` row is an
-                    await and free; a `stop` row ENDS the run, resumably. */}
-                {stopping.map((b) => boundary(b)).join(', ')}{' '}
-                {stopping.length === 1 ? 'ends' : 'end'} the run there rather than asking.
-              </>
-            )}
-          </>
+    <div className={`v-footer v-footer--active${canControl ? '' : ' v-footer--idle'}`}>
+      <div className="v-footer__actionbar">
+        <div className="v-footer__mode">
+          <LivenessDot state={run.running === null ? 'waiting' : 'live'} />
+          <span>{run.running === null ? 'Preparing' : 'Live run'}</span>
+          <button className="v-footer__info" type="button" title={boundaryTitle} aria-label={boundaryTitle}>
+            <Icon name="info" size={14} />
+          </button>
+        </div>
+        {canControl && (
+          <div className="v-footer__controls">
+            <button
+              className="v-control"
+              disabled={busy || pausing}
+              onClick={onPause}
+              title={pausing ? 'The loop will hold at the next boundary.' : 'Let the current turn finish, then hold at the next boundary.'}
+              aria-label="Pause at the next gate"
+            >
+              <Icon name="pause" size={14} />
+              <span>{pausing ? 'Pause armed' : 'Pause at gate'}</span>
+            </button>
+            <button
+              className="v-control v-control--grave"
+              disabled={busy}
+              onClick={onStop}
+              title="Stop the active turn now. The run will be resumable from its last checkpoint."
+              aria-label="Stop this turn now — ends the run"
+            >
+              <Icon name="stop" size={14} />
+              <span>Stop run</span>
+            </button>
+          </div>
         )}
       </div>
-
-      {/*
-        Hi-fi 18. Two controls, one above the other, **neither a primary**, and
-        the visual difference is deliberately small: two controls that look
-        wildly different stop reading as alternatives, and these are alternatives.
-        **The labels carry the distinction, not the colour** - they differ in
-        when it happens and what it acts on, and each carries its cost on a
-        second line.
-      */}
-      <div className="v-footer__controls">
-        <button className="v-control" disabled={busy || pausing} onClick={onPause}>
-          <span className="v-control__label">⏸ Pause at the next gate</span>
-          {/* Only the armed state keeps a second line: it is the one thing a
-              press changes, and nothing else on screen says it took. */}
-          {pausing && (
-            <span className="v-control__cost">armed — the loop holds at the next boundary it reaches</span>
-          )}
-        </button>
-        <button className="v-control v-control--grave" disabled={busy} onClick={onStop}>
-          <span className="v-control__label">
-            ⏹ Stop this turn now
-            <StateKicker tone="alarm">ends the run</StateKicker>
-          </span>
-        </button>
-      </div>
+      {!canControl && <span className="v-footer__note">No turn is open.</span>}
     </div>
   );
 }

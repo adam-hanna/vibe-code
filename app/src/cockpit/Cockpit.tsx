@@ -1691,7 +1691,7 @@ export function Cockpit() {
             take the left, next to the rail they are drawn from. */}
         <SidePanel
           side="right"
-          title="Run overview"
+          title="Run status"
           mark="⋮⋮"
           open={showLoop}
           onToggle={() => setShowLoop((on) => !on)}
@@ -1787,6 +1787,7 @@ export function Cockpit() {
             <LoopColumn
               run={columnRun}
               now={now}
+              compact
               hostPid={past ? null : wire.hostPid}
               onOpen={open}
             />
