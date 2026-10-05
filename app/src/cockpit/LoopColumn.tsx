@@ -1,11 +1,13 @@
 import { useState } from 'react';
 import { LivenessDot, MetaChip, StateKicker } from '../design';
+import { Icon } from '../design/Icon';
 import { Counts } from './Counts';
 import { Caret } from './Disclosure';
-import { clock, elapsed } from './format';
+import { boundary, clock, elapsed } from './format';
 import { censusByPhase, questionsByPhase, title, unplacedQuestions } from './rounds';
 import { RunningRow } from './RunningRow';
 import type { KeyboardEvent } from 'react';
+import { CYCLE_OF, runningRow } from './model';
 import type { Census, CycleKind, PhaseGroup, Preflight, QuestionRound, ResumedFrom, Run, Turn } from './model';
 
 /**
@@ -52,10 +54,10 @@ export type OpenAt = (tab: string, round?: number | null) => void;
  * `status()` says `re-runs on every fix` under the two that re-open.
  */
 const TITLE: Readonly<Record<CycleKind, string>> = {
-  plan: 'GROUP 1 · PLAN',
-  critique: 'GROUP 2 · PLAN CRITIQUE',
-  code: 'GROUP 3 · CODE',
-  review: 'GROUP 4 · CODE REVIEW',
+  plan: 'Plan',
+  critique: 'Plan critique',
+  code: 'Code',
+  review: 'Code review',
 };
 
 /**
@@ -673,6 +675,7 @@ export function LoopColumn({
   now,
   hostPid = null,
   onOpen,
+  compact = false,
 }: {
   run: Run;
   now: number;
@@ -683,7 +686,11 @@ export function LoopColumn({
    * them. The Gallery draws this column with no tabs behind it.
    */
   onOpen?: OpenAt | undefined;
+  /** Use the glanceable run-status rail in the desktop cockpit. */
+  compact?: boolean;
 }) {
+  if (compact) return <RunRail run={run} now={now} onOpen={onOpen} />;
+
   /**
    * Which groups and rounds are folded shut.
    *
@@ -736,7 +743,7 @@ export function LoopColumn({
           for IS something happening, and two lines claiming the opposite of each
           other is the disagreement #202 was about. */}
       {run.cycles.length === 0 && run.preflight === null && run.identity === null && (
-        <div className="v-loop__empty">nothing has run yet</div>
+        <div className="v-loop__empty">Your run will take shape here.</div>
       )}
 
       {run.cycles.map((cycle) => {
@@ -808,6 +815,280 @@ export function LoopColumn({
             </div>
           </div>
         ))}
+    </section>
+  );
+}
+
+/**
+ * The cockpit's glanceable version of the loop column.
+ *
+ * The full column still exists for the Gallery and for round-level inspection,
+ * but the live desktop rail has a different job: explain what is happening now,
+ * then make the shape of the run easy to scan. Details stay behind one disclosure
+ * per stage and the Activity tab remains the home for the raw transcript.
+ */
+const RAIL_KINDS: readonly CycleKind[] = ['plan', 'critique', 'code', 'review'];
+
+const RAIL_TITLE: Readonly<Record<CycleKind, string>> = {
+  plan: 'Plan',
+  critique: 'Plan critique',
+  code: 'Code',
+  review: 'Code review',
+};
+
+const TURN_GROUP: Readonly<Record<string, CycleKind>> = {
+  plan: 'plan',
+  critique: 'critique',
+  implement: 'code',
+  review: 'review',
+};
+
+type RailState = 'upcoming' | 'complete' | 'running' | 'waiting';
+
+function railKindForTurn(kind: string): CycleKind | null {
+  return TURN_GROUP[kind] ?? CYCLE_OF[kind] ?? null;
+}
+
+function findTurn(run: Run, id: number | null): Turn | null {
+  if (id === null) return null;
+  for (const cycle of run.cycles) {
+    for (const phase of cycle.phases) {
+      const turn = phase.turns.find((candidate) => candidate.id === id);
+      if (turn !== undefined) return turn;
+    }
+  }
+  return null;
+}
+
+function roleName(role: string): string {
+  return role.length === 0 ? 'Agent' : `${role.slice(0, 1).toUpperCase()}${role.slice(1)}`;
+}
+
+function RailStateIcon({ state }: { state: RailState }) {
+  if (state === 'running') {
+    return <LivenessDot state="live" />;
+  }
+  if (state === 'waiting') {
+    return <Icon name="pause" size={13} />;
+  }
+  if (state === 'complete') {
+    return <Icon name="check" size={14} />;
+  }
+  return <span className="v-rail__empty-state" aria-hidden="true" />;
+}
+
+function RailStage({
+  kind,
+  cycle,
+  state,
+  open,
+  onToggle,
+  censusOf,
+  onOpen,
+}: {
+  kind: CycleKind;
+  cycle: Run['cycles'][number] | undefined;
+  state: RailState;
+  open: boolean;
+  onToggle: () => void;
+  censusOf: ReadonlyMap<number, Census>;
+  onOpen?: OpenAt | undefined;
+}) {
+  const count = cycle?.phases.length ?? 0;
+  const meta = cycle === undefined
+    ? 'not started'
+    : `${count} ${count === 1 ? 'round' : 'rounds'}`;
+  const stateLabel = state === 'running'
+    ? 'running'
+    : state === 'waiting'
+      ? 'waiting for your decision'
+      : state === 'complete'
+        ? 'complete'
+        : 'not started';
+  const reruns = kind === 'critique' || kind === 'code';
+  const canExpand = cycle !== undefined;
+
+  return (
+    <section className={`v-rail__stage v-rail__stage--${state}${open ? ' v-rail__stage--open' : ''}`}>
+      <button
+        type="button"
+        className="v-rail__stage-head"
+        onClick={canExpand ? onToggle : undefined}
+        aria-expanded={canExpand ? open : undefined}
+        disabled={!canExpand}
+        title={canExpand
+          ? reruns ? `${RAIL_TITLE[kind]} can run again after a fix` : `Show ${RAIL_TITLE[kind]} details`
+          : `${RAIL_TITLE[kind]} has not started yet`}
+      >
+        <span className="v-rail__stage-icon" title={stateLabel}>
+          <RailStateIcon state={state} />
+        </span>
+        <span className="v-rail__stage-name">{RAIL_TITLE[kind]}</span>
+        <span className="v-rail__stage-meta">{meta}</span>
+        {canExpand
+          ? <Icon name="chevron" size={14} style={{ transform: open ? 'rotate(90deg)' : undefined }} />
+          : <span className="v-rail__stage-spacer" aria-hidden="true" />}
+      </button>
+
+      {open && cycle !== undefined && (
+        <div className="v-rail__stage-body">
+          {cycle.phases.map((phase) => {
+            const census = censusOf.get(phase.id);
+            const round = phase.round === null ? 'unnumbered pass' : `round ${phase.round}`;
+            const turnCount = phase.turns.length;
+            return (
+              <div
+                className="v-rail__pass"
+                key={phase.id}
+                title={`${phase.phase} · ${round}${turnCount === 0 ? ' · no turns reported' : ` · ${turnCount} ${turnCount === 1 ? 'turn' : 'turns'}`}`}
+              >
+                <span className="v-rail__pass-mark" aria-hidden="true"><Icon name="arrow" size={12} /></span>
+                <span className="v-rail__pass-name">{round}</span>
+                <span className="v-rail__pass-meta">{turnCount} {turnCount === 1 ? 'turn' : 'turns'}</span>
+                {census !== undefined && (
+                  <Counts
+                    counts={census.counts}
+                    compact
+                    onOpen={onOpen === undefined
+                      ? undefined
+                      : () => { onOpen(census.phase === 'plan' ? 'critique' : 'review', phase.round); }}
+                  />
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function RailPreflight({ preflight, now }: { preflight: Preflight; now: number }) {
+  const state: RailState = preflight.passed ? 'complete' : preflight.probing === null ? 'waiting' : 'running';
+  const label = preflight.passed
+    ? 'toolchain satisfied'
+    : preflight.probing === null
+      ? 'preparing checks'
+      : `checking ${preflight.probing}`;
+  return (
+    <div className={`v-rail__stage v-rail__stage--${state} v-rail__stage--preflight`}>
+      <div className="v-rail__stage-head v-rail__stage-head--static">
+        <span className="v-rail__stage-icon" title={preflight.passed ? 'Complete' : label}>
+          <RailStateIcon state={state} />
+        </span>
+        <span className="v-rail__stage-name">Preflight</span>
+        <span className="v-rail__stage-meta" title={label}>{label}</span>
+        <span className="v-rail__preflight-time">{elapsed(Math.max(0, now - preflight.at))}</span>
+      </div>
+    </div>
+  );
+}
+
+function RunRail({ run, now, onOpen }: { run: Run; now: number; onOpen?: OpenAt | undefined }) {
+  const currentTurn = run.running ?? findTurn(run, run.gate?.turnId ?? null);
+  const currentKind = currentTurn === null ? null : railKindForTurn(currentTurn.kind);
+  const [open, setOpen] = useState<ReadonlySet<CycleKind>>(() => new Set());
+  const toggle = (kind: CycleKind) => {
+    setOpen((current) => {
+      const next = new Set(current);
+      if (!next.delete(kind)) next.add(kind);
+      return next;
+    });
+  };
+  const censusOf = censusByPhase(run);
+  const activity = currentTurn === null ? null : runningRow(currentTurn, now);
+  const isEmpty = run.identity === null && run.preflight === null && run.cycles.length === 0;
+  const status = run.gate !== null
+    ? { title: 'Needs your decision', detail: `Waiting at ${boundary(run.gate.boundary)}`, tone: 'waiting' }
+    : run.running !== null && currentKind !== null
+      ? { title: RAIL_TITLE[currentKind], detail: `${roleName(run.running.role)} is working`, tone: 'running' }
+      : run.preflight !== null && !run.preflight.passed
+        ? { title: 'Preflight', detail: run.preflight.probing === null ? 'Preparing checks' : `Checking ${run.preflight.probing}`, tone: 'running' }
+        : run.reason !== null
+          ? { title: 'Run ending', detail: run.reason.message, tone: 'waiting' }
+          : run.ended?.how === 'stopped'
+            ? { title: 'Run stopped', detail: run.ended.detail, tone: 'waiting' }
+            : run.completed?.exit === 0 || run.ended?.how === 'approved'
+            ? { title: 'Run complete', detail: 'Review the results in the workspace', tone: 'complete' }
+            : run.completed !== null
+              ? { title: 'Process finished', detail: `Exit ${run.completed.exit}`, tone: 'complete' }
+            : isEmpty
+              ? { title: 'Waiting for a brief', detail: 'Review the brief to begin', tone: 'upcoming' }
+              : { title: 'Ready for the next turn', detail: 'The run is between turns', tone: 'waiting' };
+  const statusState = status.tone as RailState;
+  const statusTime = activity === null
+    ? run.preflight === null ? null : elapsed(Math.max(0, now - run.preflight.at))
+    : elapsed(activity.elapsedMs);
+
+  return (
+    <section className="v-rail" aria-label="run status">
+      <div className={`v-rail__now v-rail__now--${statusState}`}>
+        <div className="v-rail__eyebrow">
+          <span>Now</span>
+          <span className="v-rail__state" title={status.detail}>
+            <RailStateIcon state={statusState} />
+            {statusState === 'running' ? 'live' : statusState === 'waiting' ? 'waiting' : statusState === 'complete' ? 'done' : 'idle'}
+          </span>
+        </div>
+        <h2>{status.title}</h2>
+        <p title={status.detail}>{status.detail}</p>
+        {statusTime !== null && (
+          <span className="v-rail__elapsed" title="Elapsed time for the current turn or preflight">
+            <Icon name="clock" size={13} /> {statusTime}
+          </span>
+        )}
+      </div>
+
+      {activity !== null && (
+        <div className="v-rail__activity">
+          <div className="v-rail__section-head">
+            <span>Current activity</span>
+            {onOpen !== undefined && (
+              <button type="button" onClick={() => onOpen('activity')} title="Open full activity">
+                <Icon name="activity" size={14} />
+                <span className="v-sr-only">Open full activity</span>
+              </button>
+            )}
+          </div>
+          <div className="v-rail__activity-line" title={activity.lastActivity ?? 'No tool activity has been reported yet'}>
+            <Icon name="activity" size={14} />
+            <span>{activity.lastActivity ?? 'Waiting for the first update'}</span>
+          </div>
+          <div className="v-rail__activity-meta">
+            {activity.activities === null
+              ? 'No activity count reported yet'
+              : `${activity.activities.count} ${activity.activities.unit}`}
+          </div>
+        </div>
+      )}
+
+      <div className="v-rail__path">
+        <div className="v-rail__section-head">
+          <span>Run path</span>
+          <span className="v-rail__path-count" title="Stages with narration received">
+            {RAIL_KINDS.filter((kind) => run.cycles.some((cycle) => cycle.kind === kind)).length}/{RAIL_KINDS.length}
+          </span>
+        </div>
+        {run.preflight !== null && <RailPreflight preflight={run.preflight} now={now} />}
+        {RAIL_KINDS.map((kind) => {
+          const cycle = run.cycles.find((candidate) => candidate.kind === kind);
+          const state: RailState = currentKind === kind
+            ? run.gate !== null ? 'waiting' : 'running'
+            : cycle === undefined ? 'upcoming' : 'complete';
+          return (
+            <RailStage
+              key={kind}
+              kind={kind}
+              cycle={cycle}
+              state={state}
+              open={open.has(kind)}
+              onToggle={() => { toggle(kind); }}
+              censusOf={censusOf}
+              onOpen={onOpen}
+            />
+          );
+        })}
+      </div>
     </section>
   );
 }

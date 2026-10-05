@@ -637,9 +637,12 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
           type: 'error',
           id: msg.id,
           message:
-            `request ${String(running)} is still running; a run reads vibe.config.json once at ` +
-            'the start, so saving now would leave the screen and the loop describing different ' +
-            'configurations',
+            // Says what to do, not only why (#223): the sentence used to end on
+            // the reason, and a person who wanted to raise a cap for the run
+            // they were about to resume was left with nothing to act on.
+            'a run is still running, and it read vibe.config.json when it started, so it would ' +
+            'not see the change. Stop it or let it finish, then save — a resume reads the file ' +
+            'again',
         });
         return;
       }
@@ -801,6 +804,7 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
             text: reply.text,
             sessionId: reply.sessionId,
             tokens: reply.tokens,
+            context: reply.context,
           });
         })
         .catch((err: unknown) => {

@@ -330,7 +330,10 @@ async function preflightClaude(
         '--tools', 'Bash',
       ],
       // The probe is billed the way the turns it stands for will be (#223).
-      { input: prompt, cwd, timeoutMs, env: agentEnv('claude') },
+      // Interruptible (#223): a probe is an agent turn like any other, and a
+      // stop pressed while one ran used to wait it out - then the next probe -
+      // and only end the run at the first real turn, minutes later.
+      { input: prompt, cwd, timeoutMs, env: agentEnv('claude'), interruptible: true },
     );
 
     const turn = parseProbeTurn(result.stdout);
@@ -420,7 +423,8 @@ async function preflightCodex(
         cwd,
         '-',
       ],
-      { input: prompt, cwd, timeoutMs, env: agentEnv('codex') },
+      // Interruptible, for the Claude probe's reason above.
+      { input: prompt, cwd, timeoutMs, env: agentEnv('codex'), interruptible: true },
     );
 
     const stream = parseProbeStream(result.stdout);

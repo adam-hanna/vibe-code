@@ -1,6 +1,11 @@
 /*
  * The design system, as tokens.
  *
+ * October 2026: the workspace redesign replaces the palette and type direction.
+ * WORKSPACE.md records the new composition. The notes below retain the history
+ * behind the token semantics; their original color ratios and font counts are
+ * historical, while scripts/contrast.mjs checks the current values.
+ *
  * Transcribed from `Vibe Design Spec.dc.html` §1-§3, which is itself the
  * distillation of fourteen hi-fi screens over nine review rounds: 51 distinct
  * hexes resolved to 42 tokens, 70 font declarations collapsed to 9 named styles
@@ -35,26 +40,26 @@
    * `active` for the live thing, `accent-tint` for selection, `alarm` for a
    * halt. Ordered here as they stack.
    */
-  --surface-page: #0e1012;          /* desk behind the window */
-  --surface-chrome: #101315;        /* titlebar, rail, tab bar */
-  --surface-column: #131618;        /* loop column, table header, footers */
-  --surface-panel: #141719;         /* window body, content panes */
-  --surface-card: #16191c;          /* cards, fields, and the modal */
-  --surface-active: #161b20;        /* the live card, your turns, selected row */
-  --surface-active-hdr: #1a2530;    /* the live cycle's header band */
-  --surface-accent-tint: #1b2a38;   /* P2 chip, selected segment, evidence chip */
-  --surface-alarm: #1b1e21;         /* halt banner and stale strip ground */
-  --surface-tray: #0b0d0e;          /* menubar strip, the app with no window */
+  --surface-page: #151815;          /* desk behind the window */
+  --surface-chrome: #191c19;        /* titlebar, rail, tab bar */
+  --surface-column: #1b1e1b;        /* loop column, table header, footers */
+  --surface-panel: #191c19;         /* window body, content panes */
+  --surface-card: #222622;          /* cards, fields, and the modal */
+  --surface-active: #252d23;        /* the live card, your turns, selected row */
+  --surface-active-hdr: #293127;    /* the live cycle's header band */
+  --surface-accent-tint: #2b3827;   /* P2 chip, selected segment, evidence chip */
+  --surface-alarm: #292a23;         /* halt banner and stale strip ground */
+  --surface-tray: #111411;          /* menubar strip, the app with no window */
 
   /* ------------------------------------------------------- text: 3 tiers, 2 emphases
    * Ratios are against `--surface-panel`, the most common ground. The floor
    * holds across all ten surfaces; the others have headroom.
    */
-  --text-display: #e7e9eb;          /* 15.4 - titles only */
-  --text-emphasis: #dbe4ec;         /* 14.0 - the live value */
-  --text-primary: #c3c8cc;          /* 10.7 - measurements, body */
-  --text-secondary: #a8aeb3;        /*  8.0 - prose, log history */
-  --text-tertiary: #9aa0a5;         /*  6.8 - labels, timestamps. THE FLOOR */
+  --text-display: #f0f2e9;          /* titles */
+  --text-emphasis: #e5ebdf;         /* the live value */
+  --text-primary: #d0d6cc;         /* measurements, body */
+  --text-secondary: #b2bbad;       /* prose, log history */
+  --text-tertiary: #a4af9f;        /* labels, timestamps. THE FLOOR */
 
   /* #8f9498 was the floor until #190 and is deliberately NOT listed below with
    * the retired greys, because it does not belong there and the audit says so:
@@ -77,21 +82,26 @@
    * The four retired greys above are good at exactly this, and that is what
    * they became.
    */
-  --rule-strong: #4a4f54;           /* dashed chips, card outline */
-  --rule-control: #3d4247;          /* buttons, fields */
-  --rule-control-dim: #33383d;      /* unselected segment, locked cell */
-  --rule-structure: #2e3236;        /* window, pane and bar edges */
-  --rule-card: #2b3034;             /* card and panel outline */
-  --rule-inner: #232a30;            /* inside a card, empty bar track */
-  --rule-hatch: #191d20;            /* absence fill, 135deg at 5px */
+  --rule-strong: #505a4b;           /* dashed chips, card outline */
+  --rule-control: #414a3c;          /* buttons, fields */
+  --rule-control-dim: #343d30;      /* unselected segment, locked cell */
+  --rule-structure: #30362c;        /* window, pane and bar edges */
+  --rule-card: #353d30;             /* card and panel outline */
+  --rule-inner: #2b3227;            /* inside a card, empty bar track */
+  --rule-hatch: #252b22;            /* absence fill, 135deg at 5px */
 
   /* ------------------------------------------------- accent: solid means interactive */
-  --accent-solid: #94bce3;          /* primary button, selection marks */
-  --accent-on-tint: #b5d9fd;        /* text on --surface-accent-tint */
-  --accent-border: #4a6b8c;         /* live card, tinted chip, modal edge */
-  --accent-border-dim: #35516b;     /* rule under an active header */
-  --accent-base: #5980a6;           /* Industry's own steel, rail selection */
-  --accent-muted: #8fb3d4;          /* metadata inside an active region */
+  --accent-solid: #c3e88d;          /* primary button, selection marks */
+  --accent-on-tint: #d6f1b1;        /* text on --surface-accent-tint */
+  --accent-border: #71855a;         /* live card, tinted chip, modal edge */
+  --accent-border-dim: #4f623f;     /* rule under an active header */
+  --accent-base: #839b65;           /* rail selection */
+  --accent-muted: #b5c99b;          /* metadata inside an active region */
+  --shadow-overlay: 0 24px 80px rgba(0, 0, 0, 0.45);
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --font-editorial: Georgia, 'Times New Roman', serif;
 
   /* ------------------------------------------------------ severity: a ramp with an order
    * Weight ascends with severity. On a dark ground the ramp is rebuilt, not
@@ -168,8 +178,8 @@
    * 16/20/22/26 sizes were canvas annotation headings - spec document type, not
    * product type. 15px survives only as `kicker`.
    */
-  --font-sans: 'Barlow', system-ui, -apple-system, sans-serif;
-  --font-condensed: 'Barlow Condensed', 'Barlow', system-ui, sans-serif;
+  --font-sans: 'Segoe UI Variable', 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-condensed: var(--font-sans);
   --font-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
 
   /**
@@ -195,15 +205,15 @@
    */
   --type-scale: 1;
 
-  --size-display: 30px;
-  --size-title: 21px;
+  --size-display: 32px;
+  --size-title: 24px;
   --size-section: 17px;
   --size-kicker: 15px;
-  --size-tab: 12px;
-  --size-label: 10px;
-  --size-lead: 14px;
-  --size-body: 13px;
-  --size-body-sm: 12px;
+  --size-tab: 13px;
+  --size-label: 11px;
+  --size-lead: 15px;
+  --size-body: 14px;
+  --size-body-sm: 13px;
   --size-mono: 13px;
   --size-mono-sm: 12px;
   --size-chip: 10px;
@@ -239,10 +249,10 @@
    * as caps without it, and that is the only reason they are tracked. */
   --track-display: 0.02em;
   --track-title: 0.01em;
-  --track-section: 0.1em;
-  --track-kicker: 0.09em;
-  --track-tab: 0.13em;
-  --track-label: 0.16em;
+  --track-section: 0.02em;
+  --track-kicker: 0.03em;
+  --track-tab: 0.01em;
+  --track-label: 0.1em;
   --track-chip: 0.05em;
   --track-chip-micro: 0.1em;
 

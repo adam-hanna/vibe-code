@@ -148,6 +148,12 @@ export type Outbound =
       text: string;
       sessionId: string;
       tokens: { input: number; output: number; cacheRead: number; cacheCreation: number; total: number };
+      /**
+       * How full the conversation is after this turn, or null when the CLI did
+       * not say (#223). Not `tokens`, which is summed over every request the
+       * turn made; see `PilotChatResult.context`.
+       */
+      context: { tokens: number; window: number | null } | null;
     }
   /**
    * The archive, in reply to an `archive` request (#223, `1b`).

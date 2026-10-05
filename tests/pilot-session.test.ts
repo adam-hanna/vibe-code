@@ -48,10 +48,13 @@ function withPilot(
   };
 }
 
+// What the CLI said the conversation occupies, carried through untouched.
+const CONTEXT = { tokens: 41_000, window: 200_000 };
+
 const replies = (text: string): ((o: PilotChatOptions) => Promise<PilotChatResult>) => {
   return (options) => {
     options.onDelta?.(text);
-    return Promise.resolve({ text, sessionId: 'from-the-cli', tokens: TOKENS });
+    return Promise.resolve({ text, sessionId: 'from-the-cli', tokens: TOKENS, context: CONTEXT });
   };
 };
 
@@ -80,7 +83,7 @@ test('the turn runs in the repository the frame named, not in this process', asy
   let seen: string | null = null;
   const { session } = withPilot((options) => {
     seen = options.cwd;
-    return Promise.resolve({ text: 'ok', sessionId: 's', tokens: TOKENS });
+    return Promise.resolve({ text: 'ok', sessionId: 's', tokens: TOKENS, context: null });
   });
   session.receive(line({ ...REQUEST, dir: 'C:/some/worktree' }));
   await settle();
@@ -104,11 +107,12 @@ test('the reply carries the tokens and no money, because there is none to carry'
       text: 'it is planning',
       sessionId: 'from-the-cli',
       tokens: TOKENS,
+      context: CONTEXT,
     },
   ]);
   const reply = sent[1];
   assert.equal(reply?.type, 'pilot_reply');
-  assert.deepEqual(Object.keys(reply ?? {}).sort(), ['id', 'sessionId', 'text', 'tokens', 'type']);
+  assert.deepEqual(Object.keys(reply ?? {}).sort(), ['context', 'id', 'sessionId', 'text', 'tokens', 'type']);
 });
 
 test('the session id the CLI reports wins over the one that was proposed', async () => {
@@ -193,7 +197,7 @@ test('a pilot turn does not hold the process open, and does not close it either'
   const sent: Outbound[] = [];
   const session = createSession((m) => void sent.push(m), {
     invoke: () => Promise.resolve(0),
-    pilot: () => held.then(() => ({ text: 'late', sessionId: 's', tokens: TOKENS })),
+    pilot: () => held.then(() => ({ text: 'late', sessionId: 's', tokens: TOKENS, context: null })),
   });
 
   session.receive(line(REQUEST));

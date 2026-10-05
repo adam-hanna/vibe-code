@@ -208,7 +208,7 @@ describe('a conversation belongs to the run it is about', () => {
     // Two different emptinesses drawn as one. Beside a run, *"nothing yet"*
     // reads as the pane having failed to load something — which is exactly how
     // it was reported.
-    expect(pilot).toMatch(/No conversation was kept for this run/);
+    expect(pilot).toMatch(/There is no saved chat here/);
     expect(pilot).toMatch(/runId === null \? \(/);
   });
 });
@@ -418,7 +418,11 @@ describe('the pilot reads the repository on screen, not the one in the sidebar (
     // reported as *"I just tried sending a chat to an old run's pilot but I
     // can't"*.
     const pane = cockpit.slice(cockpit.indexOf('<PilotPane'), cockpit.indexOf('onEffect={onEffect}'));
-    expect(pane).toContain('dir={shownDir}');
+    // Through `pilotDir` since #223, which IS `shownDir` except for the seconds
+    // a launch waits for its run id, when it holds the directory of the chat
+    // that proposed the run (see `holdChat`).
+    expect(pane).toContain('dir={pilotDir}');
+    expect(cockpit).toContain('const pilotDir = holdChat?.dir ?? shownDir;');
     expect(pane).not.toContain('dir={repoDir}');
   });
 

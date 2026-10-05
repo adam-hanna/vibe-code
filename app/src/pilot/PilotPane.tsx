@@ -3,6 +3,8 @@ import { Button, MetaChip, StateKicker, ThinkingWave } from '../design';
 import { elapsed } from '../cockpit/format';
 import { logOf } from './log';
 import { RoundCard } from './RoundCard';
+import { Welcome } from './Welcome';
+import { Icon } from '../design/Icon';
 import * as host from '../host';
 import * as keys from './keys';
 import * as pilot from './pilot';
@@ -13,7 +15,7 @@ import { readEmitted, unique, visible } from './emit';
 import { useFollow } from './follow';
 import { autoRun, NO_ACCESS } from './access';
 import { declare, settleCall } from './tools';
-import { chatKey, chatMove, isDraftKey, readChat, worthSaving, writable } from './saved';
+import { chatKey, chatMove, isDraftKey, readChat, replyKey, worthSaving, writable } from './saved';
 import {
   costOf,
   describeDay,
@@ -26,12 +28,21 @@ import {
 } from './ledger';
 import type { Ledger, PilotLimits } from './ledger';
 import {
+  adoptSession,
   answerOf,
   ask,
   autoRan,
+  clearContext,
+  compact,
+  COMPACT_PROMPT,
+  contextNow,
+  describeContext,
   decide,
   emptyConversation,
   follow,
+  heldSession,
+  measure,
+  needsFollow,
   reduce,
   refuse,
   retext,
@@ -41,7 +52,9 @@ import {
   unanswered,
   unrecognised,
   wake,
+  withCarry,
 } from './transcript';
+import type { Context } from './transcript';
 import type { ReactNode } from 'react';
 import type { KeyStatus } from './keys';
 import type { PilotAccess } from './access';
@@ -194,6 +207,14 @@ type Action =
   /** A proposal the person's settings ran without a card (#223). */
   | { type: 'auto'; id: string; why: string }
   | { type: 'unknown' }
+  /** The pilot summarising itself, to carry into a fresh context (#223). */
+  | { type: 'compact'; turn: number; provider: Backend; openedAt: number }
+  /** The session the CLI says the live turn ran in. */
+  | { type: 'adopt'; turn: number; sessionId: string }
+  /** How full the conversation was when the live turn ended. */
+  | { type: 'measure'; turn: number; context: Context | null }
+  /** Forget what the pilot holds; the log stays. */
+  | { type: 'clear' }
   /** A conversation read back from storage, replacing whatever is here (#223). */
   | { type: 'restore'; conversation: Conversation };
 
@@ -219,6 +240,14 @@ function apply(state: Conversation, action: Action): Conversation {
       return autoRan(state, action.id, action.why);
     case 'unknown':
       return unrecognised(state);
+    case 'compact':
+      return compact(state, action.turn, action.provider, action.openedAt);
+    case 'adopt':
+      return adoptSession(state, action.turn, action.sessionId);
+    case 'measure':
+      return measure(state, action.turn, action.context);
+    case 'clear':
+      return clearContext(state);
     // Replaces rather than merges. Two conversations interleaved by arrival
     // would be a transcript of a discussion that never happened.
     case 'restore':
@@ -447,26 +476,48 @@ function TurnElapsed({ startedAt, now }: { startedAt: number | null; now: number
 }
 
 
+/**
+ * That a turn is open, pinned to the foot of the log (#223).
+ *
+ * It sat in the live card's header, so a reply that streamed more than a
+ * screen pushed it out of view, and so did scrolling up to re-read: *"the
+ * 'Thinking...' needs to always be at the bottom so the user can see it"*. A
+ * direct child of the scrolling log with `position: sticky`, so it holds the
+ * bottom edge wherever the reader is, and drawn only while a turn is open.
+ * It is still the one pulse on screen, and the elapsed still travels with it.
+ */
+function TurnWorking({
+  reply,
+  now,
+}: {
+  reply: Reply;
+  /**
+   * The clock, passed in rather than read here: one ticking value for the
+   * whole pane, so the elapsed does not freeze at the second the last token
+   * arrived - which is precisely the moment it starts mattering.
+   */
+  now: number;
+}) {
+  const word = reply.text === '' ? 'thinking' : 'streaming';
+  return (
+    <div className="v-pilot__working" role="status">
+      <ThinkingWave label={word} />
+      <StateKicker tone="accent">{word}</StateKicker>
+      <TurnElapsed startedAt={reply.startedAt} now={now} />
+    </div>
+  );
+}
+
 function ReplyCard({
   reply,
   conversation,
   onDecide,
   busy,
-  now,
 }: {
   reply: Reply;
   conversation: Conversation;
   onDecide: (id: string, accepted: boolean, note: string) => void;
   busy: boolean;
-  /**
-   * The clock, passed in rather than read here.
-   *
-   * One ticking value for the whole pane: a card reading `Date.now()` itself
-   * would only re-render when something else made it, so the elapsed would
-   * freeze at whatever second the last token arrived - which is precisely the
-   * moment it starts mattering.
-   */
-  now: number;
 }) {
   const outcome = reply.outcome;
   return (
@@ -499,6 +550,8 @@ function ReplyCard({
             reader has to be able to tell what they asked for from what the run
             caused (#211). */}
         {reply.woke !== null && <StateKicker tone="quiet">woke at a gate</StateKicker>}
+        {/* A compaction is a turn nobody typed, so it says what it is (#223). */}
+        {reply.compacts === true && <StateKicker tone="quiet">compacting context</StateKicker>}
         <MetaChip>{BACKEND_NAME[reply.provider]}</MetaChip>
         {/* What ANSWERED, not what was asked for: an alias resolves to a dated
             version, and the resolved one is the fact worth showing. Absent until
@@ -512,13 +565,9 @@ function ReplyCard({
             `thinking` is the honest word for *sent, nothing back yet*; once
             text is arriving the text itself is the evidence and the label says
             so. The wave is on both, because both are open turns. */}
-        {outcome === null && (
-          <>
-            <ThinkingWave label={reply.text === '' ? 'thinking' : 'streaming'} />
-            <StateKicker tone="accent">{reply.text === '' ? 'thinking' : 'streaming'}</StateKicker>
-            <TurnElapsed startedAt={reply.startedAt} now={now} />
-          </>
-        )}
+        {/* The open turn's indicator is not drawn here any more: it is
+            `TurnWorking`, pinned to the foot of the log, because at the top of a
+            card it scrolled away as soon as the reply grew. */}
         {/* The vendor's own word — `end_turn`, `stop`, `max_tokens`, `length`.
             Not translated into a shared spelling, because a shared spelling
             would claim a shared meaning nobody has established. */}
@@ -535,6 +584,11 @@ function ReplyCard({
         <div className="v-pilot__text v-selectable">{visible(reply.text)}</div>
       )}
       {outcome?.kind === 'failed' && <div className="v-pilot__why">{outcome.message}</div>}
+      {reply.compacts === true && outcome?.kind === 'ended' && reply.text !== '' && reply.calls.length === 0 && (
+        <div className="v-pilot__spend">
+          the pilot carries on from this summary — it no longer holds the conversation above it
+        </div>
+      )}
 
       {reply.calls.map((call) => (
         <CallCard
@@ -792,6 +846,12 @@ export function PilotPane({
         // the draft asked for has now started and holds the conversation, so the
         // draft's copy would only come back as a duplicate.
         else if (before !== null && isDraftKey(before)) localStorage.removeItem(before);
+        // A run's own chat that proposed this one keeps its record but gives
+        // up its CLI session (#223): the new run carries it on, and two chats
+        // resuming one session would each answer from the other's messages.
+        else if (before !== null) {
+          localStorage.setItem(before, writable({ ...held.current, session: null, carry: null }));
+        }
       } catch {
         // The conversation is still on screen and still correct. What is lost is
         // its return next time.
@@ -800,6 +860,10 @@ export function PilotPane({
     }
 
     const back = readChat(stored);
+    // Restoring is browsing. Historical usage is already in the books, and a
+    // saved tool result must not resume an unattended vendor request.
+    for (const reply of back.replies) counted.current.add(replyKey(reply));
+    sentAt.current = back.messages.length;
     // Every call that came back from storage is one nobody in this session saw
     // asked for, so none of them may run without a press (#223) — a `git
     // commit` from yesterday's conversation must not fire because the window
@@ -835,25 +899,14 @@ export function PilotPane({
   const [vendor, setVendor] = useState<keys.Provider>('anthropic');
   const provider: Backend = backendFor(vendor, access ?? NO_ACCESS);
   const [model, setModel] = useState<string>(SUBSCRIPTION_MODELS[0] ?? '');
-  /**
-   * The conversation the CLI is keeping, once it has said what it is (#193).
-   *
-   * Allocated here on the first turn and then **replaced by whatever the CLI
-   * returns**, which is authoritative over ours. Null means the next turn opens
-   * a new conversation; a session id means it resumes one, which is what makes a
-   * subscription turn cost nothing in re-sent context.
-   */
-  const session = useRef<string | null>(null);
-  // A conversation belongs to the backend that is holding it. Carrying a CLI
-  // session id across to a vendor — or back, or from one CLI to the other — would
-  // resume a conversation on a wire that has never heard of it (#193). The
-  // backend moves when the vendor is picked AND when Settings changes the road,
-  // so this follows the derived value rather than the picker.
+  // The conversation the CLI is keeping is `conversation.session` now, stored
+  // with the chat (#223) - see `Session` for the two defects a ref here had. It
+  // names its backend, so a session is never resumed on a wire that has never
+  // heard of it (#193), and a turn taken on another backend retires it.
   const heldBy = useRef<Backend>(provider);
   useEffect(() => {
     if (heldBy.current === provider) return;
     heldBy.current = provider;
-    session.current = null;
     setModel(modelsFor(provider, pilot.MODELS)[0] ?? '');
   }, [provider]);
   /**
@@ -897,7 +950,7 @@ export function PilotPane({
   // per-day ceiling that reset when the app restarted would not be a ceiling.
   const [ledger, setLedger] = useState<Ledger>(readLedger);
   /** Turns already in the books, so a re-render cannot bill one twice. */
-  const counted = useRef<Set<number>>(new Set());
+  const counted = useRef<Set<string>>(new Set());
   /** The chain ran out and the pilot is holding for a person. */
   const [stalled, setStalled] = useState(false);
   /**
@@ -907,7 +960,7 @@ export function PilotPane({
    * the reply count - because the question it answers is *where is the reader
    * looking*, and only the reader can move that.
    */
-  const log = useFollow<HTMLDivElement>();
+  const log = useFollow<HTMLDivElement>(conversation.replies.length > 0 || conversation.live !== null || run.cycles.length > 0);
   /**
    * The clock behind the elapsed on an open turn (#211).
    *
@@ -934,6 +987,8 @@ export function PilotPane({
   const sentAt = useRef(-1);
 
   useEffect(() => {
+    // The browser preview has no Tauri event bridge to subscribe to.
+    if (!host.inShell()) return;
     let stop: (() => void) | null = null;
     let cancelled = false;
     void (async () => {
@@ -1020,13 +1075,13 @@ export function PilotPane({
   // something else entirely.
   useEffect(() => {
     const fresh = conversation.replies.filter(
-      (reply) => reply.outcome !== null && reply.usage !== null && !counted.current.has(reply.turn),
+      (reply) => reply.outcome !== null && reply.usage !== null && !counted.current.has(replyKey(reply)),
     );
     if (fresh.length === 0) return;
     let next = ledger;
     const at = new Date();
     for (const reply of fresh) {
-      counted.current.add(reply.turn);
+      counted.current.add(replyKey(reply));
       if (reply.usage === null) continue;
       next = record(next, costOf(reply.provider, reply.model, reply.usage), at);
     }
@@ -1049,6 +1104,7 @@ export function PilotPane({
   // for would be the window stating something it was not told - the same rule
   // the field's own comment states.
   useEffect(() => {
+    if (!host.inShell()) return;
     let stop: (() => void) | null = null;
     let cancelled = false;
     void (async () => {
@@ -1079,7 +1135,10 @@ export function PilotPane({
           return;
         }
         // The CLI's id wins over the one we proposed, always.
-        session.current = frame.sessionId;
+        dispatch({ type: 'adopt', turn, sessionId: frame.sessionId });
+        // Before `ended`, which closes the turn this lands on. A host older
+        // than the field sends none, and that is an unmeasured turn.
+        dispatch({ type: 'measure', turn, context: frame.context ?? null });
         // The reply the CLI says it made, over the deltas we accumulated. The
         // deltas are every assistant block in the turn, interstitials between
         // its own Read and Glob calls included; this is the final message. Both
@@ -1152,6 +1211,8 @@ ${frame.text}`, turn, origin.current))) {
        * answer) and it was still not typed by anybody.
        */
       woke: string | null = null,
+      /** This turn is the pilot writing the summary a compaction carries (#223). */
+      compacting = false,
     ) => {
       /**
        * When the wait started, taken **here** rather than when the request
@@ -1174,7 +1235,7 @@ ${frame.text}`, turn, origin.current))) {
       // the calls come back in a fenced block that `emit.ts` reads (#211). Same
       // table, same executors, same proposal card; only the channel differs.
       if (!needsKey(provider)) {
-        const id = session.current;
+        const id = heldSession(held.current, provider);
         void host
           .pilotTurn({
             agent: agentOf(provider),
@@ -1183,7 +1244,10 @@ ${frame.text}`, turn, origin.current))) {
             // else said is already there and the results are the only new
             // thing. An empty prompt here used to be sent instead, which asked
             // the model to answer nothing.
-            prompt: said ?? trailingResults(messages) ?? '',
+            //
+            // A new session after a compaction opens with the summary, which is
+            // the whole of how the compaction reaches the next conversation.
+            prompt: withCarry(id === null ? held.current.carry : null, said ?? trailingResults(messages) ?? ''),
             system: systemPrompt(run, launched, 'emitted', access, provider === 'subscription'),
             model,
             dir,
@@ -1193,7 +1257,8 @@ ${frame.text}`, turn, origin.current))) {
           .then((turn) => {
             hostTurn.current = turn;
             setLive(turn);
-            if (said === null) dispatch({ type: 'follow', turn, provider, openedAt });
+            if (compacting) dispatch({ type: 'compact', turn, provider, openedAt });
+            else if (said === null) dispatch({ type: 'follow', turn, provider, openedAt });
             else if (woke !== null)
               dispatch({ type: 'wake', reason: woke, turn, provider, openedAt });
             else dispatch({ type: 'ask', content: said, turn, provider, openedAt });
@@ -1201,7 +1266,9 @@ ${frame.text}`, turn, origin.current))) {
           .catch((err: unknown) =>
             dispatch({
               type: 'refuse',
-              content: said,
+              // A refused compaction is drawn without the prompt as though
+              // somebody had typed it.
+              content: compacting ? null : said,
               provider,
               message: err instanceof Error ? err.message : String(err),
               woke,
@@ -1227,14 +1294,15 @@ ${frame.text}`, turn, origin.current))) {
           // down the wrong road (#223).
           hostTurn.current = -1;
           setLive(turn);
-          if (said === null) dispatch({ type: 'follow', turn, provider, openedAt });
+          if (compacting) dispatch({ type: 'compact', turn, provider, openedAt });
+          else if (said === null) dispatch({ type: 'follow', turn, provider, openedAt });
           else if (woke !== null) dispatch({ type: 'wake', reason: woke, turn, provider, openedAt });
           else dispatch({ type: 'ask', content: said, turn, provider, openedAt });
         })
         .catch((err: unknown) =>
           dispatch({
             type: 'refuse',
-            content: said,
+            content: compacting ? null : said,
             provider,
             message: err instanceof Error ? err.message : String(err),
             woke,
@@ -1250,8 +1318,14 @@ ${frame.text}`, turn, origin.current))) {
   // effect running, and saying "waiting on you" about those would be untrue for
   // as long as anybody could read it.
   const proposals = owed.filter((call) => call.settlement?.kind === 'proposes');
-  const last = conversation.messages[conversation.messages.length - 1];
-  const owesReply = conversation.live === null && owed.length === 0 && last?.role === 'tool';
+  const owesReply = needsFollow(conversation, sentAt.current);
+
+  // A compaction or a clear shrinks the wire (#223). The count this compares
+  // against has to shrink with it, or the conversation growing back through the
+  // old number would read as already sent and a tool result would go unanswered.
+  useEffect(() => {
+    if (conversation.messages.length < sentAt.current) sentAt.current = conversation.messages.length;
+  }, [conversation.messages.length]);
 
   // The other half of a tool loop. Keyed on the message count so StrictMode's
   // second pass finds the turn already sent rather than sending it twice.
@@ -1297,7 +1371,7 @@ ${frame.text}`, turn, origin.current))) {
     needsKey(provider) && (statuses === null || !keys.usable(statuses).includes(provider))
       ? `no ${keys.PROVIDER_NAME[provider]} key — enter one in Settings, or switch ${keys.PROVIDER_NAME[provider]} to your subscription there`
       : !needsKey(provider) && dir.trim() === ''
-        ? 'choose a repository first — this backend runs in one and can read only that one'
+        ? 'Add a project in the sidebar to send your first message.'
         : !verdict.allowed
           ? // The ceiling is the pilot's own and is off unless somebody set one,
             // so the sentence names where it is set. `why` is the ledger's own
@@ -1482,6 +1556,21 @@ ${frame.text}`, turn, origin.current))) {
     return;
   }, [commands, ready, live, conversation.messages, start]);
 
+  const contextState = contextNow(conversation, provider);
+  const contextLine = describeContext(contextState, !needsKey(provider));
+  // Both need a context worth emptying, and a turn that is not running.
+  // Compacting is a turn, so it also needs everything a send needs.
+  const holding = contextState.kind === 'measured' || contextState.kind === 'unmeasured';
+  const canCompact = holding && live === null && ready;
+  const canClear = (holding || contextState.kind === 'compacted') && live === null;
+  const compactNow = useCallback(() => {
+    if (live !== null || !ready) return;
+    // A person pressed it, so this is an attended turn and the chain starts over.
+    chain.current = 0;
+    setStalled(false);
+    start([...conversation.messages, { role: 'user' as const, content: COMPACT_PROMPT }], COMPACT_PROMPT, null, true);
+  }, [conversation.messages, live, ready, start]);
+
   const submit = useCallback(() => {
     const content = entry.trim();
     // `ready` is checked HERE as well as on the button, because the field is no
@@ -1535,6 +1624,7 @@ ${frame.text}`, turn, origin.current))) {
       <div className="v-pilot__controls">
         <select
           className="v-pilot__select"
+          aria-label="Pilot provider"
           value={vendor}
           // The session and the model follow in the effect on `provider`.
           onChange={(e) => setVendor(e.target.value === 'openai' ? 'openai' : 'anthropic')}
@@ -1548,7 +1638,7 @@ ${frame.text}`, turn, origin.current))) {
             </option>
           ))}
         </select>
-        <select className="v-pilot__select" value={model} onChange={(e) => setModel(e.target.value)}>
+        <select className="v-pilot__select" aria-label="Pilot model" value={model} onChange={(e) => setModel(e.target.value)}>
           {modelsFor(provider, pilot.MODELS).map((m) => (
             <option key={m} value={m}>
               {m}
@@ -1565,7 +1655,6 @@ ${frame.text}`, turn, origin.current))) {
             configured is a supported state, and so is a window that has not
             been pointed at a repository yet - two different absences with two
             different fixes. */}
-        {blocked !== null && <span className="v-pilot__note">{blocked}</span>}
         {/* The one switch that lets the pilot spend without anybody typing.
             It said *"speak up at a gate — one turn each, still proposes only"*,
             which is three clauses in the product's own vocabulary and answers
@@ -1590,7 +1679,7 @@ ${frame.text}`, turn, origin.current))) {
               }
             }}
           />
-          <span>Have the pilot weigh in whenever the run stops for you</span>
+          <span>Help at run checkpoints</span>
         </label>
         {proposals.length > 0 && (
           <span className="v-pilot__note">
@@ -1613,6 +1702,28 @@ ${frame.text}`, turn, origin.current))) {
           reading, because that is about this conversation and nothing else. */}
       <div className="v-pilot__books">
         <span className="v-pilot__note">{describeDay(day)}</span>
+        {/* How full the pilot's context is, and the two ways to empty it (#223).
+            Beside the books rather than on a card, because it is about the
+            conversation as a whole and the next turn, not about one reply. */}
+        <span className="v-pilot__context">
+          <span className={`v-pilot__note${contextLine.alarm ? ' v-pilot__note--warn' : ''}`}>{contextLine.text}</span>
+          <Button
+            level="tertiary"
+            disabled={!canCompact}
+            title="The pilot writes a summary of this conversation, and carries on from the summary in a fresh context. The log above stays."
+            onClick={compactNow}
+          >
+            compact
+          </Button>
+          <Button
+            level="tertiary"
+            disabled={!canClear}
+            title="The pilot forgets this conversation and starts its next turn with nothing. The log above stays."
+            onClick={() => dispatch({ type: 'clear' })}
+          >
+            clear
+          </Button>
+        </span>
       </div>
       {!verdict.allowed && verdict.why !== null && (
         <div className="v-pilot__note v-pilot__note--alarm">
@@ -1639,7 +1750,7 @@ ${frame.text}`, turn, origin.current))) {
              `saved.ts` did not either. Saying *"nothing yet"* over an opened run
              reads as the pane having failed to load something, which is exactly
              how it was reported — *"nor do I see the pilot chat update"*. */
-          <div className="v-pilot__note">
+          <div className="v-pilot__empty">
             {runId === null ? (
               <>
                 {/* **The front door describes the flow, not the permissions
@@ -1651,18 +1762,18 @@ ${frame.text}`, turn, origin.current))) {
                     made and this copy had not. What a person needs here is what
                     happens when they type, because it is no longer obvious: the
                     reply is questions rather than a run. */}
-                Say what you want built. The pilot reads this repository, digs into the request and
-                asks about anything that would change the shape of the work — a run is long and
-                expensive, and it converges or stalls on the brief it was given. When the brief is
-                settled it puts the exact command in front of you, and you press it. Nothing here
-                starts a run on its own.
+                <Welcome onPrompt={(prompt) => {
+                  setEntry(prompt);
+                  // A starter prepares a message. Sending is still the person's action.
+                  log.ref.current?.parentElement?.querySelector<HTMLTextAreaElement>('.v-pilot__entry')?.focus();
+                }} />
               </>
             ) : (
               <>
-                No conversation was kept for this run. A chat is stored by this window, per run, so
-                a run started from the terminal or by an older build has none — the run itself is
-                unaffected, and its plans, reports and transcript are in the tabs above. Anything
-                you say here is kept with this run from now on.
+                <div className="v-empty-chat"><Icon name="code" size={28} />
+                  <h2>A fresh conversation about this run</h2>
+                  <p>There is no saved chat here. Explore its plans and reports above, or ask the pilot about the work. New messages will be saved with this run.</p>
+                </div>
               </>
             )}
           </div>
@@ -1675,6 +1786,10 @@ ${frame.text}`, turn, origin.current))) {
         {entries.map((entry) =>
           entry.kind === 'round' ? (
             <RoundCard key={`round-${entry.card.key}`} card={entry.card} onOpen={onOpen} />
+          ) : entry.reply.cleared === true ? (
+            <div key={`reply-${String(entry.reply.turn)}`} className="v-pilot__divider" role="separator">
+              context cleared — the pilot remembers nothing above this line
+            </div>
           ) : (
             <ReplyCard
               key={`reply-${String(entry.reply.turn)}`}
@@ -1682,7 +1797,6 @@ ${frame.text}`, turn, origin.current))) {
               conversation={conversation}
               busy={live !== null}
               onDecide={onDecide}
-              now={now}
             />
           ),
         )}
@@ -1692,8 +1806,10 @@ ${frame.text}`, turn, origin.current))) {
             conversation={conversation}
             busy
             onDecide={onDecide}
-            now={now}
           />
+        )}
+        {conversation.live !== null && conversation.live.outcome === null && (
+          <TurnWorking reply={conversation.live} now={now} />
         )}
       </div>
 
@@ -1725,8 +1841,9 @@ ${frame.text}`, turn, origin.current))) {
       <div className="v-pilot__composer">
         <textarea
           className="v-pilot__entry"
+          aria-label="Message your pilot"
           rows={2}
-          placeholder="say what you want built — enter sends, shift+enter is a new line"
+          placeholder="What would you like to build, improve, or figure out?"
           value={entry}
           // **Never disabled.** Composing and sending are two acts, and only the
           // second of them can be blocked: a proposal waiting to be answered, a
@@ -1754,8 +1871,8 @@ ${frame.text}`, turn, origin.current))) {
           }}
         />
         {live === null ? (
-          <Button level="primary" disabled={!ready || entry.trim() === ''} onClick={submit}>
-            send
+          <Button level="primary" aria-label="Send message" disabled={!ready || entry.trim() === ''} onClick={submit}>
+            <Icon name="send" size={18} />
           </Button>
         ) : (
           <Button
@@ -1777,6 +1894,7 @@ ${frame.text}`, turn, origin.current))) {
           </Button>
         )}
       </div>
+      <p className="v-pilot__hint">Enter to send <span>·</span> Shift + Enter for a new line</p>
     </div>
   );
 }

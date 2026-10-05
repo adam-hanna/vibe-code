@@ -121,6 +121,7 @@
 .v-side {
   width: 364px;
   flex: none;
+  position: relative;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -133,6 +134,34 @@
 
 .v-side--right {
   border-left: 1px solid var(--rule-structure);
+}
+
+/* The inner edge of an open panel is its resize handle (#223). It straddles the
+   rule, so the hit target is wider than the line it sits on, and it shows the
+   accent only while it is being found or used. */
+.v-side__resize {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  z-index: 2;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.v-side--left .v-side__resize {
+  right: -4px;
+}
+
+.v-side--right .v-side__resize {
+  left: -4px;
+}
+
+.v-side__resize:hover,
+.v-side__resize:active,
+.v-side__resize:focus-visible {
+  background: linear-gradient(var(--accent-solid), var(--accent-solid)) center / 2px 100% no-repeat;
+  outline: none;
 }
 
 /* Shut: a strip, never a gap. The way back is where the panel was. */
@@ -314,6 +343,20 @@
 
 .v-nav__row--on {
   background: var(--surface-active);
+}
+
+/* The run on screen (#223): *"I can't tell which run I'm in."* The plain
+   `--on` ground was one step off the panel and darker than the hover, so the
+   selected row read as the unselected one. A run row gets the selection tint
+   and the rail's selection bar; a project row keeps its own border treatment. */
+.v-nav__row--on:not(.v-nav__row--project),
+.v-nav__row--on:not(.v-nav__row--project):hover {
+  background: var(--surface-accent-tint);
+  box-shadow: inset 2px 0 0 var(--accent-base);
+}
+
+.v-nav__row--on:not(.v-nav__row--project) .v-nav__title {
+  color: var(--accent-on-tint);
 }
 
 .v-nav__open {
@@ -2917,7 +2960,13 @@
   max-width: 68ch;
 }
 
+/* Sticky, because a refusal is about the field you just left and that field is
+   usually a long way down the page (#223): at the top of the scroll it was
+   never in view, and the save looked as though it had worked. */
 .v-set__refused {
+  position: sticky;
+  top: 0;
+  z-index: 2;
   display: flex;
   align-items: baseline;
   gap: var(--space-3);
@@ -3982,5 +4031,13 @@
    — minutes typed, milliseconds stored. */
 .v-set__unit {
   font: var(--type-body-sm);
+  color: var(--text-tertiary);
+}
+
+/* A setting's key beside its label (#223), so a name read in a message can be
+   found here. Quieter than the label: it is the reference, not the prose. */
+.v-set__key {
+  margin-left: var(--space-2);
+  font: var(--type-mono-sm);
   color: var(--text-tertiary);
 }

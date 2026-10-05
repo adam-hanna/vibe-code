@@ -1,4 +1,4 @@
-import { claudeBin, detectRateLimit, extractTokens } from '@src/claude.js';
+import { claudeBin, detectRateLimit, extractTokens, promptContext } from '@src/claude.js';
 import { agentEnv } from '@src/auth.js';
 import { attachEnding, describeEnding, run } from '@src/proc.js';
 import type { ChildEnding, RunFn } from '@src/proc.js';
@@ -158,6 +158,24 @@ export interface PilotChatResult {
    * ships.
    */
   tokens: TokenUsage;
+  /**
+   * How full the conversation is now, or null when the turn did not say.
+   *
+   * Not `tokens`: that is what the turn *moved*, summed over every request in
+   * it, and a turn that read four files reports four prompts' worth. This is
+   * the prompt of the last request, which is what occupies the window.
+   */
+  context: PilotContext | null;
+}
+
+/**
+ * The size of a pilot conversation, and the window it is measured against
+ * (#223). `window` is null when nothing reported one - drawn as a count with no
+ * share, never as a share of a guessed window.
+ */
+export interface PilotContext {
+  tokens: number;
+  window: number | null;
 }
 
 /**
@@ -336,6 +354,7 @@ export async function pilotChat(
       sessionId:
         typeof result['session_id'] === 'string' ? result['session_id'] : options.sessionId,
       tokens: extractTokens(result),
+      context: promptContext(stdout),
     };
   } catch (err: unknown) {
     throw ended.seen === null ? err : attachEnding(err, ended.seen);

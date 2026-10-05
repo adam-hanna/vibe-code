@@ -111,8 +111,13 @@ describe('the cockpit wires it', () => {
   });
 
   test('the pilot pane is keyed by the draft, and a draft counts as pointed-at', () => {
-    expect(cockpit).toContain('runId={drafting?.id ?? shownRunId}');
-    expect(cockpit).toContain('opened={viewing !== null || drafting !== null}');
+    // Through `pilotRunId` since #223: outside a launch's hold it is exactly the
+    // draft first and then the run on screen, and `opened` is unchanged there.
+    expect(cockpit).toContain('runId={pilotRunId}');
+    expect(cockpit).toContain(
+      'const pilotRunId = holdChat !== null ? holdChat.runId : (drafting?.id ?? shownRunId);',
+    );
+    expect(cockpit).toContain('opened={holdChat === null && (viewing !== null || drafting !== null)}');
   });
 
   test('only the pilot\'s invoke can claim a draft', () => {

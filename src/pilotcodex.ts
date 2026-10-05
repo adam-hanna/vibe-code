@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { detectRateLimit } from '@src/claude.js';
@@ -6,7 +6,7 @@ import { codexBin, parseEvents } from '@src/codex.js';
 import { agentEnv } from '@src/auth.js';
 import { attachEnding, describeEnding, run } from '@src/proc.js';
 import type { ChildEnding, RunFn } from '@src/proc.js';
-import type { PilotChatOptions, PilotChatResult } from '@src/pilotchat.js';
+import type { PilotChatOptions, PilotChatResult, PilotContext } from '@src/pilotchat.js';
 
 /**
  * One pilot chat turn on the OpenAI subscription: `codex exec` (#223).
@@ -100,6 +100,91 @@ export function pilotCodexArgs(options: PilotChatOptions, instructions: string):
     : ['exec', ...common, '-s', 'read-only', '-C', options.cwd, '-'];
 }
 
+/**
+ * How full a Codex thread is, from the record Codex keeps of it (#223).
+ *
+ * **`codex exec --json` does not say**, so this is the one place the pilot reads
+ * a file another program owns. `turn.completed` carries the turn's usage summed
+ * over every request in it - measured on a pilot thread, 40,078 input tokens
+ * against a last prompt of 14,280 - so it overstates occupancy by however many
+ * requests the turn made, and it names no window at all. Codex's own rollout,
+ * `$CODEX_HOME/sessions/YYYY/MM/DD/rollout-…-<thread>.jsonl`, writes a
+ * `token_count` event after every request carrying both: `last_token_usage`
+ * and `model_context_window`. That window is the figure Codex itself compacts
+ * against, so it is a measurement made on this machine and not a table.
+ *
+ * **Fails closed, to null.** A format nobody promised can change under us, and
+ * the right drawing of a context nobody measured is no figure - never the
+ * turn's aggregate standing in for it. `cached_input_tokens` is a subset of
+ * `input_tokens` (OpenAI's nesting, see `codex.ts`), so input alone is the
+ * prompt.
+ */
+export function rolloutContext(
+  threadId: string,
+  home: string = process.env['CODEX_HOME'] ?? path.join(os.homedir(), '.codex'),
+): PilotContext | null {
+  const file = findRollout(path.join(home, 'sessions'), threadId);
+  if (file === null) return null;
+  let text: string;
+  try {
+    text = readFileSync(file, 'utf8');
+  } catch {
+    return null;
+  }
+  const lines = text.split(/\r?\n/);
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const line = lines[i] ?? '';
+    if (!line.includes('"token_count"')) continue;
+    let event: unknown;
+    try {
+      event = JSON.parse(line) as unknown;
+    } catch {
+      continue;
+    }
+    const payload = isRecord(event) ? event['payload'] : null;
+    if (!isRecord(payload) || payload['type'] !== 'token_count') continue;
+    const info = payload['info'];
+    if (!isRecord(info)) continue;
+    const last = info['last_token_usage'];
+    const tokens = isRecord(last) ? last['input_tokens'] : null;
+    if (typeof tokens !== 'number' || !Number.isFinite(tokens) || tokens <= 0) return null;
+    const window = info['model_context_window'];
+    return {
+      tokens,
+      window: typeof window === 'number' && Number.isFinite(window) && window > 0 ? window : null,
+    };
+  }
+  return null;
+}
+
+/**
+ * The rollout file for a thread, newest day first.
+ *
+ * A resumed thread keeps writing to the file it was created in, so the search
+ * cannot stop at today. Matched on the name's suffix and never built from the
+ * id, so a thread id is not a path anybody can steer.
+ */
+function findRollout(sessions: string, threadId: string): string | null {
+  const suffix = `-${threadId}.jsonl`;
+  const down = (dir: string): string[] => {
+    try {
+      return readdirSync(dir).sort().reverse();
+    } catch {
+      return [];
+    }
+  };
+  for (const year of down(sessions)) {
+    for (const month of down(path.join(sessions, year))) {
+      for (const day of down(path.join(sessions, year, month))) {
+        const dir = path.join(sessions, year, month, day);
+        const hit = down(dir).find((name) => name.endsWith(suffix));
+        if (hit !== undefined) return path.join(dir, hit);
+      }
+    }
+  }
+  return null;
+}
+
 /** The text of an `agent_message` that completed on this line, or null. */
 export function readMessage(line: string): string | null {
   const trimmed = line.trim();
@@ -129,6 +214,8 @@ export function readMessage(line: string): string | null {
 export async function pilotCodex(
   options: PilotChatOptions,
   exec: RunFn = run,
+  /** Injected so a test never reads the machine's own `~/.codex`. */
+  readContext: (threadId: string) => PilotContext | null = rolloutContext,
 ): Promise<PilotChatResult> {
   const scratch = mkdtempSync(path.join(os.tmpdir(), 'vibe-pilot-'));
   const instructions = path.join(scratch, 'instructions.md');
@@ -165,12 +252,14 @@ export async function pilotCodex(
           `(${describeEnding({ code, signal })}): ${detail}\nstderr:\n${stderr.slice(-2000)}`,
       );
     }
+    // The thread Codex says it ran on is the one that resumes. A first turn
+    // has no id of ours to fall back on that Codex would recognise.
+    const thread = events.threadId ?? (options.resume ? options.sessionId : null);
     return {
       text: last,
-      // The thread Codex says it ran on is the one that resumes. A first turn
-      // has no id of ours to fall back on that Codex would recognise.
-      sessionId: events.threadId ?? options.sessionId,
+      sessionId: thread ?? options.sessionId,
       tokens: events.tokens,
+      context: thread === null ? null : readContext(thread),
     };
   } catch (err: unknown) {
     throw ended.seen === null ? err : attachEnding(err, ended.seen);
