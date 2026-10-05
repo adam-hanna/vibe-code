@@ -14,6 +14,11 @@ const paths = {
   send: 'M12 19V5m-6 6 6-6 6 6',
   check: 'm5 12 4 4L19 6',
   loop: 'M20 8a8 8 0 0 0-14-3L3 8m0-5v5h5m-4 8a8 8 0 0 0 14 3l3-3m0 5v-5h-5',
+  pause: 'M7 5v14M17 5v14',
+  stop: 'M6 6h12v12H6z',
+  activity: 'M3 12h4l2-7 4 14 2-7h6',
+  clock: 'M12 7v5l3 2M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z',
+  info: 'M12 11v5m0-9h.01M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z',
 } as const;
 
 export function Icon({ name, size = 18, style }: {

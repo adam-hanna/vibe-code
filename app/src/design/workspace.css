@@ -183,6 +183,202 @@ kbd { font: calc(10px * var(--type-scale))/1.5 var(--font-mono); border: 1px sol
 .v-turnstrip { padding: 12px 24px; flex-wrap: wrap; }
 .v-counts--link { border-radius: var(--radius-sm); }
 
+/* The right rail is a glanceable status surface. The detailed loop remains
+   available behind each stage disclosure, while the Activity tab owns the raw
+   event stream. */
+.v-rail {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 0 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+/* `v-rail` is also the historical name of the collapsed left navigation strip.
+   Scope the status rail to its parent so the two surfaces can coexist without
+   inheriting the strip's fixed width and centered alignment. */
+.v-cockpit__loop > .v-rail {
+  width: auto;
+  align-items: stretch;
+  background: var(--surface-column);
+  border-right: 0;
+}
+.v-rail__now {
+  padding: 15px 14px 14px;
+  border: 1px solid var(--rule-card);
+  border-radius: var(--radius-md);
+  background: var(--surface-card);
+  position: relative;
+  overflow: hidden;
+}
+.v-rail__now::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--rule-control);
+}
+.v-rail__now--running::before { background: var(--accent-solid); }
+.v-rail__now--waiting::before { background: var(--accent-muted); }
+.v-rail__now--complete::before { background: var(--semantic-live); }
+.v-rail__eyebrow,
+.v-rail__section-head,
+.v-rail__activity-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font: var(--type-label);
+  color: var(--text-tertiary);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.v-rail__state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-secondary);
+  letter-spacing: 0.05em;
+}
+.v-rail__state .v-dot { width: 6px; height: 6px; }
+.v-rail__now h2 {
+  margin: 10px 0 3px;
+  font: 600 calc(20px * var(--type-scale))/1.2 var(--font-sans);
+  letter-spacing: -0.35px;
+  color: var(--text-display);
+}
+.v-rail__now p {
+  margin: 0;
+  color: var(--text-secondary);
+  font: var(--type-body-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.v-rail__elapsed {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 11px;
+  color: var(--text-primary);
+  font: var(--type-mono-sm);
+}
+.v-rail__activity,
+.v-rail__path {
+  border: 1px solid var(--rule-card);
+  border-radius: var(--radius-md);
+  background: var(--surface-column);
+  overflow: clip;
+}
+.v-rail__activity { padding: 13px 14px; }
+.v-rail__activity .v-rail__section-head,
+.v-rail__path > .v-rail__section-head { margin-bottom: 10px; }
+.v-rail__section-head { color: var(--text-secondary); }
+.v-rail__section-head button,
+.v-footer__info {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  min-height: 24px;
+  padding: 4px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  color: var(--text-tertiary);
+  background: none;
+  cursor: pointer;
+}
+.v-rail__section-head button:hover,
+.v-footer__info:hover { color: var(--accent-solid); background: var(--surface-active); border-color: var(--rule-card); }
+.v-rail__activity-line {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  color: var(--text-primary);
+  font: var(--type-mono-sm);
+}
+.v-rail__activity-line svg { flex: none; color: var(--accent-solid); margin-top: 2px; }
+.v-rail__activity-line span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.v-rail__activity-meta { margin-top: 8px; font: var(--type-mono-sm); letter-spacing: 0; text-transform: none; }
+.v-rail__path { padding: 13px 0 4px; }
+.v-rail__path > .v-rail__section-head { padding: 0 14px; }
+.v-rail__path-count { font: var(--type-mono-sm); color: var(--text-tertiary); letter-spacing: 0; }
+.v-rail__stage { border-top: 1px solid var(--rule-inner); }
+.v-rail__stage--preflight { border-top: 0; border-bottom: 1px solid var(--rule-inner); margin: 0 0 3px; }
+.v-rail__stage-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 46px;
+  padding: 9px 14px;
+  border: 0;
+  color: var(--text-primary);
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+.v-rail__stage-head:hover { background: var(--surface-active-hdr); }
+.v-rail__stage-head:disabled { cursor: default; }
+.v-rail__stage-head:disabled:hover { background: none; }
+.v-rail__stage-head:focus-visible,
+.v-rail__section-head button:focus-visible,
+.v-footer__info:focus-visible { outline: 2px solid var(--accent-solid); outline-offset: -2px; }
+.v-rail__stage-head--static { cursor: default; }
+.v-rail__stage-head--static:hover { background: none; }
+.v-rail__stage-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  flex: none;
+  color: var(--text-tertiary);
+}
+.v-rail__stage--complete .v-rail__stage-icon { color: var(--semantic-live); }
+.v-rail__stage--running .v-rail__stage-icon { color: var(--accent-solid); }
+.v-rail__stage--waiting .v-rail__stage-icon { color: var(--accent-muted); }
+.v-rail__stage--upcoming .v-rail__stage-icon { color: var(--text-tertiary); }
+.v-rail__empty-state { width: 7px; height: 7px; border: 1px solid currentColor; border-radius: 50%; }
+.v-rail__stage-name { font: 500 calc(13px * var(--type-scale))/1.3 var(--font-sans); }
+.v-rail__stage--upcoming .v-rail__stage-name { color: var(--text-secondary); }
+.v-rail__stage-meta { margin-left: auto; color: var(--text-tertiary); font: var(--type-body-sm); }
+.v-rail__stage-head > svg { flex: none; color: var(--text-tertiary); transition: transform 140ms ease; }
+.v-rail__stage-spacer { width: 14px; flex: none; }
+.v-rail__preflight-time { margin-left: auto; color: var(--text-tertiary); font: var(--type-mono-sm); }
+.v-rail__stage-body { padding: 1px 14px 11px 40px; background: var(--surface-active); }
+.v-rail__pass {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 31px;
+  color: var(--text-secondary);
+  font: var(--type-body-sm);
+}
+.v-rail__pass + .v-rail__pass { border-top: 1px dashed var(--rule-inner); }
+.v-rail__pass-mark { color: var(--text-tertiary); display: inline-flex; }
+.v-rail__pass-name { color: var(--text-primary); }
+.v-rail__pass-meta { margin-left: auto; color: var(--text-tertiary); font: var(--type-mono-sm); }
+.v-rail__pass .v-counts { width: 100%; padding: 2px 0 4px; gap: 4px; }
+.v-rail__pass .v-counts .v-sev { min-width: 0; padding: 2px 5px; }
+.v-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+
+.v-footer--active { padding: 10px 12px; gap: 0; border-top: 1px solid var(--rule-structure); }
+.v-footer__actionbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.v-footer__mode { display: inline-flex; align-items: center; gap: 7px; min-width: 0; color: var(--text-secondary); font: var(--type-body-sm); }
+.v-footer__mode .v-dot { width: 6px; height: 6px; flex: none; }
+.v-footer__controls { display: flex; gap: 5px; margin: 0; }
+.v-footer__controls .v-control { display: inline-flex; align-items: center; justify-content: center; gap: 5px; width: auto; min-height: 30px; padding: 5px 7px; border-radius: 6px; }
+.v-footer__controls .v-control span { font: var(--type-label); color: var(--text-secondary); letter-spacing: 0; text-transform: none; }
+.v-footer__controls .v-control:hover:not(:disabled) span { color: var(--text-primary); }
+.v-footer__controls .v-control--grave svg { color: var(--text-emphasis); }
+.v-footer--idle .v-footer__mode { color: var(--text-tertiary); }
+.v-footer--idle .v-footer__info { margin-left: auto; }
+
 @media (max-width: 1200px) {
   .v-side--left { width: 218px; }
   .v-side--right { width: 286px; }
