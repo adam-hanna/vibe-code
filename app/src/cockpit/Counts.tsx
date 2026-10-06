@@ -1,4 +1,6 @@
-import { MetaChip, SeverityChip } from '../design';
+import { SeverityChip } from '../design';
+import { Badge } from '@/ui/badge';
+import { cn } from '@/lib/utils';
 import { SEVERITIES } from './model';
 import type { Severity } from '../design';
 
@@ -23,6 +25,11 @@ import type { Severity } from '../design';
  * `onOpen` is optional and its absence is a real state — the Gallery draws this
  * row with nowhere to send anybody, and a button that goes nowhere is worse than
  * a row that does not claim to be one.
+ *
+ * As a button it keeps exactly the same geometry. The click target is the row,
+ * and the only thing that changes on hover is the cursor and a hairline — a
+ * count that grew a background on hover would flicker during the peripheral
+ * scan the row exists for.
  */
 
 /** A severity this build knows how to weight, or null for the zero variant. */
@@ -30,11 +37,14 @@ function weight(severity: string): Severity | null {
   return (SEVERITIES as readonly string[]).includes(severity) ? (severity as Severity) : null;
 }
 
+const ROW = 'my-1 flex flex-wrap items-center gap-1';
+
 export function Counts({
   counts,
   tolerance,
   onOpen,
   compact = false,
+  className,
 }: {
   counts: Readonly<Record<string, number>>;
   /** `p1Tolerance`, or null where the row is drawn without a gate decision. */
@@ -43,6 +53,8 @@ export function Counts({
   onOpen?: (() => void) | undefined;
   /** The 364px column drops the tolerance chip; the pilot's wider card keeps it. */
   compact?: boolean;
+  /** Where the row sits in its parent; never what it looks like. */
+  className?: string | undefined;
 }) {
   const chips = (
     <>
@@ -51,16 +63,20 @@ export function Counts({
         return <SeverityChip key={s} severity={n === 0 ? null : weight(s)} label={s} count={n} />;
       })}
       {!compact && tolerance !== null && tolerance !== undefined && (
-        <MetaChip>tolerance P1≤{tolerance}</MetaChip>
+        <Badge className="normal-case tracking-normal">tolerance P1≤{tolerance}</Badge>
       )}
     </>
   );
 
-  if (onOpen === undefined) return <div className="v-counts">{chips}</div>;
+  if (onOpen === undefined) return <div className={cn(ROW, className)}>{chips}</div>;
   return (
     <button
       type="button"
-      className="v-counts v-counts--link"
+      className={cn(
+        ROW,
+        'cursor-pointer border-0 border-b border-transparent bg-transparent p-0 text-left text-inherit hover:border-rule-control',
+        className,
+      )}
       onClick={onOpen}
       // Not "open the findings" any more: there is no Findings tab, and where
       // this row sends you depends on which judge produced the census. The

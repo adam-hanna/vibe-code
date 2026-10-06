@@ -2,6 +2,8 @@ import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { Activity, Terminal, X } from 'lucide-react';
 import type { Layout, LayoutChangedMeta } from 'react-resizable-panels';
 import { StateKicker } from '../design';
+import { Badge } from '@/ui/badge';
+import { Button } from '@/ui/button';
 import { Icon } from '../design/Icon';
 import { ActivityBar } from '../shell/ActivityBar';
 import { Palette } from '../shell/Palette';
@@ -1813,7 +1815,7 @@ export function Cockpit() {
           <>
           <ResizableSeparator orientation="horizontal" />
           <ResizablePanel id="loop" defaultSize="364px" minSize="240px" maxSize="50%" className="flex min-h-0 min-w-0 flex-col bg-column">
-          <div className="v-cockpit__loop">
+          <div className="flex min-h-0 flex-1 flex-col">
             {/* **The column follows the run the window is pointed at** (#223),
                 and it is the SAME column. Opening a run used to change six panes
                 and leave this one on the live run — *"when I click on an existing
@@ -1831,17 +1833,17 @@ export function Cockpit() {
                 could still be open, and every turn in an archive is a turn that
                 ended, because `applyCharge` records one when it is charged. */}
             {past && viewing !== null ? (
-              <div className="v-loop__reading">
-                <StateKicker tone="quiet">reading</StateKicker>
-                <span className="v-loop__readingwhat">{preview(viewing.task)}</span>
-                {opened.loading && opened.run === null && <p>Reading this run…</p>}
+              <div className="flex flex-col items-start gap-2 p-4 text-body-sm text-secondary">
+                <Badge>reading</Badge>
+                <span className="text-body text-primary">{preview(viewing.task)}</span>
+                {opened.loading && opened.run === null && <p className="m-0">Reading this run…</p>}
                 {/* The core's own sentence, verbatim. A run whose id will not
                     join onto a path, a directory vibe refuses to follow (#53)
                     and a `state.json` the validators reject are three findings
                     needing three responses, and *"could not read the run"*
                     answers none of them. */}
                 {opened.failure !== null && (
-                  <p className="v-loop__readingwhy">{opened.failure}</p>
+                  <p className="m-0 text-tertiary">{opened.failure}</p>
                 )}
                 {/* Said once, here, rather than as a blank on every turn row.
                     `state.turnStartedAt` describes the turn in flight, so the
@@ -1849,14 +1851,14 @@ export function Cockpit() {
                     — and a duration invented from the gap between two charges
                     would include every gate the loop held at. */}
                 {opened.run !== null && (
-                  <p className="v-loop__readingwhy">
+                  <p className="m-0 text-tertiary">
                     Some turns have no duration: a run records a turn when it is charged, and only a
                     checkpoint keeps the moment one began.
                   </p>
                 )}
-                <button className="v-doc__again" onClick={() => setViewing(null)}>
+                <Button variant="quiet" size="sm" onClick={() => setViewing(null)}>
                   back to the live run
-                </button>
+                </Button>
               </div>
             ) : (
               <>
@@ -1875,21 +1877,23 @@ export function Cockpit() {
                     refuses a second invoke until the first settles. */}
                 {(!launched || run.completed !== null) && !outside && (
                   <>
-                    <div className="v-loop__waiting">
-                      <StateKicker tone="quiet">waiting for the brief</StateKicker>
-                      <p>
+                    <div className="mx-4 mb-2 rounded-md border border-rule-card bg-card px-4 py-3.5">
+                      <span className="text-body-sm font-medium text-primary">waiting for the brief</span>
+                      <p className="mt-1.5 mb-0 text-body-sm leading-relaxed text-secondary">
                         Describe the work to your pilot. Review the brief, then approve its proposal to begin.
                       </p>
                     </div>
                     {/* `4a`, for the one moment somebody is deciding how THIS run
                         should differ from the project's defaults. */}
-                    <button
-                      className="v-launch__more"
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      className="mx-4 mb-3 self-start"
                       onClick={() => setComposing({ dir: repoDir, locked: false })}
                       disabled={busy || !wire.connected}
                     >
                       Customize this run
-                    </button>
+                    </Button>
                   </>
                 )}
               </>

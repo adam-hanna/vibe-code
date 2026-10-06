@@ -1,4 +1,5 @@
-import { MetaChip, StateKicker } from '../design';
+import { Badge } from '@/ui/badge';
+import { cn } from '@/lib/utils';
 import { clock, elapsed } from './format';
 import type { RateLimit } from './model';
 
@@ -14,7 +15,8 @@ import type { RateLimit } from './model';
  * So: no alarm ground, no primary action, no kicker that says the run is
  * broken. It is the quiet strip, and it says which account is out of headroom -
  * because the other provider's work is unaffected and somebody watching should
- * not conclude the whole tool has stopped.
+ * not conclude the whole tool has stopped. An alarm treatment here would train
+ * people to read alarms as noise.
  *
  * **"Run this phase on the other agent" is deliberately not offered.** The
  * design demotes it to a text link and states the cost, and the cost is why:
@@ -24,6 +26,9 @@ import type { RateLimit } from './model';
  * not a faster route to the same one - and there is no frame that would carry
  * such a request anyway, so a button here would be decoration.
  */
+
+const STRIP = 'flex flex-wrap items-baseline gap-3 border-b border-rule-inner bg-chrome px-5 py-2 text-body-sm';
+
 export function RateLimitStrip({ wait, now }: { wait: RateLimit | null; now: number }) {
   if (wait === null) return null;
 
@@ -32,8 +37,8 @@ export function RateLimitStrip({ wait, now }: { wait: RateLimit | null; now: num
   // went - which is the first question somebody asks about a long run.
   if (wait.resumedAt !== null) {
     return (
-      <div className="v-rate v-rate--past">
-        <StateKicker tone="quiet">waited</StateKicker>
+      <div className={cn(STRIP, 'text-tertiary')}>
+        <Badge>waited</Badge>
         <span>
           {elapsed(wait.resumedAt - wait.at)} on a rate limit
           {wait.provider !== null && <> · {wait.provider}</>} — resumed at {clock(wait.resumedAt)}
@@ -45,14 +50,14 @@ export function RateLimitStrip({ wait, now }: { wait: RateLimit | null; now: num
 
   const waited = Math.max(0, now - wait.at);
   return (
-    <div className="v-rate">
+    <div className={cn(STRIP, 'text-secondary')}>
       {/* `waiting`, not `halted`. Quiet tone, no alarm ground. */}
-      <StateKicker tone="quiet">waiting</StateKicker>
+      <Badge>waiting</Badge>
       <span>
         {wait.provider === null ? 'An agent' : wait.provider} has no headroom left, so &ldquo;
         {wait.label}&rdquo; is sitting out the window. Nothing needs you.
       </span>
-      <span className="v-rate__times">
+      <span className="font-mono text-mono-sm text-tertiary">
         {/* What is known, and only what is known. The reset instant comes from
             the provider; the planned wait is the loop's own figure; neither is
             derived from the other. */}
@@ -60,7 +65,7 @@ export function RateLimitStrip({ wait, now }: { wait: RateLimit | null; now: num
         {wait.waitMs !== null && <> of about {elapsed(wait.waitMs)}</>}
         {wait.resetsAt !== null && <> · resets {clock(Date.parse(wait.resetsAt))}</>}
       </span>
-      <MetaChip>the other provider keeps running</MetaChip>
+      <Badge>the other provider keeps running</Badge>
     </div>
   );
 }

@@ -1,6 +1,9 @@
 import { useState } from 'react';
-import { Button, LivenessDot, StateKicker } from '../design';
-import { Icon } from '../design/Icon';
+import { Info, Pause, Play, SkipForward, Square } from 'lucide-react';
+import { LivenessDot } from '../design';
+import { Badge } from '@/ui/badge';
+import { Button } from '@/ui/button';
+import { cn } from '@/lib/utils';
 import { boundary, ending, hold, nextHold } from './format';
 import type { Raise } from './argv';
 import { latestQuestions } from './model';
@@ -139,6 +142,33 @@ function raiseFor(exit: number, caps: Caps | null): { label: string; note: strin
   return null;
 }
 
+/*
+ * The footer's recurring styles, named once (the UI rework). Every colour is a
+ * token through `theme.css`.
+ */
+/** The footer itself: the column's foot, flush with its edge. */
+const FOOT = 'flex flex-none flex-col gap-2 border-t border-rule-structure bg-column p-4';
+/** A sentence under a banner: the rounds, a note, a cost. */
+const NOTE = 'text-body-sm leading-relaxed text-tertiary';
+/** The banner's own sentence beside the kicker. */
+const DETAIL = 'text-body-sm leading-relaxed text-emphasis';
+/**
+ * A block of what the gate is asking, ruled off on the left with the accent so
+ * the shared answer and the boundary-specific detail read as one block when
+ * both are drawn.
+ */
+const ASKING = 'mb-2 flex flex-col gap-2 border-l-2 border-accent-border pl-3';
+/** A row of controls under a banner. */
+const ACTIONS = 'mt-2 flex items-center gap-2';
+/**
+ * The core's own sentence, which may be long and is not ours to trim. Scrolls
+ * rather than clips: a truncated reason is a reason nobody can act on, and the
+ * footer must not grow without limit either.
+ */
+const WHY = 'max-h-[7em] overflow-y-auto whitespace-pre-wrap text-body-sm text-secondary [overflow-wrap:anywhere]';
+/** The tone a kicker takes, as a Badge variant. */
+const TONE = { alarm: 'alarm', accent: 'accent', quiet: 'quiet' } as const;
+
 export function Footer({
   run,
   onDecide,
@@ -184,10 +214,11 @@ export function Footer({
     // it - in which case nothing is drawn rather than something generic.
     const held = hold(gate.boundary);
     return (
-      <div className="v-footer v-footer--holding">
-        <div className="v-footer__banner">
-          <StateKicker tone="accent">holding</StateKicker>
-          <span className="v-footer__detail">at {boundary(gate.boundary)}</span>
+      // The halt replaces the footer IN PLACE, so the place you look never moves.
+      <div className={cn(FOOT, 'border-t-2 border-accent-border bg-active')}>
+        <div className="flex items-center gap-2">
+          <Badge variant="accent">holding</Badge>
+          <span className={DETAIL}>at {boundary(gate.boundary)}</span>
         </div>
 
         {/* The rounds travel with the boundary because a boundary alone does not
@@ -198,7 +229,7 @@ export function Footer({
             and "plan 1 of 5" is a position in something — which is what makes it
             a fact somebody can act on. Absent rather than guessed when the
             config has not been read, for `raiseFor`'s reason. */}
-        <div className="v-footer__rounds">
+        <div className={NOTE}>
           plan {gate.planRound}
           {caps !== null && ` of ${caps.maxPlanRounds}`} · verify {gate.verifyRound} · review{' '}
           {gate.reviewRound}
@@ -213,9 +244,9 @@ export function Footer({
           `ending()` follows for an exit code it does not know.
         */}
         {held !== null && (
-          <div className="v-footer__hold">
-            <div className="v-footer__note">{held.what}</div>
-            <div className="v-footer__note">
+          <div className={ASKING}>
+            <div className={NOTE}>{held.what}</div>
+            <div className={NOTE}>
               <strong>To look at it:</strong> {held.inspect}
             </div>
             {/* The run's own directory, which is where PLAN.md, every critique
@@ -224,17 +255,18 @@ export function Footer({
                 has no filesystem and #207 keeps reading an artifact a separate
                 decision with #129's link refusal attached. */}
             {run.identity !== null && (
-              <div className="v-footer__path">
-                <code>{run.identity.dir}</code>
-                <button
-                  className="v-footer__copy"
+              <div className="flex items-center gap-2">
+                <code className="font-mono text-mono-sm text-secondary [overflow-wrap:anywhere]">{run.identity.dir}</code>
+                <Button
+                  variant="quiet"
+                  size="sm"
                   onClick={() => void navigator.clipboard.writeText(run.identity?.dir ?? '')}
                 >
                   copy
-                </button>
+                </Button>
               </div>
             )}
-            <div className="v-footer__note">
+            <div className={NOTE}>
               <strong>Continuing:</strong> {held.cost}
             </div>
           </div>
@@ -251,11 +283,14 @@ export function Footer({
           need no mechanism at all: the loop is already waiting, so fixing it
           yourself is what happens if you simply do not answer. What the app adds
           is saying so, and giving you the path.
+
+          Capped and scrolled so the two buttons below never leave the screen — a
+          decision you have to scroll past to reach is one people stop reading.
         */}
         {gate.boundary === 'verify-round' && (
-          <div className="v-footer__verify">
+          <div className={cn(ASKING, 'max-h-72 overflow-y-auto')}>
             {failing !== undefined && (
-              <div className="v-footer__note">
+              <div className={NOTE}>
                 <strong>{failing.name}</strong> failed{' '}
                 {failing.failed === null
                   ? ''
@@ -266,7 +301,7 @@ export function Footer({
             {/* The cost of continuing is on the shared card above. What is here
                 is the option that has no button, because it needs none: the
                 loop is already waiting. */}
-            <div className="v-footer__note">
+            <div className={NOTE}>
               Doing nothing is <strong>fix it yourself</strong>: the loop will keep waiting — edit
               the worktree, then continue. That path spends no round.
             </div>
@@ -274,7 +309,7 @@ export function Footer({
                 the gate out of band and no frame does that - and the design is
                 explicit that a rerun spends a round, so a button that silently
                 did not would be worse than none. */}
-            <div className="v-footer__note">
+            <div className={NOTE}>
               There is no <em>rerun</em> button: nothing on this wire can re-enter the gate, and
               a rerun costs one of the verify rounds, which is the scarce thing here.
             </div>
@@ -298,18 +333,18 @@ export function Footer({
           shown.
         */}
         {gate.boundary === 'question-round' && (
-          <div className="v-footer__verify">
+          <div className={cn(ASKING, 'max-h-72 overflow-y-auto')}>
             {asked === null ? (
               // A real state, not an error: `questions_opened` is what fills
               // this, and a build that held here without seeing one says so
               // rather than drawing an empty inbox as "no questions".
-              <div className="v-footer__note">
+              <div className={NOTE}>
                 The loop is holding at a question round, and this window never saw the questions
                 open. They are in <code>.vibe/runs/{'<'}run-id{'>'}/answers-N.json</code>.
               </div>
             ) : (
               <>
-                <div className="v-footer__note">
+                <div className={NOTE}>
                   {asked.total} question{asked.total === 1 ? '' : 's'}
                   {asked.blocking > 0 && (
                     <>
@@ -329,30 +364,26 @@ export function Footer({
                       Number(b.declined) - Number(a.declined),
                   )
                   .map((q) => (
-                    <div className="v-footer__q" key={q.question}>
-                      <div className="v-footer__q-head">
-                        {q.blocking ? (
-                          <StateKicker tone="accent">blocking</StateKicker>
-                        ) : (
-                          <StateKicker tone="quiet">advisory</StateKicker>
-                        )}
-                        <span className="v-footer__q-ask">{q.question}</span>
+                    <div className="flex flex-col gap-1 border-t border-rule-inner py-2" key={q.question}>
+                      <div className="flex flex-wrap items-baseline gap-2">
+                        {q.blocking ? <Badge variant="accent">blocking</Badge> : <Badge>advisory</Badge>}
+                        <span className="text-body-sm text-primary">{q.question}</span>
                       </div>
                       {q.declined ? (
-                        <div className="v-footer__q-answer v-footer__q-answer--declined">
+                        <div className="pl-3 text-body-sm text-emphasis">
                           declined — {q.rationale ?? 'no reason given'}
                         </div>
                       ) : q.answer === null ? (
-                        <div className="v-footer__q-answer">no answer came back for this one</div>
+                        <div className="pl-3 text-body-sm text-secondary">no answer came back for this one</div>
                       ) : (
-                        <div className="v-footer__q-answer">
+                        <div className="pl-3 text-body-sm text-secondary">
                           <em>{q.confidence ?? 'confidence not stated'}</em> — {q.answer}
                         </div>
                       )}
                     </div>
                   ))}
                 {asked.open.length < asked.total && (
-                  <div className="v-footer__note">
+                  <div className={NOTE}>
                     The count is the loop&apos;s; this build could not read every question behind
                     it. The rest are in the run&apos;s <code>answers-N.json</code>.
                   </div>
@@ -363,7 +394,7 @@ export function Footer({
                 to this boundary: stopping here is how you answer them yourself,
                 and until the questions rode along on the stop it produced a
                 document with nothing in it to answer. */}
-            <div className="v-footer__note">
+            <div className={NOTE}>
               <strong>Stop</strong> ends the run resumably and writes these into{' '}
               <code>NEEDS-INPUT.md</code> with a blank under each. Answer them on the{' '}
               <strong>Questions</strong> tab — the window fills in that same file and resumes —
@@ -372,37 +403,38 @@ export function Footer({
           </div>
         )}
 
-        <div className="v-footer__note">
+        <div className={NOTE}>
           Nothing further has run. The session is still warm, so continuing re-sends no context.
         </div>
 
-        <div className="v-footer__actions">
-          <Button level="primary" disabled={busy} onClick={() => onDecide(gate.askId, { kind: 'continue' })}>
+        <div className={ACTIONS}>
+          <Button variant="primary" disabled={busy} onClick={() => onDecide(gate.askId, { kind: 'continue' })}>
+            <SkipForward size={14} aria-hidden="true" />
             {/* The label says what pressing it does, at the two boundaries
                 where "continue" is not self-explanatory. Both spend a turn, and
                 naming which one is the difference between a decision and a
                 reflex. */}
             {gate.boundary === 'verify-round'
-              ? '⏭ let FIX run'
+              ? 'let FIX run'
               : gate.boundary === 'question-round'
-                ? '⏭ accept these answers'
-                : '⏭ continue'}
+                ? 'accept these answers'
+                : 'continue'}
           </Button>
           <input
-            className="v-footer__reason"
+            className="h-7 min-w-0 flex-1 rounded-sm border border-rule-control bg-card px-2 font-sans text-body-sm text-primary outline-none placeholder:text-tertiary focus-visible:ring-1 focus-visible:ring-accent-border"
             placeholder="why you are stopping (optional)"
             value={reason}
             onChange={(e) => setReason(e.target.value)}
           />
           <Button
-            level="secondary"
+            variant="secondary"
             disabled={busy}
             onClick={() => {
               onDecide(gate.askId, { kind: 'stop', reason });
               setReason('');
             }}
           >
-            ⏹ stop
+            <Square size={12} aria-hidden="true" /> stop
           </Button>
         </div>
       </div>
@@ -419,10 +451,14 @@ export function Footer({
     const how = ending(exit);
     const raise = raiseFor(exit, caps);
     return (
-      <div className={`v-footer v-footer--ended${how?.tone === 'alarm' ? ' v-footer--alarm' : ''}`}>
-        <div className="v-footer__banner">
-          <StateKicker tone={how?.tone ?? 'quiet'}>{how?.kicker ?? `exit ${exit}`}</StateKicker>
-          <span className="v-footer__detail">
+      // An ending is a halt too, and gets the same weight in the same place
+      // (#162). `--text-emphasis` is reserved for alarm across the whole
+      // product, and an ending that went wrong is one; an ending that did not -
+      // exit 0, 2 or 7 - must not wear it.
+      <div className={cn(FOOT, 'border-t-2 bg-active', how?.tone === 'alarm' ? 'border-emphasis' : 'border-rule-strong')}>
+        <div className="flex items-center gap-2">
+          <Badge variant={TONE[how?.tone ?? 'quiet']}>{how?.kicker ?? `exit ${exit}`}</Badge>
+          <span className={DETAIL}>
             {/* An unknown code says it is unknown. Inventing a phrase for it
                 would be a claim about what happened, made by a build that does
                 not know - which is the failure `boundary()` avoids the same way. */}
@@ -434,13 +470,13 @@ export function Footer({
             it. A run can be approved and then fail on the way out, and those are
             two facts - showing only the second would lose the work it did. */}
         {run.ended !== null && (
-          <div className="v-footer__note">
+          <div className={NOTE}>
             The loop {run.ended.how === 'approved' ? 'approved the review' : 'was stopped'}:{' '}
             {run.ended.detail}
           </div>
         )}
 
-        {run.reason !== null && <div className="v-footer__why">{run.reason.message}</div>}
+        {run.reason !== null && <div className={WHY}>{run.reason.message}</div>}
         {/* **A finished plan-only run is the one ending with work left to do**,
             and until #223 it was the only ending offering nothing. `plan_only_stopped`
             is what makes it distinguishable: every other exit-0 run built what it
@@ -456,17 +492,17 @@ export function Footer({
             code. Exit 0 is not a halt and must not start reading as one; this is
             a separate labelled act on a run that finished exactly as asked. */}
         {run.plannedOnly !== null && run.identity !== null && (
-          <div className="v-footer__actions">
+          <div className={ACTIONS}>
             <Button
-              level="primary"
+              variant="primary"
               disabled={busy}
               onClick={() => {
                 if (run.identity !== null) onImplement(run.identity.runId, run.identity.dir);
               }}
             >
-              ▶ implement this plan
+              <Play size={14} aria-hidden="true" /> implement this plan
             </Button>
-            <span className="v-footer__note">
+            <span className={NOTE}>
               It continues this run rather than starting one: the approved plan, the acceptance
               bar the critic passed, the{' '}
               {run.plannedOnly.carried > 0
@@ -481,16 +517,14 @@ export function Footer({
             accepted DESPITE them — and a reader who thinks the plan is clean is
             reading the wrong thing. Absent, not zero, when none were carried. */}
         {run.plannedOnly !== null && run.plannedOnly.carried > 0 && (
-          <div className="v-footer__why">
+          <div className={WHY}>
             This plan was accepted carrying {run.plannedOnly.carried} P1(s) on tolerance — not
             without them. They are stated in the implementation prompt, so whatever implements
             this plan is told about them; the Plan critique tab has each in full.
           </div>
         )}
 
-
-
-        {how !== null && how.next !== null && <div className="v-footer__note">{how.next}</div>}
+        {how !== null && how.next !== null && <div className={NOTE}>{how.next}</div>}
 
         {/*
           `4d`'s rule made real: **every halt names a next action, and exactly
@@ -513,18 +547,18 @@ export function Footer({
         */}
         {RESUMABLE.has(exit) && run.identity?.repo != null && (
           <>
-            <div className="v-footer__actions">
+            <div className={ACTIONS}>
               <Button
-                level="primary"
+                variant="primary"
                 disabled={busy}
                 onClick={() => {
                   const at = run.identity;
                   if (at?.repo != null) onResume(at.runId, at.repo);
                 }}
               >
-                ▶ resume this run
+                <Play size={14} aria-hidden="true" /> resume this run
               </Button>
-              <span className="v-footer__note">
+              <span className={NOTE}>
                 It picks up from the last checkpoint on the same agent sessions. Nothing before
                 the halt is redone.
               </span>
@@ -533,11 +567,12 @@ export function Footer({
             {/* `4d`'s second choice, and never a peer of the first: exactly one
                 primary, because somebody reading a halt banner is already
                 frustrated and four equal-weight buttons make them read all four
-                every time. */}
+                every time. A text link rather than a button. */}
             {raise !== null && (
-              <div className="v-footer__actions">
+              <div className={ACTIONS}>
                 <button
-                  className="v-footer__demoted"
+                  type="button"
+                  className="cursor-pointer border-0 border-b border-accent-border bg-transparent p-0 py-1 text-label font-medium uppercase tracking-label text-accent-on-tint disabled:cursor-default disabled:opacity-70"
                   disabled={busy}
                   onClick={() => {
                     // The repository, for the reason above: `dir` is the run's
@@ -549,11 +584,11 @@ export function Footer({
                 >
                   {raise.label}
                 </button>
-                <span className="v-footer__note">{raise.note}</span>
+                <span className={NOTE}>{raise.note}</span>
               </div>
             )}
             {raise === null && (exit === 3 || exit === 4) && (
-              <div className="v-footer__note">
+              <div className={NOTE}>
                 Raising the cap on the way back in is the usual answer here, and this build has
                 not read the project&apos;s current one — so it is not offered rather than
                 offered against a number it guessed. Settings has the caps.
@@ -562,7 +597,7 @@ export function Footer({
           </>
         )}
         {RESUMABLE.has(exit) && run.identity?.repo == null && (
-          <div className="v-footer__note">
+          <div className={NOTE}>
             This run is resumable, but the loop never said which run it is or which repository it
             is in — so there is nothing to point a resume at from here. `vibe list` has the id.
           </div>
@@ -573,22 +608,22 @@ export function Footer({
 
   if (run.ended !== null) {
     return (
-      <div className="v-footer">
-        <div className="v-footer__banner">
-          <StateKicker tone={run.ended.how === 'approved' ? 'accent' : 'alarm'}>
+      <div className={FOOT}>
+        <div className="flex items-center gap-2">
+          <Badge variant={run.ended.how === 'approved' ? 'accent' : 'alarm'}>
             {run.ended.how === 'approved' ? 'review clear' : 'stopped'}
-          </StateKicker>
-          <span className="v-footer__detail">{run.ended.detail}</span>
+          </Badge>
+          <span className={DETAIL}>{run.ended.detail}</span>
         </div>
         {run.ended.how === 'stopped' && (
-          <div className="v-footer__note">
+          <div className={NOTE}>
             The run is resumable — the reason is in NEEDS-INPUT.md and `vibe resume` picks it up.
           </div>
         )}
         {/* Said plainly rather than left to look like a hung app: the loop is
             finished and the command is not - artifacts, commits and the summary
             all happen after the last thing the loop narrates. */}
-        <div className="v-footer__note">The command has not returned yet.</div>
+        <div className={NOTE}>The command has not returned yet.</div>
       </div>
     );
   }
@@ -598,13 +633,13 @@ export function Footer({
   // saying "running" through it would be the same lie in a smaller size.
   if (run.reason !== null) {
     return (
-      <div className="v-footer v-footer--ended v-footer--alarm">
-        <div className="v-footer__banner">
-          <StateKicker tone="alarm">ending</StateKicker>
-          <span className="v-footer__detail">the run is stopping.</span>
+      <div className={cn(FOOT, 'border-t-2 border-emphasis bg-active')}>
+        <div className="flex items-center gap-2">
+          <Badge variant="alarm">ending</Badge>
+          <span className={DETAIL}>the run is stopping.</span>
         </div>
-        <div className="v-footer__why">{run.reason.message}</div>
-        <div className="v-footer__note">
+        <div className={WHY}>{run.reason.message}</div>
+        <div className={NOTE}>
           The command has not returned yet, so what it exits with is not known.
         </div>
       </div>
@@ -614,10 +649,14 @@ export function Footer({
   // No run means no process to pause or stop. The old footer offered both on
   // the welcome screen, turning a harmless empty workspace into a control desk.
   if (run.identity === null && run.preflight === null && run.running === null) {
-    return <div className="v-footer v-footer--welcome">
-      <span className="v-footer__ready">Ready when you are</span>
-      <p>The pilot prepares the brief. You decide when the run begins.</p>
-    </div>;
+    return (
+      <div className={cn(FOOT, 'gap-1.5 px-6 py-5')}>
+        <span className="text-body-sm font-medium text-accent-muted">Ready when you are</span>
+        <p className="m-0 text-body-sm leading-relaxed text-secondary">
+          The pilot prepares the brief. You decide when the run begins.
+        </p>
+      </div>
+    );
   }
 
   const canControl = run.preflight !== null || run.running !== null;
@@ -627,42 +666,52 @@ export function Footer({
       ? 'No boundary holds. The loop will run to the end without asking.'
       : `${next === null ? '' : `Next possible hold: ${boundary(next)}. `}Holds at ${holding.map((b) => boundary(b)).join(', ')}.${stopping.length > 0 ? ` ${stopping.map((b) => boundary(b)).join(', ')} ends the run there.` : ''}`;
 
+  /*
+   * Hi-fi 18. Two controls side by side, **neither a primary**, and the visual
+   * difference between them deliberately small: two controls that look wildly
+   * different stop reading as alternatives, and these are alternatives. The
+   * labels carry the distinction, not the colour - what separates them is the
+   * emphasis on the stop glyph and the cost in each title, never a red button,
+   * which would say *dangerous* where the honest word is *different*.
+   */
   return (
-    <div className={`v-footer v-footer--active${canControl ? '' : ' v-footer--idle'}`}>
-      <div className="v-footer__actionbar">
-        <div className="v-footer__mode">
+    <div className={cn(FOOT, 'gap-0 px-3 py-2.5')}>
+      <div className="flex items-center justify-between gap-2">
+        <div className={cn('inline-flex min-w-0 items-center gap-1.5 text-body-sm', canControl ? 'text-secondary' : 'text-tertiary')}>
           <LivenessDot state={run.running === null ? 'waiting' : 'live'} />
           <span>{run.running === null ? 'Preparing' : 'Live run'}</span>
-          <button className="v-footer__info" type="button" title={boundaryTitle} aria-label={boundaryTitle}>
-            <Icon name="info" size={14} />
-          </button>
+          <Button variant="quiet" size="icon-sm" title={boundaryTitle} aria-label={boundaryTitle}>
+            <Info size={14} aria-hidden="true" />
+          </Button>
         </div>
         {canControl && (
-          <div className="v-footer__controls">
-            <button
-              className="v-control"
+          <div className="flex gap-1.5">
+            <Button
+              variant="secondary"
+              size="sm"
               disabled={busy || pausing}
               onClick={onPause}
               title={pausing ? 'The loop will hold at the next boundary.' : 'Let the current turn finish, then hold at the next boundary.'}
               aria-label="Pause at the next gate"
             >
-              <Icon name="pause" size={14} />
+              <Pause size={14} aria-hidden="true" />
               <span>{pausing ? 'Pause armed' : 'Pause at gate'}</span>
-            </button>
-            <button
-              className="v-control v-control--grave"
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
               disabled={busy}
               onClick={onStop}
               title="Stop the active turn now. The run will be resumable from its last checkpoint."
               aria-label="Stop this turn now — ends the run"
             >
-              <Icon name="stop" size={14} />
+              <Square size={12} className="text-emphasis" aria-hidden="true" />
               <span>Stop run</span>
-            </button>
+            </Button>
           </div>
         )}
       </div>
-      {!canControl && <span className="v-footer__note">No turn is open.</span>}
+      {!canControl && <span className={NOTE}>No turn is open.</span>}
     </div>
   );
 }

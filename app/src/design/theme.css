@@ -90,6 +90,12 @@
   --text-mono: calc(var(--size-mono) * var(--type-scale));
   --text-mono--line-height: 1.55;
 
+  /* Letter-spacing for the uppercase labels, from the design's own `--track-*`.
+     Tailwind's own `tracking-*` scale stays, because the chips use it. */
+  --tracking-label: var(--track-label);
+  --tracking-chip: var(--track-chip);
+  --tracking-kicker: var(--track-kicker);
+
   --radius-sm: var(--radius-sm);
   --radius-md: var(--radius-md);
   --radius-lg: var(--radius-lg);

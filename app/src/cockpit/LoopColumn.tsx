@@ -1,6 +1,9 @@
 import { useState } from 'react';
-import { LivenessDot, MetaChip, StateKicker } from '../design';
-import { Icon } from '../design/Icon';
+import { Activity, ArrowRight, Check, ChevronRight, Clock, Pause } from 'lucide-react';
+import { LivenessDot } from '../design';
+import { Badge } from '@/ui/badge';
+import { Button } from '@/ui/button';
+import { cn } from '@/lib/utils';
 import { Counts } from './Counts';
 import { Caret } from './Disclosure';
 import { boundary, clock, elapsed } from './format';
@@ -38,7 +41,19 @@ export type OpenAt = (tab: string, round?: number | null) => void;
  * revision under the critique that caused it. `rounds()` is the grouping and it
  * is shared with the pilot's log, so the two surfaces cannot disagree about what
  * one round was.
+ *
+ * Styled with utilities (the UI rework): every colour is a token through
+ * `theme.css`, and what recurs is named once below rather than in a stylesheet
+ * nobody can see from here.
  */
+
+/** A small uppercase label: a group title, a section head, an eyebrow. */
+const LABEL = 'text-label uppercase tracking-label';
+/** A measured figure beside a row: monospace and tabular so a column of them lines up. */
+const FIGURE = 'font-mono text-mono-sm tabular-nums text-tertiary';
+/** A disclosure head that is the whole row, reset from the button it is. */
+const HEAD =
+  'flex w-full cursor-pointer items-center gap-2 border-0 bg-transparent text-left text-inherit outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent';
 
 /**
  * The four groups, in the order the loop reaches them.
@@ -60,13 +75,6 @@ const TITLE: Readonly<Record<CycleKind, string>> = {
   review: 'Code review',
 };
 
-/**
- * What a cycle header says about itself.
- *
- * Counted from what arrived, never from a cap: the caps are configurable and
- * this slice is not given them, so `2 rounds` is a fact and `2/5` would be two
- * thirds of one.
- */
 /**
  * What a group header says about itself.
  *
@@ -101,13 +109,13 @@ const drawOf = (turn: Turn, runningId: number | null, settledId: number | null):
 function Version({ turn, draw, now }: { turn: Turn; draw: Draw; now: number }) {
   if (draw !== 'done') return <RunningRow turn={turn} now={now} live={draw === 'live'} />;
   return (
-    <div className="v-version">
-      <span className="v-version__who">
+    <div className="flex items-center gap-2 py-1 text-body-sm text-secondary">
+      <span className="text-primary">
         {turn.role} · {turn.kind}
       </span>
-      {turn.round !== null && <MetaChip>round {turn.round}</MetaChip>}
+      {turn.round !== null && <Badge>round {turn.round}</Badge>}
       {turn.endedAt !== null && (
-        <span className="v-version__took">{elapsed(turn.endedAt - turn.startedAt)}</span>
+        <span className={cn(FIGURE, 'ml-auto')}>{elapsed(turn.endedAt - turn.startedAt)}</span>
       )}
     </div>
   );
@@ -168,19 +176,26 @@ function Round({
   const turns = phase.turns.filter((t) => !isAnswerer(t));
   const answerers = phase.turns.filter(isAnswerer);
   return (
-    <div className={`v-phase${open ? '' : ' v-phase--closed'}`}>
+    <div className="border-b border-rule-inner px-4 py-3 last:border-b-0">
       {/* The whole head is the control, not a separate affordance beside it: a
           round row is two lines tall and a hit target smaller than the thing it
-          opens is the reason nobody finds it. */}
-      <button type="button" className="v-phase__head" onClick={onToggle} aria-expanded={open}>
+          opens is the reason nobody finds it. A closed round keeps its head and
+          gives up the space its body had, so a long run folds down to a
+          readable list of round headings. */}
+      <button
+        type="button"
+        className={cn(HEAD, 'group p-0', open && 'mb-2')}
+        onClick={onToggle}
+        aria-expanded={open}
+      >
         <Caret open={open} />
-        <span className="v-phase__name">{title(phase.phase)}</span>
+        <span className="text-body-sm text-primary group-hover:text-emphasis">{title(phase.phase)}</span>
         {/* The archive's round, which is the number that names the artifact
             behind it. The heading in the terminal says "round 1"; the file is
             `plan-critique-0.json`, and a row has to agree with the file — and
             since the groups became peers it is also what pairs this row with
             its other half one group up or down. */}
-        {phase.round !== null && <MetaChip kind="checkable">round {phase.round}</MetaChip>}
+        {phase.round !== null && <Badge className="font-mono normal-case tracking-normal">round {phase.round}</Badge>}
       </button>
 
       {open && (
@@ -211,7 +226,7 @@ function Round({
             />
           )}
           {phase.gates.map((gate, i) => (
-            <div className="v-phase__gate" key={`${gate}-${String(i)}`}>
+            <div className="py-1 font-mono text-mono-sm text-secondary" key={`${gate}-${String(i)}`}>
               verify · {gate}
             </div>
           ))}
@@ -252,7 +267,8 @@ function Round({
               // A phase that announced itself and ran nothing under it. The
               // implementing phase used to be the one that reached this, because
               // it had no `turn_started` of its own until #223 gave it one.
-              <div className="v-phase__silent">
+              // A sentence, not a label - so the prose tier, not the floor (#190).
+              <div className="text-body-sm text-secondary">
                 announced by the phase, with no turn line of its own
               </div>
             )}
@@ -300,7 +316,8 @@ function Round({
  * It is a `role="button"` on the container rather than a `<button>` around it,
  * because the box holds the answerer's turn rows and a button inside a button is
  * a control a keyboard cannot reach. The keyboard path is handled here instead —
- * Enter and Space, which is what the role promises.
+ * Enter and Space, which is what the role promises — and the focus ring the role
+ * does not bring with it is drawn here too.
  */
 function Questions({
   questions,
@@ -322,7 +339,10 @@ function Questions({
   const go = onOpen === undefined ? null : () => { onOpen('questions', questions.round); };
   return (
     <div
-      className={`v-questions${go === null ? '' : ' v-questions--link'}`}
+      className={cn(
+        'group my-2 ml-3 border-l-2 border-accent-border-dim px-3 py-2',
+        go !== null && 'cursor-pointer outline-none hover:bg-active-hdr focus-visible:ring-1 focus-visible:ring-accent',
+      )}
       {...(go === null
         ? {}
         : {
@@ -337,17 +357,17 @@ function Questions({
             },
           })}
     >
-      <div className="v-questions__head">
+      <div className={cn(LABEL, 'flex flex-wrap items-center gap-2 text-tertiary')}>
         QUESTIONS · answerer
         {/* Hi-fi 14's own counter, nested inside the plan round's. Against the
             cap where one arrived, because `round 3/3` is the state the
             escalation is about and `round 3` is a number. Absent rather than
             guessed on a core that sent neither. */}
         {questions.round !== null && (
-          <MetaChip kind="checkable">
+          <Badge className="font-mono normal-case tracking-normal">
             round {questions.round}
             {questions.cap !== null && ` of ${questions.cap}`}
-          </MetaChip>
+          </Badge>
         )}
       </div>
       {/* Not a control of its own any more: the box is the control, and a nested
@@ -356,6 +376,7 @@ function Questions({
         total={questions.total}
         blocking={questions.blocking}
         outstanding={outstanding}
+        linked={go !== null}
       />
 
       {turns.map((turn) => (
@@ -367,15 +388,15 @@ function Questions({
           assuming the run died. Drawn only while something is genuinely
           outstanding, so it cannot become a permanent reassurance nobody reads. */}
       {outstanding > 0 && (
-        <div className="v-questions__waiting">
-          <StateKicker tone="quiet">waiting on an answer</StateKicker>
+        <div className="mt-1 flex flex-wrap items-baseline gap-2 text-body-sm text-secondary">
+          <Badge>waiting on an answer</Badge>
           <span>Answers already given are in the draft and are not lost.</span>
         </div>
       )}
       {/* The explicit panel `7a` asks for. Two full turns of legitimate work run
           and the outer counter correctly does not move, which without saying so
           is indistinguishable from a stall. */}
-      <div className="v-questions__note">
+      <div className="mt-1 text-body-sm text-tertiary">
         A question round produces no critique, so it cannot advance the plan round. This is where
         that time is accounted for.
       </div>
@@ -387,19 +408,22 @@ function QuestionCount({
   total,
   blocking,
   outstanding,
+  linked,
 }: {
   total: number;
   blocking: number;
   outstanding: number;
+  /** Whether the box around this is a control, so the count can show it on hover. */
+  linked: boolean;
 }) {
   return (
-    <div className="v-questions__body">
-      <span className="v-questions__n">{total} raised</span>
-      <span className="v-questions__sub">{blocking} blocking</span>
+    <div className="flex w-full flex-wrap items-baseline gap-2 py-1 text-body-sm text-primary">
+      <span className={cn(linked && 'group-hover:text-accent group-hover:underline')}>{total} raised</span>
+      <span className="text-tertiary">{blocking} blocking</span>
       {/* Counted from the rows themselves rather than from a field, because the
           answers arrive on a second frame and nothing on the wire restates the
           total. A round with every answer in says so instead of showing a zero. */}
-      <span className="v-questions__sub">
+      <span className="text-tertiary">
         {outstanding === 0 ? 'all answered' : `${outstanding} unanswered`}
       </span>
     </div>
@@ -428,12 +452,12 @@ function Step({
   detail: string;
 }) {
   return (
-    <li className={`v-starting__step${done ? ' v-starting__step--done' : ''}`}>
-      <span className="v-starting__mark" aria-hidden="true">
+    <li className="flex items-baseline gap-2 py-1 text-body-sm text-secondary">
+      <span className={cn('w-[1em]', done ? 'text-accent' : 'text-tertiary')} aria-hidden="true">
         {done ? '✓' : '·'}
       </span>
-      <span className="v-starting__what">{label}</span>
-      <span className="v-starting__detail">{detail}</span>
+      <span className="text-primary">{label}</span>
+      <span className="ml-auto font-mono text-mono-sm text-secondary">{detail}</span>
     </li>
   );
 }
@@ -479,20 +503,20 @@ function ResumedRow({ from }: { from: ResumedFrom }) {
   }
 
   return (
-    <div className="v-resumed">
-      <div className="v-resumed__head">
-        <StateKicker tone="quiet">picked up</StateKicker>
-        <span className="v-resumed__where">
+    <div className="flex flex-col gap-1 rounded-md border border-rule-inner bg-panel px-4 py-3">
+      <div className="flex flex-wrap items-baseline gap-2">
+        <Badge>picked up</Badge>
+        <span className="text-body-sm text-primary">
           {from.phase === null ? 'from an earlier session' : `in ${from.phase}`}
           {from.status === null ? '' : `, which ended ${from.status}`}
         </span>
       </div>
-      {rounds.length > 0 && <div className="v-resumed__line">{rounds.join(' · ')}</div>}
-      {open.length > 0 && <div className="v-resumed__line">{open.join(' · ')}</div>}
+      {rounds.length > 0 && <div className="text-body-sm text-secondary">{rounds.join(' · ')}</div>}
+      {open.length > 0 && <div className="text-body-sm text-secondary">{open.join(' · ')}</div>}
       {/* Said out loud, because it is the thing most likely to be misread: the
           cards below are this session only, and the totals in the footer start
           from zero again. */}
-      <div className="v-resumed__note">
+      <div className="text-body-sm text-secondary">
         Everything below is this session. Earlier sessions spent{' '}
         {from.tokensUsed === null ? 'an unrecorded number of' : from.tokensUsed.toLocaleString()}{' '}
         tokens
@@ -534,14 +558,19 @@ function PreflightRow({ preflight, now }: { preflight: Preflight; now: number })
       : 'checking that both agents can run what this run needs';
 
   return (
-    <div className={`v-preflight${preflight.passed ? ' v-preflight--done' : ' v-preflight--live'}`}>
+    <div
+      className={cn(
+        'flex items-baseline gap-3 rounded-md border px-4 py-3',
+        preflight.passed ? 'border-rule-card bg-card opacity-70' : 'border-accent-border bg-active',
+      )}
+    >
       {!preflight.passed && <LivenessDot state="live" />}
-      <span className="v-preflight__label">PREFLIGHT</span>
-      <span className="v-preflight__state">{state}</span>
+      <span className={cn(LABEL, 'text-emphasis')}>PREFLIGHT</span>
+      <span className="text-body-sm text-secondary">{state}</span>
       {/* The elapsed a spinner would have replaced. Measured from the frame that
           announced preflight, so it is this step's duration and not the run's. */}
       {!preflight.passed && (
-        <span className="v-preflight__elapsed">{elapsed(Math.max(0, now - preflight.at))}</span>
+        <span className={cn(FIGURE, 'ml-auto text-secondary')}>{elapsed(Math.max(0, now - preflight.at))}</span>
       )}
     </div>
   );
@@ -573,8 +602,8 @@ function Starting({
   now: number;
 }) {
   return (
-    <div className="v-starting">
-      <ol className="v-starting__steps">
+    <div className="rounded-md border border-dashed border-rule-control-dim px-4 py-3">
+      <ol className="m-0 list-none p-0">
         <Step
           label="task reached the core"
           done={run.identity !== null}
@@ -603,14 +632,16 @@ function Starting({
       </ol>
 
       {/* Named and attributed rather than left blank. Without this the next
-          reader assumes four numbers were forgotten. */}
-      <p className="v-starting__unknown">
+          reader assumes four numbers were forgotten. Dashed and never dimmed,
+          which is the design's rule for absence: dimming reads as "disabled for
+          you", dashed reads as "nothing has filled this in". */}
+      <p className="mt-2 mb-0 border-t border-dashed border-rule-control-dim pt-2 text-body-sm text-tertiary">
         phase, round, elapsed total and spend — the first turn has not reported
       </p>
       {/* The issue number this line used to carry has gone from the copy and
           stayed in the source. An end user cannot act on `#114`; the sentence
           they can act on is the one that says the figure does not exist. */}
-      <p className="v-starting__unknown">
+      <p className="mt-2 mb-0 border-t border-dashed border-rule-control-dim pt-2 text-body-sm text-tertiary">
         how long this usually takes — no frame carries a past run&apos;s timings
       </p>
     </div>
@@ -633,35 +664,42 @@ function Starting({
  * A field a frame did not carry is drawn as absent with its reason rather than
  * omitted, because a header with a line missing reads as a header that forgot
  * one — and the two cases here are genuinely different: *nothing said* is an
- * older core, and *no branch* is a run that has one for a stated reason.
+ * older core, and *no branch* is a run that has one for a stated reason. Dashed
+ * for the same reason an unavailable tab is: dimming reads as "disabled for
+ * you", dashed reads as "nothing has filled this in".
  */
+const ABSENT = 'border-b border-dashed border-rule-control-dim text-tertiary';
+
 function Identity({ run }: { run: Run }) {
   const identity = run.identity;
   if (identity === null) return null;
   const branch = run.branch;
   return (
-    <header className="v-ident">
+    <header className="flex flex-none flex-col gap-1 rounded-md border border-rule-card bg-card p-4">
       {/* Clamped, and the whole of it on the title.
           `task` joined this frame with the identity header and a brief is not a
           name: a run launched from a file - which is what AGENTS.md tells you to
           do - put its entire prompt across the top of the column, which was
           reported as the prompt being printed. Two lines and an ellipsis; the
           full text is one hover away and is also in the run's own artifacts. */}
-      <div className="v-ident__name" title={identity.task ?? identity.runId}>
+      <div
+        className="line-clamp-2 text-section font-semibold tracking-tight text-display [overflow-wrap:anywhere]"
+        title={identity.task ?? identity.runId}
+      >
         {identity.task ?? identity.runId}
       </div>
-      <div className="v-ident__line">
+      <div className="mt-1 font-mono text-mono-sm text-tertiary [overflow-wrap:anywhere]">
         {branch === null ? (
-          <span className="v-ident__absent">branch — nothing has said</span>
+          <span className={ABSENT}>branch — nothing has said</span>
         ) : branch.name === null ? (
-          <span className="v-ident__absent">no branch — {branch.why ?? 'no reason given'}</span>
+          <span className={ABSENT}>no branch — {branch.why ?? 'no reason given'}</span>
         ) : (
           branch.name
         )}
       </div>
-      <div className="v-ident__line">
+      <div className="font-mono text-mono-sm text-tertiary [overflow-wrap:anywhere]">
         {identity.repo === null ? (
-          <span className="v-ident__absent">repository — this core did not say which</span>
+          <span className={ABSENT}>repository — this core did not say which</span>
         ) : (
           identity.repo
         )}
@@ -727,7 +765,7 @@ export function LoopColumn({
   const questionsOf = questionsByPhase(run);
 
   return (
-    <section className="v-loop" aria-label="loop">
+    <section className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-4 pt-1 pb-5" aria-label="loop">
       <Identity run={run} />
       {run.from !== null && <ResumedRow from={run.from} />}
       {run.preflight !== null && <PreflightRow preflight={run.preflight} now={now} />}
@@ -743,27 +781,30 @@ export function LoopColumn({
           for IS something happening, and two lines claiming the opposite of each
           other is the disagreement #202 was about. */}
       {run.cycles.length === 0 && run.preflight === null && run.identity === null && (
-        <div className="v-loop__empty">Your run will take shape here.</div>
+        <div className="py-2 text-body-sm text-tertiary">Your run will take shape here.</div>
       )}
 
       {run.cycles.map((cycle) => {
         const open = !shut.has(cycle.kind);
         return (
-          <div className={`v-cycle${open ? '' : ' v-cycle--closed'}`} key={cycle.kind}>
+          <div className="flex-none overflow-clip rounded-md border border-rule-card bg-card" key={cycle.kind}>
             <button
               type="button"
-              className="v-cycle__head"
+              className={cn(HEAD, 'flex-wrap items-baseline px-3 py-3.5 hover:bg-active-hdr', open && 'border-b border-rule-inner')}
               onClick={() => { toggle(cycle.kind); }}
               aria-expanded={open}
             >
               <Caret open={open} />
-              <span className="v-cycle__title">{TITLE[cycle.kind]}</span>
+              {/* `auto` margin rather than `space-between` on the parent: the row
+                  is three children, and spreading them would push the caret away
+                  from the title it opens. */}
+              <span className="mr-auto text-body-sm font-medium text-emphasis">{TITLE[cycle.kind]}</span>
               {/* One phase per round now that the groups are peers, so counting
                   this group's phases counts its rounds - which is what the old
                   three-cycle header got wrong, calling two plan rounds three.
                   Drawn folded as well as open: the count is the reason to open
                   a group, so hiding it behind the fold would hide the answer. */}
-              <span className="v-cycle__status">{status(cycle.kind, cycle.phases.length)}</span>
+              <span className="text-chip text-tertiary">{status(cycle.kind, cycle.phases.length)}</span>
             </button>
             {open &&
               cycle.phases.map((phase) => (
@@ -804,14 +845,20 @@ export function LoopColumn({
 
       {/* Four groups are always the shape of a run, so the ones that have not
           started are named rather than absent - at reduced weight, because a
-          missing group reads as a loop with fewer parts than it has. */}
+          missing group reads as a loop with fewer parts than it has. Dashed
+          (hi-fi 16): "these stages exist and none has begun". It is what
+          replaces a skeleton - a skeleton implies content is arriving into that
+          exact shape, and none of these has a shape yet. */}
       {(['plan', 'critique', 'code', 'review'] as const)
         .filter((kind) => !run.cycles.some((c) => c.kind === kind))
         .map((kind) => (
-          <div className="v-cycle v-cycle--idle" key={kind}>
-            <div className="v-cycle__head">
-              <span className="v-cycle__title">{TITLE[kind]}</span>
-              <span className="v-cycle__status">not started</span>
+          <div className="flex-none rounded-md border border-dashed border-rule-control-dim" key={kind}>
+            <div className="flex flex-wrap items-baseline gap-2 px-3 py-3.5">
+              <span className="mr-auto inline-flex items-center gap-2 text-body-sm font-medium text-secondary">
+                <span className="size-1.75 rounded-full border border-rule-strong" aria-hidden="true" />
+                {TITLE[kind]}
+              </span>
+              <span className="text-chip text-tertiary">not started</span>
             </div>
           </div>
         ))}
@@ -845,6 +892,28 @@ const TURN_GROUP: Readonly<Record<string, CycleKind>> = {
 
 type RailState = 'upcoming' | 'complete' | 'running' | 'waiting';
 
+/**
+ * The one place a state becomes a colour. Four states, four tokens: the accent
+ * for what is running, the live green for what finished, the muted accent for
+ * what is waiting on a person, and the floor for what has not begun.
+ */
+const STATE_TEXT: Readonly<Record<RailState, string>> = {
+  running: 'text-accent',
+  complete: 'text-live',
+  waiting: 'text-accent-muted',
+  upcoming: 'text-tertiary',
+};
+
+const STATE_BAR: Readonly<Record<RailState, string>> = {
+  running: 'before:bg-accent',
+  complete: 'before:bg-live',
+  waiting: 'before:bg-accent-muted',
+  upcoming: 'before:bg-transparent',
+};
+
+/** A card in the rail: the `now` card, the activity card and the path. */
+const CARD = 'rounded-md border border-rule-card bg-card';
+
 function railKindForTurn(kind: string): CycleKind | null {
   return TURN_GROUP[kind] ?? CYCLE_OF[kind] ?? null;
 }
@@ -869,12 +938,12 @@ function RailStateIcon({ state }: { state: RailState }) {
     return <LivenessDot state="live" />;
   }
   if (state === 'waiting') {
-    return <Icon name="pause" size={13} />;
+    return <Pause size={13} aria-hidden="true" />;
   }
   if (state === 'complete') {
-    return <Icon name="check" size={14} />;
+    return <Check size={14} aria-hidden="true" />;
   }
-  return <span className="v-rail__empty-state" aria-hidden="true" />;
+  return <span className="size-1.75 rounded-full border border-current" aria-hidden="true" />;
 }
 
 function RailStage({
@@ -909,10 +978,13 @@ function RailStage({
   const canExpand = cycle !== undefined;
 
   return (
-    <section className={`v-rail__stage v-rail__stage--${state}${open ? ' v-rail__stage--open' : ''}`}>
+    <section className="border-t border-rule-inner" data-state={state}>
       <button
         type="button"
-        className="v-rail__stage-head"
+        className={cn(
+          HEAD,
+          'gap-2.5 px-3.5 py-2.5 hover:bg-active-hdr disabled:cursor-default disabled:hover:bg-transparent',
+        )}
         onClick={canExpand ? onToggle : undefined}
         aria-expanded={canExpand ? open : undefined}
         disabled={!canExpand}
@@ -920,35 +992,38 @@ function RailStage({
           ? reruns ? `${RAIL_TITLE[kind]} can run again after a fix` : `Show ${RAIL_TITLE[kind]} details`
           : `${RAIL_TITLE[kind]} has not started yet`}
       >
-        <span className="v-rail__stage-icon" title={stateLabel}>
+        <span className={cn('inline-flex size-4 flex-none items-center justify-center', STATE_TEXT[state])} title={stateLabel}>
           <RailStateIcon state={state} />
         </span>
-        <span className="v-rail__stage-name">{RAIL_TITLE[kind]}</span>
-        <span className="v-rail__stage-meta">{meta}</span>
+        <span className={cn('text-body-sm font-medium', state === 'upcoming' ? 'text-secondary' : 'text-primary')}>
+          {RAIL_TITLE[kind]}
+        </span>
+        <span className="ml-auto text-body-sm text-tertiary">{meta}</span>
         {canExpand
-          ? <Icon name="chevron" size={14} style={{ transform: open ? 'rotate(90deg)' : undefined }} />
-          : <span className="v-rail__stage-spacer" aria-hidden="true" />}
+          ? <ChevronRight size={14} className={cn('flex-none text-tertiary transition-transform', open && 'rotate-90')} aria-hidden="true" />
+          : <span className="w-3.5 flex-none" aria-hidden="true" />}
       </button>
 
       {open && cycle !== undefined && (
-        <div className="v-rail__stage-body">
+        <div className="divide-y divide-dashed divide-rule-inner bg-active py-px pr-3.5 pb-2.75 pl-10">
           {cycle.phases.map((phase) => {
             const census = censusOf.get(phase.id);
             const round = phase.round === null ? 'unnumbered pass' : `round ${phase.round}`;
             const turnCount = phase.turns.length;
             return (
               <div
-                className="v-rail__pass"
+                className="flex flex-wrap items-center gap-2 py-1.5 text-body-sm"
                 key={phase.id}
                 title={`${phase.phase} · ${round}${turnCount === 0 ? ' · no turns reported' : ` · ${turnCount} ${turnCount === 1 ? 'turn' : 'turns'}`}`}
               >
-                <span className="v-rail__pass-mark" aria-hidden="true"><Icon name="arrow" size={12} /></span>
-                <span className="v-rail__pass-name">{round}</span>
-                <span className="v-rail__pass-meta">{turnCount} {turnCount === 1 ? 'turn' : 'turns'}</span>
+                <span className="inline-flex text-tertiary" aria-hidden="true"><ArrowRight size={12} /></span>
+                <span className="text-primary">{round}</span>
+                <span className={cn(FIGURE, 'ml-auto')}>{turnCount} {turnCount === 1 ? 'turn' : 'turns'}</span>
                 {census !== undefined && (
                   <Counts
                     counts={census.counts}
                     compact
+                    className="w-full py-0.5"
                     onOpen={onOpen === undefined
                       ? undefined
                       : () => { onOpen(census.phase === 'plan' ? 'critique' : 'review', phase.round); }}
@@ -971,14 +1046,14 @@ function RailPreflight({ preflight, now }: { preflight: Preflight; now: number }
       ? 'preparing checks'
       : `checking ${preflight.probing}`;
   return (
-    <div className={`v-rail__stage v-rail__stage--${state} v-rail__stage--preflight`}>
-      <div className="v-rail__stage-head v-rail__stage-head--static">
-        <span className="v-rail__stage-icon" title={preflight.passed ? 'Complete' : label}>
+    <div className="mb-0.75 border-b border-rule-inner" data-state={state}>
+      <div className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left">
+        <span className={cn('inline-flex size-4 flex-none items-center justify-center', STATE_TEXT[state])} title={preflight.passed ? 'Complete' : label}>
           <RailStateIcon state={state} />
         </span>
-        <span className="v-rail__stage-name">Preflight</span>
-        <span className="v-rail__stage-meta" title={label}>{label}</span>
-        <span className="v-rail__preflight-time">{elapsed(Math.max(0, now - preflight.at))}</span>
+        <span className="text-body-sm font-medium text-primary">Preflight</span>
+        <span className="ml-auto min-w-0 truncate text-body-sm text-tertiary" title={label}>{label}</span>
+        <span className={FIGURE}>{elapsed(Math.max(0, now - preflight.at))}</span>
       </div>
     </div>
   );
@@ -1021,40 +1096,47 @@ function RunRail({ run, now, onOpen }: { run: Run; now: number; onOpen?: OpenAt 
     : elapsed(activity.elapsedMs);
 
   return (
-    <section className="v-rail" aria-label="run status">
-      <div className={`v-rail__now v-rail__now--${statusState}`}>
-        <div className="v-rail__eyebrow">
+    <section className="flex min-h-0 min-w-0 flex-1 flex-col gap-2.5 overflow-y-auto bg-column px-3 pb-3.5" aria-label="run status">
+      {/* The `now` card: what is happening, in one sentence, with a state bar
+          down its left edge in the state's colour. */}
+      <div
+        className={cn(
+          CARD,
+          'relative overflow-hidden p-3.5 pl-4 before:absolute before:inset-y-0 before:left-0 before:w-0.75',
+          STATE_BAR[statusState],
+        )}
+      >
+        <div className={cn(LABEL, 'flex items-center justify-between text-tertiary')}>
           <span>Now</span>
-          <span className="v-rail__state" title={status.detail}>
+          <span className={cn('inline-flex items-center gap-1.5', STATE_TEXT[statusState])} title={status.detail}>
             <RailStateIcon state={statusState} />
             {statusState === 'running' ? 'live' : statusState === 'waiting' ? 'waiting' : statusState === 'complete' ? 'done' : 'idle'}
           </span>
         </div>
-        <h2>{status.title}</h2>
-        <p title={status.detail}>{status.detail}</p>
+        <h2 className="mt-1.5 mb-0 text-section font-semibold text-display">{status.title}</h2>
+        <p className="mt-1 mb-0 text-body-sm text-secondary" title={status.detail}>{status.detail}</p>
         {statusTime !== null && (
-          <span className="v-rail__elapsed" title="Elapsed time for the current turn or preflight">
-            <Icon name="clock" size={13} /> {statusTime}
+          <span className={cn(FIGURE, 'mt-2 inline-flex items-center gap-1')} title="Elapsed time for the current turn or preflight">
+            <Clock size={13} aria-hidden="true" /> {statusTime}
           </span>
         )}
       </div>
 
       {activity !== null && (
-        <div className="v-rail__activity">
-          <div className="v-rail__section-head">
+        <div className={cn(CARD, 'p-3.5')}>
+          <div className={cn(LABEL, 'flex items-center justify-between text-secondary')}>
             <span>Current activity</span>
             {onOpen !== undefined && (
-              <button type="button" onClick={() => onOpen('activity')} title="Open full activity">
-                <Icon name="activity" size={14} />
-                <span className="v-sr-only">Open full activity</span>
-              </button>
+              <Button variant="quiet" size="icon-sm" onClick={() => onOpen('activity')} title="Open full activity" aria-label="Open full activity">
+                <Activity size={14} aria-hidden="true" />
+              </Button>
             )}
           </div>
-          <div className="v-rail__activity-line" title={activity.lastActivity ?? 'No tool activity has been reported yet'}>
-            <Icon name="activity" size={14} />
-            <span>{activity.lastActivity ?? 'Waiting for the first update'}</span>
+          <div className="mt-2.5 flex items-start gap-2 text-body-sm text-primary" title={activity.lastActivity ?? 'No tool activity has been reported yet'}>
+            <Activity size={14} className="mt-0.5 flex-none text-accent" aria-hidden="true" />
+            <span className="min-w-0 truncate">{activity.lastActivity ?? 'Waiting for the first update'}</span>
           </div>
-          <div className="v-rail__activity-meta">
+          <div className={cn(FIGURE, 'mt-2')}>
             {activity.activities === null
               ? 'No activity count reported yet'
               : `${activity.activities.count} ${activity.activities.unit}`}
@@ -1062,10 +1144,10 @@ function RunRail({ run, now, onOpen }: { run: Run; now: number; onOpen?: OpenAt 
         </div>
       )}
 
-      <div className="v-rail__path">
-        <div className="v-rail__section-head">
+      <div className={cn(CARD, 'pt-3.5 pb-1')}>
+        <div className={cn(LABEL, 'mb-2.5 flex items-center justify-between px-3.5 text-secondary')}>
           <span>Run path</span>
-          <span className="v-rail__path-count" title="Stages with narration received">
+          <span className={cn(FIGURE, 'normal-case tracking-normal')} title="Stages with narration received">
             {RAIL_KINDS.filter((kind) => run.cycles.some((cycle) => cycle.kind === kind)).length}/{RAIL_KINDS.length}
           </span>
         </div>

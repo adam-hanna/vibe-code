@@ -1,4 +1,5 @@
-import { StateKicker } from '../design';
+import { Badge } from '@/ui/badge';
+import { cn } from '@/lib/utils';
 import { clock, elapsed } from './format';
 import type { Staleness } from './model';
 
@@ -16,16 +17,22 @@ import type { Staleness } from './model';
  *   to stop reading both.
  * - **thinking** — one quiet line, **stated as a fact and not as a worry**. A
  *   turn emitting nothing for twelve minutes is a healthy turn; the retired
- *   6-minute indicator is on the canvas with exactly that reason beside it.
+ *   6-minute indicator is on the canvas with exactly that reason beside it. It
+ *   gets the chrome ground and no weight.
  * - **not-live** — a strip across the window. Everything on screen is however
  *   old it is and vibe cannot confirm the phase is still running. **This one
- *   must not look normal**, which is why it is the only state that gets width.
+ *   must not look normal**, which is why it is the only state that gets width
+ *   and the alarm ground.
  *
  * `unknown` is drawn too, and it is not a fourth degree of staleness: it is the
  * pane saying it has no threshold to judge against. That happens on a core that
  * does not report its heartbeat cadence, and picking a number here instead would
  * be the invented denominator this repo refuses everywhere.
  */
+
+const STRIP = 'flex items-baseline gap-3 border-b px-5 py-2 text-body-sm';
+const QUIET = 'border-rule-inner bg-chrome text-secondary';
+
 /**
  * Both clocks, side by side (hi-fi 13).
  *
@@ -33,7 +40,8 @@ import type { Staleness } from './model';
  * the app reached a different conclusion in each case, and they are the same two
  * numbers the code branches on."* The `thinking` strip already showed them; the
  * `not-live` one did not, which is the state where a reader most wants to check
- * the app's arithmetic — and the design draws them on **both**.
+ * the app's arithmetic — and the design draws them on **both**. Mono and
+ * tabular because a reader is checking the app's arithmetic against them.
  *
  * `pid · alive` beside them is the third figure the frame carries, and it is
  * three-valued rather than two: `alive` is a fact and *cannot tell* is the state
@@ -44,7 +52,7 @@ import type { Staleness } from './model';
  */
 function Clocks({ state, hostPid }: { state: Staleness; hostPid: number | null }) {
   return (
-    <span className="v-stale__clocks">
+    <span className="flex gap-3 font-mono text-mono-sm tabular-nums text-tertiary">
       <span>output {state.outputMs === null ? 'never' : elapsed(state.outputMs)}</span>
       <span>activity {state.activityMs === null ? 'never' : elapsed(state.activityMs)}</span>
       {hostPid !== null && <span>host pid {hostPid}</span>}
@@ -68,8 +76,8 @@ export function StalenessStrip({
     // announcement; not knowing the cadence is a real thing to report.
     if (state.why === null || state.lastBeatAt === null) return null;
     return (
-      <div className="v-stale v-stale--quiet">
-        <StateKicker tone="quiet">cannot tell</StateKicker>
+      <div className={cn(STRIP, QUIET)}>
+        <Badge>cannot tell</Badge>
         <span>
           {state.why}. Last beat {clock(state.lastBeatAt)}.
         </span>
@@ -79,8 +87,8 @@ export function StalenessStrip({
 
   if (state.state === 'thinking') {
     return (
-      <div className="v-stale v-stale--quiet">
-        <StateKicker tone="quiet">thinking</StateKicker>
+      <div className={cn(STRIP, QUIET)}>
+        <Badge>thinking</Badge>
         <span>
           {/* Both clocks on one line, because the point is the comparison: the
               child has been silent this long, and vibe heard from itself this
@@ -93,8 +101,8 @@ export function StalenessStrip({
   }
 
   return (
-    <div className="v-stale v-stale--alarm">
-      <StateKicker tone="alarm">not live</StateKicker>
+    <div className={cn(STRIP, 'border-rule-strong bg-alarm text-primary')}>
+      <Badge variant="alarm">not live</Badge>
       <span>
         {/* An instant, not a relative time. This strip is on screen precisely
             because nothing is updating, and a relative time on a still surface
