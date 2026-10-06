@@ -169,6 +169,7 @@ test("the Codex models are the core's own list, read from the file that defines 
 test('the pane tells the host which CLI takes a turn, and lets Settings choose the road', () => {
   expect(pilotPane).toContain('agent: agentOf(provider)');
   expect(pilotPane).toContain('backendFor(vendor, access ?? NO_ACCESS)');
-  // Only the Claude CLI has file tools of its own; the Codex CLI's are off.
-  expect(pilotPane).toContain("systemPrompt(run, launched, 'emitted', access, provider === 'subscription')");
+  // Each CLI is told which one it is, because both now have their own tools
+  // and the limits on them are enforced differently (#223).
+  expect(pilotPane).toContain("systemPrompt(run, launched, 'emitted', access, agentOf(provider))");
 });

@@ -18,28 +18,34 @@ import type { PilotChatOptions, PilotChatResult, PilotContext } from '@src/pilot
  * charged to no run. What differs is how a chat is kept to its job, because
  * Codex's controls are not Claude's.
  *
- * ## What it may do, and how that is enforced
+ * ## What it may do: what Codex can, inside the person's rules
  *
- * **Codex has no closed tool allow-list.** `claude --tools Read Glob Grep` names
- * what exists and everything else does not; Codex's tools are features, on by
- * default, and the only control is switching each one off. So this is a
- * deny-list - the shape `pilotchat.ts` replaced because a tool a future release
- * adds is not on it - and it is held to that standard by what sits under it:
+ * **It has Codex's own shell now** (#223), at the owner's decision - *"the pilot
+ * should be a full fledged cli … so long as it follows the sandbox rules"* -
+ * which reverses the read-only pilot this module was written as. The limits are
+ * the settings for all projects, and **Codex's sandbox** is what enforces them:
  *
- * - **`OFF`** switches off the shell, code mode, the browser and computer use,
- *   image generation, apps, plugins, sub-agents, goals and hooks. Measured on
- *   0.157.1: the turn then lists only `exec` (which fails closed with code mode
- *   off), `wait` and `request_user_input`, and cannot read a file at all.
- * - **`web_search="disabled"`** - not a feature flag, a setting.
- * - **`-s read-only`** on a new thread, and `resume`'s default, which is the
- *   same: whatever a future tool does, it does not write and has no network.
+ * - **YOLO** - `--dangerously-bypass-approvals-and-sandbox`. Nothing asked,
+ *   nothing confined.
+ * - **Otherwise** - `sandbox_mode="workspace-write"`, with the allowed
+ *   directories as `writable_roots`: it reads anything, writes only inside the
+ *   repository and those directories, and has no network. Set with `-c` on a
+ *   resume as well as a new thread, because `resume` takes no `-s`. Measured on
+ *   0.157.1: a resumed thread under this override wrote inside the repository
+ *   and was refused (`read-only file system`) writing to the home directory.
+ *
+ * **The safe list cannot bound Codex's own commands, and that is said rather
+ * than papered over.** `codex exec` has no per-command allow-list - its
+ * approvals are off on that road - so outside YOLO every command may run *inside
+ * the sandbox*, and the sandbox is the boundary. The safe list still decides
+ * which of its `run_command` proposals run without a card, as on every backend.
+ *
+ * - **`OFF`** still switches off everything that is not coding: the browser and
+ *   computer use, image generation, apps, plugins, sub-agents, goals, hooks.
+ * - **`web_search="disabled"`** - a setting rather than a feature flag.
  * - **`--ignore-user-config`** - no `config.toml`, so no MCP servers and none of
  *   the person's own tool settings, which is `--strict-mcp-config`'s job on the
  *   Claude side. Auth still comes from `CODEX_HOME`, which is the subscription.
- *
- * So the Codex pilot reads the disk only through vibe's own `list_dir` and
- * `read_file`, which the host answers inside the allowed directories - the same
- * boundary as the API-backed pilot, and narrower than the Claude CLI's.
  *
  * ## The system prompt is a file, and why
  *
@@ -53,9 +59,6 @@ import type { PilotChatOptions, PilotChatResult, PilotContext } from '@src/pilot
 
 /** The features switched off for a chat turn (see the module comment). */
 export const OFF: readonly string[] = [
-  'shell_tool',
-  'unified_exec',
-  'code_mode_host',
   'apps',
   'plugins',
   'browser_use',
@@ -76,6 +79,22 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
 }
 
+/**
+ * The sandbox a turn runs in, from the person's settings (see the module
+ * comment). The writable roots are the allowed directories beyond the
+ * repository, which `workspace-write` already includes.
+ */
+export function sandboxArgs(options: PilotChatOptions): readonly string[] {
+  if (options.access?.yolo === true) return ['--dangerously-bypass-approvals-and-sandbox'];
+  const roots = (options.addDirs ?? []).filter((d) => d !== options.cwd);
+  return [
+    '-c',
+    'sandbox_mode="workspace-write"',
+    // JSON's array and string syntax are TOML's, so any path survives as itself.
+    ...(roots.length === 0 ? [] : ['-c', `sandbox_workspace_write.writable_roots=${JSON.stringify(roots)}`]),
+  ];
+}
+
 /** The argv for one turn, given where its instructions were written. */
 export function pilotCodexArgs(options: PilotChatOptions, instructions: string): readonly string[] {
   const common = [
@@ -91,13 +110,14 @@ export function pilotCodexArgs(options: PilotChatOptions, instructions: string):
     // or a quote in it survives as itself.
     '-c',
     `model_instructions_file=${JSON.stringify(instructions)}`,
+    ...sandboxArgs(options),
   ];
-  // `resume` takes neither -C nor -s: its directory is the spawn's cwd and its
-  // sandbox defaults to read-only, which is the one wanted. The prompt arrives
-  // on stdin, which the trailing `-` says.
+  // `resume` takes neither -C nor -s: its directory is the spawn's cwd, and the
+  // sandbox comes from the `-c` overrides above, which it does honour. The
+  // prompt arrives on stdin, which the trailing `-` says.
   return options.resume
     ? ['exec', 'resume', options.sessionId, ...common, '-']
-    : ['exec', ...common, '-s', 'read-only', '-C', options.cwd, '-'];
+    : ['exec', ...common, '-C', options.cwd, '-'];
 }
 
 /**

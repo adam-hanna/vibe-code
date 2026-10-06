@@ -40,43 +40,38 @@ import type { TokenUsage } from '@src/types.js';
  * many: `claudeBin` resolves the same executable, `extractTokens` reads the same
  * envelope, and `detectRateLimit` decides the same question.
  *
- * ## What this turn may do, and the four layers that decide it
+ * ## What this turn may do: what the CLI can, inside the person's rules
  *
- * **It may read the repository and it may do nothing else.** That is a decision
- * taken on #193 rather than a consequence of a flag: a pilot that can read
- * `PLAN.md` and the diff is the thing somebody asking *"what is this doing"*
- * actually wants, and it is the capability that makes this better than a generic
- * assistant. It does mean the two providers are asymmetric - the API-backed
- * pilot has no filesystem at all - and that asymmetry is accepted and written
- * down rather than discovered.
+ * **It is the CLI, with the CLI's tools** (#223). It used to be held to `Read`,
+ * `Glob` and `Grep` under plan mode, and the pilot said so honestly when asked to
+ * change something after a run: *"I can't edit files. On this backend I have no
+ * write tool."* The owner's answer reverses #193's read-only decision: *"The
+ * pilot should be a full fledged cli (claude or codex) it should be able to do
+ * everything that cli can do. So long as it follows the sandbox rules (i.e. yolo
+ * mode or whitelist dirs and commands)."* So the limits are now the settings for
+ * all projects (`src/pilotaccess.ts`), stated in the argv, and the CLI's own
+ * permission layer enforces them:
  *
- * Granting it deliberately is what makes the *closed* form possible, and that is
- * the real change. Before the decision this file denied seven built-ins by name,
- * which is open at the top: a tool a future release adds would not have been on
- * the list. Knowing exactly what to permit means naming it instead.
+ * - **YOLO** - every built-in tool, `bypassPermissions`, and the root of every
+ *   disk as a working directory. Nothing is asked and nothing is refused.
+ * - **Otherwise** - `--restricted` still confines the file tools to the
+ *   repository and the allowed directories and ignores the machine's settings
+ *   files, and `--tools` names what exists: the reads, `Edit`, `Write` and
+ *   `Bash` (naming it is what re-admits it under `--restricted`). The
+ *   permission mode is `dontAsk`, so a tool runs only if `--allowedTools`
+ *   pre-approves it: every file tool, and `Bash(<command>:*)` for each entry on
+ *   the safe list. Any other command is **denied by the CLI** rather than
+ *   prompted, because a `-p` turn has nobody to ask - and the prompt tells the
+ *   model to propose it with `run_command` instead, so a person can press it.
  *
- * - **`--tools Read Glob Grep`** - the CLI's built-in allow-list. Anything not
- *   named is unavailable, including tools that do not exist yet.
- * - **`--restricted`** - removes the built-ins that run commands or code, and
- *   **confines the file tools to the working directory**, so "read the
- *   repository" means that repository and not the rest of the disk. It also
- *   ignores user, project and local settings files, so what this turn can do is
- *   decided here rather than by whatever the machine happens to be configured
- *   with.
- * - **`--strict-mcp-config`**, with no `--mcp-config` beside it, which means **no
- *   MCP servers at all**. #138 is open precisely because every role reaches
- *   whatever MCP servers the user configured globally, and a read-only seat can
- *   end up holding a write tool that way. The pilot is the last surface that
- *   should inherit that, so it does not.
- * - **`--permission-mode plan`** - the permission layer underneath all of it,
- *   which refuses an edit even if the layers above were wrong.
+ * - **`--strict-mcp-config`** in both, with no `--mcp-config`: no MCP servers.
+ *   #138 is about every role reaching whatever servers the user configured, and
+ *   the pilot does not inherit them either way.
  *
- * **`Bash` is deliberately absent, and this list is narrower than
- * `READ_ONLY_TOOLS` in `roles.ts` because of it.** That toolset is read-only in
- * the sense a *run's* seats are - a shell under a sandbox, in work a person
- * launched. This is a chat surface the model drives turn by turn, and the app's
- * standing rule is written about exactly this case: *"'run this program' must
- * never be in reach of it"* (#144). A shell is not what "read the repo" means.
+ * What a person presses is unchanged: `start_run`, `answer_gate` and
+ * `run_command`/`stop_command` are still the app's proposals (#144). What moved
+ * is that the model can now do, itself, the work a person would otherwise have
+ * to do at a terminal.
  *
  * ## What it costs, and what it does not
  *
@@ -131,6 +126,13 @@ export interface PilotChatOptions {
    * for a directory the person did not allow. YOLO is the root of every disk.
    */
   addDirs?: readonly string[] | undefined;
+  /**
+   * What the person's settings let this turn do without asking (#223), from
+   * the host's reading of the settings for all projects - never the frame.
+   * Absent is the narrowest answer: files in the working directories, and no
+   * command at all.
+   */
+  access?: PilotChatAccess | undefined;
   timeoutMs: number;
   /** The stop button (#223). Kills this turn's child and only it; see `RunOptions.signal`. */
   signal?: AbortSignal | undefined;
@@ -142,6 +144,14 @@ export interface PilotChatOptions {
    * is called after the promise settles.
    */
   onDelta?: ((text: string) => void) | undefined;
+}
+
+/** The two settings a CLI turn's own tools are bounded by (#223). */
+export interface PilotChatAccess {
+  /** Everything, everywhere, with nothing asked. */
+  yolo: boolean;
+  /** Command prefixes that may run, program first - `git status`, `npm test`. */
+  safeCommands: readonly string[];
 }
 
 export interface PilotChatResult {
@@ -179,17 +189,18 @@ export interface PilotContext {
 }
 
 /**
- * Everything this turn may reach, named.
- *
- * A closed list, which is the whole reason it replaced a deny-list: a tool a
- * future CLI release adds is not on it and therefore is not available, where a
- * deny-list would have silently gained it.
- *
- * Narrower than `READ_ONLY_TOOLS` in `roles.ts` on purpose - see the module
- * comment. That set includes `Bash`, `WebSearch` and `WebFetch`, which are right
- * for a run's read-only seats and wrong for a chat the model drives.
+ * The reads, named. A closed list outside YOLO, so a tool a future CLI release
+ * adds is not available until somebody names it here.
  */
 const READS: readonly string[] = ['Read', 'Glob', 'Grep'];
+
+/** And the tools that change things, which only the settings make usable. */
+const WRITES: readonly string[] = ['Edit', 'Write'];
+
+/** A safe-list entry as the CLI's own rule: the command and anything after it. */
+export function bashRule(command: string): string {
+  return `Bash(${command.trim()}:*)`;
+}
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -197,6 +208,7 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 
 /** The argv for one turn. Split out so a test can read it without a child. */
 export function pilotChatArgs(options: PilotChatOptions): readonly string[] {
+  const yolo = options.access?.yolo === true;
   const args: string[] = [
     '-p',
     '--output-format',
@@ -206,14 +218,14 @@ export function pilotChatArgs(options: PilotChatOptions): readonly string[] {
     // Without it the stream carries whole assistant messages and the pane would
     // sit blank for the length of a reply.
     '--include-partial-messages',
-    // The three layers above the permission mode. Each is independent, each is
-    // stated in the module comment, and all three are visible in a process list
-    // - which is the point of putting them in the argv rather than in a settings
-    // file this turn would then have to be trusted to have.
-    '--restricted',
+    // Visible in a process list either way, which is the point of putting the
+    // limits in the argv rather than in a settings file this turn would then
+    // have to be trusted to have. `--restricted` refuses `bypassPermissions`,
+    // so YOLO is the one case that drops it.
+    ...(yolo ? [] : ['--restricted']),
     '--strict-mcp-config',
     '--permission-mode',
-    'plan',
+    yolo ? 'bypassPermissions' : 'dontAsk',
     '--system-prompt',
     options.system,
   ];
@@ -225,11 +237,16 @@ export function pilotChatArgs(options: PilotChatOptions): readonly string[] {
   // never starts with `-`, so nothing after it can be mistaken for one.
   const extra = (options.addDirs ?? []).filter((d) => d !== options.cwd);
   if (extra.length > 0) args.push('--add-dir', ...extra);
+  if (!yolo) {
+    // What runs without asking, and nothing else does: `dontAsk` denies every
+    // tool use these do not cover. Variadic, so a flag follows it.
+    const safe = (options.access?.safeCommands ?? []).filter((c) => c.trim() !== '');
+    args.push('--allowedTools', ...READS, ...WRITES, ...safe.map(bashRule));
+  }
   args.push('--model', options.model);
-  // Variadic, so last: it greedily consumes the tokens after it. Note this also
-  // re-admits anything `--restricted` removed that it names - which is why it
-  // names only reads.
-  args.push('--tools', ...READS);
+  // Variadic, so last: it greedily consumes the tokens after it. YOLO names no
+  // list, which is the CLI's whole default set.
+  if (!yolo) args.push('--tools', ...READS, ...WRITES, 'Bash');
   return args;
 }
 

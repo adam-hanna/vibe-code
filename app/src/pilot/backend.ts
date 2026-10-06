@@ -19,11 +19,10 @@ import type { Provider } from './keys';
  *
  * ## The two are asymmetric, and both directions are on purpose
  *
- * The Claude CLI has file tools of its own - `--tools Read Glob Grep` under
- * `--restricted`. Every other backend reads through vibe's `list_dir` and
- * `read_file`, answered by the host inside the allowed directories (#223): the
- * vendors because they never had a filesystem, and the Codex CLI because its own
- * tools are switched off.
+ * Both CLIs have their own tools - files and a shell, bounded by the settings
+ * for all projects (#223, `src/pilotchat.ts`, `src/pilotcodex.ts`). The vendors'
+ * APIs have no filesystem at all, so they read through vibe's `list_dir` and
+ * `read_file`, answered by the host inside the allowed directories.
  *
  * In the other direction the two reach the **same** tools by different roads,
  * which is #211 and is a change from how this shipped. `claude -p` still takes

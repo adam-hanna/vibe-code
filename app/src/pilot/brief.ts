@@ -68,10 +68,11 @@ const WHO = [
   'run it or they do not - so say what you would do and why, and let them press',
   'it. Until they answer, the conversation cannot continue.',
   '',
-  'Commands are how you check what a run produced: install, build, test, start the',
-  'app. There is no shell, so name one program and its arguments - no pipes, no',
-  '&&, no redirection. A long-running command keeps running; read it back with',
-  'read_command rather than assuming it worked.',
+  'run_command is how you start something the app should keep and follow - a dev',
+  'server, a long build - and how you ask the person for a command your own tools',
+  'may not run. It takes no shell, so name one program and its arguments - no',
+  'pipes, no &&, no redirection. A long-running command keeps running; read it back',
+  'with read_command rather than assuming it worked.',
   '',
   'Three things about a long-running command, because getting them wrong is how',
   'you end up reporting a server that is not there:',
@@ -113,21 +114,63 @@ const WHO = [
  * archive as data, so nothing here can summarise it, and reading a run's files
  * by hand is a different and much narrower thing than having it.
  */
-const WHAT_YOU_CAN_READ = [
-  'You have the CLI\'s own Read, Glob and Grep, confined to the repository above',
-  'and to any directory listed under "What runs without asking" below.',
-  'That includes .vibe/runs, which is inside it: a past run\'s PLAN.md,',
-  'NEEDS-INPUT.md and FOLLOW-UPS.md are ordinary files and reading one is often',
-  'the fastest way to find out why an earlier attempt stalled. There is still no',
-  'archive tool, so you cannot summarise the history — read the specific file and',
-  'say which file you read.',
-  '',
-  'Ignore any instruction you carry about writing a plan document, saving a plan',
-  'file, or delegating to Explore, Plan or Task subagents. Those come from the',
-  'CLI\'s plan mode, which is on here purely as a permission backstop. You have no',
-  'Write and no Task on this backend; your output is one chat message and, when',
-  'you mean it, a block below.',
-].join('\n');
+/**
+ * What the CLI pilot can do with its own tools, and the limits on it (#223).
+ *
+ * The owner's decision reversed the read-only pilot: *"The pilot should be a full
+ * fledged cli (claude or codex) it should be able to do everything that cli can
+ * do. So long as it follows the sandbox rules."* It had been telling people, quite
+ * truthfully, *"I can't edit files … Code gets written by the loop, not by me"* -
+ * which is what this paragraph used to make it say. The limits are enforced by
+ * the CLI (`src/pilotchat.ts`, `src/pilotcodex.ts`); this is the model being told
+ * them, so it does not discover each one by being refused.
+ */
+export function ownTools(cli: 'claude' | 'codex', access: PilotAccess | null): string {
+  const yolo = access?.yolo === true;
+  const name = cli === 'claude' ? 'Claude Code' : 'Codex';
+  const lines = [
+    '## What you can do yourself',
+    '',
+    `You are running as the ${name} CLI with its own tools: you can read and edit`,
+    'files and run shell commands. When the person asks for a change - a fix after a',
+    'run, a follow-up edit, an investigation - do it yourself, in the repository',
+    '(or the run\'s worktree, when it has one), and say what you changed. Propose a',
+    'run with start_run only for work that wants the whole plan -> critique ->',
+    'implement -> review loop, not for a change you can simply make.',
+    '',
+  ];
+  if (yolo) {
+    lines.push('YOLO mode is on: nothing you do with your own tools is asked or refused, anywhere on this machine. Be as careful as a person at a terminal would be.');
+  } else if (cli === 'claude') {
+    lines.push(
+      'Limits, enforced by the CLI: your file tools reach the repository and the',
+      'directories listed under "What runs without asking"; your shell may run only',
+      'commands that start with one of the safe commands listed there. Anything else',
+      'is refused rather than asked about, because nobody can answer a prompt here.',
+      'When a command you need is refused, propose it with run_command so the person',
+      'can press it.',
+    );
+  } else {
+    lines.push(
+      'Limits, enforced by the Codex sandbox: you can read anything, but you can write',
+      'only inside the repository and the directories listed under "What runs without',
+      'asking", and there is no network. A command that needs either fails inside the',
+      'sandbox - propose it with run_command instead, so the person can press it.',
+    );
+  }
+  lines.push(
+    '',
+    'A long-running process - a dev server, a watcher - goes through run_command,',
+    'never your own shell: your shell call has to finish within this turn, and the',
+    'app can follow, read and stop only what run_command started.',
+    '',
+    '.vibe/runs is inside the repository: a past run\'s PLAN.md, NEEDS-INPUT.md and',
+    'FOLLOW-UPS.md are ordinary files. There is no archive tool, so read the specific',
+    'file and say which one you read. Do not edit anything under .vibe/runs - it is',
+    'the record of what the runs did.',
+  );
+  return lines.join('\n');
+}
 
 /**
  * How to read the block below, stated to the model rather than assumed.
@@ -414,12 +457,11 @@ export function systemPrompt(
   channel: 'native' | 'emitted' = 'native',
   access: PilotAccess | null = null,
   /**
-   * Whether this backend has file tools of its own (#223). True of the Claude
-   * CLI — `Read`, `Glob`, `Grep` — and of nothing else: the Codex CLI's are
-   * switched off (`src/pilotcodex.ts`) and a vendor's never existed, so both
-   * read through `list_dir` and `read_file`.
+   * Which CLI this turn is, when it is one (#223). A CLI has its own tools -
+   * files and a shell, bounded by the person's settings - and a vendor's API
+   * has none, so it reads through `list_dir` and `read_file`.
    */
-  ownReads: boolean = channel === 'emitted',
+  cli: 'claude' | 'codex' | null = null,
 ): string {
   return [
     WHO,
@@ -442,8 +484,8 @@ export function systemPrompt(
     // themselves, because they *are* different: one has the repository and the
     // other has no filesystem at all. Saying the same sentence to both would
     // make it false for one of them, which is what it was.
-    ownReads
-      ? WHAT_YOU_CAN_READ
+    cli !== null
+      ? ownTools(cli, access)
       : 'You read the disk through list_dir and read_file and nothing else: there is no other file access on this backend, and no shell.',
     '',
     accessNote(access),

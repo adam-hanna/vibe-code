@@ -66,39 +66,47 @@ const done = (over: Record<string, unknown> = {}): string =>
 
 // ---- what goes out ---------------------------------------------------------
 
-test('a chat turn may read the repository and reach nothing else', () => {
-  // #193 decided the pilot may read - that is what makes it better than a
-  // generic assistant - and deciding it is what allowed the CLOSED form. This
-  // case previously asserted a deny-list of seven built-ins; that mechanism was
-  // replaced rather than loosened, and the claim underneath it is unchanged and
-  // still asserted below: nothing that acts is reachable.
-  const args = pilotChatArgs(options());
-
-  // An allow-list, so a tool a future release adds is absent by default. It has
-  // to be last because it is variadic - a flag after it is swallowed as a tool
-  // name - and it also re-admits anything `--restricted` removed that it names,
-  // which is why it names only reads.
+test('outside YOLO a chat turn has the CLI\'s file tools and a shell, and the list is closed', () => {
+  // Case 2 (#223). This pinned a read-only pilot - Read, Glob and Grep under plan
+  // mode - and the owner reversed it: *"The pilot should be a full fledged cli
+  // ... so long as it follows the sandbox rules (i.e. yolo mode or whitelist
+  // dirs and commands)."* What still holds is kept: the list is CLOSED, so a
+  // tool a future release adds is absent, and it is last because it is variadic.
+  const args = pilotChatArgs(options({ access: { yolo: false, safeCommands: ['git status', 'npm test'] } }));
   const tools = args.indexOf('--tools');
-  assert.ok(tools !== -1);
-  assert.deepEqual(args.slice(tools + 1), ['Read', 'Glob', 'Grep']);
-  assert.ok(!args.slice(tools + 1).some((a) => a.startsWith('--')), 'a flag after a variadic one');
-
-  // The three layers around it, each independent of the list above.
-  assert.ok(args.includes('--restricted'), 'code-running tools, and reads outside the cwd');
+  assert.deepEqual(args.slice(tools + 1), ['Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash']);
+  assert.ok(args.includes('--restricted'), 'file tools confined to the working directories');
   assert.ok(args.includes('--strict-mcp-config'), 'globally configured MCP servers (#138)');
-  assert.equal(args[args.indexOf('--permission-mode') + 1], 'plan');
+  // Nothing is asked: what the settings allow runs, and everything else is
+  // denied, because a -p turn has nobody to ask.
+  assert.equal(args[args.indexOf('--permission-mode') + 1], 'dontAsk');
 });
 
-test('nothing that acts is named, and a shell least of all', () => {
-  // The claim the old deny-list case was really making, kept. `Bash` is the one
-  // worth naming on its own: `READ_ONLY_TOOLS` in `roles.ts` includes it, so
-  // this list being narrower than that one is a decision rather than an
-  // oversight - a run's read-only seat is a shell under a sandbox in work a
-  // person launched, and this is a chat the model drives turn by turn.
-  const args = pilotChatArgs(options());
-  for (const tool of ['Bash', 'Edit', 'Write', 'NotebookEdit', 'WebFetch', 'WebSearch', 'Task']) {
+test('the shell runs only the safe list, and nothing outside the coding tools is named', () => {
+  // The claim the read-only case was really making, narrowed rather than
+  // dropped: a shell exists, but it is pre-approved only per safe command and
+  // never as a bare `Bash`, which would approve every command.
+  const args = pilotChatArgs(options({ access: { yolo: false, safeCommands: ['git status', ' npm test '] } }));
+  const allowed = args.slice(args.indexOf('--allowedTools') + 1, args.indexOf('--model'));
+  assert.deepEqual(allowed, ['Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash(git status:*)', 'Bash(npm test:*)']);
+  assert.ok(!allowed.includes('Bash'), 'every command approved');
+  for (const tool of ['NotebookEdit', 'WebFetch', 'WebSearch', 'Task']) {
     assert.ok(!args.includes(tool), `${tool} is reachable from a pilot turn`);
   }
+  // With no settings at all the shell exists and runs nothing.
+  const bare = pilotChatArgs(options());
+  assert.ok(!bare.some((a) => a.startsWith('Bash(')));
+});
+
+test('YOLO is the CLI with nothing asked: every tool, and no confinement', () => {
+  const args = pilotChatArgs(options({ access: { yolo: true, safeCommands: [] } }));
+  assert.equal(args[args.indexOf('--permission-mode') + 1], 'bypassPermissions');
+  // `--restricted` refuses bypassPermissions, and `--tools` would close a list
+  // YOLO means to leave open.
+  assert.ok(!args.includes('--restricted'));
+  assert.ok(!args.includes('--tools'));
+  assert.ok(!args.includes('--allowedTools'));
+  assert.ok(args.includes('--strict-mcp-config'), 'still no MCP servers');
 });
 
 test('no MCP server reaches a pilot turn, which is the half #138 is open about', () => {

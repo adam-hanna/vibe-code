@@ -1248,7 +1248,7 @@ ${frame.text}`, turn, origin.current))) {
             // A new session after a compaction opens with the summary, which is
             // the whole of how the compaction reaches the next conversation.
             prompt: withCarry(id === null ? held.current.carry : null, said ?? trailingResults(messages) ?? ''),
-            system: systemPrompt(run, launched, 'emitted', access, provider === 'subscription'),
+            system: systemPrompt(run, launched, 'emitted', access, agentOf(provider)),
             model,
             dir,
             sessionId: id ?? crypto.randomUUID(),

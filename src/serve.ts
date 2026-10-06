@@ -767,8 +767,10 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       // frame (#223). A section that does not parse refuses the turn with its
       // own sentence rather than running it under a guess.
       let addDirs: string[];
+      let granted: PilotAccess;
       try {
-        addDirs = pilotRoots(msg.dir, access());
+        granted = access();
+        addDirs = pilotRoots(msg.dir, granted);
       } catch (err: unknown) {
         send({ type: 'error', id, message: err instanceof Error ? err.message : String(err) });
         return;
@@ -791,6 +793,9 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
         // directory, and the frame is refused without it.
         cwd: msg.dir,
         addDirs,
+        // What its own tools may do without asking (#223), from the same
+        // machine settings as the directories, never from the frame.
+        access: { yolo: granted.yolo, safeCommands: granted.safeCommands },
         timeoutMs: PILOT_TIMEOUT_MS,
         signal: stopper.signal,
         onDelta: (text: string) => {

@@ -2514,6 +2514,38 @@ deliberately not the unpriced-model sentence. Those are two different nulls: one
 is missing information, and this is a statement that there is no price to have.
 Collapsing them would make the second read as an omission somebody should fix.
 
+**The subscription pilot is a full CLI now, bounded by the settings for all projects**
+(#223, at the owner's decision). This reverses the read-only pilot described below.
+The pilot was truthfully telling people *"I can't edit files … Code gets written by the
+loop, not by me"*, and the answer was *"The pilot should be a full fledged cli (claude or
+codex) it should be able to do everything that cli can do. So long as it follows the
+sandbox rules."* The limits are now `pilot.yolo`, `pilot.dirs` and
+`pilot.safeCommands`, stated in the argv and enforced by each CLI's own layer:
+
+- **Claude, outside YOLO:** `--restricted` keeps the file tools inside the repository
+  and the allowed directories. `--tools` is the closed list `Read Glob Grep Edit Write
+  Bash`. The permission mode is `dontAsk`, with `--allowedTools` granting the file
+  tools and one `Bash(<command>:*)` per safe command, so any other command is denied
+  rather than prompted. **In YOLO** it is `bypassPermissions` with every tool, which
+  is why `--restricted` goes, since it refuses that mode. Measured against the real CLI:
+  a `Write` inside the repository and a safe-listed `ls` ran, a `touch` was denied,
+  and a `Write` to the home directory was refused.
+- **Codex, outside YOLO:** its shell is back on, and it runs under
+  `sandbox_mode="workspace-write"` with the allowed directories as `writable_roots`.
+  That is set with `-c` on a resume too, because `resume` takes no `-s`. **The safe list
+  cannot bound Codex's own commands**: `codex exec` has no per-command allow-list, so
+  the sandbox is the boundary, and the prompt says so. **In YOLO** it runs with
+  `--dangerously-bypass-approvals-and-sandbox`. Measured on 0.157.1: a write inside
+  the repository succeeded, and one to the home directory failed with `read-only file
+  system`, on a resumed thread as well. That last result is also new evidence against
+  the settled *"a persisted Codex thread cannot hold a writing role"*, which has not
+  been revisited for runs.
+
+What a person presses is unchanged: `start_run`, `answer_gate`, `run_command` and
+`stop_command` are still the window's proposals (#144). The prompt tells the pilot to
+make a change itself rather than propose a run for it, and to use `run_command` for
+long-running processes, since only those can be followed and stopped by the window.
+
 **It may read the repository and nothing else, and the four layers are named in
 the argv.** #193 decided the read: a pilot that can open `PLAN.md` and the diff is
 what somebody asking *"what is this doing"* wants, and it is what makes this
