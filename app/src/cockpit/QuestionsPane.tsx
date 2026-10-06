@@ -122,16 +122,16 @@ function One({
           only the answerer's turn, so a question the answerer deferred to you
           went on showing its deferral - at high confidence - after you had
           answered it, which read as your answer being overwritten. */}
-      {mine !== null && (
+      {mine !== null ? (
+        // **And it is the only one drawn.** The answerer's draft used to follow
+        // under "which yours replaced", and the report was that nobody needs the
+        // superseded answer on screen: "just show the answer". The draft is
+        // still in `answers-<n>.json` for anyone who does.
         <div className={ANSWER}>
           <Badge variant="accent">your answer</Badge>
           <p>{mine}</p>
         </div>
-      )}
-      {mine !== null && (q.declined || q.answer !== null) && (
-        <p className={NOTE}>The answerer&apos;s draft, which yours replaced:</p>
-      )}
-      {q.declined ? (
+      ) : q.declined ? (
         // A decline is an outcome, not a missing answer, and it is the one that
         // ends the run. It gets the severity rule rather than the accent one.
         <div className={cn(ANSWER, 'border-l-2 border-emphasis')}>
@@ -150,10 +150,13 @@ function One({
           )}
         </div>
       ) : q.answer === null ? (
-        mine === null && <p className={NOTE}>No answer yet — the answerer has not taken its turn.</p>
+        <p className={NOTE}>No answer yet — the answerer has not taken its turn.</p>
       ) : (
         <div className={ANSWER}>
-          <div className="mb-1">
+          {/* Said to be the answerer's, so a card with no `your answer` chip
+              is not read as yours by its absence. */}
+          <div className="mb-1 flex flex-wrap gap-1">
+            <Badge>answerer</Badge>
             <Badge variant={tone(q.confidence)}>
               {q.confidence ?? 'confidence not stated'}
             </Badge>

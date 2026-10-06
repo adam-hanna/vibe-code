@@ -1562,29 +1562,15 @@ export function Cockpit() {
             {/* Usage now lives in the workspace heading, giving the artifact
                 navigation its full width. The same pane keeps both providers. */}
           </nav>
-          {/* **Which run the panes are about, whenever it is not the live one.**
-              The panes and the column both follow an opened run now (#223), so
-              this no longer has to explain a window showing two runs at once —
-              what is left is the one thing that genuinely does not follow: the
-              spend readout in the bar above, which is the live run's, because it
-              is charged as the run goes rather than read off a record. It
-              carries the way back and the way forward: stop reading, or go to
-              `1b`, which is the only place a run is started. */}
-          {past && viewing !== null && (
-            <div className="mx-6 mt-3 flex flex-wrap items-center gap-2 rounded-md border border-rule-card bg-card p-3 text-body-sm text-secondary">
-              <Badge>reading</Badge>
-              <span className="min-w-0 flex-1 truncate text-primary" title={viewing.task}>{viewing.task}</span>
-              <span className="basis-full leading-relaxed text-tertiary">
-                Reading a saved run. Usage above belongs to the live run; this run&apos;s record is in the overview.
-              </span>
-              <Button variant="quiet" size="sm" onClick={() => setTab('runs')}>
-                resume it…
-              </Button>
-              <Button variant="quiet" size="sm" onClick={() => setViewing(null)}>
-                back to the live run
-              </Button>
-            </div>
-          )}
+          {/* There is no "reading a saved run" strip here any more. The panes
+              and the column both follow an opened run (#223), the sidebar
+              highlights which run that is, and the footer carries the real
+              resume control - so the strip's two buttons were a two-hop link
+              labelled `resume it…` that resumed nothing, and a duplicate of a
+              sidebar click. Asked to go: "I don't understand… get rid of that
+              reading box". The loop column's own `reading` head stays, since
+              that is where the one fact worth stating (turn durations are
+              missing on a replay) is said. */}
           {tab === 'verify' && <VerifyPane passes={run.verify} />}
           {tab === 'spend' && <SpendPane run={run} />}
           {tab === 'questions' && (

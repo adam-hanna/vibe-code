@@ -1940,7 +1940,7 @@ export function Settings({
           id="prompt-blocks"
           open={showPrompts}
           onToggle={() => setShowPrompts((on) => !on)}
-          title="the blocks, in full"
+          title="Prompts"
           meta={
             prompts.blocks.length > 0 ? (
               <Badge>{prompts.blocks.length} blocks</Badge>
