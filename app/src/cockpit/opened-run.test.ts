@@ -195,7 +195,8 @@ describe('a conversation belongs to the run it is about', () => {
   test('only the project bucket is cleared after an adoption', () => {
     // Taking a *run's* key away would delete a real conversation to tidy up
     // after a move.
-    expect(pilot).toMatch(/if \(before === bucket\) localStorage\.removeItem\(bucket\)/);
+    // Through `putChat` since the store moved to the host's files (#223).
+    expect(pilot).toMatch(/if \(before === bucket\) putChat\(bucket, null\)/);
   });
 
   test('the decision is pure, so it is this file that checks it', () => {

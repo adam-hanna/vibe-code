@@ -16,6 +16,7 @@ import { useFollow } from './follow';
 import { autoRun, NO_ACCESS } from './access';
 import { declare, settleCall } from './tools';
 import { chatKey, chatMove, isDraftKey, readChat, replyKey, worthSaving, writable } from './saved';
+import { getChat, putChat, useChats } from './chatstore';
 import {
   costOf,
   describeDay,
@@ -798,18 +799,16 @@ export function PilotPane({
   const held = useRef(conversation);
   held.current = conversation;
 
-  // Load when the window is pointed at a different run, and only then.
+  // Load when the window is pointed at a different run, and only then - and
+  // not before the stored conversations have been read at all (#223), or the
+  // first restore would find nothing and the first save would write that
+  // nothing over a conversation that was there.
+  const chats = useChats();
   useEffect(() => {
+    if (!chats.ready) return;
     const key = chatKey(dir, runId);
     const before = chat.current;
-    let stored: string | null = null;
-    try {
-      stored = localStorage.getItem(key);
-    } catch {
-      // Storage can be switched off. Treated as nothing stored, which sends the
-      // decision down the `restore` road and lands on an empty conversation —
-      // a smaller failure than a window that will not render.
-    }
+    const stored = getChat(key);
     const move = chatMove({
       from: before,
       to: key,
@@ -835,22 +834,22 @@ export function PilotPane({
     // worth keeping.
     if (move === 'adopt') {
       try {
-        localStorage.setItem(key, writable(held.current));
+        putChat(key, writable(held.current));
         // Cleared, so the next run in this project starts from nothing rather
         // than inheriting the conversation that launched the previous one. Only
         // the project bucket is cleared: taking a *run's* key away here would
         // delete a real conversation to tidy up after a move.
         const bucket = chatKey(dir, null);
-        if (before === bucket) localStorage.removeItem(bucket);
+        if (before === bucket) putChat(bucket, null);
         // And a draft's, which is the same case one step later (#223): the run
         // the draft asked for has now started and holds the conversation, so the
         // draft's copy would only come back as a duplicate.
-        else if (before !== null && isDraftKey(before)) localStorage.removeItem(before);
+        else if (before !== null && isDraftKey(before)) putChat(before, null);
         // A run's own chat that proposed this one keeps its record but gives
         // up its CLI session (#223): the new run carries it on, and two chats
         // resuming one session would each answer from the other's messages.
         else if (before !== null) {
-          localStorage.setItem(before, writable({ ...held.current, session: null, carry: null }));
+          putChat(before, writable({ ...held.current, session: null, carry: null }));
         }
       } catch {
         // The conversation is still on screen and still correct. What is lost is
@@ -870,7 +869,7 @@ export function PilotPane({
     // reopened. They still settle, and a proposal among them is a card.
     for (const reply of back.replies) for (const call of reply.calls) restored.current.add(call.id);
     dispatch({ type: 'restore', conversation: back });
-  }, [dir, runId, opened]);
+  }, [dir, runId, opened, chats.ready]);
 
   // Save on every settled change. `live` is dropped by `writable`, so a turn in
   // flight is not stored half-streamed and a window killed mid-turn leaves a
@@ -878,13 +877,10 @@ export function PilotPane({
   useEffect(() => {
     const key = chat.current;
     if (key === null || !worthSaving(conversation)) return;
-    try {
-      localStorage.setItem(key, writable(conversation));
-    } catch {
-      // Quota, or storage switched off. The conversation still works for this
-      // session; what is lost is its return next time, which is not worth an
-      // error in the middle of one.
-    }
+    // To the host's files, debounced (#223). A failure is no longer swallowed:
+    // `useChats` carries it and the pane says so, because a conversation that
+    // is silently not being saved is how three days of them were lost.
+    putChat(key, writable(conversation));
   }, [conversation]);
   /**
    * Where turns run (#193). **Subscription by default**, because it is the one
@@ -1812,6 +1808,15 @@ ${frame.text}`, turn, origin.current))) {
           <TurnWorking reply={conversation.live} now={now} />
         )}
       </div>
+
+      {/* A conversation that is not being saved says so (#223). Swallowing this
+          is how three days of chats were lost without a word on screen. */}
+      {chats.failure !== null && (
+        <div className="v-pilot__note v-pilot__note--alarm">{chats.failure}</div>
+      )}
+      {!chats.ready && chats.failure === null && host.inShell() && (
+        <div className="v-pilot__note">reading saved conversations…</div>
+      )}
 
       {conversation.unknown > 0 && (
         <div className="v-pilot__note">

@@ -1355,7 +1355,27 @@ they are waiting on. Four things in it are worth carrying:
   reading it back is not pattern-matching on English. A line matching neither is a
   continuation, a stack frame under an error, and is kept whole: dropping it would silently
   shorten the one record of a run nobody is narrating any more.
-- **A conversation is kept between launches, and it is not run state.** `app/src/pilot/saved.ts`
+- **Conversations are files the host writes, because `localStorage` filled up and said
+nothing** (#223). WebKit caps `localStorage` at about 5 MB per origin. A pilot chat that
+reads files and runs commands grows by tool results, and one ERM chat alone reached
+2.16 MB. At 5.24 MB in total every save failed inside a `try` that swallowed it. For
+three days each reply lived only in memory, and a click on another run replaced it with
+the last copy that had saved: *"Have I lost my pilot chats?!"* The CLIs' own session
+logs still held every turn, and the chats were rebuilt from them by hand.
+
+`src/chatstore.ts` keeps one file per conversation under `$VIBE_APP_DATA/chats`. Rust
+sets that variable to the app's data directory. Files are named by a hash of the key,
+so a key never becomes a path, and are written via a temporary file and a rename.
+`app/src/pilot/chatstore.ts` is the window's synchronous cache in front of it, with
+writes debounced per key. Three rules travel with it:
+- **Nothing restores or saves before the first read.** Saving an empty conversation
+  over one not yet read is the same loss by a new road.
+- **The migration out of `localStorage` removes a key only after the host has
+  confirmed it.**
+- **A failed save is drawn in the pane.** The swallowed failure was the whole defect.
+  Everything else in `localStorage` is small and stays where it is.
+
+**A conversation is kept between launches, and it is not run state.** `app/src/pilot/saved.ts`
   keys it by `(project, run)` — a run id is unique only inside one archive, the same reason a
   pin carries both. The conversation that exists *before* a run is the one that will **propose**
   it, so it lives under the project alone and is **adopted** when a run starts; restoring the

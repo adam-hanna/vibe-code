@@ -40,6 +40,7 @@ import {
 } from './pending';
 import type { Draft } from './pending';
 import { chatKey } from '../pilot/saved';
+import { loadChats, putChat } from '../pilot/chatstore';
 import { useReplay } from './useReplay';
 
 import { LoopColumn } from './LoopColumn';
@@ -148,6 +149,11 @@ export function Cockpit() {
     log: [],
     unknown: [],
   });
+  // The pilot's stored conversations, once the host can answer (#223). In a
+  // browser preview there is no host and they come from localStorage instead.
+  useEffect(() => {
+    if (wire.connected || !host.inShell()) void loadChats();
+  }, [wire.connected]);
   /**
    * How big the product is drawn (#223).
    *
@@ -561,7 +567,7 @@ export function Cockpit() {
     (d: Draft) => {
       saveDrafts((list) => removeDraft(list, d.id));
       try {
-        localStorage.removeItem(chatKey(d.dir, d.id));
+        putChat(chatKey(d.dir, d.id), null);
       } catch {
         // Storage off: the conversation was never kept either.
       }

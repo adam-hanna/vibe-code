@@ -347,6 +347,20 @@ export interface ReplayFrame {
  * plan, the findings, the diff — so what a settings screen can honestly show is
  * the part that does not vary, and showing it means quoting it.
  */
+/** Every stored pilot conversation (#223, `src/chatstore.ts`). */
+export interface ChatsFrame {
+  type: 'chats';
+  id: number;
+  chats: readonly { key: string; value: string }[];
+}
+
+/** One conversation was written or removed. */
+export interface ChatSavedFrame {
+  type: 'chat_saved';
+  id: number;
+  key: string;
+}
+
 export interface PromptsFrame {
   type: 'prompts';
   id: number;
@@ -448,6 +462,8 @@ export type Frame =
   | ArtifactFrame
   | RunDeleted
   | PromptsFrame
+  | ChatsFrame
+  | ChatSavedFrame
   | ReplayFrame
   | QuestionsAnswered;
 
@@ -496,6 +512,10 @@ export function isFrame(v: unknown): v is Frame {
     // reason: they are the same in every run, so they say nothing about the one
     // being narrated.
     type === 'prompts' ||
+    // The pilot's stored conversations (#223), which belong to the pane and
+    // say nothing about the run being narrated.
+    type === 'chats' ||
+    type === 'chat_saved' ||
     // A past run's narration, ignored by THIS reducer for a sharper version of
     // the same reason: it describes a run this process is NOT narrating, and
     // folding it into the live run is exactly the confusion it exists to end.
@@ -903,6 +923,24 @@ export async function prompts(): Promise<PromptsFrame['blocks']> {
     'the host did not answer with the prompt blocks',
   );
   return frame.blocks;
+}
+
+/** Every pilot conversation the host has stored (#223). */
+export async function chats(): Promise<ChatsFrame['chats']> {
+  const id = nextRequestId();
+  const frame = await ask<ChatsFrame>({ type: 'chats', id }, id, 'chats', 'the host did not answer with the stored conversations');
+  return frame.chats;
+}
+
+/** Store one conversation, or remove it with null. Rejects with the host's sentence. */
+export async function saveChat(key: string, value: string | null): Promise<void> {
+  const id = nextRequestId();
+  await ask<ChatSavedFrame>(
+    { type: 'chat_save', id, key, value },
+    id,
+    'chat_saved',
+    'the host did not confirm the conversation was saved',
+  );
 }
 
 /**

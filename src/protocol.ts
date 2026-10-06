@@ -344,6 +344,10 @@ export type Outbound =
    * describing the product rather than quoting it.
    */
   | { type: 'prompts'; id: number; blocks: readonly PromptBlock[] }
+  /** Every stored pilot conversation, answering `chats` (#223, `src/chatstore.ts`). */
+  | { type: 'chats'; id: number; chats: readonly { key: string; value: string }[] }
+  /** A conversation was written or removed, answering `chat_save`. */
+  | { type: 'chat_saved'; id: number; key: string }
   /**
    * What an `answer_questions` request placed, in its own words.
    *
@@ -618,6 +622,10 @@ export type Inbound =
    * later reader has to work out is unused.
    */
   | { type: 'prompts'; id: number }
+  /** The pilot's stored conversations (#223). */
+  | { type: 'chats'; id: number }
+  /** Store one conversation, or remove it with a null value. */
+  | { type: 'chat_save'; id: number; key: string; value: string | null }
   /**
    * Delete a run from the archive (#223).
    *
@@ -905,6 +913,20 @@ export function decode(line: string): Decoded {
         answers.push({ question, answer });
       }
       return { ok: true, message: { type: 'answer_questions', id, dir, runId, answers } };
+    }
+    case 'chats':
+      return { ok: true, message: { type: 'chats', id } };
+    case 'chat_save': {
+      const key = parsed['key'];
+      const value = parsed['value'];
+      if (typeof key !== 'string' || !key.startsWith('vibe.chat.')) {
+        return { ok: false, id, reason: 'chat_save carried no conversation key' };
+      }
+      // Null is a removal and must be said; a missing value is not one.
+      if (value !== null && typeof value !== 'string') {
+        return { ok: false, id, reason: 'chat_save carried no value - send null to remove' };
+      }
+      return { ok: true, message: { type: 'chat_save', id, key, value } };
     }
     case 'prompts':
       // No fields to check. Every other read names a repository or a run and is

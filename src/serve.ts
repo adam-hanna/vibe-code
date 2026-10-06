@@ -6,6 +6,7 @@ import { pilotCodex } from '@src/pilotcodex.js';
 import { cliStatus } from '@src/clipaths.js';
 import { acceptKeys } from '@src/heldkeys.js';
 import { pilotFs, pilotRoots, readPilotAccess, resolvedAccess } from '@src/pilotaccess.js';
+import { chatDir, listChats, saveChat } from '@src/chatstore.js';
 import type { PilotAccess } from '@src/pilotaccess.js';
 import { promptBlocks } from '@src/prompts.js';
 import * as log from '@src/log.js';
@@ -522,6 +523,28 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
           id: msg.id,
           message: err instanceof Error ? err.message : String(err),
         });
+      }
+      return;
+    }
+
+    // The window's conversations (#223). Reads and writes beside a run, like
+    // the other reads: they touch only the app's own data directory, never a
+    // run's, so they cannot observe or disturb one.
+    if (msg.type === 'chats' || msg.type === 'chat_save') {
+      const dir = chatDir();
+      if (dir === null) {
+        send({ type: 'error', id: msg.id, message: 'this host was not told where the app keeps its data (VIBE_APP_DATA)' });
+        return;
+      }
+      try {
+        if (msg.type === 'chats') {
+          send({ type: 'chats', id: msg.id, chats: listChats(dir) });
+        } else {
+          saveChat(dir, msg.key, msg.value);
+          send({ type: 'chat_saved', id: msg.id, key: msg.key });
+        }
+      } catch (err: unknown) {
+        send({ type: 'error', id: msg.id, message: err instanceof Error ? err.message : String(err) });
       }
       return;
     }
