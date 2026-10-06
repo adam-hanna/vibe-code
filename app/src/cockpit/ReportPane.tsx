@@ -1,9 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
-import { MetaChip, SeverityChip, StateKicker } from '../design';
+import { SeverityChip } from '../design';
+import { Badge } from '@/ui/badge';
+import { Button } from '@/ui/button';
+import { cn } from '@/lib/utils';
 import { Counts } from './Counts';
 import { Caret, Section } from './Disclosure';
 import { ofKind, readReport } from './artifacts';
 import { SEVERITIES } from './model';
+import { DOCUMENT, EMPTY, FILE, HEAD, LABEL, NOTE, PANE } from './pane';
 import { useArtifact, useArtifacts, noText } from './useArtifacts';
 import { sizeOf } from './PlansPane';
 import type { Severity } from '../design';
@@ -55,6 +59,15 @@ function citation(c: FullFinding['citations'][number]): string {
   return c.ref ?? c.kind;
 }
 
+/** A list of one-line facts about a finding: its history, its reproducer. */
+const FACTS = 'm-0 flex list-none flex-col gap-1 p-0 text-body-sm text-secondary';
+/** A caption over prose behind the fold: label weight, because it is not a title of its own. */
+const CAPTION = cn(LABEL, 'mt-2 mb-0');
+/** Prose the report carried. `pre-wrap`, because a reviewer's paragraphs are its own. */
+const PROSE = 'm-0 whitespace-pre-wrap text-body text-secondary';
+/** A field the report did not carry, named as absent rather than left blank. */
+const ABSENT = 'm-0 text-body-sm text-tertiary';
+
 /**
  * The two severity histories, kept apart (#142).
  *
@@ -74,10 +87,10 @@ function History({ row }: { row: FindingRow }) {
   const changes = row.severityChanges ?? [];
   if (row.downgraded === null && changes.length === 0) return null;
   return (
-    <ul className="v-rep__history">
+    <ul className={FACTS}>
       {row.downgraded !== null && (
         <li>
-          <MetaChip>guard</MetaChip> downgraded from {row.downgraded.from} — {row.downgraded.reason}
+          <Badge>guard</Badge> downgraded from {row.downgraded.from} — {row.downgraded.reason}
         </li>
       )}
       {changes.map((c, i) => (
@@ -86,7 +99,7 @@ function History({ row }: { row: FindingRow }) {
           {/* `by` is `FindingAuthor`, the same vocabulary #141 put on the
               record - not a second enum that would eventually disagree about
               what `human` means. */}
-          <MetaChip>{c.by ?? 'unattributed'}</MetaChip> moved {c.from} → {c.to}
+          <Badge>{c.by ?? 'unattributed'}</Badge> moved {c.from} → {c.to}
           {c.reason !== undefined && ` — ${c.reason}`}
         </li>
       ))}
@@ -116,21 +129,21 @@ function History({ row }: { row: FindingRow }) {
 function Reproducer({ outcomes }: { outcomes: FindingRow['reproducer'] }) {
   if (outcomes === null) return null;
   return (
-    <ul className="v-rep__history">
+    <ul className={FACTS}>
       {outcomes.map((o, i) => (
         // eslint-disable-next-line react/no-array-index-key
         <li key={`${o.at}-${o.verdict}-${String(i)}`}>
-          <MetaChip
-            kind={
+          <Badge
+            variant={
               o.verdict === 'reproduced'
                 ? 'alarm'
                 : o.verdict === 'did-not-reproduce'
-                  ? 'checkable'
-                  : 'default'
+                  ? 'live'
+                  : 'quiet'
             }
           >
             {o.verdict}
-          </MetaChip>{' '}
+          </Badge>{' '}
           {o.at === 'review' ? 'before the fix' : 'after the final fix'}
           {/* The reason is the whole value of `unproven`: the file could not be
               placed, no gate could be resolved, or it failed with no baseline
@@ -159,59 +172,59 @@ function Finding({ finding, row }: { finding: FullFinding; row: FindingRow | nul
   const [open, setOpen] = useState(false);
   const w = weight(finding.severity);
   return (
-    <div className={`v-rep__finding${open ? ' v-rep__finding--open' : ''}`}>
+    <div className="rounded-sm border border-rule-inner bg-panel">
       <button
         type="button"
-        className="v-rep__head"
+        className="group flex w-full cursor-pointer flex-wrap items-baseline gap-3 border-0 bg-transparent p-3 text-left text-inherit outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent"
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
       >
         <Caret open={open} />
         <SeverityChip severity={w} label={finding.severity} />
-        <span className="v-rep__title">{finding.title}</span>
-        <code className="v-rep__id">{finding.id}</code>
+        <span className="text-body font-medium text-primary group-hover:text-display">{finding.title}</span>
+        <code className={cn(FILE, 'ml-auto')}>{finding.id}</code>
       </button>
       {open && (
-        <div className="v-rep__body">
-          <div className="v-rep__meta">
+        <div className="flex flex-col gap-2 px-3 pb-3">
+          <div className="flex flex-wrap gap-2">
             {finding.raisedBy === null ? (
-              <MetaChip>author not recorded</MetaChip>
+              <Badge>author not recorded</Badge>
             ) : (
-              <MetaChip>raised by {finding.raisedBy}</MetaChip>
+              <Badge>raised by {finding.raisedBy}</Badge>
             )}
-            {finding.deferred && <MetaChip>deferred — real, and for separate work</MetaChip>}
+            {finding.deferred && <Badge>deferred — real, and for separate work</Badge>}
             {/* The guards' downgrade, which is a fact about the severity above
                 and has to be readable beside it. Never rewritten and never
                 cleared, including by a person restoring the severity (#142). */}
             {finding.downgraded !== null && (
-              <MetaChip kind="alarm">
+              <Badge variant="alarm">
                 guard downgraded it from {finding.downgraded.from}
-              </MetaChip>
+              </Badge>
             )}
             {/* Said out loud rather than left as an empty row. *Nobody tried to
                 prove this* is part of the provenance - it is not a mark against
                 the finding, and #113 is explicit that a finding without one
                 behaves exactly as every finding did before reproducers. */}
             {row !== null && row.reproducer === null && (
-              <MetaChip>no reproducer was written</MetaChip>
+              <Badge>no reproducer was written</Badge>
             )}
           </div>
 
-          <h5 className="v-rep__label">What is wrong</h5>
+          <h5 className={CAPTION}>What is wrong</h5>
           {finding.detail === null ? (
-            <p className="v-rep__absent">The report carried no detail for this finding.</p>
+            <p className={ABSENT}>The report carried no detail for this finding.</p>
           ) : (
-            <p className="v-rep__prose">{finding.detail}</p>
+            <p className={PROSE}>{finding.detail}</p>
           )}
 
-          <h5 className="v-rep__label">What would fix it</h5>
+          <h5 className={CAPTION}>What would fix it</h5>
           {finding.suggestedFix === null ? (
-            <p className="v-rep__absent">The report suggested no fix.</p>
+            <p className={ABSENT}>The report suggested no fix.</p>
           ) : (
-            <p className="v-rep__prose">{finding.suggestedFix}</p>
+            <p className={PROSE}>{finding.suggestedFix}</p>
           )}
 
-          <h5 className="v-rep__label">
+          <h5 className={CAPTION}>
             Where it says to look
             {finding.citations.length > 0 && ` · ${String(finding.citations.length)}`}
           </h5>
@@ -219,17 +232,21 @@ function Finding({ finding, row }: { finding: FullFinding; row: FindingRow | nul
             // `4c`'s ungrounded flag, in the pane that can now show what the
             // alternative looked like. The reviewer is held to the same standard
             // as the implementer: a claim that points nowhere is displayed as one.
-            <p className="v-rep__absent">
+            <p className={ABSENT}>
               Nothing. A blocking finding that cites nothing that resolves is carried as a P2 with
               the reason recorded.
             </p>
           ) : (
-            <ul className="v-rep__cites">
+            <ul className={cn(FACTS, 'gap-2')}>
               {finding.citations.map((c, i) => (
                 // eslint-disable-next-line react/no-array-index-key
                 <li key={`${c.kind}-${citation(c)}-${String(i)}`}>
-                  <MetaChip>{c.kind}</MetaChip> <code>{citation(c)}</code>
-                  {c.excerpt !== null && <pre className="v-rep__excerpt">{c.excerpt}</pre>}
+                  <Badge>{c.kind}</Badge> <code className="font-mono text-mono-sm text-primary">{citation(c)}</code>
+                  {c.excerpt !== null && (
+                    <pre className="mt-1 mb-0 whitespace-pre-wrap border-l-2 border-rule-inner bg-card px-3 py-2 font-mono text-mono-sm text-tertiary [overflow-wrap:anywhere]">
+                      {c.excerpt}
+                    </pre>
+                  )}
                 </li>
               ))}
             </ul>
@@ -241,13 +258,13 @@ function Finding({ finding, row }: { finding: FullFinding; row: FindingRow | nul
               window did not watch. */}
           {row !== null && (row.downgraded !== null || (row.severityChanges ?? []).length > 0) && (
             <>
-              <h5 className="v-rep__label">How it reached this severity</h5>
+              <h5 className={CAPTION}>How it reached this severity</h5>
               <History row={row} />
             </>
           )}
           {row !== null && row.reproducer !== null && (
             <>
-              <h5 className="v-rep__label">What the reviewer’s own test observed</h5>
+              <h5 className={CAPTION}>What the reviewer’s own test observed</h5>
               <Reproducer outcomes={row.reproducer} />
             </>
           )}
@@ -276,12 +293,12 @@ function ReportBody({
   const missing = noText(read, failure);
 
   if (loading && read === null && missing === null) {
-    return <p className="v-doc__note">reading {name}…</p>;
+    return <p className={NOTE}>reading {name}…</p>;
   }
   if (missing !== null) {
     return (
-      <p className="v-doc__note">
-        <StateKicker tone="quiet">no report</StateKicker> {missing}
+      <p className={NOTE}>
+        <Badge>no report</Badge> {missing}
       </p>
     );
   }
@@ -291,11 +308,11 @@ function ReportBody({
   if (report === null) {
     return (
       <>
-        <p className="v-doc__note">
-          <StateKicker tone="alarm">unreadable</StateKicker> This file is not the report shape this
+        <p className={NOTE}>
+          <Badge variant="alarm">unreadable</Badge> This file is not the report shape this
           build understands. It is shown as it is on disk.
         </p>
-        <pre className="v-doc__text">{read.text}</pre>
+        <pre className={DOCUMENT}>{read.text}</pre>
       </>
     );
   }
@@ -309,11 +326,12 @@ function ReportBody({
       {/* The gate's four counts, and the tolerance stated rather than left to be
           inferred from two numbers. Drawn from the census because that is what
           the gate decided on; a tally of the list below would be this pane's
-          arithmetic wearing the gate's clothes. */}
+          arithmetic wearing the gate's clothes. The loop's own sentence where it
+          blocked, never one composed from the counts. */}
       {census !== null && (
         <>
           <Counts counts={census.counts} tolerance={census.tolerance} compact />
-          <p className="v-rep__verdict">
+          <p className="m-0 text-body text-primary">
             {census.pass
               ? 'The gate passed.'
               : (census.reason ?? 'The gate blocked this round.')}
@@ -324,18 +342,18 @@ function ReportBody({
         // The report's own word, when no census was narrated for this round -
         // which is every round of a run this window joined late. It is the
         // judge's verdict and not the gate's decision, and it says which.
-        <p className="v-rep__verdict">
-          <MetaChip>{report.verdict}</MetaChip> the judge’s own verdict. No gate decision was
+        <p className="m-0 text-body text-primary">
+          <Badge>{report.verdict}</Badge> the judge’s own verdict. No gate decision was
           narrated to this window for this round.
         </p>
       )}
 
       {/* The summary is the paragraph a person reads before any individual
           finding, and no frame has ever carried it. */}
-      {report.summary !== null && <p className="v-rep__summary">{report.summary}</p>}
+      {report.summary !== null && <p className={PROSE}>{report.summary}</p>}
 
       {listed === 0 ? (
-        <p className="v-doc__note">This round reported no findings at all.</p>
+        <p className={NOTE}>This round reported no findings at all.</p>
       ) : (
         report.findings.map((f) => (
           <Finding
@@ -354,7 +372,7 @@ function ReportBody({
           say, the pane admits it rather than letting the list read as the whole
           of what the round found. */}
       {counted !== null && listed < counted && (
-        <p className="v-doc__note">
+        <p className={NOTE}>
           The counts above are the gate’s and are what decided the round; this build could read{' '}
           {listed} of the {counted} findings behind them.
         </p>
@@ -435,45 +453,43 @@ export function ReportPane({
 
   if (runId === null) {
     return (
-      <div className="v-doc v-doc--empty">
-        <StateKicker tone="quiet">no run</StateKicker>
-        <p>A {words.title} is read out of a run’s own directory, so there has to be a run.</p>
+      <div className={EMPTY}>
+        <Badge>no run</Badge>
+        <p className="m-0 max-w-md">A {words.title} is read out of a run’s own directory, so there has to be a run.</p>
       </div>
     );
   }
 
   if (failure !== null) {
     return (
-      <div className="v-doc v-doc--empty">
-        <StateKicker tone="alarm">no {words.title}</StateKicker>
-        <p>{failure}</p>
-        <button className="v-doc__again" onClick={reload}>
+      <div className={EMPTY}>
+        <Badge variant="alarm">no {words.title}</Badge>
+        <p className="m-0 max-w-md">{failure}</p>
+        <Button variant="secondary" size="sm" onClick={reload}>
           try again
-        </button>
+        </Button>
       </div>
     );
   }
 
   if (reports.length === 0) {
     return (
-      <div className="v-doc v-doc--empty">
-        <StateKicker tone="quiet">
-          {loading ? 'reading' : `no ${words.title} yet`}
-        </StateKicker>
-        <p>{loading ? 'asking the host what this run has written…' : words.who}</p>
+      <div className={EMPTY}>
+        <Badge>{loading ? 'reading' : `no ${words.title} yet`}</Badge>
+        <p className="m-0 max-w-md">{loading ? 'asking the host what this run has written…' : words.who}</p>
       </div>
     );
   }
 
   return (
-    <div className="v-doc">
-      <div className="v-doc__head">
+    <div className={PANE}>
+      <div className={HEAD}>
         <span>
           {reports.length} round{reports.length === 1 ? '' : 's'} of {words.title}
         </span>
-        <button className="v-doc__again" onClick={reload}>
+        <Button variant="quiet" size="sm" onClick={reload}>
           reread
-        </button>
+        </Button>
       </div>
       {reports.map((report) => (
         <Section
@@ -516,9 +532,9 @@ export function ReportPane({
 function Summary({ report, census }: { report: Classified; census: Census | null }) {
   return (
     <>
-      {census !== null && <Counts counts={census.counts} compact />}
-      <code className="v-doc__file">{report.name}</code>
-      {report.bytes !== null && <MetaChip>{sizeOf(report.bytes)}</MetaChip>}
+      {census !== null && <Counts counts={census.counts} compact className="my-0" />}
+      <code className={FILE}>{report.name}</code>
+      {report.bytes !== null && <Badge className="normal-case tracking-normal">{sizeOf(report.bytes)}</Badge>}
     </>
   );
 }

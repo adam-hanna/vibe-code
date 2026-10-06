@@ -52,15 +52,17 @@
  */
 export function Kickoff({ dir }: { dir: string }) {
   return (
-    <div className="v-kick">
-      <p className="v-kick__note">
+    <div className="px-6 pb-2">
+      <p className="m-0 text-label leading-relaxed text-secondary">
         {dir.trim() === '' ? (
           <>
             <strong>Start with a project.</strong> Add a repository in the sidebar so your pilot can explore its code.
           </>
         ) : (
           <>
-            Working in <code className="v-kick__where">{dir}</code>. Your pilot can read this repository; you approve each run.
+            {/* The repository the pilot is confined to. Monospace because it is a
+                path, and wrapping anywhere because a worktree path is one word. */}
+            Working in <code className="font-mono text-mono-sm text-primary [overflow-wrap:anywhere]">{dir}</code>. Your pilot can read this repository; you approve each run.
           </>
         )}
       </p>

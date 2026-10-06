@@ -1,8 +1,12 @@
 import { useEffect, useState } from 'react';
-import { Button, Card, MetaChip, StateKicker } from '../design';
+import { Play } from 'lucide-react';
+import { Badge } from '@/ui/badge';
+import { Button } from '@/ui/button';
+import { cn } from '@/lib/utils';
 import * as host from '../host';
 import { Section } from './Disclosure';
 import { ofKind, readAnswers } from './artifacts';
+import { CARD, EMPTY, FIELD, FILE, PANE } from './pane';
 import { useArtifact, useArtifacts, noText } from './useArtifacts';
 import type { RecordedAnswer } from './artifacts';
 import { answerFiles, humanAnswers, questionKey } from './humananswers';
@@ -74,6 +78,10 @@ function tone(confidence: string | null): 'alarm' | 'accent' | 'quiet' {
   return 'accent';
 }
 
+const NOTE = 'mt-2 mb-0 text-body-sm text-tertiary';
+/** An answer under its question, ruled off on the left with the accent. */
+const ANSWER = 'mt-3 border-l-2 border-accent-border pl-3 text-body-sm text-secondary [&_p]:mt-1 [&_p]:mb-0';
+
 /**
  * One question, live or recorded.
  *
@@ -100,32 +108,34 @@ function One({
   };
 }) {
   return (
-    <Card>
-      <div className="v-q__head">
-        {q.kind !== null && <MetaChip>{q.kind}</MetaChip>}
+    <div className={CARD}>
+      <div className="flex items-center gap-2">
+        {q.kind !== null && <Badge>{q.kind}</Badge>}
         {/* Blocking is what decides whether a decline ends the run, so it is
             stated on every question rather than only on the blocking ones. */}
-        {q.blocking === true && <StateKicker tone="accent">blocking</StateKicker>}
-        {q.blocking === false && <MetaChip>advisory</MetaChip>}
+        {q.blocking === true && <Badge variant="accent">blocking</Badge>}
+        {q.blocking === false && <Badge>advisory</Badge>}
       </div>
-      <p className="v-q__question">{q.question}</p>
+      <p className="mt-2 mb-0 text-body text-primary">{q.question}</p>
 
       {/* **Yours first, and it is the one the run used** (#223). The pane drew
           only the answerer's turn, so a question the answerer deferred to you
           went on showing its deferral - at high confidence - after you had
           answered it, which read as your answer being overwritten. */}
       {mine !== null && (
-        <div className="v-q__answer v-q__answer--mine">
-          <StateKicker tone="accent">your answer</StateKicker>
+        <div className={ANSWER}>
+          <Badge variant="accent">your answer</Badge>
           <p>{mine}</p>
         </div>
       )}
       {mine !== null && (q.declined || q.answer !== null) && (
-        <p className="v-q__note">The answerer&apos;s draft, which yours replaced:</p>
+        <p className={NOTE}>The answerer&apos;s draft, which yours replaced:</p>
       )}
       {q.declined ? (
-        <div className="v-q__answer v-q__answer--declined">
-          <StateKicker tone="alarm">declined</StateKicker>
+        // A decline is an outcome, not a missing answer, and it is the one that
+        // ends the run. It gets the severity rule rather than the accent one.
+        <div className={cn(ANSWER, 'border-l-2 border-emphasis')}>
+          <Badge variant="alarm">declined</Badge>
           {/* **The answerer's own words, and nothing in front of them.** This
               used to open every declined card with a fixed sentence — *"The
               adversary would not guess at this."* — and then print the
@@ -134,25 +144,25 @@ function One({
               for three different reasons read as three copies of one reason,
               because the only part that was identical was the part vibe wrote. */}
           {q.rationale === null ? (
-            <p className="v-q__note">It declined without giving a reason.</p>
+            <p className="text-tertiary">It declined without giving a reason.</p>
           ) : (
             <p>{q.rationale}</p>
           )}
         </div>
       ) : q.answer === null ? (
-        mine === null && <p className="v-q__note">No answer yet — the answerer has not taken its turn.</p>
+        mine === null && <p className={NOTE}>No answer yet — the answerer has not taken its turn.</p>
       ) : (
-        <div className="v-q__answer">
-          <div className="v-q__conf">
-            <StateKicker tone={tone(q.confidence)}>
+        <div className={ANSWER}>
+          <div className="mb-1">
+            <Badge variant={tone(q.confidence)}>
               {q.confidence ?? 'confidence not stated'}
-            </StateKicker>
+            </Badge>
           </div>
           <p>{q.answer}</p>
-          {q.rationale !== null && <p className="v-q__note">{q.rationale}</p>}
+          {q.rationale !== null && <p className="text-tertiary">{q.rationale}</p>}
         </div>
       )}
-    </Card>
+    </div>
   );
 }
 
@@ -232,12 +242,12 @@ function RecordedRound({
   const missing = noText(read, failure);
 
   if (loading && read === null && missing === null) {
-    return <p className="v-q__note">reading {name}…</p>;
+    return <p className={NOTE}>reading {name}…</p>;
   }
   if (missing !== null) {
     return (
-      <p className="v-q__note">
-        <StateKicker tone="quiet">no answers</StateKicker> {missing}
+      <p className={NOTE}>
+        <Badge>no answers</Badge> {missing}
       </p>
     );
   }
@@ -246,15 +256,15 @@ function RecordedRound({
   const answers = readAnswers(read.text);
   if (answers === null) {
     return (
-      <p className="v-q__note">
-        <StateKicker tone="alarm">unreadable</StateKicker> {name} is not the shape this build
+      <p className={NOTE}>
+        <Badge variant="alarm">unreadable</Badge> {name} is not the shape this build
         understands, so nothing was drawn from it.
       </p>
     );
   }
   if (answers.length === 0) {
     return (
-      <p className="v-q__note">
+      <p className={NOTE}>
         The answerer returned nothing for this round. That is what ends a run when the question
         blocks, and it is on disk as an empty list rather than as a missing file.
       </p>
@@ -285,6 +295,10 @@ function RecordedRound({
  * **Saving does not spend anything.** The write and the resume are separate
  * buttons for that reason — somebody may answer two questions now and the third
  * after lunch, and a Save that started a run would make that impossible.
+ *
+ * A bordered block rather than loose fields, because it is a different act from
+ * reading: everything above it is the record and this is the one part that
+ * writes.
  */
 function AnswerForm({
   dir,
@@ -330,9 +344,9 @@ function AnswerForm({
   };
 
   return (
-    <div className="v-q__answer">
-      <div className="v-q__answerhead">
-        <StateKicker tone="accent">your turn</StateKicker>
+    <div className="mt-5 rounded-md border border-accent-border bg-accent-tint p-4 text-body-sm text-secondary">
+      <div className="mb-4 flex items-baseline gap-3">
+        <Badge variant="accent">your turn</Badge>
         <span>
           These go into the run&apos;s <code>NEEDS-INPUT.md</code> — the same file{' '}
           <code>vibe resume</code> reads, so answering here and answering in an editor are the
@@ -341,19 +355,19 @@ function AnswerForm({
       </div>
 
       {open.map((q) => (
-        <label className="v-q__field" key={q.question}>
-          <span className="v-q__fieldq">{q.question}</span>
+        <label className="mb-4 block" key={q.question}>
+          <span className="mb-1 block text-body text-emphasis">{q.question}</span>
           {/* **What is on the wire, and nothing that is not.** The escalation
               file records what the planner would default to; `Question` on the
               wire does not carry it, so the form says whether an unanswered one
               ENDS the run rather than inventing the default it would take. */}
-          <span className="v-q__fielddefault">
+          <span className="mb-2 block text-body-sm text-tertiary">
             {q.blocking
               ? 'blocking — left blank, this is what the run stops on again'
               : 'advisory — left blank, the planner keeps its own answer and the loop carries on'}
           </span>
           <textarea
-            className="v-q__fieldbox"
+            className={cn(FIELD, 'w-full resize-y bg-card text-body')}
             rows={3}
             value={typed[q.question] ?? ''}
             disabled={busy || saving}
@@ -364,12 +378,12 @@ function AnswerForm({
       ))}
 
       {failure !== null && (
-        <p className="v-q__note v-q__note--alarm" role="alert">
-          <StateKicker tone="alarm">refused</StateKicker> {failure}
+        <p className="mt-2 mb-0 text-body-sm text-primary" role="alert">
+          <Badge variant="alarm">refused</Badge> {failure}
         </p>
       )}
       {result !== null && failure === null && (
-        <p className="v-q__note">
+        <p className={NOTE}>
           {result.filled} written to <code>NEEDS-INPUT.md</code>.{' '}
           {result.open.length > 0 ? (
             <>
@@ -382,9 +396,10 @@ function AnswerForm({
         </p>
       )}
 
-      <div className="v-q__actions">
+      {/* The primary sits last, matching every other action row in the product. */}
+      <div className="mt-4 flex gap-3">
         <Button
-          level="secondary"
+          variant="secondary"
           disabled={busy || saving || answers.length === 0}
           onClick={() => save()}
         >
@@ -395,11 +410,12 @@ function AnswerForm({
             over a refused save would spend a preflight to halt on the same
             question. */}
         <Button
-          level="primary"
+          variant="primary"
+          className="ml-auto"
           disabled={busy || saving}
           onClick={() => save(() => onResume(runId, dir))}
         >
-          ▶ save and resume
+          <Play size={14} aria-hidden="true" /> save and resume
         </Button>
       </div>
     </div>
@@ -462,9 +478,9 @@ export function QuestionsPane({
 
   if (questions === null && settled.length === 0) {
     return (
-      <div className="v-q v-q--empty">
-        <StateKicker tone="quiet">no questions</StateKicker>
-        <p>
+      <div className={EMPTY}>
+        <Badge>no questions</Badge>
+        <p className="m-0 max-w-md">
           The planner raises these when it cannot settle something from the brief. None has come up
           in this run.
         </p>
@@ -486,7 +502,7 @@ export function QuestionsPane({
           .map((q) => ({ question: q.question, blocking: q.blocking }));
 
   return (
-    <div className="v-q">
+    <div className={PANE}>
       {settled.map((round) => (
         <Section
           key={round.name}
@@ -494,7 +510,7 @@ export function QuestionsPane({
           open={open === round.name}
           onToggle={() => { setOpen((cur) => (cur === round.name ? '' : round.name)); }}
           title={round.round === null ? 'a question round' : `round ${String(round.round)}`}
-          meta={<code className="v-doc__file">{round.name}</code>}
+          meta={<code className={FILE}>{round.name}</code>}
         >
           <RecordedRound dir={dir} runId={runId ?? ''} name={round.name} revision={revision + saves} mine={mine} />
         </Section>
@@ -511,11 +527,11 @@ export function QuestionsPane({
           }
           meta={
             <>
-              <MetaChip>{questions.total} raised</MetaChip>
-              <MetaChip kind={questions.blocking > 0 ? 'alarm' : 'default'}>
+              <Badge>{questions.total} raised</Badge>
+              <Badge variant={questions.blocking > 0 ? 'alarm' : 'quiet'}>
                 {questions.blocking} blocking
-              </MetaChip>
-              {outstanding > 0 && <StateKicker tone="accent">waiting</StateKicker>}
+              </Badge>
+              {outstanding > 0 && <Badge variant="accent">waiting</Badge>}
             </>
           }
         >
@@ -538,7 +554,7 @@ export function QuestionsPane({
               list is shorter, the pane admits it rather than letting the list
               read as the whole of what was asked. */}
           {questions.open.length < questions.total && (
-            <p className="v-q__note">
+            <p className={NOTE}>
               The count above is the loop&apos;s; this build could not read every question behind
               it.
             </p>
@@ -548,7 +564,7 @@ export function QuestionsPane({
               `blocking` alone, which is already a chip at the top of the card,
               it was a third copy of something the card said twice. */}
           {declined > 0 && (
-            <p className="v-q__note">
+            <p className={NOTE}>
               {declined} declined. A declined <strong>blocking</strong> question ends the run and
               writes NEEDS-INPUT.md; a declined <strong>advisory</strong> one leaves the planner’s
               own fallback in place and the loop carries on.
@@ -560,7 +576,7 @@ export function QuestionsPane({
       {/* What is actually true, replacing a sentence that was false twice over.
           See the header. Once, under the whole pane, because it is a fact about
           the loop rather than about any one round. */}
-      <p className="v-q__note">
+      <p className={NOTE}>
         Nothing here fires on a timer. The answerer takes its turn when the round opens, and a
         question it declines escalates immediately — there is no auto-submit to wait out and no
         grace period to interrupt.

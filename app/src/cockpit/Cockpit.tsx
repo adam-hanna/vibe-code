@@ -1564,18 +1564,18 @@ export function Cockpit() {
               carries the way back and the way forward: stop reading, or go to
               `1b`, which is the only place a run is started. */}
           {past && viewing !== null && (
-            <div className="v-cockpit__viewing">
-              <StateKicker tone="quiet">reading</StateKicker>
-              <span className="v-cockpit__viewingwhat">{viewing.task}</span>
-              <span className="v-cockpit__viewingnote">
+            <div className="mx-6 mt-3 flex flex-wrap items-center gap-2 rounded-md border border-rule-card bg-card p-3 text-body-sm text-secondary">
+              <Badge>reading</Badge>
+              <span className="min-w-0 flex-1 truncate text-primary" title={viewing.task}>{viewing.task}</span>
+              <span className="basis-full leading-relaxed text-tertiary">
                 Reading a saved run. Usage above belongs to the live run; this run&apos;s record is in the overview.
               </span>
-              <button className="v-doc__again" onClick={() => setTab('runs')}>
+              <Button variant="quiet" size="sm" onClick={() => setTab('runs')}>
                 resume it…
-              </button>
-              <button className="v-doc__again" onClick={() => setViewing(null)}>
+              </Button>
+              <Button variant="quiet" size="sm" onClick={() => setViewing(null)}>
                 back to the live run
-              </button>
+              </Button>
             </div>
           )}
           {tab === 'verify' && <VerifyPane passes={run.verify} />}
