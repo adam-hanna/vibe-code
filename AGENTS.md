@@ -68,6 +68,14 @@ properly:
   symptom looks like a broken front end: the window opens, nothing invokes, nothing logs.
   A bundled build is on `http://tauri.localhost/`; check the webview URL first when the app
   seems inert.
+- **A blank white window on Linux is the renderer, not the page.** WebKitGTK's DMABUF
+  renderer paints nothing under some GPUs - measured on 2026-10-06 on the VMware VM this repo
+  is developed on (Fedora 44, X11, webkit2gtk 2.54): three plain launches blank, the previous
+  build blank the same way, the same binary painting normally with
+  `WEBKIT_DISABLE_DMABUF_RENDERER=1`, and the page itself rendering in Firefox. Nothing is
+  logged, by either side. `main.rs` sets that variable on Linux before `run()`, and only when
+  it is unset, so somebody who needs the renderer on can still say so. It cost half a day as
+  a suspected front-end bug, which is why it is here beside the other two.
 
 `npm run app:build` needs Rust on PATH (`~/.cargo/bin`) and runs `stage:sidecar` itself. The
 staged tree is ~92 MB of Node plus ~1.5 MB of compiled core, and both are gitignored — they
