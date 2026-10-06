@@ -3,7 +3,6 @@ import { createRoot } from 'react-dom/client';
 import { Boundary } from './Boundary';
 import { Cockpit } from './cockpit/Cockpit';
 import './cockpit/cockpit.css';
-import './pilot/pilot.css';
 import './design/workspace.css';
 // Tailwind over the tokens, and the two typefaces the rework moves to. Neither
 // changes a pixel yet: no utility is used, and `tokens.css` still names the old

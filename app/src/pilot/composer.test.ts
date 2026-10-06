@@ -18,9 +18,15 @@ import pilotPane from './PilotPane.tsx?raw';
  * focus to show a tooltip.
  */
 
-/** The composer's textarea, from its class to the tag that closes it. */
+/**
+ * The composer's textarea, from its label to the tag that closes it.
+ *
+ * Case 2 (the UI rework): the field used to be found by its class, and the
+ * class went with `pilot.css`. Its accessible name is the stable handle - it is
+ * what a screen reader says, and it survives any restyle.
+ */
 function entry(): string {
-  const from = pilotPane.indexOf('className="v-pilot__entry"');
+  const from = pilotPane.indexOf('aria-label="Message your pilot"');
   expect(from).toBeGreaterThan(-1);
   return pilotPane.slice(from, pilotPane.indexOf('/>', from));
 }
@@ -71,6 +77,9 @@ describe('the composer', () => {
   });
 
   test('the reason is drawn, or the sentence is one nobody reads', () => {
-    expect(pilotPane).toMatch(/blocked !== null && <div className="v-pilot__blocked">/);
+    // `BLOCKED` is the one named style for this line (case 2, as above: the
+    // class name went with the stylesheet). What is pinned is that the sentence
+    // reaches the screen, on a line of its own rather than in the placeholder.
+    expect(pilotPane).toMatch(/blocked !== null && <div className=\{BLOCKED\}>\{blocked\}<\/div>/);
   });
 });

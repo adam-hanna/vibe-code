@@ -1663,7 +1663,7 @@ export function Cockpit() {
               on a person would be destroyed by a glance at the output pane -
               which is the one thing this tab must not do. The other two panes
               hold nothing, so they stay conditional. */}
-          <div className="v-cockpit__hidden" hidden={tab !== 'pilot'}>
+          <div className={cn('min-h-0 flex-1 flex-col', tab === 'pilot' ? 'flex' : 'hidden')} hidden={tab !== 'pilot'}>
             <PilotPane
               run={run}
               launched={sentLaunch}

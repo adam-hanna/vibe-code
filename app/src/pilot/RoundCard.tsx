@@ -1,4 +1,6 @@
-import { MetaChip, SeverityChip, StateKicker } from '../design';
+import { SeverityChip } from '../design';
+import { Badge } from '@/ui/badge';
+import { cn } from '@/lib/utils';
 import { Counts } from '../cockpit/Counts';
 import { elapsed, work as describeWork } from '../cockpit/format';
 import { SEVERITIES } from '../cockpit/model';
@@ -24,6 +26,15 @@ import type { GateRun } from '../cockpit/model';
  * Nothing here is computed from anything else. A round with no work reading says
  * so, a round nobody numbered has no round chip, and a card whose turns have not
  * all ended shows no duration rather than one measured to now.
+ *
+ * Visually it is a card and NOT a reply: the reply is a conversation and this is
+ * a record, so it takes the card ground and the card rule rather than the
+ * reply's indentation. The one live treatment is the accent border and the
+ * active ground, the same a live turn takes - and no pulse, because *exactly one
+ * element on screen pulses* and while a round is running the turn card in the
+ * loop column already has it. The cycle is deliberately not a colour: three
+ * cycles reading as three hues would be hue carrying meaning, which this system
+ * does not do.
  */
 
 /** A severity this build knows how to weight, or null for the zero variant. */
@@ -74,6 +85,18 @@ const PANE: Readonly<Record<Round['cycle'], string>> = {
   review: 'review',
 };
 
+/** A measured duration on the card: monospace and tabular, so a column of them lines up. */
+const TOOK = 'font-mono text-mono-sm tabular-nums text-tertiary';
+/** A block of evidence under the turns, ruled off from what is above it. */
+const EVIDENCE = 'flex flex-col gap-2 border-t border-rule-inner pt-2';
+/**
+ * The design's `open verify` - a text link, because it goes somewhere rather
+ * than doing something. A button styled as a button here would compete with the
+ * proposal cards, which are the only controls in this scroll that spend.
+ */
+const OPEN =
+  'cursor-pointer self-start border-0 bg-transparent p-0 text-left text-body-sm text-accent underline underline-offset-2 hover:text-accent-on-tint';
+
 export function RoundCard({
   card,
   onOpen,
@@ -87,18 +110,27 @@ export function RoundCard({
   const go = onOpen === undefined ? null : () => { onOpen(PANE[card.cycle], card.round); };
 
   return (
-    <article className={`v-round v-round--${card.cycle}${open ? ' v-round--open' : ''}`}>
+    <article
+      className={cn(
+        'mb-4 flex flex-col gap-2 rounded-md border border-rule-card border-l-2 border-l-rule-strong bg-chrome p-4',
+        open && 'border-l-accent-border bg-active',
+      )}
+      data-cycle={card.cycle}
+    >
       {/* The heading is the control. A card is the round's summary and the pane
           behind it is the round's detail, so the name of the round is the
           shortest path between the two - and a card whose title was not a link
-          taught you to go looking for one at the bottom. */}
-      <header className="v-round__head">
+          taught you to go looking for one at the bottom. A button reset rather
+          than a link, because it navigates within the window; only the linked
+          form takes a cursor, since a heading that looks clickable on a card
+          with nowhere to send anybody is the defect this pattern keeps fixing. */}
+      <header className="flex items-center gap-2">
         {go === null ? (
-          <span className="v-round__what">{roundTitle(card)}</span>
+          <span className="text-kicker font-semibold text-display">{roundTitle(card)}</span>
         ) : (
           <button
             type="button"
-            className="v-round__what v-round__what--link"
+            className="cursor-pointer border-0 bg-transparent p-0 text-left text-kicker font-semibold text-display hover:underline hover:underline-offset-4"
             onClick={go}
             title={`Open this ${roundTitle(card)} round`}
           >
@@ -109,28 +141,28 @@ export function RoundCard({
             behind it — the file is `plan-critique-0.json`, and a card has to
             agree with the file. It is also what the link above carries, so the
             pane opens at this round rather than at the newest one. */}
-        {card.round !== null && <MetaChip kind="checkable">round {card.round}</MetaChip>}
+        {card.round !== null && <Badge className="font-mono normal-case tracking-normal">round {card.round}</Badge>}
         {card.endedAt !== null && (
-          <span className="v-round__took">{elapsed(card.endedAt - card.startedAt)}</span>
+          <span className={cn(TOOK, 'ml-auto')}>{elapsed(card.endedAt - card.startedAt)}</span>
         )}
-        {open && <StateKicker tone="accent">running</StateKicker>}
+        {open && <Badge variant="accent">running</Badge>}
       </header>
 
       {/* What ran. Roles and kinds as the loop named them — there is no model on
           a turn frame, so a card does not claim one. The design's
           `claude/opus` is a fact this wire does not carry (#136). */}
       {card.turns.length > 0 && (
-        <ul className="v-round__turns">
+        <ul className="m-0 flex list-none flex-col gap-1 p-0">
           {card.turns.map((t) => (
-            <li key={t.id}>
-              <span className="v-round__who">
+            <li key={t.id} className="flex items-baseline gap-3">
+              <span className="text-body-sm text-primary">
                 {t.role} · {t.kind}
               </span>
               {/* Absent while the turn is open rather than measured to now: a
                   duration on a turn that has not finished is a number that
                   keeps changing about a fact that has not happened. */}
               {t.endedAt !== null && (
-                <span className="v-round__ms">{elapsed(t.endedAt - t.startedAt)}</span>
+                <span className={cn(TOOK, 'ml-auto')}>{elapsed(t.endedAt - t.startedAt)}</span>
               )}
             </li>
           ))}
@@ -144,20 +176,22 @@ export function RoundCard({
 
           A count and a link, not the questions themselves: this card is 364px
           of a log and a question is a paragraph. The Questions tab is where the
-          text is, one section per round. */}
+          text is, one section per round. A row rather than a column: it is
+          chips and one link, and stacking three chips would give the questions
+          more vertical weight than the findings above them. */}
       {card.questions !== null && (
-        <div className="v-round__questions">
-          <MetaChip>
+        <div className="flex flex-wrap items-center gap-2 border-t border-rule-inner pt-2">
+          <Badge>
             {card.questions.round === null
               ? 'questions'
               : `question round ${String(card.questions.round)}`}
-          </MetaChip>
-          <MetaChip>{card.questions.total} raised</MetaChip>
+          </Badge>
+          <Badge>{card.questions.total} raised</Badge>
           {card.questions.blocking > 0 && (
-            <MetaChip kind="alarm">{card.questions.blocking} blocking</MetaChip>
+            <Badge variant="alarm">{card.questions.blocking} blocking</Badge>
           )}
           {onOpen !== undefined && (
-            <button className="v-round__open" onClick={() => onOpen('questions')}>
+            <button type="button" className={OPEN} onClick={() => onOpen('questions')}>
               open questions
             </button>
           )}
@@ -167,20 +201,20 @@ export function RoundCard({
       {/* `11 files · +604 −71`, in `src/work.ts`'s own words rather than
           re-composed here. Absent when no reading arrived, and a real zero gets
           the sentence the loop uses for it. */}
-      {card.work !== null && <div className="v-round__work">{describeWork(card.work)}</div>}
+      {card.work !== null && <div className="text-body-sm text-emphasis">{describeWork(card.work)}</div>}
 
       {card.verify !== null && (
-        <div className="v-round__verify">
+        <div className={EVIDENCE}>
           {card.verify.gates.map((g) => (
-            <div className="v-round__gate" key={g.name}>
+            <div className="text-body-sm text-secondary" key={g.name}>
               {gateLine(g)}
             </div>
           ))}
           {card.verify.gates.length === 0 && (
-            <div className="v-round__gate">a verification pass with no gates in it</div>
+            <div className="text-body-sm text-secondary">a verification pass with no gates in it</div>
           )}
           {onOpen !== undefined && (
-            <button className="v-round__open" onClick={() => onOpen('verify')}>
+            <button type="button" className={OPEN} onClick={() => onOpen('verify')}>
               open verify
             </button>
           )}
@@ -188,7 +222,7 @@ export function RoundCard({
       )}
 
       {counts !== null && card.census !== null && (
-        <div className="v-round__findings">
+        <div className={EVIDENCE}>
           {/* Four chips, zeros shown. Where a gate decision is being made an
               absence is information, and `no P0s` is the most important thing
               on the row.
@@ -205,25 +239,25 @@ export function RoundCard({
           {/* The loop's own sentence where it blocked, because `gate()` names
               the exact arithmetic that stopped the round. Never one composed
               here from the counts. */}
-          <div className="v-round__verdict">
+          <div className="text-body-sm text-primary">
             {card.census.pass
               ? 'The gate passed.'
               : (card.census.reason ?? 'The gate blocked this round.')}
           </div>
           {card.census.findings.slice(0, 3).map((f) => (
-            <div className="v-round__finding" key={f.id}>
+            <div className="flex items-baseline gap-2" key={f.id}>
               <SeverityChip severity={weight(f.severity)} label={f.severity} />
-              <code className="v-round__fid">{f.id}</code>
-              <span className="v-round__ftitle">{f.title}</span>
+              <code className="font-mono text-mono-sm text-tertiary">{f.id}</code>
+              <span className="text-body-sm text-primary">{f.title}</span>
             </div>
           ))}
           {card.census.findings.length > 3 && (
-            <div className="v-round__more">
+            <div className="text-body-sm text-secondary">
               {card.census.findings.length - 3} more in this round
             </div>
           )}
           {go !== null && (
-            <button className="v-round__open" onClick={go}>
+            <button type="button" className={OPEN} onClick={go}>
               open this {roundTitle(card)}
             </button>
           )}
