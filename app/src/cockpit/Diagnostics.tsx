@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { Check, Copy, X } from 'lucide-react';
 import { buildStamp, uptime } from './format';
 import type { Build, Status } from '../host';
 
@@ -27,9 +28,10 @@ import type { Build, Status } from '../host';
  * destined for a bug report and retyping a run id is how the wrong run gets
  * investigated.
  *
- * **A popover, not a modal: no scrim.** Diagnostics are read while looking at
- * the thing that went wrong, so this is the one elevated surface in the product
- * that does not block what is behind it.
+ * **The body of a popover, not a modal: no scrim.** Diagnostics are read while
+ * looking at the thing that went wrong, so this is the one elevated surface in
+ * the product that does not block what is behind it. The status bar owns the
+ * popover; this is what goes inside it.
  */
 
 /** One fact: what it is, the value to copy, and why it is worth having. */
@@ -47,18 +49,24 @@ function Fact({ label, value, note }: { label: string; value: string | null; not
   };
 
   return (
-    <div className="v-diag__fact">
-      <span className="v-diag__label">{label}</span>
+    <div className="grid grid-cols-[4.5rem_1fr_auto] items-baseline gap-x-2 gap-y-0.5 py-1.5 [&+&]:border-t [&+&]:border-rule-inner">
+      <span className="text-chip font-bold uppercase tracking-wide text-tertiary">{label}</span>
       {value === null ? (
         // Absent with its reason, never blank and never a placeholder value.
-        <span className="v-diag__absent">{note}</span>
+        <span className="col-span-2 text-body-sm text-tertiary">{note}</span>
       ) : (
         <>
-          <span className="v-diag__value">{value}</span>
-          <button className="v-diag__copy" onClick={copy} aria-label={`copy ${label}`}>
+          <span className="break-all font-mono text-mono-sm text-emphasis">{value}</span>
+          <button
+            type="button"
+            className="flex cursor-pointer items-center gap-1 rounded-sm border border-transparent bg-transparent px-1 text-label text-secondary hover:text-emphasis"
+            onClick={copy}
+            aria-label={`copy ${label}`}
+          >
+            {copied === 'yes' ? <Check className="size-3" aria-hidden /> : copied === 'no' ? <X className="size-3" aria-hidden /> : <Copy className="size-3" aria-hidden />}
             {copied === null ? 'copy' : copied === 'yes' ? 'copied' : 'could not copy'}
           </button>
-          <span className="v-diag__note">{note}</span>
+          <span className="col-start-2 col-span-2 text-label text-tertiary">{note}</span>
         </>
       )}
     </div>
@@ -71,21 +79,15 @@ export interface DiagnosticsProps {
   expected: number;
   /** The run's identity, or null before the loop has said which run it is. */
   identity: { runId: string; dir: string } | null;
-  onClose: () => void;
 }
 
-export function Diagnostics({ status, expected, identity, onClose }: DiagnosticsProps) {
+export function Diagnostics({ status, expected, identity }: DiagnosticsProps) {
   const build: Build | null = status?.build ?? null;
   const protocol = status?.ready?.protocol ?? null;
 
   return (
-    <div className="v-diag" role="dialog" aria-label="diagnostics">
-      <div className="v-diag__head">
-        <span className="v-diag__title">DIAGNOSTICS</span>
-        <button className="v-diag__close" onClick={onClose} aria-label="close diagnostics">
-          ✕
-        </button>
-      </div>
+    <div aria-label="diagnostics">
+      <div className="mb-1 text-chip font-bold uppercase tracking-wide text-tertiary">Diagnostics</div>
 
       <Fact
         label="run"
@@ -129,6 +131,12 @@ export function Diagnostics({ status, expected, identity, onClose }: Diagnostics
               : `this window expects ${String(expected)} — they disagree`
         }
       />
+      {/* Why killing the app would leave the host running, when it would (#157).
+          Shown here rather than as a banner, which was removed at the owner's
+          request: it is a fact that matters only when something has gone wrong. */}
+      {status?.uncontained != null && (
+        <p className="mt-2 text-label text-tertiary">{status.uncontained}</p>
+      )}
     </div>
   );
 }

@@ -177,11 +177,18 @@ describe('the sidebar is the navigator, and 1b is where a lock is overruled', ()
     // §1.1 of `design/AUDIT.md` was never "there should be a strip" — it was
     // that `＋ ⌘K ⚙` had nowhere to live and ended up in the tab bar. A panel
     // that shut them away would put the finding straight back.
-    const from = cockpit.indexOf('shut={');
-    const strip = from < 0 ? '' : cockpit.slice(from, cockpit.indexOf('<Sidebar', from));
-    expect(strip).toMatch(/＋/);
-    expect(strip).toMatch(/⌘K/);
-    expect(strip).toMatch(/⚙/);
+    //
+    // Case 2 (the UI rework): they lived on the sidebar's shut strip, and the
+    // activity bar is the strip now - always drawn, whatever the sidebar does.
+    // The claim is unchanged: the three are on screen at every width.
+    expect(cockpit).toMatch(/<ActivityBar/);
+    expect(cockpit).toMatch(/onNew=\{act\.newRun\}/);
+    expect(cockpit).toMatch(/onPalette=\{act\.palette\}/);
+    expect(cockpit).toMatch(/onSettings=\{act\.settings\}/);
+    // And they are not conditional on the sidebar being open.
+    const from = cockpit.indexOf('<ActivityBar');
+    const before = cockpit.slice(cockpit.lastIndexOf('{panels.sidebar &&', from), from);
+    expect(before).toBe('');
   });
 
   test('a row shows a run; it does not start one', () => {

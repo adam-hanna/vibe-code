@@ -61,6 +61,35 @@
   --font-condensed: var(--font-condensed);
   --font-mono: var(--font-mono);
 
+  /*
+   * Type sizes, and none of Tailwind's own: a `text-sm` would be a size nobody
+   * chose. Each is the design's `--size-*` times `--type-scale`, which is what
+   * keeps the Settings slider true of the shell - every size moves together.
+   * The leading matches `--type-*`: 1 for a style that cannot wrap, 1.4 or
+   * more for one that can (`audit:contrast` §8's line).
+   */
+  --text-*: initial;
+  --text-chip: calc(var(--size-chip) * var(--type-scale));
+  --text-chip--line-height: 1.6;
+  --text-label: calc(var(--size-label) * var(--type-scale));
+  --text-label--line-height: 1.5;
+  --text-tab: calc(var(--size-tab) * var(--type-scale));
+  --text-tab--line-height: 1;
+  --text-body-sm: calc(var(--size-body-sm) * var(--type-scale));
+  --text-body-sm--line-height: 1.55;
+  --text-body: calc(var(--size-body) * var(--type-scale));
+  --text-body--line-height: 1.6;
+  --text-kicker: calc(var(--size-kicker) * var(--type-scale));
+  --text-kicker--line-height: 1;
+  --text-section: calc(var(--size-section) * var(--type-scale));
+  --text-section--line-height: 1.2;
+  --text-title: calc(var(--size-title) * var(--type-scale));
+  --text-title--line-height: 1.1;
+  --text-mono-sm: calc(var(--size-mono-sm) * var(--type-scale));
+  --text-mono-sm--line-height: 1.5;
+  --text-mono: calc(var(--size-mono) * var(--type-scale));
+  --text-mono--line-height: 1.55;
+
   --radius-sm: var(--radius-sm);
   --radius-md: var(--radius-md);
   --radius-lg: var(--radius-lg);
