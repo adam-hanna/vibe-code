@@ -5,6 +5,12 @@ import { Cockpit } from './cockpit/Cockpit';
 import './cockpit/cockpit.css';
 import './pilot/pilot.css';
 import './design/workspace.css';
+// Tailwind over the tokens, and the two typefaces the rework moves to. Neither
+// changes a pixel yet: no utility is used, and `tokens.css` still names the old
+// fonts. Groundwork, so the shell that follows is one change rather than two.
+import './design/theme.css';
+import '@fontsource-variable/inter';
+import '@fontsource-variable/jetbrains-mono';
 
 // The cockpit is the window now (#159). The specimen gallery is still the design
 // system's acceptance test and still what `audit:contrast` is written against -

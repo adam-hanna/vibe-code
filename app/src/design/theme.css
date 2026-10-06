@@ -1,0 +1,69 @@
+/*
+ * Tailwind, fed by `tokens.css`.
+ *
+ * Every colour a utility can reach is a REFERENCE to a token, never a value:
+ * `bg-panel` compiles to `var(--surface-panel)`, so the one file allowed to
+ * hold a hex is still `tokens.css` and `audit:contrast` §7 goes on holding
+ * without knowing Tailwind exists. `@theme inline` is what makes the utility
+ * emit the token's own name rather than a theme variable that points at it,
+ * which keeps the computed value readable in devtools as the token it is.
+ *
+ * **Preflight is deliberately not imported yet.** This file lands as groundwork
+ * with no visible change, and Tailwind's reset would restyle every button and
+ * heading the current stylesheets rely on `base.css` for. It comes in with the
+ * new shell, at the point the old stylesheets start to go.
+ */
+
+@layer theme, base, components, utilities;
+@import 'tailwindcss/theme.css' layer(theme);
+@import 'tailwindcss/utilities.css' layer(utilities);
+
+@theme inline {
+  /* No palette of Tailwind's own: a `bg-slate-800` would be a colour nobody chose. */
+  --color-*: initial;
+
+  --color-page: var(--surface-page);
+  --color-chrome: var(--surface-chrome);
+  --color-column: var(--surface-column);
+  --color-panel: var(--surface-panel);
+  --color-card: var(--surface-card);
+  --color-active: var(--surface-active);
+  --color-active-hdr: var(--surface-active-hdr);
+  --color-accent-tint: var(--surface-accent-tint);
+  --color-alarm: var(--surface-alarm);
+  --color-tray: var(--surface-tray);
+
+  --color-display: var(--text-display);
+  --color-emphasis: var(--text-emphasis);
+  --color-primary: var(--text-primary);
+  --color-secondary: var(--text-secondary);
+  --color-tertiary: var(--text-tertiary);
+
+  --color-rule-strong: var(--rule-strong);
+  --color-rule-control: var(--rule-control);
+  --color-rule-control-dim: var(--rule-control-dim);
+  --color-rule-structure: var(--rule-structure);
+  --color-rule-card: var(--rule-card);
+  --color-rule-inner: var(--rule-inner);
+  --color-rule-hatch: var(--rule-hatch);
+
+  --color-accent: var(--accent-solid);
+  --color-accent-on-tint: var(--accent-on-tint);
+  --color-accent-border: var(--accent-border);
+  --color-accent-border-dim: var(--accent-border-dim);
+  --color-accent-base: var(--accent-base);
+  --color-accent-muted: var(--accent-muted);
+
+  --color-live: var(--semantic-live);
+  --color-loss: var(--semantic-loss);
+
+  --font-sans: var(--font-sans);
+  --font-condensed: var(--font-condensed);
+  --font-mono: var(--font-mono);
+
+  --radius-sm: var(--radius-sm);
+  --radius-md: var(--radius-md);
+  --radius-lg: var(--radius-lg);
+
+  --shadow-overlay: var(--shadow-overlay);
+}
