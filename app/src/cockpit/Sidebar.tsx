@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Plus, Settings } from 'lucide-react';
+import { Plus } from 'lucide-react';
 import { LivenessDot } from '../design';
 import { cn } from '@/lib/utils';
 import * as host from '../host';
@@ -614,7 +614,6 @@ export function Sidebar({
   currentId,
   onNew,
   onNewIn,
-  onSettings,
   onProjectSettings,
   onRuns,
   onShow,
@@ -634,9 +633,8 @@ export function Sidebar({
   onNew: () => void;
   /** Compose a run in one project, with the directory already settled (#223). */
   onNewIn: (dir: string) => void;
-  /** The settings for all projects — the left bar's ⚙ (#223). */
-  onSettings: () => void;
-  /** One project's settings — the ⚙ on its row. */
+  /** One project's settings — the ⚙ on its row. The settings for all
+      projects are the activity bar's ⚙, not this panel's (#223). */
   onProjectSettings: (dir: string) => void;
   /** Open `1b` for a project, which is where a lock can be overruled. */
   onRuns: (dir: string) => void;
@@ -1127,15 +1125,14 @@ export function Sidebar({
         )}
       </section>
 
-      <div className="mt-auto border-t border-rule-structure pt-4">
-        <button
-          className="flex min-h-9 w-full cursor-pointer items-center gap-2.5 rounded-sm border-0 bg-transparent px-3 py-2 text-left text-body text-primary hover:bg-active-hdr hover:text-emphasis"
-          onClick={onSettings}
-        >
-          <Settings size={16} className="flex-none text-tertiary" aria-hidden="true" /> Settings
-        </button>
-        {!host.inShell() && <p className="m-0 px-3 pt-2.5 text-label leading-relaxed text-tertiary">Preview mode · run agents in the desktop app.</p>}
-      </div>
+      {/* No settings entry down here: the activity bar's ⚙ is the one door to
+          the settings for all projects, and a second one at the foot of this
+          panel was the same control drawn twice ("get rid of it"). */}
+      {!host.inShell() && (
+        <div className="mt-auto border-t border-rule-structure pt-4">
+          <p className="m-0 px-3 text-label leading-relaxed text-tertiary">Preview mode · run agents in the desktop app.</p>
+        </div>
+      )}
     </nav>
   );
 }

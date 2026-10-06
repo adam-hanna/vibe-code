@@ -1384,7 +1384,6 @@ export function Cockpit() {
               rememberRepo(next);
               setComposing({ dir: next, locked: true });
             }}
-            onSettings={() => openSettings('global')}
             // Points the window at the project first, so the settings shown are
             // the ones for the row that was pressed.
             onProjectSettings={(next) => {

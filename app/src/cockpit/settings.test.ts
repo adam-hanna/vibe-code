@@ -264,7 +264,12 @@ describe('two doors to the settings, not a switch on one screen (#223)', () => {
   });
 
   test('the left bar opens every project’s, and a project row opens its own', () => {
-    expect(cockpit).toContain("onSettings={() => openSettings('global')}");
+    // Case 2 (the UI rework): "the left bar" is the activity bar now, and the
+    // sidebar's own Settings footer went because it was the same door twice.
+    // The claim is unchanged - one control on the left opens every project's.
+    expect(cockpit).toContain("settings: () => openSettings('global')");
+    expect(cockpit).toContain('onSettings={act.settings}');
+    expect(sidebar).not.toMatch(/onSettings/);
     expect(cockpit).toMatch(/onProjectSettings=\{\(next\) => \{\s*rememberRepo\(next\);\s*openSettings\('project'\);/);
     const row = sidebar.slice(sidebar.indexOf('function Project('));
     expect(row).toContain('onClick={() => onProjectSettings(dir)}');
