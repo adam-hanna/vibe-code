@@ -339,6 +339,56 @@ test('the steps come back in the order they happened', () => {
   assert.ok(replay.steps.some((s) => s.narration.id === 'round_committed'));
 });
 
+test('the implement phase carries its base, and each commit names the one before it', () => {
+  // The Code tab reads `baseSha` off `phase_started` and each round's range off
+  // `round_committed`. Without the first an opened run was all `no base`; with
+  // `since: null` every round was "the first commit in the repository".
+  const state = stateWith({
+    baseSha: 'base0000',
+    events: [
+      { at: iso(10_000), type: 'claude_turn', label: 'plan', tokens: 1 },
+      { at: iso(30_000), type: 'claude_turn', label: 'implement', tokens: 1 },
+      { at: iso(60_000), type: 'claude_turn', label: 'fix-1', tokens: 1 },
+    ],
+  });
+  const checkpoint = (n: number, at: number, commit: string | null) => ({
+    n,
+    at: iso(at),
+    boundary: 'review-round',
+    phase: 'implementing',
+    planRound: 0,
+    reviewRound: n,
+    verifyRound: 0,
+    questionRound: 0,
+    commit,
+    turnStartedAt: null,
+  });
+  const replay = replayRun(state, {
+    ...NOTHING,
+    checkpoints: [
+      checkpoint(1, 40_000, 'aaaa111'),
+      // The same sha again, as a second checkpoint inside one round leaves it.
+      checkpoint(2, 45_000, 'aaaa111'),
+      checkpoint(3, 70_000, 'bbbb222'),
+    ],
+  });
+  const implementing = replay.steps.find(
+    (s) => s.narration.id === 'phase_started' && s.narration.data?.['phase'] === 'implementing',
+  );
+  assert.equal(implementing?.narration.data?.['baseSha'], 'base0000');
+  const planning = replay.steps.find(
+    (s) => s.narration.id === 'phase_started' && s.narration.data?.['phase'] === 'planning',
+  );
+  assert.equal('baseSha' in (planning?.narration.data ?? {}), false);
+  const commits = replay.steps
+    .filter((s) => s.narration.id === 'round_committed')
+    .map((s) => [s.narration.data?.['since'], s.narration.data?.['sha']]);
+  assert.deepEqual(commits, [
+    ['base0000', 'aaaa111'],
+    ['aaaa111', 'bbbb222'],
+  ]);
+});
+
 // ---- the guards are `loadRun`'s, not a second set ---------------------------
 
 function repoWith(state: Record<string, unknown>, id = '20260101-000000-a-run'): string {

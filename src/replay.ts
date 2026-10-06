@@ -354,6 +354,14 @@ export function replayRun(state: RunState, sources: ReplaySources): Replay {
           say('phase_started', `${seat.phase} ${String(round)}`, {
             phase: seat.phase,
             round,
+            // The live loop says the base on `implementing` and nowhere else
+            // (`orchestrator.ts`, beside `markBase`), and the window's "everything
+            // since the base" diff is read off it. A replay that left it out
+            // drew every opened run's Code tab as `no base` over a run that
+            // plainly had code: "when I click on the code tab for a run that I
+            // KNOW had code, it doesn't show anything". `state.baseSha` is the
+            // same field, durable since the implement phase marked it.
+            ...(seat.phase === 'implementing' ? { baseSha: state.baseSha } : {}),
           }),
         );
         openPhase = seat.phase;
@@ -422,10 +430,24 @@ export function replayRun(state: RunState, sources: ReplaySources): Replay {
     }
   }
 
+  // `since` is the commit before this one, which for the archive is the
+  // previous checkpoint's commit and, for the first, the base the implement
+  // phase marked. The live loop reads HEAD before it commits for the reason
+  // AGENTS.md gives - pairing consecutive commits in NARRATION order breaks on a
+  // resume, where the earlier commits were said to a process that has exited.
+  // That does not apply here: the checkpoints are the whole durable list, in
+  // the run's own order, so the pair is read rather than guessed. Emitting
+  // `null` instead drew every replayed round as "the first commit in the
+  // repository", which was false of all but the first.
+  let since: string | null = state.baseSha;
   for (const c of sources.checkpoints) {
     const at = ms(c.at);
     if (at === null || c.commit === null) continue;
-    push(at, say('round_committed', `Committed ${c.commit}`, { sha: c.commit, since: null }));
+    // Two checkpoints inside one round carry the same sha (a question round
+    // leaves two); one commit is one card.
+    if (c.commit === since) continue;
+    push(at, say('round_committed', `Committed ${c.commit}`, { sha: c.commit, since }));
+    since = c.commit;
   }
 
   // The ending, in the core's own words, selected by event type — never by
