@@ -1,6 +1,8 @@
 import { requestCancel } from '@src/cancel.js';
 import { main } from '@src/cli.js';
-import { refused as commandRefused, startCommand, stopAllCommands, stopCommand } from '@src/commands.js';
+import { commandLogDir } from '@src/commandlog.js';
+import { keepCommandLogs, refused as commandRefused, startCommand, stopAllCommands, stopCommand } from '@src/commands.js';
+import type { PastCommand } from '@src/commandlog.js';
 import { pilotChat } from '@src/pilotchat.js';
 import { pilotCodex } from '@src/pilotcodex.js';
 import { cliStatus } from '@src/clipaths.js';
@@ -173,6 +175,12 @@ export interface Departure {
 export const HOST_EXIT_ABANDONED = 70;
 
 export interface SessionDeps {
+  /**
+   * What earlier launches left in the command log, read once by `serve()`
+   * before anything starts (#223). Defaults to none: a session in a test has no
+   * past, and reading the real one here would make every test depend on it.
+   */
+  pastCommands?: readonly PastCommand[];
   /**
    * What runs an argv. Defaults to the CLI's own `main`.
    *
@@ -544,6 +552,14 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
     // The window's conversations (#223). Reads and writes beside a run, like
     // the other reads: they touch only the app's own data directory, never a
     // run's, so they cannot observe or disturb one.
+    if (msg.type === 'commands_past') {
+      // A read of what was loaded at start-up, never of the directory now: a
+      // command this process started is already in the window, live, and
+      // listing it again here would draw it twice.
+      send({ type: 'commands_past', id: msg.id, commands: deps.pastCommands ?? [] });
+      return;
+    }
+
     if (msg.type === 'chats' || msg.type === 'chat_save') {
       const dir = chatDir();
       if (dir === null) {
@@ -1004,7 +1020,8 @@ export function installProtocolStdout(): Send {
  */
 export async function serve(): Promise<void> {
   const send = installProtocolStdout();
-  const session = createSession(send);
+  const logs = commandLogDir();
+  const session = createSession(send, { pastCommands: logs === null ? [] : keepCommandLogs(logs) });
   log.setSink(session.sink);
 
   send({ type: 'ready', protocol: PROTOCOL_VERSION, pid: process.pid });

@@ -3,6 +3,7 @@ import type { GateContext } from '@src/host.js';
 import type { ArtifactRead, RunArtifact, RunSummary } from '@src/types.js';
 import type { PromptBlock } from '@src/prompts.js';
 import type { FsAnswer, PilotAccess } from '@src/pilotaccess.js';
+import type { PastCommand } from '@src/commandlog.js';
 
 /** Where one CLI is, as `config` reports it (#223). */
 export interface CliStatus {
@@ -349,6 +350,11 @@ export type Outbound =
   /** A conversation was written or removed, answering `chat_save`. */
   | { type: 'chat_saved'; id: number; key: string }
   /**
+   * The commands a previous host left on disk, answering `commands_past`
+   * (#223, `src/commandlog.ts`). Oldest first; none of them is running.
+   */
+  | { type: 'commands_past'; id: number; commands: readonly PastCommand[] }
+  /**
    * What an `answer_questions` request placed, in its own words.
    *
    * `filled` is how many questions got text and `open` is which are still
@@ -626,6 +632,8 @@ export type Inbound =
   | { type: 'chats'; id: number }
   /** Store one conversation, or remove it with a null value. */
   | { type: 'chat_save'; id: number; key: string; value: string | null }
+  /** The commands earlier launches ran, read back from their logs (#223). */
+  | { type: 'commands_past'; id: number }
   /**
    * Delete a run from the archive (#223).
    *
@@ -916,6 +924,8 @@ export function decode(line: string): Decoded {
     }
     case 'chats':
       return { ok: true, message: { type: 'chats', id } };
+    case 'commands_past':
+      return { ok: true, message: { type: 'commands_past', id } };
     case 'chat_save': {
       const key = parsed['key'];
       const value = parsed['value'];

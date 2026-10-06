@@ -354,6 +354,33 @@ export interface ChatsFrame {
   chats: readonly { key: string; value: string }[];
 }
 
+/**
+ * A command an earlier launch ran, read back from its log (#223,
+ * `src/commandlog.ts`). `lost` is a host that went away while it was running.
+ */
+export interface PastCommand {
+  id: string;
+  program: string;
+  args: readonly string[];
+  resolved: string;
+  dir: string;
+  startedAt: number;
+  endedAt: number | null;
+  code: number | null;
+  signal: string | null;
+  stopped: boolean;
+  output: string;
+  truncated: boolean;
+  bytes: number;
+  lost: boolean;
+}
+
+export interface PastCommandsFrame {
+  type: 'commands_past';
+  id: number;
+  commands: readonly PastCommand[];
+}
+
 /** One conversation was written or removed. */
 export interface ChatSavedFrame {
   type: 'chat_saved';
@@ -464,6 +491,7 @@ export type Frame =
   | PromptsFrame
   | ChatsFrame
   | ChatSavedFrame
+  | PastCommandsFrame
   | ReplayFrame
   | QuestionsAnswered;
 
@@ -526,7 +554,8 @@ export function isFrame(v: unknown): v is Frame {
     // there is none - so `Cockpit` folds them with `reduceCommands` instead.
     type === 'command_started' ||
     type === 'command_output' ||
-    type === 'command_ended'
+    type === 'command_ended' ||
+    type === 'commands_past'
   );
 }
 
@@ -930,6 +959,18 @@ export async function chats(): Promise<ChatsFrame['chats']> {
   const id = nextRequestId();
   const frame = await ask<ChatsFrame>({ type: 'chats', id }, id, 'chats', 'the host did not answer with the stored conversations');
   return frame.chats;
+}
+
+/** What earlier launches ran, from the host's command logs (#223). */
+export async function pastCommands(): Promise<PastCommandsFrame['commands']> {
+  const id = nextRequestId();
+  const frame = await ask<PastCommandsFrame>(
+    { type: 'commands_past', id },
+    id,
+    'commands_past',
+    'the host did not answer with the earlier commands',
+  );
+  return frame.commands;
 }
 
 /** Store one conversation, or remove it with null. Rejects with the host's sentence. */

@@ -27,6 +27,17 @@ export function elapsed(ms: number): string {
  * card at a held gate came to read `last activity 5h39m ago` on a turn that had
  * taken a minute. An instant is true forever, so it is what a settled card uses.
  */
+/**
+ * The day of an instant, for a time that may not be today (#223). A command
+ * read back from an earlier launch says `ended 02:14` about last night, and
+ * without its day that reads as two in the afternoon.
+ */
+export function dayOf(ms: number): string {
+  const at = new Date(ms);
+  if (Number.isNaN(at.getTime())) return 'an unrecorded day';
+  return at.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
 export function clock(ms: number): string {
   const at = new Date(ms);
   // A time from another process, so an unusable one is possible. `Invalid Date`

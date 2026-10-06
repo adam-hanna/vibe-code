@@ -1375,6 +1375,30 @@ writes debounced per key. Three rules travel with it:
 - **A failed save is drawn in the pane.** The swallowed failure was the whole defect.
   Everything else in `localStorage` is small and stays where it is.
 
+**A command's output is on disk too, and so is where the window was pointed** (#223). The
+two other things that lived only in memory after the chats moved: the host held every
+command's output in a 256 KB buffer and took it with it, so a relaunch emptied the Commands
+tab and a dev server that fell over in the night left nothing to read; and every relaunch
+landed on the pilot with no run open.
+- **`src/commandlog.ts` writes `$VIBE_APP_DATA/commands/<id>.log`**, appended as output
+  arrives and uncapped, plus `<id>.json`, the record without its output, rewritten
+  atomically at start and at end. `serve()` reads them once, before anything starts, and
+  `commands_past` answers with what it read. The newest `COMMAND_LOGS_KEPT` are kept: a
+  retention choice, counted in commands because a reader looks for *the one from last night*.
+- **Ids continue past the highest on disk**, so `cmd-3` means one command across launches. A
+  restored conversation holds `read_command` calls by id, and without this they would have
+  read whatever this process happened to start third.
+- **`stopAllCommands` writes each ending itself**, because `process.exit` follows at once and
+  no `close` handler will run. A record still marked running at start-up belongs to a host
+  that died without a word, and it is `lost`: `endedAt` stays null, since nobody measured an
+  ending, and `isRunning` is the question every caller asks.
+- **A restored command never wakes the pilot.** Its ending was news to a conversation that is
+  over.
+- **`app/src/cockpit/where.ts` keeps the open run, the tab and an open draft** in
+  `localStorage`, as a pointer: opening a run is a read, so coming back to one costs what a
+  sidebar click costs. A draft is restored only while it still exists. Collapsed panels are
+  still not kept, for the reason above.
+
 **A conversation is kept between launches, and it is not run state.** `app/src/pilot/saved.ts`
   keys it by `(project, run)` — a run id is unique only inside one archive, the same reason a
   pin carries both. The conversation that exists *before* a run is the one that will **propose**
@@ -1866,6 +1890,7 @@ src/validate.ts      parser vocabulary for model output
 src/proc.ts          child-process plumbing, and how a child ended
 src/cancel.ts        stopping a turn that is already running - the latch, what it may kill, and the wait it may cut short
 src/commands.ts      a command a person pressed - no shell, no shim, and where it runs
+src/commandlog.ts    a command's output on disk, and what the last launch left there
 src/ending.ts        how this process ended - the stamp beside the lock
 src/git.ts           branch and commit operations
 src/worktree.ts      a checkout of its own: where the work happens, and where it does not
@@ -1911,6 +1936,7 @@ app/src/pilot/access.ts    which proposals the person's settings run without a c
 app/src/pilot/ledger.ts    the pilot's own books - the one place a dollar is a dollar
 app/src/cockpit/argv.ts    a form to an argv, and the composer's settings as the pilot is told them
 app/src/cockpit/commands.ts  commands this window ran - pure, and not part of any run
+app/src/cockpit/where.ts     where the window was pointed, kept between launches
 app/src-tauri/src/host.rs    supervising the host process, and the \\?\ path fix
 app/src-tauri/src/reaper.rs  making a killed app take the host with it
 app/src-tauri/src/keys.rs    the OS keychain, and the read the window cannot reach

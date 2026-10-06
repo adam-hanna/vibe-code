@@ -1525,6 +1525,9 @@ ${frame.text}`, turn, origin.current))) {
     };
 
     for (const command of commands.all) {
+      // One read back from an earlier launch is history, not news: whatever it
+      // did, it did to a conversation that is over (#223).
+      if (command.restored) continue;
       const seen = woken.current.get(command.id);
       // An end outranks a quiet: a server that came up and then fell over has
       // two things worth saying and the second is the one that matters.

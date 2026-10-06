@@ -1,7 +1,9 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, statSync } from 'node:fs';
 import path from 'node:path';
+import { appendLog, highestId, pastCommands, prune, writeMeta } from '@src/commandlog.js';
 import { expandHome } from '@src/proc.js';
+import type { CommandMeta, PastCommand } from '@src/commandlog.js';
 import type { ChildProcess } from 'node:child_process';
 
 /**
@@ -104,6 +106,55 @@ const commands = new Map<string, Live>();
 
 /** Ids allocated here, so a caller cannot collide two commands on one name. */
 let next = 0;
+
+/**
+ * Where each command's output is also written, or null (#223, `commandlog.ts`).
+ *
+ * A module latch for the registry's own reason. Null in tests and under the CLI,
+ * where nothing outlives the process anyway; the host sets it once at start-up.
+ */
+let logDir: string | null = null;
+
+/**
+ * Keep every command's output on disk under `dir`, and read back the ones a
+ * previous process left there.
+ *
+ * **Numbering continues from the highest id on disk**, which is what makes an
+ * id mean one command across launches: a pilot conversation is restored with
+ * its `read_command` calls in it, and `cmd-3` reached from one of those has to
+ * be the command it was about rather than whatever this process started third.
+ *
+ * Never throws. A log directory that cannot be read is a host that keeps its
+ * commands in memory, as it always did, and the caller is told by the empty
+ * history rather than by a crash at start-up.
+ */
+export function keepCommandLogs(dir: string): readonly PastCommand[] {
+  try {
+    prune(dir);
+    next = Math.max(next, highestId(dir));
+    logDir = dir;
+    return pastCommands(dir, OUTPUT_KEEP_BYTES);
+  } catch {
+    logDir = null;
+    return [];
+  }
+}
+
+function metaOf(record: CommandRecord): CommandMeta {
+  const { output: _output, truncated: _truncated, ...meta } = record;
+  return meta;
+}
+
+/** Best effort: a log that cannot be written must not stop the command. */
+function persist(record: CommandRecord, chunk?: string): void {
+  if (logDir === null) return;
+  try {
+    if (chunk === undefined) writeMeta(logDir, metaOf(record));
+    else appendLog(logDir, record.id, chunk);
+  } catch {
+    // A full disk, a removed directory. The window still has the stream.
+  }
+}
 
 /**
  * The Node-family CLIs, and the file each one really is.
@@ -274,6 +325,7 @@ export function startCommand(options: StartOptions): CommandRecord | Refusal {
   };
   const live: Live = { record, child: null };
   commands.set(id, live);
+  persist(record);
 
   let child: ChildProcess;
   try {
@@ -290,6 +342,8 @@ export function startCommand(options: StartOptions): CommandRecord | Refusal {
       endedAt: now(),
       output: err instanceof Error ? err.message : String(err),
     };
+    persist(live.record, live.record.output);
+    persist(live.record);
     return live.record;
   }
   live.child = child;
@@ -302,6 +356,7 @@ export function startCommand(options: StartOptions): CommandRecord | Refusal {
       truncated = true;
     }
     live.record = { ...live.record, output, truncated };
+    persist(live.record, chunk);
     options.onOutput?.(id, chunk);
   };
 
@@ -315,6 +370,7 @@ export function startCommand(options: StartOptions): CommandRecord | Refusal {
   child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
     live.child = null;
     live.record = { ...live.record, endedAt: now(), code, signal };
+    persist(live.record);
     options.onEnd?.(live.record);
   });
 
@@ -347,10 +403,21 @@ export function stopCommand(id: string): boolean {
   return true;
 }
 
-/** Stop everything still running. Returns how many were killed. */
-export function stopAllCommands(): number {
+/**
+ * Stop everything still running. Returns how many were killed.
+ *
+ * The host calls this on its way out and `process.exit` follows at once, so no
+ * `close` handler will ever record these endings: each is written here, as
+ * stopped, now. Otherwise every dev server open at a quit would come back as
+ * `lost`, which is the word for a host that died without saying anything.
+ */
+export function stopAllCommands(now: () => number = () => Date.now()): number {
   let killed = 0;
-  for (const id of commands.keys()) if (stopCommand(id)) killed += 1;
+  for (const [id, live] of commands) {
+    if (!stopCommand(id)) continue;
+    killed += 1;
+    persist({ ...live.record, endedAt: now() });
+  }
   return killed;
 }
 
@@ -358,4 +425,5 @@ export function stopAllCommands(): number {
 export function clearCommands(): void {
   commands.clear();
   next = 0;
+  logDir = null;
 }

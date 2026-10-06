@@ -1,7 +1,7 @@
 import { launchArgv } from '../cockpit/argv';
 import type { Overrides } from '../cockpit/argv';
 import { dirKey } from '../cockpit/projects';
-import { line, outcome, tail } from '../cockpit/commands';
+import { isRunning, line, outcome, tail } from '../cockpit/commands';
 import { OUTPUT_KEEP } from '../cockpit/model';
 import type { Command, Commands } from '../cockpit/commands';
 import { allowedDir, NO_ACCESS } from './access';
@@ -654,7 +654,7 @@ function describeCommand(command: Command, since: number | null): Record<string,
     // Absent while running rather than a zero: `outcome` is null until it ends,
     // and a model reading `exit 0` on a live dev server would report it finished.
     outcome: outcome(command),
-    running: command.endedAt === null,
+    running: isRunning(command),
     // The position to pass back as `since`. Unchanged between two reads means
     // the command has written nothing in between - which is a real answer about
     // a server that has finished starting, and is not the same as "it is gone".
@@ -862,7 +862,7 @@ const STOP_COMMAND: ToolDef = {
             : `Running and finished: ${all.map((c) => c.id).join(', ')}.`),
       };
     }
-    if (one.endedAt !== null) {
+    if (!isRunning(one)) {
       return {
         kind: 'refused',
         content: `"${id}" (${line(one)}) has already ended — ${outcome(one) ?? 'no outcome recorded'}.`,

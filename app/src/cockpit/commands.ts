@@ -1,4 +1,4 @@
-import type { CommandEnded, CommandOutput, CommandStarted } from '../host';
+import type { CommandEnded, CommandOutput, CommandStarted, PastCommand } from '../host';
 
 /**
  * Commands this window started, folded from frames and from nothing else (#211).
@@ -47,6 +47,18 @@ export interface Command {
    * it saw the lot (#223).
    */
   bytes: number;
+  /**
+   * Started by an earlier launch and read back from its log (#223). Nothing will
+   * arrive for it, and the pilot is never woken about it: its ending was news to
+   * a conversation that is over.
+   */
+  restored: boolean;
+  /**
+   * The host went away while it was running and never saw it end. `endedAt` is
+   * null because nobody measured an ending - and it is **not** running, which is
+   * what this says. `isRunning` is the question every caller asks.
+   */
+  lost: boolean;
 }
 
 export interface Commands {
@@ -98,6 +110,8 @@ export function started(commands: Commands, frame: CommandStarted): Commands {
     output: '',
     truncated: false,
     bytes: 0,
+    restored: false,
+    lost: false,
   };
   // A refusal is cleared by a start, because the two answer the same question
   // and the newer one is the answer.
@@ -138,9 +152,29 @@ export function reduceCommands(
   return ended(commands, frame);
 }
 
+/**
+ * What earlier launches ran, put in front of this launch's (#223).
+ *
+ * Before, not merged by time, because the list reads as a history and every
+ * past one precedes every live one. A past id already present is skipped:
+ * the host answers this once, but a reload of the window asks again.
+ */
+export function restore(commands: Commands, past: readonly PastCommand[]): Commands {
+  const have = new Set(commands.all.map((c) => c.id));
+  const old: Command[] = past
+    .filter((p) => !have.has(p.id))
+    .map((p) => ({ ...p, restored: true }));
+  return { ...commands, all: [...old, ...commands.all] };
+}
+
+/** Whether a command is still going. A lost one is not, though it has no `endedAt`. */
+export function isRunning(command: Command): boolean {
+  return command.endedAt === null && !command.lost;
+}
+
 /** Still running, which is what a stop button and a liveness dot ask about. */
 export function running(commands: Commands): readonly Command[] {
-  return commands.all.filter((c) => c.endedAt === null);
+  return commands.all.filter(isRunning);
 }
 
 /**
@@ -152,6 +186,7 @@ export function running(commands: Commands): readonly Command[] {
  * pressing stop.
  */
 export function outcome(command: Command): string | null {
+  if (command.lost) return 'the app closed before it ended';
   if (command.endedAt === null) return null;
   if (command.stopped) return 'stopped';
   if (command.signal !== null) return `killed by ${command.signal}`;

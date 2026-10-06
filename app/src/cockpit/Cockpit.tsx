@@ -8,7 +8,9 @@ import type { KeyStatus } from '../pilot/keys';
 // `PilotPane`, not `Pilot`: `pilot.ts` beside it is the wire, and two files
 // differing only in case is a compile error on Windows and macOS both.
 import { PilotPane } from '../pilot/PilotPane';
-import { noCommands, reduceCommands, running } from './commands';
+import { noCommands, reduceCommands, restore, running } from './commands';
+import { NOWHERE, readWhere, WHERE_KEY, writableWhere } from './where';
+import type { Viewing, Where } from './where';
 import { CommandsPane } from './CommandsPane';
 import { CodePane } from './CodePane';
 import { Diagnostics } from './Diagnostics';
@@ -103,6 +105,15 @@ const TICK_MS = 1000;
 
 /** Where the last repository is remembered. See `repoDir` below. */
 const REPO_KEY = 'vibe.repo';
+
+/** Where the window was pointed when it last closed. See `where.ts`. */
+function storedWhere(): Where {
+  try {
+    return readWhere(localStorage.getItem(WHERE_KEY));
+  } catch {
+    return NOWHERE;
+  }
+}
 
 interface Wire {
   connected: boolean;
@@ -236,7 +247,9 @@ export function Cockpit() {
    * whole model is arranged against. The loop column and the spend readout stay
    * with the live run and say which run they are about.
    */
-  const [viewing, setViewing] = useState<{ dir: string; runId: string; task: string } | null>(null);
+  // Restored from the last launch (#223): opening a run is a read, so coming
+  // back to one costs what a click on the sidebar costs and starts nothing.
+  const [viewing, setViewing] = useState<Viewing | null>(() => storedWhere().viewing);
   /** Whether the ⌘K switcher is open (`5f`, #223). */
   const [switching, setSwitching] = useState(false);
   /**
@@ -424,7 +437,7 @@ export function Cockpit() {
     // take control"*, and the app answered it with a form and a tab beside the
     // log. The composer is the front door, so this is where you land — and the
     // output pane has nothing in it before a run anyway.
-  >('pilot');
+  >(() => storedWhere().tab);
   /**
    * Which settings the settings screen is showing (#223): the left bar's ⚙ is
    * every project's, a project row's ⚙ is that project's own. Two doors to one
@@ -535,8 +548,20 @@ export function Cockpit() {
     },
     [repoDir, rememberRepo, saveDrafts],
   );
-  const [draftId, setDraftId] = useState<string | null>(null);
+  const [draftId, setDraftId] = useState<string | null>(() => {
+    // A draft is only restored while it still exists: it may have become a run
+    // or been removed in the launch that closed.
+    const id = storedWhere().draftId;
+    return drafts.some((d) => d.id === id) ? id : null;
+  });
   const drafting = drafts.find((d) => d.id === draftId) ?? null;
+  useEffect(() => {
+    try {
+      localStorage.setItem(WHERE_KEY, writableWhere({ tab, viewing, draftId }));
+    } catch {
+      // Storage switched off: the next launch lands on the pilot, as it used to.
+    }
+  }, [tab, viewing, draftId]);
   /**
    * The draft whose proposal was pressed, so only ITS run can claim it.
    *
@@ -973,6 +998,21 @@ export function Cockpit() {
       stop?.();
     };
   }, []);
+  // What earlier launches ran (#223), once the host is up. A failure costs the
+  // history and says so in the log; this launch's commands are unaffected.
+  useEffect(() => {
+    if (!wire.connected) return;
+    let cancelled = false;
+    host
+      .pastCommands()
+      .then((past) => {
+        if (!cancelled) setCommands((prev) => restore(prev, past));
+      })
+      .catch((err: unknown) => note('log', `earlier commands could not be read: ${String(err)}`));
+    return () => {
+      cancelled = true;
+    };
+  }, [wire.connected, note]);
 
   /**
    * Run one, in the repository this window is pointed at.
