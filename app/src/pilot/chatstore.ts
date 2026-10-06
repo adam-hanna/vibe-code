@@ -70,21 +70,36 @@ export function loadChats(): Promise<void> {
     }
     try {
       for (const { key, value } of await host.chats()) cache.set(key, value);
-      for (const key of localKeys()) {
-        const value = localStorage.getItem(key);
-        if (value === null) continue;
+    } catch (err: unknown) {
+      // Not ready, and said: the pane shows it and keeps what is on screen.
+      loading = null;
+      set({ failure: `conversations could not be read: ${err instanceof Error ? err.message : String(err)}` });
+      return;
+    }
+    // One conversation that will not move must not hold the rest hostage: it
+    // stays in localStorage, still readable from there, and the pane says so.
+    const stuck: string[] = [];
+    for (const key of localKeys()) {
+      const value = localStorage.getItem(key);
+      if (value === null) continue;
+      try {
         if (!cache.has(key)) {
           await host.saveChat(key, value);
           cache.set(key, value);
         }
         localStorage.removeItem(key);
+      } catch {
+        cache.set(key, value);
+        stuck.push(key);
       }
-      set({ ready: true, failure: null });
-    } catch (err: unknown) {
-      // Not ready, and said: the pane shows it and keeps what is on screen.
-      loading = null;
-      set({ failure: `conversations could not be read: ${err instanceof Error ? err.message : String(err)}` });
     }
+    set({
+      ready: true,
+      failure:
+        stuck.length === 0
+          ? null
+          : `${String(stuck.length)} saved conversation(s) could not be moved to the app's files and are still in this window's storage`,
+    });
   })();
   return loading;
 }

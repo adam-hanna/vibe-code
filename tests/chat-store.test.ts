@@ -65,3 +65,25 @@ test('a save must name a conversation key and say null to remove', () => {
   assert.equal(decode(line({ type: 'chat_save', id: 1, key: 'vibe.repo', value: 'x' })).ok, false);
   assert.equal(decode(line({ type: 'chats', id: 2 })).ok, true);
 });
+
+test('the host takes a conversation larger than the old 1 MB line ceiling', async () => {
+  // A 1.1 MB chat was dropped at the line reader, the window waited out its
+  // timeout, and the move out of localStorage stopped there.
+  const { createSession } = await import('@src/serve.js');
+  const base = mkdtempSync(path.join(tmpdir(), 'vibe-chats-host-'));
+  const before = process.env['VIBE_APP_DATA'];
+  process.env['VIBE_APP_DATA'] = base;
+  try {
+    const sent: { type: string; id?: unknown }[] = [];
+    const session = createSession((m) => void sent.push(m as { type: string }), {
+      invoke: () => Promise.resolve(0),
+    });
+    session.write(`${JSON.stringify({ type: 'chat_save', id: 9, key: KEY, value: 'y'.repeat(3_000_000) })}\n`);
+    await new Promise((r) => setTimeout(r, 20));
+    assert.ok(sent.some((m) => m.type === 'chat_saved' && m.id === 9), JSON.stringify(sent.slice(0, 2)));
+    assert.equal(listChats(path.join(base, 'chats'))[0]?.value.length, 3_000_000);
+  } finally {
+    if (before === undefined) delete process.env['VIBE_APP_DATA'];
+    else process.env['VIBE_APP_DATA'] = before;
+  }
+});

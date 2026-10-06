@@ -256,6 +256,20 @@ export interface SessionDeps {
   pilotAccess?: () => PilotAccess;
 }
 
+/**
+ * The longest line this process will take from the window (#223).
+ *
+ * The reader's own default is 1 MB, which was right while every inbound frame
+ * was a request or an answer. A pilot conversation is now saved through here
+ * (`chat_save`), and one ERM chat is 1.1 MB as JSON: its save was dropped, the
+ * window waited out its timeout, and the move out of `localStorage` stopped. The
+ * ceiling still exists - a sender that never writes a newline must not be an
+ * unbounded allocation in the process holding the run - but it is sized for a
+ * long conversation. The number is a bound, not a measurement: 64 MB is about
+ * thirty times the largest chat seen.
+ */
+export const INBOUND_MAX_BYTES = 64 * 1024 * 1024;
+
 export function createSession(send: Send, deps: SessionDeps = {}): Session {
   const invoke = deps.invoke ?? ((argv, loop) => main(argv, loop));
   const chat = deps.pilot ?? pilotChat;
@@ -920,13 +934,17 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
     runInvoke(msg.id, msg.argv);
   };
 
-  const write = createLineReader(receive, (bytes) => {
-    send({
-      type: 'error',
-      id: null,
-      message: `dropped ${bytes} bytes of input with no newline in them`,
-    });
-  });
+  const write = createLineReader(
+    receive,
+    (bytes) => {
+      send({
+        type: 'error',
+        id: null,
+        message: `dropped ${bytes} bytes of input with no newline in them`,
+      });
+    },
+    INBOUND_MAX_BYTES,
+  );
 
   return {
     host,
