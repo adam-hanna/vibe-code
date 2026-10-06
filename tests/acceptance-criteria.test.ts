@@ -11,6 +11,7 @@ import {
   renderPlanDoc,
   reviewPrompt,
   revisePlanPrompt,
+  taskContext,
 } from '@src/prompts.js';
 import { loadRun, saveState } from '@src/run.js';
 import { PLAN_SCHEMA } from '@src/schemas.js';
@@ -537,10 +538,15 @@ test('an empty or absent bar changes not one byte of the implementation prompt',
   );
 });
 
-test('a run whose plan states no criteria produces the implementation prompt it always did', async () => {
+test('a run whose plan states no criteria supplies its brief and scope without inventing criteria', async () => {
   const driven = await drive();
 
-  assert.equal(promptOf(driven, 'implement'), implementPrompt(planFixture().plan_md, []));
+  assert.equal(
+    promptOf(driven, 'implement'),
+    taskContext(driven.state.task, driven.state.extraContext) +
+      implementPrompt(planFixture().plan_md, [], [], [], planFixture().out_of_scope),
+  );
+  assert.ok(!promptOf(driven, 'implement').includes('## Acceptance criteria'));
 });
 
 test('a bar adds no round, and stops nothing', async () => {

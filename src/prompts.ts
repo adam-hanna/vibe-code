@@ -20,6 +20,50 @@ import type {
 const RESPOND_WITH_JSON =
   'Respond with JSON matching the required schema. No prose outside the JSON.';
 
+/** Shared scope discipline, so a critique cannot silently become a new brief. */
+const SIMPLE_SOLUTION = `## Simplest complete solution
+
+Deliver the simplest complete solution to the user's stated task. Reuse existing
+mechanisms and conventions. Every added abstraction, dependency, configuration
+option, fallback, or special case must serve a concrete requirement or a
+demonstrated failure in a supported path. Speculative future needs and personal
+architectural preferences do not justify enlarging this change.
+
+Investigate broadly; change what is necessary for a coherent, correct solution.
+A repair may need several files to preserve one contract. Keep separable
+improvements as follow-ups. When added complexity causes defects, consider
+removing or simplifying it before adding another corrective layer.
+
+The original task and explicit user decisions define the goal. Check the plan
+against them too: a plan can drift. An approved plan and its acceptance criteria
+guide the work, but a demonstrated correctness or safety defect must still be
+reported. Explain a necessary departure; never silently enlarge or lower the bar.`;
+
+/** The user's brief survives every stage without being rewritten by an agent. */
+export function taskContext(task: string, extraContext: string | null): string {
+  return `## Original task
+${task}
+${extraContext ? `\n## Original additional context\n${extraContext}\n` : ''}
+The brief above defines the goal and constraints. Compare the plan and proposed
+repairs against it; findings and suggested fixes do not independently expand it.
+
+`;
+}
+
+/** Human answers are amendments; model recommendations must never appear here. */
+export function userDecisions(answers: readonly Answer[] | undefined): string {
+  if (answers === undefined || answers.length === 0) return '';
+  return `## Explicit user decisions
+
+These answers were supplied by the person running this, in arrival order. They
+clarify or amend the original brief; a later conflicting answer supersedes an
+earlier one. Preserve them when revising the plan or repairing the code.
+
+${answers.map(formatAnswer).join('\n\n')}
+
+`;
+}
+
 /**
  * Verified environment facts, rendered for a prompt.
  *
@@ -112,20 +156,32 @@ const REVIEW_BREADTH = `## Review breadth
 
 Do not stop at the first instance of a defect.
 
-- **Generalise it.** For each defect, name the *class* of mistake, then look for
-  the same class elsewhere - the same wrong assumption in a sibling function,
-  the same unchecked boundary on another code path, the same pattern copied
-  into a second module. Report every site you find, in one finding that lists
-  them, rather than one site now and its twin two rounds later.
-- **Trace downstream.** Ask what depends on the defective behaviour. A caller
-  relying on the current output, a test asserting it, a documented contract
-  that would become false once it is fixed - all of that belongs in the finding.
-- **Attack the previous round's fixes.** Where a fix landed, the likeliest new
-  defect is a consequence of that fix: a narrowed condition that now excludes a
-  valid case, a changed return shape a caller still reads the old way.
+- **Find the root cause and affected paths.** Look for the same wrong assumption
+  in sibling functions and related paths. Group proven instances of the same
+  cause in one finding. Similar-looking code is a lead to check, not evidence
+  that it shares the defect or belongs in this task.
+- **Trace upstream and downstream.** Check inputs, producers, callers,
+  ownership and assumptions, then consumers, serialised or persisted data,
+  tests and documented contracts. Name the effects a coherent repair must
+  account for, including valid behaviour that must keep working.
+- **Check the previous round's fixes for regressions.** A narrowed condition may
+  exclude a valid case, or a changed return shape may break a consumer. Evaluate
+  simpler alternatives, including removing an unnecessary mechanism, before
+  recommending more layers to repair it.
 - **Prefer root causes.** Given a choice between a finding that names the
   underlying error and one that names a symptom, report the former and list the
-  symptoms under it. Symptom-level findings produce symptom-level patches.`;
+  symptoms under it. Symptom-level findings produce symptom-level patches.
+
+For each substantive finding, name a concrete trigger in a supported scenario,
+the incorrect outcome, the affected task requirement or existing contract, and
+the evidence linking them. Explain why resolving it belongs in this change.
+Suggest the simplest coherent remedy; your suggested fix is advisory, and an
+alternative that resolves the demonstrated defect is equally valid.
+
+Inspect independently and report only supported defects. An empty findings list
+is a successful review when the evidence supports it. You need not find anything
+beyond the implementer's report, and should drop an earlier finding when a valid
+repair or an evidence-backed rebuttal resolves it.`;
 
 /**
  * The other half: a fixer that changes only the reported line reproduces the
@@ -135,14 +191,28 @@ const FIX_BREADTH = `## Fix breadth
 
 Fix the cause, not the line.
 
-- For each finding, decide what the underlying mistake is, then search for the
-  same mistake elsewhere and fix those occurrences too. A reviewer who found one
-  instance will find its twin next round, and that costs another full cycle.
-- Before changing anything, trace what depends on it: callers, tests,
-  serialised shapes, documented behaviour. Update them in the same pass.
+During initial implementation, apply these checks to each planned change; during
+revision or repair, apply them to the findings.
+
+- Before editing, evaluate each finding against the actual code, the original
+  task and the approved requirements. Verify its trigger and incorrect outcome;
+  reproduce it when practical. Evaluate the proposed remedy independently.
+  A suggested fix is advisory, not an instruction to adopt that design.
+- Decide what the underlying mistake is, then search for it in related paths.
+  Fix proven occurrences necessary to this task or its coherent repair. Keep
+  unrelated existing defects and separable improvements as follow-ups; looking
+  broadly does not authorise a repository-wide rewrite or a new abstraction.
+- Trace upstream inputs, producers, callers, ownership and assumptions, and
+  downstream consumers, serialised or persisted shapes, tests and documented
+  behaviour. Preserve the contract across affected sites in the same pass.
 - After each change, ask what it could break that previously worked. Narrowing a
   condition to exclude a bad case often excludes good ones too.
-- In your report, state for each finding what you changed, **what else you
+- Resolve valid defects with the simplest coherent repair. If added complexity
+  caused the defect, consider removing or simplifying it. Reject an incorrect
+  finding or unnecessary scope expansion with evidence; a valid defect still
+  needs resolving even when you reject the reviewer's proposed remedy.
+- In your report, state each finding's disposition (fixed, rebutted, or deferred)
+  and its reason, what you changed, **what else you
   checked for the same class of problem**, and what you found. "Checked X and Y,
   they were already correct" is useful; silence is not.`;
 
@@ -584,9 +654,7 @@ export function planPrompt(
 ): string {
   return `You are planning an implementation. Do NOT write any code or modify any files - this is a planning pass only.
 
-## Task
-${task}
-${extraContext ? `\n## Additional context\n${extraContext}\n` : ''}
+${taskContext(task, extraContext)}
 ${environmentBlock(environment, 'planner', roles)}${priorRunsSection(priorRuns ?? [])}## What to produce
 
 Investigate the codebase first (read files, search, inspect the build and test setup), then produce a plan detailed enough that another engineer could execute it without asking you anything.
@@ -599,14 +667,16 @@ The plan must cover:
 
 ## Two things this plan will be judged on
 
-**Assumptions.** A separate reviewer will attack this plan. Every judgement call you made that a reasonable engineer could dispute must appear in \`assumptions\` - the choice, why you made it, and what has to be redone if you are wrong. An assumption you leave unstated is one the reviewer cannot catch, which is how a plan passes review and still ships the wrong thing.
+**Assumptions.** Declare material unresolved assumptions affecting correctness, scope, compatibility or verification - the choice, why you made it, and what has to be redone if you are wrong. Check repository facts before treating them as assumptions. An empty list is valid when there are no material unresolved assumptions; do not invent uncertainty or catalogue routine implementation choices.
 
 **Open questions.** You cannot ask a human interactively here. Anything you would have stopped to ask goes in \`open_questions\` with your best answer in \`recommended\`. Classify each honestly:
 - \`kind: "technical"\` - answerable from the codebase, the ecosystem, or engineering judgement.
 - \`kind: "product"\` - depends on user intent, business priorities, or taste. You cannot derive it by reading code.
 - \`blocking: true\` - only when proceeding on your recommended answer risks doing substantial work that turns out wrong.
 
-Do not inflate either list. A plan with fifteen trivial questions is as unreviewable as one with none.
+Do not inflate either list. Scale the plan's detail and verification to the task's complexity and risk; avoid speculative architecture and exhaustive catalogues of remote edge cases.
+
+${block(BLOCK.simple, SIMPLE_SOLUTION)}
 
 ${block(BLOCK.json, RESPOND_WITH_JSON)}`;
 }
@@ -661,7 +731,7 @@ export function critiquePrompt(
    */
   planActivity?: TurnActivity | undefined,
 ): string {
-  return `You are a senior engineer reviewing an implementation plan before any code is written. Be adversarial: your job is to find what is wrong with it, not to praise it.${
+  return `You are a senior engineer reviewing an implementation plan before any code is written. Try to falsify its correctness against the user's task and the actual repository. Challenge unsupported complexity as well as defects; a sound, simple plan may earn approval with no findings.${
     round > 1 ? continuityNote(round, hasMemory, 'plan') : ''
   }${planInspectionNote(planActivity)}
 
@@ -700,6 +770,8 @@ Nothing executes a criterion in this run, so do not raise findings about running
 
 ${block(BLOCK.review, REVIEW_BREADTH)}
 
+${block(BLOCK.simple, SIMPLE_SOLUTION)}
+
 ## The plan
 
 ${planMd}
@@ -717,6 +789,8 @@ export function answerPrompt(questions: readonly OpenQuestion[], planMd: string)
   return `An engineer is planning an implementation and hit questions they could not resolve alone. Answer the ones you can from the codebase and sound engineering judgement.
 
 Read the repository before answering. Ground each answer in what is actually there.
+
+${block(BLOCK.simple, SIMPLE_SOLUTION)}
 
 **Be honest about what you cannot know.** If a question turns on what the user wants - product intent, priorities, taste, business context - set \`defer_to_human: true\` and do not invent a preference. A confidently wrong answer to a product question is far more expensive than escalating it, because the entire implementation gets built on top of it.
 
@@ -740,6 +814,8 @@ ${block(BLOCK.json, RESPOND_WITH_JSON)}`;
 }
 
 export interface RevisePlanArgs {
+  /** Restated even on a continuing session, so revisions are standalone. */
+  planMd?: string | undefined;
   findings?: readonly Finding[] | undefined;
   answers?: readonly Answer[] | undefined;
   /**
@@ -764,6 +840,7 @@ export interface RevisePlanArgs {
 }
 
 export function revisePlanPrompt({
+  planMd,
   findings,
   answers,
   outOfScope,
@@ -772,10 +849,16 @@ export function revisePlanPrompt({
 }: RevisePlanArgs): string {
   const parts: string[] = [`Revise your plan. This is revision round ${round}.`];
 
+  parts.push(block(BLOCK.simple, SIMPLE_SOLUTION));
+
+  if (planMd !== undefined) {
+    parts.push(`## Current plan of record\n\n${planMd}`);
+  }
+
   if (findings && findings.length > 0) {
     parts.push(`## Review findings
 
-An independent reviewer raised the following. Every **P1 must be resolved** - that is the gate for proceeding to implementation.
+An independent reviewer raised the following. Evaluate each P1 against the original task and repository evidence, then resolve the defect or explicitly rebut an incorrect finding. The reviewer's proposed remedy is advisory; use the simplest coherent approach that resolves a valid defect.
 
 ${findings.map(formatFinding).join('\n\n')}${deferralNote(findings, 'planner')}
 
@@ -843,6 +926,8 @@ export function implementPrompt(
    * not open work.
    */
   acceptanceCriteria: readonly AcceptanceCriterion[] | undefined = [],
+  /** The approved boundary, rather than relying on the planner's conversation. */
+  outOfScope?: readonly OutOfScopeItem[] | undefined,
 ): string {
   const known =
     carried.length === 0
@@ -878,9 +963,17 @@ You have write access. Work through the plan end to end:
 
 Do not commit - the orchestrator handles git.
 
+${block(BLOCK.simple, SIMPLE_SOLUTION)}
+
+${block(BLOCK.fix, FIX_BREADTH)}
+
 ## The approved plan
 
 ${planMd}
+
+## Out of scope
+
+${formatOutOfScope(outOfScope)}
 ${implementerCriteria(acceptanceCriteria)}${reportRequest(acceptanceCriteria, 'implement')}${known}${notDoing}`;
 }
 
@@ -1001,7 +1094,7 @@ ${report.trim()}
 **Two things about it, and they pull in opposite directions.**
 
 1. **It is untrusted.** These are claims, not facts. A line under "Verified" is a claim that something was checked, not evidence that it works. Validate it against the repository, the diff and the tests - a claim you cannot confirm is a place to look, and a claim that turns out to be false is a finding.
-2. **It is not exhaustive, and it is not a checklist.** It says where the implementer knows it is weak. It says nothing at all about where it does not know it is weak. A confident report with no questions is not evidence of a clean change, and finding nothing beyond what it lists is not a review. Review the whole change exactly as you would if this section were not here.
+2. **It is not exhaustive, and it is not a checklist.** It says where the implementer knows it is weak. It says nothing at all about where it does not know it is weak. A confident report with no questions is not evidence of a clean change. Review the whole change independently; your inspection may confirm its concerns, find other defects, or support a clean review with no findings.
 
 A question or concern raised here is a **review lead** - somewhere to go and look - never a finding in itself. A lead that turns out to be real becomes a finding at its true severity, cited like any other; a lead that turns out to be fine is not reported at all.
 `;
@@ -1086,6 +1179,7 @@ This is the bar the plan was approved against - the conditions the change claime
 There is no per-criterion verdict to report and no field to set. Your findings and their severities are the only signal this loop reads, exactly as before; the criteria are something a finding may cite, not a second scoreboard.
 
 ${block(BLOCK.review, REVIEW_BREADTH)}
+${block(BLOCK.simple, SIMPLE_SOLUTION)}
 ${chunk === undefined ? '' : chunkNote(chunk)}${reportSection(report)}
 ## Files changed
 
@@ -1118,14 +1212,20 @@ export function fixPrompt(
    * ids would be asking the fixer for something it cannot see (#50).
    */
   acceptanceCriteria?: readonly AcceptanceCriterion[] | undefined,
+  /** The approved plan and boundary travel on every fix, including verification. */
+  plan?: Plan | null | undefined,
 ): string {
   return `A code reviewer found issues in your implementation. This is fix round ${round}.
 
-Resolve **every P1**. Address P2s where the fix is contained and low-risk; skip P3s unless trivial.
+Evaluate **every P1**, then resolve valid defects or rebut incorrect findings with evidence. Address a P2 only when it belongs to the task or is necessary to a coherent repair and the fix is contained and low-risk. Defer separable improvements, even when they would be a small edit. Skip P3s unless they are incidental to required work.
 
 ${findings.map(formatFinding).join('\n\n')}${deferralNote(findings, 'fixer')}
 
 ${block(BLOCK.fix, FIX_BREADTH)}
+
+${block(BLOCK.simple, SIMPLE_SOLUTION)}
+
+${plan == null ? '' : `## Approved plan of record\n\n${plan.plan_md}\n\n## Out of scope\n\n${formatOutOfScope(plan.out_of_scope)}\n`}
 
 Re-run the project's tests after fixing. If you believe a finding is incorrect, fix nothing for it but explain why in your final message - do not silently skip it.
 
@@ -1145,6 +1245,8 @@ Include, densely and without padding:
 - What the task is, and where the work currently stands.
 - What you learned about this codebase that cost you effort to discover: file layout, key symbols, conventions, build and test commands, anything surprising.
 - Decisions already made and why, so they are not relitigated.
+- The original task's constraints, explicit user decisions, and scope exclusions.
+- Why added mechanisms are necessary, and where a simpler approach may replace them.
 - Dead ends already ruled out, so they are not retried.
 - What must happen next.
 
@@ -1159,8 +1261,8 @@ Output the briefing as markdown. No preamble.`;
  * The two halves are independent. A rotation can produce no briefing at all -
  * the baseline rotation for an unattributable measurement rotates even when its
  * handoff turn fails - and the plan of record is the one thing a fresh session
- * must never start without: `revisePlanPrompt` does not restate it, so a turn
- * that lost both was asked to revise a plan it could not see.
+ * must never start without. Revision and fix builders now restate it explicitly;
+ * this prefix remains a fallback for callers whose own prompt does not.
  *
  * `stale` marks a briefing that survived a failed rotation. It describes an
  * earlier point in the run, so presenting it as "what you knew" would assert
@@ -1211,24 +1313,10 @@ function continuityNote(round: number, hasMemory: boolean, subject: 'plan' | 'ch
 
 Two things follow. If a finding of yours is **still unresolved**, re-raise it with the **exact same \`id\` you used before**; do not restate it under a new name. If it was addressed, drop it and do not re-litigate it. Judging whether your own earlier objections were actually met is the main job this round.`;
   }
-  // The `change` half of the memoryless branch says something different from the
-  // `plan` half, because only one of the two prompts is telling the truth.
-  // `revisePlanPrompt` does put the critique's findings in front of the planner;
-  // `reviewPrompt` puts NO findings in front of the reviewer - it renders the
-  // files, the diff, the plan, the scope and the criteria. So under
-  // `codex.persistSession: false`, where every review turn is a fresh
-  // conversation, this note used to tell a reviewer that had never seen a
-  // finding not to re-litigate it, and a defect that was never fixed reads back
-  // as an approval - the exact failure #49 exists to close.
-  //
-  // The `plan` half has the same shape of problem for the critic and is
-  // deliberately left alone: the critic is out of scope for #49, and changing
-  // its prompt inside a change to the review loop would move a second loop's
-  // behaviour without evidence. Recorded as a follow-up.
-  if (subject === 'change') {
-    return `\n\nThis is review round ${round}. The change has already been revised in response to findings from earlier rounds, but **you do not have those findings** - this turn starts a fresh conversation and they are not reproduced here. Review what you are given on its own terms and raise every defect you can see, including one that may already have been raised before; do not stay silent about something because it might have been addressed. Use whatever \`id\` you would naturally choose - repeats are reconciled by the tool.`;
-  }
-  return `\n\nThis is review round ${round}. The ${what} has already been revised in response to earlier findings, which are quoted below. Re-raise one with its original \`id\` only if it is genuinely still unresolved - do not re-litigate points that were addressed.`;
+  // Neither judge prompt renders earlier findings. Under a fresh session,
+  // asking for their ids or saying they were addressed assumes unavailable
+  // history and can turn an unfixed defect into silence (#49's review failure).
+  return `\n\nThis is review round ${round}. The ${what} has already been revised in response to findings from earlier rounds, but **you do not have those findings** - this turn starts a fresh conversation and they are not reproduced here. Review what you are given on its own terms and raise every defect you can see, including one that may already have been raised before; do not stay silent about something because it might have been addressed. Use whatever \`id\` you would naturally choose - repeats are reconciled by the tool.`;
 }
 
 /**
@@ -1417,7 +1505,7 @@ function deferralNote(findings: readonly Finding[], audience: 'planner' | 'fixer
 
 function formatAssumptions(assumptions: readonly Assumption[]): string {
   if (assumptions.length === 0) {
-    return '(the planner declared none - treat that itself as suspicious)';
+    return '(the planner declared no material unresolved assumptions - check this against the task and repository like any other claim)';
   }
   return assumptions
     .map(
@@ -1485,6 +1573,7 @@ const BLOCK = {
   review: 'review breadth',
   fix: 'fix breadth',
   deferred: 'a deferred finding',
+  simple: 'simple solution',
 } as const;
 
 let installed: Readonly<Record<string, string>> = {};
@@ -1571,6 +1660,7 @@ export function promptBlocks(): readonly PromptBlock[] {
     of(BLOCK.json, ['planner', 'critic', 'answerer', 'reviewer'], RESPOND_WITH_JSON),
     of(BLOCK.review, ['critic', 'reviewer'], REVIEW_BREADTH),
     of(BLOCK.fix, ['planner', 'implementer'], FIX_BREADTH),
+    of(BLOCK.simple, ['planner', 'critic', 'answerer', 'implementer', 'reviewer'], SIMPLE_SOLUTION),
     // Through `formatFinding`, so it reaches exactly the two turns that are
     // GIVEN a findings list - the planner revising against a critique and the
     // implementer fixing against a review. The reviewer produces findings and

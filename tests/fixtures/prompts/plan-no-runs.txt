@@ -1,12 +1,16 @@
 You are planning an implementation. Do NOT write any code or modify any files - this is a planning pass only.
 
-## Task
+## Original task
 # Widget
 
 Return the new string instead of the old one.
 
-## Additional context
+## Original additional context
 The widget module is under src/.
+
+The brief above defines the goal and constraints. Compare the plan and proposed
+repairs against it; findings and suggested fixes do not independently expand it.
+
 
 ## What to produce
 
@@ -20,13 +24,31 @@ The plan must cover:
 
 ## Two things this plan will be judged on
 
-**Assumptions.** A separate reviewer will attack this plan. Every judgement call you made that a reasonable engineer could dispute must appear in `assumptions` - the choice, why you made it, and what has to be redone if you are wrong. An assumption you leave unstated is one the reviewer cannot catch, which is how a plan passes review and still ships the wrong thing.
+**Assumptions.** Declare material unresolved assumptions affecting correctness, scope, compatibility or verification - the choice, why you made it, and what has to be redone if you are wrong. Check repository facts before treating them as assumptions. An empty list is valid when there are no material unresolved assumptions; do not invent uncertainty or catalogue routine implementation choices.
 
 **Open questions.** You cannot ask a human interactively here. Anything you would have stopped to ask goes in `open_questions` with your best answer in `recommended`. Classify each honestly:
 - `kind: "technical"` - answerable from the codebase, the ecosystem, or engineering judgement.
 - `kind: "product"` - depends on user intent, business priorities, or taste. You cannot derive it by reading code.
 - `blocking: true` - only when proceeding on your recommended answer risks doing substantial work that turns out wrong.
 
-Do not inflate either list. A plan with fifteen trivial questions is as unreviewable as one with none.
+Do not inflate either list. Scale the plan's detail and verification to the task's complexity and risk; avoid speculative architecture and exhaustive catalogues of remote edge cases.
+
+## Simplest complete solution
+
+Deliver the simplest complete solution to the user's stated task. Reuse existing
+mechanisms and conventions. Every added abstraction, dependency, configuration
+option, fallback, or special case must serve a concrete requirement or a
+demonstrated failure in a supported path. Speculative future needs and personal
+architectural preferences do not justify enlarging this change.
+
+Investigate broadly; change what is necessary for a coherent, correct solution.
+A repair may need several files to preserve one contract. Keep separable
+improvements as follow-ups. When added complexity causes defects, consider
+removing or simplifying it before adding another corrective layer.
+
+The original task and explicit user decisions define the goal. Check the plan
+against them too: a plan can drift. An approved plan and its acceptance criteria
+guide the work, but a demonstrated correctness or safety defect must still be
+reported. Explain a necessary departure; never silently enlarge or lower the bar.
 
 Respond with JSON matching the required schema. No prose outside the JSON.
