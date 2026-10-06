@@ -2522,6 +2522,14 @@ carry it:
   have handed a child in that child's stdout, stderr and lines, because Codex's 401 quotes the key
   in full and every caller hands stderr to a log. `keys.test.ts` pins the second reader.
 
+**A pilot turn's limit is a setting, `pilot.timeoutMs`** (#223). It was a fixed five minutes in
+`serve.ts`, chosen when the pilot only read and answered, and a full CLI editing files ran out of
+it: *"claude timed out after 300000ms. Can we change that anywhere in the settings?"* The default
+is thirty minutes, borrowed from `claude.planTimeoutMs` rather than invented, and anything under a
+minute is refused by name. It is the machine's, beside YOLO and the safe list. A turn that fails
+having run its full limit says where the limit is set. That is decided by the clock, not by
+reading the error's sentence.
+
 **A launch holds the chat that proposed it until the run has an id** (#223).
 `launch` points the window at the new run before `run_started` has named it, so for
 those seconds the pilot pane had no run id to key its chat by. It fell back to the

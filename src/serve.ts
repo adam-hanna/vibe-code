@@ -82,14 +82,10 @@ import type { RunSummary } from '@src/types.js';
  * Nothing here is worth more than that separation holding.
  */
 
-/**
- * How long a pilot chat turn may take before its child is killed (#193).
- *
- * Its own number rather than a role's `timeoutMs`, and shorter than any of
- * them: a role turn is a model working through a repository for as long as it
- * needs, and this is somebody waiting for a sentence with the window open. Five
- * minutes is generous for that and short enough that a wedged child does not sit
- * there for the length of a run.
+/*
+ * A pilot turn's ceiling is `pilot.timeoutMs` now (#223, `PILOT_TIMEOUT_MS` in
+ * `pilotaccess.ts`), read with the rest of the machine's pilot settings on each
+ * turn so a change in Settings reaches the next one.
  *
  * **The contention this creates is named rather than solved.** These tokens come
  * out of the same subscription window the run draws on, so a long conversation
@@ -99,7 +95,6 @@ import type { RunSummary } from '@src/types.js';
  * shared budget between the two: `app/src/pilot/ledger.ts` is the pilot's own
  * books precisely so a conversation cannot stop a run by spending its ceiling.
  */
-const PILOT_TIMEOUT_MS = 5 * 60_000;
 
 /** Where a frame goes. Behind a function so a test needs no pipe. */
 export type Send = (msg: Outbound) => void;
@@ -856,6 +851,7 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       // This turn's own off switch (#223), held until it settles either way.
       const stopper = new AbortController();
       pilotTurns.set(id, stopper);
+      const turnStarted = Date.now();
       void (msg.agent === 'codex' ? chatCodex : chat)({
         prompt: msg.prompt,
         system: msg.system,
@@ -874,7 +870,7 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
         // What its own tools may do without asking (#223), from the same
         // machine settings as the directories, never from the frame.
         access: { yolo: granted.yolo, safeCommands: granted.safeCommands },
-        timeoutMs: PILOT_TIMEOUT_MS,
+        timeoutMs: granted.timeoutMs,
         signal: stopper.signal,
         onDelta: (text: string) => {
           send({ type: 'pilot_delta', id, text });
@@ -900,10 +896,17 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
           // would look like a model that had nothing to say, and this is a turn
           // that did not happen. `RateLimitError` arrives here as itself, which
           // is what the module raised it for.
+          const said = err instanceof Error ? err.message : String(err);
+          // A turn that reached its ceiling says where the ceiling is (#223).
+          // Decided by the clock, not by reading the sentence: the turn has
+          // lasted at least as long as it was allowed to.
+          const ranOut = Date.now() - turnStarted >= granted.timeoutMs;
           send({
             type: 'error',
             id,
-            message: err instanceof Error ? err.message : String(err),
+            message: ranOut
+              ? `${said} - the pilot's limit is ${String(Math.round(granted.timeoutMs / 60_000))} min, set as "pilot turn limit" in Settings (pilot.timeoutMs)`
+              : said,
           });
         })
         .finally(() => {

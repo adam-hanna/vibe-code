@@ -1114,6 +1114,25 @@ export function Settings({
                   </select>
                 </div>
                 <div className="v-set__row">
+                  {/* Was five minutes and fixed, from when the pilot only
+                      answered; a full CLI editing files and running tests ran
+                      out of it (#223). Minutes here, milliseconds in the file. */}
+                  <label className="v-set__label" htmlFor="pilot-timeout">
+                    pilot turn limit
+                    {source('pilot', 'timeoutMs')}
+                  </label>
+                  <span className="v-set__inline">
+                    <NumberField
+                      id="pilot-timeout"
+                      value={Math.round(frame.pilot.timeoutMs / 60_000)}
+                      disabled={busy}
+                      onSave={(n) => write({ pilot: { timeoutMs: n * 60_000 } }, 'global')}
+                    />
+                    <span className="v-set__unit">minutes</span>
+                    <Key name="pilot.timeoutMs" />
+                  </span>
+                </div>
+                <div className="v-set__row">
                   <label className="v-set__label" htmlFor="pilot-safe">
                     commands that run without a card
                     {/* `source` answers correctly in both views: a project file can

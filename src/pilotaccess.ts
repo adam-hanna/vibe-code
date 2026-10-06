@@ -62,6 +62,8 @@ export interface PilotAccess {
   yolo: boolean;
   safeCommands: readonly string[];
   dirs: readonly string[];
+  /** How long one pilot turn may take before its child is killed. `PILOT_TIMEOUT_MS`. */
+  timeoutMs: number;
   /** Anthropic: `claude` on the subscription, or the API key (`auth.anthropic`). */
   anthropic: Route;
   /** OpenAI: `codex` on the subscription, or the API key (`auth.openai`). */
@@ -116,6 +118,23 @@ export const DEFAULT_SAFE_COMMANDS: readonly string[] = [
 ];
 
 /**
+ * How long a pilot turn may take by default (#223).
+ *
+ * It was five minutes, fixed in `serve.ts`, chosen when the pilot only read and
+ * answered - *"somebody waiting for a sentence with the window open"*. It is a
+ * full CLI now that edits files and runs the tests, and a turn doing that hit the
+ * ceiling: *"claude timed out after 300000ms. Can we change that anywhere in the
+ * settings?"* Thirty minutes is `claude.planTimeoutMs`, the figure this repo
+ * already uses for a Claude turn that works through a repository, borrowed
+ * rather than invented. It is a setting because that is still a guess about
+ * somebody else's work.
+ */
+export const PILOT_TIMEOUT_MS = 30 * 60_000;
+
+/** Below this a turn cannot start a CLI and say anything; refused by name. */
+const MIN_TIMEOUT_MS = 60_000;
+
+/**
  * Subscription for both: it is the one that works with nothing entered, and a
  * default that needed a key would be a pilot that does nothing until you buy one.
  */
@@ -123,6 +142,7 @@ export const PILOT_ACCESS_DEFAULTS: PilotAccess = {
   yolo: false,
   safeCommands: DEFAULT_SAFE_COMMANDS,
   dirs: [],
+  timeoutMs: PILOT_TIMEOUT_MS,
   anthropic: 'subscription',
   openai: 'subscription',
 };
@@ -144,7 +164,7 @@ export function readPilotAccess(globalRaw: Readonly<Record<string, unknown>>): P
   const routes = readRoutes(globalRaw);
   if (section === undefined) return { ...PILOT_ACCESS_DEFAULTS, ...routes };
   if (!isRecord(section)) throw new Error('pilot must be an object');
-  const known = new Set(['yolo', 'safeCommands', 'dirs']);
+  const known = new Set(['yolo', 'safeCommands', 'dirs', 'timeoutMs']);
   for (const key of Object.keys(section)) {
     // By name, for `mergeSection`'s silent-drop reason: a misspelt key is a
     // setting somebody believes is on.
@@ -189,7 +209,11 @@ export function readPilotAccess(globalRaw: Readonly<Record<string, unknown>>): P
     }
     dirs.push(entry.trim());
   }
-  return { yolo, safeCommands, dirs, ...routes };
+  const timeoutMs = section['timeoutMs'] ?? PILOT_ACCESS_DEFAULTS.timeoutMs;
+  if (typeof timeoutMs !== 'number' || !Number.isInteger(timeoutMs) || timeoutMs < MIN_TIMEOUT_MS) {
+    throw new Error(`pilot.timeoutMs must be a whole number of milliseconds, at least ${String(MIN_TIMEOUT_MS)} (one minute)`);
+  }
+  return { yolo, safeCommands, dirs, timeoutMs, ...routes };
 }
 
 /**

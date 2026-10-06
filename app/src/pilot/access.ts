@@ -28,6 +28,8 @@ export interface PilotAccess {
   yolo: boolean;
   safeCommands: readonly string[];
   dirs: readonly string[];
+  /** How long one pilot turn may take, in ms (`pilot.timeoutMs`). */
+  timeoutMs: number;
   /** How each vendor is reached: its CLI on the subscription, or the API (#223). */
   anthropic: 'subscription' | 'api';
   openai: 'subscription' | 'api';
@@ -41,6 +43,9 @@ export const NO_ACCESS: PilotAccess = {
   yolo: false,
   safeCommands: [],
   dirs: [],
+  // The core's default; the host enforces whatever is set, and this is only
+  // ever drawn before the settings have been read.
+  timeoutMs: 30 * 60_000,
   anthropic: 'subscription',
   openai: 'subscription',
 };
