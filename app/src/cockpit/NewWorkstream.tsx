@@ -1,5 +1,8 @@
 import { useEffect, useState } from 'react';
-import { Button, MetaChip, Modal } from '../design';
+import { Modal } from '../design';
+import { Badge } from '@/ui/badge';
+import { Button } from '@/ui/button';
+import { cn } from '@/lib/utils';
 import * as host from '../host';
 import { briefFor } from './argv';
 import { pickDirectory } from './pick';
@@ -46,6 +49,13 @@ import type { ConfigFrame } from '../host';
  * only what it had would read as the whole of what a run can be configured to
  * do.
  */
+
+/** A field in the composer. */
+const FIELD = 'w-full rounded-sm border border-rule-control bg-panel px-3 py-2.5 font-sans text-body text-primary outline-none placeholder:text-tertiary focus-visible:ring-1 focus-visible:ring-accent-border';
+/** A label over a field: small caps, the form's one visual rhythm. */
+const LABEL = 'text-body-sm font-medium text-secondary';
+/** A sentence under a control. */
+const NOTE = 'm-0 text-body-sm leading-relaxed text-secondary';
 
 /** The gate modes, in the order `src/gates.ts` lists them. Filled from the wire. */
 type Gates = Readonly<Record<string, string>>;
@@ -152,7 +162,7 @@ export function NewWorkstream({
   return (
     <Modal width={680} onDismiss={onClose} label="New run">
       <form
-        className="v-new"
+        className="flex flex-col gap-3.5"
         onSubmit={(e) => {
           e.preventDefault();
           if (!ready || busy) return;
@@ -163,81 +173,81 @@ export function NewWorkstream({
           onClose();
         }}
       >
-        <div className="v-new__head">
-          <p className="v-new__eyebrow">A new beginning</p>
-          <h2 className="v-new__title">What should we work on?</h2>
+        <div>
+          <p className="mt-0 mb-1.5 text-body-sm text-accent-muted">A new beginning</p>
+          <h2 className="m-0 text-title font-semibold tracking-tight text-display">What should we work on?</h2>
         </div>
 
-        <label className="v-new__label" htmlFor="brief">
+        <label className={LABEL} htmlFor="brief">
           Your brief
         </label>
         <textarea
           id="brief"
-          className="v-new__task"
+          className={cn(FIELD, 'resize-y')}
           rows={5}
           value={task}
           placeholder="Describe the idea, the problem, and what a good result looks like."
           onChange={(e) => setTask(e.target.value)}
         />
 
-        <label className="v-new__label" htmlFor={locked ? undefined : 'newdir'}>
+        <label className={LABEL} htmlFor={locked ? undefined : 'newdir'}>
           Repository
         </label>
         {locked ? (
           // Stated, not offered. The project answered this, and a field here
           // would be a second way to answer it. See `locked` above.
-          <div className="v-new__row">
-            <code className="v-new__fixed">{dir}</code>
-            <MetaChip>from the project</MetaChip>
+          <div className="flex items-center gap-2">
+            <code className="min-w-0 flex-1 font-mono text-mono-sm text-primary [overflow-wrap:anywhere]">{dir}</code>
+            <Badge>from the project</Badge>
           </div>
         ) : (
           <>
-            <div className="v-new__row">
+            <div className="flex items-center gap-2">
               <input
                 id="newdir"
-                className="v-new__dir"
+                className={cn(FIELD, "min-w-0 flex-1 font-mono text-mono-sm")}
                 value={dir}
                 placeholder="Path to your project repository"
                 onChange={(e) => onDir(e.target.value)}
               />
-              <Button type="button" onClick={choose} disabled={busy}>
+              <Button variant="secondary" onClick={choose} disabled={busy}>
                 Browse…
               </Button>
             </div>
             {pickFailed !== null && (
-              <p className="v-new__note">the chooser did not open: {pickFailed} — type or paste</p>
+              <p className={NOTE}>the chooser did not open: {pickFailed} — type or paste</p>
             )}
           </>
         )}
 
-        <details className="v-new__over" open={differing.length > 0}>
+        <details className="rounded-sm bg-chrome p-3.5 [&_summary]:flex [&_summary]:cursor-pointer [&_summary]:flex-wrap [&_summary]:items-center [&_summary]:gap-2 [&_summary]:text-body-sm [&_summary]:text-primary" open={differing.length > 0}>
           <summary>
             overrides
             {differing.length > 0 ? (
-              <MetaChip>{differing.length} differ from project</MetaChip>
+              <Badge variant="accent">{differing.length} differ from project</Badge>
             ) : (
-              <MetaChip>none — everything is the project default</MetaChip>
+              <Badge>none — everything is the project default</Badge>
             )}
             {differing.length > 0 && (
-              <button type="button" className="v-new__reset" onClick={() => setGates({})}>
+              <Button variant="quiet" size="sm" onClick={() => setGates({})}>
                 reset
-              </button>
+              </Button>
             )}
           </summary>
 
           {cfg === null ? (
-            <p className="v-new__note">
+            <p className={cn(NOTE, "mt-3")}>
               The project&apos;s configuration could not be read, so this cannot show what differs
               from it — only what you set. Anything left alone stays the project default.
             </p>
           ) : (
-            <table className="v-new__gates">
+            <table className="mt-3 w-full border-collapse text-body-sm [&_td]:border-t [&_td]:border-rule-inner [&_td]:px-2 [&_td]:py-1.5 [&_td]:align-middle [&_code]:font-mono [&_code]:text-mono-sm [&_code]:text-primary [&_select]:rounded-sm [&_select]:border [&_select]:border-rule-control [&_select]:bg-card [&_select]:px-2 [&_select]:py-1 [&_select]:text-body-sm [&_select]:text-primary">
               <tbody>
                 {cfg.gateable.map((boundary) => {
                   const current = gates[boundary] ?? defaults[boundary] ?? '';
                   const changed = defaults[boundary] !== undefined && current !== defaults[boundary];
                   return (
-                    <tr key={boundary} className={changed ? 'is-changed' : ''}>
+                    <tr key={boundary} className={changed ? 'bg-active' : ''}>
                       <td>
                         <code>{boundary}</code>
                       </td>
@@ -257,9 +267,9 @@ export function NewWorkstream({
                       </td>
                       <td>
                         {changed ? (
-                          <MetaChip>changed from {defaults[boundary]}</MetaChip>
+                          <Badge variant="accent">changed from {defaults[boundary]}</Badge>
                         ) : (
-                          <span className="v-new__dim">project default</span>
+                          <span className="text-tertiary">project default</span>
                         )}
                       </td>
                     </tr>
@@ -269,23 +279,23 @@ export function NewWorkstream({
             </table>
           )}
 
-          <div className="v-new__row">
-            <label className="v-new__label" htmlFor="cap">
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <label className={LABEL} htmlFor="cap">
               token cap
             </label>
             <input
               id="cap"
-              className="v-new__num"
+              className={cn(FIELD, 'w-40 py-1.5 font-mono text-mono-sm')}
               value={maxTokens}
               placeholder="empty — the project default"
               onChange={(e) => setMaxTokens(e.target.value)}
             />
-            <label className="v-new__label" htmlFor="tol">
+            <label className={LABEL} htmlFor="tol">
               P1 tolerance
             </label>
             <input
               id="tol"
-              className="v-new__num"
+              className={cn(FIELD, 'w-24 py-1.5 font-mono text-mono-sm')}
               value={tolerance}
               placeholder="empty"
               onChange={(e) => setTolerance(e.target.value)}
@@ -294,13 +304,13 @@ export function NewWorkstream({
           {/* Empty is not zero, and here the difference is load-bearing in both
               fields: `--max-tokens 0` turns the ceiling OFF, and a tolerance of
               0 demands a spotless verdict. */}
-          <p className="v-new__note">
+          <p className={cn(NOTE, "mt-2")}>
             Both are left alone when empty. A cap of <code>0</code> turns the ceiling off, and a
             tolerance of <code>0</code> demands a spotless verdict — neither is the same as saying
             nothing.
           </p>
           {badNumber && (
-            <p className="v-new__bad">
+            <p className="m-0 text-body-sm text-emphasis">
               One of those is not a number, so nothing will be sent for it. Clear it or fix it.
             </p>
           )}
@@ -308,12 +318,12 @@ export function NewWorkstream({
 
         {/* Branch naming is automatic and worktree setup belongs to project
             settings. Neither needs another control in the brief composer. */}
-        <p className="v-new__note">
+        <p className={NOTE}>
           Your pilot helps refine the brief. You review the proposed run before it starts.
         </p>
 
-        <label className="v-new__toggle">
-          <input type="checkbox" checked={planOnly} onChange={(e) => setPlanOnly(e.target.checked)} />
+        <label className="flex items-start gap-3 rounded-sm border border-rule-card bg-active p-3 text-body-sm text-secondary [&_strong]:text-primary">
+          <input type="checkbox" className="mt-1 accent-accent" checked={planOnly} onChange={(e) => setPlanOnly(e.target.checked)} />
           <span>
             <strong>Start with a plan</strong><br />
             Stop after planning and critique. Turn this off to include code changes and commits.
@@ -323,11 +333,11 @@ export function NewWorkstream({
         {/* No argv here any more. The command is drawn on the pilot's
             proposal card, which is where it is pressed — an argv in this modal
             would describe a command nothing on this screen runs. */}
-        <div className="v-new__foot">
-          <Button type="button" onClick={onClose}>
+        <div className="flex justify-end gap-2 border-t border-rule-inner pt-4">
+          <Button variant="secondary" onClick={onClose}>
             Cancel
           </Button>
-          <Button level="primary" type="submit" disabled={!ready || busy}>
+          <Button variant="primary" type="submit" disabled={!ready || busy}>
             Discuss with pilot
           </Button>
         </div>

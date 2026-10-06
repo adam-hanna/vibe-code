@@ -348,24 +348,26 @@ console.log('\n9 · the element reset leaves no user-agent ground showing');
 // invariant, not a fact about whichever screen last broke it.
 console.log('\n10 · a dialog cannot outgrow the window it is covering');
 {
-  const components = readFileSync(
-    path.join(here, '..', 'src', 'design', 'components.css'),
-    'utf8',
-  ).replace(/\/\*[\s\S]*?\*\//g, '');
-  const modal = /(^|\})\s*\.v-modal\s*\{([^}]*)\}/m.exec(components)?.[2] ?? '';
-  if (!/max-height\s*:/.test(modal)) {
-    fail('.v-modal has no max-height, so a long dialog can push its own actions off screen');
+  // The modal moved out of the stylesheet with the UI rework: its look is a
+  // string of utilities in `Surfaces.tsx`, so the check reads that file and asks
+  // the same two questions of it.
+  const surfaces = readFileSync(path.join(here, '..', 'src', 'design', 'Surfaces.tsx'), 'utf8');
+  const dialog = /role="dialog"/.test(surfaces)
+    ? (surfaces.slice(0, surfaces.indexOf('role="dialog"')).split('className=').pop() ?? '')
+    : '';
+  if (!/\bmax-h-\[/.test(dialog)) {
+    fail('the Modal has no max-h, so a long dialog can push its own actions off screen');
   } else {
-    pass('.v-modal is bounded by the viewport');
+    pass('the Modal is bounded by the viewport');
   }
-  // The bound alone would only clip. The body is what scrolls, and `min-height`
+  // The bound alone would only clip. The body is what scrolls, and `min-h-0`
   // is what lets it: a flex item's automatic minimum size is its content, so
   // without it the body refuses to shrink and the dialog grows past the bound.
-  const body = /(^|\})\s*\.v-modal__body\s*\{([^}]*)\}/m.exec(components)?.[2] ?? '';
-  if (!/overflow-y\s*:\s*auto/.test(body) || !/min-height\s*:\s*0/.test(body)) {
-    fail('.v-modal__body does not scroll (it needs both `min-height: 0` and `overflow-y: auto`)');
+  const body = /<div className="([^"]*)">\{children\}<\/div>/.exec(surfaces)?.[1] ?? '';
+  if (!/\boverflow-y-auto\b/.test(body) || !/\bmin-h-0\b/.test(body)) {
+    fail('the Modal body does not scroll (it needs both `min-h-0` and `overflow-y-auto`)');
   } else {
-    pass('.v-modal__body scrolls inside the bound');
+    pass('the Modal body scrolls inside the bound');
   }
 }
 console.log(`\n${checks} checks passed, ${failures} failed\n`);

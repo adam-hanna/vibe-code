@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
-import { MetaChip, StateKicker, Table } from '../design';
+import { Table } from '../design';
+import { Badge } from '@/ui/badge';
+import { Button } from '@/ui/button';
+import { EMPTY, HEAD, PANE } from './pane';
 import * as host from '../host';
 import type { ArchiveRun } from '../host';
 
@@ -45,15 +48,15 @@ import type { ArchiveRun } from '../host';
  */
 function statusChip(run: ArchiveRun) {
   if (run.linked === true) {
-    return <MetaChip kind="alarm">not followed — a link</MetaChip>;
+    return <Badge variant="alarm">not followed — a link</Badge>;
   }
   if (run.unverified === true) {
     // The fail-closed half, and a different sentence on purpose. This one is not
     // "it is a link" — it is "we could not find out", which is why it is refused
     // rather than opened.
-    return <MetaChip kind="alarm">could not be classified</MetaChip>;
+    return <Badge variant="alarm">could not be classified</Badge>;
   }
-  return <MetaChip>{run.status}</MetaChip>;
+  return <Badge className="normal-case tracking-normal">{run.status}</Badge>;
 }
 
 /** Whether a row can be reopened at all. */
@@ -126,7 +129,7 @@ function Reopen({
   // A live holder. Named, never a disabled button with no explanation.
   if (lock !== null && !lock.needed) {
     return (
-      <span className="v-ws__absent" title={lock.why}>
+      <span className="text-body-sm text-tertiary" title={lock.why}>
         held
       </span>
     );
@@ -134,29 +137,29 @@ function Reopen({
 
   if (lock === null) {
     return (
-      <button className="v-ws__again" onClick={() => onResume(run.id, false)}>
+      <Button variant="secondary" size="sm" onClick={() => onResume(run.id, false)}>
         reopen
-      </button>
+      </Button>
     );
   }
 
   if (!confirming) {
     return (
-      <button className="v-ws__again" onClick={() => setConfirming(true)}>
+      <Button variant="secondary" size="sm" onClick={() => setConfirming(true)}>
         reopen…
-      </button>
+      </Button>
     );
   }
 
   return (
-    <span className="v-ws__force">
-      <span className="v-ws__why">{lock.why}</span>
-      <button className="v-ws__again" onClick={() => onResume(run.id, true)}>
+    <span className="flex max-w-md flex-wrap items-baseline gap-2">
+      <span className="text-body-sm text-emphasis">{lock.why}</span>
+      <Button variant="secondary" size="sm" onClick={() => onResume(run.id, true)}>
         take the lock and reopen
-      </button>
-      <button className="v-ws__again" onClick={() => setConfirming(false)}>
+      </Button>
+      <Button variant="quiet" size="sm" onClick={() => setConfirming(false)}>
         cancel
-      </button>
+      </Button>
     </span>
   );
 }
@@ -193,30 +196,30 @@ export function Workstreams({
 
   if (failure !== null) {
     return (
-      <div className="v-ws v-ws--empty">
-        <StateKicker tone="alarm">no archive</StateKicker>
-        <p>{failure}</p>
-        <button className="v-ws__again" onClick={load}>
+      <div className={EMPTY}>
+        <Badge variant="alarm">no archive</Badge>
+        <p className="m-0 max-w-md">{failure}</p>
+        <Button variant="secondary" size="sm" onClick={load}>
           try again
-        </button>
+        </Button>
       </div>
     );
   }
 
   if (runs === null) {
     return (
-      <div className="v-ws v-ws--empty">
-        <StateKicker tone="quiet">reading</StateKicker>
-        <p>asking the host what this repository holds…</p>
+      <div className={EMPTY}>
+        <Badge>reading</Badge>
+        <p className="m-0 max-w-md">asking the host what this repository holds…</p>
       </div>
     );
   }
 
   if (runs.length === 0) {
     return (
-      <div className="v-ws v-ws--empty">
-        <StateKicker tone="quiet">no runs yet</StateKicker>
-        <p>
+      <div className={EMPTY}>
+        <Badge>no runs yet</Badge>
+        <p className="m-0 max-w-md">
           Nothing has run in <code>{dir}</code>. A run leaves its record in{' '}
           <code>.vibe/runs/</code>, and this reads that.
         </p>
@@ -225,14 +228,14 @@ export function Workstreams({
   }
 
   return (
-    <div className="v-ws">
-      <div className="v-ws__head">
+    <div className={PANE}>
+      <div className={HEAD}>
         <span>
           {runs.length} run{runs.length === 1 ? '' : 's'} in <code>{dir}</code>
         </span>
-        <button className="v-ws__again" onClick={load}>
+        <Button variant="quiet" size="sm" onClick={load}>
           reread
-        </button>
+        </Button>
       </div>
 
       <Table
@@ -242,12 +245,12 @@ export function Workstreams({
           cells: [
             <code key="id">{run.id}</code>,
             statusChip(run),
-            <span key="task" className="v-ws__task">
+            <span key="task" className="line-clamp-2 max-w-md text-body-sm text-primary">
               {run.task}
             </span>,
             run.costUsd === null ? (
               // Absent with its reason, never zero.
-              <span key="cost" className="v-ws__absent">
+              <span key="cost" className="text-body-sm text-tertiary">
                 unknown
               </span>
             ) : (
@@ -256,11 +259,11 @@ export function Workstreams({
             // The design's most-wanted column, named and empty. Deriving it
             // needs a read of each run's state.json, which is #114's request
             // rather than this one.
-            <span key="fp" className="v-ws__absent" title="Needs a read of each run's state">
+            <span key="fp" className="text-body-sm text-tertiary" title="Needs a read of each run's state">
               not read
             </span>,
             !openable(run) ? (
-              <span key="act" className="v-ws__absent">
+              <span key="act" className="text-body-sm text-tertiary">
                 —
               </span>
             ) : (
@@ -270,7 +273,7 @@ export function Workstreams({
         }))}
       />
 
-      <p className="v-ws__absent">
+      <p className="m-0 text-body-sm text-tertiary">
         The rounds fingerprint — <code>p2 v1 r2</code>, cheap to scan for runs that thrashed — is
         the column this table most wants and it needs a read of each run&apos;s state.
         Cost is Claude-side only, as everywhere.
