@@ -19,30 +19,8 @@ kbd { font: calc(10px * var(--type-scale))/1.5 var(--font-mono); border: 1px sol
 .v-btn { border-radius: var(--radius-sm); min-height: 34px; text-transform: none; letter-spacing: 0; font: 500 calc(13px * var(--type-scale))/1.4 var(--font-sans); padding: 8px 13px; }
 .v-meta, .v-sev { border-radius: 4px; }
 .v-card, .v-banner { border-radius: var(--radius-md); }
-.v-modal { border-radius: var(--radius-lg); box-shadow: var(--shadow-overlay); border-color: var(--rule-strong); }
-.v-modal__head { padding: 20px 24px; }
-.v-modal__body { padding: 24px; }
-.v-modal__title { text-transform: none; letter-spacing: -0.5px; }
-.v-modal::before, .v-modal::after, .v-card::before, .v-card::after { display: none; }
+
 .v-diag { border-radius: var(--radius-md); box-shadow: var(--shadow-overlay); }
-.v-doc, .v-set, .v-dp, .v-ws, .v-spend, .v-verify, .v-questions, .v-commands { padding: 24px 28px; }
-
-.v-doc--empty, .v-dp--empty, .v-set--empty { justify-content: center; align-items: center; text-align: center; color: var(--text-secondary); }
-
-.v-set { max-width: 1060px; width: 100%; }
-.v-set__section { padding: 22px 0; border-top-color: var(--rule-structure); }
-.v-set__section h3, .v-set__h3 { text-transform: none; letter-spacing: 0; }
-.v-set__table { border-radius: var(--radius-sm); overflow: hidden; }
-.v-set__table th, .v-set__table td { padding: 11px 10px; }
-.v-set__prompt, .v-new__over { border-radius: var(--radius-sm); padding: 14px; background: var(--surface-chrome); }
-.v-new { gap: 14px; }
-.v-new__head { display: block; }
-.v-new__eyebrow { margin: 0 0 7px; color: var(--accent-muted); font: var(--type-body-sm); }
-.v-new__title { margin: 0 0 8px; color: var(--text-display); font: 600 calc(26px * var(--type-scale))/1.3 var(--font-sans); letter-spacing: -0.7px; }
-.v-new__label { text-transform: none; letter-spacing: 0; font: 500 calc(13px * var(--type-scale))/1.5 var(--font-sans); }
-.v-new__task, .v-new__dir, .v-new__num { padding: 10px 12px; }
-.v-new__toggle { padding: 12px; background: var(--surface-active); border: 1px solid var(--rule-card); border-radius: var(--radius-sm); }
-.v-new__foot { padding-top: 16px; }
 
 @media (prefers-reduced-motion: reduce) {
   button { transition: none; }

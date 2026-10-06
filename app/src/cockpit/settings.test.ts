@@ -232,8 +232,10 @@ describe('one form, pointed at one of two files (#223)', () => {
 describe('which view each setting lives in (#223)', () => {
   // *"we talked about moving some settings out of global and into project scope
   // (e.g. test command, whether to use worktrees, etc)"*.
-  const project = settings.indexOf("{scope === 'global' ? (\n        <p className=\"v-set__note\">\n          The test command");
-  const machine = settings.indexOf("{scope === 'project' ? (\n        <p className=\"v-set__note\">\n          How each vendor");
+  // Case 2 (the UI rework): the note's class is a named style now; the two
+  // anchors are the same two sentences.
+  const project = settings.indexOf("{scope === 'global' ? (\n        <p className={S.note}>\n          The test command");
+  const machine = settings.indexOf("{scope === 'project' ? (\n        <p className={S.note}>\n          How each vendor");
 
   test('the test command and the worktree are drawn only for this project', () => {
     expect(project).toBeGreaterThan(-1);

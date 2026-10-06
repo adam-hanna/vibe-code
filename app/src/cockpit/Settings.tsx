@@ -1,6 +1,9 @@
 import { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import type { ReactNode } from 'react';
-import { Button, MetaChip, StateKicker } from '../design';
+import { Badge } from '@/ui/badge';
+import { Button } from '@/ui/button';
+import { cn } from '@/lib/utils';
+import { EMPTY, PANE } from './pane';
 import * as host from '../host';
 import { KeychainFailure, Vendor } from '../pilot/Credentials';
 import type { PilotLimits } from '../pilot/ledger';
@@ -15,6 +18,43 @@ import type { KeyStatus } from '../pilot/keys';
 import type { ConfigFrame, PromptsFrame } from '../host';
 import { CLI_DEFAULT, loadCliModels, optionsFor, useModels, whyNot } from './models';
 import type { Listing } from './models';
+
+/**
+ * The settings screen's recurring styles, named once (the UI rework). Every
+ * colour is a token through `theme.css`. One table rather than thirty literals,
+ * because the screen draws the same eleven shapes under three headings.
+ */
+const S = {
+  note: 'm-0 max-w-[78ch] text-body-sm text-tertiary',
+  row: 'flex flex-wrap items-center gap-3 text-body-sm text-secondary',
+  label: 'text-body-sm text-primary',
+  h: 'm-0 text-label uppercase tracking-label text-tertiary',
+  block: 'flex flex-col gap-2',
+  inline: 'ml-2 inline-flex items-center gap-2',
+  unit: 'text-body-sm text-tertiary',
+  factname: 'text-label uppercase tracking-label text-tertiary',
+  why: 'max-w-[68ch] text-tertiary',
+  fact: 'grid grid-cols-[9rem_1fr] gap-3 border-t border-rule-inner py-3 text-body-sm text-secondary',
+  promptrow: 'mt-3 flex flex-wrap items-center gap-3',
+  matrix: 'border-collapse text-body-sm text-secondary [&_th]:border-b [&_th]:border-rule-inner [&_th]:px-3 [&_th]:py-2 [&_th]:text-left [&_th]:text-label [&_th]:uppercase [&_th]:tracking-label [&_th]:text-tertiary [&_td]:border-b [&_td]:border-rule-inner [&_td]:px-3 [&_td]:py-2',
+  again: 'cursor-pointer rounded-sm border border-accent-border bg-transparent px-2 py-1 text-label uppercase tracking-label text-accent-on-tint hover:bg-accent-tint disabled:cursor-not-allowed disabled:opacity-50',
+  text: 'w-full rounded-sm border border-rule-control bg-card p-2 font-mono text-mono-sm text-primary outline-none focus-visible:ring-1 focus-visible:ring-accent-border disabled:border-dashed disabled:text-tertiary',
+  h4: 'mt-5 mb-2 text-body-sm font-semibold uppercase tracking-kicker text-secondary',
+  refused: 'flex items-baseline gap-3 rounded-sm bg-alarm px-3 py-2 text-body-sm text-primary',
+  radio: 'flex max-w-[22ch] cursor-pointer items-baseline gap-2',
+  promptbox: 'w-full rounded-sm border border-rule-control bg-panel p-3 font-mono text-mono-sm text-primary outline-none focus-visible:ring-1 focus-visible:ring-accent-border',
+  model: 'flex items-center gap-2',
+  hint: 'text-body-sm text-tertiary',
+  title: 'm-0 text-title font-semibold tracking-tight text-display',
+  scale: 'flex flex-wrap items-baseline gap-5 py-3',
+  promptname: 'mb-2 flex flex-wrap items-baseline gap-2 text-body font-semibold text-emphasis',
+  prompt: 'rounded-sm border-t border-rule-inner py-3',
+  num: 'w-20 rounded-sm border border-rule-control bg-card p-2 font-mono text-mono-sm text-primary outline-none focus-visible:ring-1 focus-visible:ring-accent-border disabled:border-dashed disabled:text-tertiary',
+  key: 'font-mono text-mono-sm text-secondary',
+  head: 'flex items-baseline gap-3 text-body-sm text-tertiary [&_code]:font-mono [&_code]:text-mono-sm [&_code]:text-secondary',
+  drafts: 'mt-3 flex flex-wrap items-center gap-3 border-t border-rule-inner pt-3',
+  draft: 'inline-flex items-center gap-1 rounded-sm border border-rule-inner px-1',
+} as const;
 
 /**
  * Everything that is a setting, in one screen (`1h`, `1i`, #223).
@@ -141,7 +181,7 @@ const Refusals = createContext(0);
  * already lead with the key (the caps, the budget) do not need it.
  */
 function Key({ name }: { name: string }) {
-  return <code className="v-set__key">{name}</code>;
+  return <code className={S.key}>{name}</code>;
 }
 
 function NumberField({
@@ -175,7 +215,7 @@ function NumberField({
   return (
     <input
       id={id}
-      className="v-set__num"
+      className={S.num}
       value={typed}
       disabled={disabled}
       inputMode="numeric"
@@ -221,7 +261,7 @@ function TextField({
   return (
     <input
       id={id}
-      className="v-set__text"
+      className={S.text}
       value={typed}
       disabled={disabled}
       placeholder={placeholder}
@@ -268,7 +308,7 @@ function ListField({
   return (
     <textarea
       id={id}
-      className="v-set__promptbox"
+      className={S.promptbox}
       rows={Math.max(3, Math.min(12, value.length + 1))}
       value={typed}
       disabled={disabled}
@@ -352,7 +392,7 @@ function ModelField({
 
   if (typing) {
     return (
-      <div className="v-set__model">
+      <div className={S.model}>
         <TextField
           id={id}
           value={value}
@@ -360,15 +400,15 @@ function ModelField({
           disabled={disabled}
           onSave={onSave}
         />
-        <button className="v-doc__again" onClick={() => setTyping(false)} disabled={disabled}>
+        <Button variant="quiet" size="sm" onClick={() => setTyping(false)} disabled={disabled}>
           pick from the list
-        </button>
+        </Button>
       </div>
     );
   }
 
   return (
-    <div className="v-set__model">
+    <div className={S.model}>
       <select
         id={id}
         value={current}
@@ -390,8 +430,8 @@ function ModelField({
         <option value={OTHER}>other…</option>
       </select>
       {/* Said, rather than an empty select that looks like a CLI with no models. */}
-      {listing === null && <span className="v-set__hint">asking {agent} for its models…</span>}
-      {why !== null && <span className="v-set__hint">{why}</span>}
+      {listing === null && <span className={S.hint}>asking {agent} for its models…</span>}
+      {why !== null && <span className={S.hint}>{why}</span>}
     </div>
   );
 }
@@ -437,21 +477,21 @@ function PromptBlock({
   const dirty = typed.trim() !== block.text.trim();
 
   return (
-    <div className="v-set__prompt">
-      <div className="v-set__promptname">
+    <div className={S.prompt}>
+      <div className={S.promptname}>
         <span>{block.name}</span>
         {block.usedBy.map((role) => (
-          <MetaChip key={role}>{role}</MetaChip>
+          <Badge key={role}>{role}</Badge>
         ))}
         {block.overridden ? (
-          <MetaChip kind="checkable">this project&apos;s</MetaChip>
+          <Badge variant="live">this project&apos;s</Badge>
         ) : (
-          <MetaChip>the default</MetaChip>
+          <Badge>the default</Badge>
         )}
       </div>
 
       <textarea
-        className="v-set__promptbox"
+        className={S.promptbox}
         rows={12}
         value={typed}
         disabled={busy}
@@ -459,13 +499,13 @@ function PromptBlock({
         onChange={(e) => setTyped(e.target.value)}
       />
 
-      <div className="v-set__promptrow">
-        <Button level="primary" disabled={busy || !dirty} onClick={() => onAdopt(block.name, typed)}>
+      <div className={S.promptrow}>
+        <Button variant="primary" disabled={busy || !dirty} onClick={() => onAdopt(block.name, typed)}>
           {dirty ? 'use this' : 'in force'}
         </Button>
         {/* Clears the key rather than writing the default in. See the header. */}
         <Button
-          level="secondary"
+          variant="secondary"
           disabled={busy || !block.overridden}
           onClick={() => onAdopt(block.name, '')}
         >
@@ -473,7 +513,7 @@ function PromptBlock({
         </Button>
         {block.overridden && !dirty && (
           <button
-            className="v-set__again"
+            className={S.again}
             onClick={() => setTyped(block.fallback)}
             disabled={busy}
           >
@@ -482,9 +522,9 @@ function PromptBlock({
         )}
       </div>
 
-      <div className="v-set__promptrow">
+      <div className={S.promptrow}>
         <input
-          className="v-set__text"
+          className={S.text}
           value={name}
           disabled={busy}
           placeholder="name this version to save it"
@@ -493,7 +533,7 @@ function PromptBlock({
         />
         {/* Saving touches no run. It is the library, not the config. */}
         <Button
-          level="secondary"
+          variant="secondary"
           disabled={busy || name.trim() === '' || typed.trim() === ''}
           onClick={() => {
             onSaveDraft({ block: block.name, name, text: typed });
@@ -505,15 +545,15 @@ function PromptBlock({
       </div>
 
       {mine.length > 0 && (
-        <div className="v-set__drafts">
-          <span className="v-set__factname">saved</span>
+        <div className={S.drafts}>
+          <span className={S.factname}>saved</span>
           {mine.map((d) => (
-            <span className="v-set__draft" key={d.name}>
-              <button className="v-set__again" disabled={busy} onClick={() => setTyped(d.text)}>
+            <span className={S.draft} key={d.name}>
+              <button className={S.again} disabled={busy} onClick={() => setTyped(d.text)}>
                 {d.name}
               </button>
               <button
-                className="v-nav__act v-nav__act--danger"
+                className="cursor-pointer border-0 bg-transparent px-1.5 text-label text-tertiary hover:text-emphasis"
                 disabled={busy}
                 title={`forget "${d.name}"`}
                 onClick={() => onRemoveDraft(block.name, d.name)}
@@ -522,7 +562,7 @@ function PromptBlock({
               </button>
             </span>
           ))}
-          <span className="v-set__note">
+          <span className={S.note}>
             Loading one puts it in the box. It is not in force until you press{' '}
             <strong>use this</strong>.
           </span>
@@ -597,9 +637,9 @@ function WhereItIs({ dir, onRelocate }: { dir: string; onRelocate: (to: string) 
   useEffect(() => setTyped(dir), [dir]);
   const point = (to: string): void => setWhy(onRelocate(to));
   return (
-    <section className="v-set__block">
-      <h3 className="v-set__h">where this project is</h3>
-      <p className="v-set__note">
+    <section className={S.block}>
+      <h3 className={S.h}>where this project is</h3>
+      <p className={S.note}>
         The repository this project points at. Change it when the project was added one folder off —
         the parent of the repository rather than the repository — or when the repository moved. The
         project keeps its name, pins and drafts; the settings below are then read from the new
@@ -607,21 +647,21 @@ function WhereItIs({ dir, onRelocate }: { dir: string; onRelocate: (to: string) 
         <code>.vibe/runs</code>. Nothing on disk is moved or copied.
       </p>
       <form
-        className="v-set__promptrow"
+        className={S.promptrow}
         onSubmit={(e) => {
           e.preventDefault();
           point(typed);
         }}
       >
         <input
-          className="v-set__text"
+          className={S.text}
           value={typed}
           spellCheck={false}
           aria-label="the project's directory"
           onChange={(e) => setTyped(e.target.value)}
         />
         <Button
-          level="secondary"
+          variant="secondary"
           type="button"
           onClick={() => {
             void pickDirectory()
@@ -635,13 +675,13 @@ function WhereItIs({ dir, onRelocate }: { dir: string; onRelocate: (to: string) 
         >
           choose…
         </Button>
-        <Button level="primary" type="submit" disabled={typed.trim() === dir.trim()}>
+        <Button variant="primary" type="submit" disabled={typed.trim() === dir.trim()}>
           point here
         </Button>
       </form>
       {why !== null && (
-        <div className="v-set__refused">
-          <StateKicker tone="alarm">refused</StateKicker>
+        <div className={S.refused}>
+          <Badge variant="alarm">refused</Badge>
           <span>{why}</span>
         </div>
       )}
@@ -811,13 +851,13 @@ export function Settings({
 
   if (frame === null) {
     return (
-      <div className="v-set v-set--empty">
-        <StateKicker tone={failure === null ? 'quiet' : 'alarm'}>
+      <div className={EMPTY}>
+        <Badge variant={failure === null ? 'quiet' : 'alarm'}>
           {failure === null ? 'reading' : 'no configuration'}
-        </StateKicker>
+        </Badge>
         <p>{failure ?? 'asking the host what this repository is configured to do…'}</p>
         {failure !== null && (
-          <button className="v-set__again" onClick={load}>
+          <button className={S.again} onClick={load}>
             try again
           </button>
         )}
@@ -872,44 +912,44 @@ export function Settings({
     if (scope === 'global') {
       return (
         <>
-          {!own && <MetaChip>{unset}</MetaChip>}
-          {inFile(frame.raw, section, key) && <MetaChip>this project overrides it</MetaChip>}
+          {!own && <Badge>{unset}</Badge>}
+          {inFile(frame.raw, section, key) && <Badge>this project overrides it</Badge>}
         </>
       );
     }
     if (own) return null;
     return inFile(frame.globalRaw, section, key) ? (
-      <MetaChip>all projects</MetaChip>
+      <Badge>all projects</Badge>
     ) : (
-      <MetaChip>{unset}</MetaChip>
+      <Badge>{unset}</Badge>
     );
   };
 
   return (
     <Refusals.Provider value={refusals}>
-    <div className="v-set">
+    <div className={cn(PANE, "w-full max-w-5xl gap-5 [&_code]:font-mono [&_code]:text-mono-sm [&_code]:text-secondary")}>
       {/* **Which file, said here** (#223). Chosen by the door this screen was
           opened from, so the heading and the line under it are what tell the two
           apart — nothing else on the screen looks different. */}
-      <h2 className="v-set__title">
+      <h2 className={S.title}>
         {scope === 'global' ? 'Settings for all projects' : `Settings for ${projectName(dir)}`}
       </h2>
-      <p className="v-set__note">
+      <p className={S.note}>
         {scope === 'project'
           ? 'This repository’s own settings, in its vibe.config.json. Anything left alone here comes from your settings for all projects, and failing that from vibe’s own default — the chip beside each value says which. The test command and the worktree are only ever set here.'
           : 'Your settings for every project on this machine. How each vendor is reached, the CLIs and the pilot’s permissions are only ever set here; for the rest, a project that sets a key in its own file wins, and the chip says when one does.'}
       </p>
       {scope === 'project' && onRelocate !== undefined && <WhereItIs dir={dir} onRelocate={onRelocate} />}
       {carry !== null && (
-        <div className="v-set__fact">
-          <span className="v-set__factname">bring the settings</span>
+        <div className={S.fact}>
+          <span className={S.factname}>bring the settings</span>
           <span>
             This directory has no <code>vibe.config.json</code>, and the one this project pointed at
             before does: <code>{carry.path}</code>. Copying it writes the same settings here, checked
             like any other save; the old file is left where it is.
-            <span className="v-set__inline">
+            <span className={S.inline}>
               <Button
-                level="primary"
+                variant="primary"
                 disabled={busy}
                 // The offer goes once the file exists, and stays on a refusal,
                 // which is shown above with the field it named.
@@ -921,7 +961,7 @@ export function Settings({
           </span>
         </div>
       )}
-      <div className="v-set__head">
+      <div className={S.head}>
         <span>
           {scope === 'global' ? (
             frame.globalPath === null ? (
@@ -938,19 +978,19 @@ export function Settings({
             <code>{frame.path}</code>
           )}
         </span>
-        <button className="v-set__again" onClick={load}>
+        <button className={S.again} onClick={load}>
           reread
         </button>
       </div>
 
       {failure !== null && (
-        <div className="v-set__refused">
-          <StateKicker tone="alarm">refused</StateKicker>
+        <div className={S.refused}>
+          <Badge variant="alarm">refused</Badge>
           <span>{failure} — nothing was written.</span>
         </div>
       )}
       {saved !== null && failure === null && (
-        <p className="v-set__note">saved to {saved}, and reread from it.</p>
+        <p className={S.note}>saved to {saved}, and reread from it.</p>
       )}
 
       {/* **Each kind of setting in the one view it belongs to** (#223). This
@@ -959,7 +999,7 @@ export function Settings({
           repository builds and tests only under "this project". The rest can
           be set at either level, project winning. */}
       {scope === 'project' ? (
-        <p className="v-set__note">
+        <p className={S.note}>
           How each vendor is reached, where the CLIs are, what the pilot may do without asking and
           how this window is drawn are this machine&apos;s, for every project — they are under
           Settings at the foot of the left bar.
@@ -967,16 +1007,16 @@ export function Settings({
       ) : (
         <>
           {/* ---- this window ------------------------------------------------- */}
-          <section className="v-set__block">
-            <h3 className="v-set__h">how this is drawn</h3>
-            <p className="v-set__note">
+          <section className={S.block}>
+            <h3 className={S.h}>how this is drawn</h3>
+            <p className={S.note}>
               This window, on this machine. It is not written to <code>vibe.config.json</code> — how
               big you like your text is not a fact about any run, and that file is meant to be
               committed.
             </p>
-            <div className="v-set__scale">
+            <div className={S.scale}>
               {STEPS.map((step) => (
-                <label key={step.scale} className="v-set__radio">
+                <label key={step.scale} className={S.radio}>
                   <input
                     type="radio"
                     name="type-scale"
@@ -992,7 +1032,7 @@ export function Settings({
             {/* Every size at once, which is what keeps the ramp the spec chose. A
                 control that moved body text alone would leave headings where they
                 were and break the relationships that make a page readable. */}
-            <p className="v-set__note">
+            <p className={S.note}>
               Every size moves together, so the proportions the design chose survive being scaled.
               Nothing else about the look is configurable: there is one palette, and it is the one the
               contrast gate is measured against.
@@ -1000,15 +1040,15 @@ export function Settings({
           </section>
 
           {/* ---- how each vendor is reached (#223) ---------------------------- */}
-          <section className="v-set__block">
-            <h3 className="v-set__h">Anthropic and OpenAI</h3>
+          <section className={S.block}>
+            <h3 className={S.h}>Anthropic and OpenAI</h3>
             {/* **Two choices per vendor.** *"There should be two options for both
                 anthropic and openAI: (1) subscription, (2) api key."* It replaced
                 three paragraphs explaining that a run's agents and the pilot are two
                 different processes. The choice covers both — *"we should use them
                 everywhere (pilot, runs, etc)"* — and is this machine's, in the
                 settings for all projects; keys stay in the OS keychain. */}
-            <p className="v-set__note">
+            <p className={S.note}>
               How vibe reaches each vendor — for runs and the pilot alike, in every project on this
               machine — and where the <code>claude</code> and <code>codex</code> CLIs are when it
               cannot find them. <code>vibe doctor</code> checks both.
@@ -1029,7 +1069,7 @@ export function Settings({
                 disabled={busy || frame.globalPath === null}
               />
             ))}
-            <h4 className="v-set__h4">the pilot&apos;s own ceiling</h4>
+            <h4 className={S.h4}>the pilot&apos;s own ceiling</h4>
             {/* **Moved here from beside the conversation** (#145 built it there,
                 #223 moved it): *"move pilot tokens and pilot $/day out of pilot chat
                 and into the same settings group"*. A ceiling is a setting, and this
@@ -1041,33 +1081,33 @@ export function Settings({
                 three, and it lands in the second: this window's, in `localStorage`,
                 this machine only. Not the project's file, which is committed, and
                 not the keychain, which holds one kind of secret. */}
-            <div className="v-set__fact">
-              <span className="v-set__factname">not the run&apos;s</span>
+            <div className={S.fact}>
+              <span className={S.factname}>not the run&apos;s</span>
               <span>
                 These bound the <strong>conversation</strong>, not the loop. A pilot turn on an API key
                 is the one place in this product where a dollar is a dollar — money moves and the vendor
                 publishes the usage — where the run&apos;s two ceilings above are work-volume brakes on a
                 subscription that bills nothing. The two never sum, and a run is never stopped by these.
-                <span className="v-set__inline">
+                <span className={S.inline}>
                   <NumberField
                     id="pilot-dailyTokens"
                     value={limits.dailyTokens ?? undefined}
                     disabled={false}
                     onSave={(n) => onLimits({ ...limits, dailyTokens: n > 0 ? n : null })}
                   />
-                  <span className="v-set__unit">tokens/day</span>
+                  <span className={S.unit}>tokens/day</span>
                   <NumberField
                     id="pilot-dailyUsd"
                     value={limits.dailyUsd ?? undefined}
                     disabled={false}
                     onSave={(n) => onLimits({ ...limits, dailyUsd: n > 0 ? n : null })}
                   />
-                  <span className="v-set__unit">$/day</span>
+                  <span className={S.unit}>$/day</span>
                 </span>
               </span>
             </div>
-            <div className="v-set__fact">
-              <span className="v-set__factname">blank is no ceiling</span>
+            <div className={S.fact}>
+              <span className={S.factname}>blank is no ceiling</span>
               <span>
                 Both are off by default, and that is deliberate: a hard default cap on a conversation
                 stops you mid-sentence for no good reason. <strong>Per day</strong> rather than per
@@ -1079,23 +1119,23 @@ export function Settings({
           </section>
 
           {/* ---- what the pilot may do without asking (#223) ------------------ */}
-          <section className="v-set__block">
-            <h3 className="v-set__h">what the pilot may do without asking</h3>
+          <section className={S.block}>
+            <h3 className={S.h}>what the pilot may do without asking</h3>
             {/* **Only ever the settings for all projects.** A project's `vibe.config.json` is committed, so a repository
                 you clone could otherwise put `rm` on its own pilot's safe list or
                 switch YOLO on for itself; the core refuses a project file that sets
                 any of this, by name. */}
-            <p className="v-set__note">
+            <p className={S.note}>
               These are this machine&apos;s, for every project — a project&apos;s own file is committed, so a repository you clone cannot widen what its
               pilot may do. Everything here still runs without a shell: one program and its arguments,
               the same on Windows, Linux and macOS.
             </p>
             {frame.globalPath === null ? (
-              <p className="v-set__note">Global settings are switched off, so none of this can be set.</p>
+              <p className={S.note}>Global settings are switched off, so none of this can be set.</p>
             ) : (
               <>
-                <div className="v-set__row">
-                  <label className="v-set__label" htmlFor="pilot-yolo">
+                <div className={S.row}>
+                  <label className={S.label} htmlFor="pilot-yolo">
                     YOLO mode
                   </label>
                   <select
@@ -1113,27 +1153,27 @@ export function Settings({
                     <option value="on">on — every command runs, and the whole disk is readable</option>
                   </select>
                 </div>
-                <div className="v-set__row">
+                <div className={S.row}>
                   {/* Was five minutes and fixed, from when the pilot only
                       answered; a full CLI editing files and running tests ran
                       out of it (#223). Minutes here, milliseconds in the file. */}
-                  <label className="v-set__label" htmlFor="pilot-timeout">
+                  <label className={S.label} htmlFor="pilot-timeout">
                     pilot turn limit
                     {source('pilot', 'timeoutMs')}
                   </label>
-                  <span className="v-set__inline">
+                  <span className={S.inline}>
                     <NumberField
                       id="pilot-timeout"
                       value={Math.round(frame.pilot.timeoutMs / 60_000)}
                       disabled={busy}
                       onSave={(n) => write({ pilot: { timeoutMs: n * 60_000 } }, 'global')}
                     />
-                    <span className="v-set__unit">minutes</span>
+                    <span className={S.unit}>minutes</span>
                     <Key name="pilot.timeoutMs" />
                   </span>
                 </div>
-                <div className="v-set__row">
-                  <label className="v-set__label" htmlFor="pilot-safe">
+                <div className={S.row}>
+                  <label className={S.label} htmlFor="pilot-safe">
                     commands that run without a card
                     {/* `source` answers correctly in both views: a project file can
                         never set this, so "this project overrides it" never shows. */}
@@ -1147,7 +1187,7 @@ export function Settings({
                     onSave={(next) => write({ pilot: { safeCommands: next } }, 'global')}
                   />
                 </div>
-                <p className="v-set__note">
+                <p className={S.note}>
                   One per line: a program and the arguments it starts with, so <code>git commit</code>{' '}
                   covers <code>git commit -m &quot;…&quot;</code>. A matching command still gets a card
                   if it names a path outside the directories below, or anything under <code>.git</code>.{' '}
@@ -1156,9 +1196,9 @@ export function Settings({
                   programs, with no shell: Linux and macOS have them all, and Windows has them only
                   where something like Git for Windows put them on <code>PATH</code>.
                 </p>
-                <div className="v-set__promptrow">
+                <div className={S.promptrow}>
                   <Button
-                    level="secondary"
+                    variant="secondary"
                     disabled={
                       busy ||
                       // Null is the default too: it is what this button writes.
@@ -1172,8 +1212,8 @@ export function Settings({
                     use the default list
                   </Button>
                 </div>
-                <div className="v-set__row">
-                  <label className="v-set__label" htmlFor="pilot-dirs">
+                <div className={S.row}>
+                  <label className={S.label} htmlFor="pilot-dirs">
                     directories it may also read and run in
                   </label>
                   <ListField
@@ -1188,7 +1228,7 @@ export function Settings({
                     onSave={(next) => write({ pilot: { dirs: next } }, 'global')}
                   />
                 </div>
-                <p className="v-set__note">
+                <p className={S.note}>
                   The project it is talking about is always readable. These are added to it, for every
                   project. YOLO mode replaces both with every disk on this machine.
                 </p>
@@ -1217,19 +1257,19 @@ export function Settings({
       )}
 
       {/* ---- how hard it tries, and what it will accept ------------------- */}
-      <section className="v-set__block">
-        <h3 className="v-set__h">how many rounds, and what it will accept</h3>
+      <section className={S.block}>
+        <h3 className={S.h}>how many rounds, and what it will accept</h3>
         {/* **The four caps and the tolerance were reachable only as flags.**
             Every one of them is a `--max-*` or `--p1-tolerance` on the CLI and
             a `loop.*` key in the file, so this is a form over settings that
             already existed rather than new configuration — which is the rule
             the whole screen is built under. */}
-        <p className="v-set__note">
+        <p className={S.note}>
           A cap is where the loop gives up and hands back, not where it is aiming. Reaching one
           stops the run <em>resumably</em> and writes what it was stuck on — nothing is lost, and
           a resume with a raised cap picks up from the same checkpoint.
         </p>
-        <table className="v-set__matrix">
+        <table className={S.matrix}>
           <tbody>
             {LIMITS.map((limit) => (
               <tr key={limit.key}>
@@ -1245,15 +1285,15 @@ export function Settings({
                     onSave={(n) => save({ loop: { [limit.key]: n } })}
                   />
                 </td>
-                <td className="v-set__why">{limit.note}</td>
+                <td className={S.why}>{limit.note}</td>
               </tr>
             ))}
           </tbody>
         </table>
 
-        <h4 className="v-set__h4">what counts as good enough</h4>
-        <div className="v-set__fact">
-          <span className="v-set__factname">P0</span>
+        <h4 className={S.h4}>what counts as good enough</h4>
+        <div className={S.fact}>
+          <span className={S.factname}>P0</span>
           <span>
             <strong>Always zero, and there is no setting for it.</strong> `gate()` refuses a round
             with any P0 before it looks at the tolerance at all —{' '}
@@ -1261,14 +1301,14 @@ export function Settings({
             accept one. A P0 is the judge saying this is wrong, not that it is imperfect.
           </span>
         </div>
-        <div className="v-set__fact">
-          <span className="v-set__factname">P1</span>
+        <div className={S.fact}>
+          <span className={S.factname}>P1</span>
           <span>
             How many the plan or the implementation may be <strong>accepted carrying</strong>,
             rather than sent back for another round. They are not forgiven: a carried P1 is
             stated in the next phase&apos;s prompt, listed in <code>OUTSTANDING.md</code>, and
             said on the run&apos;s summary. <code>0</code> demands a spotless verdict.
-            <span className="v-set__inline">
+            <span className={S.inline}>
               <NumberField
                 id="loop-p1Tolerance"
                 value={loop["p1Tolerance"]}
@@ -1279,29 +1319,29 @@ export function Settings({
             </span>
           </span>
         </div>
-        <div className="v-set__fact">
-          <span className="v-set__factname">P2 and P3</span>
+        <div className={S.fact}>
+          <span className={S.factname}>P2 and P3</span>
           <span>
             Never block anything. They are recorded on the round and carried into{' '}
             <code>FOLLOW-UPS.md</code>, which is what that file is for.
           </span>
         </div>
-        <h4 className="v-set__h4">when a turn has gone quiet</h4>
+        <h4 className={S.h4}>when a turn has gone quiet</h4>
         {/* **A ceiling on silence, and it is not the turn timeout.** The agent
             timeouts bound how long a turn may *take*; this bounds how long it
             may say nothing while taking it. A review turn went silent five
             minutes in and was killed thirty-nine minutes later when the Codex
             turn ceiling expired, having done nothing for any of it — raising
             that ceiling would only have bought a longer hang. */}
-        <div className="v-set__fact">
-          <span className="v-set__factname">silence</span>
+        <div className={S.fact}>
+          <span className={S.factname}>silence</span>
           <span>
             Minutes a turn may produce <strong>no output at all</strong> before it is stopped.
             Measured from the child&apos;s last line, which is the finer of the two clocks and the
             one a stall trips first — a long turn is not a quiet turn, because a turn is long by
             doing many things. Stopping is <em>resumable</em>, like every other cap here.{' '}
             <code>0</code> switches it off.
-            <span className="v-set__inline">
+            <span className={S.inline}>
               <NumberField
                 id="progress-maxQuietMinutes"
                 // Minutes on screen, milliseconds in the file. The config is in
@@ -1316,7 +1356,7 @@ export function Settings({
                 disabled={busy}
                 onSave={(n) => save({ progress: { maxQuietMs: n * 60_000 } })}
               />
-              <span className="v-set__unit">minutes</span>
+              <span className={S.unit}>minutes</span>
               <Key name="progress.maxQuietMs" />
                 {source('progress', 'maxQuietMs')}
             </span>
@@ -1325,8 +1365,8 @@ export function Settings({
       </section>
 
       {/* ---- what it may spend ------------------------------------------- */}
-      <section className="v-set__block">
-        <h3 className="v-set__h">what it may spend</h3>
+      <section className={S.block}>
+        <h3 className={S.h}>what it may spend</h3>
         {/* **The ceilings that end a run, and they were not here.** A run
             stopped with *"a ceiling in `budget` was reached"* and pointed at
             `budget.planShare`, and the footer's own note said *"Settings has the
@@ -1334,12 +1374,12 @@ export function Settings({
             Reported exactly that way: *"I got this error but don't see anywhere
             to edit this in settings. All of these types of settings need to be
             editable."* */}
-        <p className="v-set__note">
+        <p className={S.note}>
           Every one of these stops the run <em>resumably</em> and says which it was. Raising one and
           resuming picks up from the last checkpoint: a resume reads this file, so a change here
           reaches a run that has already started.
         </p>
-        <table className="v-set__matrix">
+        <table className={S.matrix}>
           <tbody>
             {/* Tokens in millions, because the ceiling is 25,000,000 and the
                 run's own message quotes it as `25.0M`. The file keeps the whole
@@ -1351,7 +1391,7 @@ export function Settings({
                 {source('budget', 'maxTokens')}
               </td>
               <td>
-                <span className="v-set__inline">
+                <span className={S.inline}>
                   <NumberField
                     id="budget-maxTokens"
                     value={
@@ -1362,10 +1402,10 @@ export function Settings({
                     disabled={busy}
                     onSave={(n) => save({ budget: { maxTokens: Math.round(n * 1_000_000) } })}
                   />
-                  <span className="v-set__unit">million</span>
+                  <span className={S.unit}>million</span>
                 </span>
               </td>
-              <td className="v-set__why">
+              <td className={S.why}>
                 the only ceiling that counts <strong>both</strong> agents, and so the one that
                 actually bounds a run. <code>0</code> is no limit.
               </td>
@@ -1379,7 +1419,7 @@ export function Settings({
                 {/* A fraction in the file and a percentage on screen, for the
                     reason the tokens are in millions: the run's own message says
                     `40% cap`. */}
-                <span className="v-set__inline">
+                <span className={S.inline}>
                   <NumberField
                     id="budget-planShare"
                     value={
@@ -1390,10 +1430,10 @@ export function Settings({
                     disabled={busy}
                     onSave={(n) => save({ budget: { planShare: n / 100 } })}
                   />
-                  <span className="v-set__unit">% of the ceiling</span>
+                  <span className={S.unit}>% of the ceiling</span>
                 </span>
               </td>
-              <td className="v-set__why">
+              <td className={S.why}>
                 how much of it planning may use before stopping. Planning that will not converge is
                 the most expensive way to fail — it produces nothing, and the whole-run ceiling only
                 catches it once the budget is gone. <code>0</code> disables it.
@@ -1405,17 +1445,17 @@ export function Settings({
                 {source('budget', 'maxCostUsd')}
               </td>
               <td>
-                <span className="v-set__inline">
+                <span className={S.inline}>
                   <NumberField
                     id="budget-maxCostUsd"
                     value={typeof budget['maxCostUsd'] === 'number' ? budget['maxCostUsd'] : undefined}
                     disabled={busy}
                     onSave={(n) => save({ budget: { maxCostUsd: n } })}
                   />
-                  <span className="v-set__unit">$, Claude-side</span>
+                  <span className={S.unit}>$, Claude-side</span>
                 </span>
               </td>
-              <td className="v-set__why">
+              <td className={S.why}>
                 <strong>Not money on a subscription.</strong> The Claude CLI derives it from token
                 counts at API rates and nothing is billed; Codex reports no cost at all, so this
                 covers half a run. Treat it as a second work-volume brake.
@@ -1427,7 +1467,7 @@ export function Settings({
                 {source('budget', 'maxWaitMinutes')}
               </td>
               <td>
-                <span className="v-set__inline">
+                <span className={S.inline}>
                   <NumberField
                     id="budget-maxWaitMinutes"
                     value={
@@ -1438,10 +1478,10 @@ export function Settings({
                     disabled={busy}
                     onSave={(n) => save({ budget: { maxWaitMinutes: n } })}
                   />
-                  <span className="v-set__unit">minutes</span>
+                  <span className={S.unit}>minutes</span>
                 </span>
               </td>
-              <td className="v-set__why">
+              <td className={S.why}>
                 the longest rate-limit window the loop will sit out rather than stopping. A wait can
                 be stopped from the footer now, so this is where it gives up on its own.
               </td>
@@ -1452,7 +1492,7 @@ export function Settings({
                 {source('budget', 'codexLimitPercent')}
               </td>
               <td>
-                <span className="v-set__inline">
+                <span className={S.inline}>
                   <NumberField
                     id="budget-codexLimitPercent"
                     value={
@@ -1463,10 +1503,10 @@ export function Settings({
                     disabled={busy}
                     onSave={(n) => save({ budget: { codexLimitPercent: n } })}
                   />
-                  <span className="v-set__unit">% used</span>
+                  <span className={S.unit}>% used</span>
                 </span>
               </td>
-              <td className="v-set__why">
+              <td className={S.why}>
                 stop before a Codex turn once its rate-limit window is this full. A whole-run brake,
                 not per-turn metering — the figure is an integer percent of a rolling window and does
                 not move measurably for one turn. <code>0</code> disables it.
@@ -1477,22 +1517,22 @@ export function Settings({
       </section>
 
       {scope === 'global' ? (
-        <p className="v-set__note">
+        <p className={S.note}>
           The test command and the worktree settings are set per project, because how a repository
           is built and tested is a fact about that repository — they are under the ⚙ on that
           project&apos;s row in the left bar.
         </p>
       ) : (
         <>
-          <section className="v-set__block">
-            <h3 className="v-set__h">how the run checks its work</h3>
+          <section className={S.block}>
+            <h3 className={S.h}>how the run checks its work</h3>
             {/* **A required gate with nothing to run ends a finished run as
                 unverified** (#223). The core auto-detects only `npm test` from a
                 `package.json`, so on a Bazel or Make project the gate had no command,
                 the run spent two and a half hours and 42M tokens, and it ended exit 7
                 with nothing having tested the change. This field was reachable only
                 by hand-editing `vibe.config.json`. */}
-            <p className="v-set__note">
+            <p className={S.note}>
               After every implementation and fix round the loop runs this command and treats a
               non-zero exit as a failure to fix. Left empty, vibe looks for a <code>test</code> script
               in <code>package.json</code> and runs <code>npm test</code> — and finds nothing on any
@@ -1500,8 +1540,8 @@ export function Settings({
               is done. Set it to whatever your suite is: <code>bazel test //tests/...</code>,{' '}
               <code>make test</code>, <code>pytest</code>, <code>cargo test</code>.
             </p>
-            <div className="v-set__row">
-              <label className="v-set__label" htmlFor="verify-enabled">
+            <div className={S.row}>
+              <label className={S.label} htmlFor="verify-enabled">
                 verify each round
                 <Key name="verify.enabled" />
                 {source('verify', 'enabled')}
@@ -1517,13 +1557,13 @@ export function Settings({
               </select>
             </div>
             {listsGates ? (
-              <p className="v-set__note">
+              <p className={S.note}>
                 This project lists its gates under <code>verify.gates</code> in{' '}
                 <code>vibe.config.json</code>, each with its own command, so they are edited there.
               </p>
             ) : (
-              <div className="v-set__row">
-                <label className="v-set__label" htmlFor="verify-command">
+              <div className={S.row}>
+                <label className={S.label} htmlFor="verify-command">
                   test command
                   <Key name="verify.command" />
                 {source('verify', 'command', 'auto-detect')}
@@ -1539,8 +1579,8 @@ export function Settings({
                 />
               </div>
             )}
-            <div className="v-set__row">
-              <label className="v-set__label" htmlFor="verify-runs">
+            <div className={S.row}>
+              <label className={S.label} htmlFor="verify-runs">
                 times it must pass
                 <Key name="verify.runs" />
                 {source('verify', 'runs')}
@@ -1552,8 +1592,8 @@ export function Settings({
                 onSave={(next) => save({ verify: { runs: next } })}
               />
             </div>
-            <div className="v-set__row">
-              <label className="v-set__label" htmlFor="verify-timeout">
+            <div className={S.row}>
+              <label className={S.label} htmlFor="verify-timeout">
                 how long one run may take, in minutes
                 <Key name="verify.timeoutMs" />
                 {source('verify', 'timeoutMs')}
@@ -1569,7 +1609,7 @@ export function Settings({
                 onSave={(next) => save({ verify: { timeoutMs: next * 60_000 } })}
               />
             </div>
-            <p className="v-set__note">
+            <p className={S.note}>
               It runs through a shell in the directory the run works in — the worktree, when that is
               on below — so a worktree has to be able to build. That is what the worktree&apos;s setup
               command is for. More than one pass is how a flaky suite is told from a broken one; a
@@ -1577,8 +1617,8 @@ export function Settings({
             </p>
           </section>
 
-          <section className="v-set__block">
-            <h3 className="v-set__h">where the run does its work</h3>
+          <section className={S.block}>
+            <h3 className={S.h}>where the run does its work</h3>
             {/* **A worktree is a thing AGENTS.md tells a human to do**, and doing it
                 by hand is four commands and a cleanup nobody remembers. Asked for as
                 *"the pilot should automatically start a worktree for the vibe session
@@ -1586,20 +1626,20 @@ export function Settings({
 
                 The section says what it costs as well as what it buys, because the
                 cost is disk and nothing in the product reclaims it. */}
-            <p className="v-set__note">
+            <p className={S.note}>
               With this on, a run works in <code>.worktrees/&lt;run-id&gt;</code> instead of in the
               repository — so the tree being edited is not the tree you are sitting in, and several
               runs can exist side by side on their own branches. The run&apos;s record stays in the
               repository either way: an archive written into a worktree is one the next run&apos;s
               planner cannot read.
             </p>
-            <p className="v-set__note">
+            <p className={S.note}>
               Nothing removes them. One worktree per run, and a checkout that has built a large
               project is gigabytes — they are named after the run so the ones worth deleting can be
               told apart.
             </p>
-            <div className="v-set__row">
-              <label className="v-set__label" htmlFor="git-worktree">
+            <div className={S.row}>
+              <label className={S.label} htmlFor="git-worktree">
                 work in a worktree
                 <Key name="git.worktree" />
                 {source('git', 'worktree')}
@@ -1620,8 +1660,8 @@ export function Settings({
                 <option value="on">on — a worktree per run</option>
               </select>
             </div>
-            <div className="v-set__row">
-              <label className="v-set__label" htmlFor="git-worktree-command">
+            <div className={S.row}>
+              <label className={S.label} htmlFor="git-worktree-command">
                 how to make one
                 <Key name="git.worktreeCommand" />
                 {source('git', 'worktreeCommand')}
@@ -1634,14 +1674,14 @@ export function Settings({
                 onSave={(next) => save({ git: { worktreeCommand: next === '' ? null : next } })}
               />
             </div>
-            <p className="v-set__note">
+            <p className={S.note}>
               Left empty, vibe runs <code>git worktree add --detach</code> and nothing else — which
               gives you a checkout with no dependencies installed, so on most projects the
               verification gate cannot run in it. That is what this field is for. It runs through a
               shell in the repository, so it can be a sequence, and these are its placeholders —
               environment variables, so quote them:
             </p>
-            <ul className="v-set__note">
+            <ul className={S.note}>
               <li>
                 <code>$VIBE_WORKTREE</code> — the directory the worktree must be created at
               </li>
@@ -1654,12 +1694,12 @@ export function Settings({
                 <code>$VIBE_REPO</code> — the repository, and <code>$VIBE_RUN_ID</code> — the run
               </li>
             </ul>
-            <p className="v-set__note">
+            <p className={S.note}>
               On Windows they are <code>%VIBE_WORKTREE%</code> and so on. It must leave a git working
               tree at the worktree path; if it does not, the run refuses before spending anything.
             </p>
-            <div className="v-set__row">
-              <label className="v-set__label" htmlFor="git-worktree-timeout">
+            <div className={S.row}>
+              <label className={S.label} htmlFor="git-worktree-timeout">
                 how long that may take, in minutes
                 <Key name="git.worktreeTimeoutMs" />
                 {source('git', 'worktreeTimeoutMs')}
@@ -1679,9 +1719,9 @@ export function Settings({
         </>
       )}
 
-      <section className="v-set__block">
-        <h3 className="v-set__h">where the loop hands control back</h3>
-        <table className="v-set__matrix">
+      <section className={S.block}>
+        <h3 className={S.h}>where the loop hands control back</h3>
+        <table className={S.matrix}>
           <thead>
             <tr>
               <th>boundary</th>
@@ -1703,7 +1743,7 @@ export function Settings({
                 </td>
                 {frame.modes.map((mode) => (
                   <td key={mode}>
-                    <label className="v-set__radio">
+                    <label className={S.radio}>
                       <input
                         type="radio"
                         name={boundary}
@@ -1723,12 +1763,12 @@ export function Settings({
                 and somebody who believes they armed a gate finds out by
                 watching a run go past it. */}
             {Object.entries(frame.ungateable).map(([boundary, why]) => (
-              <tr key={boundary} className="v-set__row--off">
+              <tr key={boundary} className="[&_code]:text-tertiary">
                 <td>
                   <code>{boundary}</code>
-                  <MetaChip kind="alarm">cannot hold</MetaChip>
+                  <Badge variant="alarm">cannot hold</Badge>
                 </td>
-                <td colSpan={frame.modes.length + 1} className="v-set__why">
+                <td colSpan={frame.modes.length + 1} className={S.why}>
                   {why}
                 </td>
               </tr>
@@ -1737,19 +1777,18 @@ export function Settings({
         </table>
       </section>
 
-      <section className="v-set__block">
-        <h3 className="v-set__h">who does what</h3>
+      <section className={S.block}>
+        <h3 className={S.h}>who does what</h3>
         {/* The models are the CLIs' own lists, asked when the window opened. A
             CLI updated since then has a newer list, and this asks again. */}
-        <p className="v-set__note">
+        <p className={S.note}>
           Models are listed by each CLI on your account.{' '}
-          <button
-            className="v-doc__again"
+          <Button variant="quiet" size="sm"
             disabled={models.claude === null || models.codex === null}
             onClick={() => loadCliModels(true)}
           >
             check again
-          </button>
+          </Button>
         </p>
         {/*
           `1i`'s roles table, and the only part of global settings that is real
@@ -1761,7 +1800,7 @@ export function Settings({
           does, so changing one field leaves a model `vibe.config.json` named
           alone. That is `roleSetting`'s behaviour and this sends the same shape.
         */}
-        <table className="v-set__matrix">
+        <table className={S.matrix}>
           <thead>
             <tr>
               <th>role</th>
@@ -1859,8 +1898,8 @@ export function Settings({
       </section>
 
       {/* ---- what every turn is told ------------------------------------- */}
-      <section className="v-set__block">
-        <h3 className="v-set__h">what each turn is told</h3>
+      <section className={S.block}>
+        <h3 className={S.h}>what each turn is told</h3>
         {/* **What this can honestly show, and what it cannot.** A prompt here is
             a function of the run — `planPrompt` takes the task and the prior-run
             index, `critiquePrompt` takes the plan it is judging, `fixPrompt`
@@ -1872,7 +1911,7 @@ export function Settings({
             somebody reading a settings screen is actually asking about: what
             instructions is the reviewer permanently under. They arrive verbatim
             from the same constants the prompts interpolate. */}
-        <p className="v-set__note">
+        <p className={S.note}>
           These are the <strong>standing</strong> instructions — the blocks every turn of a kind
           gets unchanged, quoted from the source rather than described. What is assembled per
           turn — the brief, the plan being judged, the findings, the diff — is in that run&apos;s
@@ -1885,13 +1924,13 @@ export function Settings({
             reviewer under different standing instructions has no other way to
             get one. What keeps the cost visible is that an overridden block is
             named on the run's own config, like any other setting. */}
-        <p className="v-set__note">
+        <p className={S.note}>
           Editing one changes what every turn of that kind is told,{' '}
           <strong>in this project</strong>: it is written to <code>vibe.config.json</code>, which
           is committed. A run whose reviewer was told something different says so on its own
           config — which is what keeps two runs comparable.
         </p>
-        <p className="v-set__note">
+        <p className={S.note}>
           <strong>Saving a version and using it are separate.</strong> A saved version lives in
           this window and changes nothing about any run; <em>use this</em> is the one that writes
           the project&apos;s file. <em>Use the default</em> clears the key rather than copying
@@ -1904,17 +1943,17 @@ export function Settings({
           title="the blocks, in full"
           meta={
             prompts.blocks.length > 0 ? (
-              <MetaChip>{prompts.blocks.length} blocks</MetaChip>
+              <Badge>{prompts.blocks.length} blocks</Badge>
             ) : undefined
           }
         >
           {prompts.failure !== null && (
-            <p className="v-set__note">
-              <StateKicker tone="alarm">not read</StateKicker> {prompts.failure}
+            <p className={S.note}>
+              <Badge variant="alarm">not read</Badge> {prompts.failure}
             </p>
           )}
           {prompts.failure === null && prompts.loading && prompts.blocks.length === 0 && (
-            <p className="v-set__note">asking the host what every turn is told…</p>
+            <p className={S.note}>asking the host what every turn is told…</p>
           )}
           {prompts.blocks.map((block) => (
             <PromptBlock

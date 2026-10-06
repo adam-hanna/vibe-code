@@ -256,7 +256,9 @@ describe('a turn that has gone quiet has a ceiling, and it is on the screen', ()
     // that made somebody type 600000 to mean ten minutes would be the storage
     // layer's units leaking onto the screen.
     expect(settings).toMatch(/Math\.round\(progress\['maxQuietMs'\] \/ 60_000\)/);
-    expect(settings).toMatch(/<span className="v-set__unit">minutes<\/span>/);
+    // Case 2 (the UI rework): the unit's class is a named style now; the claim
+    // that the field is typed in minutes is unchanged.
+    expect(settings).toMatch(/<span className=\{S\.unit\}>minutes<\/span>/);
   });
 
   test('it says what it measures, because a long turn is not a quiet turn', () => {
@@ -276,8 +278,10 @@ describe('a turn that has gone quiet has a ceiling, and it is on the screen', ()
     // one helper gives all of them, so no row can draw the old two-way chip.
     expect(settings).toContain("{source('progress', 'maxQuietMs')}");
     const helper = settings.slice(settings.indexOf('const source = ('));
-    expect(helper).toContain('<MetaChip>{unset}</MetaChip>');
-    expect(helper).toContain('<MetaChip>all projects</MetaChip>');
+    // Case 2 (the UI rework): the chip is a Badge now; the claim that an unset
+    // value is marked as the default is unchanged.
+    expect(helper).toContain('<Badge>{unset}</Badge>');
+    expect(helper).toContain('<Badge>all projects</Badge>');
   });
 });
 
