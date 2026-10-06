@@ -48,6 +48,9 @@
   --color-rule-hatch: var(--rule-hatch);
 
   --color-accent: var(--accent-solid);
+  --color-accent-fill: var(--accent-fill);
+  --color-accent-fill-hover: var(--accent-fill-hover);
+  --color-on-accent: var(--accent-on-fill);
   --color-accent-on-tint: var(--accent-on-tint);
   --color-accent-border: var(--accent-border);
   --color-accent-border-dim: var(--accent-border-dim);

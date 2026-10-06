@@ -7,8 +7,8 @@ import { cn } from '@/lib/utils';
  * The one button (shadcn's shape, this design's tokens).
  *
  * Every colour below is a token through `theme.css`, so `audit:contrast` §1
- * still decides whether a pairing is legible. `primary` is the accent on the
- * page ground, which is the one dark-on-light pairing in the product and is
+ * still decides whether a pairing is legible. `primary` is white on the
+ * accent fill - VS Code's button, and the one solid fill in the product - and is
  * reserved for the action a screen is for; `quiet` is navigation and chrome.
  *
  * It states its own ground and border, which is what §9 of the audit is about:
@@ -19,7 +19,7 @@ export const buttonVariants = cva(
   {
     variants: {
       variant: {
-        primary: 'border-accent bg-accent text-page hover:bg-accent-muted',
+        primary: 'border-accent-fill bg-accent-fill text-on-accent hover:bg-accent-fill-hover',
         secondary: 'border-rule-control bg-card text-primary hover:bg-active hover:text-emphasis',
         quiet: 'border-transparent bg-transparent text-secondary hover:bg-card hover:text-emphasis',
         loss: 'border-rule-control bg-card text-loss hover:bg-alarm',
