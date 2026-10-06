@@ -1913,18 +1913,27 @@ export function Cockpit() {
                 `hostPid` is the live host's, so it is withheld from a run this
                 process is not running: a pid beside a finished run would name a
                 process that has nothing to do with it. */}
-            <LoopColumn
-              run={columnRun}
-              now={now}
-              compact
-              hostPid={past ? null : wire.hostPid}
-              onOpen={open}
-            />
-            {/* `4g`, and only on the ending that means the loop finished.
-                Every other exit is a halt, and a halt gets the footer's
-                banner and its one action rather than a summary of work that
-                stopped early. */}
-            {columnRun.completed?.exit === 0 && <Summary run={columnRun} />}
+            {/* One scroll for the rail AND the summary. Each used to size
+                itself - the rail `flex-1` and the summary by its content - so on
+                a finished run the summary's four tiles and its next step took
+                the column and left the rail a sliver with `Code review` cut in
+                half (reported from a screenshot: "there's a window that's
+                totally collapsed"). The footer stays outside, pinned, because
+                its one action must never need scrolling to. */}
+            <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+              <LoopColumn
+                run={columnRun}
+                now={now}
+                compact
+                hostPid={past ? null : wire.hostPid}
+                onOpen={open}
+              />
+              {/* `4g`, and only on the ending that means the loop finished.
+                  Every other exit is a halt, and a halt gets the footer's
+                  banner and its one action rather than a summary of work that
+                  stopped early. */}
+              {columnRun.completed?.exit === 0 && <Summary run={columnRun} />}
+            </div>
             {/* The same footer, about the same run. Its live controls draw
                 themselves off `run.completed`, which a finished run has set — so
                 stop and pause do not appear beside one, and what remains is the

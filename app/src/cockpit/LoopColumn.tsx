@@ -1095,8 +1095,12 @@ function RunRail({ run, now, onOpen }: { run: Run; now: number; onOpen?: OpenAt 
     ? run.preflight === null ? null : elapsed(Math.max(0, now - run.preflight.at))
     : elapsed(activity.elapsedMs);
 
+  // `flex-none`: the rail is sized by its groups and the cockpit's wrapper is
+  // what scrolls, so a summary placed after it shares the scroll rather than
+  // squeezing it (AGENTS.md's rule that a scrolling column's children must not
+  // be allowed to shrink, applied to this one).
   return (
-    <section className="flex min-h-0 min-w-0 flex-1 flex-col gap-2.5 overflow-y-auto bg-column px-3 pb-3.5" aria-label="run status">
+    <section className="flex min-w-0 flex-none flex-col gap-2.5 bg-column px-3 pb-3.5" aria-label="run status">
       {/* The `now` card: what is happening, in one sentence, with a state bar
           down its left edge in the state's colour. */}
       <div
