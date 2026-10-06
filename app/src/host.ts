@@ -362,6 +362,10 @@ export interface PastCommand {
   truncated: boolean;
   bytes: number;
   lost: boolean;
+  /** The process; null on a record older than the field. `src/commandlog.ts`. */
+  pid?: number | null;
+  /** Picked back up from an earlier launch, so its exit code cannot be seen. */
+  adopted?: boolean;
 }
 
 /** One model a CLI offers. `src/models.ts`. */

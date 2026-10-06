@@ -71,6 +71,28 @@ describe('a past command', () => {
     expect(execute(call('stop_command', { id: 'cmd-4' }), ctx(state)).kind).toBe('refused');
   });
 
+  test('one still running was picked back up: it is running, follows output, and can be stopped', () => {
+    const up = past({ endedAt: null, code: null, lost: false, adopted: true, pid: 4242, output: 'up on 5174\n', bytes: 11 });
+    let state = restore(noCommands(), [up]);
+    expect(isRunning(state.all[0]!)).toBe(true);
+    state = reduceCommands(state, { type: 'command_output', commandId: 'cmd-4', chunk: 'GET /\n' });
+    expect(state.all[0]?.output).toBe('up on 5174\nGET /\n');
+    expect(state.all[0]?.bytes).toBe(17);
+    const read = execute(call('read_command', { id: 'cmd-4' }), ctx(state));
+    const seen = JSON.parse(read.kind === 'ran' ? read.content : '{}') as { running: boolean };
+    expect(seen.running).toBe(true);
+    expect(execute(call('stop_command', { id: 'cmd-4' }), ctx(state)).kind).toBe('proposes');
+    // Not the host's child, so its ending has no code - said, not called a failure.
+    state = reduceCommands(state, { type: 'command_ended', commandId: 'cmd-4', code: null, signal: null, stopped: false, endedAt: 20_000 });
+    expect(outcome(state.all[0]!)).toMatch(/exit code not seen/);
+  });
+
+  test('one that outlived the host and then ended is down, and says when it went', () => {
+    const down = restore(noCommands(), [past({ endedAt: null, code: null, lost: true, pid: 4242 })]).all[0]!;
+    expect(isRunning(down)).toBe(false);
+    expect(outcome(down)).toBe('ended while the app was closed');
+  });
+
   test('a truncated log keeps the cursor arithmetic honest', () => {
     const one = restore(noCommands(), [past({ output: 'tail', truncated: true, bytes: 104 })]).all[0]!;
     expect(tail(one, 0)).toEqual({ text: 'tail', missed: 100, cursor: 104 });

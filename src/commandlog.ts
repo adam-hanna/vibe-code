@@ -50,6 +50,18 @@ export interface CommandMeta {
   code: number | null;
   signal: string | null;
   stopped: boolean;
+  /**
+   * The process, and on POSIX the process group it leads (#223). What lets a
+   * later launch find a command still running and pick it back up. Null on a
+   * record written before the field, and on a spawn that never got one.
+   */
+  pid: number | null;
+  /**
+   * Picked up by a launch that did not start it, so its exit code can never be
+   * seen: it is not that process's child. An ending with no code is then a
+   * fact about who was watching, not a command that died without one.
+   */
+  adopted: boolean;
 }
 
 /** A past command as a window reads it back. */
@@ -65,9 +77,11 @@ export interface PastCommand extends CommandMeta {
    */
   bytes: number;
   /**
-   * The host went away while it was running, without a word from it: a crash,
-   * or a kill that ran none of this process's code. Its ending was never seen,
-   * so `endedAt` stays null and this says why rather than drawing it as live.
+   * Not running, and its ending was never seen: the host went away while it was
+   * running and the process is gone too - it ended while the app was closed,
+   * or (with no `pid`) a host that died took it down. `endedAt` stays null and
+   * this says why rather than drawing it as live. A command that is still
+   * running when a launch reads this is picked back up instead (`commands.ts`).
    */
   lost: boolean;
 }
@@ -101,6 +115,8 @@ function metaOf(row: unknown): CommandMeta | null {
     code,
     signal,
     stopped: r['stopped'] === true,
+    pid: typeof r['pid'] === 'number' && Number.isInteger(r['pid']) && r['pid'] > 0 ? r['pid'] : null,
+    adopted: r['adopted'] === true,
   };
 }
 
@@ -139,13 +155,18 @@ export function writeMeta(dir: string, meta: CommandMeta): void {
   renameSync(temp, file);
 }
 
+/** Where one command's output is kept. */
+export function logFile(dir: string, id: string): string {
+  return path.join(dir, `${id}.log`);
+}
+
 /** Append output as it arrives. */
 export function appendLog(dir: string, id: string, chunk: string): void {
-  appendFileSync(path.join(dir, `${id}.log`), chunk, 'utf8');
+  appendFileSync(logFile(dir, id), chunk, 'utf8');
 }
 
 /** The last `keep` bytes of a log, cut at a character boundary, and the file's size. */
-function tailOf(file: string, keep: number): { text: string; size: number } {
+export function tailOf(file: string, keep: number): { text: string; size: number } {
   let fd: number;
   try {
     fd = openSync(file, 'r');
@@ -170,7 +191,8 @@ function tailOf(file: string, keep: number): { text: string; size: number } {
  * Every past command, oldest first, each with the end of its log.
  *
  * Called once a process starts, before it has started anything, so any record
- * still marked running belongs to a host that is gone: it is `lost`.
+ * still marked running belongs to a host that is gone: it is `lost` here, and
+ * `keepCommandLogs` takes back the ones whose process is still alive.
  */
 export function pastCommands(dir: string, keep: number): PastCommand[] {
   return metas(dir).map((meta) => {

@@ -1,7 +1,8 @@
 import { requestCancel } from '@src/cancel.js';
 import { main } from '@src/cli.js';
 import { commandLogDir } from '@src/commandlog.js';
-import { keepCommandLogs, refused as commandRefused, startCommand, stopAllCommands, stopCommand } from '@src/commands.js';
+import { adoptedSnapshot, keepCommandLogs, refused as commandRefused, startCommand, stopTiedCommands, stopCommand } from '@src/commands.js';
+import type { Handlers as CommandHandlers } from '@src/commands.js';
 import type { PastCommand } from '@src/commandlog.js';
 import { pilotChat } from '@src/pilotchat.js';
 import { pilotCodex } from '@src/pilotcodex.js';
@@ -577,7 +578,12 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       // A read of what was loaded at start-up, never of the directory now: a
       // command this process started is already in the window, live, and
       // listing it again here would draw it twice.
-      send({ type: 'commands_past', id: msg.id, commands: deps.pastCommands ?? [] });
+      //
+      // One that was picked back up is the exception, and is answered as it is
+      // NOW: its output has moved on since start-up, and the frames carrying
+      // that went to a window that did not know the id yet.
+      const past = (deps.pastCommands ?? []).map((p) => adoptedSnapshot(p.id) ?? p);
+      send({ type: 'commands_past', id: msg.id, commands: past });
       return;
     }
 
@@ -771,21 +777,7 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       // Deliberately not awaited. A dev server does not exit, and that is the
       // point of it: `command_started` answers now, output arrives as it comes,
       // and `command_ended` lands whenever it lands.
-      const started = startCommand({
-        program: msg.program,
-        args: msg.args,
-        dir: msg.dir,
-        onOutput: (commandId, chunk) => send({ type: 'command_output', commandId, chunk }),
-        onEnd: (record) =>
-          send({
-            type: 'command_ended',
-            commandId: record.id,
-            code: record.code,
-            signal: record.signal,
-            stopped: record.stopped,
-            endedAt: record.endedAt ?? Date.now(),
-          }),
-      });
+      const started = startCommand({ program: msg.program, args: msg.args, dir: msg.dir, ...commandFrames(send) });
       send(
         commandRefused(started)
           ? { type: 'command_started', id: msg.id, command: null, refused: started.refused }
@@ -1046,10 +1038,29 @@ export function installProtocolStdout(): Send {
  * after the first request would tell a host the protocol version too late to
  * act on it.
  */
+/**
+ * The frames a command's output and ending travel as - one definition for a
+ * command this process starts and one an earlier launch left running (#223).
+ */
+export function commandFrames(send: (m: Outbound) => void): CommandHandlers {
+  return {
+    onOutput: (commandId, chunk) => send({ type: 'command_output', commandId, chunk }),
+    onEnd: (record) =>
+      send({
+        type: 'command_ended',
+        commandId: record.id,
+        code: record.code,
+        signal: record.signal,
+        stopped: record.stopped,
+        endedAt: record.endedAt ?? Date.now(),
+      }),
+  };
+}
+
 export async function serve(): Promise<void> {
   const send = installProtocolStdout();
   const logs = commandLogDir();
-  const session = createSession(send, { pastCommands: logs === null ? [] : keepCommandLogs(logs) });
+  const session = createSession(send, { pastCommands: logs === null ? [] : keepCommandLogs(logs, commandFrames(send)) });
   log.setSink(session.sink);
 
   send({ type: 'ready', protocol: PROTOCOL_VERSION, pid: process.pid });
@@ -1096,13 +1107,15 @@ export async function serve(): Promise<void> {
   // `reaper.rs` takes them with the app; where it cannot, `Status.uncontained`
   // already says so rather than the app pretending otherwise.
   //
-  // **Commands are killed here, and the asymmetry is deliberate** (#211). A run's
-  // agent children are work a person launched and a resume picks up; a dev
-  // server a person started from this window is not something anything picks
-  // up, and one left listening on 5173 after its window has gone is a port
-  // nobody can find the owner of. `process.exit` runs no `close` handler, so
-  // this is the last point at which anything can ask.
-  stopAllCommands();
+  // **A command is left running when the next launch can pick it up** (#223).
+  // This used to kill every one, because a dev server left listening after its
+  // window had gone was a port nobody could find the owner of (#211). Once its
+  // pid and its output are on disk the next launch finds it - and a relaunch
+  // killing every server the pilot had started was the report that moved it.
+  // What cannot be picked up - a piped command, on Windows or with no log
+  // directory - is still stopped here, since `process.exit` runs no `close`
+  // handler and this is the last point at which anything can ask.
+  stopTiedCommands();
   process.exitCode = HOST_EXIT_ABANDONED;
   process.exit(HOST_EXIT_ABANDONED);
 }

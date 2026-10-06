@@ -2036,9 +2036,21 @@ displayed.**
   pressed.
 - **It runs where the window is pointed**, checked to exist first and never defaulted to
   `process.cwd()` — the defaulting that put the pilot in a home directory.
-- **A dev server is the point, so it survives**, and `stopAllCommands()` runs on the host's way
-  out. The asymmetry with a run's agent children is deliberate: those are work a resume picks
-  up, and a server left listening on 5173 after its window has gone is a port with no owner.
+- **A dev server is the point, so it survives — including a relaunch** (#223). This said a
+  server left listening after its window had gone was *"a port with no owner"*, and the host
+  killed every command on its way out. That was true while nothing could find it again; once
+  the log was on disk the next launch could, and what the old rule cost was every server the
+  pilot had started, on every rebuild — the pilot then reported, correctly, *"they stopped when
+  the previous session ended"*. So on POSIX, with a log directory, a command is spawned
+  **detached, writing straight into its log file**, and the host follows the file rather than a
+  pipe. `keepCommandLogs` takes back any record still marked running whose pid is alive **and
+  started when the record says** (`ps -o lstart`) — a live pid alone could be a stranger, and
+  the next stop would signal it. A picked-up command is not the host's child, so its ending
+  carries no exit code and the window says *exit code not seen* rather than calling it a
+  failure. A stop signals the **process group**, so `npm run dev` takes Vite with it.
+  `stopTiedCommands` still stops what cannot be picked up — Windows, where the host's children
+  sit in the app's job object and leaving it has not been measured, and a host with no log
+  directory.
 
 
 **A process the pilot starts is one it can follow, and one it can turn off** (#223). Running a

@@ -48,11 +48,20 @@ export interface Command {
    */
   bytes: number;
   /**
-   * Started by an earlier launch and read back from its log (#223). Nothing will
-   * arrive for it, and the pilot is never woken about it: its ending was news to
-   * a conversation that is over.
+   * Started by an earlier launch and read back from its log (#223). The pilot
+   * is never woken about it: its ending was news to a conversation that is
+   * over. One still running was picked back up by the host (`adopted`), and its
+   * output and ending arrive like any other's.
    */
   restored: boolean;
+  /**
+   * Still running when this launch began, and picked back up. Not the host's
+   * child, so an ending it sees carries no exit code - which is a fact about
+   * who was watching, and `outcome` says so rather than calling it a failure.
+   */
+  adopted: boolean;
+  /** Null on a record older than the field; only `outcome` reads it. */
+  pid: number | null;
   /**
    * The host went away while it was running and never saw it end. `endedAt` is
    * null because nobody measured an ending - and it is **not** running, which is
@@ -111,6 +120,8 @@ export function started(commands: Commands, frame: CommandStarted): Commands {
     truncated: false,
     bytes: 0,
     restored: false,
+    adopted: false,
+    pid: null,
     lost: false,
   };
   // A refusal is cleared by a start, because the two answer the same question
@@ -163,7 +174,7 @@ export function restore(commands: Commands, past: readonly PastCommand[]): Comma
   const have = new Set(commands.all.map((c) => c.id));
   const old: Command[] = past
     .filter((p) => !have.has(p.id))
-    .map((p) => ({ ...p, restored: true }));
+    .map((p) => ({ ...p, restored: true, adopted: p.adopted === true, pid: p.pid ?? null }));
   return { ...commands, all: [...old, ...commands.all] };
 }
 
@@ -186,10 +197,13 @@ export function running(commands: Commands): readonly Command[] {
  * pressing stop.
  */
 export function outcome(command: Command): string | null {
-  if (command.lost) return 'the app closed before it ended';
+  // With a pid it was detached and outlived the host, so it ended on its own
+  // while nobody was watching; without one, the host that died took it down.
+  if (command.lost) return command.pid !== null ? 'ended while the app was closed' : 'the app closed before it ended';
   if (command.endedAt === null) return null;
   if (command.stopped) return 'stopped';
   if (command.signal !== null) return `killed by ${command.signal}`;
+  if (command.code === null && command.adopted) return 'ended (exit code not seen: an earlier launch started it)';
   if (command.code === null) return 'ended without an exit code';
   return command.code === 0 ? 'exit 0' : `exit ${String(command.code)}`;
 }
