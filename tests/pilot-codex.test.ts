@@ -36,19 +36,35 @@ const OPTIONS: PilotChatOptions = {
 
 const ZERO = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, total: 0 };
 
-test('a new Codex chat turn is read-only, in the project, with its own tools switched off', () => {
-  const args = pilotCodexArgs(OPTIONS, '/tmp/x/instructions.md');
+test('a new Codex chat turn has its shell, in the workspace-write sandbox, with the extras off', () => {
+  // Case 2 (#223): this pinned a read-only pilot with its shell switched off,
+  // and the owner reversed that - a full CLI bounded by the settings. What still
+  // holds is kept: in the project, no user config (so no MCP), no web search,
+  // the non-coding features off, the instructions file, the prompt on stdin.
+  const args = pilotCodexArgs({ ...OPTIONS, addDirs: ['/repo', '/notes'] }, '/tmp/x/instructions.md');
   assert.equal(args[0], 'exec');
-  assert.deepEqual(args.slice(args.indexOf('-s'), args.indexOf('-s') + 2), ['-s', 'read-only']);
+  assert.ok(!args.includes('-s'), 'the sandbox is set by -c, the one form resume also takes');
+  assert.ok(args.includes('sandbox_mode="workspace-write"'));
+  assert.ok(args.includes('sandbox_workspace_write.writable_roots=["/notes"]'), 'the repository is the workspace already');
   assert.deepEqual(args.slice(args.indexOf('-C'), args.indexOf('-C') + 2), ['-C', '/repo']);
   assert.ok(args.includes('--ignore-user-config'), 'no config.toml, so no MCP servers');
   for (const feature of ['shell_tool', 'unified_exec', 'code_mode_host']) {
-    assert.ok(OFF.includes(feature));
+    assert.ok(!OFF.includes(feature), `${feature} is the shell, and is on`);
+  }
+  for (const feature of ['browser_use', 'computer_use', 'multi_agent', 'plugins']) {
     assert.ok(args.join(' ').includes(`--disable ${feature}`), `${feature} is off`);
   }
   assert.ok(args.includes('web_search="disabled"'));
   assert.ok(args.includes('model_instructions_file="/tmp/x/instructions.md"'));
   assert.equal(args[args.length - 1], '-', 'the prompt arrives on stdin');
+});
+
+test('YOLO drops the sandbox, on a resume as well', () => {
+  const yolo = { ...OPTIONS, access: { yolo: true, safeCommands: [] } };
+  for (const args of [pilotCodexArgs(yolo, '/i.md'), pilotCodexArgs({ ...yolo, resume: true }, '/i.md')]) {
+    assert.ok(args.includes('--dangerously-bypass-approvals-and-sandbox'));
+    assert.ok(!args.includes('sandbox_mode="workspace-write"'));
+  }
 });
 
 test('a resumed turn names the thread and sends neither -C nor -s, which resume refuses', () => {
@@ -118,6 +134,7 @@ test('the host sends a turn naming codex to the Codex pilot, and only that one',
       yolo: false,
       safeCommands: [],
       dirs: [],
+      timeoutMs: 30 * 60_000,
       anthropic: 'subscription',
       openai: 'subscription',
     }),

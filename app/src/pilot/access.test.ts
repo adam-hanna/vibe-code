@@ -191,12 +191,25 @@ describe('the pane', () => {
   });
 });
 
-describe('what each backend is told it can read', () => {
-  test('only the Claude CLI is told of file tools of its own', () => {
-    const claude = systemPrompt(emptyRun(), null, 'emitted', null, true);
-    const codex = systemPrompt(emptyRun(), null, 'emitted', null, false);
-    expect(claude).toContain("You have the CLI's own Read, Glob and Grep");
-    expect(codex).not.toContain("You have the CLI's own Read, Glob and Grep");
-    expect(codex).toMatch(/list_dir and read_file and nothing else/);
+describe('what each backend is told it can do', () => {
+  // Case 2 (#223): this pinned "only the Claude CLI has file tools of its own",
+  // and the owner reversed that - both CLIs are now full CLIs bounded by the
+  // settings. What still holds: a vendor's API has no tools, and each backend
+  // is told the truth about its own limits rather than one sentence for all.
+  const safe = { ...NO_ACCESS, safeCommands: ['git status'] };
+  test('both CLIs are told they can edit and run commands, each with its own enforcer', () => {
+    const claude = systemPrompt(emptyRun(), null, 'emitted', safe, 'claude');
+    const codex = systemPrompt(emptyRun(), null, 'emitted', safe, 'codex');
+    for (const p of [claude, codex]) {
+      expect(p).toMatch(/you can read and edit\s+files and run shell commands/);
+      expect(p).toMatch(/do it yourself/);
+    }
+    expect(claude).toMatch(/enforced by the CLI/);
+    expect(codex).toMatch(/enforced by the Codex sandbox/);
+  });
+
+  test('YOLO says nothing is refused, and an API backend is told it has no shell', () => {
+    expect(systemPrompt(emptyRun(), null, 'emitted', { ...safe, yolo: true }, 'claude')).toMatch(/YOLO mode is on: nothing/);
+    expect(systemPrompt(emptyRun(), null, 'native', safe)).toMatch(/list_dir and read_file and nothing else/);
   });
 });

@@ -205,17 +205,6 @@ export interface ConfigFrame {
   providers: readonly string[];
   efforts: readonly string[];
   /**
-   * The model names this build knows, per agent (#223).
-   *
-   * **Offered, not enforced**, which is what separates it from the three lists
-   * above. Those are closed sets the validator refuses a value outside of; a
-   * model is any non-empty string, because *"guessing whether a model exists is
-   * the never-invent-a-number rule applied to a name"* — so a row whose model is
-   * not on this list is still shown and still saved, and there is an `other…`
-   * way in for a model that shipped this morning.
-   */
-  models: Readonly<Record<string, readonly string[]>>;
-  /**
    * What the pilot may do without asking (#223), resolved by the host from the
    * settings for all projects. Never a project's: a committed file cannot widen
    * its own pilot.
@@ -347,6 +336,68 @@ export interface ReplayFrame {
  * plan, the findings, the diff — so what a settings screen can honestly show is
  * the part that does not vary, and showing it means quoting it.
  */
+/** Every stored pilot conversation (#223, `src/chatstore.ts`). */
+export interface ChatsFrame {
+  type: 'chats';
+  id: number;
+  chats: readonly { key: string; value: string }[];
+}
+
+/**
+ * A command an earlier launch ran, read back from its log (#223,
+ * `src/commandlog.ts`). `lost` is a host that went away while it was running.
+ */
+export interface PastCommand {
+  id: string;
+  program: string;
+  args: readonly string[];
+  resolved: string;
+  dir: string;
+  startedAt: number;
+  endedAt: number | null;
+  code: number | null;
+  signal: string | null;
+  stopped: boolean;
+  output: string;
+  truncated: boolean;
+  bytes: number;
+  lost: boolean;
+  /** The process; null on a record older than the field. `src/commandlog.ts`. */
+  pid?: number | null;
+  /** Picked back up from an earlier launch, so its exit code cannot be seen. */
+  adopted?: boolean;
+}
+
+/** One model a CLI offers. `src/models.ts`. */
+export interface CliModel {
+  value: string;
+  resolves: string | null;
+  name: string;
+  description: string;
+}
+
+export type CliListing = { ok: true; models: readonly CliModel[] } | { ok: false; why: string };
+
+/** What each CLI offers, asked of the CLI (#223). */
+export interface ModelsFrame {
+  type: 'models';
+  id: number;
+  listings: { claude: CliListing; codex: CliListing };
+}
+
+export interface PastCommandsFrame {
+  type: 'commands_past';
+  id: number;
+  commands: readonly PastCommand[];
+}
+
+/** One conversation was written or removed. */
+export interface ChatSavedFrame {
+  type: 'chat_saved';
+  id: number;
+  key: string;
+}
+
 export interface PromptsFrame {
   type: 'prompts';
   id: number;
@@ -448,6 +499,10 @@ export type Frame =
   | ArtifactFrame
   | RunDeleted
   | PromptsFrame
+  | ChatsFrame
+  | ChatSavedFrame
+  | PastCommandsFrame
+  | ModelsFrame
   | ReplayFrame
   | QuestionsAnswered;
 
@@ -496,6 +551,10 @@ export function isFrame(v: unknown): v is Frame {
     // reason: they are the same in every run, so they say nothing about the one
     // being narrated.
     type === 'prompts' ||
+    // The pilot's stored conversations (#223), which belong to the pane and
+    // say nothing about the run being narrated.
+    type === 'chats' ||
+    type === 'chat_saved' ||
     // A past run's narration, ignored by THIS reducer for a sharper version of
     // the same reason: it describes a run this process is NOT narrating, and
     // folding it into the live run is exactly the confusion it exists to end.
@@ -506,7 +565,10 @@ export function isFrame(v: unknown): v is Frame {
     // there is none - so `Cockpit` folds them with `reduceCommands` instead.
     type === 'command_started' ||
     type === 'command_output' ||
-    type === 'command_ended'
+    type === 'command_ended' ||
+    type === 'commands_past' ||
+    // Which models each CLI offers: about the account, not the run.
+    type === 'models'
   );
 }
 
@@ -903,6 +965,43 @@ export async function prompts(): Promise<PromptsFrame['blocks']> {
     'the host did not answer with the prompt blocks',
   );
   return frame.blocks;
+}
+
+/** Every pilot conversation the host has stored (#223). */
+export async function chats(): Promise<ChatsFrame['chats']> {
+  const id = nextRequestId();
+  const frame = await ask<ChatsFrame>({ type: 'chats', id }, id, 'chats', 'the host did not answer with the stored conversations');
+  return frame.chats;
+}
+
+/** Which models each CLI offers (#223). `fresh` asks the CLIs again. */
+export async function models(fresh = false): Promise<ModelsFrame['listings']> {
+  const id = nextRequestId();
+  const frame = await ask<ModelsFrame>({ type: 'models', id, fresh }, id, 'models', 'the host did not answer with the models');
+  return frame.listings;
+}
+
+/** What earlier launches ran, from the host's command logs (#223). */
+export async function pastCommands(): Promise<PastCommandsFrame['commands']> {
+  const id = nextRequestId();
+  const frame = await ask<PastCommandsFrame>(
+    { type: 'commands_past', id },
+    id,
+    'commands_past',
+    'the host did not answer with the earlier commands',
+  );
+  return frame.commands;
+}
+
+/** Store one conversation, or remove it with null. Rejects with the host's sentence. */
+export async function saveChat(key: string, value: string | null): Promise<void> {
+  const id = nextRequestId();
+  await ask<ChatSavedFrame>(
+    { type: 'chat_save', id, key, value },
+    id,
+    'chat_saved',
+    'the host did not confirm the conversation was saved',
+  );
 }
 
 /**

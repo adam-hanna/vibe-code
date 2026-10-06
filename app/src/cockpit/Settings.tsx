@@ -13,6 +13,8 @@ import { DRAFTS_KEY, draftsFor, readDrafts, removeDraft, saveDraft } from './dra
 import type { Draft } from './drafts';
 import type { KeyStatus } from '../pilot/keys';
 import type { ConfigFrame, PromptsFrame } from '../host';
+import { CLI_DEFAULT, loadCliModels, optionsFor, useModels, whyNot } from './models';
+import type { Listing } from './models';
 
 /**
  * Everything that is a setting, in one screen (`1h`, `1i`, #223).
@@ -296,42 +298,41 @@ function ListField({
 const OTHER = ' other';
 
 /**
- * Which model a role runs on: a list of the ones this build knows, and a way
- * past it (#223).
+ * Which model a role runs on: the list its CLI gave, and a way past it (#223).
  *
- * **This reverses a decision made one report ago, and the reversal is narrow.**
- * The field was free text, argued from the core's own rule - *"no allowlist and
- * no default table: guessing whether a model exists is the never-invent-a-number
- * rule applied to a name"* - and the reply was *"the model should be a drop down
- * and not a text input"*. Both are right about different halves. Typing
- * `gpt-5.6-luna` from memory to change one role is a bad control; a list that
- * *claimed* to be the vendor's catalogue would be the invention.
- *
- * So the list is what this build **knows a name for**, sent by the core from
- * `KNOWN_MODELS` beside the defaults it has to agree with, and three things keep
- * it from becoming an allowlist:
+ * **The list is asked of the CLI and no longer shipped here.** It was
+ * `KNOWN_MODELS`, a list beside the defaults, and it aged on the vendors'
+ * schedule: Opus 5.5 and Fable 5.1 were missing and Codex's default had moved
+ * on. *"What if claude introduces a new model, we have to change source code?
+ * I really want to avoid that."* `cockpit/models.ts` holds what `claude` and
+ * `codex` said, and three things keep it from becoming an allowlist:
  *
  * - **A value not on the list is still shown**, as its own option, marked. A
- *   select that silently dropped it would rewrite a role's model by rendering,
- *   which is the worst kind of data loss because nobody pressed anything.
- * - **`other…` is always there**, and it reveals the text field this replaced.
- *   A model that shipped this morning is typeable this morning; the core still
- *   validates it as any non-empty string, so nothing here can refuse one.
- * - **Empty is a legal state and is offered**, because a role with no model
- *   takes its agent's own default, which is what every unconfigured row is.
+ *   select that silently dropped it would rewrite a role's model by rendering.
+ * - **`other…` is always there**, revealing a text field, so a name can be
+ *   typed when the listing failed or is missing one.
+ * - **Empty is offered, and means this agent's own setting** - which by default
+ *   is the CLI's default, named with what it resolves to today.
+ *
+ * The listing's own `default` entry is not offered beside the empty one: on a
+ * role row the two mean the same thing unless `claude.model` or `codex.model`
+ * was set, and two options for one intention is one too many.
  */
 function ModelField({
   id,
   value,
   agent,
-  known,
+  listing,
+  inherited,
   disabled,
   onSave,
 }: {
   id: string;
   value: string | undefined;
   agent: string;
-  known: readonly string[];
+  listing: Listing;
+  /** What empty means here: the agent's own `model` setting, as configured. */
+  inherited: string | undefined;
   disabled: boolean;
   onSave: (next: string) => void;
 }) {
@@ -340,6 +341,14 @@ function ModelField({
   // `current` because somebody who has just chosen it has typed nothing yet, and
   // a derived flag would flip the control back the moment the box emptied.
   const [typing, setTyping] = useState(false);
+  const why = whyNot(listing);
+  const choices = optionsFor(listing, current).filter((c) => c.value !== CLI_DEFAULT || current === CLI_DEFAULT);
+  const resolved =
+    listing?.ok === true ? (listing.models.find((m) => m.value === CLI_DEFAULT) ?? null) : null;
+  const empty =
+    inherited === undefined || inherited === CLI_DEFAULT
+      ? `— ${agent}'s default${resolved !== null ? ` · ${resolved.description || resolved.resolves || ''}` : ''} —`
+      : `— ${agent}.model: ${inherited} —`;
 
   if (typing) {
     return (
@@ -359,35 +368,31 @@ function ModelField({
   }
 
   return (
-    <select
-      id={id}
-      value={current}
-      disabled={disabled}
-      onChange={(e) => {
-        if (e.target.value === OTHER) {
-          setTyping(true);
-          return;
-        }
-        onSave(e.target.value);
-      }}
-    >
-      {/* Not set, which is what an unconfigured row is and a legal thing to go
-          back to. Removing it would make every row claim a model somebody
-          chose. */}
-      <option value="">— {agent} default —</option>
-      {known.map((m) => (
-        <option key={m} value={m}>
-          {m}
-        </option>
-      ))}
-      {/* Configured, and not one this build has a name for. Kept rather than
-          dropped: it may be a model that shipped after this build, and a select
-          that could not represent its own value would overwrite it. */}
-      {current !== '' && !known.includes(current) && (
-        <option value={current}>{current} — not one this build knows</option>
-      )}
-      <option value={OTHER}>other…</option>
-    </select>
+    <div className="v-set__model">
+      <select
+        id={id}
+        value={current}
+        disabled={disabled}
+        onChange={(e) => {
+          if (e.target.value === OTHER) {
+            setTyping(true);
+            return;
+          }
+          onSave(e.target.value);
+        }}
+      >
+        <option value="">{empty}</option>
+        {choices.map((c) => (
+          <option key={c.value} value={c.value}>
+            {c.unlisted ? `${c.label} — not in ${agent}'s list` : c.label}
+          </option>
+        ))}
+        <option value={OTHER}>other…</option>
+      </select>
+      {/* Said, rather than an empty select that looks like a CLI with no models. */}
+      {listing === null && <span className="v-set__hint">asking {agent} for its models…</span>}
+      {why !== null && <span className="v-set__hint">{why}</span>}
+    </div>
   );
 }
 
@@ -698,6 +703,9 @@ export function Settings({
   onSaved?: (() => void) | undefined;
 }) {
   const [frame, setFrame] = useState<ConfigFrame | null>(null);
+  // Asked of the CLIs once per window, and again on request (#223).
+  const models = useModels();
+  useEffect(() => loadCliModels(), []);
   const [failure, setFailure] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -833,6 +841,8 @@ export function Settings({
     budget?: Record<string, number | boolean | undefined>;
     git?: Record<string, string | number | boolean | null | undefined>;
     verify?: Record<string, unknown>;
+    claude?: { model?: string };
+    codex?: { model?: string };
   };
   const gates = effective.gates ?? {};
   const loop = effective.loop ?? {};
@@ -1102,6 +1112,25 @@ export function Settings({
                     <option value="off">off — the safe list below, and a card for everything else</option>
                     <option value="on">on — every command runs, and the whole disk is readable</option>
                   </select>
+                </div>
+                <div className="v-set__row">
+                  {/* Was five minutes and fixed, from when the pilot only
+                      answered; a full CLI editing files and running tests ran
+                      out of it (#223). Minutes here, milliseconds in the file. */}
+                  <label className="v-set__label" htmlFor="pilot-timeout">
+                    pilot turn limit
+                    {source('pilot', 'timeoutMs')}
+                  </label>
+                  <span className="v-set__inline">
+                    <NumberField
+                      id="pilot-timeout"
+                      value={Math.round(frame.pilot.timeoutMs / 60_000)}
+                      disabled={busy}
+                      onSave={(n) => write({ pilot: { timeoutMs: n * 60_000 } }, 'global')}
+                    />
+                    <span className="v-set__unit">minutes</span>
+                    <Key name="pilot.timeoutMs" />
+                  </span>
                 </div>
                 <div className="v-set__row">
                   <label className="v-set__label" htmlFor="pilot-safe">
@@ -1710,6 +1739,18 @@ export function Settings({
 
       <section className="v-set__block">
         <h3 className="v-set__h">who does what</h3>
+        {/* The models are the CLIs' own lists, asked when the window opened. A
+            CLI updated since then has a newer list, and this asks again. */}
+        <p className="v-set__note">
+          Models are listed by each CLI on your account.{' '}
+          <button
+            className="v-doc__again"
+            disabled={models.claude === null || models.codex === null}
+            onClick={() => loadCliModels(true)}
+          >
+            check again
+          </button>
+        </p>
         {/*
           `1i`'s roles table, and the only part of global settings that is real
           configuration with a real validator behind it. The other three things
@@ -1796,7 +1837,14 @@ export function Settings({
                       // turn that fails after it has been spawned. A row whose
                       // agent this build has no list for offers none rather than
                       // borrowing the other one's.
-                      known={frame.models[current.provider ?? ''] ?? []}
+                      listing={current.provider === 'claude' || current.provider === 'codex' ? models[current.provider] : null}
+                      inherited={
+                        current.provider === 'claude'
+                          ? effective.claude?.model
+                          : current.provider === 'codex'
+                            ? effective.codex?.model
+                            : undefined
+                      }
                       disabled={busy}
                       onSave={(next) =>
                         save({ roles: { [role]: { ...current, model: next } } })

@@ -69,6 +69,10 @@ describe('the webview can store a key and can never read one', () => {
       'key_set',
       'key_status',
       'pilot_cancel',
+      // Case 2 (#223): a ninth command, on purpose. It answers with the model
+      // names a stored key may use - never the key, never a reply - and it is
+      // what replaced a model list compiled into this window.
+      'pilot_models',
       'pilot_send',
     ]);
   });

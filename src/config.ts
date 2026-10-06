@@ -1,3 +1,4 @@
+import { CLI_DEFAULT } from '@src/modelflag.js';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -44,14 +45,20 @@ export const DEFAULTS: Config = {
   // assignment every run made before this key existed.
   roles: DEFAULT_ROLE_PROVIDERS,
   claude: {
-    // Matches the interactive workflow this tool automates: opus, medium thinking.
-    model: 'opus',
+    // Claude's own default, at the owner's decision (#223): *"Follow both
+    // defaults unless changed by the user."* `default` sends no `--model`, so a
+    // run takes whatever the CLI recommends for this account today - which is
+    // how a new model reaches a run with no change here. See `modelflag.ts`.
+    model: CLI_DEFAULT,
     effort: 'medium',
     planTimeoutMs: 30 * 60 * 1000,
     implementTimeoutMs: 90 * 60 * 1000,
   },
   codex: {
-    model: 'gpt-5.6-luna',
+    // Codex's own default, for the same reason: no `-m`. This was
+    // `gpt-5.6-luna`, which Codex's own list now calls its fast and affordable
+    // model for easier tasks, while its default had moved to `gpt-6-astra`.
+    model: CLI_DEFAULT,
     effort: 'xhigh',
     // Critique and review never need write access.
     sandbox: 'read-only',

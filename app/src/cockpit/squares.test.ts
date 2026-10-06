@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import cockpit from './Cockpit.tsx?raw';
 import { initials, rail } from './squares';
+import { NOWHERE, readWhere } from './where';
 import type { ArchiveRun } from '../host';
 
 /**
@@ -187,7 +188,12 @@ describe('the tab bar the rail emptied', () => {
     expect(bar).not.toMatch(/v-cockpit__tab--off[^>]*>\s*Versions/);
   });
 
-  test('the window lands on the pilot', () => {
-    expect(cockpit).toMatch(/>\('pilot'\);/);
+  test('a fresh window lands on the pilot', () => {
+    // Case 2 (#223): a relaunch now comes back to the tab it closed on, so the
+    // literal moved into `where.ts`. What still holds is that a window with
+    // nothing to come back to - and one whose record is unreadable - opens here.
+    expect(cockpit).toMatch(/>\(\(\) => storedWhere\(\)\.tab\);/);
+    expect(readWhere(null).tab).toBe('pilot');
+    expect(NOWHERE.tab).toBe('pilot');
   });
 });

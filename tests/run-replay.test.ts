@@ -7,7 +7,6 @@ import path from 'node:path';
 import { readRunReplay } from '@src/run.js';
 import { replayRun, seatOf } from '@src/replay.js';
 import type { ReplaySources } from '@src/replay.js';
-import { KNOWN_MODELS, PROVIDERS } from '@src/roles.js';
 import { decode } from '@src/protocol.js';
 import type { RunState } from '@src/types.js';
 
@@ -404,24 +403,11 @@ test('a replay request with no dir or no runId is refused by name', () => {
 });
 
 // ---- the model list is offered, never enforced ------------------------------
-
-test('every agent has a model list and every name on it is non-empty', () => {
-  // A list a window may OFFER. It is not an allowlist and `validateRoleSetting`
-  // is unchanged — *"guessing whether a model exists is the never-invent-a-number
-  // rule applied to a name"* still holds, which is why a value not on this list
-  // is still typed, still saved and still shown.
-  for (const provider of PROVIDERS) {
-    const models = KNOWN_MODELS[provider];
-    assert.ok(models.length > 0, `${provider} has no models to offer`);
-    for (const model of models) assert.notEqual(model.trim(), '');
-  }
-});
-
-test('the list has an entry for every agent and no agent this build cannot seat', () => {
-  // One list, keyed by the same names `PROVIDERS` holds. A second vocabulary is
-  // one that can disagree, and the disagreement is a row whose select is empty.
-  assert.deepEqual(Object.keys(KNOWN_MODELS).sort(), [...PROVIDERS].sort());
-});
+//
+// Case 2 (#223): `KNOWN_MODELS` is gone. The list is asked of each CLI now
+// (`src/models.ts`), so the two claims these cases made - a list for every
+// agent, and no empty name on it - moved to `model-listing.test.ts`, where they
+// are made of what the CLIs answer.
 
 // ---- a turn that was stopped is still a turn that happened -------------------
 

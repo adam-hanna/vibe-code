@@ -1,4 +1,5 @@
 ﻿import { writeFileSync, readFileSync, existsSync, renameSync, rmSync } from 'node:fs';
+import { CLI_DEFAULT, modelArgs } from '@src/modelflag.js';
 import path from 'node:path';
 import { attachSpend } from '@src/charge.js';
 import { attachEnding, describeEnding, resolveBin, run } from '@src/proc.js';
@@ -446,7 +447,9 @@ export async function codexTurn(
   // `resume` accepts neither -C nor -s: it takes its working directory from the
   // spawned process cwd, and its sandbox defaults to read-only. It does NOT
   // inherit -m or the reasoning effort either, so both are re-sent every turn -
-  // omitting them silently drops back to the config.toml default model.
+  // omitting them silently drops back to the config.toml default model. That
+  // drop is exactly what `default` asks for (#223), so `modelArgs` omits -m
+  // there on every verb alike, and a thread never changes model between turns.
   // `--json` turns stdout into JSONL, which is the only way Codex reports token
   // usage. It does not change what lands in `outFile`, so the result path is
   // unaffected; it is accepted by both `exec` and `exec resume`.
@@ -509,7 +512,7 @@ export async function codexTurn(
     ? [
         'exec', 'resume', resumeAfterFork,
         '--json',
-        '-m', model,
+        ...modelArgs('-m', model),
         '-c', `model_reasoning_effort="${effort}"`,
         '--skip-git-repo-check',
         ...schemaArgs,
@@ -520,7 +523,7 @@ export async function codexTurn(
     ? [
         'exec', 'fork', forkFrom,
         '--json',
-        '-m', model,
+        ...modelArgs('-m', model),
         '-c', `model_reasoning_effort="${effort}"`,
         '--skip-git-repo-check',
         ...schemaArgs,
@@ -531,7 +534,7 @@ export async function codexTurn(
     ? [
         'exec', 'resume', sessionId,
         '--json',
-        '-m', model,
+        ...modelArgs('-m', model),
         '-c', `model_reasoning_effort="${effort}"`,
         '--skip-git-repo-check',
         ...schemaArgs,
@@ -541,7 +544,7 @@ export async function codexTurn(
     : [
         'exec',
         '--json',
-        '-m', model,
+        ...modelArgs('-m', model),
         '-c', `model_reasoning_effort="${effort}"`,
         '-s', sandbox,
         '--skip-git-repo-check',
@@ -552,7 +555,7 @@ export async function codexTurn(
       ];
 
   const verb = forkFrom ? (resumeAfterFork === null ? 'fork' : 'fork+resume') : sessionId ? 'resume' : 'exec';
-  detail(`codex ${verb} -m ${model} (${effort}) -> ${schemaName}`);
+  detail(`codex ${verb} -m ${model === CLI_DEFAULT ? '(codex default)' : model} (${effort}) -> ${schemaName}`);
 
   // See the same holder in claude.ts (#211). Both adapters report it, because a
   // measurement present on one provider and absent on the other is a gap that

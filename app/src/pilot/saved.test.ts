@@ -122,10 +122,11 @@ describe('a run adopts the conversation that proposed it', () => {
     // about this file: that the move is a write-and-clear and not a read.
     expect(pilotPane).toMatch(/const move = chatMove\(\{/);
     expect(pilotPane).toMatch(/if \(move === 'adopt'\)/);
-    expect(pilotPane).toMatch(/localStorage\.setItem\(key, writable\(held\.current\)\)/);
+    // Through `putChat` since the store moved to the host's files (#223).
+    expect(pilotPane).toMatch(/putChat\(key, writable\(held\.current\)\)/);
     // Cleared, and only the bucket: taking a *run's* key away here would delete
     // a real conversation to tidy up after a move.
-    expect(pilotPane).toMatch(/if \(before === bucket\) localStorage\.removeItem\(bucket\)/);
+    expect(pilotPane).toMatch(/if \(before === bucket\) putChat\(bucket, null\)/);
   });
 
   test('the loader keys on the run, never on the conversation', () => {

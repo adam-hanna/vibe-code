@@ -1,4 +1,5 @@
-﻿import { readFileSync, existsSync, renameSync } from 'node:fs';
+﻿import { CLI_DEFAULT } from '@src/modelflag.js';
+import { readFileSync, existsSync, renameSync } from 'node:fs';
 import path from 'node:path';
 import {
   applyOverrides,
@@ -100,9 +101,9 @@ Options
   -C, --cwd <dir>            Target repository (default: cwd)
   --at <n>                   Which checkpoint of the run to fork from
   --context <file>           Extra context file appended to the planning prompt
-  --claude-model <m>         Default: opus
+  --claude-model <m>         Default: default (claude's own; no --model is sent)
   --claude-effort <e>        low|medium|high|xhigh|max (default: medium)
-  --codex-model <m>          Default: gpt-5.6-luna
+  --codex-model <m>          Default: default (codex's own; no -m is sent)
   --codex-effort <e>         Default: xhigh
   --role <r>:<k>=<v>         Per-role setting, repeatable. The role is one of planner,
                              implementer, critic, answerer, reviewer; the key is provider,
@@ -282,6 +283,15 @@ export async function main(
 }
 
 /** Exported for the flag tests: the whole flag contract without running main(). */
+/**
+ * A model as a person reads it. `default` is not a model, it is the absence of
+ * one (#223, `modelflag.ts`), and printing it bare would read as a model called
+ * "default".
+ */
+export function shownModel(model: string, agent: 'claude' | 'codex'): string {
+  return model === CLI_DEFAULT ? `${agent}'s default` : model;
+}
+
 export function parseArgs(args: readonly string[]): ParsedArgs {
   const out: ParsedArgs = { positional: [], flags: {} };
 
@@ -674,13 +684,13 @@ async function startRun(
     },
   });
   log.info(`Repo:    ${targetDir}`);
-  log.info(`Claude:  ${cfg.claude.model} / ${cfg.claude.effort}`);
+  log.info(`Claude:  ${shownModel(cfg.claude.model, 'claude')} / ${cfg.claude.effort}`);
   // The thread count is read off the table rather than stated: since #45 the
   // reviewer holds its own Codex conversation, so a default persisted run
   // carries two and "single thread" would be a false summary of it.
   const threads = codexConversations(cfg);
   log.info(
-    `Codex:   ${cfg.codex.model} / ${cfg.codex.effort}` +
+    `Codex:   ${shownModel(cfg.codex.model, 'codex')} / ${cfg.codex.effort}` +
       `${cfg.codex.persistSession ? ` (${threads} thread${threads === 1 ? '' : 's'}, carried across turns)` : ' (one-shot per turn)'}`,
   );
   log.info(
@@ -869,7 +879,7 @@ async function resumeRun(
   const stored = state.config;
   const cfg = resumeConfig(targetDir, state, flags);
   if (stored !== undefined) {
-    log.detail(`resuming with the run's settings: claude ${cfg.claude.model}/${cfg.claude.effort}`);
+    log.detail(`resuming with the run's settings: claude ${shownModel(cfg.claude.model, 'claude')}/${cfg.claude.effort}`);
   }
   log.attachTranscript(path.join(state.dir, 'transcript.log'));
 
@@ -2573,7 +2583,7 @@ async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
     // global settings is every machine before this, and does not need telling.
     const globalAt = globalConfigPath();
     if (globalAt !== null && existsSync(globalAt)) log.info(`  also your settings for all projects: ${globalAt}`);
-    log.info(`  claude ${cfg.claude.model}/${cfg.claude.effort} - codex ${cfg.codex.model}/${cfg.codex.effort}`);
+    log.info(`  claude ${shownModel(cfg.claude.model, 'claude')}/${cfg.claude.effort} - codex ${shownModel(cfg.codex.model, 'codex')}/${cfg.codex.effort}`);
     reportResolvedRoles(cfg);
     log.info(
       `  budget $${cfg.budget.maxCostUsd} (Claude) / ` +

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Button, LivenessDot, MetaChip, StateKicker } from '../design';
-import { clock, elapsed } from './format';
+import { clock, dayOf, elapsed } from './format';
 import { line, outcome } from './commands';
 import type { Command, Commands } from './commands';
 
@@ -61,8 +61,8 @@ function CommandCard({
               #202 settled. `last activity 6s ago` on a finished card ages into a
               lie; a start time does not. */}
           {command.endedAt === null
-            ? `started ${clock(command.startedAt)}`
-            : `${elapsed(command.endedAt - command.startedAt)}, ended ${clock(command.endedAt)}`}
+            ? `started ${clock(command.startedAt)}${command.restored ? `, ${dayOf(command.startedAt)}` : ''}`
+            : `${elapsed(command.endedAt - command.startedAt)}, ended ${clock(command.endedAt)}${command.restored ? `, ${dayOf(command.endedAt)}` : ''}`}
         </span>
       </div>
 

@@ -11,7 +11,7 @@ import {
   refused,
   resolveCommand,
   startCommand,
-  stopAllCommands,
+  stopTiedCommands,
   stopCommand,
 } from '@src/commands.js';
 
@@ -137,7 +137,7 @@ test('a command that will not exit keeps running, and stopping it says a person 
   // file's event loop alive, and the runner hung with the real failure buffered
   // behind it. A hook rather than a `finally`, because it also covers a throw
   // from `startCommand` itself.
-  t.after(() => void stopAllCommands());
+  t.after(() => void stopTiedCommands());
   const started = startCommand({
     program: process.execPath,
     args: ['-e', 'setInterval(() => process.stdout.write("tick\\n"), 10)'],
@@ -277,7 +277,7 @@ test('stopping a command takes its whole tree, and that is the platform doing it
   // it there would be a claim about behaviour this build does not have.
   if (process.platform !== 'win32') return;
   clearCommands();
-  t.after(() => void stopAllCommands());
+  t.after(() => void stopTiedCommands());
 
   const started = startCommand({
     program: process.execPath,

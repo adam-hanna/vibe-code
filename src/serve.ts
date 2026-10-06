@@ -1,11 +1,15 @@
 import { requestCancel } from '@src/cancel.js';
 import { main } from '@src/cli.js';
-import { refused as commandRefused, startCommand, stopAllCommands, stopCommand } from '@src/commands.js';
+import { commandLogDir } from '@src/commandlog.js';
+import { adoptedSnapshot, keepCommandLogs, refused as commandRefused, startCommand, stopTiedCommands, stopCommand } from '@src/commands.js';
+import type { Handlers as CommandHandlers } from '@src/commands.js';
+import type { PastCommand } from '@src/commandlog.js';
 import { pilotChat } from '@src/pilotchat.js';
 import { pilotCodex } from '@src/pilotcodex.js';
 import { cliStatus } from '@src/clipaths.js';
 import { acceptKeys } from '@src/heldkeys.js';
 import { pilotFs, pilotRoots, readPilotAccess, resolvedAccess } from '@src/pilotaccess.js';
+import { chatDir, listChats, saveChat } from '@src/chatstore.js';
 import type { PilotAccess } from '@src/pilotaccess.js';
 import { promptBlocks } from '@src/prompts.js';
 import * as log from '@src/log.js';
@@ -30,7 +34,9 @@ import {
 } from '@src/config.js';
 import { GATEABLE, GATE_MODES, UNGATEABLE } from '@src/gates.js';
 import { diffRange, diffSinceWithLimit } from '@src/git.js';
-import { KNOWN_MODELS, PROVIDERS, ROLE_NAMES } from '@src/roles.js';
+import { PROVIDERS, ROLE_NAMES } from '@src/roles.js';
+import { listModels } from '@src/models.js';
+import type { ModelListings } from '@src/models.js';
 import { EFFORTS } from '@src/types.js';
 import type { ArtifactRead, LoadedConfig, RunArtifact } from '@src/types.js';
 import type { RunLoop } from '@src/cli.js';
@@ -77,14 +83,10 @@ import type { RunSummary } from '@src/types.js';
  * Nothing here is worth more than that separation holding.
  */
 
-/**
- * How long a pilot chat turn may take before its child is killed (#193).
- *
- * Its own number rather than a role's `timeoutMs`, and shorter than any of
- * them: a role turn is a model working through a repository for as long as it
- * needs, and this is somebody waiting for a sentence with the window open. Five
- * minutes is generous for that and short enough that a wedged child does not sit
- * there for the length of a run.
+/*
+ * A pilot turn's ceiling is `pilot.timeoutMs` now (#223, `PILOT_TIMEOUT_MS` in
+ * `pilotaccess.ts`), read with the rest of the machine's pilot settings on each
+ * turn so a change in Settings reaches the next one.
  *
  * **The contention this creates is named rather than solved.** These tokens come
  * out of the same subscription window the run draws on, so a long conversation
@@ -94,7 +96,6 @@ import type { RunSummary } from '@src/types.js';
  * shared budget between the two: `app/src/pilot/ledger.ts` is the pilot's own
  * books precisely so a conversation cannot stop a run by spending its ceiling.
  */
-const PILOT_TIMEOUT_MS = 5 * 60_000;
 
 /** Where a frame goes. Behind a function so a test needs no pipe. */
 export type Send = (msg: Outbound) => void;
@@ -172,6 +173,17 @@ export interface Departure {
 export const HOST_EXIT_ABANDONED = 70;
 
 export interface SessionDeps {
+  /**
+   * What earlier launches left in the command log, read once by `serve()`
+   * before anything starts (#223). Defaults to none: a session in a test has no
+   * past, and reading the real one here would make every test depend on it.
+   */
+  pastCommands?: readonly PastCommand[];
+  /**
+   * What lists each CLI's models (#223). Defaults to `listModels`, which spawns
+   * both CLIs; a test answers instead, for the reason `invoke` is a seam.
+   */
+  models?: () => Promise<ModelListings>;
   /**
    * What runs an argv. Defaults to the CLI's own `main`.
    *
@@ -255,6 +267,20 @@ export interface SessionDeps {
   pilotAccess?: () => PilotAccess;
 }
 
+/**
+ * The longest line this process will take from the window (#223).
+ *
+ * The reader's own default is 1 MB, which was right while every inbound frame
+ * was a request or an answer. A pilot conversation is now saved through here
+ * (`chat_save`), and one ERM chat is 1.1 MB as JSON: its save was dropped, the
+ * window waited out its timeout, and the move out of `localStorage` stopped. The
+ * ceiling still exists - a sender that never writes a newline must not be an
+ * unbounded allocation in the process holding the run - but it is sized for a
+ * long conversation. The number is a bound, not a measurement: 64 MB is about
+ * thirty times the largest chat seen.
+ */
+export const INBOUND_MAX_BYTES = 64 * 1024 * 1024;
+
 export function createSession(send: Send, deps: SessionDeps = {}): Session {
   const invoke = deps.invoke ?? ((argv, loop) => main(argv, loop));
   const chat = deps.pilot ?? pilotChat;
@@ -262,6 +288,8 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
   /** Subscription pilot turns in flight, by request id, so `pilot_stop` can reach one. */
   const pilotTurns = new Map<number, AbortController>();
   const archive = deps.archive ?? ((dir: string) => listRuns(dir));
+  const listModelsWith = deps.models ?? listModels;
+  let listings: Promise<ModelListings> | null = null;
   const readConfig = deps.config ?? ((dir: string) => loadConfig(dir));
   const writeConfig = deps.writeConfig ?? writeConfigPatch;
   // `head` is what makes this one round rather than the whole change. Undefined
@@ -526,6 +554,58 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       return;
     }
 
+    // The window's conversations (#223). Reads and writes beside a run, like
+    // the other reads: they touch only the app's own data directory, never a
+    // run's, so they cannot observe or disturb one.
+    if (msg.type === 'models') {
+      // A read, beside a run like the others: it spawns each CLI to ask and
+      // takes no turn. Asked once per host and kept, because the answer changes
+      // when a vendor ships rather than between two screens - and `fresh` asks
+      // again. A listing that failed is never kept, so the next ask retries it:
+      // the usual cause is a key that had not arrived yet.
+      if (msg.fresh || listings === null) listings = listModelsWith();
+      const asked = listings;
+      void asked.then((got) => {
+        if (!got.claude.ok || !got.codex.ok) {
+          if (listings === asked) listings = null;
+        }
+        send({ type: 'models', id: msg.id, listings: got });
+      });
+      return;
+    }
+
+    if (msg.type === 'commands_past') {
+      // A read of what was loaded at start-up, never of the directory now: a
+      // command this process started is already in the window, live, and
+      // listing it again here would draw it twice.
+      //
+      // One that was picked back up is the exception, and is answered as it is
+      // NOW: its output has moved on since start-up, and the frames carrying
+      // that went to a window that did not know the id yet.
+      const past = (deps.pastCommands ?? []).map((p) => adoptedSnapshot(p.id) ?? p);
+      send({ type: 'commands_past', id: msg.id, commands: past });
+      return;
+    }
+
+    if (msg.type === 'chats' || msg.type === 'chat_save') {
+      const dir = chatDir();
+      if (dir === null) {
+        send({ type: 'error', id: msg.id, message: 'this host was not told where the app keeps its data (VIBE_APP_DATA)' });
+        return;
+      }
+      try {
+        if (msg.type === 'chats') {
+          send({ type: 'chats', id: msg.id, chats: listChats(dir) });
+        } else {
+          saveChat(dir, msg.key, msg.value);
+          send({ type: 'chat_saved', id: msg.id, key: msg.key });
+        }
+      } catch (err: unknown) {
+        send({ type: 'error', id: msg.id, message: err instanceof Error ? err.message : String(err) });
+      }
+      return;
+    }
+
     if (msg.type === 'prompts') {
       // A read like the four above it and the simplest of them: `promptBlocks`
       // opens nothing, reads no directory and returns the same four constants
@@ -670,7 +750,6 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
           roleNames: ROLE_NAMES,
           providers: PROVIDERS,
           efforts: EFFORTS,
-          models: KNOWN_MODELS,
           pilot: resolvedAccess(access()),
           clis: { claude: cliStatus('claude'), codex: cliStatus('codex') },
         });
@@ -698,21 +777,7 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       // Deliberately not awaited. A dev server does not exit, and that is the
       // point of it: `command_started` answers now, output arrives as it comes,
       // and `command_ended` lands whenever it lands.
-      const started = startCommand({
-        program: msg.program,
-        args: msg.args,
-        dir: msg.dir,
-        onOutput: (commandId, chunk) => send({ type: 'command_output', commandId, chunk }),
-        onEnd: (record) =>
-          send({
-            type: 'command_ended',
-            commandId: record.id,
-            code: record.code,
-            signal: record.signal,
-            stopped: record.stopped,
-            endedAt: record.endedAt ?? Date.now(),
-          }),
-      });
+      const started = startCommand({ program: msg.program, args: msg.args, dir: msg.dir, ...commandFrames(send) });
       send(
         commandRefused(started)
           ? { type: 'command_started', id: msg.id, command: null, refused: started.refused }
@@ -767,8 +832,10 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       // frame (#223). A section that does not parse refuses the turn with its
       // own sentence rather than running it under a guess.
       let addDirs: string[];
+      let granted: PilotAccess;
       try {
-        addDirs = pilotRoots(msg.dir, access());
+        granted = access();
+        addDirs = pilotRoots(msg.dir, granted);
       } catch (err: unknown) {
         send({ type: 'error', id, message: err instanceof Error ? err.message : String(err) });
         return;
@@ -776,6 +843,7 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       // This turn's own off switch (#223), held until it settles either way.
       const stopper = new AbortController();
       pilotTurns.set(id, stopper);
+      const turnStarted = Date.now();
       void (msg.agent === 'codex' ? chatCodex : chat)({
         prompt: msg.prompt,
         system: msg.system,
@@ -791,7 +859,10 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
         // directory, and the frame is refused without it.
         cwd: msg.dir,
         addDirs,
-        timeoutMs: PILOT_TIMEOUT_MS,
+        // What its own tools may do without asking (#223), from the same
+        // machine settings as the directories, never from the frame.
+        access: { yolo: granted.yolo, safeCommands: granted.safeCommands },
+        timeoutMs: granted.timeoutMs,
         signal: stopper.signal,
         onDelta: (text: string) => {
           send({ type: 'pilot_delta', id, text });
@@ -817,10 +888,17 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
           // would look like a model that had nothing to say, and this is a turn
           // that did not happen. `RateLimitError` arrives here as itself, which
           // is what the module raised it for.
+          const said = err instanceof Error ? err.message : String(err);
+          // A turn that reached its ceiling says where the ceiling is (#223).
+          // Decided by the clock, not by reading the sentence: the turn has
+          // lasted at least as long as it was allowed to.
+          const ranOut = Date.now() - turnStarted >= granted.timeoutMs;
           send({
             type: 'error',
             id,
-            message: err instanceof Error ? err.message : String(err),
+            message: ranOut
+              ? `${said} - the pilot's limit is ${String(Math.round(granted.timeoutMs / 60_000))} min, set as "pilot turn limit" in Settings (pilot.timeoutMs)`
+              : said,
           });
         })
         .finally(() => {
@@ -892,13 +970,17 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
     runInvoke(msg.id, msg.argv);
   };
 
-  const write = createLineReader(receive, (bytes) => {
-    send({
-      type: 'error',
-      id: null,
-      message: `dropped ${bytes} bytes of input with no newline in them`,
-    });
-  });
+  const write = createLineReader(
+    receive,
+    (bytes) => {
+      send({
+        type: 'error',
+        id: null,
+        message: `dropped ${bytes} bytes of input with no newline in them`,
+      });
+    },
+    INBOUND_MAX_BYTES,
+  );
 
   return {
     host,
@@ -956,9 +1038,29 @@ export function installProtocolStdout(): Send {
  * after the first request would tell a host the protocol version too late to
  * act on it.
  */
+/**
+ * The frames a command's output and ending travel as - one definition for a
+ * command this process starts and one an earlier launch left running (#223).
+ */
+export function commandFrames(send: (m: Outbound) => void): CommandHandlers {
+  return {
+    onOutput: (commandId, chunk) => send({ type: 'command_output', commandId, chunk }),
+    onEnd: (record) =>
+      send({
+        type: 'command_ended',
+        commandId: record.id,
+        code: record.code,
+        signal: record.signal,
+        stopped: record.stopped,
+        endedAt: record.endedAt ?? Date.now(),
+      }),
+  };
+}
+
 export async function serve(): Promise<void> {
   const send = installProtocolStdout();
-  const session = createSession(send);
+  const logs = commandLogDir();
+  const session = createSession(send, { pastCommands: logs === null ? [] : keepCommandLogs(logs, commandFrames(send)) });
   log.setSink(session.sink);
 
   send({ type: 'ready', protocol: PROTOCOL_VERSION, pid: process.pid });
@@ -1005,13 +1107,15 @@ export async function serve(): Promise<void> {
   // `reaper.rs` takes them with the app; where it cannot, `Status.uncontained`
   // already says so rather than the app pretending otherwise.
   //
-  // **Commands are killed here, and the asymmetry is deliberate** (#211). A run's
-  // agent children are work a person launched and a resume picks up; a dev
-  // server a person started from this window is not something anything picks
-  // up, and one left listening on 5173 after its window has gone is a port
-  // nobody can find the owner of. `process.exit` runs no `close` handler, so
-  // this is the last point at which anything can ask.
-  stopAllCommands();
+  // **A command is left running when the next launch can pick it up** (#223).
+  // This used to kill every one, because a dev server left listening after its
+  // window had gone was a port nobody could find the owner of (#211). Once its
+  // pid and its output are on disk the next launch finds it - and a relaunch
+  // killing every server the pilot had started was the report that moved it.
+  // What cannot be picked up - a piped command, on Windows or with no log
+  // directory - is still stopped here, since `process.exit` runs no `close`
+  // handler and this is the last point at which anything can ask.
+  stopTiedCommands();
   process.exitCode = HOST_EXIT_ABANDONED;
   process.exit(HOST_EXIT_ABANDONED);
 }

@@ -98,7 +98,8 @@ describe('the conversation goes with it', () => {
 
   test('the pane removes the draft\'s copy once the run holds it', () => {
     const adopt = pane.slice(pane.indexOf("if (move === 'adopt') {"));
-    expect(adopt).toContain('isDraftKey(before)) localStorage.removeItem(before)');
+    // Through `putChat` since the store moved to the host's files (#223).
+    expect(adopt).toContain('isDraftKey(before)) putChat(before, null)');
   });
 });
 

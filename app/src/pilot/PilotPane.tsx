@@ -8,7 +8,8 @@ import { Icon } from '../design/Icon';
 import * as host from '../host';
 import * as keys from './keys';
 import * as pilot from './pilot';
-import { agentOf, BACKEND_NAME, BACKEND_NOTE, backendFor, modelsFor, needsKey, SUBSCRIPTION_MODELS } from './backend';
+import { agentOf, BACKEND_NAME, BACKEND_NOTE, backendFor, needsKey, sourceOf } from './backend';
+import { CLI_DEFAULT, firstOf, loadApiModels, loadCliModels, optionsFor, useModels, whyNot } from '../cockpit/models';
 import type { Backend } from './backend';
 import { systemPrompt } from './brief';
 import { readEmitted, unique, visible } from './emit';
@@ -16,6 +17,7 @@ import { useFollow } from './follow';
 import { autoRun, NO_ACCESS } from './access';
 import { declare, settleCall } from './tools';
 import { chatKey, chatMove, isDraftKey, readChat, replyKey, worthSaving, writable } from './saved';
+import { getChat, putChat, useChats } from './chatstore';
 import {
   costOf,
   describeDay,
@@ -798,18 +800,16 @@ export function PilotPane({
   const held = useRef(conversation);
   held.current = conversation;
 
-  // Load when the window is pointed at a different run, and only then.
+  // Load when the window is pointed at a different run, and only then - and
+  // not before the stored conversations have been read at all (#223), or the
+  // first restore would find nothing and the first save would write that
+  // nothing over a conversation that was there.
+  const chats = useChats();
   useEffect(() => {
+    if (!chats.ready) return;
     const key = chatKey(dir, runId);
     const before = chat.current;
-    let stored: string | null = null;
-    try {
-      stored = localStorage.getItem(key);
-    } catch {
-      // Storage can be switched off. Treated as nothing stored, which sends the
-      // decision down the `restore` road and lands on an empty conversation —
-      // a smaller failure than a window that will not render.
-    }
+    const stored = getChat(key);
     const move = chatMove({
       from: before,
       to: key,
@@ -835,22 +835,22 @@ export function PilotPane({
     // worth keeping.
     if (move === 'adopt') {
       try {
-        localStorage.setItem(key, writable(held.current));
+        putChat(key, writable(held.current));
         // Cleared, so the next run in this project starts from nothing rather
         // than inheriting the conversation that launched the previous one. Only
         // the project bucket is cleared: taking a *run's* key away here would
         // delete a real conversation to tidy up after a move.
         const bucket = chatKey(dir, null);
-        if (before === bucket) localStorage.removeItem(bucket);
+        if (before === bucket) putChat(bucket, null);
         // And a draft's, which is the same case one step later (#223): the run
         // the draft asked for has now started and holds the conversation, so the
         // draft's copy would only come back as a duplicate.
-        else if (before !== null && isDraftKey(before)) localStorage.removeItem(before);
+        else if (before !== null && isDraftKey(before)) putChat(before, null);
         // A run's own chat that proposed this one keeps its record but gives
         // up its CLI session (#223): the new run carries it on, and two chats
         // resuming one session would each answer from the other's messages.
         else if (before !== null) {
-          localStorage.setItem(before, writable({ ...held.current, session: null, carry: null }));
+          putChat(before, writable({ ...held.current, session: null, carry: null }));
         }
       } catch {
         // The conversation is still on screen and still correct. What is lost is
@@ -870,7 +870,7 @@ export function PilotPane({
     // reopened. They still settle, and a proposal among them is a card.
     for (const reply of back.replies) for (const call of reply.calls) restored.current.add(call.id);
     dispatch({ type: 'restore', conversation: back });
-  }, [dir, runId, opened]);
+  }, [dir, runId, opened, chats.ready]);
 
   // Save on every settled change. `live` is dropped by `writable`, so a turn in
   // flight is not stored half-streamed and a window killed mid-turn leaves a
@@ -878,13 +878,10 @@ export function PilotPane({
   useEffect(() => {
     const key = chat.current;
     if (key === null || !worthSaving(conversation)) return;
-    try {
-      localStorage.setItem(key, writable(conversation));
-    } catch {
-      // Quota, or storage switched off. The conversation still works for this
-      // session; what is lost is its return next time, which is not worth an
-      // error in the middle of one.
-    }
+    // To the host's files, debounced (#223). A failure is no longer swallowed:
+    // `useChats` carries it and the pane says so, because a conversation that
+    // is silently not being saved is how three days of them were lost.
+    putChat(key, writable(conversation));
   }, [conversation]);
   /**
    * Where turns run (#193). **Subscription by default**, because it is the one
@@ -898,7 +895,20 @@ export function PilotPane({
    */
   const [vendor, setVendor] = useState<keys.Provider>('anthropic');
   const provider: Backend = backendFor(vendor, access ?? NO_ACCESS);
-  const [model, setModel] = useState<string>(SUBSCRIPTION_MODELS[0] ?? '');
+  // The model is the one picked, or else the first the road's own listing
+  // offers (#223) - which for a CLI is `default`, so the pilot follows the CLI
+  // as a run does. Before the listing has answered a CLI still has its default,
+  // and an API road has nothing to send until its vendor says what the key may
+  // use.
+  const listings = useModels();
+  const listing = listings[sourceOf(provider)];
+  const [picked, setPicked] = useState<string | null>(null);
+  const model = picked ?? firstOf(listing) ?? (needsKey(provider) ? '' : CLI_DEFAULT);
+  const setModel = setPicked;
+  useEffect(() => {
+    if (needsKey(provider)) loadApiModels(provider);
+    else loadCliModels();
+  }, [provider]);
   // The conversation the CLI is keeping is `conversation.session` now, stored
   // with the chat (#223) - see `Session` for the two defects a ref here had. It
   // names its backend, so a session is never resumed on a wire that has never
@@ -907,7 +917,7 @@ export function PilotPane({
   useEffect(() => {
     if (heldBy.current === provider) return;
     heldBy.current = provider;
-    setModel(modelsFor(provider, pilot.MODELS)[0] ?? '');
+    setModel(null);
   }, [provider]);
   /**
    * The host-backed turn whose frames we are listening for, or -1.
@@ -1248,7 +1258,7 @@ ${frame.text}`, turn, origin.current))) {
             // A new session after a compaction opens with the summary, which is
             // the whole of how the compaction reaches the next conversation.
             prompt: withCarry(id === null ? held.current.carry : null, said ?? trailingResults(messages) ?? ''),
-            system: systemPrompt(run, launched, 'emitted', access, provider === 'subscription'),
+            system: systemPrompt(run, launched, 'emitted', access, agentOf(provider)),
             model,
             dir,
             sessionId: id ?? crypto.randomUUID(),
@@ -1370,6 +1380,10 @@ ${frame.text}`, turn, origin.current))) {
   const blocked: string | null =
     needsKey(provider) && (statuses === null || !keys.usable(statuses).includes(provider))
       ? `no ${keys.PROVIDER_NAME[provider]} key — enter one in Settings, or switch ${keys.PROVIDER_NAME[provider]} to your subscription there`
+      : model === ''
+        ? whyNot(listing) === null
+          ? `waiting for ${keys.PROVIDER_NAME[vendor]} to list the models this key may use`
+          : 'no model to send — type one beside the picker'
       : !needsKey(provider) && dir.trim() === ''
         ? 'Add a project in the sidebar to send your first message.'
         : !verdict.allowed
@@ -1529,6 +1543,9 @@ ${frame.text}`, turn, origin.current))) {
     };
 
     for (const command of commands.all) {
+      // One read back from an earlier launch is history, not news: whatever it
+      // did, it did to a conversation that is over (#223).
+      if (command.restored) continue;
       const seen = woken.current.get(command.id);
       // An end outranks a quiet: a server that came up and then fell over has
       // two things worth saying and the second is the one that matters.
@@ -1639,12 +1656,25 @@ ${frame.text}`, turn, origin.current))) {
           ))}
         </select>
         <select className="v-pilot__select" aria-label="Pilot model" value={model} onChange={(e) => setModel(e.target.value)}>
-          {modelsFor(provider, pilot.MODELS).map((m) => (
-            <option key={m} value={m}>
-              {m}
+          {optionsFor(listing, model).map((c) => (
+            <option key={c.value} value={c.value}>
+              {c.label}
             </option>
           ))}
         </select>
+        {listing === null && <span className="v-pilot__note">asking for the models…</span>}
+        {whyNot(listing) !== null && <span className="v-pilot__note">no model list: {whyNot(listing)}</span>}
+        {/* With no list there is still a way to name one: a CLI falls back to its
+            own default, and an API road has nothing until a name is typed. */}
+        {whyNot(listing) !== null && (
+          <input
+            className="v-pilot__select"
+            aria-label="Pilot model name"
+            placeholder="model name"
+            defaultValue={picked ?? ''}
+            onBlur={(e) => setPicked(e.target.value.trim() === '' ? null : e.target.value.trim())}
+          />
+        )}
         {/* What this backend costs, when that is not obvious from its name.
             Empty for the subscription, which is why this is conditional rather
             than a span that renders a blank. */}
@@ -1812,6 +1842,15 @@ ${frame.text}`, turn, origin.current))) {
           <TurnWorking reply={conversation.live} now={now} />
         )}
       </div>
+
+      {/* A conversation that is not being saved says so (#223). Swallowing this
+          is how three days of chats were lost without a word on screen. */}
+      {chats.failure !== null && (
+        <div className="v-pilot__note v-pilot__note--alarm">{chats.failure}</div>
+      )}
+      {!chats.ready && chats.failure === null && host.inShell() && (
+        <div className="v-pilot__note">reading saved conversations…</div>
+      )}
 
       {conversation.unknown > 0 && (
         <div className="v-pilot__note">

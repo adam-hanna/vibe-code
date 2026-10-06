@@ -1,3 +1,4 @@
+import { modelArgs } from '@src/modelflag.js';
 import { attachSpend } from '@src/charge.js';
 import { attachEnding, describeEnding, resolveBin, run } from '@src/proc.js';
 import { configuredBin } from '@src/clipaths.js';
@@ -181,7 +182,8 @@ export async function claudeTurn(
   } else {
     args.push(resume ? '--resume' : '--session-id', sessionId);
   }
-  args.push('--model', model, '--effort', effort);
+  // No `--model` at all for the CLI's own default (#223, `models.ts`).
+  args.push(...modelArgs('--model', model), '--effort', effort);
   if (jsonSchema) args.push('--json-schema', JSON.stringify(jsonSchema));
   args.push(...sessionArgs);
   // Variadic flags must come last: they greedily consume following tokens.

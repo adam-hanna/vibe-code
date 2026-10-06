@@ -39,6 +39,7 @@ mod reaper;
 
 use host::{host_send, host_start, host_status, launch, HostProcess};
 use keys::{key_clear, key_set, key_status};
+use pilot::models::pilot_models;
 use pilot::{pilot_cancel, pilot_send, Pilot};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
@@ -89,7 +90,10 @@ pub fn run() {
             key_clear,
             key_status,
             pilot_send,
-            pilot_cancel
+            pilot_cancel,
+            // The one command that answers with data from a vendor, and it is a
+            // list of model names - never a key and never a reply (#223).
+            pilot_models
         ])
         .setup(|app| {
             // Before `launch`, because the first thing worth keeping is why the

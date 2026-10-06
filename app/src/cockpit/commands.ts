@@ -1,4 +1,4 @@
-import type { CommandEnded, CommandOutput, CommandStarted } from '../host';
+import type { CommandEnded, CommandOutput, CommandStarted, PastCommand } from '../host';
 
 /**
  * Commands this window started, folded from frames and from nothing else (#211).
@@ -47,6 +47,27 @@ export interface Command {
    * it saw the lot (#223).
    */
   bytes: number;
+  /**
+   * Started by an earlier launch and read back from its log (#223). The pilot
+   * is never woken about it: its ending was news to a conversation that is
+   * over. One still running was picked back up by the host (`adopted`), and its
+   * output and ending arrive like any other's.
+   */
+  restored: boolean;
+  /**
+   * Still running when this launch began, and picked back up. Not the host's
+   * child, so an ending it sees carries no exit code - which is a fact about
+   * who was watching, and `outcome` says so rather than calling it a failure.
+   */
+  adopted: boolean;
+  /** Null on a record older than the field; only `outcome` reads it. */
+  pid: number | null;
+  /**
+   * The host went away while it was running and never saw it end. `endedAt` is
+   * null because nobody measured an ending - and it is **not** running, which is
+   * what this says. `isRunning` is the question every caller asks.
+   */
+  lost: boolean;
 }
 
 export interface Commands {
@@ -98,6 +119,10 @@ export function started(commands: Commands, frame: CommandStarted): Commands {
     output: '',
     truncated: false,
     bytes: 0,
+    restored: false,
+    adopted: false,
+    pid: null,
+    lost: false,
   };
   // A refusal is cleared by a start, because the two answer the same question
   // and the newer one is the answer.
@@ -138,9 +163,29 @@ export function reduceCommands(
   return ended(commands, frame);
 }
 
+/**
+ * What earlier launches ran, put in front of this launch's (#223).
+ *
+ * Before, not merged by time, because the list reads as a history and every
+ * past one precedes every live one. A past id already present is skipped:
+ * the host answers this once, but a reload of the window asks again.
+ */
+export function restore(commands: Commands, past: readonly PastCommand[]): Commands {
+  const have = new Set(commands.all.map((c) => c.id));
+  const old: Command[] = past
+    .filter((p) => !have.has(p.id))
+    .map((p) => ({ ...p, restored: true, adopted: p.adopted === true, pid: p.pid ?? null }));
+  return { ...commands, all: [...old, ...commands.all] };
+}
+
+/** Whether a command is still going. A lost one is not, though it has no `endedAt`. */
+export function isRunning(command: Command): boolean {
+  return command.endedAt === null && !command.lost;
+}
+
 /** Still running, which is what a stop button and a liveness dot ask about. */
 export function running(commands: Commands): readonly Command[] {
-  return commands.all.filter((c) => c.endedAt === null);
+  return commands.all.filter(isRunning);
 }
 
 /**
@@ -152,9 +197,13 @@ export function running(commands: Commands): readonly Command[] {
  * pressing stop.
  */
 export function outcome(command: Command): string | null {
+  // With a pid it was detached and outlived the host, so it ended on its own
+  // while nobody was watching; without one, the host that died took it down.
+  if (command.lost) return command.pid !== null ? 'ended while the app was closed' : 'the app closed before it ended';
   if (command.endedAt === null) return null;
   if (command.stopped) return 'stopped';
   if (command.signal !== null) return `killed by ${command.signal}`;
+  if (command.code === null && command.adopted) return 'ended (exit code not seen: an earlier launch started it)';
   if (command.code === null) return 'ended without an exit code';
   return command.code === 0 ? 'exit 0' : `exit ${String(command.code)}`;
 }

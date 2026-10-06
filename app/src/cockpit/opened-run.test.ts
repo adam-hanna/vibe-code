@@ -195,7 +195,8 @@ describe('a conversation belongs to the run it is about', () => {
   test('only the project bucket is cleared after an adoption', () => {
     // Taking a *run's* key away would delete a real conversation to tidy up
     // after a move.
-    expect(pilot).toMatch(/if \(before === bucket\) localStorage\.removeItem\(bucket\)/);
+    // Through `putChat` since the store moved to the host's files (#223).
+    expect(pilot).toMatch(/if \(before === bucket\) putChat\(bucket, null\)/);
   });
 
   test('the decision is pure, so it is this file that checks it', () => {
@@ -213,20 +214,16 @@ describe('a conversation belongs to the run it is about', () => {
   });
 });
 
-describe('a model is picked from a list this build ships, and typed past it', () => {
-  test('the cell is a select, fed by the core rather than by the window', () => {
-    // The list lives beside `DEFAULTS` in the core, for the reason
-    // `pilot.MODELS` gives about Rust: a list compiled into the surface that
-    // displays it goes stale on somebody else's schedule instead of ours.
+describe('a model is picked from the list its CLI gave, and typed past it', () => {
+  // Case 2 (#223): these pinned `known={frame.models[...]}` - a list the core
+  // shipped as `KNOWN_MODELS`. The list is now asked of each CLI, so the
+  // source moved; every rule these cases guarded still holds and is pinned
+  // where it now lives. Keeping an unlisted value is `optionsFor`'s job and is
+  // tested in `models.test.ts`.
+  test('the cell is a select, fed by what the CLI said rather than by this build', () => {
     expect(settings).toMatch(/<ModelField/);
-    expect(settings).toMatch(/known=\{frame\.models\[current\.provider \?\? ''\] \?\? \[\]\}/);
-  });
-
-  test('a configured model this build does not know is still offered', () => {
-    // A select that could not represent its own value would rewrite a role's
-    // model by rendering — the worst kind of data loss, because nobody pressed
-    // anything. It may be a model that shipped after this build.
-    expect(settings).toMatch(/!known\.includes\(current\)/);
+    expect(settings).toMatch(/listing=\{current\.provider === 'claude' \|\| current\.provider === 'codex' \? models\[current\.provider\] : null\}/);
+    expect(settings).toMatch(/optionsFor\(listing, current\)/);
   });
 
   test('there is always a way to type one, and it is not the empty option', () => {
@@ -235,7 +232,7 @@ describe('a model is picked from a list this build ships, and typed past it', ()
     // to type, and the two are opposite intentions.
     expect(settings).toMatch(/const OTHER = ' other'/);
     expect(settings).toMatch(/<option value=\{OTHER\}>other/);
-    expect(settings).toMatch(/<option value="">— \{agent\} default —<\/option>/);
+    expect(settings).toMatch(/<option value="">\{empty\}<\/option>/);
   });
 
   test('the list is per agent and never borrowed from the other one', () => {

@@ -711,6 +711,34 @@ they are waiting on. Four things in it are worth carrying:
   The sentence is drawn on its own line rather than in the placeholder, because
   a placeholder disappears the moment somebody types and this is the one thing
   they need while looking at a button that will not work.
+- **The model lists are asked of the CLIs now, and no list ships in this repo** (#223). This
+  supersedes the two notes below it about `KNOWN_MODELS`. Every list had aged: Opus 5.5 and
+  Fable 5.1 could not be picked in the pilot, Codex's default had moved to `gpt-6-astra`, and
+  `gpt-5.6-pro` was no longer in Codex's own list at all. The owner's line was *"What if claude
+  introduces a new model, we have to change source code? I really want to avoid that."*
+  - **Both CLIs list their models on the subscription, for free.** `claude` answers the
+    stream-json `initialize` control request, the one the Agent SDK's `supportedModels()`
+    reads, with every alias, what it resolves to and a description. Stdin is closed after the
+    request, so it answers and exits without a turn: measured at 2.5s, exit 0, no `result`.
+    `codex app-server` answers `model/list` and marks its default. `src/models.ts` asks both
+    with `agentEnv`, so the list is the one the billed account can use.
+  - **With a key, the vendor is asked instead.** `pilot_models` in `pilot/models.rs` is a
+    ninth command, and it answers with model names only. It runs as `command(async)`, because a
+    plain command runs on the main thread. OpenAI's listing is not filtered: no field says
+    which models can chat, and every rule that could would be a list to keep current.
+  - **There is no fallback list.** A fallback is a list somebody has to keep current. A
+    listing that fails says why, the chosen value is kept, and a name can be typed.
+  - **Neither call is a promised interface**, so both parsers fail closed to *no list*.
+  - **Both run defaults are the CLI's own** (`model: "default"`), at the owner's decision:
+    *"Follow both defaults unless changed by the user."* `modelArgs` in `src/modelflag.ts` is
+    the one place that turns it into *no flag*, and `model-listing.test.ts` fails on a call
+    site that writes the flag itself. A consequence worth knowing: a context measurement and
+    the window seeded from an earlier run are keyed by the configured name, so after the CLI's
+    default moves to a model with a different window the first turn's ratio can be wrong
+    once, until `recordTurnContext` overwrites it.
+  - **The host keeps a good listing and retries a failed one**, because the usual failure is a
+    key that had not arrived yet. Settings has a *check again* control for a CLI updated since
+    the window opened.
 - **A model is picked from a list this build ships, and typed past it.** This
   reverses the decision one report above it, and the reversal is narrow rather
   than a change of mind about the rule. Free text was argued from the core's own
@@ -1355,7 +1383,51 @@ they are waiting on. Four things in it are worth carrying:
   reading it back is not pattern-matching on English. A line matching neither is a
   continuation, a stack frame under an error, and is kept whole: dropping it would silently
   shorten the one record of a run nobody is narrating any more.
-- **A conversation is kept between launches, and it is not run state.** `app/src/pilot/saved.ts`
+- **Conversations are files the host writes, because `localStorage` filled up and said
+nothing** (#223). WebKit caps `localStorage` at about 5 MB per origin. A pilot chat that
+reads files and runs commands grows by tool results, and one ERM chat alone reached
+2.16 MB. At 5.24 MB in total every save failed inside a `try` that swallowed it. For
+three days each reply lived only in memory, and a click on another run replaced it with
+the last copy that had saved: *"Have I lost my pilot chats?!"* The CLIs' own session
+logs still held every turn, and the chats were rebuilt from them by hand.
+
+`src/chatstore.ts` keeps one file per conversation under `$VIBE_APP_DATA/chats`. Rust
+sets that variable to the app's data directory. Files are named by a hash of the key,
+so a key never becomes a path, and are written via a temporary file and a rename.
+`app/src/pilot/chatstore.ts` is the window's synchronous cache in front of it, with
+writes debounced per key. Three rules travel with it:
+- **Nothing restores or saves before the first read.** Saving an empty conversation
+  over one not yet read is the same loss by a new road.
+- **The migration out of `localStorage` removes a key only after the host has
+  confirmed it.**
+- **A failed save is drawn in the pane.** The swallowed failure was the whole defect.
+  Everything else in `localStorage` is small and stays where it is.
+
+**A command's output is on disk too, and so is where the window was pointed** (#223). The
+two other things that lived only in memory after the chats moved: the host held every
+command's output in a 256 KB buffer and took it with it, so a relaunch emptied the Commands
+tab and a dev server that fell over in the night left nothing to read; and every relaunch
+landed on the pilot with no run open.
+- **`src/commandlog.ts` writes `$VIBE_APP_DATA/commands/<id>.log`**, appended as output
+  arrives and uncapped, plus `<id>.json`, the record without its output, rewritten
+  atomically at start and at end. `serve()` reads them once, before anything starts, and
+  `commands_past` answers with what it read. The newest `COMMAND_LOGS_KEPT` are kept: a
+  retention choice, counted in commands because a reader looks for *the one from last night*.
+- **Ids continue past the highest on disk**, so `cmd-3` means one command across launches. A
+  restored conversation holds `read_command` calls by id, and without this they would have
+  read whatever this process happened to start third.
+- **`stopAllCommands` writes each ending itself**, because `process.exit` follows at once and
+  no `close` handler will run. A record still marked running at start-up belongs to a host
+  that died without a word, and it is `lost`: `endedAt` stays null, since nobody measured an
+  ending, and `isRunning` is the question every caller asks.
+- **A restored command never wakes the pilot.** Its ending was news to a conversation that is
+  over.
+- **`app/src/cockpit/where.ts` keeps the open run, the tab and an open draft** in
+  `localStorage`, as a pointer: opening a run is a read, so coming back to one costs what a
+  sidebar click costs. A draft is restored only while it still exists. Collapsed panels are
+  still not kept, for the reason above.
+
+**A conversation is kept between launches, and it is not run state.** `app/src/pilot/saved.ts`
   keys it by `(project, run)` — a run id is unique only inside one archive, the same reason a
   pin carries both. The conversation that exists *before* a run is the one that will **propose**
   it, so it lives under the project alone and is **adopted** when a run starts; restoring the
@@ -1846,6 +1918,9 @@ src/validate.ts      parser vocabulary for model output
 src/proc.ts          child-process plumbing, and how a child ended
 src/cancel.ts        stopping a turn that is already running - the latch, what it may kill, and the wait it may cut short
 src/commands.ts      a command a person pressed - no shell, no shim, and where it runs
+src/commandlog.ts    a command's output on disk, and what the last launch left there
+src/models.ts        which models each CLI offers, asked of the CLI - never a list here
+src/modelflag.ts     `default` means no model flag, so the CLI picks
 src/ending.ts        how this process ended - the stamp beside the lock
 src/git.ts           branch and commit operations
 src/worktree.ts      a checkout of its own: where the work happens, and where it does not
@@ -1891,6 +1966,9 @@ app/src/pilot/access.ts    which proposals the person's settings run without a c
 app/src/pilot/ledger.ts    the pilot's own books - the one place a dollar is a dollar
 app/src/cockpit/argv.ts    a form to an argv, and the composer's settings as the pilot is told them
 app/src/cockpit/commands.ts  commands this window ran - pure, and not part of any run
+app/src/cockpit/where.ts     where the window was pointed, kept between launches
+app/src/cockpit/models.ts    the four model listings the pickers draw, and nothing else
+app/src-tauri/src/pilot/models.rs  which models a stored key may use, asked of the vendor
 app/src-tauri/src/host.rs    supervising the host process, and the \\?\ path fix
 app/src-tauri/src/reaper.rs  making a killed app take the host with it
 app/src-tauri/src/keys.rs    the OS keychain, and the read the window cannot reach
@@ -1958,9 +2036,21 @@ displayed.**
   pressed.
 - **It runs where the window is pointed**, checked to exist first and never defaulted to
   `process.cwd()` — the defaulting that put the pilot in a home directory.
-- **A dev server is the point, so it survives**, and `stopAllCommands()` runs on the host's way
-  out. The asymmetry with a run's agent children is deliberate: those are work a resume picks
-  up, and a server left listening on 5173 after its window has gone is a port with no owner.
+- **A dev server is the point, so it survives — including a relaunch** (#223). This said a
+  server left listening after its window had gone was *"a port with no owner"*, and the host
+  killed every command on its way out. That was true while nothing could find it again; once
+  the log was on disk the next launch could, and what the old rule cost was every server the
+  pilot had started, on every rebuild — the pilot then reported, correctly, *"they stopped when
+  the previous session ended"*. So on POSIX, with a log directory, a command is spawned
+  **detached, writing straight into its log file**, and the host follows the file rather than a
+  pipe. `keepCommandLogs` takes back any record still marked running whose pid is alive **and
+  started when the record says** (`ps -o lstart`) — a live pid alone could be a stranger, and
+  the next stop would signal it. A picked-up command is not the host's child, so its ending
+  carries no exit code and the window says *exit code not seen* rather than calling it a
+  failure. A stop signals the **process group**, so `npm run dev` takes Vite with it.
+  `stopTiedCommands` still stops what cannot be picked up — Windows, where the host's children
+  sit in the app's job object and leaving it has not been measured, and a host with no log
+  directory.
 
 
 **A process the pilot starts is one it can follow, and one it can turn off** (#223). Running a
@@ -2444,6 +2534,14 @@ carry it:
   have handed a child in that child's stdout, stderr and lines, because Codex's 401 quotes the key
   in full and every caller hands stderr to a log. `keys.test.ts` pins the second reader.
 
+**A pilot turn's limit is a setting, `pilot.timeoutMs`** (#223). It was a fixed five minutes in
+`serve.ts`, chosen when the pilot only read and answered, and a full CLI editing files ran out of
+it: *"claude timed out after 300000ms. Can we change that anywhere in the settings?"* The default
+is thirty minutes, borrowed from `claude.planTimeoutMs` rather than invented, and anything under a
+minute is refused by name. It is the machine's, beside YOLO and the safe list. A turn that fails
+having run its full limit says where the limit is set. That is decided by the clock, not by
+reading the error's sentence.
+
 **A launch holds the chat that proposed it until the run has an id** (#223).
 `launch` points the window at the new run before `run_started` has named it, so for
 those seconds the pilot pane had no run id to key its chat by. It fell back to the
@@ -2513,6 +2611,38 @@ directory this process picked is a directory nobody chose.
 deliberately not the unpriced-model sentence. Those are two different nulls: one
 is missing information, and this is a statement that there is no price to have.
 Collapsing them would make the second read as an omission somebody should fix.
+
+**The subscription pilot is a full CLI now, bounded by the settings for all projects**
+(#223, at the owner's decision). This reverses the read-only pilot described below.
+The pilot was truthfully telling people *"I can't edit files … Code gets written by the
+loop, not by me"*, and the answer was *"The pilot should be a full fledged cli (claude or
+codex) it should be able to do everything that cli can do. So long as it follows the
+sandbox rules."* The limits are now `pilot.yolo`, `pilot.dirs` and
+`pilot.safeCommands`, stated in the argv and enforced by each CLI's own layer:
+
+- **Claude, outside YOLO:** `--restricted` keeps the file tools inside the repository
+  and the allowed directories. `--tools` is the closed list `Read Glob Grep Edit Write
+  Bash`. The permission mode is `dontAsk`, with `--allowedTools` granting the file
+  tools and one `Bash(<command>:*)` per safe command, so any other command is denied
+  rather than prompted. **In YOLO** it is `bypassPermissions` with every tool, which
+  is why `--restricted` goes, since it refuses that mode. Measured against the real CLI:
+  a `Write` inside the repository and a safe-listed `ls` ran, a `touch` was denied,
+  and a `Write` to the home directory was refused.
+- **Codex, outside YOLO:** its shell is back on, and it runs under
+  `sandbox_mode="workspace-write"` with the allowed directories as `writable_roots`.
+  That is set with `-c` on a resume too, because `resume` takes no `-s`. **The safe list
+  cannot bound Codex's own commands**: `codex exec` has no per-command allow-list, so
+  the sandbox is the boundary, and the prompt says so. **In YOLO** it runs with
+  `--dangerously-bypass-approvals-and-sandbox`. Measured on 0.157.1: a write inside
+  the repository succeeded, and one to the home directory failed with `read-only file
+  system`, on a resumed thread as well. That last result is also new evidence against
+  the settled *"a persisted Codex thread cannot hold a writing role"*, which has not
+  been revisited for runs.
+
+What a person presses is unchanged: `start_run`, `answer_gate`, `run_command` and
+`stop_command` are still the window's proposals (#144). The prompt tells the pilot to
+make a change itself rather than propose a run for it, and to use `run_command` for
+long-running processes, since only those can be followed and stopped by the window.
 
 **It may read the repository and nothing else, and the four layers are named in
 the argv.** #193 decided the read: a pilot that can open `PLAN.md` and the diff is

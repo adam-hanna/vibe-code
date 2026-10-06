@@ -1,7 +1,10 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, statSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readSync, statSync } from 'node:fs';
 import path from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
+import { appendLog, highestId, logFile, pastCommands, prune, tailOf, writeMeta } from '@src/commandlog.js';
 import { expandHome } from '@src/proc.js';
+import type { CommandMeta, PastCommand } from '@src/commandlog.js';
 import type { ChildProcess } from 'node:child_process';
 
 /**
@@ -86,11 +89,104 @@ export interface CommandRecord {
   truncated: boolean;
   /** Whether a person stopped it, as opposed to it ending on its own. */
   stopped: boolean;
+  /** The process, once spawned. See `CommandMeta.pid`. */
+  pid: number | null;
+  /** Started by an earlier launch and picked back up. See `CommandMeta.adopted`. */
+  adopted: boolean;
 }
 
 interface Live {
   record: CommandRecord;
+  /** Null for a command this process did not spawn, and once it has ended. */
   child: ChildProcess | null;
+  /**
+   * The process group a detached command leads, which is what a stop signals
+   * so `npm run dev` takes Vite with it. Null for a piped one.
+   */
+  group: number | null;
+  /** Every character written, dropped ones included: the window's cursor. */
+  bytes: number;
+  /** Stops following the log. Null for a piped command. */
+  unfollow: (() => void) | null;
+}
+
+/**
+ * Whether a command can outlive the host that started it (#223).
+ *
+ * **A dev server survives a relaunch now, and the rule it reverses is
+ * recorded.** The host used to kill every command on its way out, on the
+ * reasoning that *"a server left listening on 5173 after its window has gone is
+ * a port nobody can find the owner of."* That was true while nothing could find
+ * it again. Since the log is on disk the next launch can: the pid is in the
+ * record, the output is in the file, and `keepCommandLogs` takes it back. What
+ * a relaunch cost instead was every server the pilot had started, with the
+ * pilot then correctly reporting *"they stopped when the previous session
+ * ended"* - and rebuilding the app is exactly when somebody wants them up.
+ *
+ * So a command is spawned **detached, writing straight into its log file**, and
+ * nothing in it depends on this process staying alive: no pipe to break, no
+ * parent to take it down. This process follows the file to stream it.
+ *
+ * **Only with a log directory, and not on Windows.** Without the file there is
+ * nothing for a later launch to follow, so a detached command would be the
+ * ownerless port the old rule was about. On Windows the host's children sit in
+ * the app's job object (`reaper.rs`), and leaving it needs a breakaway this has
+ * not been measured against - so there it is piped and killed on exit, as
+ * before.
+ */
+function detaches(): boolean {
+  return logDir !== null && !isWin;
+}
+
+/**
+ * How often a detached command's log is read for new output.
+ *
+ * A display latency, and allowed to be one: it decides how soon a line reaches
+ * the window, never what the line was.
+ */
+const FOLLOW_MS = 200;
+
+/**
+ * How far a running process's start may be from the record's `startedAt` and
+ * still be the same process.
+ *
+ * A pid is reused, so a live pid alone could adopt a stranger and a stop would
+ * then signal it. `ps` reports start time to the second, and the spawn happens
+ * within milliseconds of the stamp, so the real gap is under a second; this is
+ * that second plus room for a loaded machine, and far short of the time a pid
+ * takes to come round again.
+ */
+const ADOPT_SLACK_MS = 5_000;
+
+/**
+ * Whether `pid` is alive and started when the record says it did. False
+ * whenever that cannot be checked - adopting a process this cannot identify is
+ * signalling a stranger on the next stop.
+ */
+export function sameProcess(pid: number, startedAt: number): boolean {
+  try {
+    process.kill(pid, 0);
+  } catch {
+    return false;
+  }
+  const ps = spawnSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
+    encoding: 'utf8',
+    env: { ...process.env, LC_ALL: 'C' },
+    windowsHide: true,
+  });
+  if (ps.status !== 0) return false;
+  const at = Date.parse(ps.stdout.trim());
+  return Number.isFinite(at) && Math.abs(at - startedAt) <= ADOPT_SLACK_MS;
+}
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    // EPERM is somebody else's process under our pid, which is not ours either.
+    return false;
+  }
 }
 
 /**
@@ -104,6 +200,97 @@ const commands = new Map<string, Live>();
 
 /** Ids allocated here, so a caller cannot collide two commands on one name. */
 let next = 0;
+
+/**
+ * Where each command's output is also written, or null (#223, `commandlog.ts`).
+ *
+ * A module latch for the registry's own reason. Null in tests and under the CLI,
+ * where nothing outlives the process anyway; the host sets it once at start-up.
+ */
+let logDir: string | null = null;
+
+/**
+ * Keep every command's output on disk under `dir`, and read back the ones a
+ * previous process left there.
+ *
+ * **Numbering continues from the highest id on disk**, which is what makes an
+ * id mean one command across launches: a pilot conversation is restored with
+ * its `read_command` calls in it, and `cmd-3` reached from one of those has to
+ * be the command it was about rather than whatever this process started third.
+ *
+ * Never throws. A log directory that cannot be read is a host that keeps its
+ * commands in memory, as it always did, and the caller is told by the empty
+ * history rather than by a crash at start-up.
+ */
+export function keepCommandLogs(dir: string, handlers: Handlers = {}): readonly PastCommand[] {
+  try {
+    prune(dir);
+    next = Math.max(next, highestId(dir));
+    logDir = dir;
+    return pastCommands(dir, OUTPUT_KEEP_BYTES).map((past) => adopt(dir, past, handlers));
+  } catch {
+    logDir = null;
+    return [];
+  }
+}
+
+/**
+ * Take back a command an earlier launch left running (#223), or return it as
+ * it was. Only one whose process is still the one the record names: anything
+ * else is left `lost`, which is what it is.
+ *
+ * Followed from the end of its log as it is now, so nothing already in the
+ * returned tail arrives a second time as output.
+ */
+function adopt(dir: string, past: PastCommand, handlers: Handlers): PastCommand {
+  if (!past.lost || past.pid === null || isWin || !sameProcess(past.pid, past.startedAt)) return past;
+  const file = logFile(dir, past.id);
+  const { text, size } = tailOf(file, OUTPUT_KEEP_BYTES);
+  const kept = Buffer.byteLength(text, 'utf8');
+  const record: CommandRecord = {
+    ...past,
+    output: text,
+    truncated: size > kept,
+    adopted: true,
+  };
+  const live: Live = { record, child: null, group: past.pid, bytes: size - kept + text.length, unfollow: null };
+  commands.set(past.id, live);
+  persist(record);
+  follow(live, file, size, handlers);
+  return snapshot(live);
+}
+
+/** One live command as the window's `commands_past` carries it. */
+function snapshot(live: Live): PastCommand {
+  const { record } = live;
+  return { ...metaOf(record), output: record.output, truncated: record.truncated, bytes: live.bytes, lost: false };
+}
+
+/**
+ * A command this process picked back up, as it stands now - so a window asking
+ * after the output has moved on is given the output as it is, not as it was at
+ * start-up. Null for anything else.
+ */
+export function adoptedSnapshot(id: string): PastCommand | null {
+  const live = commands.get(id);
+  return live !== undefined && live.record.adopted ? snapshot(live) : null;
+}
+
+function metaOf(record: CommandRecord): CommandMeta {
+  const { output: _output, truncated: _truncated, ...meta } = record;
+  return meta;
+}
+
+/** Best effort: a log that cannot be written must not stop the command. */
+function persist(record: CommandRecord, chunk?: string): void {
+  if (logDir === null) return;
+  try {
+    if (chunk === undefined) writeMeta(logDir, metaOf(record));
+    else appendLog(logDir, record.id, chunk);
+  } catch {
+    // A full disk, a removed directory. The window still has the stream.
+  }
+}
 
 /**
  * The Node-family CLIs, and the file each one really is.
@@ -232,15 +419,90 @@ export function resolveCommand(
   return { file: found, argv: args, resolved: found };
 }
 
-export interface StartOptions {
-  program: string;
-  args: readonly string[];
-  dir: string;
+export interface Handlers {
   /** Called as output arrives, so a window can stream it. */
   onOutput?: ((id: string, chunk: string) => void) | undefined;
   /** Called once, when it ends. */
   onEnd?: ((record: CommandRecord) => void) | undefined;
   now?: (() => number) | undefined;
+}
+
+export interface StartOptions extends Handlers {
+  program: string;
+  args: readonly string[];
+  dir: string;
+}
+
+/** Keep `chunk` in the bounded buffer and pass it on. Output is never decided on. */
+function take(live: Live, chunk: string, handlers: Handlers): void {
+  let output = live.record.output + chunk;
+  let truncated = live.record.truncated;
+  if (output.length > OUTPUT_KEEP_BYTES) {
+    output = output.slice(output.length - OUTPUT_KEEP_BYTES);
+    truncated = true;
+  }
+  live.record = { ...live.record, output, truncated };
+  live.bytes += chunk.length;
+  handlers.onOutput?.(live.record.id, chunk);
+}
+
+/** Record the ending, once. Every road to an ending comes through here. */
+function finish(live: Live, code: number | null, signal: string | null, handlers: Handlers): void {
+  if (live.record.endedAt !== null) return;
+  live.unfollow?.();
+  live.unfollow = null;
+  live.child = null;
+  live.record = { ...live.record, endedAt: (handlers.now ?? (() => Date.now()))(), code, signal };
+  persist(live.record);
+  handlers.onEnd?.(live.record);
+}
+
+/**
+ * Read a detached command's log as it grows, from byte `from`.
+ *
+ * For a command this process did not spawn, the same tick is also how its end
+ * is noticed: there is no `exit` event for a process that is not our child, so
+ * the pid going away is the ending, and its code is not something anybody here
+ * can see.
+ */
+function follow(live: Live, file: string, from: number, handlers: Handlers): void {
+  let position = from;
+  const decoder = new StringDecoder('utf8');
+  const buffer = Buffer.alloc(64 * 1024);
+  const drain = (): void => {
+    let fd: number;
+    try {
+      fd = openSync(file, 'r');
+    } catch {
+      return;
+    }
+    try {
+      for (;;) {
+        const n = readSync(fd, buffer, 0, buffer.length, position);
+        if (n <= 0) break;
+        position += n;
+        const text = decoder.write(buffer.subarray(0, n));
+        if (text !== '') take(live, text, handlers);
+      }
+    } finally {
+      closeSync(fd);
+    }
+  };
+  const tick = (): void => {
+    drain();
+    if (live.child === null && live.group !== null && !alive(live.group)) {
+      drain();
+      finish(live, null, null, handlers);
+    }
+  };
+  const timer = setInterval(tick, FOLLOW_MS);
+  // A follower must never be what keeps the host alive: on its way out the
+  // host leaves detached commands running, and this is only watching them.
+  timer.unref();
+  live.unfollow = () => {
+    clearInterval(timer);
+    drain();
+  };
 }
 
 /** Start one, or say why not. Never throws: a refusal is an answer. */
@@ -271,40 +533,61 @@ export function startCommand(options: StartOptions): CommandRecord | Refusal {
     output: '',
     truncated: false,
     stopped: false,
+    pid: null,
+    adopted: false,
   };
-  const live: Live = { record, child: null };
+  const live: Live = { record, child: null, group: null, bytes: 0, unfollow: null };
   commands.set(id, live);
+  const handlers: Handlers = { ...options, now };
 
+  const detached = detaches() && logDir !== null ? logDir : null;
   let child: ChildProcess;
+  let out: number | null = null;
   try {
+    if (detached !== null) {
+      mkdirSync(detached, { recursive: true });
+      out = openSync(logFile(detached, id), 'a');
+    }
     child = spawn(plan.file, [...plan.argv], {
       cwd: dir,
       // **Never a shell.** The whole module depends on this line.
       shell: false,
       windowsHide: true,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      // Detached, it writes into its own log and leads its own process group,
+      // so it outlives this process; see `detaches`.
+      detached: out !== null,
+      stdio: out === null ? ['ignore', 'pipe', 'pipe'] : ['ignore', out, out],
     });
   } catch (err: unknown) {
-    live.record = {
-      ...record,
-      endedAt: now(),
-      output: err instanceof Error ? err.message : String(err),
-    };
+    const message = err instanceof Error ? err.message : String(err);
+    live.record = { ...record, endedAt: now(), output: message };
+    persist(live.record, message);
+    persist(live.record);
     return live.record;
+  } finally {
+    // The child holds its own copy; this one is only ever ours to close.
+    if (out !== null) closeSync(out);
   }
   live.child = child;
+  live.record = { ...live.record, pid: child.pid ?? null };
+  persist(live.record);
+
+  if (detached !== null) {
+    live.group = child.pid ?? null;
+    child.unref();
+    follow(live, logFile(detached, id), 0, handlers);
+    child.on('error', (err: Error) => {
+      persist(live.record, `\n${err.message}\n`);
+      finish(live, null, null, handlers);
+    });
+    child.on('exit', (code: number | null, signal: NodeJS.Signals | null) => finish(live, code, signal, handlers));
+    return live.record;
+  }
 
   const append = (chunk: string): void => {
-    let output = live.record.output + chunk;
-    let truncated = live.record.truncated;
-    if (output.length > OUTPUT_KEEP_BYTES) {
-      output = output.slice(output.length - OUTPUT_KEEP_BYTES);
-      truncated = true;
-    }
-    live.record = { ...live.record, output, truncated };
-    options.onOutput?.(id, chunk);
+    persist(live.record, chunk);
+    take(live, chunk, handlers);
   };
-
   child.stdout?.setEncoding('utf8');
   child.stderr?.setEncoding('utf8');
   // Interleaved, because that is what a person reading a terminal sees and the
@@ -312,11 +595,7 @@ export function startCommand(options: StartOptions): CommandRecord | Refusal {
   child.stdout?.on('data', (d: string) => append(d));
   child.stderr?.on('data', (d: string) => append(d));
   child.on('error', (err: Error) => append(`\n${err.message}\n`));
-  child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
-    live.child = null;
-    live.record = { ...live.record, endedAt: now(), code, signal };
-    options.onEnd?.(live.record);
-  });
+  child.on('close', (code: number | null, signal: NodeJS.Signals | null) => finish(live, code, signal, handlers));
 
   return live.record;
 }
@@ -338,24 +617,65 @@ export function listCommands(): readonly CommandRecord[] {
  * the close event arrives first - a command that was stopped and one that
  * exited on its own are different outcomes, and the exit code cannot tell them
  * apart on Windows, where there are no signals (#131).
+ *
+ * A detached command is stopped by its **group**: it leads one, so `npm run
+ * dev` takes the Vite and the watcher it started with it, which killing the one
+ * pid would not.
  */
 export function stopCommand(id: string): boolean {
   const live = commands.get(id);
-  if (live === undefined || live.child === null) return false;
+  if (live === undefined || live.record.endedAt !== null) return false;
+  if (live.group === null && live.child === null) return false;
   live.record = { ...live.record, stopped: true };
-  live.child.kill();
+  if (live.group !== null) {
+    try {
+      process.kill(-live.group, 'SIGTERM');
+    } catch {
+      try {
+        process.kill(live.group, 'SIGTERM');
+      } catch {
+        return false;
+      }
+    }
+    return true;
+  }
+  live.child?.kill();
   return true;
 }
 
-/** Stop everything still running. Returns how many were killed. */
-export function stopAllCommands(): number {
+/**
+ * Stop what cannot outlive this process. Returns how many were killed.
+ *
+ * The host calls this on its way out and `process.exit` follows at once. A
+ * **detached** command is left running - that is the point of it, and the next
+ * launch picks it up (see `detaches`) - and its record is left saying it is
+ * running, which is true. A piped one would die with its pipes anyway, so it is
+ * stopped and written as stopped now: no `close` handler will run, and
+ * otherwise it would come back as `lost`, which is the word for a host that
+ * died without saying anything.
+ */
+export function stopTiedCommands(now: () => number = () => Date.now()): number {
   let killed = 0;
-  for (const id of commands.keys()) if (stopCommand(id)) killed += 1;
+  for (const [id, live] of commands) {
+    if (live.group !== null) {
+      live.unfollow?.();
+      continue;
+    }
+    if (!stopCommand(id)) continue;
+    killed += 1;
+    persist({ ...live.record, endedAt: now() });
+  }
   return killed;
 }
 
 /** Test seam: forget every command. Never called by the product. */
 export function clearCommands(): void {
+  // Detached ones would outlive the test that started them.
+  for (const [id, live] of commands) {
+    stopCommand(id);
+    live.unfollow?.();
+  }
   commands.clear();
   next = 0;
+  logDir = null;
 }

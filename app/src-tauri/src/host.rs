@@ -302,7 +302,16 @@ impl HostProcess {
         let mut command = Command::new(&node);
         command
             .arg(&entry)
-            .env("VIBE_HOST_KEYS_SECRET", &secret)
+            .env("VIBE_HOST_KEYS_SECRET", &secret);
+        // Where the pilot's conversations are kept (#223, `src/chatstore.ts`).
+        // They were the webview's `localStorage`, which has a quota they
+        // outgrew; the host writes them as files under the app's own data
+        // directory instead. Absent when the platform has none, and the host
+        // then refuses the frame by name rather than guessing a directory.
+        if let Ok(data) = app.path().app_data_dir() {
+            command.env("VIBE_APP_DATA", data);
+        }
+        command
             .current_dir(&cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
