@@ -5,6 +5,7 @@ import { Section } from './Disclosure';
 import { ofKind, readAnswers } from './artifacts';
 import { useArtifact, useArtifacts, noText } from './useArtifacts';
 import type { RecordedAnswer } from './artifacts';
+import { answerFiles, humanAnswers, questionKey } from './humananswers';
 import type { Question, QuestionRound } from './model';
 
 /**
@@ -84,7 +85,10 @@ function tone(confidence: string | null): 'alarm' | 'accent' | 'quiet' {
  */
 function One({
   q,
+  mine = null,
 }: {
+  /** What the person answered, from the run's own files (#223), or null. */
+  mine?: string | null;
   q: {
     question: string;
     kind: string | null;
@@ -106,6 +110,19 @@ function One({
       </div>
       <p className="v-q__question">{q.question}</p>
 
+      {/* **Yours first, and it is the one the run used** (#223). The pane drew
+          only the answerer's turn, so a question the answerer deferred to you
+          went on showing its deferral - at high confidence - after you had
+          answered it, which read as your answer being overwritten. */}
+      {mine !== null && (
+        <div className="v-q__answer v-q__answer--mine">
+          <StateKicker tone="accent">your answer</StateKicker>
+          <p>{mine}</p>
+        </div>
+      )}
+      {mine !== null && (q.declined || q.answer !== null) && (
+        <p className="v-q__note">The answerer&apos;s draft, which yours replaced:</p>
+      )}
       {q.declined ? (
         <div className="v-q__answer v-q__answer--declined">
           <StateKicker tone="alarm">declined</StateKicker>
@@ -123,7 +140,7 @@ function One({
           )}
         </div>
       ) : q.answer === null ? (
-        <p className="v-q__note">No answer yet — the answerer has not taken its turn.</p>
+        mine === null && <p className="v-q__note">No answer yet — the answerer has not taken its turn.</p>
       ) : (
         <div className="v-q__answer">
           <div className="v-q__conf">
@@ -137,6 +154,42 @@ function One({
       )}
     </Card>
   );
+}
+
+/**
+ * The person's answers for this run, from `answered-<n>.md` and `NEEDS-INPUT.md`
+ * (see `humananswers.ts`). Read whole each time a listed file or a save changes.
+ */
+function useHumanAnswers(
+  dir: string,
+  runId: string | null,
+  names: readonly string[],
+  revision: number,
+): ReadonlyMap<string, string> {
+  const [found, setFound] = useState<ReadonlyMap<string, string>>(() => new Map());
+  const files = answerFiles(names).join('\n');
+  useEffect(() => {
+    if (runId === null || files === '' || !host.inShell()) {
+      setFound(new Map());
+      return;
+    }
+    let cancelled = false;
+    void Promise.all(
+      files.split('\n').map((name) =>
+        host
+          .artifact(dir, runId, name)
+          .then((r) => (r.kind === 'text' ? r.text : ''))
+          // One unreadable file costs its own answers, not the others'.
+          .catch(() => ''),
+      ),
+    ).then((texts) => {
+      if (!cancelled) setFound(humanAnswers(texts));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [dir, runId, files, revision]);
+  return found;
 }
 
 /** A live question, widened to what `One` draws. */
@@ -167,11 +220,13 @@ function RecordedRound({
   runId,
   name,
   revision,
+  mine,
 }: {
   dir: string;
   runId: string;
   name: string;
   revision: number;
+  mine: ReadonlyMap<string, string>;
 }) {
   const { read, failure, loading } = useArtifact(dir, runId, name, revision);
   const missing = noText(read, failure);
@@ -208,7 +263,7 @@ function RecordedRound({
   return (
     <>
       {answers.map((a) => (
-        <One key={a.question} q={recorded(a)} />
+        <One key={a.question} q={recorded(a)} mine={mine.get(questionKey(a.question)) ?? null} />
       ))}
     </>
   );
@@ -237,6 +292,7 @@ function AnswerForm({
   open,
   busy,
   onResume,
+  onSaved,
 }: {
   dir: string;
   runId: string;
@@ -244,6 +300,8 @@ function AnswerForm({
   open: readonly { question: string; blocking: boolean }[];
   busy: boolean;
   onResume: (runId: string, dir: string) => void;
+  /** A save landed, so what the pane shows as yours has to be read again. */
+  onSaved?: () => void;
 }) {
   const [typed, setTyped] = useState<Readonly<Record<string, string>>>({});
   const [saving, setSaving] = useState(false);
@@ -261,6 +319,7 @@ function AnswerForm({
       .answerQuestions(dir, runId, answers)
       .then((placed: { filled: number; open: readonly string[] }) => {
         setResult({ filled: placed.filled, open: placed.open });
+        onSaved?.();
         then?.();
       })
       // The core's own sentence. *"It is running, so it is not waiting for an
@@ -376,6 +435,10 @@ export function QuestionsPane({
   revision?: number;
 }) {
   const { entries } = useArtifacts(dir, runId, revision);
+  // Bumped by a save from the form below, which rewrites NEEDS-INPUT.md without
+  // writing an artifact the listing would notice.
+  const [saves, setSaves] = useState(0);
+  const mine = useHumanAnswers(dir, runId, entries.map((e) => e.name), revision + saves);
   // Every settled round, minus the one the wire is still describing: the loop
   // writes `answers-<n>.json` the moment the answerer's turn ends, so the live
   // round appears here too and drawing both would be one round twice.
@@ -433,7 +496,7 @@ export function QuestionsPane({
           title={round.round === null ? 'a question round' : `round ${String(round.round)}`}
           meta={<code className="v-doc__file">{round.name}</code>}
         >
-          <RecordedRound dir={dir} runId={runId ?? ''} name={round.name} revision={revision} />
+          <RecordedRound dir={dir} runId={runId ?? ''} name={round.name} revision={revision + saves} mine={mine} />
         </Section>
       ))}
 
@@ -457,7 +520,7 @@ export function QuestionsPane({
           }
         >
           {questions.open.map((q) => (
-            <One key={q.question} q={live(q)} />
+            <One key={q.question} q={live(q)} mine={mine.get(questionKey(q.question)) ?? null} />
           ))}
           {/* Only on a halt, and only for the questions still waiting. See
               `halted` above for why it is told rather than worked out. */}
@@ -468,6 +531,7 @@ export function QuestionsPane({
               open={waiting}
               busy={busy}
               onResume={onResume}
+              onSaved={() => setSaves((n) => n + 1)}
             />
           )}
           {/* The counts are the loop's and are what the round acted on. If the

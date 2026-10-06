@@ -4141,3 +4141,10 @@
   font: var(--type-mono-sm);
   color: var(--text-tertiary);
 }
+
+/* The person's own answer (#223), above the answerer's draft it replaced. The
+   same rule as an answer, in the accent - it is the one the run used. */
+.v-q__answer--mine {
+  border-left-color: var(--accent-base);
+  color: var(--text-primary);
+}
