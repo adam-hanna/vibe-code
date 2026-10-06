@@ -208,7 +208,9 @@ describe('the sidebar is the navigator, and 1b is where a lock is overruled', ()
     // a run that had to start to find out (#189). The field stays as the
     // fallback for a shell where the chooser will not open.
     expect(sidebar).toMatch(/pickDirectory\(\)/);
-    expect(sidebar).toMatch(/v-nav__field/);
+    // The typed field, by its accessible name (case 2, the UI rework: the class
+    // left with the stylesheet).
+    expect(sidebar).toMatch(/aria-label="path to a repository"/);
   });
 
   test('1b is still reachable, and still has no tab of its own', () => {
@@ -217,7 +219,7 @@ describe('the sidebar is the navigator, and 1b is where a lock is overruled', ()
     // is how the bar got to twelve.
     expect(cockpit).toMatch(/tab === 'runs' &&/);
     expect(cockpit).toMatch(/<Workstreams/);
-    const from = cockpit.indexOf('<div className="v-cockpit__tabs">');
+    const from = cockpit.indexOf('aria-label="panes"');
     const to = cockpit.indexOf("{tab === 'pilot' && ", from);
     const bar = from < 0 ? '' : cockpit.slice(from, to < 0 ? cockpit.length : to);
     expect(bar).not.toMatch(/>\s*Runs\b/);

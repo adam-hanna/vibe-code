@@ -1,10 +1,8 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { Activity, Terminal, X } from 'lucide-react';
 import type { Layout, LayoutChangedMeta } from 'react-resizable-panels';
-import { StateKicker } from '../design';
 import { Badge } from '@/ui/badge';
 import { Button } from '@/ui/button';
-import { Icon } from '../design/Icon';
 import { ActivityBar } from '../shell/ActivityBar';
 import { Palette } from '../shell/Palette';
 import { StatusBar } from '../shell/StatusBar';
@@ -82,6 +80,16 @@ import type { Caps } from './Footer';
 import type { Effect } from '../pilot/tools';
 import type { Frame } from '../host';
 import type { Run } from './model';
+
+/**
+ * A tab in the main pane's bar (the UI rework). Stated rather than inherited:
+ * these were the app's only unstyled buttons once, and an unselected tab is
+ * navigation you are not in, which is the prose tier. The selected one takes the
+ * accent and the 2px rule under it, and nothing dims.
+ */
+const TAB =
+  'cursor-pointer whitespace-nowrap border-0 border-b-2 border-transparent bg-transparent px-2.5 pt-2.5 pb-3 text-body-sm font-medium text-secondary hover:bg-column hover:text-primary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent';
+const TAB_ON = 'border-accent text-accent';
 
 /**
  * The cockpit, at the slice #159 scopes it to.
@@ -1310,8 +1318,8 @@ export function Cockpit() {
       <RateLimitStrip wait={run.rateLimit} now={now} />
 
       {wire.failure !== null && (
-        <div className="v-cockpit__alarm">
-          <StateKicker tone="alarm">no host</StateKicker> {wire.failure}
+        <div className="flex flex-none items-center gap-2 bg-alarm px-5 py-2 text-body-sm text-primary">
+          <Badge variant="alarm">no host</Badge> {wire.failure}
         </div>
       )}
       {/* `Status.uncontained` is no longer drawn here: a permanent banner on
@@ -1428,15 +1436,15 @@ export function Cockpit() {
           onLayoutChanged={saveLayout('center')}
         >
         <ResizablePanel id="main" minSize="20%" className="flex min-h-0 min-w-0 flex-col">
-        <div className="v-cockpit__pane" role="main">
-          <header className="v-workspace__head">
-            <div><p className="v-workspace__eyebrow">{viewing !== null ? 'Run archive' : 'Make room for good work'}</p>
-              <h2>{tab === 'pilot' ? 'Your pilot' : tab === 'plans' ? 'Plans' : tab === 'critique' ? 'Plan critique' : tab === 'code' ? 'Code changes' : tab === 'review' ? 'Code review' : tab === 'verify' ? 'Verification' : tab === 'questions' ? 'Questions' : tab === 'spend' ? 'Usage' : tab === 'settings' ? 'Settings' : 'Project runs'}</h2>
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-page" role="main">
+          <header className="flex flex-none items-center justify-between gap-4 px-7 pt-6 pb-4">
+            <div><p className="mb-1 text-label text-tertiary">{viewing !== null ? 'Run archive' : 'Make room for good work'}</p>
+              <h2 className="m-0 text-title font-semibold tracking-tight text-display">{tab === 'pilot' ? 'Your pilot' : tab === 'plans' ? 'Plans' : tab === 'critique' ? 'Plan critique' : tab === 'code' ? 'Code changes' : tab === 'review' ? 'Code review' : tab === 'verify' ? 'Verification' : tab === 'questions' ? 'Questions' : tab === 'spend' ? 'Usage' : tab === 'settings' ? 'Settings' : 'Project runs'}</h2>
             </div>
-            <button className="v-workspace__usage" onClick={() => setTab('spend')} title="Usage for the live run">
-              <Icon name="loop" size={15} />
+            <Button variant="quiet" size="sm" onClick={() => setTab('spend')} title="Usage for the live run">
+              <Activity size={14} aria-hidden="true" />
               {run.spend.tokens === null ? 'No usage reported' : `${fmtTokens(run.spend.tokens)} tokens`}
-            </button>
+            </Button>
           </header>
           {/*
             Hi-fi 1's bar, in the design's own order. It had twelve tabs against
@@ -1452,12 +1460,12 @@ export function Cockpit() {
             they go, and putting them after the frames it does name is the least
             it can be wrong by.
           */}
-          <div className="v-cockpit__tabs">
+          <nav className="flex flex-none items-stretch gap-0.5 overflow-x-auto border-b border-rule-structure bg-page px-6" aria-label="panes">
             {/* The pilot (#143, #144), and hi-fi 5's first tab. The count is
                 proposals waiting on a person, and it is here because a proposal
                 nobody sees blocks the conversation silently. */}
             <button
-              className={`v-cockpit__tab ${tab === 'pilot' ? 'v-cockpit__tab--on' : ''}`}
+              className={cn(TAB, tab === 'pilot' && TAB_ON)}
               aria-current={tab === 'pilot' ? 'page' : undefined}
               onClick={() => setTab('pilot')}
             >
@@ -1471,7 +1479,7 @@ export function Cockpit() {
                 that reading one is its own decision with #129's link refusal
                 attached to it. Both are now on the core side, where they belong. */}
             <button
-              className={`v-cockpit__tab ${tab === 'plans' ? 'v-cockpit__tab--on' : ''}`}
+              className={cn(TAB, tab === 'plans' && TAB_ON)}
               aria-current={tab === 'plans' ? 'page' : undefined}
               onClick={() => open('plans')}
             >
@@ -1497,7 +1505,7 @@ export function Cockpit() {
                 counts are inside, on the round they belong to, where `Counts`
                 draws all four beside the tolerance that decided them. */}
             <button
-              className={`v-cockpit__tab ${tab === 'critique' ? 'v-cockpit__tab--on' : ''}`}
+              className={cn(TAB, tab === 'critique' && TAB_ON)}
               aria-current={tab === 'critique' ? 'page' : undefined}
               onClick={() => open('critique')}
             >
@@ -1506,14 +1514,14 @@ export function Cockpit() {
             {/* `1d`, per round. The whole-run diff is this pane's first section
                 and is still what it opens on before any round has committed. */}
             <button
-              className={`v-cockpit__tab ${tab === 'code' ? 'v-cockpit__tab--on' : ''}`}
+              className={cn(TAB, tab === 'code' && TAB_ON)}
               aria-current={tab === 'code' ? 'page' : undefined}
               onClick={() => open('code')}
             >
               Code{run.commits.length > 0 ? ` · ${String(run.commits.length)}` : ''}
             </button>
             <button
-              className={`v-cockpit__tab ${tab === 'review' ? 'v-cockpit__tab--on' : ''}`}
+              className={cn(TAB, tab === 'review' && TAB_ON)}
               aria-current={tab === 'review' ? 'page' : undefined}
               onClick={() => open('review')}
             >
@@ -1523,7 +1531,7 @@ export function Cockpit() {
                 advisory question the answerer handled needs nobody, and a
                 badge that included it would train you to ignore the badge. */}
             <button
-              className={`v-cockpit__tab ${tab === 'questions' ? 'v-cockpit__tab--on' : ''}`}
+              className={cn(TAB, tab === 'questions' && TAB_ON)}
               aria-current={tab === 'questions' ? 'page' : undefined}
               onClick={() => open('questions')}
             >
@@ -1536,7 +1544,7 @@ export function Cockpit() {
                 subject is the decision in front of you and its trend, and a
                 gate count would move for a reason nobody cares about. */}
             <button
-              className={`v-cockpit__tab ${tab === 'verify' ? 'v-cockpit__tab--on' : ''}`}
+              className={cn(TAB, tab === 'verify' && TAB_ON)}
               aria-current={tab === 'verify' ? 'page' : undefined}
               onClick={() => setTab('verify')}
             >
@@ -1554,7 +1562,7 @@ export function Cockpit() {
             */}
             {/* Usage now lives in the workspace heading, giving the artifact
                 navigation its full width. The same pane keeps both providers. */}
-          </div>
+          </nav>
           {/* **Which run the panes are about, whenever it is not the live one.**
               The panes and the column both follow an opened run now (#223), so
               this no longer has to explain a window showing two runs at once —
@@ -1724,7 +1732,7 @@ export function Cockpit() {
             />
           </div>
           {wire.unknown.length > 0 && (
-            <div className="v-cockpit__unknown">
+            <div className="flex-none border-t border-rule-card px-5 py-2 font-mono text-mono-sm text-emphasis">
               {wire.unknown.length} unrecognised frame(s): {wire.unknown[wire.unknown.length - 1]}
             </div>
           )}

@@ -319,12 +319,17 @@ console.log('\n9 · the element reset leaves no user-agent ground showing');
   }
   // And the three that had the bug now say what colour they are, rather than
   // inheriting one that was only ever correct against a ground they did not have.
-  const cockpit = readFileSync(path.join(here, '..', 'src', 'cockpit', 'cockpit.css'), 'utf8');
-  const tab = /\.v-cockpit__tab\s*\{([^}]*)\}/.exec(cockpit.replace(/\/\*[\s\S]*?\*\//g, ''));
-  if (tab === null || !/color\s*:/.test(tab[1] ?? '')) {
-    fail('.v-cockpit__tab does not state its own colour');
+  //
+  // The tab moved out of the stylesheet with the UI rework: its look is the
+  // `TAB` constant in `Cockpit.tsx`, a string of utilities, so the check reads
+  // that file and asks the same question of it - does the tab name a text colour
+  // and a ground of its own, rather than inheriting whatever a button gets.
+  const cockpit = readFileSync(path.join(here, '..', 'src', 'cockpit', 'Cockpit.tsx'), 'utf8');
+  const tab = /const TAB =\s*'([^']*)'/.exec(cockpit);
+  if (tab === null || !/\btext-(primary|secondary|tertiary|emphasis|display)\b/.test(tab[1] ?? '') || !/\bbg-\w/.test(tab[1] ?? '')) {
+    fail('the main pane tab (TAB in Cockpit.tsx) does not state its own colour and ground');
   } else {
-    pass('.v-cockpit__tab states its own colour');
+    pass('the main pane tab states its own colour and ground');
   }
 }
 

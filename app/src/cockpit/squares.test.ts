@@ -83,8 +83,11 @@ describe('the tab bar the rail emptied', () => {
   // because each one drifting back is how twelve tabs happened.
   //
   // Sliced between the container and the first pane render rather than matched
-  // with a `</div>`, which a nested element closes first.
-  const from = cockpit.indexOf('<div className="v-cockpit__tabs">');
+  // with a `</nav>`, which a nested element closes first.
+  //
+  // Case 2 (the UI rework): the bar is found by its accessible name rather than
+  // by a class that left with the stylesheet. Every claim below is unchanged.
+  const from = cockpit.indexOf('aria-label="panes"');
   const to = cockpit.indexOf("{tab === 'pilot' && ", from);
   const bar = from < 0 ? '' : cockpit.slice(from, to < 0 ? cockpit.length : to);
   /** Where a label first appears in the bar, or Infinity. Order, not pixels. */
@@ -94,7 +97,8 @@ describe('the tab bar the rail emptied', () => {
   };
 
   test('the bar was found and is the bar', () => {
-    expect(bar).toMatch(/v-cockpit__tab/);
+    // Every tab says which one is current, which is what makes it a tab bar.
+    expect(bar).toMatch(/aria-current=\{tab === /);
     expect(bar).toMatch(/Questions/);
   });
 
@@ -109,10 +113,11 @@ describe('the tab bar the rail emptied', () => {
   test('usage is a readout in the heading rather than an artifact tab', () => {
     // Hi-fi 1 puts `1.9M tok · codex 5h 41%` right-aligned in this bar. The
     // pane behind it survives - the readout is the way in - but it costs no tab.
-    expect(bar).not.toMatch(/v-cockpit__tab[^>]*>\s*Spend/);
+    expect(bar).not.toMatch(/>\s*Spend\s*</);
     // The redesign moves the same readout one row up to give navigation room.
-    expect(cockpit).toMatch(/className="v-workspace__usage" onClick=\{\(\) => setTab\('spend'\)\}/);
-    expect(cockpit.indexOf('className="v-workspace__usage"')).toBeLessThan(from);
+    // Found by its title rather than a class (case 2, the UI rework).
+    expect(cockpit).toMatch(/onClick=\{\(\) => setTab\('spend'\)\} title="Usage for the live run"/);
+    expect(cockpit.indexOf('title="Usage for the live run"')).toBeLessThan(from);
   });
 
   test('the readout says nothing rather than zero before anything is charged', () => {
@@ -190,10 +195,10 @@ describe('the tab bar the rail emptied', () => {
     // could not answer what a single round changed. A tab for either coming
     // back is two answers to one question, which is how twelve tabs happened.
     expect(bar).not.toMatch(/>\s*Findings\b/);
-    expect(bar).not.toMatch(/v-cockpit__tab[^>]*>\s*Diff\b/);
+    expect(bar).not.toMatch(/>\s*Diff\s*</);
     // And `Versions` is no longer a dashed placeholder saying the window cannot
     // read a run's artifacts, because it can.
-    expect(bar).not.toMatch(/v-cockpit__tab--off[^>]*>\s*Versions/);
+    expect(bar).not.toMatch(/>\s*Versions\s*</);
   });
 
   test('a fresh window lands on the pilot', () => {
