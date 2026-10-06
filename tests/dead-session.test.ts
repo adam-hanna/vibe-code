@@ -7,7 +7,7 @@ import { failureSparedConversation, RateLimitError } from '@src/claude.js';
 import { DEFAULTS } from '@src/config.js';
 import { Escalation, EXIT, runTurn } from '@src/orchestrator.js';
 import type { AgentTurns, Role, TurnRequest } from '@src/orchestrator.js';
-import { handoffContext } from '@src/prompts.js';
+import { handoffContext, taskContext } from '@src/prompts.js';
 import { createRun } from '@src/run.js';
 import { slotHasDeadTurn, slotHasMemory } from '@src/slots.js';
 import type { ClaudeTurnOptions } from '@src/claude.js';
@@ -143,6 +143,8 @@ function owesFork(state: RunState, parentId = 'parent-session'): RunState {
 
 /** The prefix a genuinely fresh generative turn is given on this fixture. */
 const FRESH_PREFIX = handoffContext(null, null, false);
+/** The goal is explicit even when the session already holds its history. */
+const TASK_CONTEXT = taskContext('dead session', null);
 
 // ---- At dispatch: a dead turn is resumed, never re-issued -------------------
 
@@ -162,7 +164,7 @@ test('a dead first turn is resumed, not re-issued', async () => {
   assert.equal(rec.calls[0]?.sessionId, spent, 'under the id the dead turn spent');
   // The session holds that turn's work, including the briefing it was given, so
   // greeting it as a fresh conversation would be false.
-  assert.equal(rec.calls[0]?.prompt, 'do the thing');
+  assert.equal(rec.calls[0]?.prompt, TASK_CONTEXT + 'do the thing');
   assert.equal(state.sessionStarted, true, 'and the recovered turn establishes it');
 });
 
@@ -217,7 +219,7 @@ test('an observed failure discards the spent id', async () => {
   await captureLog(() => runTurn(state, cfg, request('planner'), next.turns));
   assert.equal(next.calls[0]?.resume, false);
   assert.equal(next.calls[0]?.sessionId, state.sessionId);
-  assert.equal(next.calls[0]?.prompt, FRESH_PREFIX + 'do the thing');
+  assert.equal(next.calls[0]?.prompt, FRESH_PREFIX + TASK_CONTEXT + 'do the thing');
 });
 
 test('a failed fork keeps the fork owed, and re-forks into an id the CLI has not refused', async () => {
@@ -330,8 +332,8 @@ test('a rate-limit retry does not re-issue a spent id', async () => {
   // conversation and is told so; attempt 2 resumes what attempt 1 registered, so
   // the same preamble would restate a briefing the session already holds.
   assert.equal(rec.calls[0]?.resume, false);
-  assert.equal(rec.calls[0]?.prompt, FRESH_PREFIX + 'do the thing');
-  assert.equal(rec.calls[1]?.prompt, 'do the thing');
+  assert.equal(rec.calls[0]?.prompt, FRESH_PREFIX + TASK_CONTEXT + 'do the thing');
+  assert.equal(rec.calls[1]?.prompt, TASK_CONTEXT + 'do the thing');
 });
 
 test('a rate-limited recovery resumes the same conversation, and is not told it is fresh', async () => {
@@ -361,13 +363,13 @@ test('a rate-limited recovery resumes the same conversation, and is not told it 
   assert.equal(rec.calls.length, 2);
   assert.equal(rec.calls[0]?.resume, true, 'the first attempt recovered the dead session');
   assert.equal(rec.calls[0]?.sessionId, spent);
-  assert.equal(rec.calls[0]?.prompt, 'do the thing', 'which needed no rehydration');
+  assert.equal(rec.calls[0]?.prompt, TASK_CONTEXT + 'do the thing', 'which needed no session rehydration');
 
   assert.equal(rec.calls[1]?.resume, true, 'and the retry recovers it again');
   assert.equal(rec.calls[1]?.sessionId, spent, 'the limit gave up nothing');
   assert.equal(
     rec.calls[1]?.prompt,
-    'do the thing',
+    TASK_CONTEXT + 'do the thing',
     'so it is not greeted as a conversation that has never seen this run',
   );
   assert.equal(state.sessionStarted, true);
@@ -435,7 +437,7 @@ test('a limit past the wait cap exits resumable on a session it kept', async () 
   await captureLog(() => runTurn(state, cfg, request('planner'), next.turns));
   assert.equal(next.calls[0]?.resume, true);
   assert.equal(next.calls[0]?.sessionId, minted);
-  assert.equal(next.calls[0]?.prompt, 'do the thing', 'holding the work the limited turn did');
+  assert.equal(next.calls[0]?.prompt, TASK_CONTEXT + 'do the thing', 'holding the work the limited turn did');
 });
 
 test('a run configured not to wait keeps the session too', async () => {

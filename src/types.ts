@@ -1723,6 +1723,8 @@ export interface RunState {
    * run nobody answered writes no field at all.
    */
   humanAnswered?: string[];
+  /** Human-supplied answers in arrival order, retained as explicit brief amendments. */
+  humanAnswers?: Answer[];
   /**
    * Re-asks the guard suppressed as rephrasings, with what each matched.
    *

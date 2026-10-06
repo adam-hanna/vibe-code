@@ -17,7 +17,7 @@ import {
   slotStarted,
 } from '@src/orchestrator.js';
 import type { AgentTurns, Role, RoleTable, TurnRequest } from '@src/orchestrator.js';
-import { handoffContext } from '@src/prompts.js';
+import { handoffContext, taskContext } from '@src/prompts.js';
 import {
   noteSlotRegistered,
   recoverDeadSlot,
@@ -172,7 +172,7 @@ test('a Claude slot whose first turn fails is not established on the next turn',
   const rec = recorder();
   await captureLog(() => runTurn(state, cfg, request('planner', { prompt: 'second' }), rec.turns));
   assert.equal(rec.claudeCalls[0]?.resume, false);
-  assert.equal(rec.claudeCalls[0]?.prompt, handoffContext(null, null, false) + 'second');
+  assert.equal(rec.claudeCalls[0]?.prompt, handoffContext(null, null, false) + taskContext(state.task, state.extraContext) + 'second');
 });
 
 test('a Codex slot whose first turn fails is not established on the next turn', async () => {
@@ -301,7 +301,7 @@ test('a started run stored before this change still carries its conversations', 
   const rec = recorder({ codexSession: 'thread-legacy' });
   await captureLog(() => runTurn(state, cfg, request('planner', { prompt: 'go on' }), rec.turns));
   assert.equal(rec.claudeCalls[0]?.resume, true);
-  assert.equal(rec.claudeCalls[0]?.prompt, 'go on');
+  assert.equal(rec.claudeCalls[0]?.prompt, taskContext(state.task, state.extraContext) + 'go on');
   assert.equal(rec.claudeCalls[0]?.sessionId, 'session-legacy');
 
   await captureLog(() => runTurn(state, cfg, request('critic'), rec.turns));

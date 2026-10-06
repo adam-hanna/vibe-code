@@ -1818,6 +1818,8 @@ const READERS = {
   // migrates and nothing is repaired.
   humanAnswered: (raw, ctx) =>
     raw === undefined ? undefined : repairedArray('humanAnswered', raw, ctx, readString),
+  humanAnswers: (raw, ctx) =>
+    raw === undefined ? undefined : repairedArray('humanAnswers', raw, ctx, readAnswer),
   suppressedQuestions: (raw, ctx) =>
     raw === undefined
       ? undefined

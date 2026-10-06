@@ -14,7 +14,7 @@ import {
   runTurn,
 } from '@src/orchestrator.js';
 import type { AgentTurns, Role, TurnRequest } from '@src/orchestrator.js';
-import { handoffContext } from '@src/prompts.js';
+import { handoffContext, taskContext } from '@src/prompts.js';
 import { createRun, recordContextMeasurement } from '@src/run.js';
 import { ANSWERS_SCHEMA, FINDINGS_SCHEMA } from '@src/schemas.js';
 import type { ClaudeTurnOptions } from '@src/claude.js';
@@ -401,12 +401,12 @@ test('the first Claude turn of a session carries the handoff context, later ones
 
   await captureLog(() => runTurn(state, cfg, request('planner', { prompt: 'first' }), rec.turns));
   assert.equal(rec.claudeCalls[0]?.resume, false);
-  assert.equal(rec.claudeCalls[0]?.prompt, handoffContext(null, null, false) + 'first');
+  assert.equal(rec.claudeCalls[0]?.prompt, handoffContext(null, null, false) + taskContext(state.task, state.extraContext) + 'first');
   assert.equal(state.sessionStarted, true);
 
   await captureLog(() => runTurn(state, cfg, request('planner', { prompt: 'second' }), rec.turns));
   assert.equal(rec.claudeCalls[1]?.resume, true);
-  assert.equal(rec.claudeCalls[1]?.prompt, 'second');
+  assert.equal(rec.claudeCalls[1]?.prompt, taskContext(state.task, state.extraContext) + 'second');
 });
 
 // ---- Ordering under concurrent compaction ----------------------------------

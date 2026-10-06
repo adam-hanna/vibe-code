@@ -707,7 +707,9 @@ async function runPhases(
           // The snapshot, never `plan.acceptance_criteria`: a criterion the
           // critic never saw is not an approved criterion.
           state.acceptanceCriteria,
+          plan.out_of_scope,
         ),
+        planInPrompt: true,
         cwd,
         label: 'implement',
       },
@@ -1242,7 +1244,9 @@ async function reviewPhase(
             // is read by the reviewer exactly as the implementer's is, so it is
             // held to the same bar (#50).
             state.acceptanceCriteria,
+            plan,
           ),
+          planInPrompt: true,
           cwd,
           label: `verify-fix-${state.verifyRound}`,
         },
@@ -1361,7 +1365,8 @@ async function reviewPhase(
         cwd,
         {
           role: 'implementer',
-          prompt: P.fixPrompt(review.findings, state.reviewRound, state.acceptanceCriteria),
+          prompt: P.fixPrompt(review.findings, state.reviewRound, state.acceptanceCriteria, plan),
+          planInPrompt: true,
           cwd,
           label: `final-fix-${state.reviewRound}`,
         },
@@ -1476,7 +1481,8 @@ async function runFixRound(
     cwd,
     {
       role: 'implementer',
-      prompt: P.fixPrompt(findings, state.reviewRound, state.acceptanceCriteria),
+      prompt: P.fixPrompt(findings, state.reviewRound, state.acceptanceCriteria, state.plan),
+      planInPrompt: state.plan !== null,
       cwd,
       label: `fix-${state.reviewRound}`,
     },
@@ -2744,6 +2750,8 @@ export type { IdOrigin, SlotName, SlotSpec } from '@src/slots.js';
 export interface TurnRequest {
   role: Role;
   prompt: string;
+  /** The builder already supplied the plan; a fresh session need not repeat it. */
+  planInPrompt?: boolean | undefined;
   cwd: string;
   /** The retry label, the progress label, and - for Codex - the output name. */
   label: string;
@@ -2819,6 +2827,14 @@ export function runTurn(
   const spec = roles[req.role];
   const dispatch: DispatchRequest = {
     ...req,
+    // Restate the immutable brief for every role, including continuing judges.
+    // The initial planning builder already renders it; user decisions still
+    // travel separately so a model's recommendations cannot acquire authority.
+    prompt:
+      (req.role === 'planner' && req.label === 'plan'
+        ? ''
+        : P.taskContext(state.task, state.extraContext)) +
+      P.userDecisions(state.humanAnswers) + req.prompt,
     timeoutMs: req.timeoutMs ?? turnTimeoutMs(req.role, cfg, roles),
     // The schema and the tool list are the role's, and the request still wins
     // for a caller with a reason of its own. Both ride on the role for the same
@@ -2843,8 +2859,9 @@ export function runTurn(
  *
  * Not conditional on there being a briefing: a rotation that could not summarise
  * the outgoing session still starts a fresh one, and the plan of record has to
- * travel with it either way - `revisePlanPrompt` and the fix prompts all assume
- * the plan is already in the conversation. The full plan document, not
+ * travel with it either way. Revision and fix builders now restate the plan on
+ * every turn; `planInPrompt` avoids duplicating it in the fresh-session prefix.
+ * Other callers retain the restoration fallback. The full plan document, not
  * `plan_md`: the boundary the plan drew is part of the plan of record, and a
  * session rehydrated without it can revise the plan into a different one without
  * ever being told it had a boundary.
@@ -2853,14 +2870,21 @@ export function runTurn(
  * implementer must run with `--no-codex-session` (config refuses the pair), so
  * it has no thread memory at all - without this it would be asked to fix code
  * against a plan it cannot see. A judging role is excluded: its prompts restate
- * the plan themselves and take an explicit `hasMemory`, so today's first Codex
- * critique turn is unchanged, as is every Claude turn under the default table -
- * where Claude holds exactly the two generative roles.
+ * the plan themselves and take an explicit `hasMemory`.
  */
-function freshConversationPrefix(state: RunState, role: Role, hasMemory: boolean): string {
+function freshConversationPrefix(
+  state: RunState,
+  role: Role,
+  hasMemory: boolean,
+  planInPrompt = false,
+): string {
   if (hasMemory || !GENERATIVE_ROLES.includes(role)) return '';
   return (
-    P.handoffContext(state.handoff, planOfRecord(state, role), state.handoffStale === true) +
+    P.handoffContext(
+      state.handoff,
+      planInPrompt ? null : planOfRecord(state, role),
+      state.handoffStale === true,
+    ) +
     rehydratedPriorRuns(state, role)
   );
 }
@@ -3103,7 +3127,9 @@ async function claudeDispatch(
         // one, and a retry carrying the first attempt's prefix would start that
         // fresh session without the handoff or the plan of record.
         const prompt =
-          freshConversationPrefix(state, req.role, slotContinuity(state, cfg, slot)) + req.prompt;
+          freshConversationPrefix(
+            state, req.role, slotContinuity(state, cfg, slot), req.planInPrompt,
+          ) + req.prompt;
         // A registered id with no successful turn means an attempt was made here
         // and never returned: a previous process died on it, or - since #91 - an
         // earlier attempt of this very turn was rate limited. A failure that left
@@ -3575,6 +3601,7 @@ async function revisePlan(
     {
       role: 'planner',
       prompt: P.revisePlanPrompt({
+        planMd: state.plan?.plan_md,
         findings: args.findings,
         answers: args.answers,
         // The plan of record's boundary, restated: a revision returns the whole
@@ -3586,6 +3613,7 @@ async function revisePlan(
         acceptanceCriteria: state.plan?.acceptance_criteria,
         round: state.planRound,
       }),
+      planInPrompt: state.plan !== null,
       cwd,
       label,
     },
@@ -3675,7 +3703,9 @@ async function codexDispatch(
   // inputs no attempt changes.
   const model = modelFor(req.role, cfg, roles);
   const forkFrom = noteSpawn(state, cfg, slot);
-  const prompt = freshConversationPrefix(state, req.role, slotContinuity(state, cfg, slot)) + req.prompt;
+  const prompt =
+    freshConversationPrefix(state, req.role, slotContinuity(state, cfg, slot), req.planInPrompt) +
+    req.prompt;
 
   // Through the same retry the Claude turns use, so a Codex rate limit gets the
   // wait, the maxWaitMinutes cap and the resumable exit that already exist
@@ -4513,7 +4543,7 @@ async function resolveQuestions(
     cfg,
     {
       role: 'answerer',
-      prompt: P.answerPrompt(questions, plan.plan_md),
+      prompt: P.answerPrompt(questions, P.renderPlanDoc(plan)),
       cwd,
       // **The question round, not the plan round.** These were keyed by
       // `planRound` and could be because every question round used to advance it
