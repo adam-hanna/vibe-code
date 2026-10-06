@@ -49,6 +49,7 @@ const CONSTANT: Readonly<Record<string, string>> = {
   'review breadth': 'REVIEW_BREADTH',
   'fix breadth': 'FIX_BREADTH',
   'a deferred finding': 'DEFERRED_MARK',
+  'simple solution': 'SIMPLE_SOLUTION',
 };
 
 /** The source of one function, from its signature to the next top-level one. */

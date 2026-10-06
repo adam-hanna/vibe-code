@@ -20,6 +20,7 @@ import type { AgentTurns, Role, RoleProviders, TurnRequest } from '@src/orchestr
 import { adjudicate, preflight } from '@src/preflight.js';
 import type { AgentPreflight, PreflightProbes } from '@src/preflight.js';
 import { codexTurn } from '@src/codex.js';
+import { taskContext } from '@src/prompts.js';
 import type { CodexTurnOptions } from '@src/codex.js';
 import { createRun, recordContextMeasurement } from '@src/run.js';
 import type {
@@ -306,12 +307,12 @@ test('a memoryless generative role is handed the plan of record; a judging one i
   assert.match(implementer.codexCalls[0]?.prompt ?? '', /do the thing$/);
 
   // The critic restates the plan in its own prompt and takes an explicit
-  // hasMemory, so today's first Codex critique turn must be untouched.
+  // hasMemory, so it gets the original brief without another copy of the plan.
   const critic = recorder();
   const judging = freshState();
   judging.plan = PLAN;
   await captureLog(() => runTurn(judging, config(), request('critic'), critic.turns));
-  assert.equal(critic.codexCalls[0]?.prompt, 'do the thing');
+  assert.equal(critic.codexCalls[0]?.prompt, taskContext(judging.task, judging.extraContext) + 'do the thing');
 });
 
 // ---- 6. The refusal --------------------------------------------------------

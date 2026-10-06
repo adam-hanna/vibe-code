@@ -19,8 +19,9 @@ export const PLAN_SCHEMA = {
     assumptions: {
       type: 'array',
       description:
-        'Every judgement call you made that a reviewer could reasonably dispute. ' +
-        'Be exhaustive - an unstated assumption is how a plan passes review and still ships the wrong thing.',
+        'Material unresolved assumptions affecting correctness, scope, compatibility or ' +
+        'verification. Check repository facts first. An empty array is valid when there ' +
+        'are none; do not invent uncertainty or catalogue routine implementation choices.',
       items: {
         type: 'object',
         additionalProperties: false,
@@ -39,11 +40,9 @@ export const PLAN_SCHEMA = {
       type: 'array',
       description:
         'Real work you are deliberately NOT doing in this change, and why it belongs ' +
-        'elsewhere. Draw the boundary before a reviewer tests one: a plan that never stated ' +
-        'a boundary can only defend one it does not have, so every legitimate finding outside ' +
-        'the change has to be absorbed, and each absorption enlarges what there is to critique. ' +
-        'An empty array is legal, but it is a claim that this change has no interesting edges - ' +
-        'make it only when that is true. When you revise a plan, restate the boundary in full: ' +
+        'elsewhere. Record material scope exclusions without inventing work to exclude. ' +
+        'The original task remains the scope reference even when this list is empty. ' +
+        'When you revise a plan, restate the boundary in full: ' +
         'this field is the whole boundary, not a delta.',
       items: {
         type: 'object',
@@ -59,7 +58,9 @@ export const PLAN_SCHEMA = {
       type: 'array',
       description:
         'How anyone can tell this change worked: the observable conditions that make it done. ' +
-        'State each so that two people would agree whether it holds - a criterion nobody can ' +
+        'Derive them from the original task and explicit user decisions; do not add speculative ' +
+        'requirements to satisfy a reviewer. State each so that two people would agree whether ' +
+        'it holds - a criterion nobody can ' +
         'check is not one. An empty array is legal, but it is a claim that done-ness here is ' +
         'unobservable, so make it only when that is true. When you revise a plan, restate the ' +
         'bar in full: this field is the whole bar, not a delta.',
@@ -200,6 +201,9 @@ export const FINDINGS_SCHEMA = {
     summary: { type: 'string' },
     findings: {
       type: 'array',
+      description:
+        'Only evidence-backed defects. An empty array is a successful review when inspection ' +
+        'supports it; there is no quota and no requirement to find something beyond the implementer report.',
       items: {
         type: 'object',
         additionalProperties: false,
@@ -238,8 +242,20 @@ export const FINDINGS_SCHEMA = {
               'If a finding is only answerable by running the code, it is a P1, not a P0.',
           },
           title: { type: 'string' },
-          detail: { type: 'string' },
-          suggested_fix: { type: 'string' },
+          detail: {
+            type: 'string',
+            description:
+              'For a substantive finding, give a concrete trigger in a supported scenario, the ' +
+              'incorrect outcome, the affected task requirement or existing contract, and evidence ' +
+              'connecting them. Explain why resolving it belongs in this change; separate work is deferred.',
+          },
+          suggested_fix: {
+            type: 'string',
+            description:
+              'Advisory: the simplest coherent remedy for the demonstrated defect. The implementer ' +
+              'may use another valid repair. Consider removing or simplifying unnecessary mechanisms ' +
+              'before adding abstractions, dependencies, configuration, fallbacks or special cases.',
+          },
           defer: {
             // Typed, not just required: with `additionalProperties: false` a
             // required property carrying no `type` still accepts a string or a

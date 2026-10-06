@@ -1291,9 +1291,13 @@ export function parseHumanAnswers(md: string): Answer[] {
  * nothing.
  */
 export function recordHumanAnswers(state: RunState, answers: readonly Answer[]): void {
-  const fresh = answers.map((a) => a.question).filter((q) => q.trim() !== '');
+  const supplied = answers.filter((a) => a.question.trim() !== '' && a.answer.trim() !== '');
+  const fresh = supplied.map((a) => a.question);
   if (fresh.length === 0) return;
   state.humanAnswered = [...(state.humanAnswered ?? []), ...fresh];
+  // The existing keys say which questions a person answered, but cannot carry
+  // their decisions past consumption of pendingAnswers or a session rotation.
+  state.humanAnswers = [...(state.humanAnswers ?? []), ...supplied.map((a) => ({ ...a }))];
 }
 
 /**

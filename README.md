@@ -170,6 +170,26 @@ When a run escalates it writes `NEEDS-INPUT.md` with each question, its options,
 
 This is the trade the tool makes deliberately: Codex answering *technical* questions keeps the loop unattended; Codex answering *product* questions would bake a guess about your intent into everything downstream, so those still come to you.
 
+### Keeping review within the task
+
+Every stage receives the original task and additional context verbatim. Human answers are
+retained as explicit decisions after the planning loop consumes them, including across
+resumes and session rotation. Revisions receive the current plan; coding and every fix
+receive the approved plan, scope exclusions and approved acceptance criteria explicitly.
+The critic, answerer and code reviewer receive the plan and its boundaries too.
+
+The shared instruction is to deliver the simplest complete solution: reuse existing
+mechanisms, justify additions against a concrete requirement or demonstrated failure, and
+keep separable improvements as follow-ups. Reviewers inspect independently and may return
+no findings. A suggested fix is advice the implementer evaluates against the code and brief;
+a valid defect can be resolved with a simpler alternative. Both initial coding and fixes
+trace upstream assumptions and downstream contracts, and check for regressions.
+
+The standing instruction blocks shown by the desktop settings screen are overridable by
+name under `prompts` in `vibe.config.json`, including `simple solution`, `review breadth`
+and `fix breadth`. These are instructions, not proof of model behaviour: the evidence,
+verification and stopping gates still determine when the loop advances.
+
 ### Raising a finding yourself
 
 The same file is how you put a finding of your own into the loop. Every `NEEDS-INPUT.md` ends with a **Raise a finding** block — one `### Finding:` heading, a `*Severity:*` line, an optional `*File:*` citation and two blockquotes. Fill one in per finding and resume; leave it untouched and nothing is raised.

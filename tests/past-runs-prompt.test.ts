@@ -55,7 +55,7 @@ function hasControlChars(s: string): boolean {
   });
 }
 
-test('a planning prompt with no prior runs is byte-identical to the one before #52', () => {
+test('a planning prompt with no prior runs matches the reviewed baseline', () => {
   assert.equal(planPrompt(TASK, EXTRA_CONTEXT, null), fixture('plan-no-runs.txt'));
 });
 
