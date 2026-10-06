@@ -1,3 +1,4 @@
+import { modelArgs } from '@src/modelflag.js';
 import path from 'node:path';
 import { ClaudeAdapter } from '@src/adapters/claude-adapter.js';
 import { CodexAdapter, selectProbeTranscript } from '@src/adapters/codex-adapter.js';
@@ -414,8 +415,7 @@ async function preflightCodex(
       [
         'exec',
         '--json',
-        '-m',
-        cfg.codex.model,
+        ...modelArgs('-m', cfg.codex.model),
         '-c',
         `model_reasoning_effort="${cfg.codex.effort}"`,
         ...args,

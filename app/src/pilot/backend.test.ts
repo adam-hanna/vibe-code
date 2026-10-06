@@ -2,7 +2,6 @@ import { expect, test } from 'vitest';
 import keysSource from './keys.ts?raw';
 import serve from '../../../src/serve.ts?raw';
 import protocol from '../../../src/protocol.ts?raw';
-import roles from '../../../src/roles.ts?raw';
 import pilotPane from './PilotPane.tsx?raw';
 import {
   agentOf,
@@ -10,12 +9,12 @@ import {
   BACKEND_NOTE,
   backendFor,
   BACKENDS,
-  CODEX_SUBSCRIPTION_MODELS,
-  modelsFor,
+  sourceOf,
   needsKey,
 } from './backend';
 import { costOf } from './ledger';
-import { MODELS } from './pilot';
+import backend from './backend.ts?raw';
+import pilotSrc from './pilot.ts?raw';
 import { PROVIDERS } from './keys';
 import type { Usage } from './pilot';
 
@@ -58,15 +57,18 @@ test('every backend has a name, and a note only where there is a cost to state',
   }
 });
 
-test('the subscription models are their own list, not a row in the vendor map', () => {
-  // `pilot.MODELS` mirrors what Rust sends to a vendor, and this backend never
-  // reaches Rust. One list serving two wires is how a model reaches the one that
-  // cannot run it.
-  expect(modelsFor('anthropic', MODELS)).toEqual(MODELS.anthropic);
-  expect(modelsFor('subscription', MODELS).length).toBeGreaterThan(0);
-  for (const model of modelsFor('subscription', MODELS)) {
-    expect(model, 'the CLI runs Claude, whatever the vendor map says').toMatch(/^claude-/);
-  }
+test('each road lists its models from what it runs on, never from a list here', () => {
+  // Case 2 (#223): this pinned `SUBSCRIPTION_MODELS` as its own list apart from
+  // `pilot.MODELS`, so a model one wire could not run never reached it. All
+  // three lists are gone - each road asks its own source - and that claim now
+  // holds by construction: a CLI's list comes from the CLI, an API's from the
+  // vendor with that key.
+  expect(sourceOf('subscription')).toBe('claude');
+  expect(sourceOf('codex')).toBe('codex');
+  expect(sourceOf('anthropic')).toBe('anthropic');
+  expect(sourceOf('openai')).toBe('openai');
+  expect(backend).not.toMatch(/'claude-opus|'gpt-\d/);
+  expect(pilotSrc).not.toMatch(/'claude-opus|'gpt-\d/);
 });
 
 test('the keychain never learns the third backend exists', () => {
@@ -159,12 +161,9 @@ test('the Codex subscription needs no key and bills nothing', () => {
   expect(free.why).toMatch(/bills nothing/);
 });
 
-test("the Codex models are the core's own list, read from the file that defines it", () => {
-  const known = /codex: \[([^\]]*)\]/.exec(roles.slice(roles.indexOf('export const KNOWN_MODELS')));
-  const listed = (known?.[1] ?? '').match(/'[^']+'/g)?.map((m) => m.slice(1, -1)) ?? [];
-  expect(modelsFor('codex', MODELS)).toEqual(listed);
-  expect(CODEX_SUBSCRIPTION_MODELS.length).toBeGreaterThan(0);
-});
+// Case 2 (#223): a case here pinned the Codex list to `KNOWN_MODELS` in
+// `src/roles.ts`. Both lists are gone; `model-listing.test.ts` in the core
+// covers what `codex` itself answers.
 
 test('the pane tells the host which CLI takes a turn, and lets Settings choose the road', () => {
   expect(pilotPane).toContain('agent: agentOf(provider)');

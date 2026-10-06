@@ -4,6 +4,7 @@ import type { ArtifactRead, RunArtifact, RunSummary } from '@src/types.js';
 import type { PromptBlock } from '@src/prompts.js';
 import type { FsAnswer, PilotAccess } from '@src/pilotaccess.js';
 import type { PastCommand } from '@src/commandlog.js';
+import type { ModelListings } from '@src/models.js';
 
 /** Where one CLI is, as `config` reports it (#223). */
 export interface CliStatus {
@@ -223,19 +224,6 @@ export type Outbound =
       providers: readonly string[];
       efforts: readonly string[];
       /**
-       * The model names this build knows, per agent (#223).
-       *
-       * **Not the vocabulary the others are.** `roleNames`, `providers` and
-       * `efforts` are closed sets the validator enforces, and a value outside
-       * one is refused; a model is any non-empty string and stays that way, for
-       * `KNOWN_MODELS`' stated reason. So this is sent as something a form may
-       * *offer*, and a form that showed only these would be claiming a catalogue
-       * nobody here has read. It is carried on this frame rather than composed
-       * in the window because the list has to agree with `DEFAULTS`, and they
-       * are the same file.
-       */
-      models: Readonly<Record<string, readonly string[]>>;
-      /**
        * What the pilot may do without asking (#223), resolved from the settings
        * for all projects over the defaults. Carried rather than read by the
        * window for the reason `globalEffective` is: a merge on that side is a
@@ -354,6 +342,11 @@ export type Outbound =
    * (#223, `src/commandlog.ts`). Oldest first; none of them is running.
    */
   | { type: 'commands_past'; id: number; commands: readonly PastCommand[] }
+  /**
+   * The models each CLI offers, answering `models` (#223, `src/models.ts`):
+   * asked of the CLIs, never a list this build ships.
+   */
+  | { type: 'models'; id: number; listings: ModelListings }
   /**
    * What an `answer_questions` request placed, in its own words.
    *
@@ -634,6 +627,8 @@ export type Inbound =
   | { type: 'chat_save'; id: number; key: string; value: string | null }
   /** The commands earlier launches ran, read back from their logs (#223). */
   | { type: 'commands_past'; id: number }
+  /** Which models each CLI offers. `fresh` asks the CLIs again. */
+  | { type: 'models'; id: number; fresh: boolean }
   /**
    * Delete a run from the archive (#223).
    *
@@ -926,6 +921,8 @@ export function decode(line: string): Decoded {
       return { ok: true, message: { type: 'chats', id } };
     case 'commands_past':
       return { ok: true, message: { type: 'commands_past', id } };
+    case 'models':
+      return { ok: true, message: { type: 'models', id, fresh: parsed['fresh'] === true } };
     case 'chat_save': {
       const key = parsed['key'];
       const value = parsed['value'];

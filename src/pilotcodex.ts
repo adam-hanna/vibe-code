@@ -1,3 +1,4 @@
+import { modelArgs } from '@src/modelflag.js';
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -99,8 +100,7 @@ export function sandboxArgs(options: PilotChatOptions): readonly string[] {
 export function pilotCodexArgs(options: PilotChatOptions, instructions: string): readonly string[] {
   const common = [
     '--json',
-    '-m',
-    options.model,
+    ...modelArgs('-m', options.model),
     '--skip-git-repo-check',
     '--ignore-user-config',
     ...OFF.flatMap((feature) => ['--disable', feature]),

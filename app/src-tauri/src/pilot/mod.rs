@@ -54,6 +54,7 @@
 
 pub mod anthropic;
 pub mod event;
+pub mod models;
 pub mod openai;
 pub mod request;
 pub mod sse;

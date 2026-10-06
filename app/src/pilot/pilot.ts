@@ -175,14 +175,17 @@ export function connect(
   });
 }
 
+/** One model a stored key may use, as the vendor named it. `pilot/models.rs`. */
+export interface ApiModel {
+  id: string;
+  name: string;
+}
+
 /**
- * The models this build offers, per provider.
- *
- * Named here rather than in Rust, and sent on every request. A model compiled
- * into the crate would go stale on the vendor's schedule instead of ours, and
- * answer with something nobody chose.
+ * The models the stored key for `provider` may use, newest first (#223). This
+ * replaced `MODELS`, a list in this file that aged on the vendors' schedule.
+ * Rejects with Rust's sentence, redacted.
  */
-export const MODELS: Readonly<Record<Provider, readonly string[]>> = {
-  anthropic: ['claude-opus-5', 'claude-sonnet-5', 'claude-haiku-4-5-20251001'],
-  openai: ['gpt-5', 'gpt-5-mini'],
-};
+export function listModels(provider: Provider): Promise<ApiModel[]> {
+  return invoke<ApiModel[]>('pilot_models', { provider });
+}

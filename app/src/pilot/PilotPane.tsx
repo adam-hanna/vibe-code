@@ -8,7 +8,8 @@ import { Icon } from '../design/Icon';
 import * as host from '../host';
 import * as keys from './keys';
 import * as pilot from './pilot';
-import { agentOf, BACKEND_NAME, BACKEND_NOTE, backendFor, modelsFor, needsKey, SUBSCRIPTION_MODELS } from './backend';
+import { agentOf, BACKEND_NAME, BACKEND_NOTE, backendFor, needsKey, sourceOf } from './backend';
+import { CLI_DEFAULT, firstOf, loadApiModels, loadCliModels, optionsFor, useModels, whyNot } from '../cockpit/models';
 import type { Backend } from './backend';
 import { systemPrompt } from './brief';
 import { readEmitted, unique, visible } from './emit';
@@ -894,7 +895,20 @@ export function PilotPane({
    */
   const [vendor, setVendor] = useState<keys.Provider>('anthropic');
   const provider: Backend = backendFor(vendor, access ?? NO_ACCESS);
-  const [model, setModel] = useState<string>(SUBSCRIPTION_MODELS[0] ?? '');
+  // The model is the one picked, or else the first the road's own listing
+  // offers (#223) - which for a CLI is `default`, so the pilot follows the CLI
+  // as a run does. Before the listing has answered a CLI still has its default,
+  // and an API road has nothing to send until its vendor says what the key may
+  // use.
+  const listings = useModels();
+  const listing = listings[sourceOf(provider)];
+  const [picked, setPicked] = useState<string | null>(null);
+  const model = picked ?? firstOf(listing) ?? (needsKey(provider) ? '' : CLI_DEFAULT);
+  const setModel = setPicked;
+  useEffect(() => {
+    if (needsKey(provider)) loadApiModels(provider);
+    else loadCliModels();
+  }, [provider]);
   // The conversation the CLI is keeping is `conversation.session` now, stored
   // with the chat (#223) - see `Session` for the two defects a ref here had. It
   // names its backend, so a session is never resumed on a wire that has never
@@ -903,7 +917,7 @@ export function PilotPane({
   useEffect(() => {
     if (heldBy.current === provider) return;
     heldBy.current = provider;
-    setModel(modelsFor(provider, pilot.MODELS)[0] ?? '');
+    setModel(null);
   }, [provider]);
   /**
    * The host-backed turn whose frames we are listening for, or -1.
@@ -1366,6 +1380,10 @@ ${frame.text}`, turn, origin.current))) {
   const blocked: string | null =
     needsKey(provider) && (statuses === null || !keys.usable(statuses).includes(provider))
       ? `no ${keys.PROVIDER_NAME[provider]} key — enter one in Settings, or switch ${keys.PROVIDER_NAME[provider]} to your subscription there`
+      : model === ''
+        ? whyNot(listing) === null
+          ? `waiting for ${keys.PROVIDER_NAME[vendor]} to list the models this key may use`
+          : 'no model to send — type one beside the picker'
       : !needsKey(provider) && dir.trim() === ''
         ? 'Add a project in the sidebar to send your first message.'
         : !verdict.allowed
@@ -1638,12 +1656,25 @@ ${frame.text}`, turn, origin.current))) {
           ))}
         </select>
         <select className="v-pilot__select" aria-label="Pilot model" value={model} onChange={(e) => setModel(e.target.value)}>
-          {modelsFor(provider, pilot.MODELS).map((m) => (
-            <option key={m} value={m}>
-              {m}
+          {optionsFor(listing, model).map((c) => (
+            <option key={c.value} value={c.value}>
+              {c.label}
             </option>
           ))}
         </select>
+        {listing === null && <span className="v-pilot__note">asking for the models…</span>}
+        {whyNot(listing) !== null && <span className="v-pilot__note">no model list: {whyNot(listing)}</span>}
+        {/* With no list there is still a way to name one: a CLI falls back to its
+            own default, and an API road has nothing until a name is typed. */}
+        {whyNot(listing) !== null && (
+          <input
+            className="v-pilot__select"
+            aria-label="Pilot model name"
+            placeholder="model name"
+            defaultValue={picked ?? ''}
+            onBlur={(e) => setPicked(e.target.value.trim() === '' ? null : e.target.value.trim())}
+          />
+        )}
         {/* What this backend costs, when that is not obvious from its name.
             Empty for the subscription, which is why this is conditional rather
             than a span that renders a blank. */}

@@ -33,7 +33,9 @@ import {
 } from '@src/config.js';
 import { GATEABLE, GATE_MODES, UNGATEABLE } from '@src/gates.js';
 import { diffRange, diffSinceWithLimit } from '@src/git.js';
-import { KNOWN_MODELS, PROVIDERS, ROLE_NAMES } from '@src/roles.js';
+import { PROVIDERS, ROLE_NAMES } from '@src/roles.js';
+import { listModels } from '@src/models.js';
+import type { ModelListings } from '@src/models.js';
 import { EFFORTS } from '@src/types.js';
 import type { ArtifactRead, LoadedConfig, RunArtifact } from '@src/types.js';
 import type { RunLoop } from '@src/cli.js';
@@ -182,6 +184,11 @@ export interface SessionDeps {
    */
   pastCommands?: readonly PastCommand[];
   /**
+   * What lists each CLI's models (#223). Defaults to `listModels`, which spawns
+   * both CLIs; a test answers instead, for the reason `invoke` is a seam.
+   */
+  models?: () => Promise<ModelListings>;
+  /**
    * What runs an argv. Defaults to the CLI's own `main`.
    *
    * The one seam a test needs, and the only one: everything else here is
@@ -285,6 +292,8 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
   /** Subscription pilot turns in flight, by request id, so `pilot_stop` can reach one. */
   const pilotTurns = new Map<number, AbortController>();
   const archive = deps.archive ?? ((dir: string) => listRuns(dir));
+  const listModelsWith = deps.models ?? listModels;
+  let listings: Promise<ModelListings> | null = null;
   const readConfig = deps.config ?? ((dir: string) => loadConfig(dir));
   const writeConfig = deps.writeConfig ?? writeConfigPatch;
   // `head` is what makes this one round rather than the whole change. Undefined
@@ -552,6 +561,23 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
     // The window's conversations (#223). Reads and writes beside a run, like
     // the other reads: they touch only the app's own data directory, never a
     // run's, so they cannot observe or disturb one.
+    if (msg.type === 'models') {
+      // A read, beside a run like the others: it spawns each CLI to ask and
+      // takes no turn. Asked once per host and kept, because the answer changes
+      // when a vendor ships rather than between two screens - and `fresh` asks
+      // again. A listing that failed is never kept, so the next ask retries it:
+      // the usual cause is a key that had not arrived yet.
+      if (msg.fresh || listings === null) listings = listModelsWith();
+      const asked = listings;
+      void asked.then((got) => {
+        if (!got.claude.ok || !got.codex.ok) {
+          if (listings === asked) listings = null;
+        }
+        send({ type: 'models', id: msg.id, listings: got });
+      });
+      return;
+    }
+
     if (msg.type === 'commands_past') {
       // A read of what was loaded at start-up, never of the directory now: a
       // command this process started is already in the window, live, and
@@ -723,7 +749,6 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
           roleNames: ROLE_NAMES,
           providers: PROVIDERS,
           efforts: EFFORTS,
-          models: KNOWN_MODELS,
           pilot: resolvedAccess(access()),
           clis: { claude: cliStatus('claude'), codex: cliStatus('codex') },
         });

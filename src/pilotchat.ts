@@ -1,3 +1,4 @@
+import { modelArgs } from '@src/modelflag.js';
 import { claudeBin, detectRateLimit, extractTokens, promptContext } from '@src/claude.js';
 import { agentEnv } from '@src/auth.js';
 import { attachEnding, describeEnding, run } from '@src/proc.js';
@@ -243,7 +244,7 @@ export function pilotChatArgs(options: PilotChatOptions): readonly string[] {
     const safe = (options.access?.safeCommands ?? []).filter((c) => c.trim() !== '');
     args.push('--allowedTools', ...READS, ...WRITES, ...safe.map(bashRule));
   }
-  args.push('--model', options.model);
+  args.push(...modelArgs('--model', options.model));
   // Variadic, so last: it greedily consumes the tokens after it. YOLO names no
   // list, which is the CLI's whole default set.
   if (!yolo) args.push('--tools', ...READS, ...WRITES, 'Bash');

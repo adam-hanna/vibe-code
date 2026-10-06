@@ -1,3 +1,4 @@
+import type { Source } from '../cockpit/models';
 import { PROVIDER_NAME, PROVIDERS } from './keys';
 import type { Provider } from './keys';
 
@@ -93,32 +94,17 @@ export function needsKey(backend: Backend): backend is Provider {
 }
 
 /**
- * What `claude -p` may be asked to run on.
+ * Where this backend's models are listed (#223, `cockpit/models.ts`).
  *
- * Its own list rather than a row in `pilot.MODELS`, because that map mirrors
- * what **Rust** sends to a vendor and this backend never reaches Rust at all.
- * One list serving two wires is how a model reaches the one that cannot run it.
+ * There used to be three lists here and in `pilot.ts` - `SUBSCRIPTION_MODELS`,
+ * `CODEX_SUBSCRIPTION_MODELS` and `MODELS` - and all three had aged: Opus 5.5
+ * and Fable 5.1 could not be picked, and Codex's default had moved on. Each
+ * road now asks the thing it runs on: a CLI lists what the subscription may
+ * use, and a vendor's API lists what the key may use.
  */
-export const SUBSCRIPTION_MODELS: readonly string[] = [
-  'claude-opus-5',
-  'claude-sonnet-5',
-  'claude-haiku-4-5-20251001',
-];
-
-/**
- * What `codex exec` may be asked to run on (#223).
- *
- * The two Codex names this build already ships — `DEFAULTS.codex.model` and the
- * one `--help` prints beside `--role` — which is `KNOWN_MODELS.codex` in
- * `src/roles.ts`. Restated rather than imported because the app and the core are
- * two packages; `backend.test.ts` reads that file and fails when they disagree.
- */
-export const CODEX_SUBSCRIPTION_MODELS: readonly string[] = ['gpt-5.6-luna', 'gpt-5.6-pro'];
-
-/** What this backend can be asked to run on. */
-export function modelsFor(backend: Backend, api: Readonly<Record<Provider, readonly string[]>>): readonly string[] {
-  if (needsKey(backend)) return api[backend];
-  return backend === 'codex' ? CODEX_SUBSCRIPTION_MODELS : SUBSCRIPTION_MODELS;
+export function sourceOf(backend: Backend): Source {
+  if (backend === 'subscription') return 'claude';
+  return backend;
 }
 
 /**

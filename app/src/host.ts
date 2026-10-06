@@ -205,17 +205,6 @@ export interface ConfigFrame {
   providers: readonly string[];
   efforts: readonly string[];
   /**
-   * The model names this build knows, per agent (#223).
-   *
-   * **Offered, not enforced**, which is what separates it from the three lists
-   * above. Those are closed sets the validator refuses a value outside of; a
-   * model is any non-empty string, because *"guessing whether a model exists is
-   * the never-invent-a-number rule applied to a name"* — so a row whose model is
-   * not on this list is still shown and still saved, and there is an `other…`
-   * way in for a model that shipped this morning.
-   */
-  models: Readonly<Record<string, readonly string[]>>;
-  /**
    * What the pilot may do without asking (#223), resolved by the host from the
    * settings for all projects. Never a project's: a committed file cannot widen
    * its own pilot.
@@ -375,6 +364,23 @@ export interface PastCommand {
   lost: boolean;
 }
 
+/** One model a CLI offers. `src/models.ts`. */
+export interface CliModel {
+  value: string;
+  resolves: string | null;
+  name: string;
+  description: string;
+}
+
+export type CliListing = { ok: true; models: readonly CliModel[] } | { ok: false; why: string };
+
+/** What each CLI offers, asked of the CLI (#223). */
+export interface ModelsFrame {
+  type: 'models';
+  id: number;
+  listings: { claude: CliListing; codex: CliListing };
+}
+
 export interface PastCommandsFrame {
   type: 'commands_past';
   id: number;
@@ -492,6 +498,7 @@ export type Frame =
   | ChatsFrame
   | ChatSavedFrame
   | PastCommandsFrame
+  | ModelsFrame
   | ReplayFrame
   | QuestionsAnswered;
 
@@ -555,7 +562,9 @@ export function isFrame(v: unknown): v is Frame {
     type === 'command_started' ||
     type === 'command_output' ||
     type === 'command_ended' ||
-    type === 'commands_past'
+    type === 'commands_past' ||
+    // Which models each CLI offers: about the account, not the run.
+    type === 'models'
   );
 }
 
@@ -959,6 +968,13 @@ export async function chats(): Promise<ChatsFrame['chats']> {
   const id = nextRequestId();
   const frame = await ask<ChatsFrame>({ type: 'chats', id }, id, 'chats', 'the host did not answer with the stored conversations');
   return frame.chats;
+}
+
+/** Which models each CLI offers (#223). `fresh` asks the CLIs again. */
+export async function models(fresh = false): Promise<ModelsFrame['listings']> {
+  const id = nextRequestId();
+  const frame = await ask<ModelsFrame>({ type: 'models', id, fresh }, id, 'models', 'the host did not answer with the models');
+  return frame.listings;
 }
 
 /** What earlier launches ran, from the host's command logs (#223). */

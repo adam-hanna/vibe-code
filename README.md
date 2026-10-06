@@ -672,13 +672,17 @@ shim), then the usual install locations. Leave a key out, or set it to `null`, t
 Every key below is shown at its default, so this block is a complete statement of the
 defaults rather than a sample — omit any section and you get exactly what is printed here.
 
+`"model": "default"` is not a model name: it sends no `--model` to `claude` and no `-m` to
+`codex`, so each CLI runs its own default for your account, and a new model reaches a run with
+no change to vibe. Name a model to pin one; the app's settings list what each CLI offers.
+
 ```json
 {
   "roles":  { "planner": "claude", "implementer": "claude",
               "critic": "codex", "answerer": "codex", "reviewer": "codex" },
-  "claude": { "model": "opus", "effort": "medium",
+  "claude": { "model": "default", "effort": "medium",
               "planTimeoutMs": 1800000, "implementTimeoutMs": 5400000 },
-  "codex":  { "model": "gpt-5.6-luna", "effort": "xhigh", "sandbox": "read-only", "persistSession": true,
+  "codex":  { "model": "default", "effort": "xhigh", "sandbox": "read-only", "persistSession": true,
               "readRateLimits": true, "contextWindow": null, "timeoutMs": 2700000,
               "implementTimeoutMs": 5400000 },
   "loop":   { "maxPlanRounds": 5, "maxReviewRounds": 5, "maxVerifyRounds": 3,

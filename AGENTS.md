@@ -711,6 +711,34 @@ they are waiting on. Four things in it are worth carrying:
   The sentence is drawn on its own line rather than in the placeholder, because
   a placeholder disappears the moment somebody types and this is the one thing
   they need while looking at a button that will not work.
+- **The model lists are asked of the CLIs now, and no list ships in this repo** (#223). This
+  supersedes the two notes below it about `KNOWN_MODELS`. Every list had aged: Opus 5.5 and
+  Fable 5.1 could not be picked in the pilot, Codex's default had moved to `gpt-6-astra`, and
+  `gpt-5.6-pro` was no longer in Codex's own list at all. The owner's line was *"What if claude
+  introduces a new model, we have to change source code? I really want to avoid that."*
+  - **Both CLIs list their models on the subscription, for free.** `claude` answers the
+    stream-json `initialize` control request, the one the Agent SDK's `supportedModels()`
+    reads, with every alias, what it resolves to and a description. Stdin is closed after the
+    request, so it answers and exits without a turn: measured at 2.5s, exit 0, no `result`.
+    `codex app-server` answers `model/list` and marks its default. `src/models.ts` asks both
+    with `agentEnv`, so the list is the one the billed account can use.
+  - **With a key, the vendor is asked instead.** `pilot_models` in `pilot/models.rs` is a
+    ninth command, and it answers with model names only. It runs as `command(async)`, because a
+    plain command runs on the main thread. OpenAI's listing is not filtered: no field says
+    which models can chat, and every rule that could would be a list to keep current.
+  - **There is no fallback list.** A fallback is a list somebody has to keep current. A
+    listing that fails says why, the chosen value is kept, and a name can be typed.
+  - **Neither call is a promised interface**, so both parsers fail closed to *no list*.
+  - **Both run defaults are the CLI's own** (`model: "default"`), at the owner's decision:
+    *"Follow both defaults unless changed by the user."* `modelArgs` in `src/modelflag.ts` is
+    the one place that turns it into *no flag*, and `model-listing.test.ts` fails on a call
+    site that writes the flag itself. A consequence worth knowing: a context measurement and
+    the window seeded from an earlier run are keyed by the configured name, so after the CLI's
+    default moves to a model with a different window the first turn's ratio can be wrong
+    once, until `recordTurnContext` overwrites it.
+  - **The host keeps a good listing and retries a failed one**, because the usual failure is a
+    key that had not arrived yet. Settings has a *check again* control for a CLI updated since
+    the window opened.
 - **A model is picked from a list this build ships, and typed past it.** This
   reverses the decision one report above it, and the reversal is narrow rather
   than a change of mind about the rule. Free text was argued from the core's own
@@ -1891,6 +1919,8 @@ src/proc.ts          child-process plumbing, and how a child ended
 src/cancel.ts        stopping a turn that is already running - the latch, what it may kill, and the wait it may cut short
 src/commands.ts      a command a person pressed - no shell, no shim, and where it runs
 src/commandlog.ts    a command's output on disk, and what the last launch left there
+src/models.ts        which models each CLI offers, asked of the CLI - never a list here
+src/modelflag.ts     `default` means no model flag, so the CLI picks
 src/ending.ts        how this process ended - the stamp beside the lock
 src/git.ts           branch and commit operations
 src/worktree.ts      a checkout of its own: where the work happens, and where it does not
@@ -1937,6 +1967,8 @@ app/src/pilot/ledger.ts    the pilot's own books - the one place a dollar is a d
 app/src/cockpit/argv.ts    a form to an argv, and the composer's settings as the pilot is told them
 app/src/cockpit/commands.ts  commands this window ran - pure, and not part of any run
 app/src/cockpit/where.ts     where the window was pointed, kept between launches
+app/src/cockpit/models.ts    the four model listings the pickers draw, and nothing else
+app/src-tauri/src/pilot/models.rs  which models a stored key may use, asked of the vendor
 app/src-tauri/src/host.rs    supervising the host process, and the \\?\ path fix
 app/src-tauri/src/reaper.rs  making a killed app take the host with it
 app/src-tauri/src/keys.rs    the OS keychain, and the read the window cannot reach
