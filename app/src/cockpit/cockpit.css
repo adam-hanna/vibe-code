@@ -2229,7 +2229,7 @@
 .v-summary {
   border: 1px solid var(--rule-card);
   background: var(--surface-card);
-  padding: var(--space-4);
+  padding: var(--space-3);
   margin: var(--space-3) var(--space-4) 0;
   display: flex;
   flex-direction: column;
@@ -2238,53 +2238,153 @@
 
 .v-summary__head {
   display: flex;
-  align-items: baseline;
-  gap: var(--space-3);
+  align-items: center;
+  gap: var(--space-2);
 }
 
-.v-summary__title {
-  font: var(--type-title);
-  letter-spacing: var(--track-title);
-  color: var(--text-primary);
-}
-
-.v-summary__facts {
+.v-summary__done {
+  width: 28px;
+  height: 28px;
+  flex: none;
   display: grid;
-  grid-template-columns: max-content 1fr;
-  gap: var(--space-2) var(--space-4);
-  margin: 0;
-  font: var(--type-body-sm);
+  place-items: center;
+  color: var(--accent-solid);
+  background: var(--surface-accent-tint);
+  border: 1px solid var(--accent-border);
+  border-radius: 50%;
 }
 
-.v-summary__facts dt {
+.v-summary__heading {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.v-summary__eyebrow,
+.v-summary__identitylabel,
+.v-summary__metrichead,
+.v-summary__nexthead {
   font: var(--type-label);
   letter-spacing: var(--track-label);
   text-transform: uppercase;
   color: var(--text-tertiary);
 }
 
-.v-summary__facts dd {
+.v-summary__heading h2 {
   margin: 0;
-  color: var(--text-secondary);
-  overflow-wrap: anywhere;
+  font: var(--type-section);
+  color: var(--text-primary);
 }
 
-.v-summary__facts code {
+.v-summary__identity {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  background: var(--surface-panel);
+  border: 1px solid var(--rule-inner);
+  color: var(--text-tertiary);
+}
+
+.v-summary__identitycopy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.v-summary__identitycopy code {
+  max-width: 13ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font: var(--type-mono-sm);
   color: var(--text-primary);
 }
 
-/* A named absence, never a blank and never a zero. */
-.v-summary__absent {
+.v-summary__identitypath {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+  font: var(--type-mono-sm);
   color: var(--text-tertiary);
 }
 
-.v-summary__next {
+.v-summary__metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: var(--space-2);
+}
+
+.v-summary__metric {
+  min-width: 0;
+  min-height: 82px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2);
+  background: var(--surface-panel);
+  border: 1px solid var(--rule-inner);
+}
+
+.v-summary__metrichead {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  white-space: nowrap;
+}
+
+.v-summary__metrichead svg {
+  color: var(--accent-muted);
+  flex: none;
+}
+
+.v-summary__metric strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: var(--type-section);
+  color: var(--text-emphasis);
+}
+
+.v-summary__metricdetail {
+  min-width: 0;
+  overflow-wrap: anywhere;
   font: var(--type-body-sm);
+  line-height: 1.4;
   color: var(--text-secondary);
-  margin: 0;
-  border-top: 1px solid var(--rule-inner);
+}
+
+.v-summary__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.v-summary__next {
   padding-top: var(--space-3);
+  border-top: 1px solid var(--rule-inner);
+  color: var(--text-secondary);
+}
+
+.v-summary__nexthead {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--accent-muted);
+}
+
+.v-summary__next p {
+  margin: var(--space-1) 0 0;
+  font: var(--type-body-sm);
 }
 
 /* ------------------------------------------------------------ spend pane (5e / 6e) */
