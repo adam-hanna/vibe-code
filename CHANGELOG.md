@@ -7,6 +7,83 @@ for a change that breaks an existing config or an existing run.
 Each entry links the pull request that made it and, where there is one, the issue it
 closes.
 
+## 1.4.0 - 2026-10-07
+
+Fifty-seven pull requests since 1.3.0. **Nothing here breaks an existing config:** no key was renamed or removed, no flag was removed, and every new section has a default. Five behaviours a running setup can notice are listed under Upgrading.
+
+The theme is a second front end. 1.3.0's loop could only be watched from a terminal. 1.4.0 adds the desktop app, built on the same core: the loop narrates to a pipe, holds at boundaries a window can answer, and can be paused, stopped and resumed from it. A **pilot** chat proposes each run and starts nothing on its own. The app ships as a Tauri bundle, not in the npm package; everything else below applies to the CLI as well.
+
+### Added
+
+- **The desktop app.** A window, tray and single instance in Rust. It supervises a host process that runs the same `main()` the CLI does and dies when the app does. The cockpit draws the loop column, the round cards, the plans, critiques, reviews, code, questions and verification, and an opened past run is replayed through the same reducer that drew it live. Redrawn in Tailwind for this release.
+  (#146, #153, #154, #157, #159, #186, #189, #190, #201, #204, #205, #207, #223, [#147](https://github.com/adam-hanna/vibe-code/pull/147), [#156](https://github.com/adam-hanna/vibe-code/pull/156), [#158](https://github.com/adam-hanna/vibe-code/pull/158), [#160](https://github.com/adam-hanna/vibe-code/pull/160), [#187](https://github.com/adam-hanna/vibe-code/pull/187), [#194](https://github.com/adam-hanna/vibe-code/pull/194), [#195](https://github.com/adam-hanna/vibe-code/pull/195), [#203](https://github.com/adam-hanna/vibe-code/pull/203), [#213](https://github.com/adam-hanna/vibe-code/pull/213), [#216](https://github.com/adam-hanna/vibe-code/pull/216), [#217](https://github.com/adam-hanna/vibe-code/pull/217), [#219](https://github.com/adam-hanna/vibe-code/pull/219), [#224](https://github.com/adam-hanna/vibe-code/pull/224), [#225](https://github.com/adam-hanna/vibe-code/pull/225), [#226](https://github.com/adam-hanna/vibe-code/pull/226), [#227](https://github.com/adam-hanna/vibe-code/pull/227), [#231](https://github.com/adam-hanna/vibe-code/pull/231))
+- **A host protocol.** `vibe`'s narration has stable ids and a second destination besides the terminal. The heartbeat is sent as numbers, durable facts are said once, and a host can hold the loop at a boundary and answer it. Read frames return the archive, the config, diffs, artifacts and replays while a run is going.
+  (#133, #134, [#148](https://github.com/adam-hanna/vibe-code/pull/148), [#149](https://github.com/adam-hanna/vibe-code/pull/149), [#150](https://github.com/adam-hanna/vibe-code/pull/150), [#151](https://github.com/adam-hanna/vibe-code/pull/151), [#152](https://github.com/adam-hanna/vibe-code/pull/152), [#155](https://github.com/adam-hanna/vibe-code/pull/155))
+- **Gates are a setting.** `gates.<boundary>` is `auto`, `step` or `stop` for each of six boundaries, and `--gate <boundary>=<mode>` sets them from the command line. `stop` gives a terminal a resumable halt. `vibe doctor` prints the effective table.
+  (#140, #106, [#170](https://github.com/adam-hanna/vibe-code/pull/170))
+- **Pause and stop.** A run can be held at its next boundary for free, and the turn in flight can be killed. A stop ends the run the same way a round cap does: resumable, with `NEEDS-INPUT.md` saying why.
+  (#209, #210, [#220](https://github.com/adam-hanna/vibe-code/pull/220), [#221](https://github.com/adam-hanna/vibe-code/pull/221))
+- **The pilot.** A chat that reads the repository and proposes runs and commands for a person to press. It runs on an API key or on your existing Claude subscription, and keeps its own books, separate from the run's ceiling.
+  (#143, #144, #145, #188, #191, #193, #211, [#161](https://github.com/adam-hanna/vibe-code/pull/161), [#165](https://github.com/adam-hanna/vibe-code/pull/165), [#166](https://github.com/adam-hanna/vibe-code/pull/166), [#167](https://github.com/adam-hanna/vibe-code/pull/167), [#174](https://github.com/adam-hanna/vibe-code/pull/174), [#192](https://github.com/adam-hanna/vibe-code/pull/192), [#196](https://github.com/adam-hanna/vibe-code/pull/196), [#197](https://github.com/adam-hanna/vibe-code/pull/197), [#200](https://github.com/adam-hanna/vibe-code/pull/200), [#222](https://github.com/adam-hanna/vibe-code/pull/222), [#229](https://github.com/adam-hanna/vibe-code/pull/229))
+- **`vibe stats` reads the run archive.** It reports what the loop's own record says about convergence, with each rate's denominator stated, and names what the archive cannot answer.
+  (#47, #53, #66, #85, [#171](https://github.com/adam-hanna/vibe-code/pull/171))
+- **A person can join the argument.** A finding can be raised from `NEEDS-INPUT.md`, and a severity a guard moved can be moved back. Every finding records who raised it.
+  (#113, #141, #142, [#175](https://github.com/adam-hanna/vibe-code/pull/175), [#177](https://github.com/adam-hanna/vibe-code/pull/177))
+- **A blocking finding can prove it reproduces.** The reviewer supplies a test file, not a command. vibe places it, runs your own gate, and removes it.
+  (#113, [#178](https://github.com/adam-hanna/vibe-code/pull/178))
+- **A flaky gate is told apart from a broken one.** A failing gate now runs its remaining attempts. `flaky` (some passes, some failures) gets a different fix prompt from `failing`.
+  (#135, [#176](https://github.com/adam-hanna/vibe-code/pull/176))
+- **A write turn says how far it has got,** as a count of the files the plan names, worded so it can't be read as a step number.
+  (#136, #198, [#173](https://github.com/adam-hanna/vibe-code/pull/173), [#199](https://github.com/adam-hanna/vibe-code/pull/199))
+- **Settings for every project** in `~/.config/vibe/config.json`, layered beneath each project's `vibe.config.json`. `VIBE_GLOBAL_CONFIG` overrides the path, or switches the file off.
+  ([#225](https://github.com/adam-hanna/vibe-code/pull/225))
+- **Editable prompts.** The standing instruction blocks can be overridden under `prompts.<block>`, and a name the build doesn't have is refused by name.
+  (#137, [#225](https://github.com/adam-hanna/vibe-code/pull/225))
+- **A run can work in a git worktree of its own.** `git.worktree` and `git.worktreeCommand` do this, while the archive stays in the repository.
+  (#208, [#225](https://github.com/adam-hanna/vibe-code/pull/225))
+- **`vibe resume <id> --implement`** takes a finished plan-only run into implementation, carrying its approved plan.
+  ([#225](https://github.com/adam-hanna/vibe-code/pull/225))
+- **A stalled turn is stopped.** `progress.maxQuietMs`, 10 minutes by default, ends a turn that has produced no output for that long.
+  ([#225](https://github.com/adam-hanna/vibe-code/pull/225))
+
+### Fixed
+
+- **A question round is a checkpoint, and no longer spends a plan round.** Revising a plan against its own answers advanced `planRound`, so every question round used up one of the rounds the run had for the critic.
+  (#78, #139, [#168](https://github.com/adam-hanna/vibe-code/pull/168))
+- **A Codex implementer no longer costs the judges their threads.** It runs one-shot on a slot of its own, because a resumed Codex turn cannot write. The critic and reviewer keep their conversations, and the old refusal still applies to any table that puts a writer on a carried thread.
+  ([#231](https://github.com/adam-hanna/vibe-code/pull/231))
+- **Adversarial planning and review stay within the original task.**
+  ([#228](https://github.com/adam-hanna/vibe-code/pull/228))
+- **How a run ended is recorded and said.** `ending.json` sits beside the lock, so a dead pid no longer looks like a kill, and the footer has one sentence for each of the eight exit codes.
+  (#131, #162, [#163](https://github.com/adam-hanna/vibe-code/pull/163), [#172](https://github.com/adam-hanna/vibe-code/pull/172))
+- **An artifact that is a link is refused** on both paths a live run reads one, and a run that never resumes reports what it still holds.
+  (#129, #130, [#179](https://github.com/adam-hanna/vibe-code/pull/179), [#180](https://github.com/adam-hanna/vibe-code/pull/180))
+- **Quitting during a run no longer waits five seconds and kills.** A closed stdin abandons the request, and the process leaves under its own control.
+  (#206, [#212](https://github.com/adam-hanna/vibe-code/pull/212))
+- **A held gate is drawn as held, and a settled card shows absolute times** rather than times that keep counting.
+  (#202, [#214](https://github.com/adam-hanna/vibe-code/pull/214), [#218](https://github.com/adam-hanna/vibe-code/pull/218))
+- **Preflight says what it is doing** instead of nothing.
+  (#205, [#215](https://github.com/adam-hanna/vibe-code/pull/215))
+
+### Internal
+
+- **The test harness reports more clearly when it fails.** It tells a child that never started from one that stalled, says what git said when a fixture fails, and states a dead pid instead of arranging for one.
+  (#164, #181, #182, [#183](https://github.com/adam-hanna/vibe-code/pull/183), [#184](https://github.com/adam-hanna/vibe-code/pull/184), [#185](https://github.com/adam-hanna/vibe-code/pull/185))
+- **The design corpus is in the repo:** `app/src/design/HANDOFF.md` and `AUDIT.md`.
+  ([#216](https://github.com/adam-hanna/vibe-code/pull/216))
+- **The README is a short quick start** with screenshots; the long material moves to a docs site.
+  (#230, [#231](https://github.com/adam-hanna/vibe-code/pull/231))
+
+### Upgrading
+
+No config change is required. Five behaviours a running setup can notice:
+
+- **Default models follow each CLI's own default.** `claude.model` and `codex.model` default to `default`, which sends no model flag, where they used to be `opus` and `gpt-5.6-luna`. If you never set a model, your runs now use whatever your CLI is configured with. Set `claude.model`, `codex.model` or `roles.<role>.model` to pin one.
+- **Gates hold in four places by default:** `plan-approved`, `implemented`, `verify-round` and `review-round`. Only the desktop app holds there; a terminal can't answer, so `vibe run` goes straight through. A `stop` row ends a CLI run resumably.
+- **A global settings file is read** at `~/.config/vibe/config.json` if it exists. Set `VIBE_GLOBAL_CONFIG=` (empty) to ignore it.
+- **Question rounds no longer use up plan rounds,** and the answerer's file is numbered by question round (`answers-1.json` is the first). A run that asks questions gets more critique rounds within the same caps.
+- **A failing gate runs every attempt** in `verify.runs`, rather than stopping at the first failure, so a red gate takes longer to report. A passing gate still stops at its first pass.
+
 ## 1.3.0 - 2026-09-02
 
 Twenty-four issues since 1.2.0. **Nothing here breaks an existing config**: no key was renamed or
