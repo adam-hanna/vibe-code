@@ -294,7 +294,32 @@ describe('a turn that has gone quiet has a ceiling, and it is on the screen', ()
     // Case 2 (the UI rework): the chip is a Badge now; the claim that an unset
     // value is marked as the default is unchanged.
     expect(helper).toContain('<Badge>{unset}</Badge>');
-    expect(helper).toContain('<Badge>all projects</Badge>');
+    // Case 2 (owner's decision): the "all projects" and "this project overrides
+    // it" chips were asked to go. A value set in either file draws no chip, so
+    // only the default is ever marked.
+    const body = helper.slice(0, helper.indexOf('\n  };'));
+    expect(body).not.toContain('<Badge>all projects');
+    expect(body).not.toContain('<Badge>this project overrides it');
+    expect(body.match(/<Badge>/g)).toHaveLength(1);
+  });
+
+  test('a refusal stays on screen, and the setting it names has a control', () => {
+    // *"I can't seem to change my implementer from claude to codex. No error
+    // appears."* The core refused it - a writing Codex seat with
+    // `codex.persistSession` on - and the sentence was drawn at the top of a
+    // page scrolled to the role table, with no control for the key it named.
+    expect(settings).toMatch(/cn\(S\.refused, 'sticky top-0/);
+    expect(settings).toContain("save({ codex: { persistSession: e.target.value === 'on' } })");
+    expect(settings).toContain("{source('codex', 'persistSession')}");
+  });
+
+  test('changing a seat’s agent does not carry the old agent’s model onto it', () => {
+    // Spreading the row carried `opus` onto a Codex seat: valid to the core,
+    // since a model is any non-empty string, and a failure on the first turn.
+    expect(settings).toContain('save({ roles: { [role]: { ...current, provider, model: own ?? CLI_DEFAULT } } });');
+    // And "the agent's default" is sent as what it means, never as the empty
+    // string `validateRoleSetting` refuses by name.
+    expect(settings).toContain("const model = next === '' ? (agentModel ?? CLI_DEFAULT) : next;");
   });
 });
 

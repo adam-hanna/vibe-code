@@ -883,7 +883,7 @@ export function Settings({
     git?: Record<string, string | number | boolean | null | undefined>;
     verify?: Record<string, unknown>;
     claude?: { model?: string };
-    codex?: { model?: string };
+    codex?: { model?: string; persistSession?: boolean };
   };
   const gates = effective.gates ?? {};
   const loop = effective.loop ?? {};
@@ -909,21 +909,12 @@ export function Settings({
   const inFile = (file: Record<string, unknown>, section: string, key: string): boolean =>
     (file[section] as Record<string, unknown> | undefined)?.[key] !== undefined;
   const source = (section: string, key: string, unset = 'default'): ReactNode => {
-    const own = inFile(raw, section, key);
-    if (scope === 'global') {
-      return (
-        <>
-          {!own && <Badge>{unset}</Badge>}
-          {inFile(frame.raw, section, key) && <Badge>this project overrides it</Badge>}
-        </>
-      );
-    }
-    if (own) return null;
-    return inFile(frame.globalRaw, section, key) ? (
-      <Badge>all projects</Badge>
-    ) : (
-      <Badge>{unset}</Badge>
-    );
+    // Only the built-in default is named. The "all projects" and "this
+    // project overrides it" chips were asked to go: on a screen whose heading
+    // already says which file it edits, they were noise beside every value.
+    if (inFile(raw, section, key)) return null;
+    if (scope === 'project' && inFile(frame.globalRaw, section, key)) return null;
+    return <Badge>{unset}</Badge>;
   };
 
   return (
@@ -937,8 +928,8 @@ export function Settings({
       </h2>
       <p className={S.note}>
         {scope === 'project'
-          ? 'This repository’s own settings, in its vibe.config.json. Anything left alone here comes from your settings for all projects, and failing that from vibe’s own default — the chip beside each value says which. The test command and the worktree are only ever set here.'
-          : 'Your settings for every project on this machine. How each vendor is reached, the CLIs and the pilot’s permissions are only ever set here; for the rest, a project that sets a key in its own file wins, and the chip says when one does.'}
+          ? 'This repository’s own settings, in its vibe.config.json. Anything left alone here comes from your settings for all projects, and failing that from vibe’s own default, which is marked. The test command and the worktree are only ever set here.'
+          : 'Your settings for every project on this machine. How each vendor is reached, the CLIs and the pilot’s permissions are only ever set here; for the rest, a project that sets a key in its own file wins.'}
       </p>
       {scope === 'project' && onRelocate !== undefined && <WhereItIs dir={dir} onRelocate={onRelocate} />}
       {carry !== null && (
@@ -984,8 +975,13 @@ export function Settings({
         </button>
       </div>
 
+      {/* **Sticky, because the control that was refused is usually far below.**
+          Changing the implementer to Codex was refused with the core's own
+          sentence, drawn here at the top of a long page, so from the role table
+          nothing happened: *"I can't seem to change my implementer from claude
+          to codex. No error appears."* */}
       {failure !== null && (
-        <div className={S.refused}>
+        <div className={cn(S.refused, 'sticky top-0 z-10 shadow-overlay')} role="alert">
           <Badge variant="alarm">refused</Badge>
           <span>{failure} — nothing was written.</span>
         </div>
@@ -1176,8 +1172,6 @@ export function Settings({
                 <div className={S.row}>
                   <label className={S.label} htmlFor="pilot-safe">
                     commands that run without a card
-                    {/* `source` answers correctly in both views: a project file can
-                        never set this, so "this project overrides it" never shows. */}
                     {source('pilot', 'safeCommands')}
                   </label>
                   <ListField
@@ -1824,9 +1818,16 @@ export function Settings({
                     <select
                       value={current.provider ?? ''}
                       disabled={busy}
-                      onChange={(e) =>
-                        save({ roles: { [role]: { ...current, provider: e.target.value } } })
-                      }
+                      onChange={(e) => {
+                        // **The model goes with the agent.** Spreading `current`
+                        // carried a Claude model onto a Codex seat, which
+                        // validates (a model is any non-empty string) and fails
+                        // on the first turn. The new agent's own setting is what
+                        // the seat takes, and `default` when it names none.
+                        const provider = e.target.value;
+                        const own = provider === 'claude' || provider === 'codex' ? effective[provider]?.model : undefined;
+                        save({ roles: { [role]: { ...current, provider, model: own ?? CLI_DEFAULT } } });
+                      }}
                     >
                       {frame.providers.map((p) => (
                         <option key={p} value={p}>
@@ -1886,9 +1887,17 @@ export function Settings({
                             : undefined
                       }
                       disabled={busy}
-                      onSave={(next) =>
-                        save({ roles: { [role]: { ...current, model: next } } })
-                      }
+                      onSave={(next) => {
+                        // The empty option means "the agent's default", and the
+                        // core refuses an empty model by name - so it is sent as
+                        // what it stands for rather than as the empty string.
+                        const agentModel =
+                          current.provider === 'claude' || current.provider === 'codex'
+                            ? effective[current.provider]?.model
+                            : undefined;
+                        const model = next === '' ? (agentModel ?? CLI_DEFAULT) : next;
+                        save({ roles: { [role]: { ...current, model } } });
+                      }}
                     />
                   </td>
                 </tr>
@@ -1896,6 +1905,34 @@ export function Settings({
             })}
           </tbody>
         </table>
+        {/* **The setting the implementer refusal names had no control.** A Codex
+            seat that writes cannot keep its thread — `codex exec resume` takes no
+            `-s` flag, so the sandbox reverts to read-only after the first turn —
+            and the core refuses the combination by name. Without this the
+            sentence said what to change and the screen offered no way to. It is
+            not switched off on the person's behalf: it applies to every Codex
+            seat, so the critic and the reviewer lose their threads too, and that
+            is a decision rather than a side effect of picking an implementer. */}
+        <div className={S.row}>
+          <label className={S.label} htmlFor="codex-session">
+            Codex keeps its conversation between turns
+          </label>
+          <select
+            id="codex-session"
+            value={effective.codex?.persistSession === false ? 'off' : 'on'}
+            disabled={busy}
+            onChange={(e) => save({ codex: { persistSession: e.target.value === 'on' } })}
+          >
+            <option value="on">on — each Codex seat resumes its own thread</option>
+            <option value="off">off — every Codex turn starts fresh</option>
+          </select>
+          {source('codex', 'persistSession')}
+        </div>
+        <p className={S.note}>
+          A <strong>Codex implementer needs this off.</strong> A resumed Codex turn cannot write, so
+          the loop refuses a writing Codex seat while it is on. Turning it off applies to every Codex
+          seat: the critic and the reviewer start each turn without their earlier rounds.
+        </p>
       </section>
 
       {/* ---- what every turn is told ------------------------------------- */}
