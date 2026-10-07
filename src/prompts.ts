@@ -152,6 +152,22 @@ ${verification}${caution}
  * are expensive, so a finding that names the root cause and every affected
  * site is worth far more than three findings discovered one round apart.
  */
+/**
+ * What a false finding costs, said to the reviewer alone (#115).
+ *
+ * `REVIEW_BREADTH` already grants permission - an empty list is a successful
+ * review - and every other rule in these prompts is written as a price rather
+ * than a permission, so this names the price. #44's one P1 was false and bought
+ * a ~1.3M-token fix round that edited working code. The critic is deliberately
+ * not told this: its noise buys a plan revision, its prompt has its own
+ * history, and changing both at once would make the effect unattributable.
+ * Exported so the golden-prompt tests can splice exactly this paragraph in.
+ */
+export const APPROVE_COST =
+  'Approving is an equally correct outcome. A change that is right should be approved with no ' +
+  'findings, and an invented finding is not free: it buys a fix round that edits working code ' +
+  'to satisfy a premise nobody checked.';
+
 const REVIEW_BREADTH = `## Review breadth
 
 Do not stop at the first instance of a defect.
@@ -1161,6 +1177,8 @@ Judge two things:
 The loop may carry a small number of P1s forward and settle them against the test suite rather than in discussion, so a P1 is not a demand that everything stop. It is never ignored. Do not inflate a finding to P0 to force attention: P0 is for defects where continuing is the wrong thing to do at all.
 
 Do not wave through a real defect. Reserve P1 for defects you can name a concrete failure case for, and prefer P1 over P0 for anything a test run could settle.
+
+${APPROVE_COST}
 
 Give each finding a stable kebab-case \`id\`.
 
