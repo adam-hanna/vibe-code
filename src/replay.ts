@@ -332,6 +332,22 @@ export function replayRun(state: RunState, sources: ReplaySources): Replay {
   let questionsSaid = 0;
   const censusSaid = new Set<string>();
 
+  // The run's totals ride on the LAST charge, and only there (#235). A live
+  // charge carries `runTokens`, `runCostUsd` and `codexTokens` because
+  // `applyCharge` narrates the totals it has just updated, and the window reads
+  // the total off the charge rather than adding turns up - so a replay whose
+  // charges carried none drew every opened run as "no turn reported a charge".
+  // The running totals were never stored, only the final ones are, and a
+  // running sum rebuilt from `events` is a second answer that need not end where
+  // `state.json` does. So the earlier charges carry no total, the last carries
+  // the record's own, and the fold finishes on the figure the run holds.
+  const last = turns[turns.length - 1];
+  const totals = {
+    runTokens: state.tokensUsed,
+    runCostUsd: state.costUsd,
+    codexTokens: state.codexTokens ?? null,
+  };
+
   for (const turn of turns) {
     const seat = seatOf(turn.label);
     const context = contextAt(sources.checkpoints, turn.at);
@@ -406,7 +422,11 @@ export function replayRun(state: RunState, sources: ReplaySources): Replay {
     // replayed total disagree with the run's own record.
     push(
       turn.at,
-      say(turn.type, `${turn.label} ${turn.failed ? 'stopped' : 'charged'}`, turn.data),
+      say(
+        turn.type,
+        `${turn.label} ${turn.failed ? 'stopped' : 'charged'}`,
+        turn === last ? { ...turn.data, ...totals } : turn.data,
+      ),
     );
 
     // The judge's verdict, read from the round's own artifact rather than from

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { emptyRun, reduce } from './model';
+import { emptyRun, foldReplay, reduce } from './model';
 import { resumeArgv, launchArgv } from './argv';
 import type { Run } from './model';
 import type { Frame } from '../host';
@@ -137,5 +137,40 @@ describe('a resume is the same four-slot argv the launch is', () => {
     // A trailing newline in a path is a directory that does not exist, and the
     // error it produces says so in the least helpful possible way.
     expect(resumeArgv(' id \n', ' C:/repo \n')).toEqual(['resume', 'id', '-C', 'C:/repo']);
+  });
+});
+
+describe('an opened run has the spend its record holds (#235)', () => {
+  // The shape `src/replay.ts` sends: every charge carries its own turn's tokens,
+  // and only the last carries the run's totals, because those are the only
+  // totals `state.json` keeps. `run-replay.test.ts` pins the core's half.
+  const step = (at: number, id: string, data: Record<string, unknown>) => ({
+    at,
+    narration: { level: 'detail' as const, message: 'x', id, data },
+  });
+
+  test('folding a replay ends on the run’s recorded total', () => {
+    const run = foldReplay([
+      step(1, 'claude_turn', { label: 'plan', provider: 'claude', tokens: 1_000_000 }),
+      step(2, 'codex_turn', { label: 'critique-0', provider: 'codex', tokens: 900_000 }),
+      step(3, 'claude_turn', {
+        label: 'implement',
+        provider: 'claude',
+        tokens: 500_000,
+        runTokens: 2_400_000,
+        runCostUsd: 3.21,
+        codexTokens: 900_000,
+      }),
+    ]);
+    expect(run.spend.tokens).toBe(2_400_000);
+    expect(run.spend.costUsd).toBe(3.21);
+    expect(run.spend.codexTokens).toBe(900_000);
+    expect(run.spend.charges).toHaveLength(3);
+  });
+
+  test('a replay with no charges still reads as absent, never as zero', () => {
+    const run = foldReplay([step(1, 'run_started', { runId: 'r' })]);
+    expect(run.spend.tokens).toBeNull();
+    expect(run.spend.charges).toEqual([]);
   });
 });

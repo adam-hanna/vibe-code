@@ -517,3 +517,91 @@ test('a failed turn whose provider this build cannot read is skipped, not misatt
   assert.equal(replay.steps.find((s) => s.narration.id === 'claude_turn'), undefined);
   assert.equal(replay.steps.find((s) => s.narration.id === 'codex_turn'), undefined);
 });
+
+// ---- what the run spent (#235) -----------------------------------------------
+
+function charges(state: RunState): Record<string, unknown>[] {
+  return replayRun(state, NOTHING)
+    .steps.filter((s) => s.narration.id === 'claude_turn' || s.narration.id === 'codex_turn')
+    .map((s) => s.narration.data ?? {});
+}
+
+test('the last charge carries the run’s own totals, so an opened run has a spend', () => {
+  // The window reads the total off a charge and never adds turns up, and a live
+  // charge carries it because `applyCharge` narrates it. A replay whose charges
+  // carried none drew every opened run as "no turn reported a charge" - including
+  // the README's own screenshots, of a run that spent 2.4M tokens.
+  const state = stateWith({
+    tokensUsed: 2_400_000,
+    costUsd: 3.21,
+    codexTokens: 900_000,
+    events: [
+      { at: iso(10_000), type: 'claude_turn', label: 'plan', tokens: 1_000_000 },
+      { at: iso(20_000), type: 'codex_turn', label: 'critique-0', tokens: 900_000 },
+      { at: iso(30_000), type: 'claude_turn', label: 'implement', tokens: 500_000 },
+    ],
+  });
+  const said = charges(state);
+  assert.equal(said.length, 3);
+  const final = said[2] ?? {};
+  assert.equal(final['runTokens'], 2_400_000);
+  assert.equal(final['runCostUsd'], 3.21);
+  assert.equal(final['codexTokens'], 900_000);
+  // The per-turn figure is still the turn's own.
+  assert.equal(final['tokens'], 500_000);
+});
+
+test('only the last charge carries a total, because the running ones were never stored', () => {
+  // A running sum rebuilt from `events` would be a second answer to a question
+  // `state.json` already answers, and it need not end where the record does. So
+  // the earlier charges say nothing about the total rather than something
+  // derived.
+  const state = stateWith({
+    tokensUsed: 30,
+    events: [
+      { at: iso(10_000), type: 'claude_turn', label: 'plan', tokens: 10 },
+      { at: iso(20_000), type: 'codex_turn', label: 'critique-0', tokens: 20 },
+    ],
+  });
+  const [first] = charges(state);
+  assert.equal(first?.['runTokens'], undefined);
+  assert.equal(first?.['codexTokens'], undefined);
+});
+
+test('the total is the record’s even where the events do not add up to it', () => {
+  // `state.tokensUsed` is the authority: a turn charged before this build
+  // recorded it as an event, or one whose label could not be read, is in the
+  // total and not in the list. The replay reports what the run holds.
+  const state = stateWith({
+    tokensUsed: 5_000,
+    events: [{ at: iso(10_000), type: 'claude_turn', label: 'plan', tokens: 100 }],
+  });
+  assert.equal(charges(state)[0]?.['runTokens'], 5_000);
+});
+
+test('a Codex share the run never recorded is said as absent, not as zero', () => {
+  const state = stateWith({
+    tokensUsed: 100,
+    events: [{ at: iso(10_000), type: 'claude_turn', label: 'plan', tokens: 100 }],
+  });
+  assert.equal(charges(state)[0]?.['codexTokens'], null);
+});
+
+test('a run with no charges carries no total at all', () => {
+  // Nothing to attach it to, and nothing invented to hold it: the window keeps
+  // drawing the absence rather than a zero.
+  const state = stateWith({ tokensUsed: 0 });
+  assert.deepEqual(charges(state), []);
+});
+
+test('a run that stopped on a failed turn carries its totals on that turn', () => {
+  const state = stateWith({
+    status: 'needs-input',
+    tokensUsed: 14_247_742,
+    events: [
+      { at: iso(10_000), type: 'claude_turn', label: 'plan', tokens: 1 },
+      { at: iso(90_000), type: 'turn_failed', label: 'implement', provider: 'claude', tokens: 14_247_741 },
+    ],
+  });
+  assert.equal(charges(state)[1]?.['runTokens'], 14_247_742);
+});
