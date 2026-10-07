@@ -87,6 +87,30 @@ describe('an opened run is drawn by the column that drew it live', () => {
     expect(cockpit).toMatch(/\{opened\.failure\}/);
   });
 
+  test('an opened run that has loaded does not say it is still reading (#236)', () => {
+    // A static `reading` badge sat over every opened run for as long as it was
+    // open, so a run that had loaded completely still looked as if it was
+    // loading. The only `reading` left is the line drawn while the replay is in
+    // flight.
+    expect(cockpit).not.toContain('<Badge>reading</Badge>');
+    expect(cockpit).toMatch(
+      /\{opened\.loading && opened\.run === null && \(\s*<p[^>]*>Reading this run…<\/p>/,
+    );
+  });
+
+  test('the way back from an opened run is in the column’s title row', () => {
+    // It is the only way back when a live run exists, so it has to survive the
+    // box it used to sit in — and it sits between the column's name and the
+    // control that hides the column, not under the column's contents.
+    const head = cockpit.slice(
+      cockpit.indexOf('>Run status</span>'),
+      cockpit.indexOf('aria-label="Hide run status"'),
+    );
+    expect(head).toContain('back to the live run');
+    expect(head).toContain('past && viewing !== null');
+    expect(cockpit.match(/back to the live run/g)?.length).toBe(1);
+  });
+
   test('a failed replay leaves the live run drawn rather than an empty column', () => {
     // `columnRun` falls back to `run`, so the column never goes blank — and the
     // failure is said beside it rather than in place of everything.

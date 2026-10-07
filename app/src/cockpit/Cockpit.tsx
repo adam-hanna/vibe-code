@@ -37,7 +37,6 @@ import {
   PROJECTS_KEY,
   dirKey,
   moveProject,
-  preview,
   readNames,
   readPins,
   readProjectNames,
@@ -1908,17 +1907,29 @@ export function Cockpit() {
             </div>
           ) : (
           <>
-          <div className="flex h-9 flex-none items-center justify-between pr-1.5 pl-4">
+          <div className="flex h-9 flex-none items-center justify-between gap-2 pr-1.5 pl-4">
             <span className="text-chip uppercase tracking-[0.12em] text-tertiary">Run status</span>
-            <Button
-              variant="quiet"
-              size="icon-sm"
-              aria-label="Hide run status"
-              title="Hide run status (Ctrl+Shift+B)"
-              onClick={act.toggleLoop}
-            >
-              <PanelRightClose className="size-4" aria-hidden />
-            </Button>
+            {/* The way back from an opened run lives in the title row (#236).
+                It sat in a box under a `reading` badge that never changed, so a
+                run that had loaded completely still looked as if it was
+                loading; the task the box repeated already titles the run in
+                the sidebar. The way back is the one thing that had to stay. */}
+            <span className="ml-auto flex items-center gap-1">
+              {past && viewing !== null && (
+                <Button variant="quiet" size="sm" onClick={() => setViewing(null)}>
+                  back to the live run
+                </Button>
+              )}
+              <Button
+                variant="quiet"
+                size="icon-sm"
+                aria-label="Hide run status"
+                title="Hide run status (Ctrl+Shift+B)"
+                onClick={act.toggleLoop}
+              >
+                <PanelRightClose className="size-4" aria-hidden />
+              </Button>
+            </span>
           </div>
           <div className="flex min-h-0 flex-1 flex-col">
             {/* **The column follows the run the window is pointed at** (#223),
@@ -1938,33 +1949,30 @@ export function Cockpit() {
                 could still be open, and every turn in an archive is a turn that
                 ended, because `applyCharge` records one when it is charged. */}
             {past && viewing !== null ? (
-              <div className="flex flex-col items-start gap-2 p-4 text-body-sm text-secondary">
-                <Badge>reading</Badge>
-                <span className="text-body text-primary">{preview(viewing.task)}</span>
-                {opened.loading && opened.run === null && <p className="m-0">Reading this run…</p>}
-                {/* The core's own sentence, verbatim. A run whose id will not
-                    join onto a path, a directory vibe refuses to follow (#53)
-                    and a `state.json` the validators reject are three findings
-                    needing three responses, and *"could not read the run"*
-                    answers none of them. */}
-                {opened.failure !== null && (
-                  <p className="m-0 text-tertiary">{opened.failure}</p>
-                )}
-                {/* Said once, here, rather than as a blank on every turn row.
-                    `state.turnStartedAt` describes the turn in flight, so the
-                    only starts an archive keeps are the ones a checkpoint froze
-                    — and a duration invented from the gap between two charges
-                    would include every gate the loop held at. */}
-                {opened.run !== null && (
-                  <p className="m-0 text-tertiary">
-                    Some turns have no duration: a run records a turn when it is charged, and only a
-                    checkpoint keeps the moment one began.
-                  </p>
-                )}
-                <Button variant="quiet" size="sm" onClick={() => setViewing(null)}>
-                  back to the live run
-                </Button>
-              </div>
+                <div className="flex flex-col gap-1 px-4 pb-2 text-body-sm">
+                  {/* Only while it is true: `reading` once the replay has
+                      landed was the defect (#236). */}
+                  {opened.loading && opened.run === null && (
+                    <p className="m-0 text-secondary">Reading this run…</p>
+                  )}
+                  {/* The core's own sentence, verbatim. A run whose id will not
+                      join onto a path, a directory vibe refuses to follow (#53)
+                      and a `state.json` the validators reject are three findings
+                      needing three responses, and *"could not read the run"*
+                      answers none of them. */}
+                  {opened.failure !== null && <p className="m-0 text-tertiary">{opened.failure}</p>}
+                  {/* Said once, here, rather than as a blank on every turn row.
+                      `state.turnStartedAt` describes the turn in flight, so the
+                      only starts an archive keeps are the ones a checkpoint froze
+                      — and a duration invented from the gap between two charges
+                      would include every gate the loop held at. */}
+                  {opened.run !== null && (
+                    <p className="m-0 text-tertiary">
+                      Some turns have no duration: a run records a turn when it is charged, and only a
+                      checkpoint keeps the moment one began.
+                    </p>
+                  )}
+                </div>
             ) : (
               <>
                 {/* While there is no run, this column is four not-started groups
