@@ -142,3 +142,21 @@ test('an uncommitted round is read through the same fallback the diff uses', asy
     removed: 4,
   });
 });
+
+test('a path containing a tab keeps its counts', async () => {
+  // `-z` leaves a pathname verbatim, tabs included, so only the first two tabs
+  // of a numstat record are field separators.
+  const dir = repo(true);
+  const base = git(dir, 'rev-parse', 'HEAD');
+  write(dir, 'tests/a\tb.test.ts', lines(3, 'tab'));
+  commitAll(dir, 'tabbed');
+
+  const { changes } = await diffChunks(dir, base);
+  assert.deepEqual(byPath(changes).get('tests/a\tb.test.ts'), {
+    path: 'tests/a\tb.test.ts',
+    oldPath: null,
+    status: 'added',
+    added: 3,
+    removed: 0,
+  });
+});

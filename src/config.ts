@@ -1014,7 +1014,14 @@ export function withProjectFile(stored: Config, targetDir: string): Config {
   refuseProjectPilot(project, 'vibe.config.json');
   refuseProjectCli(project, 'vibe.config.json');
   refuseProjectAuth(project, 'vibe.config.json');
-  return mergeConfig(mergeConfig(stored, readGlobalConfig()), project);
+  // Seeded from `DEFAULTS` first, because `mergeSection` copies only the keys
+  // its base already has. A run stored before a key existed has no such key,
+  // so without the seed a project file naming it - `verify.testPaths` on a run
+  // older than #112 - would be dropped here and the default restored by
+  // `applyOverrides` afterwards: a written-down setting silently not applied.
+  // `applyOverrides` already layers the run's memory over `DEFAULTS`, so this
+  // moves that seed earlier and changes nothing a stored key says.
+  return mergeConfig(mergeConfig(mergeConfig(DEFAULTS, stored), readGlobalConfig()), project);
 }
 
 /**

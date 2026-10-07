@@ -725,9 +725,15 @@ async function fileChanges(cwd: string, prefix: readonly string[]): Promise<File
   // `a\td\tpath\0`, or for a rename `a\td\t\0old\0new\0`.
   const nums = counted.stdout.split('\0');
   for (let i = 0; i < nums.length; i += 1) {
-    const fields = (nums[i] as string).split('\t');
-    if (fields.length < 3) continue;
-    const [add = '', del = '', inline = ''] = fields;
+    // Only the first two tabs separate fields: `-z` leaves a pathname verbatim,
+    // and a path may itself contain a tab.
+    const record = nums[i] as string;
+    const first = record.indexOf('\t');
+    const second = first === -1 ? -1 : record.indexOf('\t', first + 1);
+    if (second === -1) continue;
+    const add = record.slice(0, first);
+    const del = record.slice(first + 1, second);
+    const inline = record.slice(second + 1);
     let file = inline;
     if (inline === '') {
       // A rename: the next two entries are the old and new paths.
