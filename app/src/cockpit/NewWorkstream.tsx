@@ -87,10 +87,10 @@ export function NewWorkstream({
    * `briefFor`.
    */
   /**
-   * `message` is what the pilot is told; `task` is the brief alone, which is
-   * what the sidebar's draft row is called until the run exists.
+   * `message` is what the pilot is told; `task` is the brief alone; `title` is
+   * what the person named the run, or null to name it from the brief (#262).
    */
-  onBrief: (message: string, task: string) => void;
+  onBrief: (message: string, task: string, title: string | null) => void;
   onClose: () => void;
   busy: boolean;
   /**
@@ -110,6 +110,7 @@ export function NewWorkstream({
   locked?: boolean;
 }) {
   const [task, setTask] = useState('');
+  const [title, setTitle] = useState('');
   const [planOnly, setPlanOnly] = useState(true);
   const [cfg, setCfg] = useState<ConfigFrame | null>(null);
   const [gates, setGates] = useState<Gates>({});
@@ -169,7 +170,7 @@ export function NewWorkstream({
           // **Submit is the conversation, not the run.** Enter in the brief field
           // reaches here, and so does the one button. The settings go with the
           // brief, in the message, so the pilot can carry them on `start_run`.
-          onBrief(briefFor(task, planOnly, overrides), task.trim());
+          onBrief(briefFor(task, planOnly, overrides), task.trim(), title.trim() === '' ? null : title.trim());
           onClose();
         }}
       >
@@ -177,6 +178,20 @@ export function NewWorkstream({
           <p className="mt-0 mb-1.5 text-body-sm text-accent-muted">A new beginning</p>
           <h2 className="m-0 text-title font-semibold tracking-tight text-display">What should we work on?</h2>
         </div>
+
+        {/* Optional (#262). Empty names the run from the brief, as before; a
+            title somebody typed is kept, through the start, and nothing is
+            generated in its place. */}
+        <label className={LABEL} htmlFor="title">
+          Title <span className="font-normal text-tertiary">(optional)</span>
+        </label>
+        <input
+          id="title"
+          className={FIELD}
+          value={title}
+          placeholder="Leave empty to name the run from its brief"
+          onChange={(e) => setTitle(e.target.value)}
+        />
 
         <label className={LABEL} htmlFor="brief">
           Your brief

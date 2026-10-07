@@ -32,7 +32,8 @@ describe('the composer hands the brief to the pilot', () => {
       composer.indexOf('onSubmit={(e) => {'),
       composer.indexOf('}}', composer.indexOf('onSubmit={(e) => {')),
     );
-    expect(onSubmit).toContain('onBrief(briefFor(task, planOnly, overrides), task.trim())');
+    // The optional title rides third since #262; the message and task are unchanged.
+    expect(onSubmit).toContain('onBrief(briefFor(task, planOnly, overrides), task.trim(), ');
     expect(onSubmit).not.toContain('onLaunch(');
   });
 
@@ -79,7 +80,9 @@ describe('the cockpit carries it across', () => {
     // is one of the two ways that happens.
     // Through `queued`, one commit later, so the pane is already holding the
     // new draft's conversation when the brief is said into it.
-    const handler = cockpit.slice(cockpit.indexOf('onBrief={(message, task) => {'));
+    const at = cockpit.indexOf('onBrief={(message, task, title) => {');
+    expect(at).toBeGreaterThan(-1);
+    const handler = cockpit.slice(at);
     expect(handler).toContain('setQueued(message)');
     expect(cockpit).toContain('setBrief(queued)');
     expect(handler).toContain("open('pilot')");

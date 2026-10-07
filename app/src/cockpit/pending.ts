@@ -1,4 +1,5 @@
-import { dirKey } from './projects';
+import { dirKey, preview, renameRun } from './projects';
+import type { RunName } from './projects';
 
 /**
  * A run that has been asked for and not started yet (#223).
@@ -38,6 +39,34 @@ export interface Draft {
   launched: boolean;
   /** The run this became, once it said so. Null until `run_started`. */
   runId: string | null;
+  /**
+   * The title the person gave it in the new-run dialog, or null (#262).
+   *
+   * Null is the ordinary case and means *name it from the brief*, which is what
+   * every draft saved before the field reads as. A title somebody typed is
+   * theirs: the row shows it instead of a preview, and it becomes the run's
+   * rename when the draft becomes a run, so pressing the pilot's proposal does
+   * not swap it for the brief the pilot wrote.
+   */
+  name: string | null;
+}
+
+/** What a draft's row is called: the title somebody gave it, or its brief. */
+export function draftTitle(d: Pick<Draft, 'name' | 'task'>): string {
+  return d.name ?? preview(d.task);
+}
+
+/**
+ * The run names once a draft has become run `runId` (#262).
+ *
+ * A typed title is written as the run's **rename** - the same store the row's
+ * own ✎ writes - and not into the run's task: a rename is a label and never a
+ * write to the run's record, and the task is the brief the run was given. A
+ * draft with no title leaves the names exactly as they were, so the row goes on
+ * being named from the brief as it always was.
+ */
+export function namesAfterStart(names: readonly RunName[], draft: Draft, runId: string): readonly RunName[] {
+  return draft.name === null ? names : renameRun(names, draft.dir, runId, draft.name);
 }
 
 export const DRAFTS_KEY = 'vibe.drafts';
@@ -49,7 +78,14 @@ export const DRAFT_PREFIX = 'draft-';
  * A new draft. The randomness is passed in rather than drawn here, so this file
  * stays pure — the same arrangement `emit.ts` has for its window origin.
  */
-export function newDraft(dir: string, task: string, now: number, salt: string): Draft {
+export function newDraft(
+  dir: string,
+  task: string,
+  now: number,
+  salt: string,
+  /** The title typed in the dialog. Blank is no title: the row is named from the brief. */
+  name: string | null = null,
+): Draft {
   return {
     dir: dir.trim(),
     id: `${DRAFT_PREFIX}${now.toString(36)}-${salt}`,
@@ -57,6 +93,7 @@ export function newDraft(dir: string, task: string, now: number, salt: string): 
     createdAt: now,
     launched: false,
     runId: null,
+    name: name === null || name.trim() === '' ? null : name.trim(),
   };
 }
 
@@ -77,7 +114,7 @@ export function readDrafts(raw: string | null): readonly Draft[] {
   return parsed.flatMap((d: unknown): Draft[] => {
     if (typeof d !== 'object' || d === null) return [];
     const r = d as Record<string, unknown>;
-    const { dir, id, task, createdAt, launched, runId } = r;
+    const { dir, id, task, createdAt, launched, runId, name } = r;
     if (typeof dir !== 'string' || typeof id !== 'string' || !isDraftId(id)) return [];
     if (typeof task !== 'string' || typeof createdAt !== 'number') return [];
     return [
@@ -88,6 +125,8 @@ export function readDrafts(raw: string | null): readonly Draft[] {
         createdAt,
         launched: launched === true,
         runId: typeof runId === 'string' ? runId : null,
+        // Absent on every draft saved before #262, and that is no title.
+        name: typeof name === 'string' && name.trim() !== '' ? name : null,
       },
     ];
   });

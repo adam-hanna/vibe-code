@@ -7,7 +7,9 @@ import {
   bindDraft,
   draftsIn,
   isDraftId,
+  draftTitle,
   markLaunched,
+  namesAfterStart,
   newDraft,
   readDrafts,
   removeDraft,
@@ -105,7 +107,11 @@ describe('the conversation goes with it', () => {
 
 describe('the cockpit wires it', () => {
   test('start makes the draft and points the pane at it before the brief is said', () => {
-    const handler = cockpit.slice(cockpit.indexOf('onBrief={(message, task) => {'));
+    // `title` joined the signature in #262; the handler is found by its new one.
+    const at = cockpit.indexOf('onBrief={(message, task, title) => {');
+    expect(at).toBeGreaterThan(-1);
+    const handler = cockpit.slice(at);
+    expect(handler).toMatch(/slice\(2, 8\),\s*title,\s*\);/);
     expect(handler).toContain('saveDrafts((list) => addDraft(list, draft))');
     expect(handler).toContain('setDraftId(draft.id)');
     expect(handler).toContain('setQueued(message)');
@@ -133,5 +139,37 @@ describe('the cockpit wires it', () => {
   test('the sidebar draws a draft among the project\'s runs, and discarding confirms', () => {
     expect(sidebar).toContain('<DraftRow');
     expect(sidebar).toContain("pending.kind === 'draft'");
+  });
+});
+
+describe('a run can be named when it is started, and keeps the name (#262)', () => {
+  test('a typed title names the row, and an empty one leaves it named from the brief', () => {
+    const named = newDraft(repo, 'fix the flaky gate\nlots more detail', 1, 'x', '  Gate flake  ');
+    expect(named.name).toBe('Gate flake');
+    expect(draftTitle(named)).toBe('Gate flake');
+    const plain = newDraft(repo, 'fix the flaky gate\nlots more detail', 1, 'x', '   ');
+    expect(plain.name).toBeNull();
+    expect(draftTitle(plain)).toBe('fix the flaky gate');
+  });
+
+  test('the title survives a round trip, and an old draft without one reads as none', () => {
+    const named = newDraft(repo, 't', 1, 'x', 'mine');
+    expect(readDrafts(JSON.stringify([named]))).toEqual([named]);
+    const { name: _gone, ...old } = newDraft(repo, 't', 1, 'y');
+    expect(readDrafts(JSON.stringify([old]))[0]?.name).toBeNull();
+  });
+
+  test('when the draft becomes a run, its title becomes the run\'s name, and only then', () => {
+    const named = { ...newDraft(repo, 't', 1, 'x', 'mine'), launched: true };
+    expect(namesAfterStart([], named, 'R1')).toEqual([{ dir: repo, runId: 'R1', name: 'mine' }]);
+    const plain = { ...newDraft(repo, 't', 1, 'y'), launched: true };
+    const existing = [{ dir: repo, runId: 'R0', name: 'older' }];
+    expect(namesAfterStart(existing, plain, 'R1')).toBe(existing);
+  });
+
+  test('the cockpit writes it when the draft is bound, and the rows draw it', () => {
+    const bind = cockpit.slice(cockpit.indexOf('bindDraft(list, drafting.id, startedId)'));
+    expect(bind).toMatch(/namesAfterStart\(readNames\(memory\.getItem\(NAMES_KEY\)\), drafting, startedId\)/);
+    expect(sidebar).toContain('title={draftTitle(d)}');
   });
 });
