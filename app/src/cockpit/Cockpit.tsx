@@ -1,6 +1,18 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
-import { LivenessDot, MetaChip, StateKicker } from '../design';
-import { Icon, VibeMark } from '../design/Icon';
+import { Activity, PanelRightClose, PanelRightOpen, Terminal, X } from 'lucide-react';
+import { usePanelRef } from 'react-resizable-panels';
+import type { Layout, LayoutChangedMeta, PanelImperativeHandle } from 'react-resizable-panels';
+import { Badge } from '@/ui/badge';
+import { Button } from '@/ui/button';
+import { LivenessDot } from '../design';
+import { ActivityBar } from '../shell/ActivityBar';
+import { Palette } from '../shell/Palette';
+import { StatusBar } from '../shell/StatusBar';
+import { ACTIONS, available, chordLabel, shortcutFor } from '../shell/actions';
+import type { ActionId } from '../shell/actions';
+import { ResizableGroup, ResizablePanel, ResizableSeparator } from '../ui/resizable';
+import { TooltipProvider } from '../ui/tooltip';
+import { cn } from '@/lib/utils';
 import { projectName } from './projects';
 import * as host from '../host';
 import * as keys from '../pilot/keys';
@@ -10,7 +22,7 @@ import type { KeyStatus } from '../pilot/keys';
 import { PilotPane } from '../pilot/PilotPane';
 import { noCommands, reduceCommands, restore, running } from './commands';
 import { NOWHERE, readWhere, WHERE_KEY, writableWhere } from './where';
-import type { Viewing, Where } from './where';
+import type { BottomTab, Panels, Viewing, Where } from './where';
 import { CommandsPane } from './CommandsPane';
 import { CodePane } from './CodePane';
 import { Diagnostics } from './Diagnostics';
@@ -49,15 +61,12 @@ import { LoopColumn } from './LoopColumn';
 import { NewWorkstream } from './NewWorkstream';
 import { OutputPane } from './OutputPane';
 import { Sidebar } from './Sidebar';
-import { initials } from './squares';
-import { SidePanel } from './SidePanel';
 import { QuestionsPane } from './QuestionsPane';
 import { RateLimitStrip } from './RateLimit';
 import { Settings } from './Settings';
 import { SpendPane } from './SpendPane';
 import { StopConfirm } from './StopConfirm';
 import { Summary } from './Summary';
-import { Switcher } from './Switcher';
 import { Workstreams } from './Workstreams';
 import { VerifyPane } from './VerifyPane';
 import { StalenessStrip } from './Staleness';
@@ -71,8 +80,19 @@ import type { PilotLimits } from '../pilot/ledger';
 import type { Launched, Raise } from './argv';
 import type { Caps } from './Footer';
 import type { Effect } from '../pilot/tools';
+import { memory } from '../memory';
 import type { Frame } from '../host';
 import type { Run } from './model';
+
+/**
+ * A tab in the main pane's bar (the UI rework). Stated rather than inherited:
+ * these were the app's only unstyled buttons once, and an unselected tab is
+ * navigation you are not in, which is the prose tier. The selected one takes the
+ * accent and the 2px rule under it, and nothing dims.
+ */
+const TAB =
+  'cursor-pointer whitespace-nowrap border-0 border-b-2 border-transparent bg-transparent px-2.5 pt-2.5 pb-3 text-body-sm font-medium text-secondary hover:bg-column hover:text-primary focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent';
+const TAB_ON = 'border-accent text-accent';
 
 /**
  * The cockpit, at the slice #159 scopes it to.
@@ -109,7 +129,7 @@ const REPO_KEY = 'vibe.repo';
 /** Where the window was pointed when it last closed. See `where.ts`. */
 function storedWhere(): Where {
   try {
-    return readWhere(localStorage.getItem(WHERE_KEY));
+    return readWhere(memory.getItem(WHERE_KEY));
   } catch {
     return NOWHERE;
   }
@@ -175,7 +195,7 @@ export function Cockpit() {
    */
   const [scale, setScale] = useState(() => {
     try {
-      return readScale(localStorage.getItem(SCALE_KEY));
+      return readScale(memory.getItem(SCALE_KEY));
     } catch {
       // Storage can be unavailable. Text at the size it was designed is a
       // smaller failure than a window that will not render.
@@ -188,7 +208,7 @@ export function Cockpit() {
   const rescale = useCallback((next: number) => {
     setScale(readScale(String(next)));
     try {
-      localStorage.setItem(SCALE_KEY, writable(next));
+      memory.setItem(SCALE_KEY, writable(next));
     } catch {
       // It still applies for this session. See above.
     }
@@ -205,7 +225,7 @@ export function Cockpit() {
    * the state is one level up, exactly as the type scale is and for the same
    * reason: a change in Settings has to reach a pane that is already open.
    *
-   * `localStorage` and not `vibe.config.json`, unchanged: this is the *pilot's*
+   * The window's memory (`memory.ts`) and not `vibe.config.json`, unchanged: this is the *pilot's*
    * ceiling, it is this machine's, and the run's two ceilings are the project's.
    */
   const [limits, setLimits] = useState<PilotLimits>(readLimits);
@@ -221,11 +241,67 @@ export function Cockpit() {
    * **Both start open, and neither is persisted.** A collapse is a gesture — put
    * the runs away to read a diff — not a decision, and a window that opened three
    * days later still folded would be answering a question nobody asked twice.
-   * `localStorage` holds the repository and the pilot's spend ceiling because
+   * The window's memory holds the repository and the pilot's spend ceiling because
    * those are decisions.
    */
-  const [showRuns, setShowRuns] = useState(true);
-  const [showLoop, setShowLoop] = useState(true);
+  /**
+   * Which regions are open and how big each is (the UI rework). Kept between
+   * launches through `where.ts`, which is where that decision is argued: with
+   * drag handles between every region an arrangement is a setting, where a
+   * collapse used to be a gesture.
+   */
+  const [panels, setPanels] = useState<Panels>(() => storedWhere().panels);
+  /** The bottom panel's tab: Output or Commands, the two terminal-shaped panes. */
+  const [bottom, setBottom] = useState<BottomTab>(() => storedWhere().bottom);
+  /**
+   * The two side panels, driven through the library rather than mounted and
+   * unmounted (the UI rework). Unmounting one changed the set of panels in the
+   * row, and the library then rebuilt the whole row from each panel's default
+   * size - deferring it when it measured the row at zero width. Shutting the
+   * sidebar was reported as shutting the run status column too: *"It looks like
+   * the left pane collapse button also collapses the right pane?"* A panel that
+   * stays mounted and collapses is a resize of one panel, and the others keep
+   * the sizes they had.
+   */
+  const sidebarPanel = usePanelRef();
+  const loopPanel = usePanelRef();
+  const saveLayout = useCallback(
+    (group: string) => (layout: Layout, meta: LayoutChangedMeta) => {
+      // A layout the library recomputed after a window resize is not a
+      // decision anybody made; only a drag is.
+      if (!meta.isUserInteraction) return;
+      // A drag past a side panel's minimum collapses it, and a drag out of the
+      // collapsed edge opens it: the flags follow, so the toggles say what the
+      // screen shows.
+      const shut = (ref: { current: PanelImperativeHandle | null }, was: boolean): boolean =>
+        ref.current === null ? was : !ref.current.isCollapsed();
+      setPanels((p) => ({
+        ...p,
+        ...(group === 'shell' ? { sidebar: shut(sidebarPanel, p.sidebar), loop: shut(loopPanel, p.loop) } : {}),
+        sizes: { ...p.sizes, [group]: layout },
+      }));
+    },
+    [sidebarPanel, loopPanel],
+  );
+  // The flags drive the panels. Checked again a frame later because the
+  // library defers its first layout until the row has a width, and a collapse
+  // asked for before then does nothing.
+  useEffect(() => {
+    const apply = (): void => {
+      for (const [ref, open] of [
+        [sidebarPanel, panels.sidebar],
+        [loopPanel, panels.loop],
+      ] as const) {
+        const panel = ref.current;
+        if (panel === null) continue;
+        if (open && panel.isCollapsed()) panel.expand();
+        else if (!open && !panel.isCollapsed()) panel.collapse();
+      }
+    };
+    apply();
+    const frame = requestAnimationFrame(apply);
+    return () => cancelAnimationFrame(frame);
+  }, [panels.sidebar, panels.loop, sidebarPanel, loopPanel]);
   /**
    * A past run this window is reading, or null for the live one (#223).
    *
@@ -269,7 +345,7 @@ export function Cockpit() {
    * **App-side state, and it belongs nowhere else.** It is not run state - a run
    * carries its own directory and always has - and it is not `vibe.config.json`,
    * which is a project file meant to be committed and would be the wrong place
-   * for one machine's path. `localStorage` is where the pilot's spend ceiling
+   * for one machine's path. The window's memory is where the pilot's spend ceiling
    * lives for the same reason.
    *
    * It is persisted because `1b` and ⌘K are most useful **before** a launch, and
@@ -278,7 +354,7 @@ export function Cockpit() {
    */
   const [repoDir, setRepoDir] = useState(() => {
     try {
-      return localStorage.getItem(REPO_KEY) ?? '';
+      return memory.getItem(REPO_KEY) ?? '';
     } catch {
       // Storage can be unavailable or full. A repository field that starts empty
       // is a smaller failure than a window that will not render.
@@ -288,7 +364,7 @@ export function Cockpit() {
   const rememberRepo = useCallback((dir: string) => {
     setRepoDir(dir);
     try {
-      localStorage.setItem(REPO_KEY, dir);
+      memory.setItem(REPO_KEY, dir);
     } catch {
       // See above. Nothing here is worth failing a render over.
     }
@@ -402,7 +478,9 @@ export function Cockpit() {
     };
   }, [repoDir, configEpoch]);
   const [tab, setTab] = useState<
-    | 'output'
+    // Output and Commands are the bottom panel's tabs now (`bottom`, above),
+    // not this pane's: both are terminal-shaped, and a dev server's log beside
+    // a plan is how an editor arranges them.
     | 'pilot'
     // The four artifact panes (#223). `plans`, `critique` and `review` are what
     // the dashed `Versions` tab was standing in for, and `code` is what `diff`
@@ -430,7 +508,6 @@ export function Cockpit() {
     // the sidebar's job and overruling a lock is this screen's, and the reason
     // they are apart is that two places able to force is one too many.
     | 'runs'
-    | 'commands'
     | 'settings'
     // **The pilot, not the output pane** (#211). The complaint was exact: *"I
     // thought my initial prompt would be given to the pilot and the pilot would
@@ -465,6 +542,14 @@ export function Cockpit() {
    */
   const [openAt, setOpenAt] = useState<number | null>(null);
   const open = useCallback((next: string, round?: number | null) => {
+    // A round card's `open verify` and the pilot's `read_command` still name
+    // the two panes by their old tab names; they live in the bottom panel now,
+    // so opening one opens that panel on it rather than a main tab that is gone.
+    if (next === 'output' || next === 'commands') {
+      setBottom(next);
+      setPanels((p) => (p.bottom ? p : { ...p, bottom: true }));
+      return;
+    }
     setTab(next as typeof tab);
     setOpenAt(round ?? null);
   }, []);
@@ -493,7 +578,7 @@ export function Cockpit() {
    */
   const [drafts, setDrafts] = useState<readonly Draft[]>(() => {
     try {
-      return readDrafts(localStorage.getItem(DRAFTS_KEY));
+      return readDrafts(memory.getItem(DRAFTS_KEY));
     } catch {
       return [];
     }
@@ -509,7 +594,7 @@ export function Cockpit() {
     setDrafts((list) => {
       const next = change(list);
       try {
-        localStorage.setItem(DRAFTS_KEY, JSON.stringify(next));
+        memory.setItem(DRAFTS_KEY, JSON.stringify(next));
       } catch {
         // The drafts still work for this session; they will not be back next time.
       }
@@ -526,16 +611,16 @@ export function Cockpit() {
       let moved: ReturnType<typeof moveProject>;
       try {
         moved = moveProject(repoDir, to, {
-          projects: readProjects(localStorage.getItem(PROJECTS_KEY)),
-          pins: readPins(localStorage.getItem(PINNED_KEY)),
-          names: readNames(localStorage.getItem(NAMES_KEY)),
-          projectNames: readProjectNames(localStorage.getItem(PROJECT_NAMES_KEY)),
+          projects: readProjects(memory.getItem(PROJECTS_KEY)),
+          pins: readPins(memory.getItem(PINNED_KEY)),
+          names: readNames(memory.getItem(NAMES_KEY)),
+          projectNames: readProjectNames(memory.getItem(PROJECT_NAMES_KEY)),
         });
         if (!moved.ok) return moved.why;
-        localStorage.setItem(PROJECTS_KEY, JSON.stringify(moved.held.projects));
-        localStorage.setItem(PINNED_KEY, JSON.stringify(moved.held.pins));
-        localStorage.setItem(NAMES_KEY, JSON.stringify(moved.held.names));
-        localStorage.setItem(PROJECT_NAMES_KEY, JSON.stringify(moved.held.projectNames));
+        memory.setItem(PROJECTS_KEY, JSON.stringify(moved.held.projects));
+        memory.setItem(PINNED_KEY, JSON.stringify(moved.held.pins));
+        memory.setItem(NAMES_KEY, JSON.stringify(moved.held.names));
+        memory.setItem(PROJECT_NAMES_KEY, JSON.stringify(moved.held.projectNames));
       } catch (err: unknown) {
         return `this window could not save that: ${err instanceof Error ? err.message : String(err)}`;
       }
@@ -557,11 +642,11 @@ export function Cockpit() {
   const drafting = drafts.find((d) => d.id === draftId) ?? null;
   useEffect(() => {
     try {
-      localStorage.setItem(WHERE_KEY, writableWhere({ tab, viewing, draftId }));
+      memory.setItem(WHERE_KEY, writableWhere({ tab, viewing, draftId, bottom, panels }));
     } catch {
       // Storage switched off: the next launch lands on the pilot, as it used to.
     }
-  }, [tab, viewing, draftId]);
+  }, [tab, viewing, draftId, bottom, panels]);
   /**
    * The draft whose proposal was pressed, so only ITS run can claim it.
    *
@@ -668,10 +753,17 @@ export function Cockpit() {
     setWire((w) => ({ ...w, [key]: [...w[key], text].slice(-200) }));
   }, []);
 
-  // ⌘⇧D / Ctrl+Shift+D, and Escape to close. Hi-fi 15 gives the panel a
-  // shortcut because it is what somebody reaches for while writing a bug report,
-  // and `event.code` rather than `event.key` so it survives a keyboard layout
-  // where shift+d is not "D".
+  /**
+   * The handler for every action, filled in below the render-time values it
+   * closes over and read through a ref here, because the key listener is
+   * registered once and a handler table built on one render would be stale on
+   * the next.
+   */
+  const actRef = useRef<Record<ActionId, () => void> | null>(null);
+  // Every chord comes from `shell/actions.ts`'s table and is read by
+  // `event.code`, so it survives a keyboard layout where the key is not the
+  // letter. Escape always leaves, from the window rather than from whichever
+  // control happens to have focus.
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') {
@@ -680,17 +772,10 @@ export function Cockpit() {
         setComposing(null);
         return;
       }
-      if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.code === 'KeyD') {
-        event.preventDefault();
-        setDiagnostics((open) => !open);
-        return;
-      }
-      // ⌘K / Ctrl+K, and `code` rather than `key` for the reason ⌘⇧D uses it:
-      // it survives a keyboard layout where the K position is not "k".
-      if ((event.metaKey || event.ctrlKey) && !event.shiftKey && event.code === 'KeyK') {
-        event.preventDefault();
-        setSwitching((open) => !open);
-      }
+      const id = shortcutFor({ code: event.code, mod: event.metaKey || event.ctrlKey, shift: event.shiftKey });
+      if (id === null) return;
+      event.preventDefault();
+      actRef.current?.[id]();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -1148,44 +1233,51 @@ export function Cockpit() {
    */
   const columnRun = past && opened.run !== null ? opened.run : run;
 
+  /**
+   * Every action the shell offers, by id (`shell/actions.ts`). The palette, the
+   * keyboard and the activity bar all go through this table, and the type is
+   * what makes an entry without a control a compile error.
+   */
+  const act: Record<ActionId, () => void> = {
+    palette: () => setSwitching((o) => !o),
+    newRun: () => setComposing({ dir: repoDir, locked: false }),
+    toggleSidebar: () => setPanels((p) => ({ ...p, sidebar: !p.sidebar })),
+    toggleLoop: () => setPanels((p) => ({ ...p, loop: !p.loop })),
+    toggleBottom: () => setPanels((p) => ({ ...p, bottom: !p.bottom })),
+    settings: () => openSettings('global'),
+    diagnostics: () => setDiagnostics((o) => !o),
+    goPilot: () => setTab('pilot'),
+    goPlans: () => open('plans'),
+    goCritique: () => open('critique'),
+    goReview: () => open('review'),
+    goCode: () => open('code'),
+    goQuestions: () => open('questions'),
+    goVerify: () => setTab('verify'),
+    goSpend: () => setTab('spend'),
+    goOutput: () => open('output'),
+    goCommands: () => open('commands'),
+    // `1b` in the main pane, which is where a lock can be overruled with a
+    // confirmation. Reached from the palette only: the sidebar's per-project
+    // link went at the owner's word, and a tab for it is how the bar got to twelve.
+    goRuns: () => setTab('runs'),
+    pause: () => pause(),
+    stop: () => setConfirmStop(true),
+    gateContinue: () => {
+      if (run.gate !== null) answer(run.gate.askId, { kind: 'continue' });
+    },
+    gateStop: () => {
+      if (run.gate !== null) answer(run.gate.askId, { kind: 'stop', reason: '' });
+    },
+    backToLive: () => setViewing(null),
+  };
+  actRef.current = act;
+  const paletteShortcut = ACTIONS.find((a) => a.id === 'palette')?.shortcut;
+  const paletteChord =
+    paletteShortcut === undefined ? '' : chordLabel(paletteShortcut, typeof navigator === 'undefined' ? '' : navigator.platform);
+
   return (
-    <div className="v-cockpit">
-      <header className="v-cockpit__bar">
-        <div className="v-cockpit__brand"><VibeMark /><span className="v-cockpit__title">vibe<span className="v-cockpit__brand-dot">.</span></span></div>
-        <span className="v-cockpit__breadcrumb">Workspace <span>/</span> <strong>{shownDir.trim() === '' ? 'Your next idea' : projectName(shownDir)}</strong></span>
-        <button className="v-cockpit__search" onClick={() => setSwitching(true)} title="Switch run (Ctrl+K)">
-          <Icon name="search" size={15} /> <span>Find a run</span><kbd>Ctrl K</kbd>
-        </button>
-        <div className="v-cockpit__connection"><LivenessDot state={outside ? 'absent' : wire.connected ? 'live' : 'quiet'} />
-          <span>{outside ? 'Browser preview' : wire.connected ? 'Connected' : 'Connecting'}</span>
-        </div>
-        {outside ? (
-          null
-        ) : (
-          <>
-            {/* Hi-fi 15: a chip **only when a value is wrong**, and it names the
-                disagreement rather than the value. `HOST 43804` and
-                `PROTOCOL 1` sat here permanently and a manual pass reported
-                that they mean nothing to a user (#204) - which is true right up
-                until one of them is wrong, which is why they moved into the
-                panel instead of being deleted. */}
-            {run.protocol !== null && run.protocol !== host.EXPECTED_PROTOCOL && (
-              <MetaChip kind="alarm">
-                protocol {run.protocol} · expected {host.EXPECTED_PROTOCOL}
-              </MetaChip>
-            )}
-            <button
-              className="v-cockpit__diag"
-              onClick={() => setDiagnostics((open) => !open)}
-              aria-label="diagnostics"
-              aria-expanded={diagnostics}
-              title="Diagnostics (Ctrl+Shift+D)"
-            >
-              •••
-            </button>
-          </>
-        )}
-      </header>
+    <TooltipProvider>
+    <div className="flex h-screen flex-col bg-panel text-primary">
 
       {confirmStop && (
         <StopConfirm
@@ -1239,26 +1331,28 @@ export function Cockpit() {
         />
       )}
 
-      {/* `5f`. A switcher, not a screen: it answers "take me to
-          fix-ratelimit-wait" and nothing else, which is why it is an overlay
-          over the cockpit rather than a tab beside `1b`. The two are different
-          features, and the design resolved to build both. */}
-      {switching && (
-        <Switcher
-          dir={repoDir}
-          onPick={(runId) => resume(runId, repoDir)}
-          onClose={() => setSwitching(false)}
-        />
-      )}
-
-      {diagnostics && (
-        <Diagnostics
-          status={wire.status}
-          expected={host.EXPECTED_PROTOCOL}
-          identity={run.identity}
-          onClose={() => setDiagnostics(false)}
-        />
-      )}
+      {/* ⌘K (`5f`, widened). Every action in the table, and the archive's
+          runs. **A pick OPENS a run** - points the window at it, a read - where
+          the switcher this replaces resumed one, which was a second place able
+          to start a run. Starting stays in `1b` and the pilot. */}
+      <Palette
+        open={switching}
+        onOpenChange={setSwitching}
+        actions={available({
+          live: run.running !== null || run.preflight !== null,
+          gate: run.gate !== null,
+          past,
+          inShell: !outside,
+        })}
+        onAction={(id) => act[id]()}
+        dir={repoDir}
+        onOpenRun={(runId, task) => {
+          rememberRepo(repoDir);
+          setDraftId(null);
+          setViewing({ dir: repoDir, runId, task });
+          setOpenAt(null);
+        }}
+      />
 
       {/* `7c`, above everything and below the titlebar. It is a statement about
           the whole window - everything under it is as old as the strip says -
@@ -1271,57 +1365,53 @@ export function Cockpit() {
       <RateLimitStrip wait={run.rateLimit} now={now} />
 
       {wire.failure !== null && (
-        <div className="v-cockpit__alarm">
-          <StateKicker tone="alarm">no host</StateKicker> {wire.failure}
+        <div className="flex flex-none items-center gap-2 bg-alarm px-5 py-2 text-body-sm text-primary">
+          <Badge variant="alarm">no host</Badge> {wire.failure}
         </div>
       )}
       {/* `Status.uncontained` is no longer drawn here: a permanent banner on
           every Linux and macOS launch was removed at the owner's request. The
           field is still read, so it can move into the diagnostics popover. */}
 
-      <div className="v-cockpit__body">
+      <div className="flex min-h-0 flex-1">
+        {/* The activity bar (the UI rework): VS Code's strip of icons. It is
+            where `＋ ⌘K ⚙` live now, at every width - `design/AUDIT.md` §1.1's
+            finding was that they had nowhere to live - and its first icon puts
+            the sidebar away and brings it back. */}
+        <ActivityBar
+          sidebarOpen={panels.sidebar}
+          onSidebar={act.toggleSidebar}
+          onNew={act.newRun}
+          onPalette={act.palette}
+          onSettings={act.settings}
+          paletteChord={paletteChord}
+        />
+        {/* The three columns, each a resizable region. Sizes are saved on a
+            drag and come back next launch (`where.ts`); a shut region is not
+            rendered, and the library gives its room to the others. */}
+        <ResizableGroup
+          id="shell"
+          orientation="horizontal"
+          className="flex min-h-0 min-w-0 flex-1"
+          defaultLayout={panels.sizes['shell']}
+          onLayoutChanged={saveLayout('shell')}
+        >
         {/* The navigator (#223). **One sidebar, not a rail beside a panel** —
             the two were the same archive twice, reported as *"there are two Runs
-            bars on the left now"*, and the rail is now this panel's collapsed
-            state. Its `＋ ⌘K ⚙` stay on screen at every width, which is the
-            whole of what `design/AUDIT.md` §1.1 asked for. */}
-        <SidePanel
-          side="left"
-          title="Projects"
-          // The run you are in, in the two letters a 54px strip has room for —
-          // the rail's own idea, in the one place it is still the best available
-          // answer. No run, or a task with nothing legible in it, gets `··` from
-          // `initials` itself: the no-value mark the loop column uses, rather
-          // than a letter picked out of an id.
-          mark={initials(run.identity?.task ?? '')}
-          open={showRuns}
-          onToggle={() => setShowRuns((on) => !on)}
-          shut={
-            <>
-              <button
-                className="v-side__tool"
-                onClick={() => setComposing({ dir: repoDir, locked: false })}
-                title="New run"
-              >
-                ＋
-              </button>
-              <button
-                className="v-side__tool"
-                onClick={() => setSwitching(true)}
-                title="Switch run (Ctrl+K)"
-              >
-                ⌘K
-              </button>
-              <button
-                className="v-side__tool"
-                onClick={() => openSettings('global')}
-                title="Settings for all projects"
-              >
-                ⚙
-              </button>
-            </>
-          }
+            bars on the left now"*. The activity bar is the strip now, and the
+            sidebar is a region that can be put away. */}
+        {/* Always mounted, collapsed to nothing when shut: see `sidebarPanel`. */}
+        <ResizablePanel
+          id="sidebar"
+          panelRef={sidebarPanel}
+          collapsible
+          collapsedSize={0}
+          defaultSize="300px"
+          minSize="240px"
+          maxSize="50%"
+          className="flex min-h-0 min-w-0 flex-col bg-column"
         >
+          {panels.sidebar && (
           <Sidebar
             dir={repoDir}
             epoch={projectsEpoch}
@@ -1342,7 +1432,6 @@ export function Cockpit() {
             // run you had just left - or on nothing when none was going. A
             // draft on screen is no run at all.
             currentId={viewing?.runId ?? (draftId !== null ? null : (run.identity?.runId ?? null))}
-            onNew={() => setComposing({ dir: repoDir, locked: false })}
             // A run in THIS project, with the repository already answered. It
             // also points the window there, because the run about to start is
             // the one the panes should be reading.
@@ -1350,18 +1439,11 @@ export function Cockpit() {
               rememberRepo(next);
               setComposing({ dir: next, locked: true });
             }}
-            onSettings={() => openSettings('global')}
             // Points the window at the project first, so the settings shown are
             // the ones for the row that was pressed.
             onProjectSettings={(next) => {
               rememberRepo(next);
               openSettings('project');
-            }}
-            // `1b` in the main pane, which is where a lock can be overruled with
-            // a confirmation. A sidebar row must not be a second way to force.
-            onRuns={(next) => {
-              rememberRepo(next);
-              setTab('runs');
             }}
             // Reads only. Points the window at the run and leaves the loop
             // alone — no probe, no lock, no turn.
@@ -1388,17 +1470,28 @@ export function Cockpit() {
               );
             }}
           />
-        </SidePanel>
+          )}
+        </ResizablePanel>
+        <ResizableSeparator orientation="horizontal" />
 
-        <div className="v-cockpit__pane" role="main">
-          <header className="v-workspace__head">
-            <div><p className="v-workspace__eyebrow">{viewing !== null ? 'Run archive' : 'Make room for good work'}</p>
-              <h2>{tab === 'pilot' ? 'Your pilot' : tab === 'output' ? 'Activity' : tab === 'plans' ? 'Plans' : tab === 'critique' ? 'Plan critique' : tab === 'code' ? 'Code changes' : tab === 'review' ? 'Code review' : tab === 'verify' ? 'Verification' : tab === 'questions' ? 'Questions' : tab === 'commands' ? 'Commands' : tab === 'spend' ? 'Usage' : tab === 'settings' ? 'Settings' : 'Project runs'}</h2>
+        <ResizablePanel id="center" minSize="30%" className="flex min-h-0 min-w-0 flex-col">
+        <ResizableGroup
+          id="center"
+          orientation="vertical"
+          className="flex min-h-0 min-w-0 flex-1 flex-col"
+          defaultLayout={panels.sizes['center']}
+          onLayoutChanged={saveLayout('center')}
+        >
+        <ResizablePanel id="main" minSize="20%" className="flex min-h-0 min-w-0 flex-col">
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-page" role="main">
+          <header className="flex flex-none items-center justify-between gap-4 px-7 pt-6 pb-4">
+            <div><p className="mb-1 text-label text-tertiary">{viewing !== null ? 'Run archive' : 'Make room for good work'}</p>
+              <h2 className="m-0 text-title font-semibold tracking-tight text-display">{tab === 'pilot' ? 'Your pilot' : tab === 'plans' ? 'Plans' : tab === 'critique' ? 'Plan critique' : tab === 'code' ? 'Code changes' : tab === 'review' ? 'Code review' : tab === 'verify' ? 'Verification' : tab === 'questions' ? 'Questions' : tab === 'spend' ? 'Usage' : tab === 'settings' ? 'Settings' : 'Project runs'}</h2>
             </div>
-            <button className="v-workspace__usage" onClick={() => setTab('spend')} title="Usage for the live run">
-              <Icon name="loop" size={15} />
+            <Button variant="quiet" size="sm" onClick={() => setTab('spend')} title="Usage for the live run">
+              <Activity size={14} aria-hidden="true" />
               {run.spend.tokens === null ? 'No usage reported' : `${fmtTokens(run.spend.tokens)} tokens`}
-            </button>
+            </Button>
           </header>
           {/*
             Hi-fi 1's bar, in the design's own order. It had twelve tabs against
@@ -1414,24 +1507,18 @@ export function Cockpit() {
             they go, and putting them after the frames it does name is the least
             it can be wrong by.
           */}
-          <div className="v-cockpit__tabs">
+          <nav className="flex flex-none items-stretch gap-0.5 overflow-x-auto border-b border-rule-structure bg-page px-6" aria-label="panes">
             {/* The pilot (#143, #144), and hi-fi 5's first tab. The count is
                 proposals waiting on a person, and it is here because a proposal
                 nobody sees blocks the conversation silently. */}
             <button
-              className={`v-cockpit__tab ${tab === 'pilot' ? 'v-cockpit__tab--on' : ''}`}
+              className={cn(TAB, tab === 'pilot' && TAB_ON)}
               aria-current={tab === 'pilot' ? 'page' : undefined}
               onClick={() => setTab('pilot')}
             >
               Pilot{proposals > 0 ? ` · ${String(proposals)}` : ''}
             </button>
-            <button
-              className={`v-cockpit__tab ${tab === 'output' ? 'v-cockpit__tab--on' : ''}`}
-              aria-current={tab === 'output' ? 'page' : undefined}
-              onClick={() => setTab('output')}
-            >
-              Activity
-            </button>
+            {/* Output and Commands are the bottom panel's tabs, below. */}
             {/* Hi-fi 3, and it is built now (#223). The tooltip on the tab it
                 replaces said *"this window cannot read a run's artifacts"*,
                 which was true until the `artifacts` frame landed - a version
@@ -1439,7 +1526,7 @@ export function Cockpit() {
                 that reading one is its own decision with #129's link refusal
                 attached to it. Both are now on the core side, where they belong. */}
             <button
-              className={`v-cockpit__tab ${tab === 'plans' ? 'v-cockpit__tab--on' : ''}`}
+              className={cn(TAB, tab === 'plans' && TAB_ON)}
               aria-current={tab === 'plans' ? 'page' : undefined}
               onClick={() => open('plans')}
             >
@@ -1465,7 +1552,7 @@ export function Cockpit() {
                 counts are inside, on the round they belong to, where `Counts`
                 draws all four beside the tolerance that decided them. */}
             <button
-              className={`v-cockpit__tab ${tab === 'critique' ? 'v-cockpit__tab--on' : ''}`}
+              className={cn(TAB, tab === 'critique' && TAB_ON)}
               aria-current={tab === 'critique' ? 'page' : undefined}
               onClick={() => open('critique')}
             >
@@ -1474,14 +1561,14 @@ export function Cockpit() {
             {/* `1d`, per round. The whole-run diff is this pane's first section
                 and is still what it opens on before any round has committed. */}
             <button
-              className={`v-cockpit__tab ${tab === 'code' ? 'v-cockpit__tab--on' : ''}`}
+              className={cn(TAB, tab === 'code' && TAB_ON)}
               aria-current={tab === 'code' ? 'page' : undefined}
               onClick={() => open('code')}
             >
               Code{run.commits.length > 0 ? ` · ${String(run.commits.length)}` : ''}
             </button>
             <button
-              className={`v-cockpit__tab ${tab === 'review' ? 'v-cockpit__tab--on' : ''}`}
+              className={cn(TAB, tab === 'review' && TAB_ON)}
               aria-current={tab === 'review' ? 'page' : undefined}
               onClick={() => open('review')}
             >
@@ -1491,7 +1578,7 @@ export function Cockpit() {
                 advisory question the answerer handled needs nobody, and a
                 badge that included it would train you to ignore the badge. */}
             <button
-              className={`v-cockpit__tab ${tab === 'questions' ? 'v-cockpit__tab--on' : ''}`}
+              className={cn(TAB, tab === 'questions' && TAB_ON)}
               aria-current={tab === 'questions' ? 'page' : undefined}
               onClick={() => open('questions')}
             >
@@ -1504,25 +1591,12 @@ export function Cockpit() {
                 subject is the decision in front of you and its trend, and a
                 gate count would move for a reason nobody cares about. */}
             <button
-              className={`v-cockpit__tab ${tab === 'verify' ? 'v-cockpit__tab--on' : ''}`}
+              className={cn(TAB, tab === 'verify' && TAB_ON)}
               aria-current={tab === 'verify' ? 'page' : undefined}
               onClick={() => setTab('verify')}
             >
               Verify{run.verify.length > 0 ? ` · ${String(run.verify.length)}` : ''}
             </button>
-            {/* The count is what is still RUNNING, not how many have been run
-                (#211). A dev server left up is the fact worth a badge - it is
-                holding a port and it will not stop by itself - and a total that
-                only grew would be the tray-badge failure `4e` names. */}
-            <button
-              className={`v-cockpit__tab ${tab === 'commands' ? 'v-cockpit__tab--on' : ''}`}
-              aria-current={tab === 'commands' ? 'page' : undefined}
-              onClick={() => setTab('commands')}
-            >
-              Commands
-              {running(commands).length > 0 ? ` · ${String(running(commands).length)}` : ''}
-            </button>
-
             {/*
               `5e`, in the place hi-fi 1 puts it: right-aligned in this bar,
               always visible, rather than costing a tab. It is the **readout**
@@ -1535,40 +1609,16 @@ export function Cockpit() {
             */}
             {/* Usage now lives in the workspace heading, giving the artifact
                 navigation its full width. The same pane keeps both providers. */}
-          </div>
-          {/* **Which run the panes are about, whenever it is not the live one.**
-              The panes and the column both follow an opened run now (#223), so
-              this no longer has to explain a window showing two runs at once —
-              what is left is the one thing that genuinely does not follow: the
-              spend readout in the bar above, which is the live run's, because it
-              is charged as the run goes rather than read off a record. It
-              carries the way back and the way forward: stop reading, or go to
-              `1b`, which is the only place a run is started. */}
-          {past && viewing !== null && (
-            <div className="v-cockpit__viewing">
-              <StateKicker tone="quiet">reading</StateKicker>
-              <span className="v-cockpit__viewingwhat">{viewing.task}</span>
-              <span className="v-cockpit__viewingnote">
-                Reading a saved run. Usage above belongs to the live run; this run&apos;s record is in the overview.
-              </span>
-              <button className="v-doc__again" onClick={() => setTab('runs')}>
-                resume it…
-              </button>
-              <button className="v-doc__again" onClick={() => setViewing(null)}>
-                back to the live run
-              </button>
-            </div>
-          )}
-          {tab === 'output' && (
-            <OutputPane
-              lines={run.output}
-              turn={past ? null : run.running}
-              staleness={staleness(run, now)}
-              // A past run's narration is on disk, in its own transcript. The
-              // live run's is on the wire and has never been read from a file.
-              transcript={past && viewing !== null ? viewing : null}
-            />
-          )}
+          </nav>
+          {/* There is no "reading a saved run" strip here any more. The panes
+              and the column both follow an opened run (#223), the sidebar
+              highlights which run that is, and the footer carries the real
+              resume control - so the strip's two buttons were a two-hop link
+              labelled `resume it…` that resumed nothing, and a duplicate of a
+              sidebar click. Asked to go: "I don't understand… get rid of that
+              reading box". The loop column's own `reading` head stays, since
+              that is where the one fact worth stating (turn durations are
+              missing on a replay) is said. */}
           {tab === 'verify' && <VerifyPane passes={run.verify} />}
           {tab === 'spend' && <SpendPane run={run} />}
           {tab === 'questions' && (
@@ -1605,7 +1655,7 @@ export function Cockpit() {
               onSaved={() => setConfigEpoch((n) => n + 1)}
             />
           )}
-          {/* `1b`, opened from a project in the sidebar. The columns the sidebar
+          {/* `1b`, opened from the palette (`goRuns`). The columns the sidebar
               has no room for — status, cost, liveness — and the one control that
               may overrule a lock, which confirms and says what it is overruling. */}
           {tab === 'runs' && (
@@ -1650,21 +1700,30 @@ export function Cockpit() {
               revision={run.artifacts.length}
             />
           )}
-          {tab === 'code' && <CodePane run={run} dir={liveRepo} openAt={openAt} />}
-          {tab === 'commands' && (
-            <CommandsPane
-              commands={commands}
-              dir={repoDir}
-              onRun={runCommand}
-              onStop={stopCommand}
-            />
-          )}
+          {/* **The run on screen, and its repository** (UI rework). This took
+              the live run because an opened run had no shas on this side; the
+              replay gives it `baseSha` and every commit's range now, so a past
+              run's Code tab was diffing the live run's shas - none, when
+              nothing was running - and said *"No base yet"* over a run that
+              committed three rounds. While the opened run is still being read
+              the pane says that, rather than drawing the live run's shas
+              against the opened run's repository. */}
+          {tab === 'code' &&
+            (!past ? (
+              <CodePane run={run} dir={liveRepo} openAt={openAt} />
+            ) : opened.run !== null ? (
+              <CodePane run={opened.run} dir={shownDir} openAt={openAt} />
+            ) : (
+              <p className="m-0 p-6 text-body-sm text-secondary">
+                {opened.failure ?? 'Reading this run…'}
+              </p>
+            ))}
           {/* Mounted whatever tab is showing, and hidden rather than unmounted.
               A conversation is state nobody can get back, and a proposal waiting
               on a person would be destroyed by a glance at the output pane -
               which is the one thing this tab must not do. The other two panes
               hold nothing, so they stay conditional. */}
-          <div className="v-cockpit__hidden" hidden={tab !== 'pilot'}>
+          <div className={cn('min-h-0 flex-1 flex-col', tab === 'pilot' ? 'flex' : 'hidden')} hidden={tab !== 'pilot'}>
             <PilotPane
               run={run}
               launched={sentLaunch}
@@ -1723,11 +1782,86 @@ export function Cockpit() {
             />
           </div>
           {wire.unknown.length > 0 && (
-            <div className="v-cockpit__unknown">
+            <div className="flex-none border-t border-rule-card px-5 py-2 font-mono text-mono-sm text-emphasis">
               {wire.unknown.length} unrecognised frame(s): {wire.unknown[wire.unknown.length - 1]}
             </div>
           )}
         </div>
+        </ResizablePanel>
+
+        {/* The bottom panel (the UI rework): the two terminal-shaped panes,
+            docked under the main pane the way an editor docks its terminal, so
+            a dev server's log can be read beside a plan. Toggled with the
+            `toggleBottom` chord, and opened by anything that names one of its
+            two panes through `open()`. */}
+        {panels.bottom && (
+          <>
+          <ResizableSeparator orientation="vertical" />
+          <ResizablePanel id="bottom" defaultSize={35} minSize="10%" className="flex min-h-0 min-w-0 flex-col">
+            <div className="flex h-8 shrink-0 items-stretch gap-1 border-b border-rule-structure bg-chrome px-2" role="tablist" aria-label="Bottom panel">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={bottom === 'output'}
+                className={cn(
+                  'flex cursor-pointer items-center gap-1.5 border-b-2 bg-transparent px-2 text-chip font-bold uppercase tracking-wide outline-none',
+                  bottom === 'output' ? 'border-accent text-emphasis' : 'border-transparent text-tertiary hover:text-secondary',
+                )}
+                onClick={() => setBottom('output')}
+              >
+                <Activity className="size-3.5" aria-hidden /> Output
+              </button>
+              {/* The count is what is still RUNNING, not how many have been run
+                  (#211). A dev server left up is the fact worth a badge - it is
+                  holding a port and it will not stop by itself - and a total that
+                  only grew would be the tray-badge failure `4e` names. */}
+              <button
+                type="button"
+                role="tab"
+                aria-selected={bottom === 'commands'}
+                className={cn(
+                  'flex cursor-pointer items-center gap-1.5 border-b-2 bg-transparent px-2 text-chip font-bold uppercase tracking-wide outline-none',
+                  bottom === 'commands' ? 'border-accent text-emphasis' : 'border-transparent text-tertiary hover:text-secondary',
+                )}
+                onClick={() => setBottom('commands')}
+              >
+                <Terminal className="size-3.5" aria-hidden /> Commands
+                {running(commands).length > 0 ? ` · ${String(running(commands).length)}` : ''}
+              </button>
+              <span className="flex-1" />
+              <button
+                type="button"
+                className="my-1.5 flex size-5 cursor-pointer items-center justify-center rounded-sm border border-transparent bg-transparent text-tertiary hover:text-emphasis"
+                onClick={act.toggleBottom}
+                aria-label="Hide the bottom panel"
+                title="Hide the bottom panel"
+              >
+                <X className="size-3.5" aria-hidden />
+              </button>
+            </div>
+            {bottom === 'output' && (
+              <OutputPane
+                lines={run.output}
+                turn={past ? null : run.running}
+                staleness={staleness(run, now)}
+                // A past run's narration is on disk, in its own transcript. The
+                // live run's is on the wire and has never been read from a file.
+                transcript={past && viewing !== null ? viewing : null}
+              />
+            )}
+            {bottom === 'commands' && (
+              <CommandsPane
+                commands={commands}
+                dir={repoDir}
+                onRun={runCommand}
+                onStop={stopCommand}
+              />
+            )}
+          </ResizablePanel>
+          </>
+        )}
+        </ResizableGroup>
+        </ResizablePanel>
 
         {/* `4h`, on the RIGHT since #223. The design puts it on the left and the
             owner moved it, which is a decision about this window rather than a
@@ -1735,14 +1869,58 @@ export function Cockpit() {
             draws — Plans, Plan critique, Code, Code review — and reading a card
             and then its artifact is the shortest path in the product. The runs
             take the left, next to the rail they are drawn from. */}
-        <SidePanel
-          side="right"
-          title="Run status"
-          mark="⋮⋮"
-          open={showLoop}
-          onToggle={() => setShowLoop((on) => !on)}
+        <ResizableSeparator orientation="horizontal" />
+        {/* Always mounted, like the sidebar, and collapsed to a strip rather
+            than to nothing: *"The right pane should have a collapse button.
+            When collapsed, I think the only thing that should be visible is the
+            collapse button (now expand) unless you can think of a smart way to
+            display the info collapsed."* The strip holds the way back and one
+            fact: the liveness dot while a run is going. The footer that
+            otherwise carries that dot is inside the column, and a run working
+            behind a shut panel with nothing on screen saying so is the idle
+            window that cost a fourteen-million-token turn. */}
+        <ResizablePanel
+          id="loop"
+          panelRef={loopPanel}
+          collapsible
+          collapsedSize="36px"
+          defaultSize="364px"
+          minSize="240px"
+          maxSize="50%"
+          className="flex min-h-0 min-w-0 flex-col bg-column"
         >
-          <div className="v-cockpit__loop">
+          {!panels.loop ? (
+            <div className="flex flex-col items-center gap-3 py-2">
+              <Button
+                variant="quiet"
+                size="icon-sm"
+                aria-label="Show run status"
+                title="Show run status (Ctrl+Shift+B)"
+                onClick={act.toggleLoop}
+              >
+                <PanelRightOpen className="size-4" aria-hidden />
+              </Button>
+              {!past && launched && run.completed === null && (
+                <span title={run.running === null ? 'the run is waiting' : 'a turn is running'}>
+                  <LivenessDot state={run.running === null ? 'waiting' : 'live'} />
+                </span>
+              )}
+            </div>
+          ) : (
+          <>
+          <div className="flex h-9 flex-none items-center justify-between pr-1.5 pl-4">
+            <span className="text-chip uppercase tracking-[0.12em] text-tertiary">Run status</span>
+            <Button
+              variant="quiet"
+              size="icon-sm"
+              aria-label="Hide run status"
+              title="Hide run status (Ctrl+Shift+B)"
+              onClick={act.toggleLoop}
+            >
+              <PanelRightClose className="size-4" aria-hidden />
+            </Button>
+          </div>
+          <div className="flex min-h-0 flex-1 flex-col">
             {/* **The column follows the run the window is pointed at** (#223),
                 and it is the SAME column. Opening a run used to change six panes
                 and leave this one on the live run — *"when I click on an existing
@@ -1760,17 +1938,17 @@ export function Cockpit() {
                 could still be open, and every turn in an archive is a turn that
                 ended, because `applyCharge` records one when it is charged. */}
             {past && viewing !== null ? (
-              <div className="v-loop__reading">
-                <StateKicker tone="quiet">reading</StateKicker>
-                <span className="v-loop__readingwhat">{preview(viewing.task)}</span>
-                {opened.loading && opened.run === null && <p>Reading this run…</p>}
+              <div className="flex flex-col items-start gap-2 p-4 text-body-sm text-secondary">
+                <Badge>reading</Badge>
+                <span className="text-body text-primary">{preview(viewing.task)}</span>
+                {opened.loading && opened.run === null && <p className="m-0">Reading this run…</p>}
                 {/* The core's own sentence, verbatim. A run whose id will not
                     join onto a path, a directory vibe refuses to follow (#53)
                     and a `state.json` the validators reject are three findings
                     needing three responses, and *"could not read the run"*
                     answers none of them. */}
                 {opened.failure !== null && (
-                  <p className="v-loop__readingwhy">{opened.failure}</p>
+                  <p className="m-0 text-tertiary">{opened.failure}</p>
                 )}
                 {/* Said once, here, rather than as a blank on every turn row.
                     `state.turnStartedAt` describes the turn in flight, so the
@@ -1778,14 +1956,14 @@ export function Cockpit() {
                     — and a duration invented from the gap between two charges
                     would include every gate the loop held at. */}
                 {opened.run !== null && (
-                  <p className="v-loop__readingwhy">
+                  <p className="m-0 text-tertiary">
                     Some turns have no duration: a run records a turn when it is charged, and only a
                     checkpoint keeps the moment one began.
                   </p>
                 )}
-                <button className="v-doc__again" onClick={() => setViewing(null)}>
+                <Button variant="quiet" size="sm" onClick={() => setViewing(null)}>
                   back to the live run
-                </button>
+                </Button>
               </div>
             ) : (
               <>
@@ -1804,21 +1982,23 @@ export function Cockpit() {
                     refuses a second invoke until the first settles. */}
                 {(!launched || run.completed !== null) && !outside && (
                   <>
-                    <div className="v-loop__waiting">
-                      <StateKicker tone="quiet">waiting for the brief</StateKicker>
-                      <p>
+                    <div className="mx-4 mb-2 rounded-md border border-rule-card bg-card px-4 py-3.5">
+                      <span className="text-body-sm font-medium text-primary">waiting for the brief</span>
+                      <p className="mt-1.5 mb-0 text-body-sm leading-relaxed text-secondary">
                         Describe the work to your pilot. Review the brief, then approve its proposal to begin.
                       </p>
                     </div>
                     {/* `4a`, for the one moment somebody is deciding how THIS run
                         should differ from the project's defaults. */}
-                    <button
-                      className="v-launch__more"
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      className="mx-4 mb-3 self-start"
                       onClick={() => setComposing({ dir: repoDir, locked: false })}
                       disabled={busy || !wire.connected}
                     >
                       Customize this run
-                    </button>
+                    </Button>
                   </>
                 )}
               </>
@@ -1830,18 +2010,27 @@ export function Cockpit() {
                 `hostPid` is the live host's, so it is withheld from a run this
                 process is not running: a pid beside a finished run would name a
                 process that has nothing to do with it. */}
-            <LoopColumn
-              run={columnRun}
-              now={now}
-              compact
-              hostPid={past ? null : wire.hostPid}
-              onOpen={open}
-            />
-            {/* `4g`, and only on the ending that means the loop finished.
-                Every other exit is a halt, and a halt gets the footer's
-                banner and its one action rather than a summary of work that
-                stopped early. */}
-            {columnRun.completed?.exit === 0 && <Summary run={columnRun} />}
+            {/* One scroll for the rail AND the summary. Each used to size
+                itself - the rail `flex-1` and the summary by its content - so on
+                a finished run the summary's four tiles and its next step took
+                the column and left the rail a sliver with `Code review` cut in
+                half (reported from a screenshot: "there's a window that's
+                totally collapsed"). The footer stays outside, pinned, because
+                its one action must never need scrolling to. */}
+            <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+              <LoopColumn
+                run={columnRun}
+                now={now}
+                compact
+                hostPid={past ? null : wire.hostPid}
+                onOpen={open}
+              />
+              {/* `4g`, and only on the ending that means the loop finished.
+                  Every other exit is a halt, and a halt gets the footer's
+                  banner and its one action rather than a summary of work that
+                  stopped early. */}
+              {columnRun.completed?.exit === 0 && <Summary run={columnRun} />}
+            </div>
             {/* The same footer, about the same run. Its live controls draw
                 themselves off `run.completed`, which a finished run has set — so
                 stop and pause do not appear beside one, and what remains is the
@@ -1861,8 +2050,36 @@ export function Cockpit() {
               pausing={pausing}
             />
           </div>
-        </SidePanel>
+          </>
+          )}
+        </ResizablePanel>
+        </ResizableGroup>
       </div>
+
+      {/* The status bar (the UI rework): the window's standing facts in one
+          row, and the one control a held run needs. The protocol alarm, the
+          build stamp and the diagnostics popover moved here from the titlebar;
+          the connection dot and the spend readout from the bar above the tabs. */}
+      <StatusBar
+        outside={outside}
+        connected={wire.connected}
+        failure={wire.failure}
+        project={shownDir.trim() === '' ? null : projectName(shownDir)}
+        protocol={run.protocol}
+        expected={host.EXPECTED_PROTOCOL}
+        run={run}
+        busy={busy}
+        onDecide={answer}
+        onPause={pause}
+        onStop={() => setConfirmStop(true)}
+        pausing={pausing}
+        onSpend={() => setTab('spend')}
+        build={wire.status?.build ?? null}
+        diagnosticsOpen={diagnostics}
+        onDiagnostics={setDiagnostics}
+        diagnostics={<Diagnostics status={wire.status} expected={host.EXPECTED_PROTOCOL} identity={run.identity} />}
+      />
     </div>
+    </TooltipProvider>
   );
 }

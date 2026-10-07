@@ -1,5 +1,7 @@
-import { Card, MetaChip, StateKicker } from '../design';
+import { Badge } from '@/ui/badge';
+import { cn } from '@/lib/utils';
 import { elapsed } from './format';
+import { CARD, EMPTY, LABEL, PANE } from './pane';
 import type { GateRun, VerifyPass } from './model';
 
 /**
@@ -74,6 +76,9 @@ function tone(gate: GateRun): 'alarm' | 'accent' | 'quiet' {
   return 'quiet';
 }
 
+/** A named absence, never a blank and never a zero. */
+const ABSENT = 'mt-3 mb-0 text-body-sm text-tertiary';
+
 /**
  * One card per attempt, from what the loop recorded about each.
  *
@@ -86,21 +91,29 @@ function Attempts({ gate }: { gate: GateRun }) {
   if (gate.attempts.length === 0) {
     if (gate.runs === 0) return null;
     return (
-      <p className="v-verify__absent">
+      <p className={ABSENT}>
         {gate.runs} attempt{gate.runs === 1 ? '' : 's'} ran and this build was not told what each
         one did — the fraction above is what the loop reported.
       </p>
     );
   }
   return (
-    <ol className="v-verify__runs">
+    <ol className="mt-3 mb-0 flex list-none flex-wrap gap-2 p-0">
       {gate.attempts.map((a) => (
-        <li key={a.run} className={`v-verify__run ${a.ok ? '' : 'v-verify__run--bad'}`}>
-          <span className="v-verify__run-n">run {a.run}</span>
-          <span className="v-verify__run-v">{a.ok ? 'passed' : 'failed'}</span>
+        // Weight, not hue - the same rule the severity chips follow: a failed
+        // attempt takes the P0 rule's width.
+        <li
+          key={a.run}
+          className={cn(
+            'flex items-center gap-2 rounded-sm border px-3 py-2 text-body-sm',
+            a.ok ? 'border-rule-control text-secondary' : 'border-2 border-emphasis text-primary',
+          )}
+        >
+          <span className="font-mono text-mono-sm text-tertiary">run {a.run}</span>
+          <span className={LABEL}>{a.ok ? 'passed' : 'failed'}</span>
           {/* The exit code only where there is one. A passing run has none to
               show and `exit 0` would be furniture. */}
-          {!a.ok && a.exitCode !== null && <MetaChip>exit {a.exitCode}</MetaChip>}
+          {!a.ok && a.exitCode !== null && <Badge>exit {a.exitCode}</Badge>}
         </li>
       ))}
     </ol>
@@ -109,33 +122,41 @@ function Attempts({ gate }: { gate: GateRun }) {
 
 function GateCard({ gate }: { gate: GateRun }) {
   const reading = gate.verdict === null ? null : READING[gate.verdict];
+  // The live gate takes the accent border and the active ground, as every
+  // running card does; a settled one takes the card ground.
   return (
-    <Card state={gate.status === 'running' ? 'live' : 'settled'}>
-      <div className="v-verify__head">
-        <StateKicker tone={tone(gate)}>{gate.name}</StateKicker>
-        <span className="v-verify__verdict">{verdictLine(gate)}</span>
+    <div className={cn(CARD, gate.status === 'running' && 'border-accent-border bg-active')}>
+      <div className="flex flex-wrap items-baseline gap-3">
+        <Badge variant={tone(gate)}>{gate.name}</Badge>
+        {/* The verdict, large and first. 4b's draft gave it a 64px right-aligned
+            label while its annotation called it primary; this is the correction. */}
+        <span className="text-title font-medium tracking-tight text-display">{verdictLine(gate)}</span>
         {gate.endedAt !== null && (
-          <span className="v-verify__took">{elapsed(gate.endedAt - gate.startedAt)}</span>
+          <span className="ml-auto font-mono text-mono-sm tabular-nums text-tertiary">{elapsed(gate.endedAt - gate.startedAt)}</span>
         )}
       </div>
 
       {/* The plain-language reading, second and never instead of the verdict.
           Absent rather than invented when the loop reported a verdict word this
           build has no sentence for - the same rule `ending()` follows. */}
-      {reading !== undefined && reading !== null && <p className="v-verify__reading">{reading}</p>}
-      {gate.reason !== null && <p className="v-verify__reading">{gate.reason}</p>}
+      {reading !== undefined && reading !== null && <p className="mt-2 mb-0 text-body text-primary">{reading}</p>}
+      {gate.reason !== null && <p className="mt-2 mb-0 text-body text-primary">{gate.reason}</p>}
 
       {/* The command, because a verdict about a suite is not usable without
           knowing which command produced it. */}
-      {gate.command !== null && <pre className="v-verify__cmd">{gate.command}</pre>}
+      {gate.command !== null && (
+        <pre className="mt-3 mb-0 overflow-x-auto whitespace-pre rounded-sm border border-rule-inner bg-panel px-3 py-2 font-mono text-mono-sm text-secondary">
+          {gate.command}
+        </pre>
+      )}
 
       <Attempts gate={gate} />
 
-      <p className="v-verify__means">
-        <span className="v-verify__means-label">What this means for the loop</span>
+      <p className="mt-3 mb-0 text-body-sm text-secondary">
+        <span className={cn(LABEL, 'mb-1 block')}>What this means for the loop</span>
         {consequence(gate)}
       </p>
-    </Card>
+    </div>
   );
 }
 
@@ -150,7 +171,7 @@ function Trend({ passes }: { passes: readonly VerifyPass[] }) {
   const failed = passes.filter((p) => p.gates.some((g) => g.status === 'failed'));
   if (passes.length < 2) return null;
   return (
-    <p className="v-verify__trend">
+    <p className="m-0 text-body-sm text-secondary">
       {failed.length} of {passes.length} verification passes have failed so far
       {failed.length > 0 && (
         <>
@@ -167,9 +188,9 @@ function Trend({ passes }: { passes: readonly VerifyPass[] }) {
 export function VerifyPane({ passes }: { passes: readonly VerifyPass[] }) {
   if (passes.length === 0) {
     return (
-      <div className="v-verify v-verify--empty">
-        <StateKicker tone="quiet">no gate yet</StateKicker>
-        <p>
+      <div className={EMPTY}>
+        <Badge>no gate yet</Badge>
+        <p className="m-0 max-w-md">
           The verification gate runs after an implementation or a fix turn. Nothing has reached it
           in this run.
         </p>
@@ -181,13 +202,13 @@ export function VerifyPane({ passes }: { passes: readonly VerifyPass[] }) {
   // older passes are the trend behind it.
   const ordered = [...passes].reverse();
   return (
-    <div className="v-verify">
+    <div className={cn(PANE, 'gap-4')}>
       <Trend passes={passes} />
       {ordered.map((pass, i) => (
-        <section key={`${String(pass.round)}-${String(pass.at)}`} className="v-verify__pass">
-          <h3 className="v-verify__round">
+        <section key={`${String(pass.round)}-${String(pass.at)}`} className="flex flex-col gap-3">
+          <h3 className={cn(LABEL, 'm-0 flex items-center gap-2 text-body-sm')}>
             {pass.round === null ? 'a verification pass' : `round ${pass.round + 1}`}
-            {i === 0 && <MetaChip>most recent</MetaChip>}
+            {i === 0 && <Badge>most recent</Badge>}
           </h3>
           {pass.gates.map((gate) => (
             <GateCard key={`${gate.name}-${String(gate.startedAt)}`} gate={gate} />
@@ -197,7 +218,7 @@ export function VerifyPane({ passes }: { passes: readonly VerifyPass[] }) {
       {/* The one row worth keeping from the 4b draft, and the honest note about
           what is not here. Named rather than omitted: a pane that showed only
           what it has reads as a finished pane. */}
-      <p className="v-verify__later">
+      <p className={ABSENT}>
         A per-test breakdown is not drawn, and will not be: it needs a reporter parser per
         toolchain, which is a maintenance commitment this repo has not taken on.
       </p>

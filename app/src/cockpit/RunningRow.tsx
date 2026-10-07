@@ -1,4 +1,6 @@
-import { LivenessDot, StateKicker } from '../design';
+import { LivenessDot } from '../design';
+import { Badge } from '@/ui/badge';
+import { cn } from '@/lib/utils';
 import { clock, counted, elapsed, tokens, work } from './format';
 import { runningRow } from './model';
 import type { Turn } from './model';
@@ -37,7 +39,10 @@ import type { Turn } from './model';
  * What it gives up is everything that says *live*: the accent border, the active
  * ground, the accent on the version label, and **the liveness dot entirely**. A
  * quiet dot would still be a dot, and the rule the column obeys is that exactly
- * one element on screen pulses - while a gate is held, nothing should.
+ * one element on screen pulses - while a gate is held, nothing should. What does
+ * NOT recede is the measurements: the tool count, the last activity, the spend
+ * and the summary stay at primary weight, because those are what the pending
+ * decision rests on.
  *
  * ## Every relative time becomes absolute, and that is the actual fix
  *
@@ -48,35 +53,50 @@ import type { Turn } from './model';
  *
  * The elapsed line takes the past tense with it: `ran 4m12s · ended 14:52`.
  */
+
+/** One measured line of the row. */
+const LINE = 'font-mono text-mono-sm text-primary';
+/**
+ * A measurement with no source. Dashed left rule and the text floor - it says
+ * "nothing has filled this in", which is a different statement from a zero and
+ * has to look like one.
+ */
+const ABSENT = 'border-l border-dashed border-rule-strong pl-1.5 text-tertiary';
+
 export function RunningRow({ turn, now, live = true }: { turn: Turn; now: number; live?: boolean }) {
   const row = runningRow(turn, now);
 
   return (
-    <div className={`v-running${live ? '' : ' v-running--settled'}`}>
-      <div className="v-running__head">
+    <div
+      className={cn(
+        'my-2 rounded-sm border p-3',
+        live ? 'border-accent-border bg-active' : 'border-rule-card bg-card',
+      )}
+    >
+      <div className={cn('mb-2 flex items-center gap-2 border-b border-rule-inner pb-2', !live && 'justify-between')}>
         {live && <LivenessDot state="live" />}
-        <span className="v-running__who">
+        <span className={cn('text-body-sm', live ? 'text-emphasis' : 'text-tertiary')}>
           {turn.role} · {turn.kind}
           {turn.round === null ? '' : ` · round ${turn.round}`}
         </span>
         {/* Names why nothing is moving, so a completely still card does not read
             as a failed one. */}
-        {!live && <StateKicker tone="quiet">held</StateKicker>}
+        {!live && <Badge>held</Badge>}
       </div>
 
-      <ol className="v-running__lines">
-        <li className="v-running__line">
+      <ol className="m-0 flex list-none flex-col gap-1 p-0">
+        <li className={LINE}>
           {live || row.endedAt === null
             ? elapsed(row.elapsedMs)
             : `ran ${elapsed(row.elapsedMs)} · ended ${clock(row.endedAt)}`}
         </li>
 
         {row.activities !== null && (
-          <li className="v-running__line">{counted(row.activities.count, row.activities.unit)}</li>
+          <li className={LINE}>{counted(row.activities.count, row.activities.unit)}</li>
         )}
 
         {row.lastActivity !== null && (
-          <li className="v-running__line v-running__line--activity">{row.lastActivity}</li>
+          <li className={cn(LINE, 'text-emphasis [overflow-wrap:anywhere]')}>{row.lastActivity}</li>
         )}
 
         {/* The measurement where there is one, and the reason where there is
@@ -84,43 +104,46 @@ export function RunningRow({ turn, now, live = true }: { turn: Turn; now: number
             line was an absence naming #136 until that landed and #198 connected
             it; the other absence below is still waiting on its own. */}
         {row.work !== null ? (
-          <li className="v-running__line">{work(row.work)}</li>
+          <li className={LINE}>{work(row.work)}</li>
         ) : (
-          <li className="v-running__line v-running__line--absent">{row.noWork}</li>
+          <li className={cn(LINE, ABSENT)}>{row.noWork}</li>
         )}
 
         {/* The line the six-hour hang was really made of. Relative while the
             card is live, absolute once it is not — see the header. */}
         {live
           ? row.quietMs !== null && (
-              <li className="v-running__line">last activity {elapsed(row.quietMs)} ago</li>
+              <li className={LINE}>last activity {elapsed(row.quietMs)} ago</li>
             )
           : row.lastBeatAt !== null && (
-              <li className="v-running__line">last activity {clock(row.lastBeatAt)}</li>
+              <li className={LINE}>last activity {clock(row.lastBeatAt)}</li>
             )}
 
-        <li className="v-running__line v-running__line--absent">{row.comparable}</li>
+        <li className={cn(LINE, ABSENT)}>{row.comparable}</li>
       </ol>
 
       {row.tokens !== null && (
-        <div className="v-running__spend">
+        <div className={cn(LINE, 'mt-2 border-t border-rule-inner pt-2')}>
           {tokens(row.tokens)} tok
           {row.context === null ? (
             // Codex reports no context figure at all, and a Claude turn has none
             // until one has measured a window. Drawn as a stated absence, never
             // as a bar at zero - those two look identical and mean opposite things.
-            <span className="v-running__unmeasured"> · context not measured for this turn</span>
+            <span className="text-tertiary"> · context not measured for this turn</span>
           ) : (
-            <span className="v-running__ctx">
+            <span className="text-secondary">
               {' · ctx '}
               {Math.round((row.context.used / row.context.window) * 100)}%
+              {/* The ONE bar in the app, and only because promptTokens over
+                  contextWindow is a real number divided by a known denominator.
+                  If you cannot name the denominator, it is not a bar. */}
               <span
-                className="v-running__ctxtrack"
+                className="ml-1.5 inline-block h-1 w-16 border border-rule-inner bg-page align-middle"
                 role="img"
                 aria-label={`context ${row.context.used} of ${row.context.window}`}
               >
                 <span
-                  className="v-running__ctxfill"
+                  className="block h-full bg-accent-base"
                   style={{
                     width: `${Math.min(100, (row.context.used / row.context.window) * 100)}%`,
                   }}

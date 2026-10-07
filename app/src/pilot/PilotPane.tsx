@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
-import { Button, MetaChip, StateKicker, ThinkingWave } from '../design';
+import { MessageSquare, Send, Square } from 'lucide-react';
+import { ThinkingWave } from '../design';
+import { Badge } from '@/ui/badge';
+import { Button } from '@/ui/button';
+import { cn } from '@/lib/utils';
 import { elapsed } from '../cockpit/format';
 import { logOf } from './log';
 import { RoundCard } from './RoundCard';
 import { Welcome } from './Welcome';
-import { Icon } from '../design/Icon';
 import * as host from '../host';
 import * as keys from './keys';
 import * as pilot from './pilot';
@@ -64,6 +67,8 @@ import type { Effect, Settlement } from './tools';
 import type { Call, Conversation, Reply } from './transcript';
 import type { Launched } from '../cockpit/argv';
 import { line, outcome } from '../cockpit/commands';
+import { memory } from '../memory';
+import { Markdown } from './Markdown';
 import type { Command, Commands } from '../cockpit/commands';
 import type { Run } from '../cockpit/model';
 
@@ -145,17 +150,44 @@ function commandWake(command: Command, news: CommandNews): string {
 /** Where the gate watcher's switch is remembered. See `watching` below. */
 const WATCH_KEY = 'vibe.pilot.watchGates';
 
+/*
+ * The pane's recurring styles, named once (the UI rework).
+ *
+ * Utilities rather than a stylesheet, so an element and its look are in one
+ * place and `pilot.css` could go. Every colour is a token through `theme.css`,
+ * so `audit:contrast` still decides whether a pairing is legible. Only what
+ * recurs enough to drift is named.
+ */
+/** A sentence about the conversation: a reading, a reason, a count. */
+const NOTE = 'text-body-sm text-secondary';
+/** Why a call or a turn went wrong, in the model's or the vendor's own words. */
+const WHY = 'whitespace-pre-wrap text-body-sm text-emphasis [overflow-wrap:anywhere]';
+/** A monospace block read whole - an argv, a payload - that scrolls past its cap rather than truncating. */
+const BLOCK =
+  'm-0 overflow-auto whitespace-pre-wrap rounded-sm border border-rule-inner bg-panel font-mono text-mono-sm [overflow-wrap:anywhere]';
+/** A field in the pane's own chrome: the two pickers and a proposal's reply. */
+// A floor, not a height: WebKitGTK draws a native select with its own padding,
+// and pinned at 28px the label lost its descenders at the default type scale.
+const FIELD =
+  'min-h-7 py-0.5 min-w-0 rounded-sm border border-rule-control bg-card px-2 font-sans text-body-sm text-primary outline-none placeholder:text-tertiary focus-visible:ring-1 focus-visible:ring-accent-border';
+/** A tool call as one row of the reply: the name, then what came of it. */
+const CALL = 'flex flex-wrap items-baseline gap-2 rounded-sm border border-rule-inner px-2.5 py-1.5';
+/** Why send is off, on its own line. Named so `composer.test.ts` can find the one line that draws it. */
+const BLOCKED = 'border-t border-rule-card bg-active px-4 py-1.5 text-label text-secondary';
+/** A sentence that stops the pane: a spent ceiling, a conversation that is not being saved. */
+const ALARM = 'bg-alarm px-4 py-1.5 text-body-sm text-emphasis';
+
 /**
  * Whether the pilot takes a turn when the loop stops at a gate (#211).
  *
  * **Off unless somebody turned it on**, and it is remembered because a setting
- * that reset every launch is one nobody uses. `localStorage` for the reason the
+ * that reset every launch is one nobody uses. The window's memory for the reason the
  * spend ceiling is there: it is this window's preference, not a project fact,
  * and `vibe.config.json` is a file meant to be committed.
  */
 function readWatch(): boolean {
   try {
-    return localStorage.getItem(WATCH_KEY) === 'on';
+    return memory.getItem(WATCH_KEY) === 'on';
   } catch {
     // Storage can be unavailable. Falling back to off is the fail-closed
     // direction: the cost of a wrong default here is unattended spend.
@@ -264,7 +296,7 @@ function EffectDetail({ effect }: { effect: Effect }) {
     // the argument that decides whether the run converges, and a summary of the
     // brief is precisely the thing nobody can check.
     return (
-      <pre className="v-proposal__argv">
+      <pre className={cn(BLOCK, 'max-h-64 p-3 text-primary')}>
         {effect.argv.map((arg, i) => `${i === 0 ? '' : '  '}${arg}`).join('\n')}
       </pre>
     );
@@ -275,7 +307,7 @@ function EffectDetail({ effect }: { effect: Effect }) {
     // different act in two repositories, and this is the one thing a person
     // cannot check from the command line alone (#211).
     return (
-      <pre className="v-proposal__argv">
+      <pre className={cn(BLOCK, 'max-h-64 p-3 text-primary')}>
         {[effect.program, ...effect.args].join(' ')}
         {'\n'}
         {`in ${effect.dir}`}
@@ -286,10 +318,10 @@ function EffectDetail({ effect }: { effect: Effect }) {
     // The id alone, because that is what is being acted on. The summary above
     // the card already carries the command line, and repeating it here as if it
     // were the argv would draw a command about to be *run*.
-    return <pre className="v-proposal__argv">{`stop ${effect.commandId}`}</pre>;
+    return <pre className={cn(BLOCK, 'max-h-64 p-3 text-primary')}>{`stop ${effect.commandId}`}</pre>;
   }
   return (
-    <pre className="v-proposal__argv">{JSON.stringify(effect.decision, null, 2)}</pre>
+    <pre className={cn(BLOCK, 'max-h-64 p-3 text-primary')}>{JSON.stringify(effect.decision, null, 2)}</pre>
   );
 }
 
@@ -308,28 +340,31 @@ function Proposal({
 }) {
   const [note, setNote] = useState('');
   return (
-    <div className="v-proposal">
-      <div className="v-pilot__meta">
-        <StateKicker tone="accent">proposed</StateKicker>
-        <MetaChip>{call.name}</MetaChip>
+    // Bordered and set apart, because it is not another line of chat: the run
+    // does not move until somebody answers it, and it has to read that way at
+    // a glance. One primary button - the act the card is for - and a quiet no.
+    <div className="flex flex-col gap-3 rounded-md border border-accent-border-dim bg-card p-3">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <Badge variant="accent">proposed</Badge>
+        <Badge>{call.name}</Badge>
       </div>
-      <div className="v-proposal__summary">{summary}</div>
+      <div className="text-body text-emphasis">{summary}</div>
       <EffectDetail effect={effect} />
-      <div className="v-proposal__note">
+      <div className={NOTE}>
         Nothing has been sent. This is the same request the button makes, and it goes down the same
         wire — so what it does is what you would get from the window yourself.
       </div>
-      <div className="v-proposal__actions">
-        <Button level="primary" disabled={busy} onClick={() => onDecide(true, note)}>
+      <div className="flex items-center gap-2">
+        <Button variant="primary" disabled={busy} onClick={() => onDecide(true, note)}>
           run it
         </Button>
         <input
-          className="v-proposal__reply"
+          className={cn(FIELD, 'flex-1 bg-panel')}
           placeholder="what to tell the pilot (optional)"
           value={note}
           onChange={(e) => setNote(e.target.value)}
         />
-        <Button level="secondary" disabled={busy} onClick={() => onDecide(false, note)}>
+        <Button variant="quiet" disabled={busy} onClick={() => onDecide(false, note)}>
           no
         </Button>
       </div>
@@ -355,17 +390,17 @@ function CallCard({
     // A model emits truncated JSON when a turn hits its ceiling mid-call.
     // Reported as a call that cannot be run, rather than shown as one that could.
     return (
-      <div className="v-pilot__call">
-        <MetaChip>{call.name}</MetaChip>
-        <span className="v-pilot__why">its arguments do not parse: {call.unreadable}</span>
+      <div className={CALL}>
+        <Badge>{call.name}</Badge>
+        <span className={WHY}>its arguments do not parse: {call.unreadable}</span>
       </div>
     );
   }
   if (settlement === null) {
     return (
-      <div className="v-pilot__call">
-        <MetaChip>{call.name}</MetaChip>
-        <span className="v-pilot__note">waiting to be run</span>
+      <div className={CALL}>
+        <Badge>{call.name}</Badge>
+        <span className={NOTE}>waiting to be run</span>
       </div>
     );
   }
@@ -381,13 +416,15 @@ function CallCard({
     );
   }
   return (
-    <div className="v-pilot__call">
-      <MetaChip>{call.name}</MetaChip>
-      {settlement.kind === 'refused' ? (
-        <span className="v-pilot__why">{settlement.content}</span>
-      ) : (
-        <Answer content={answer} />
-      )}
+    <div className={cn(CALL, 'flex-col items-stretch gap-1')}>
+      <div className="flex flex-wrap items-baseline gap-2">
+        <Badge>{call.name}</Badge>
+        {settlement.kind === 'refused' ? (
+          <span className={WHY}>{settlement.content}</span>
+        ) : (
+          <Answer content={answer} />
+        )}
+      </div>
       {/* What it was, once it has been answered (#223). A command the safe list
           ran was never drawn as a card, so this is the only place the exact
           program and arguments appear — and "what runs is what was displayed"
@@ -412,17 +449,17 @@ function CallCard({
  * is behind the fold so the size itself stays visible.
  */
 function Answer({ content }: { content: string | null }) {
-  if (content === null) return <span className="v-pilot__note">read</span>;
+  if (content === null) return <span className={NOTE}>read</span>;
   // Short enough to read in place. A threshold rather than always folding: a
   // one-line refusal or a small object behind a disclosure is a click for
   // nothing, and most of what makes this unreadable is the big two.
-  if (content.length <= 160) return <span className="v-pilot__note">{content}</span>;
+  if (content.length <= 160) return <span className={cn(NOTE, '[overflow-wrap:anywhere]')}>{content}</span>;
   return (
-    <details className="v-pilot__answer">
-      <summary className="v-pilot__note">
+    <details className="min-w-0 flex-1">
+      <summary className={cn(NOTE, 'cursor-pointer select-none')}>
         answered with {content.length.toLocaleString()} characters — the model has all of it
       </summary>
-      <pre className="v-pilot__payload v-selectable">{content}</pre>
+      <pre className={cn(BLOCK, 'mt-2 max-h-56 select-text px-3 py-2 text-secondary')}>{content}</pre>
     </details>
   );
 }
@@ -442,14 +479,17 @@ function Answer({ content }: { content: string | null }) {
 function TurnPrice({ reply }: { reply: Reply }) {
   if (reply.usage === null) return null;
   const cost = costOf(reply.provider, reply.model, reply.usage);
+  // An absent figure carries its reason, in the place the figure would have
+  // been. Dimmer than the figure, because it is a statement about the
+  // measurement rather than a measurement.
   if (cost.usd === null) {
-    return <span className="v-pilot__price v-pilot__price--absent"> · cost: {cost.why}</span>;
+    return <span className="text-tertiary"> · cost: {cost.why}</span>;
   }
   return (
-    <span className="v-pilot__price">
+    <span className="text-secondary">
       {' · '}~{formatUsd(cost.usd)} estimated
       {cost.price !== null && (
-        <span className="v-pilot__price-note"> (published prices, read {cost.price.takenOn})</span>
+        <span className="text-tertiary"> (published prices, read {cost.price.takenOn})</span>
       )}
     </span>
   );
@@ -474,7 +514,14 @@ function TurnPrice({ reply }: { reply: Reply }) {
  */
 function TurnElapsed({ startedAt, now }: { startedAt: number | null; now: number }) {
   if (startedAt === null) return null;
-  return <span className="v-pilot__elapsed">{elapsed(Math.max(0, now - startedAt))}</span>;
+  // Monospace and tabular, because it re-renders every second and proportional
+  // digits make the row jump sideways on each tick - motion that means nothing,
+  // beside the one indicator whose motion is supposed to mean something.
+  return (
+    <span className="font-mono text-body-sm tabular-nums text-secondary">
+      {elapsed(Math.max(0, now - startedAt))}
+    </span>
+  );
 }
 
 
@@ -501,10 +548,16 @@ function TurnWorking({
   now: number;
 }) {
   const word = reply.text === '' ? 'thinking' : 'streaming';
+  // Sticky inside the scrolling log, so it holds the bottom edge wherever the
+  // reader is; `mt-auto` puts it at the foot of a short log as well. The panel
+  // ground is so text scrolling under it does not show through.
   return (
-    <div className="v-pilot__working" role="status">
+    <div
+      className="sticky bottom-0 mt-auto flex flex-none items-center gap-2 border-t border-rule-structure bg-panel py-2"
+      role="status"
+    >
       <ThinkingWave label={word} />
-      <StateKicker tone="accent">{word}</StateKicker>
+      <Badge variant="accent">{word}</Badge>
       <TurnElapsed startedAt={reply.startedAt} now={now} />
     </div>
   );
@@ -523,7 +576,7 @@ function ReplyCard({
 }) {
   const outcome = reply.outcome;
   return (
-    <div className="v-pilot__turn">
+    <div className="flex flex-col gap-2">
       {/* What you said, above the answer to it (#211). The pane drew replies
           and never messages, so this was missing entirely: you pressed send,
           the composer emptied, and the next thing on screen was an answer to a
@@ -539,26 +592,39 @@ function ReplyCard({
           me to tell which is which."* The chip is the same vocabulary the answer
           uses rather than a second one, and the ground is what makes the two
           scannable apart without reading either. */}
+      {/* **Your half is mirrored, and only your half** (#223). Bounded at 80%
+          and pulled right, hugging its text so the right edge is a line and
+          the left is ragged - the shape that reads as "the other speaker" at a
+          glance. The reply keeps the whole column, because a proposal card
+          holding an argv has to stay readable. The text inside stays
+          left-aligned: a right-aligned paragraph has a ragged left edge, and
+          the left edge is the one the eye returns to on every line. Newlines
+          survive, because they are the reason shift+enter exists. */}
       {reply.asked !== null && (
-        <div className="v-pilot__you">
-          <MetaChip>you</MetaChip>
-          <div className="v-pilot__asked v-selectable">{reply.asked}</div>
+        <div className="flex max-w-[80%] flex-col items-end gap-1.5 self-end rounded-md border border-rule-card bg-active px-3.5 py-2.5">
+          <Badge>you</Badge>
+          <div className="self-stretch select-text whitespace-pre-wrap text-left text-body text-primary [overflow-wrap:anywhere]">
+            {reply.asked}
+          </div>
         </div>
       )}
-      <div className="v-pilot__reply">
-        <div className="v-pilot__meta">
+      <div className="flex flex-col gap-2 self-stretch border-l-2 border-accent-border-dim py-1 pl-4">
+        <div className="flex flex-wrap items-center gap-1.5">
         {/* The pane draws replies and not messages, so without this a woken
             turn is the pilot speaking unprompted with nothing saying why. A
             reader has to be able to tell what they asked for from what the run
             caused (#211). */}
-        {reply.woke !== null && <StateKicker tone="quiet">woke at a gate</StateKicker>}
+        {reply.woke !== null && <Badge>woke at a gate</Badge>}
         {/* A compaction is a turn nobody typed, so it says what it is (#223). */}
-        {reply.compacts === true && <StateKicker tone="quiet">compacting context</StateKicker>}
-        <MetaChip>{BACKEND_NAME[reply.provider]}</MetaChip>
+        {reply.compacts === true && <Badge>compacting context</Badge>}
+        <Badge>{BACKEND_NAME[reply.provider]}</Badge>
         {/* What ANSWERED, not what was asked for: an alias resolves to a dated
             version, and the resolved one is the fact worth showing. Absent until
-            the vendor says so, rather than filled in from the request. */}
-        {reply.model !== null && <MetaChip kind="checkable">{reply.model}</MetaChip>}
+            the vendor says so, rather than filled in from the request. A model
+            name is an identifier, so it keeps its own case and face. */}
+        {reply.model !== null && (
+          <Badge className="font-mono font-normal normal-case tracking-normal text-secondary">{reply.model}</Badge>
+        )}
         {/* **Three states, not one.** `streaming` was drawn from the instant the
             turn opened, including for the whole wait before a single byte came
             back — when nothing was streaming — and it is a two-word label with
@@ -573,21 +639,22 @@ function ReplyCard({
         {/* The vendor's own word — `end_turn`, `stop`, `max_tokens`, `length`.
             Not translated into a shared spelling, because a shared spelling
             would claim a shared meaning nobody has established. */}
-        {outcome?.kind === 'ended' && outcome.stop !== null && <MetaChip>{outcome.stop}</MetaChip>}
-        {outcome?.kind === 'cancelled' && <StateKicker tone="quiet">stopped</StateKicker>}
-        {outcome?.kind === 'failed' && <StateKicker tone="alarm">failed</StateKicker>}
+        {outcome?.kind === 'ended' && outcome.stop !== null && <Badge>{outcome.stop}</Badge>}
+        {outcome?.kind === 'cancelled' && <Badge>stopped</Badge>}
+        {outcome?.kind === 'failed' && <Badge variant="alarm">failed</Badge>}
       </div>
 
       {/* `visible`, not the raw text: a tool call the subscription backend made
           arrives as a fenced block inside the prose, and the card two lines down
           is a better rendering of it than the JSON that produced it. The raw
-          text stays in `Reply.text`, which is the record (#211). */}
-      {visible(reply.text) !== '' && (
-        <div className="v-pilot__text v-selectable">{visible(reply.text)}</div>
-      )}
-      {outcome?.kind === 'failed' && <div className="v-pilot__why">{outcome.message}</div>}
+          text stays in `Reply.text`, which is the record (#211). Drawn as
+          Markdown (`Markdown.tsx`), because that is what the pilot writes and
+          the prompt now says it is rendered: as preformatted text a table
+          arrived as rows of pipes. */}
+      {visible(reply.text) !== '' && <Markdown text={visible(reply.text)} />}
+      {outcome?.kind === 'failed' && <div className={WHY}>{outcome.message}</div>}
       {reply.compacts === true && outcome?.kind === 'ended' && reply.text !== '' && reply.calls.length === 0 && (
-        <div className="v-pilot__spend">
+        <div className={NOTE}>
           the pilot carries on from this summary — it no longer holds the conversation above it
         </div>
       )}
@@ -606,13 +673,13 @@ function ReplyCard({
           part is missing from an OpenAI line — and a reader can tell that apart
           from a cache write of zero, which is the entire point. */}
       {reply.usage !== null && (
-        <div className="v-pilot__spend">
+        <div className={NOTE}>
           {spendParts(reply.usage).join(' · ')}
           <TurnPrice reply={reply} />
         </div>
       )}
       {reply.usage === null && outcome !== null && (
-        <div className="v-pilot__spend">
+        <div className={NOTE}>
           no usage reported — this turn did not get far enough for the vendor to say
         </div>
       )}
@@ -955,8 +1022,10 @@ export function PilotPane({
    */
   const whole = useRef<{ turn: number; text: string }>({ turn: -1, text: '' });
   const [entry, setEntry] = useState('');
+  /** The composer's field, so a starter can hand it focus without a selector. */
+  const entryRef = useRef<HTMLTextAreaElement>(null);
   const [live, setLive] = useState<number | null>(null);
-  // The pilot's own books (#145). Read from `localStorage` at mount, because a
+  // The pilot's own books (#145). Read from the window's memory at mount, because a
   // per-day ceiling that reset when the app restarted would not be a ceiling.
   const [ledger, setLedger] = useState<Ledger>(readLedger);
   /** Turns already in the books, so a re-render cannot bill one twice. */
@@ -1637,10 +1706,10 @@ ${frame.text}`, turn, origin.current))) {
   );
 
   return (
-    <div className="v-pilot">
-      <div className="v-pilot__controls">
+    <div className="flex min-h-0 flex-1 flex-col bg-panel">
+      <div className="flex flex-none flex-wrap items-center gap-2 border-b border-rule-structure px-4 py-2">
         <select
-          className="v-pilot__select"
+          className={cn(FIELD, 'max-w-45')}
           aria-label="Pilot provider"
           value={vendor}
           // The session and the model follow in the effect on `provider`.
@@ -1655,20 +1724,25 @@ ${frame.text}`, turn, origin.current))) {
             </option>
           ))}
         </select>
-        <select className="v-pilot__select" aria-label="Pilot model" value={model} onChange={(e) => setModel(e.target.value)}>
+        <select
+          className={cn(FIELD, 'max-w-45')}
+          aria-label="Pilot model"
+          value={model}
+          onChange={(e) => setModel(e.target.value)}
+        >
           {optionsFor(listing, model).map((c) => (
             <option key={c.value} value={c.value}>
               {c.label}
             </option>
           ))}
         </select>
-        {listing === null && <span className="v-pilot__note">asking for the models…</span>}
-        {whyNot(listing) !== null && <span className="v-pilot__note">no model list: {whyNot(listing)}</span>}
+        {listing === null && <span className={NOTE}>asking for the models…</span>}
+        {whyNot(listing) !== null && <span className={NOTE}>no model list: {whyNot(listing)}</span>}
         {/* With no list there is still a way to name one: a CLI falls back to its
             own default, and an API road has nothing until a name is typed. */}
         {whyNot(listing) !== null && (
           <input
-            className="v-pilot__select"
+            className={cn(FIELD, 'max-w-45')}
             aria-label="Pilot model name"
             placeholder="model name"
             defaultValue={picked ?? ''}
@@ -1678,9 +1752,7 @@ ${frame.text}`, turn, origin.current))) {
         {/* What this backend costs, when that is not obvious from its name.
             Empty for the subscription, which is why this is conditional rather
             than a span that renders a blank. */}
-        {BACKEND_NOTE[provider] !== '' && (
-          <span className="v-pilot__note">{BACKEND_NOTE[provider]}</span>
-        )}
+        {BACKEND_NOTE[provider] !== '' && <span className={NOTE}>{BACKEND_NOTE[provider]}</span>}
         {/* Names what is missing rather than "not ready". One provider
             configured is a supported state, and so is a window that has not
             been pointed at a repository yet - two different absences with two
@@ -1693,16 +1765,17 @@ ${frame.text}`, turn, origin.current))) {
             the pilot has. The label is now the behaviour and the tooltip is the
             cost, which is the split the rest of this bar uses. */}
         <label
-          className="v-pilot__limit"
+          className="ml-auto flex items-center gap-1.5 text-body-sm text-secondary"
           title="One turn each time, and it can only propose — you still press the button."
         >
           <input
             type="checkbox"
+            className="accent-accent"
             checked={watching}
             onChange={(e) => {
               setWatching(e.target.checked);
               try {
-                localStorage.setItem(WATCH_KEY, e.target.checked ? 'on' : 'off');
+                memory.setItem(WATCH_KEY, e.target.checked ? 'on' : 'off');
               } catch {
                 // The switch still works for this session. A preference that
                 // could not be saved is not worth an error in the pane.
@@ -1712,7 +1785,7 @@ ${frame.text}`, turn, origin.current))) {
           <span>Help at run checkpoints</span>
         </label>
         {proposals.length > 0 && (
-          <span className="v-pilot__note">
+          <span className={NOTE}>
             {proposals.length} proposal(s) waiting on you — nothing more can be sent until they are
             answered, and neither vendor will take a conversation that leaves one open
           </span>
@@ -1730,15 +1803,21 @@ ${frame.text}`, turn, origin.current))) {
           beside the conversation it limits made it the only setting in the
           product with no home on the settings screen. What stays here is the
           reading, because that is about this conversation and nothing else. */}
-      <div className="v-pilot__books">
-        <span className="v-pilot__note">{describeDay(day)}</span>
+      <div className="flex flex-none flex-wrap items-center justify-between gap-3 border-b border-rule-structure px-4 py-1.5">
+        <span className={NOTE}>{describeDay(day)}</span>
         {/* How full the pilot's context is, and the two ways to empty it (#223).
             Beside the books rather than on a card, because it is about the
-            conversation as a whole and the next turn, not about one reply. */}
-        <span className="v-pilot__context">
-          <span className={`v-pilot__note${contextLine.alarm ? ' v-pilot__note--warn' : ''}`}>{contextLine.text}</span>
+            conversation as a whole and the next turn, not about one reply.
+            Emphasis rather than a ground past 80%: a ground would make one
+            sentence look like a halt banner. */}
+        <span className="flex flex-wrap items-center gap-2">
+          <span className={cn(NOTE, contextLine.alarm && 'text-emphasis')}>{contextLine.text}</span>
+          {/* `secondary`, not `quiet`: a bordered button on the card ground.
+              Drawn quiet, the two read as labels beside the figure and were
+              reported as not looking clickable. */}
           <Button
-            level="tertiary"
+            variant="secondary"
+            size="sm"
             disabled={!canCompact}
             title="The pilot writes a summary of this conversation, and carries on from the summary in a fresh context. The log above stays."
             onClick={compactNow}
@@ -1746,7 +1825,8 @@ ${frame.text}`, turn, origin.current))) {
             compact
           </Button>
           <Button
-            level="tertiary"
+            variant="secondary"
+            size="sm"
             disabled={!canClear}
             title="The pilot forgets this conversation and starts its next turn with nothing. The log above stays."
             onClick={() => dispatch({ type: 'clear' })}
@@ -1756,12 +1836,10 @@ ${frame.text}`, turn, origin.current))) {
         </span>
       </div>
       {!verdict.allowed && verdict.why !== null && (
-        <div className="v-pilot__note v-pilot__note--alarm">
-          The pilot has stopped: {verdict.why}
-        </div>
+        <div className={ALARM}>The pilot has stopped: {verdict.why}</div>
       )}
 
-      {/* `v-selectable`, because `base.css` turns selection off on `body` — a
+      {/* `select-text`, because `base.css` turns selection off on `body` — a
           drag across the cockpit chrome should not paint half the app blue, and
           the rule restores it on "anything a user reads or copies". A
           conversation is the most copied thing in the product and was missed:
@@ -1770,7 +1848,11 @@ ${frame.text}`, turn, origin.current))) {
       {/* Follows the bottom while you leave it there, and stops the instant you
           scroll up — see `follow.ts` for why that state belongs to the reader
           and not to the pane. */}
-      <div className="v-pilot__log v-selectable" ref={log.ref} onScroll={log.onScroll}>
+      <div
+        className="flex min-h-0 flex-1 select-text flex-col gap-4 overflow-y-auto px-6 py-5"
+        ref={log.ref}
+        onScroll={log.onScroll}
+      >
         {entries.length === 0 && conversation.live === null && (
           /* **Two different emptinesses, and they were drawn as one.** With no
              run, this is the conversation that has not started — the front door.
@@ -1780,7 +1862,7 @@ ${frame.text}`, turn, origin.current))) {
              `saved.ts` did not either. Saying *"nothing yet"* over an opened run
              reads as the pane having failed to load something, which is exactly
              how it was reported — *"nor do I see the pilot chat update"*. */
-          <div className="v-pilot__empty">
+          <div className="flex min-h-min flex-1 flex-col justify-center">
             {runId === null ? (
               <>
                 {/* **The front door describes the flow, not the permissions
@@ -1792,19 +1874,23 @@ ${frame.text}`, turn, origin.current))) {
                     made and this copy had not. What a person needs here is what
                     happens when they type, because it is no longer obvious: the
                     reply is questions rather than a run. */}
-                <Welcome onPrompt={(prompt) => {
-                  setEntry(prompt);
-                  // A starter prepares a message. Sending is still the person's action.
-                  log.ref.current?.parentElement?.querySelector<HTMLTextAreaElement>('.v-pilot__entry')?.focus();
-                }} />
+                <Welcome
+                  onPrompt={(prompt) => {
+                    setEntry(prompt);
+                    // A starter prepares a message. Sending is still the person's action.
+                    entryRef.current?.focus();
+                  }}
+                />
               </>
             ) : (
-              <>
-                <div className="v-empty-chat"><Icon name="code" size={28} />
-                  <h2>A fresh conversation about this run</h2>
-                  <p>There is no saved chat here. Explore its plans and reports above, or ask the pilot about the work. New messages will be saved with this run.</p>
-                </div>
-              </>
+              <div className="m-auto flex max-w-105 flex-col items-center gap-2 text-center text-secondary">
+                <MessageSquare size={28} className="text-accent-muted" aria-hidden="true" />
+                <h2 className="m-0 text-section text-display">A fresh conversation about this run</h2>
+                <p className="m-0 text-body">
+                  There is no saved chat here. Explore its plans and reports above, or ask the pilot
+                  about the work. New messages will be saved with this run.
+                </p>
+              </div>
             )}
           </div>
         )}
@@ -1817,7 +1903,14 @@ ${frame.text}`, turn, origin.current))) {
           entry.kind === 'round' ? (
             <RoundCard key={`round-${entry.card.key}`} card={entry.card} onOpen={onOpen} />
           ) : entry.reply.cleared === true ? (
-            <div key={`reply-${String(entry.reply.turn)}`} className="v-pilot__divider" role="separator">
+            // Where the pilot's memory starts again: a rule across the log with
+            // the reason on it, because a cleared context is a fact about every
+            // reply after it.
+            <div
+              key={`reply-${String(entry.reply.turn)}`}
+              className="flex items-center gap-3 text-body-sm text-tertiary before:h-px before:flex-1 before:bg-rule-structure after:h-px after:flex-1 after:bg-rule-structure"
+              role="separator"
+            >
               context cleared — the pilot remembers nothing above this line
             </div>
           ) : (
@@ -1845,21 +1938,19 @@ ${frame.text}`, turn, origin.current))) {
 
       {/* A conversation that is not being saved says so (#223). Swallowing this
           is how three days of chats were lost without a word on screen. */}
-      {chats.failure !== null && (
-        <div className="v-pilot__note v-pilot__note--alarm">{chats.failure}</div>
-      )}
+      {chats.failure !== null && <div className={ALARM}>{chats.failure}</div>}
       {!chats.ready && chats.failure === null && host.inShell() && (
-        <div className="v-pilot__note">reading saved conversations…</div>
+        <div className={cn(NOTE, 'px-4 py-1.5')}>reading saved conversations…</div>
       )}
 
       {conversation.unknown > 0 && (
-        <div className="v-pilot__note">
+        <div className={cn(NOTE, 'px-4 py-1.5')}>
           {conversation.unknown} unrecognised event(s) — this window is older than the app
         </div>
       )}
 
       {stalled && (
-        <div className="v-pilot__note">
+        <div className={cn(NOTE, 'px-4 py-1.5')}>
           It has taken {MAX_CHAIN} turns on its own since you last said anything. Send something to
           let it carry on — the ceiling is here so it cannot keep spending unattended.
         </div>
@@ -1875,11 +1966,14 @@ ${frame.text}`, turn, origin.current))) {
           does not say why is the same defect everywhere, and here it was worse
           than usual: the textarea was disabled too, so the answer to "why can I
           not type" was not reachable by clicking on anything. */}
-      {blocked !== null && <div className="v-pilot__blocked">{blocked}</div>}
+      {blocked !== null && <div className={BLOCKED}>{blocked}</div>}
 
-      <div className="v-pilot__composer">
+      {/* The composer is one bordered box: the field has no border of its own
+          and the box takes the accent while anything inside it has focus. */}
+      <div className="mx-4 mt-2 flex flex-none items-end gap-2 rounded-lg border border-rule-control bg-card p-2.5 focus-within:border-accent-border">
         <textarea
-          className="v-pilot__entry"
+          ref={entryRef}
+          className="min-h-14 min-w-0 flex-1 resize-none border-0 bg-transparent px-1 py-0.5 font-sans text-body text-primary outline-none placeholder:text-tertiary"
           aria-label="Message your pilot"
           rows={2}
           placeholder="What would you like to build, improve, or figure out?"
@@ -1910,12 +2004,18 @@ ${frame.text}`, turn, origin.current))) {
           }}
         />
         {live === null ? (
-          <Button level="primary" aria-label="Send message" disabled={!ready || entry.trim() === ''} onClick={submit}>
-            <Icon name="send" size={18} />
+          <Button
+            variant="primary"
+            size="icon"
+            aria-label="Send message"
+            disabled={!ready || entry.trim() === ''}
+            onClick={submit}
+          >
+            <Send size={16} aria-hidden="true" />
           </Button>
         ) : (
           <Button
-            level="secondary"
+            variant="secondary"
             onClick={() => {
               // A refusal here means the turn ended between the render and the
               // click. Not worth a message: the terminal event is about to
@@ -1929,11 +2029,13 @@ ${frame.text}`, turn, origin.current))) {
               else void pilot.cancel(live).catch(() => {});
             }}
           >
-            ⏹ stop
+            <Square size={12} aria-hidden="true" /> stop
           </Button>
         )}
       </div>
-      <p className="v-pilot__hint">Enter to send <span>·</span> Shift + Enter for a new line</p>
+      <p className="mx-4 my-2 text-label text-tertiary">
+        Enter to send <span className="px-1">·</span> Shift + Enter for a new line
+      </p>
     </div>
   );
 }

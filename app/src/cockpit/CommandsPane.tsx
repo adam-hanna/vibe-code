@@ -1,7 +1,12 @@
 import { useState } from 'react';
-import { Button, LivenessDot, MetaChip, StateKicker } from '../design';
+import { Square } from 'lucide-react';
+import { LivenessDot } from '../design';
+import { Badge } from '@/ui/badge';
+import { Button } from '@/ui/button';
+import { cn } from '@/lib/utils';
 import { clock, dayOf, elapsed } from './format';
 import { line, outcome } from './commands';
+import { BLOCK, FIELD, LABEL } from './pane';
 import type { Command, Commands } from './commands';
 
 /**
@@ -23,6 +28,13 @@ import type { Command, Commands } from './commands';
  * the honest version of the same convenience.
  */
 
+const NOTE = 'm-0 text-body-sm text-secondary';
+
+/**
+ * One command. The live one takes the accent rule, which is the same signal a
+ * running turn takes in the loop column - a process holding a port is the thing
+ * on this screen most worth noticing.
+ */
 function CommandCard({
   command,
   onStop,
@@ -32,29 +44,29 @@ function CommandCard({
 }) {
   const how = outcome(command);
   return (
-    <div className={`v-cmd${how === null ? ' v-cmd--live' : ''}`}>
-      <div className="v-cmd__head">
+    <div className={cn('flex flex-col gap-2 border-l-2 pl-3', how === null ? 'border-accent-border' : 'border-rule-card')}>
+      <div className="flex flex-wrap items-center gap-2">
         {how === null && <LivenessDot state="live" />}
-        <code className="v-cmd__line">{line(command)}</code>
+        <code className="font-mono text-mono-sm text-primary">{line(command)}</code>
         {how === null ? (
-          <StateKicker tone="accent">running</StateKicker>
+          <Badge variant="accent">running</Badge>
         ) : (
-          <MetaChip kind={how === 'exit 0' ? 'checkable' : 'alarm'}>{how}</MetaChip>
+          <Badge variant={how === 'exit 0' ? 'live' : 'alarm'} className="normal-case tracking-normal">{how}</Badge>
         )}
         {how === null && (
-          <Button level="secondary" onClick={() => onStop(command.id)}>
-            ⏹ stop
+          <Button variant="secondary" size="sm" onClick={() => onStop(command.id)}>
+            <Square size={12} aria-hidden="true" /> stop
           </Button>
         )}
       </div>
 
-      <div className="v-cmd__meta">
+      <div className="flex flex-wrap gap-3 text-body-sm text-secondary">
         <span>{command.dir}</span>
         {/* What was actually spawned, when it is not what was typed. `npm`
             resolves to `node …/npm-cli.js` so that no shell is involved, and
             hiding that would make the card a description rather than a record. */}
         {command.resolved !== command.program && (
-          <span className="v-cmd__resolved">ran {command.resolved}</span>
+          <span className="font-mono text-mono-sm">ran {command.resolved}</span>
         )}
         <span>
           {/* An instant once it has stopped, a duration while it runs - the pair
@@ -67,11 +79,11 @@ function CommandCard({
       </div>
 
       {command.output === '' ? (
-        <div className="v-cmd__quiet">
+        <div className={NOTE}>
           {how === null ? 'no output yet' : 'it wrote nothing'}
         </div>
       ) : (
-        <pre className="v-cmd__output v-selectable">
+        <pre className={cn(BLOCK, 'max-h-88 select-text')}>
           {command.truncated ? '…earlier output was dropped\n' : ''}
           {command.output}
         </pre>
@@ -98,28 +110,28 @@ export function CommandsPane({
   const ready = program.trim() !== '' && dir.trim() !== '';
 
   return (
-    <div className="v-cmds">
-      <div className="v-cmds__form">
-        <label className="v-cmds__label" htmlFor="cmdprog">
+    <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <label className={LABEL} htmlFor="cmdprog">
           program
         </label>
         <input
           id="cmdprog"
-          className="v-cmds__prog"
+          className={cn(FIELD, 'w-32 font-mono text-mono-sm')}
           value={program}
           onChange={(e) => setProgram(e.target.value)}
         />
-        <label className="v-cmds__label" htmlFor="cmdargs">
+        <label className={LABEL} htmlFor="cmdargs">
           arguments
         </label>
         <input
           id="cmdargs"
-          className="v-cmds__args"
+          className={cn(FIELD, 'min-w-48 flex-1 font-mono text-mono-sm')}
           value={args}
           onChange={(e) => setArgs(e.target.value)}
         />
         <Button
-          level="primary"
+          variant="primary"
           disabled={!ready}
           onClick={() => {
             onRun(program.trim(), parts);
@@ -129,7 +141,7 @@ export function CommandsPane({
         </Button>
       </div>
 
-      <p className="v-cmds__note">
+      <p className={NOTE}>
         {dir.trim() === '' ? (
           <>Set a repository first — a command runs in one, and there is none.</>
         ) : (
@@ -143,16 +155,16 @@ export function CommandsPane({
       </p>
 
       {commands.refused !== null && (
-        <div className="v-cmds__refused">
-          <StateKicker tone="alarm">refused</StateKicker>
+        <div className="flex flex-wrap items-baseline gap-2 rounded-sm bg-alarm px-3 py-2 text-body-sm text-emphasis">
+          <Badge variant="alarm">refused</Badge>
           <span>{commands.refused}</span>
         </div>
       )}
 
       {commands.all.length === 0 ? (
-        <div className="v-cmds__empty">
-          <StateKicker tone="quiet">nothing run yet</StateKicker>
-          <p>
+        <div className="flex flex-col gap-2">
+          <Badge className="self-start">nothing run yet</Badge>
+          <p className={NOTE}>
             Anything started here keeps running while you work, and stops when the app does. The
             pilot can propose a command; it cannot run one.
           </p>

@@ -34,8 +34,11 @@ export function Icon({ name, size = 18, style }: {
 
 /** The same mark at window and welcome sizes; it is artwork, never a run measurement. */
 export function VibeMark({ large = false }: { large?: boolean }) {
-  return <span className={`v-brandmark${large ? ' v-brandmark--large' : ''}`} aria-hidden="true">
-    <svg viewBox="0 0 40 40" fill="none">
+  return <span
+    className={`inline-flex flex-none items-center justify-center bg-accent-fill text-on-accent ${large ? 'size-11 rounded-[14px]' : 'size-8 rounded-[10px]'}`}
+    aria-hidden="true"
+  >
+    <svg viewBox="0 0 40 40" fill="none" className="size-full">
       <path d="M10 12 20 29 30 12M15 12l5 9 5-9" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   </span>;

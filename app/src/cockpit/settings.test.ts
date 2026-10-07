@@ -232,8 +232,10 @@ describe('one form, pointed at one of two files (#223)', () => {
 describe('which view each setting lives in (#223)', () => {
   // *"we talked about moving some settings out of global and into project scope
   // (e.g. test command, whether to use worktrees, etc)"*.
-  const project = settings.indexOf("{scope === 'global' ? (\n        <p className=\"v-set__note\">\n          The test command");
-  const machine = settings.indexOf("{scope === 'project' ? (\n        <p className=\"v-set__note\">\n          How each vendor");
+  // Case 2 (the UI rework): the note's class is a named style now; the two
+  // anchors are the same two sentences.
+  const project = settings.indexOf("{scope === 'global' ? (\n        <p className={S.note}>\n          The test command");
+  const machine = settings.indexOf("{scope === 'project' ? (\n        <p className={S.note}>\n          How each vendor");
 
   test('the test command and the worktree are drawn only for this project', () => {
     expect(project).toBeGreaterThan(-1);
@@ -262,7 +264,12 @@ describe('two doors to the settings, not a switch on one screen (#223)', () => {
   });
 
   test('the left bar opens every project’s, and a project row opens its own', () => {
-    expect(cockpit).toContain("onSettings={() => openSettings('global')}");
+    // Case 2 (the UI rework): "the left bar" is the activity bar now, and the
+    // sidebar's own Settings footer went because it was the same door twice.
+    // The claim is unchanged - one control on the left opens every project's.
+    expect(cockpit).toContain("settings: () => openSettings('global')");
+    expect(cockpit).toContain('onSettings={act.settings}');
+    expect(sidebar).not.toMatch(/onSettings/);
     expect(cockpit).toMatch(/onProjectSettings=\{\(next\) => \{\s*rememberRepo\(next\);\s*openSettings\('project'\);/);
     const row = sidebar.slice(sidebar.indexOf('function Project('));
     expect(row).toContain('onClick={() => onProjectSettings(dir)}');

@@ -42,6 +42,7 @@ import { Escalation, EXIT, orchestrate, writeEscalation } from '@src/orchestrato
 import type { ExitCode } from '@src/orchestrator.js';
 import {
   codexConversations,
+  codexOneShotRoles,
   DEFAULT_ROLE_PROVIDERS,
   effortFor,
   modelFor,
@@ -689,9 +690,12 @@ async function startRun(
   // reviewer holds its own Codex conversation, so a default persisted run
   // carries two and "single thread" would be a false summary of it.
   const threads = codexConversations(cfg);
+  // A Codex writer is one-shot whatever `persistSession` says (`SLOTS.write`),
+  // so a run that carries threads says which seat does not.
+  const fresh = codexOneShotRoles(cfg);
   log.info(
     `Codex:   ${shownModel(cfg.codex.model, 'codex')} / ${cfg.codex.effort}` +
-      `${cfg.codex.persistSession ? ` (${threads} thread${threads === 1 ? '' : 's'}, carried across turns)` : ' (one-shot per turn)'}`,
+      `${cfg.codex.persistSession ? ` (${threads} thread${threads === 1 ? '' : 's'}, carried across turns${fresh.length > 0 ? `; ${fresh.join(', ')} one-shot per turn` : ''})` : ' (one-shot per turn)'}`,
   );
   log.info(
     `Ceiling: ~$${cfg.budget.maxCostUsd} API-equivalent, Claude only` +

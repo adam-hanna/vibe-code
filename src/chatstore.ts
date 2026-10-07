@@ -28,12 +28,34 @@ export function chatDir(env: NodeJS.ProcessEnv = process.env): string | null {
   return base === undefined || base === '' ? null : path.join(base, 'chats');
 }
 
+/**
+ * Where the rest of the window's memory lives (#223): the projects, the pins,
+ * the names, the drafts, the type scale, the pilot's books and where the window
+ * was pointed. Same files, same rules, a directory of its own.
+ *
+ * They followed the chats out of `localStorage` for a reason measured on
+ * 2026-10-06, after the chats had already gone. Deleting the migrated chat keys
+ * left the storage file at 5,267,456 bytes holding 29 KB of live data, because
+ * sqlite never shrinks a file on its own - and WebKit refuses an origin's whole
+ * storage once the **file** is past its 5 MiB quota, so every read came back
+ * empty and the app looked factory-reset with all eleven keys still on disk.
+ * The page cannot compact that file, so the only durable answer is for nothing
+ * the product needs to live there.
+ *
+ * A separate directory rather than the chats', so the `chats` read stays a
+ * listing of conversations and a pane restoring one never sees a pin.
+ */
+export function memoryDir(env: NodeJS.ProcessEnv = process.env): string | null {
+  const base = env['VIBE_APP_DATA'];
+  return base === undefined || base === '' ? null : path.join(base, 'memory');
+}
+
 function fileFor(dir: string, key: string): string {
   return path.join(dir, `${createHash('sha256').update(key).digest('hex')}.json`);
 }
 
-/** Every stored conversation. A file that does not parse is skipped, never fatal. */
-export function listChats(dir: string): { key: string; value: string }[] {
+/** Every stored entry. A file that does not parse is skipped, never fatal. */
+export function listEntries(dir: string): { key: string; value: string }[] {
   let names: string[];
   try {
     names = readdirSync(dir);
@@ -57,12 +79,12 @@ export function listChats(dir: string): { key: string; value: string }[] {
 }
 
 /**
- * Store one conversation, or remove it with null.
+ * Store one entry, or remove it with null.
  *
  * Written to a temporary file and renamed over the old one, so a process killed
  * mid-write leaves the previous version rather than half of the new one.
  */
-export function saveChat(dir: string, key: string, value: string | null): void {
+export function saveEntry(dir: string, key: string, value: string | null): void {
   const file = fileFor(dir, key);
   if (value === null) {
     rmSync(file, { force: true });
@@ -73,3 +95,7 @@ export function saveChat(dir: string, key: string, value: string | null): void {
   writeFileSync(temp, JSON.stringify({ key, value }), 'utf8');
   renameSync(temp, file);
 }
+
+/** The conversations' names for the two, which every caller already uses. */
+export const listChats = listEntries;
+export const saveChat = saveEntry;

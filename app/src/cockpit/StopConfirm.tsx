@@ -1,4 +1,7 @@
-import { Button, MetaChip, Modal, StateKicker } from '../design';
+import { Pause, Square } from 'lucide-react';
+import { Modal } from '../design';
+import { Badge } from '@/ui/badge';
+import { Button } from '@/ui/button';
 import { counted, tokens } from './format';
 import type { Turn } from './model';
 
@@ -26,14 +29,17 @@ import type { Turn } from './model';
 /** One row of the cost table, or the reason there is no figure for it. */
 function Cost({ label, value, note }: { label: string; value: string | null; note: string }) {
   return (
-    <div className="v-stop__cost">
-      <span className="v-stop__label">{label}</span>
+    <div className="grid grid-cols-[9rem_1fr] gap-x-3 gap-y-1 border-t border-rule-inner py-2">
+      <span className="text-label uppercase tracking-label text-tertiary">{label}</span>
       {value === null ? (
-        <span className="v-stop__absent">{note}</span>
+        // A figure this build cannot produce, named with its reason. Never a
+        // zero: a turn killed before it completes may report no usage at all,
+        // and `0 tok` would be a claim that it spent nothing.
+        <span className="text-body-sm text-tertiary">{note}</span>
       ) : (
         <>
-          <span className="v-stop__value">{value}</span>
-          <span className="v-stop__note">{note}</span>
+          <span className="font-mono text-mono text-primary">{value}</span>
+          <span className="col-start-2 text-body-sm text-secondary">{note}</span>
         </>
       )}
     </div>
@@ -54,16 +60,16 @@ export function StopConfirm({ turn, busy, onStop, onPause, onKeep }: StopConfirm
 
   return (
     <Modal width={560} onDismiss={onKeep}>
-      <div className="v-stop__head">
-        <StateKicker tone="alarm">ends the run</StateKicker>
-        <span className="v-stop__title">
+      <div className="mb-4 flex items-center gap-3">
+        <Badge variant="alarm">ends the run</Badge>
+        <span className="text-title font-semibold tracking-tight text-display">
           {turn === null
             ? 'Stop the run'
             : `Stop ${turn.role} · ${turn.kind} now`}
         </span>
       </div>
 
-      <p className="v-stop__lead">
+      <p className="mt-0 mb-4 text-body text-primary">
         {turn === null
           ? 'Nothing is running, so no work is discarded. The run ends here and resumes from its last checkpoint.'
           : 'The agent is killed mid-turn. That turn is redone from the top when you resume — the conversation is picked up by session id, so nothing is re-sent.'}
@@ -99,21 +105,23 @@ export function StopConfirm({ turn, busy, onStop, onPause, onKeep }: StopConfirm
         note="its last checkpoint — no frame carries which one, so it is not named here"
       />
 
-      <div className="v-stop__middle">
-        <MetaChip>the honest middle</MetaChip>
-        <span className="v-stop__note">
+      <div className="mt-4 flex items-baseline gap-3 border-t border-rule-inner pt-3">
+        <Badge>the honest middle</Badge>
+        <span className="text-body-sm text-secondary">
           Pausing holds at the next boundary instead and costs nothing: the turn finishes, both
           sessions stay warm, and continuing re-sends no context.
         </span>
       </div>
 
-      <div className="v-stop__actions">
+      {/* The primary sits last, so the destructive action is not what the eye or
+          the pointer lands on first. */}
+      <div className="mt-5 flex gap-3">
         {/* Leftmost, secondary, no fill and no red. The label carries it. */}
-        <Button level="secondary" disabled={busy} onClick={onStop}>
-          ⏹ Stop the turn
+        <Button variant="secondary" disabled={busy} onClick={onStop}>
+          <Square size={12} aria-hidden="true" /> Stop the turn
         </Button>
-        <Button level="secondary" disabled={busy} onClick={onPause}>
-          ⏸ Pause instead
+        <Button variant="secondary" disabled={busy} onClick={onPause}>
+          <Pause size={14} aria-hidden="true" /> Pause instead
         </Button>
         {/* **Never disabled, and that is the fix rather than an inconsistency.**
             The other two send a frame, so they wait their turn behind one that
@@ -123,7 +131,7 @@ export function StopConfirm({ turn, busy, onStop, onPause, onKeep }: StopConfirm
             over the whole window, which is a window with no way out of it. A
             confirmation's cancel must never depend on anything being reachable
             (#211). */}
-        <Button level="primary" onClick={onKeep}>
+        <Button variant="primary" className="ml-auto" onClick={onKeep}>
           Keep running
         </Button>
       </div>

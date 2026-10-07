@@ -271,6 +271,7 @@ const SLOT_NAMES = {
   main: 'main',
   judge: 'judge',
   review: 'review',
+  write: 'write',
 } satisfies Record<SlotName, SlotName>;
 
 const FORK_WHYS = {

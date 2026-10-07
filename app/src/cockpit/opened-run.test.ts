@@ -93,6 +93,19 @@ describe('an opened run is drawn by the column that drew it live', () => {
     expect(cockpit).toMatch(/past && opened\.run !== null \? opened\.run : run/);
   });
 
+  test('the Code tab diffs the opened run, in its own repository', () => {
+    // *"in a run that produced code changes, when I go to the code tab, it
+    // still says 'No base yet'"*. The pane was handed the LIVE run, whose base
+    // is null when nothing is running, while every other pane followed the
+    // opened one. The replay carries the opened run's base and each commit's
+    // range, so the pane takes that run and diffs where its commits are.
+    expect(cockpit).toMatch(/<CodePane run=\{opened\.run\} dir=\{shownDir\}/);
+    expect(cockpit).toMatch(/!past \? \(\s*<CodePane run=\{run\} dir=\{liveRepo\}/);
+    // And it never draws the live run's shas against the opened run's
+    // repository while the replay is still being read.
+    expect(cockpit).not.toMatch(/<CodePane run=\{columnRun\}/);
+  });
+
   test('an absolute stamp carries the day, not just the time', () => {
     // `clock` renders a moment inside the run you are watching, where the date
     // is today by construction. A record may be a week old, and `15:33` with no
@@ -256,7 +269,9 @@ describe('a turn that has gone quiet has a ceiling, and it is on the screen', ()
     // that made somebody type 600000 to mean ten minutes would be the storage
     // layer's units leaking onto the screen.
     expect(settings).toMatch(/Math\.round\(progress\['maxQuietMs'\] \/ 60_000\)/);
-    expect(settings).toMatch(/<span className="v-set__unit">minutes<\/span>/);
+    // Case 2 (the UI rework): the unit's class is a named style now; the claim
+    // that the field is typed in minutes is unchanged.
+    expect(settings).toMatch(/<span className=\{S\.unit\}>minutes<\/span>/);
   });
 
   test('it says what it measures, because a long turn is not a quiet turn', () => {
@@ -276,8 +291,37 @@ describe('a turn that has gone quiet has a ceiling, and it is on the screen', ()
     // one helper gives all of them, so no row can draw the old two-way chip.
     expect(settings).toContain("{source('progress', 'maxQuietMs')}");
     const helper = settings.slice(settings.indexOf('const source = ('));
-    expect(helper).toContain('<MetaChip>{unset}</MetaChip>');
-    expect(helper).toContain('<MetaChip>all projects</MetaChip>');
+    // Case 2 (the UI rework): the chip is a Badge now; the claim that an unset
+    // value is marked as the default is unchanged.
+    expect(helper).toContain('<Badge>{unset}</Badge>');
+    // Case 2 (owner's decision): the "all projects" and "this project overrides
+    // it" chips were asked to go. A value set in either file draws no chip, so
+    // only the default is ever marked.
+    const body = helper.slice(0, helper.indexOf('\n  };'));
+    expect(body).not.toContain('<Badge>all projects');
+    expect(body).not.toContain('<Badge>this project overrides it');
+    expect(body.match(/<Badge>/g)).toHaveLength(1);
+  });
+
+  test('a refusal stays on screen wherever the page is scrolled', () => {
+    // *"I can't seem to change my implementer from claude to codex. No error
+    // appears."* The core refused it - a writing Codex seat with
+    // `codex.persistSession` on - and the sentence was drawn at the top of a
+    // page scrolled to the role table. The core no longer refuses that table,
+    // and any refusal now stays in view.
+    expect(settings).toMatch(/cn\(S\.refused, 'sticky top-0/);
+    // The key that refusal named has no control any more, because the core no
+    // longer needs it: a Codex writer is one-shot by itself (\`SLOTS.write\`).
+    expect(settings).not.toContain('persistSession');
+  });
+
+  test('changing a seat’s agent does not carry the old agent’s model onto it', () => {
+    // Spreading the row carried `opus` onto a Codex seat: valid to the core,
+    // since a model is any non-empty string, and a failure on the first turn.
+    expect(settings).toContain('save({ roles: { [role]: { ...current, provider, model: own ?? CLI_DEFAULT } } });');
+    // And "the agent's default" is sent as what it means, never as the empty
+    // string `validateRoleSetting` refuses by name.
+    expect(settings).toContain("const model = next === '' ? (agentModel ?? CLI_DEFAULT) : next;");
   });
 });
 

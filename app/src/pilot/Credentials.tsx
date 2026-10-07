@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
-import { Button, MetaChip, Segmented, StateKicker } from '../design';
+import { Badge } from '@/ui/badge';
+import { Button } from '@/ui/button';
+import { cn } from '@/lib/utils';
 import * as keys from './keys';
 import type { CliStatus } from '../host';
 import type { KeyStatus, Provider } from './keys';
@@ -52,6 +54,26 @@ const ENV_OF: Readonly<Record<Provider, string>> = {
   openai: 'VIBE_CODEX_BIN',
 };
 
+/* The card's recurring styles, named once. Every colour is a token through `theme.css`. */
+/** A row of the card: a chip, a control, a word beside them. */
+const HEAD = 'flex flex-wrap items-center gap-3';
+/**
+ * Prose, so it is on the prose tier. `--text-tertiary` is documented as "labels,
+ * timestamps" and this is a two-sentence paragraph about where a credential
+ * lives - the tier was wrong independently of what its value is (#190).
+ */
+const NOTE = 'text-body-sm text-secondary';
+/** A failure, in the keychain's or the search's own words. */
+const ERROR = 'flex flex-wrap items-center gap-2 rounded-sm border border-rule-card bg-alarm px-3 py-1.5 text-body-sm text-primary';
+/** A field and the button that submits it. */
+const ENTRY = 'flex gap-2';
+/**
+ * A key or a path: typed, never read back. Monospace, because what goes in it
+ * has to be recognised character by character.
+ */
+const FIELD =
+  'min-w-0 flex-1 rounded-sm border border-rule-control bg-panel px-3 py-1.5 font-mono text-mono-sm text-primary outline-none placeholder:text-tertiary focus-visible:ring-1 focus-visible:ring-accent-border disabled:cursor-not-allowed disabled:opacity-50';
+
 /** The keychain row: whether a key is stored, and the field to store one. */
 function KeyEntry({ status, onChanged }: { status: KeyStatus; onChanged: () => void }) {
   const [entry, setEntry] = useState('');
@@ -73,25 +95,29 @@ function KeyEntry({ status, onChanged }: { status: KeyStatus; onChanged: () => v
 
   return (
     <>
-      <div className="v-cred__head">
+      <div className={HEAD}>
         {status.unreadable !== null ? (
           // Not "no key". The keychain could not be read, and saying "none"
           // would have the user enter one they already gave.
-          <MetaChip>cannot tell</MetaChip>
+          <Badge>cannot tell</Badge>
         ) : status.present ? (
-          <MetaChip kind="checkable">key stored</MetaChip>
+          <Badge variant="live">key stored</Badge>
         ) : (
-          <MetaChip>no key</MetaChip>
+          <Badge>no key</Badge>
         )}
         {status.present && (
-          <Button level="secondary" disabled={busy} onClick={() => run(() => keys.clear(status.provider))}>
+          <Button variant="secondary" size="sm" disabled={busy} onClick={() => run(() => keys.clear(status.provider))}>
             forget
           </Button>
         )}
       </div>
-      {status.unreadable !== null && <div className="v-cred__note">{status.unreadable}</div>}
+      {status.unreadable !== null && <div className={NOTE}>{status.unreadable}</div>}
+      {/* `type="password"`, and it stays that way. There is no reveal toggle,
+          because revealing implies reading something back and nothing in this
+          window can - what is in this field is what the user just typed, and it
+          is gone on submit. */}
       <form
-        className="v-cred__entry"
+        className={ENTRY}
         onSubmit={(e) => {
           e.preventDefault();
           if (entry.trim() === '' || busy) return;
@@ -99,7 +125,7 @@ function KeyEntry({ status, onChanged }: { status: KeyStatus; onChanged: () => v
         }}
       >
         <input
-          className="v-cred__field"
+          className={FIELD}
           type="password"
           autoComplete="off"
           spellCheck={false}
@@ -107,11 +133,11 @@ function KeyEntry({ status, onChanged }: { status: KeyStatus; onChanged: () => v
           placeholder={status.present ? `replace the ${name} key` : `${name} API key`}
           onChange={(e) => setEntry(e.target.value)}
         />
-        <Button level="primary" type="submit" disabled={busy || entry.trim() === ''}>
+        <Button variant="primary" type="submit" disabled={busy || entry.trim() === ''}>
           {status.present ? 'replace' : 'store'}
         </Button>
       </form>
-      {error !== null && <div className="v-cred__error">{error}</div>}
+      {error !== null && <div className={ERROR}>{error}</div>}
     </>
   );
 }
@@ -120,18 +146,20 @@ function KeyEntry({ status, onChanged }: { status: KeyStatus; onChanged: () => v
 function Found({ cli }: { cli: CliStatus }) {
   if (cli.found === null) {
     return (
-      <div className="v-cred__error">
-        <StateKicker tone="alarm">not found</StateKicker> {cli.problem}
+      <div className={ERROR}>
+        <Badge variant="alarm">not found</Badge> {cli.problem}
       </div>
     );
   }
   const via =
     cli.via === 'env' ? 'from the environment variable' : cli.via === 'settings' ? 'from your path below' : 'by searching';
+  // A path someone has to recognise, so it is monospace and wraps anywhere - a
+  // Windows install path is one unbroken word.
   return (
-    <div className="v-cred__head">
-      <MetaChip kind="checkable">found</MetaChip>
-      <code className="v-cred__path">{cli.found}</code>
-      <span className="v-cred__note">{via}</span>
+    <div className={HEAD}>
+      <Badge variant="live">found</Badge>
+      <code className="min-w-0 font-mono text-mono-sm text-primary [overflow-wrap:anywhere]">{cli.found}</code>
+      <span className={NOTE}>{via}</span>
     </div>
   );
 }
@@ -151,25 +179,25 @@ function PathEntry({
   const changed = typed.trim() !== (cli.configured ?? '');
   return (
     <form
-      className="v-cred__entry"
+      className={ENTRY}
       onSubmit={(e) => {
         e.preventDefault();
         if (changed) onSave(typed.trim() === '' ? null : typed.trim());
       }}
     >
       <input
-        className="v-cred__field"
+        className={FIELD}
         spellCheck={false}
         value={typed}
         disabled={disabled}
         placeholder="blank — vibe finds it"
         onChange={(e) => setTyped(e.target.value)}
       />
-      <Button level="primary" type="submit" disabled={disabled || !changed}>
+      <Button variant="primary" type="submit" disabled={disabled || !changed}>
         use this path
       </Button>
       {cli.configured !== null && (
-        <Button level="secondary" disabled={disabled} onClick={() => onSave(null)}>
+        <Button variant="secondary" disabled={disabled} onClick={() => onSave(null)}>
           search instead
         </Button>
       )}
@@ -195,21 +223,33 @@ export function Vendor({ vendor, route, onRoute, cli, onCliPath, status, onKeysC
   const name = keys.PROVIDER_NAME[vendor];
   const bin = CLI_OF[vendor];
   return (
-    <div className="v-cred">
-      <div className="v-cred__head">
-        <span className="v-cred__name">{name}</span>
-        <Segmented
-          cells={[
-            { value: 'subscription', label: 'subscription', unavailable: disabled },
-            { value: 'api', label: 'API key', unavailable: disabled },
-          ]}
-          value={route}
-          onChange={(v) => onRoute(v === 'api' ? 'api' : 'subscription')}
-        />
+    <div className="flex flex-col gap-3 rounded-md border border-rule-card bg-card p-4">
+      <div className={HEAD}>
+        <span className="text-section text-emphasis">{name}</span>
+        {/* The two roads, as a segmented pair: the selected one takes the accent
+            tint, which is the one place in the product a tint means "chosen". */}
+        <div role="group" aria-label={`How ${name} is reached`} className="ml-auto inline-flex rounded-sm border border-rule-control-dim">
+          {(['subscription', 'api'] as const).map((v) => (
+            <button
+              key={v}
+              type="button"
+              disabled={disabled}
+              aria-pressed={route === v}
+              onClick={() => onRoute(v)}
+              className={cn(
+                'h-7 cursor-pointer border-0 px-2.5 font-sans text-label font-medium first:rounded-l-sm last:rounded-r-sm',
+                route === v ? 'bg-accent-tint text-accent-on-tint' : 'bg-card text-secondary hover:text-emphasis',
+                disabled && 'cursor-not-allowed opacity-50',
+              )}
+            >
+              {v === 'api' ? 'API key' : 'subscription'}
+            </button>
+          ))}
+        </div>
       </div>
 
       {route === 'subscription' ? (
-        <div className="v-cred__note">
+        <div className={NOTE}>
           Everything vibe does with {name} — every run turn and the pilot — goes through the{' '}
           <code>{bin}</code> CLI you are already logged into, and nothing is billed. An API key in
           your environment is removed from what <code>{bin}</code> sees, so it cannot quietly take
@@ -217,7 +257,7 @@ export function Vendor({ vendor, route, onRoute, cli, onCliPath, status, onKeysC
         </div>
       ) : (
         <>
-          <div className="v-cred__note">
+          <div className={NOTE}>
             Everything vibe does with {name} is billed to this key: every run turn goes through{' '}
             <code>{bin}</code> with the key as <code>{KEY_VAR[vendor]}</code>, and the pilot calls
             the API with it directly. Keys are held in the OS keychain and never written to a
@@ -230,7 +270,7 @@ export function Vendor({ vendor, route, onRoute, cli, onCliPath, status, onKeysC
 
       {/* The CLI on both roads: a run is always a `claude` or `codex` child,
           and the road only decides how that child is authenticated. */}
-      <div className="v-cred__note">
+      <div className={NOTE}>
         vibe looks for <code>{bin}</code> in this order: <code>{ENV_OF[vendor]}</code> if that is
         set, then the path below if you give one, then your <code>PATH</code> — preferring a real
         executable over a script shim — then the places {bin} usually installs to. If it found the
@@ -246,8 +286,8 @@ export function Vendor({ vendor, route, onRoute, cli, onCliPath, status, onKeysC
 export function KeychainFailure({ failure }: { failure: string | null }) {
   if (failure === null) return null;
   return (
-    <div className="v-cred__error">
-      <StateKicker tone="alarm">keychain</StateKicker> {failure}
+    <div className={ERROR}>
+      <Badge variant="alarm">keychain</Badge> {failure}
     </div>
   );
 }

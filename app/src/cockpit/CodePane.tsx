@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { MetaChip, StateKicker } from '../design';
+import { Badge } from '@/ui/badge';
 import { DiffPane } from './DiffPane';
 import { Section } from './Disclosure';
 import { work as describeWork } from './format';
+import { EMPTY, FILE, NOTE, PANE } from './pane';
 import { committed } from './rounds';
 import type { Run } from './model';
 
@@ -72,15 +73,15 @@ export function CodePane({
 
   if (dir.trim() === '') {
     return (
-      <div className="v-doc v-doc--empty">
-        <StateKicker tone="quiet">no repository</StateKicker>
-        <p>A diff is read with git, in a repository, and this window is not pointed at one.</p>
+      <div className={EMPTY}>
+        <Badge>no repository</Badge>
+        <p className="m-0 max-w-md">A diff is read with git, in a repository, and this window is not pointed at one.</p>
       </div>
     );
   }
 
   return (
-    <div className="v-doc">
+    <div className={PANE}>
       <Section
         open={open === WHOLE}
         onToggle={() => {
@@ -90,9 +91,9 @@ export function CodePane({
         title="everything since the base"
         meta={
           run.baseSha === null ? (
-            <MetaChip>no base</MetaChip>
+            <Badge>no base</Badge>
           ) : (
-            <code className="v-doc__file">{run.baseSha.slice(0, 7)}..HEAD</code>
+            <code className={FILE}>{run.baseSha.slice(0, 7)}..HEAD</code>
           )
         }
       >
@@ -101,8 +102,8 @@ export function CodePane({
       </Section>
 
       {rounds.length === 0 && (
-        <p className="v-doc__note">
-          <StateKicker tone="quiet">no rounds in the history</StateKicker> Nothing has been
+        <p className={NOTE}>
+          <Badge>no rounds in the history</Badge> Nothing has been
           committed under this run yet. A round that changed no files, a project with{' '}
           <code>git.commitEachRound</code> switched off and a directory that is not a repository
           all look the same from here — the run says which in the output.
@@ -129,14 +130,18 @@ export function CodePane({
               {/* The message names what the round was - `vibe: address review
                   round 2` - which is the loop's own sentence and not one
                   composed here from the phase. */}
-              {card.commit.message !== null && <MetaChip>{card.commit.message}</MetaChip>}
-              <code className="v-doc__file">
+              {card.commit.message !== null && (
+                <Badge className="normal-case tracking-normal">{card.commit.message}</Badge>
+              )}
+              <code className={FILE}>
                 {card.commit.since === null ? '(no parent)' : card.commit.since.slice(0, 7)}..
                 {card.commit.sha.slice(0, 7)}
               </code>
               {/* What the loop measured of the tree during that round, in
                   `src/work.ts`'s own words. Absent when no reading arrived. */}
-              {card.work !== null && <MetaChip>{describeWork(card.work)}</MetaChip>}
+              {card.work !== null && (
+                <Badge className="normal-case tracking-normal">{describeWork(card.work)}</Badge>
+              )}
             </>
           }
         >
@@ -145,7 +150,7 @@ export function CodePane({
             // has no left-hand end, so there is no range to ask for. Named with
             // its reason rather than answered with the whole history, which
             // would be a different diff wearing this round's label.
-            <p className="v-doc__note">
+            <p className={NOTE}>
               This is the first commit in the repository, so there is no earlier state to compare
               it against. <strong>Everything since the base</strong> above is the whole of it.
             </p>

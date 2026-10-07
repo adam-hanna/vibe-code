@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Plus } from 'lucide-react';
 import { LivenessDot } from '../design';
-import { Icon } from '../design/Icon';
+import { cn } from '@/lib/utils';
 import * as host from '../host';
 import { Confirm } from './Confirm';
 import { rail } from './squares';
@@ -40,6 +41,7 @@ import type { ReactNode } from 'react';
 import type { Pin, ProjectName, ProjectNode, RunName } from './projects';
 import type { RailRun } from './squares';
 import { draftsIn, settled } from './pending';
+import { memory, useMemoryFailure } from '../memory';
 import type { Draft } from './pending';
 import type { ArchiveRun } from '../host';
 
@@ -90,8 +92,8 @@ import type { ArchiveRun } from '../host';
  *
  * ## The four controls on a row, and which of them touch a disk
  *
- * Exactly one does. **Pin** and **rename** are this window's own memory and are
- * `localStorage`; they change nothing in any repository, which is why neither
+ * Exactly one does. **Pin** and **rename** are this window's own memory
+ * (`memory.ts`); they change nothing in any repository, which is why neither
  * confirms. **New run** in a project opens the composer with that project's
  * directory already settled — that is the whole of what *"In this window, I
  * shouldn't have to select the project folder, it's already known"* asked for,
@@ -106,6 +108,25 @@ import type { ArchiveRun } from '../host';
  * controls a pixel apart, one of which deletes files and one of which does not,
  * is exactly the pair a confirmation exists to keep separate.
  */
+
+/*
+ * The navigator's recurring styles, named once (the UI rework). Every colour is a
+ * token through `theme.css`.
+ */
+/**
+ * A row's controls: pin, rename, delete on a run; new-run and remove on a
+ * project. Quiet until the row is under the pointer, because a list of twenty
+ * runs with sixty glyphs down its right edge is a list nobody can scan.
+ */
+const ACT = 'flex-none cursor-pointer rounded-sm border-0 bg-transparent px-1.5 py-1 text-label text-tertiary opacity-0 hover:bg-card hover:text-emphasis focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent group-hover:opacity-100 group-focus-within:opacity-100';
+/** The row's main control: the whole width that is not a glyph opens the thing. */
+const OPEN = 'flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 border-0 bg-transparent p-2 text-left text-body text-secondary hover:text-emphasis focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent';
+/** A path or a name being typed. */
+const FIELD = 'w-full rounded-sm border border-rule-control bg-card p-2 font-mono text-mono-sm text-primary outline-none focus-visible:ring-1 focus-visible:ring-accent-border';
+/** A sentence in the list: a reading state, an empty project, a refusal. */
+const NOTE = 'px-2.5 py-1 text-body-sm leading-relaxed text-tertiary';
+/** A quiet text control at the foot of a list. */
+const MORE = 'cursor-pointer border-0 bg-transparent p-2 text-left text-body-sm text-tertiary hover:text-emphasis focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent';
 
 /** One project's archive, fetched when it opens. */
 interface Loaded {
@@ -165,7 +186,7 @@ function useArchive(
 function PinButton({ on, onToggle }: { on: boolean; onToggle: () => void }) {
   return (
     <button
-      className={`v-nav__act${on ? ' v-nav__act--on' : ''}`}
+      className={cn(ACT, on && 'text-accent opacity-100')}
       onClick={(e) => {
         // The row underneath opens a run. A pin is a note to yourself about one
         // and must never be the click that navigates.
@@ -211,14 +232,14 @@ function RenameRow({
   const [typed, setTyped] = useState(named ? title : '');
   return (
     <form
-      className="v-nav__row v-nav__row--rename"
+      className="flex min-h-9 items-center gap-1 rounded-sm py-1"
       onSubmit={(e) => {
         e.preventDefault();
         onDone(typed);
       }}
     >
       <input
-        className="v-nav__field"
+        className={cn(FIELD, "min-w-0 flex-1")}
         value={typed}
         onChange={(e) => setTyped(e.target.value)}
         onKeyDown={(e) => {
@@ -230,10 +251,10 @@ function RenameRow({
         aria-label={`name for this ${what}`}
         autoFocus
       />
-      <button className="v-nav__act" type="submit" title="Save this name">
+      <button className={cn(ACT, "opacity-100")} type="submit" title="Save this name">
         ✓
       </button>
-      <button className="v-nav__act" type="button" onClick={() => onDone(null)} title="Cancel">
+      <button className={cn(ACT, "opacity-100")} type="button" onClick={() => onDone(null)} title="Cancel">
         ✕
       </button>
     </form>
@@ -276,9 +297,9 @@ function RunRow({
   if (renaming) return <RenameRow title={title} named={title !== task} onDone={onRenamed} />;
 
   return (
-    <div className={`v-nav__row${current ? ' v-nav__row--on' : ''}`}>
+    <div className={cn('group flex min-h-9 items-center rounded-sm hover:bg-active-hdr', current && 'bg-accent-tint shadow-[inset_2px_0_0_var(--accent-base)] hover:bg-accent-tint')}>
       <button
-        className="v-nav__open"
+        className={OPEN}
         onClick={onOpen}
         // A second way to rename, for the row whose ✎ only shows on hover
         // (#223): *"I'd like to be able to rename projects and runs"* was asked
@@ -288,15 +309,15 @@ function RunRow({
       >
         {/* The archive's verdict, never one derived here. A run this window is
             showing gets the dot too, because it is the running one. */}
-        {live ? <LivenessDot state="live" /> : <span className="v-nav__bullet">·</span>}
-        <span className="v-nav__title">{title}</span>
+        {live ? <LivenessDot state="live" /> : <span className="w-4 flex-none text-label text-tertiary">·</span>}
+        <span className={cn('truncate', current && 'text-accent-on-tint')}>{title}</span>
       </button>
       <PinButton on={pinned} onToggle={onPin} />
-      <button className="v-nav__act" onClick={onRename} title="Rename this run">
+      <button className={ACT} onClick={onRename} title="Rename this run">
         ✎
       </button>
       {/* The only control in this row that reaches a disk. It opens a dialog. */}
-      <button className="v-nav__act v-nav__act--danger" onClick={onDelete} title="Delete this run">
+      <button className={ACT} onClick={onDelete} title="Delete this run">
         −
       </button>
     </div>
@@ -328,16 +349,16 @@ function DraftRow({
   onForget: () => void;
 }) {
   return (
-    <div className={`v-nav__row${current ? ' v-nav__row--on' : ''}`}>
-      <button className="v-nav__open" onClick={onOpen} title={title}>
-        <span className="v-nav__bullet">◌</span>
-        <span className="v-nav__title">{title}</span>
+    <div className={cn('group flex min-h-9 items-center rounded-sm hover:bg-active-hdr', current && 'bg-accent-tint shadow-[inset_2px_0_0_var(--accent-base)] hover:bg-accent-tint')}>
+      <button className={OPEN} onClick={onOpen} title={title}>
+        <span className="w-4 flex-none text-label text-tertiary">◌</span>
+        <span className={cn('truncate', current && 'text-accent-on-tint')}>{title}</span>
         {/* Said rather than styled: a row with no run behind it has to read as
             one, or the first click on it looks like a run that will not load. */}
-        <span className="v-nav__draft">{launched ? 'starting' : 'drafting'}</span>
+        <span className="ml-auto flex-none text-label lowercase text-tertiary">{launched ? 'starting' : 'drafting'}</span>
       </button>
       <button
-        className="v-nav__act v-nav__act--danger"
+        className={ACT}
         onClick={onForget}
         title="Discard this draft and its conversation"
       >
@@ -372,7 +393,6 @@ function Project({
   onRename,
   onRenamed,
   onDeleteRun,
-  onAll,
   onNewIn,
   onProjectSettings,
   onForget,
@@ -416,7 +436,6 @@ function Project({
   onRename: (dir: string, runId: string) => void;
   onRenamed: (name: string | null) => void;
   onDeleteRun: (dir: string, runId: string, title: string, task: string) => void;
-  onAll: (dir: string) => void;
   /** Start a run in THIS project, with its directory already settled. */
   onNewIn: (dir: string) => void;
   /** This project's own settings — its `vibe.config.json` (#223). */
@@ -465,20 +484,20 @@ function Project({
   }, [done, onSettled]);
 
   return (
-    <div className="v-nav__project">
+    <div className="flex flex-col">
       {renamingProject ? (
         <RenameRow title={label} named={named} what="project" onDone={onRenamedProject} />
       ) : (
-        <div className="v-nav__row v-nav__row--project">
+        <div className={cn('flex min-h-9 items-center rounded-sm border hover:bg-active-hdr', current ? 'border-rule-card' : 'border-transparent')}>
           <button
-            className="v-nav__open"
+            className={cn(OPEN, 'text-primary')}
             onClick={() => setOpen((o) => !o)}
             onDoubleClick={onRenameProject}
             aria-expanded={open}
             title={`${dir} — double-click to rename`}
           >
-            <span className="v-nav__folder">{open ? '▾' : '▸'}</span>
-            <span className={`v-nav__title${current ? ' v-nav__title--on' : ''}`}>
+            <span className="w-4 flex-none text-label text-tertiary">{open ? '▾' : '▸'}</span>
+            <span className={cn('truncate', current && 'text-emphasis')}>
               {label}
             </span>
           </button>
@@ -492,7 +511,7 @@ function Project({
               because the arrow on the left is the disclosure and a second control
               there would be a second thing that opens the section. */}
           <button
-            className="v-nav__act"
+            className={cn(ACT, 'opacity-100')}
             onClick={() => onProjectSettings(dir)}
             title={`Settings for ${label}`}
           >
@@ -500,18 +519,18 @@ function Project({
           </button>
           {/* Renaming a project names the row and nothing else: the directory is
               what every request sends, so it stays exactly what it is. */}
-          <button className="v-nav__act" onClick={onRenameProject} title={`Rename ${label}`}>
+          <button className={cn(ACT, 'opacity-100')} onClick={onRenameProject} title={`Rename ${label}`}>
             ✎
           </button>
           <button
-            className="v-nav__act"
+            className={cn(ACT, 'opacity-100')}
             onClick={() => onNewIn(dir)}
             title={`New run in ${label}`}
           >
             ＋
           </button>
           <button
-            className="v-nav__act v-nav__act--danger"
+            className={cn(ACT, 'opacity-100')}
             onClick={() => onForget(dir)}
             title={`Remove ${label} from this list`}
           >
@@ -521,10 +540,10 @@ function Project({
       )}
 
       {open && (
-        <div className="v-nav__runs">
-          {failure !== null && <span className="v-nav__note">{failure}</span>}
+        <div className="ml-2.5 flex flex-col border-l border-rule-structure pl-2">
+          {failure !== null && <span className={NOTE}>{failure}</span>}
           {failure === null && loading && runs.length === 0 && (
-            <span className="v-nav__note">reading…</span>
+            <span className={NOTE}>reading…</span>
           )}
           {mine.map((d) => (
             <DraftRow
@@ -537,7 +556,7 @@ function Project({
             />
           ))}
           {failure === null && !loading && runs.length === 0 && mine.length === 0 && (
-            <span className="v-nav__note">no runs here yet</span>
+            <span className={NOTE}>no runs here yet</span>
           )}
           {shown.map((r) => {
             // The name if there is one, the task if there is not. Resolved once,
@@ -566,15 +585,13 @@ function Project({
             );
           })}
           {hidden > 0 && (
-            <button className="v-nav__more" onClick={() => setMore(true)}>
+            <button className={MORE} onClick={() => setMore(true)}>
               Show {hidden} more
             </button>
           )}
-          {runs.length > 0 && (
-            <button className="v-nav__more" onClick={() => onAll(dir)}>
-              All runs, with status and cost
-            </button>
-          )}
+          {/* `1b` — all runs with status and cost — used to be a link here and
+              went at the owner's word; the palette's `All runs in this project`
+              is its route now. */}
           {nested}
         </div>
       )}
@@ -592,11 +609,8 @@ export function Sidebar({
   dir,
   epoch,
   currentId,
-  onNew,
   onNewIn,
-  onSettings,
   onProjectSettings,
-  onRuns,
   onShow,
   onProject,
   onDeleted,
@@ -611,15 +625,11 @@ export function Sidebar({
   /** Bumped when the lists were rewritten elsewhere — a project moved (#223). */
   epoch: number;
   currentId: string | null;
-  onNew: () => void;
   /** Compose a run in one project, with the directory already settled (#223). */
   onNewIn: (dir: string) => void;
-  /** The settings for all projects — the left bar's ⚙ (#223). */
-  onSettings: () => void;
-  /** One project's settings — the ⚙ on its row. */
+  /** One project's settings — the ⚙ on its row. The settings for all
+      projects are the activity bar's ⚙, not this panel's (#223). */
   onProjectSettings: (dir: string) => void;
-  /** Open `1b` for a project, which is where a lock can be overruled. */
-  onRuns: (dir: string) => void;
   onShow: (dir: string, runId: string, task: string) => void;
   /** Point the window at a project. */
   onProject: (dir: string) => void;
@@ -640,6 +650,8 @@ export function Sidebar({
   /** Which project has its rename box open, or null. */
   const [renamingProject, setRenamingProject] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
+  /** Why this window's lists are not being kept, if they are not (#223, `memory.ts`). */
+  const unkept = useMemoryFailure();
   const [typed, setTyped] = useState('');
   /** Which run has its rename box open, or null. At most one, sidebar-wide. */
   const [renaming, setRenaming] = useState<{ dir: string; runId: string } | null>(null);
@@ -668,10 +680,10 @@ export function Sidebar({
   // are this window's own memory, so every other write goes through the setters.
   useEffect(() => {
     try {
-      setProjects(readProjects(localStorage.getItem(PROJECTS_KEY)));
-      setPins(readPins(localStorage.getItem(PINNED_KEY)));
-      setNames(readNames(localStorage.getItem(NAMES_KEY)));
-      setProjectNames(readProjectNames(localStorage.getItem(PROJECT_NAMES_KEY)));
+      setProjects(readProjects(memory.getItem(PROJECTS_KEY)));
+      setPins(readPins(memory.getItem(PINNED_KEY)));
+      setNames(readNames(memory.getItem(NAMES_KEY)));
+      setProjectNames(readProjectNames(memory.getItem(PROJECT_NAMES_KEY)));
     } catch {
       // Storage can be unavailable or full. An empty sidebar is a smaller
       // failure than a window that will not render.
@@ -680,7 +692,7 @@ export function Sidebar({
 
   const save = useCallback((key: string, value: unknown) => {
     try {
-      localStorage.setItem(key, JSON.stringify(value));
+      memory.setItem(key, JSON.stringify(value));
     } catch {
       // The list still works for this session. See above.
     }
@@ -815,7 +827,7 @@ export function Sidebar({
    * Do what the open confirmation says, and nothing else.
    *
    * The two branches are as different as the dialog claims they are: forgetting
-   * a project touches `localStorage` and stops there, and deleting a run is a
+   * a project touches the window's memory and stops there, and deleting a run is a
    * host request that can be refused. The refusal stays on the dialog — a window
    * that closed on it would look exactly like one that had succeeded.
    */
@@ -906,7 +918,7 @@ export function Sidebar({
         holds={within(p, dir)}
         nested={
           node.children.length > 0 && (
-            <div className="v-nav__nested">
+            <div className="mt-1 flex flex-col border-l border-rule-inner">
               {node.children.map((c) => draw(c, p))}
             </div>
           )
@@ -932,7 +944,6 @@ export function Sidebar({
           setRefused(null);
           setPending({ kind: 'run', dir: d, runId, title, task });
         }}
-        onAll={onRuns}
         onNewIn={onNewIn}
         onProjectSettings={onProjectSettings}
         onForget={(d) => setPending({ kind: 'project', dir: d })}
@@ -941,7 +952,7 @@ export function Sidebar({
   };
 
   return (
-    <nav className="v-nav" aria-label="projects">
+    <nav className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto px-3 pt-3 pb-4" aria-label="projects">
       {pending !== null && pending.kind === 'run' && (
         <Confirm
           kicker="deletes files"
@@ -1017,15 +1028,13 @@ export function Sidebar({
         />
       )}
 
-      <div className="v-nav__actions">
-        <button className="v-nav__action v-nav__action--new" onClick={onNew}>
-          <span className="v-nav__glyph"><Icon name="plus" size={17} /></span> New run
-        </button>
-      </div>
-
+      {/* No `New run` at the head of this panel. The activity bar's ＋ (and ⌘N)
+          starts one where the window is pointed, and each project row's ＋
+          starts one there - a third button saying the same thing was asked
+          to go. */}
       {pins.length > 0 && (
-        <section className="v-nav__section">
-          <h3 className="v-nav__heading">Pinned</h3>
+        <section className="flex flex-col">
+          <h3 className="m-0 px-2.5 pb-3 text-chip uppercase tracking-[0.12em] text-tertiary">Pinned</h3>
           {pins.map((p) => {
             const title = nameOf(names, p.dir, p.runId, p.task);
             return (
@@ -1057,10 +1066,10 @@ export function Sidebar({
         </section>
       )}
 
-      <section className="v-nav__section">
-        <h3 className="v-nav__heading">Projects</h3>
+      <section className="flex flex-col">
+        <h3 className="m-0 px-2.5 pb-3 text-chip uppercase tracking-[0.12em] text-tertiary">Projects</h3>
         {projects.length === 0 && (
-          <span className="v-nav__note">
+          <span className={NOTE}>
             Your ideas need a home. Add a repository to get started.
           </span>
         )}
@@ -1070,19 +1079,22 @@ export function Sidebar({
             platform-shaped, and a typo in one does not fail at the field — it
             fails at preflight, minutes later, in a run that had to start to find
             out (#189). */}
-        <button className="v-nav__more" onClick={choose}>
-          <Icon name="plus" size={15} /> Add a project
+        <button
+          className="mt-3 flex cursor-pointer items-center gap-1.5 rounded-sm border border-dashed border-rule-control bg-transparent px-2.5 py-2 text-left text-body-sm text-tertiary hover:border-accent-border hover:bg-active hover:text-emphasis"
+          onClick={choose}
+        >
+          <Plus size={14} aria-hidden="true" /> Add a project
         </button>
         {adding && (
           <form
-            className="v-nav__add"
+            className="px-2 py-1"
             onSubmit={(e) => {
               e.preventDefault();
               addAndSay(typed);
             }}
           >
             <input
-              className="v-nav__field"
+              className={FIELD}
               value={typed}
               onChange={(e) => setTyped(e.target.value)}
               placeholder="path to a repository"
@@ -1092,21 +1104,29 @@ export function Sidebar({
           </form>
         )}
         {problem !== null && (
-          <span className="v-nav__note v-nav__note--alarm" role="alert">
+          <span className={cn(NOTE, 'rounded-sm bg-alarm text-primary')} role="alert">
             {problem}{' '}
-            <button className="v-nav__dismiss" onClick={() => setProblem(null)}>
+            <button className="cursor-pointer border-0 bg-transparent px-1 text-label text-tertiary underline hover:text-emphasis" onClick={() => setProblem(null)}>
               dismiss
             </button>
           </span>
         )}
       </section>
 
-      <div className="v-nav__footer">
-        <button className="v-nav__action" onClick={onSettings}>
-          <span className="v-nav__glyph"><Icon name="settings" size={17} /></span> Settings
-        </button>
-        {!host.inShell() && <p>Preview mode · run agents in the desktop app.</p>}
-      </div>
+      {/* No settings entry down here: the activity bar's ⚙ is the one door to
+          the settings for all projects, and a second one at the foot of this
+          panel was the same control drawn twice ("get rid of it"). */}
+      {/* A setting that is not being kept is said here, beside the lists it
+          would lose: a sidebar that quietly forgot its projects on the next
+          launch is the defect `memory.ts` exists to end. */}
+      {(unkept !== null || !host.inShell()) && (
+        <div className="mt-auto flex flex-col gap-2 border-t border-rule-structure pt-4">
+          {unkept !== null && <p className="m-0 px-3 text-label leading-relaxed text-loss">{unkept}</p>}
+          {!host.inShell() && (
+            <p className="m-0 px-3 text-label leading-relaxed text-tertiary">Preview mode · run agents in the desktop app.</p>
+          )}
+        </div>
+      )}
     </nav>
   );
 }

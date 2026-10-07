@@ -59,12 +59,15 @@ describe('the composer hands the brief to the pilot', () => {
   });
 
   test('the one control describes the conversation it actually starts', () => {
-    // `level="primary"` is the one the eye lands on and the one Enter triggers,
-    // and it is the only button besides cancel.
-    const foot = composer.slice(composer.indexOf('className="v-new__foot"'));
+    // `variant="primary"` is the one the eye lands on and the one Enter
+    // triggers, and it is the only button besides cancel. Case 2 (the UI
+    // rework): the foot is found by its utilities and the button by the new
+    // Button's `variant` prop; the claim is unchanged.
+    const foot = composer.slice(composer.indexOf('className="flex justify-end gap-2 border-t'));
+    expect(foot.length).toBeGreaterThan(0);
     // A run starts later, on the pilot's proposal. Calling this "start" hid
     // that distinction; the new wording makes the existing behavior explicit.
-    expect(foot).toMatch(/level="primary" type="submit"[^>]*>\s*Discuss with pilot\s*</);
+    expect(foot).toMatch(/variant="primary" type="submit"[^>]*>\s*Discuss with pilot\s*</);
     expect(foot.match(/<Button/g)).toHaveLength(2);
   });
 });

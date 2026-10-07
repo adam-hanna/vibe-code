@@ -139,9 +139,15 @@ export function Modal({
     return () => window.removeEventListener('keydown', onKey);
   }, [onDismiss]);
 
+  // Styled with utilities (the UI rework), and every rule the stylesheet carried
+  // is here: the scrim is fixed over the whole window at z-50, above the palette;
+  // the dialog is bounded by the viewport (`max-h`) and the body is the flex item
+  // that shrinks and scrolls (`min-h-0`), so a dialog's own actions stay
+  // reachable however long its content is. `audit:contrast` §10 reads these two
+  // classes off this file.
   return (
     <div
-      className="v-scrim"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-page/60"
       // On the scrim rather than the dialog so a keystroke lands whatever has
       // focus inside it, and `autoFocus`-free: taking focus on mount would move
       // it away from whatever the user was typing in behind the modal.
@@ -154,14 +160,17 @@ export function Modal({
       {/* Deliberately not dismissed by clicking the scrim. Every dialog here
           guards something expensive - ending a run, launching one, deleting one -
           and a stray click outside is not an intention. Escape is. */}
-      <div className="v-modal" style={{ width }} role="dialog" aria-modal="true" aria-label={label}>
-        {/* The scrolling half, and the reason it is a wrapper rather than
-            `overflow` on `.v-modal` itself: the corner marks are absolutely
-            positioned against the dialog, and a scrolling dialog would scroll
-            two of the four out of view — the marks and the one shadow are what
-            carry elevation in this palette, so losing them on a long dialog
-            loses the elevation exactly when there is most to look at. */}
-        <div className="v-modal__body">{children}</div>
+      <div
+        className="relative flex max-h-[calc(100vh-44px)] max-w-[calc(100vw-32px)] flex-col rounded-lg border border-rule-strong bg-card p-6 shadow-overlay"
+        style={{ width }}
+        role="dialog"
+        aria-modal="true"
+        aria-label={label}
+      >
+        {/* The scrolling half, a wrapper rather than `overflow` on the dialog
+            itself, so the dialog keeps its border and shadow while a long body
+            scrolls inside it. */}
+        <div className="min-h-0 flex-1 overflow-y-auto">{children}</div>
       </div>
     </div>
   );

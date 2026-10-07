@@ -148,7 +148,9 @@ describe('the row’s controls, and which of them reach a disk', () => {
     const from = newWorkstream.indexOf('{locked ? (');
     expect(from).toBeGreaterThan(-1);
     const fixed = newWorkstream.slice(from, newWorkstream.indexOf(') : (', from));
-    expect(fixed).toMatch(/v-new__fixed/);
+    // The path, stated as a monospace code element rather than offered as a
+    // field (case 2, the UI rework: found by its utilities, not a class).
+    expect(fixed).toMatch(/<code className="[^"]*font-mono[^"]*">\{dir\}<\/code>/);
     expect(fixed).not.toMatch(/<input/);
     expect(fixed).not.toMatch(/onClick=\{choose\}/);
   });
@@ -320,14 +322,18 @@ describe('a dialog cannot outgrow the window it is covering', () => {
     // modal bound is checked by `audit:contrast` §10 — vitest stubs a CSS import
     // to the empty string, `?raw` included, and that script reads the file.
     expect(sidebar).toMatch(/label: 'asked to', value: pending\.task, scroll: true/);
-    expect(confirm).toMatch(/v-confirm__value--scroll/);
+    // Case 2 (the UI rework): the scrolling row is a set of utilities on the
+    // value rather than a class, and the claim is the same - a `scroll` fact
+    // is capped and scrolls.
+    expect(confirm).toMatch(/fact\.scroll === true && 'max-h-\d+ overflow-y-auto/);
   });
 
-  test('the modal body is a wrapper, so the corner marks do not scroll away', () => {
+  test('the modal body is a wrapper, so the frame keeps its border while the body scrolls', () => {
     // The structural half, and the one that protects every dialog rather than
     // the one that broke. Nothing inside a modal can bound what a caller passes
-    // into it, so the frame has to bound itself.
-    expect(surfaces).toMatch(/<div className="v-modal__body">\{children\}<\/div>/);
+    // into it, so the frame has to bound itself. Case 2 (the UI rework): the
+    // wrapper is found by its utilities rather than a class.
+    expect(surfaces).toMatch(/<div className="min-h-0 flex-1 overflow-y-auto">\{children\}<\/div>/);
   });
 
   test('escape leaves from anywhere, not only from inside the dialog', () => {

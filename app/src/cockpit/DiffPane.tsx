@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { DiffRow, HunkHeader, MetaChip, StateKicker, TruncationBand } from '../design';
+import { DiffRow, HunkHeader, TruncationBand } from '../design';
+import { Badge } from '@/ui/badge';
+import { Button } from '@/ui/button';
+import { cn } from '@/lib/utils';
 import * as host from '../host';
+import { BLOCK, EMPTY, FIELD, PANE } from './pane';
 import { raiseBlock } from './raise';
 import type { Severity } from '../design';
 
@@ -90,6 +94,9 @@ function parseDiff(patch: string): Hunk[] {
 
 const SEVERITIES: readonly Severity[] = ['P0', 'P1', 'P2', 'P3'];
 
+/** The head of the pane or of the composer: a sentence and a control. */
+const HEAD = 'flex items-baseline gap-3 text-body-sm text-tertiary [&_code]:font-mono [&_code]:text-mono-sm [&_code]:text-secondary';
+
 export function DiffPane({
   dir,
   baseSha,
@@ -156,9 +163,9 @@ export function DiffPane({
     // Named, with the reason. Asking for a diff with no base is the request that
     // would stage the user's whole working tree.
     return (
-      <div className="v-dp v-dp--empty">
-        <StateKicker tone="quiet">no base yet</StateKicker>
-        <p>
+      <div className={cn(EMPTY, 'flex-none')}>
+        <Badge>no base yet</Badge>
+        <p className="m-0 max-w-md">
           A diff is taken against the commit the implement phase marks, and this run has not
           reached it. Nothing is guessed here: a diff with no base would stage your whole working
           tree before it read anything.
@@ -169,30 +176,30 @@ export function DiffPane({
 
   if (failure !== null) {
     return (
-      <div className="v-dp v-dp--empty">
-        <StateKicker tone="alarm">no diff</StateKicker>
-        <p>{failure}</p>
-        <button className="v-dp__again" onClick={load}>
+      <div className={cn(EMPTY, 'flex-none')}>
+        <Badge variant="alarm">no diff</Badge>
+        <p className="m-0 max-w-md">{failure}</p>
+        <Button variant="secondary" size="sm" onClick={load}>
           try again
-        </button>
+        </Button>
       </div>
     );
   }
 
   if (patch === null) {
     return (
-      <div className="v-dp v-dp--empty">
-        <StateKicker tone="quiet">reading</StateKicker>
-        <p>asking the host for the diff since {baseSha.slice(0, 7)}…</p>
+      <div className={cn(EMPTY, 'flex-none')}>
+        <Badge>reading</Badge>
+        <p className="m-0 max-w-md">asking the host for the diff since {baseSha.slice(0, 7)}…</p>
       </div>
     );
   }
 
   if (hunks.length === 0) {
     return (
-      <div className="v-dp v-dp--empty">
-        <StateKicker tone="quiet">nothing changed</StateKicker>
-        <p>
+      <div className={cn(EMPTY, 'flex-none')}>
+        <Badge>nothing changed</Badge>
+        <p className="m-0 max-w-md">
           Nothing has changed since {baseSha.slice(0, 7)}. That is a measurement, not a failure to
           read one.
         </p>
@@ -203,15 +210,17 @@ export function DiffPane({
   const block = at === null ? '' : raiseBlock({ ...at, title, detail, fix, severity });
 
   return (
-    <div className="v-dp">
-      <div className="v-dp__head">
+    // `flex-none` and no padding of its own: this pane is drawn inside a
+    // disclosure section of the Code pane, which has both.
+    <div className={cn(PANE, 'flex-none overflow-auto p-0')}>
+      <div className={HEAD}>
         <span>
           {hunks.length} hunk{hunks.length === 1 ? '' : 's'} since{' '}
           <code>{baseSha.slice(0, 7)}</code>
         </span>
-        <button className="v-dp__again" onClick={load}>
+        <Button variant="quiet" size="sm" onClick={load}>
           reread
-        </button>
+        </Button>
       </div>
 
       {/* The band is a judgement about what the REVIEWER read, so it is drawn
@@ -224,30 +233,35 @@ export function DiffPane({
         </TruncationBand>
       )}
 
+      {/* Propose only: the composer builds the block and nothing is sent. */}
       {at !== null && (
-        <form className="v-dp__composer" onSubmit={(e) => e.preventDefault()}>
-          <div className="v-dp__head">
-            <StateKicker tone="accent">a finding at</StateKicker>
+        <form
+          className="flex flex-col gap-2 rounded-md border border-accent-border bg-card p-3"
+          onSubmit={(e) => e.preventDefault()}
+        >
+          <div className={HEAD}>
+            <Badge variant="accent">a finding at</Badge>
             <code>
               {at.file}:{at.line}
             </code>
-            <button type="button" className="v-dp__again" onClick={() => setAt(null)}>
+            <Button variant="quiet" size="sm" className="ml-auto" onClick={() => setAt(null)}>
               close
-            </button>
+            </Button>
           </div>
 
           <input
-            className="v-dp__field"
+            className={FIELD}
             placeholder="one line saying what is wrong"
             value={title}
             onChange={(e) => setTitle(e.target.value)}
           />
-          <div className="v-dp__sevs">
+          <div className="flex gap-3">
             {SEVERITIES.map((s) => (
-              <label key={s} className="v-dp__sev">
+              <label key={s} className="flex cursor-pointer items-center gap-1 text-label uppercase tracking-label text-secondary">
                 <input
                   type="radio"
                   name="severity"
+                  className="accent-accent"
                   checked={severity === s}
                   onChange={() => setSeverity(s)}
                 />
@@ -256,21 +270,21 @@ export function DiffPane({
             ))}
           </div>
           <textarea
-            className="v-dp__field"
+            className={cn(FIELD, 'resize-y')}
             rows={3}
             placeholder="what is wrong, in detail"
             value={detail}
             onChange={(e) => setDetail(e.target.value)}
           />
           <textarea
-            className="v-dp__field"
+            className={cn(FIELD, 'resize-y')}
             rows={2}
             placeholder="what would fix it"
             value={fix}
             onChange={(e) => setFix(e.target.value)}
           />
 
-          <pre className="v-dp__block">{block}</pre>
+          <pre className={cn(BLOCK, 'max-h-[24vh]')}>{block}</pre>
 
           {/*
             Propose only. There is no "raise" button because there is no frame
@@ -279,10 +293,11 @@ export function DiffPane({
             where the grounding rule, the gate's count and `finding_reraised` all
             already live.
           */}
-          <div className="v-dp__foot">
-            <button
-              type="button"
-              className="v-dp__again"
+          <div className="flex items-start gap-3">
+            <Button
+              variant="secondary"
+              size="sm"
+              className="flex-none"
               onClick={() => {
                 void navigator.clipboard
                   .writeText(block)
@@ -294,8 +309,8 @@ export function DiffPane({
               }}
             >
               {copied ? 'copied' : 'copy the block'}
-            </button>
-            <span className="v-dp__note">
+            </Button>
+            <span className="max-w-[62ch] text-body-sm text-tertiary">
               Paste this under <strong>Raise a finding</strong> in the run&apos;s{' '}
               <code>NEEDS-INPUT.md</code> and resume. A P0 or P1 whose <code>*File:*</code> line
               does not resolve is carried as a P2 with the reason recorded — the same rule the
@@ -306,9 +321,9 @@ export function DiffPane({
       )}
 
       {hunks.map((hunk, i) => (
-        <section key={`${hunk.file}-${String(i)}`} className="v-dp__section">
+        <section key={`${hunk.file}-${String(i)}`} className="flex flex-col">
           <HunkHeader>
-            {hunk.file} <MetaChip>{hunk.header}</MetaChip>
+            {hunk.file} <Badge className="font-mono normal-case tracking-normal">{hunk.header}</Badge>
           </HunkHeader>
           {hunk.rows.map((row, j) => {
             const number = hunk.line + j;
@@ -322,7 +337,7 @@ export function DiffPane({
                 // eslint-disable-next-line react/no-array-index-key
                 key={j}
                 type="button"
-                className="v-dp__line"
+                className="block w-full cursor-pointer border-0 bg-transparent p-0 text-left text-inherit"
                 onClick={() => {
                   setAt({ file: hunk.file, line: number });
                   setCopied(false);

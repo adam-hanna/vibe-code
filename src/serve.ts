@@ -9,7 +9,7 @@ import { pilotCodex } from '@src/pilotcodex.js';
 import { cliStatus } from '@src/clipaths.js';
 import { acceptKeys } from '@src/heldkeys.js';
 import { pilotFs, pilotRoots, readPilotAccess, resolvedAccess } from '@src/pilotaccess.js';
-import { chatDir, listChats, saveChat } from '@src/chatstore.js';
+import { chatDir, listChats, listEntries, memoryDir, saveChat, saveEntry } from '@src/chatstore.js';
 import type { PilotAccess } from '@src/pilotaccess.js';
 import { promptBlocks } from '@src/prompts.js';
 import * as log from '@src/log.js';
@@ -599,6 +599,28 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
         } else {
           saveChat(dir, msg.key, msg.value);
           send({ type: 'chat_saved', id: msg.id, key: msg.key });
+        }
+      } catch (err: unknown) {
+        send({ type: 'error', id: msg.id, message: err instanceof Error ? err.message : String(err) });
+      }
+      return;
+    }
+
+    if (msg.type === 'memory' || msg.type === 'memory_save') {
+      // The chats' twin, in a directory of its own (#223). Refused rather than
+      // defaulted without the data directory, for the chats' reason: a
+      // directory this process picked is one the next launch may not look in.
+      const dir = memoryDir();
+      if (dir === null) {
+        send({ type: 'error', id: msg.id, message: 'this host was not told where the app keeps its data (VIBE_APP_DATA)' });
+        return;
+      }
+      try {
+        if (msg.type === 'memory') {
+          send({ type: 'memory', id: msg.id, entries: listEntries(dir) });
+        } else {
+          saveEntry(dir, msg.key, msg.value);
+          send({ type: 'memory_saved', id: msg.id, key: msg.key });
         }
       } catch (err: unknown) {
         send({ type: 'error', id: msg.id, message: err instanceof Error ? err.message : String(err) });

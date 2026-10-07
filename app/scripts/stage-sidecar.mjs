@@ -14,7 +14,7 @@
 // relying on a runtime default for whether our own ESM parses is the kind of
 // thing that breaks on a machine we do not own. Stating `"type": "module"` makes
 // it ours.
-import { execFileSync } from 'node:child_process';
+import { execFileSync, execSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -64,6 +64,14 @@ function bytes(dir) {
 const mb = (n) => `${(n / 1_000_000).toFixed(1)} MB`;
 
 const built = path.join(repo, 'dist', 'src');
+// Compiled here, every time, rather than copied as found. `beforeBuildCommand`
+// runs the APP's `npm run build`, which is the webview, so nothing in the bundle
+// build ever compiled the core: `dist/src` was whatever the last root build or
+// `npm test` happened to leave, and a host-side fix could be committed, pass its
+// tests and still not be in the app. Found on 2026-10-06 checking why an opened
+// run's Code tab still said "No base yet" after the replay learned to carry the
+// base. A shell, because `npm` is `npm.cmd` on Windows and only a shell runs it.
+execSync('npm run build', { cwd: repo, stdio: 'inherit' });
 if (!existsSync(path.join(built, 'hostmain.js'))) {
   console.error(`No built core at ${built}. Run \`npm run build\` in the repo root first.`);
   process.exit(1);

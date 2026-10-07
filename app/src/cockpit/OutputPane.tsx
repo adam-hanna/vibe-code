@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { LivenessDot, MetaChip } from '../design';
+import { LivenessDot } from '../design';
+import { Badge } from '@/ui/badge';
+import { Button } from '@/ui/button';
+import { cn } from '@/lib/utils';
 import { elapsed } from './format';
 import { groups, readTranscript } from './outgroups';
 import { noText, useArtifact } from './useArtifacts';
@@ -70,6 +73,20 @@ const SAID = 'model_said';
  */
 
 /**
+ * The colour a line's message takes, by the level the loop stamped on it. The
+ * loop's own steps and headings read at emphasis, an `ok` in the live green, a
+ * warning or an error at primary weight, and detail at the floor.
+ */
+const LEVEL: Readonly<Record<string, string>> = {
+  heading: 'text-emphasis',
+  step: 'text-emphasis',
+  ok: 'text-live',
+  warn: 'text-primary',
+  error: 'text-primary',
+  detail: 'text-tertiary',
+};
+
+/**
  * Hi-fi 1's turn strip, above the pane.
  *
  * `implement · claude/opus · medium · bypassPermissions · follow ✓` in the
@@ -86,21 +103,22 @@ const SAID = 'model_said';
  */
 function TurnStrip({ turn, staleness }: { turn: Turn; staleness: Staleness }) {
   return (
-    <div className="v-turnstrip">
-      <span className="v-turnstrip__who">
+    <div className="flex flex-none flex-wrap items-center gap-3 border-b border-rule-structure bg-column px-6 py-3">
+      <span className="text-body-sm text-emphasis">
         {turn.role} · {turn.kind}
       </span>
-      {turn.round !== null && <MetaChip kind="checkable">round {turn.round}</MetaChip>}
+      {turn.round !== null && <Badge className="font-mono normal-case tracking-normal">round {turn.round}</Badge>}
       {/* Not the config's role table. See above. */}
-      <MetaChip>model, effort and permission mode — no turn frame carries them</MetaChip>
+      <Badge className="normal-case tracking-normal">model, effort and permission mode — no turn frame carries them</Badge>
       {/* The design's `working · last activity 8s ago`, drawn from `7c`'s two
           clocks rather than from one. `outputMs` is how long the CHILD has been
           silent, which is the half a person is actually asking about; a beat
           fires on a timer whether or not the child said anything, so its
           arrival proves vibe is alive and proves nothing about the turn.
           Absent, with the reason, when the child has written nothing at all —
-          which is a different fact from zero. */}
-      <span className="v-turnstrip__live">
+          which is a different fact from zero. Pushed right, and tabular because
+          it re-renders every second. */}
+      <span className="ml-auto flex items-center gap-2 font-mono text-mono-sm tabular-nums text-tertiary">
         <LivenessDot state={staleness.state === 'live' ? 'live' : 'quiet'} />
         {staleness.outputMs === null
           ? 'nothing written yet this turn'
@@ -110,7 +128,13 @@ function TurnStrip({ turn, staleness }: { turn: Turn; staleness: Staleness }) {
   );
 }
 
-/** One round's lines, under a heading that opens and shuts. */
+/**
+ * One round's lines, under a heading that opens and shuts.
+ *
+ * `flex-none`, for the reason the disclosure section has it: this is a flex item
+ * inside a scrolling column, and a clipped overflow would otherwise resolve its
+ * automatic minimum size to zero and let it clip instead of the pane scrolling.
+ */
 function Group({
   group,
   open,
@@ -124,38 +148,49 @@ function Group({
   last: boolean;
 }) {
   return (
-    <section className={`v-og${open ? ' v-og--open' : ''}`}>
-      <button className="v-og__head" onClick={onToggle} aria-expanded={open}>
-        <span className="v-og__caret">{open ? '▾' : '▸'}</span>
-        <span className="v-og__title">{group.title}</span>
-        <span className="v-og__count">
+    <section className="flex-none overflow-hidden border-b border-rule-inner">
+      <button
+        type="button"
+        className="flex w-full cursor-pointer items-center gap-2 border-0 bg-transparent py-2 text-left text-inherit outline-none hover:bg-active-hdr focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent"
+        onClick={onToggle}
+        aria-expanded={open}
+      >
+        <span className="w-[1.2ch] flex-none text-label text-tertiary" aria-hidden="true">{open ? '▾' : '▸'}</span>
+        <span className="text-body-sm font-semibold text-emphasis">{group.title}</span>
+        <span className="ml-auto text-body-sm text-tertiary">
           {group.lines.length} line{group.lines.length === 1 ? '' : 's'}
         </span>
         {/* A shut group that holds a warning says so, because the reason to
             collapse a run is to find the part that went wrong in it. */}
-        {group.alarming && !open && <MetaChip kind="alarm">warnings</MetaChip>}
-        {last && <MetaChip>latest</MetaChip>}
+        {group.alarming && !open && <Badge variant="alarm">warnings</Badge>}
+        {last && <Badge>latest</Badge>}
       </button>
       {open && (
-        <ol className="v-output__lines">
+        <ol className="m-0 list-none p-0">
           {group.lines.map((line) => (
             <li
               key={line.n}
-              className={`v-output__line v-output__line--${line.level}${
-                line.id === SAID ? ' v-output__line--said' : ''
-              }`}
-            >
-              {/* **The model's own words are drawn as the model's.** A line the
-                  agent wrote and a line the loop wrote are two different kinds
-                  of claim, and running them together at one weight is how a
-                  reader comes to believe vibe said something the model did. The
-                  id is what separates them — never the sentence. The rule is
-                  set on `id`, so it is the same seam every other decision in
-                  this window is made on. */}
-              {line.id !== null && line.id !== SAID && (
-                <span className="v-output__id">{line.id}</span>
+              className={cn(
+                'py-1 font-mono text-mono-sm leading-relaxed text-secondary',
+                line.id === SAID
+                  // **The model's own words are drawn as the model's.** A line the
+                  // agent wrote and a line the loop wrote are two different kinds
+                  // of claim, and running them together at one weight is how a
+                  // reader comes to believe vibe said something the model did. A
+                  // rule down the left and the paragraph shape kept, because this
+                  // is the one thing in the pane that is a quotation. The rule is
+                  // set on `id`, never on the sentence.
+                  ? 'my-2 block whitespace-pre-wrap border-l-2 border-rule-inner pl-3 text-primary [overflow-wrap:anywhere]'
+                  : 'flex gap-3 whitespace-pre-wrap [overflow-wrap:anywhere]',
               )}
-              <span className="v-output__msg">{line.message}</span>
+            >
+              {/* The id beside the sentence, never instead of it. The seam is additive. */}
+              {line.id !== null && line.id !== SAID && (
+                <span className="min-w-29 flex-none text-tertiary">{line.id}</span>
+              )}
+              <span className={cn('min-w-0 flex-1', line.id === SAID ? undefined : LEVEL[line.level])}>
+                {line.message}
+              </span>
             </li>
           ))}
         </ol>
@@ -217,33 +252,34 @@ export function OutputPane({
   const newest = shown[shown.length - 1]?.key ?? null;
 
   return (
-    <div className="v-outwrap">
+    <div className="flex min-h-0 flex-1 flex-col">
       {/* Hi-fi 1 puts a turn strip above this pane. Absent between turns rather
           than showing the last role that ran, which is what `1c` means by
           *never inferred*. */}
       {turn !== null && <TurnStrip turn={turn} staleness={staleness} />}
 
-      <div className="v-output__head">
+      <div className="flex flex-none items-center gap-3 border-b border-rule-inner bg-chrome px-6 py-2 text-body-sm text-tertiary">
         <span>
           {source.length} line{source.length === 1 ? '' : 's'} in {shown.length} group
           {shown.length === 1 ? '' : 's'}
         </span>
         {/* Never inferred. A stretch with no turn open says so rather than
             naming the role that most recently ran under a different one. */}
-        {role !== null && <MetaChip>{role} was running</MetaChip>}
-        <button className="v-output__filter" onClick={() => setClosed(new Set())}>
+        {role !== null && <Badge>{role} was running</Badge>}
+        <Button variant="quiet" size="sm" onClick={() => setClosed(new Set())}>
           open all
-        </button>
-        <button
-          className="v-output__filter"
+        </Button>
+        <Button
+          variant="quiet"
+          size="sm"
           onClick={() => setClosed(new Set(shown.map((g) => g.key)))}
         >
           collapse all
-        </button>
+        </Button>
       </div>
 
       <div
-        className="v-output"
+        className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-page px-6 py-3"
         onScroll={(e) => {
           const el = e.currentTarget;
           pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
@@ -265,7 +301,7 @@ export function OutputPane({
           />
         ))}
         {source.length === 0 && (
-          <div className="v-output__empty">
+          <div className="p-3 text-body-sm text-tertiary">
             {past === null
               ? 'the run has not said anything yet'
               : missing !== null
@@ -281,8 +317,10 @@ export function OutputPane({
       {/* Named rather than left implied, the way the launching row names its
           missing ETA. Hi-fi 1 draws a tool timeline here and the data for one
           is on 34 of 265 recorded turns, so what would be drawn is 13% of a
-          pane presented as all of it. */}
-      <div className="v-output__unbuilt">
+          pane presented as all of it. A footnote tier: it is a statement about
+          the pane rather than anything in it, so it takes the floor colour and
+          sits under the scroll rather than in it. */}
+      <div className="flex-none border-t border-rule-inner px-6 py-2 text-body-sm text-tertiary">
         These are the loop&apos;s own lines. What the agent <em>did</em> — each read, each edit
         and its size — is not here: the core records tool items on a minority of turns, and
         reconstructing a timeline by reading these sentences is the one thing this pane must

@@ -319,12 +319,17 @@ console.log('\n9 · the element reset leaves no user-agent ground showing');
   }
   // And the three that had the bug now say what colour they are, rather than
   // inheriting one that was only ever correct against a ground they did not have.
-  const cockpit = readFileSync(path.join(here, '..', 'src', 'cockpit', 'cockpit.css'), 'utf8');
-  const tab = /\.v-cockpit__tab\s*\{([^}]*)\}/.exec(cockpit.replace(/\/\*[\s\S]*?\*\//g, ''));
-  if (tab === null || !/color\s*:/.test(tab[1] ?? '')) {
-    fail('.v-cockpit__tab does not state its own colour');
+  //
+  // The tab moved out of the stylesheet with the UI rework: its look is the
+  // `TAB` constant in `Cockpit.tsx`, a string of utilities, so the check reads
+  // that file and asks the same question of it - does the tab name a text colour
+  // and a ground of its own, rather than inheriting whatever a button gets.
+  const cockpit = readFileSync(path.join(here, '..', 'src', 'cockpit', 'Cockpit.tsx'), 'utf8');
+  const tab = /const TAB =\s*'([^']*)'/.exec(cockpit);
+  if (tab === null || !/\btext-(primary|secondary|tertiary|emphasis|display)\b/.test(tab[1] ?? '') || !/\bbg-\w/.test(tab[1] ?? '')) {
+    fail('the main pane tab (TAB in Cockpit.tsx) does not state its own colour and ground');
   } else {
-    pass('.v-cockpit__tab states its own colour');
+    pass('the main pane tab states its own colour and ground');
   }
 }
 
@@ -343,24 +348,26 @@ console.log('\n9 · the element reset leaves no user-agent ground showing');
 // invariant, not a fact about whichever screen last broke it.
 console.log('\n10 · a dialog cannot outgrow the window it is covering');
 {
-  const components = readFileSync(
-    path.join(here, '..', 'src', 'design', 'components.css'),
-    'utf8',
-  ).replace(/\/\*[\s\S]*?\*\//g, '');
-  const modal = /(^|\})\s*\.v-modal\s*\{([^}]*)\}/m.exec(components)?.[2] ?? '';
-  if (!/max-height\s*:/.test(modal)) {
-    fail('.v-modal has no max-height, so a long dialog can push its own actions off screen');
+  // The modal moved out of the stylesheet with the UI rework: its look is a
+  // string of utilities in `Surfaces.tsx`, so the check reads that file and asks
+  // the same two questions of it.
+  const surfaces = readFileSync(path.join(here, '..', 'src', 'design', 'Surfaces.tsx'), 'utf8');
+  const dialog = /role="dialog"/.test(surfaces)
+    ? (surfaces.slice(0, surfaces.indexOf('role="dialog"')).split('className=').pop() ?? '')
+    : '';
+  if (!/\bmax-h-\[/.test(dialog)) {
+    fail('the Modal has no max-h, so a long dialog can push its own actions off screen');
   } else {
-    pass('.v-modal is bounded by the viewport');
+    pass('the Modal is bounded by the viewport');
   }
-  // The bound alone would only clip. The body is what scrolls, and `min-height`
+  // The bound alone would only clip. The body is what scrolls, and `min-h-0`
   // is what lets it: a flex item's automatic minimum size is its content, so
   // without it the body refuses to shrink and the dialog grows past the bound.
-  const body = /(^|\})\s*\.v-modal__body\s*\{([^}]*)\}/m.exec(components)?.[2] ?? '';
-  if (!/overflow-y\s*:\s*auto/.test(body) || !/min-height\s*:\s*0/.test(body)) {
-    fail('.v-modal__body does not scroll (it needs both `min-height: 0` and `overflow-y: auto`)');
+  const body = /<div className="([^"]*)">\{children\}<\/div>/.exec(surfaces)?.[1] ?? '';
+  if (!/\boverflow-y-auto\b/.test(body) || !/\bmin-h-0\b/.test(body)) {
+    fail('the Modal body does not scroll (it needs both `min-h-0` and `overflow-y-auto`)');
   } else {
-    pass('.v-modal__body scrolls inside the bound');
+    pass('the Modal body scrolls inside the bound');
   }
 }
 console.log(`\n${checks} checks passed, ${failures} failed\n`);

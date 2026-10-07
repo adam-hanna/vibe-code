@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import type { ReactNode } from 'react';
+import { cn } from '@/lib/utils';
 
 /**
  * The one disclosure gesture, at every level it appears (#223).
@@ -15,8 +16,10 @@ import type { ReactNode } from 'react';
  */
 
 export function Caret({ open }: { open: boolean }) {
+  // `ch` rather than a pixel width so the two glyphs occupy exactly the same
+  // space and a section does not shift sideways when it opens.
   return (
-    <span className="v-disclose" aria-hidden="true">
+    <span className="inline-block w-[1.2ch] flex-none text-tertiary" aria-hidden="true">
       {open ? '▾' : '▸'}
     </span>
   );
@@ -77,19 +80,33 @@ export function Section({
     ref.current?.scrollIntoView?.({ block: 'start', behavior: 'smooth' });
   }, [reveal, open]);
 
+  // `flex-none` is what makes an opened section scrollable, and the reason is
+  // the clipped overflow beside it: a flex item's automatic minimum size resolves
+  // to zero when `overflow` is anything but `visible`, so a section holding a
+  // nine-page plan shrank to whatever height was left and the pane never
+  // scrolled. The clip stays - it is what keeps the head's hover ground inside
+  // the border - and this says the section keeps its content height regardless.
   return (
-    <section className={`v-sect${open ? ' v-sect--open' : ''}`} id={id} ref={ref}>
+    <section className="flex-none overflow-clip rounded-md border border-rule-card bg-card" id={id} ref={ref}>
       <button
         type="button"
-        className="v-sect__head"
+        className={cn(
+          'flex w-full cursor-pointer items-center gap-2 border-0 bg-chrome px-4 py-3.5 text-left text-inherit outline-none hover:bg-active-hdr focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-accent',
+          open && 'border-b border-rule-inner',
+        )}
         onClick={onToggle}
         aria-expanded={open}
       >
         <Caret open={open} />
-        <span className="v-sect__title">{title}</span>
-        {meta !== undefined && <span className="v-sect__meta">{meta}</span>}
+        <span className="text-body-sm font-semibold text-emphasis">{title}</span>
+        {/* `auto` margin rather than `space-between` on the parent: the row is
+            three children and spreading them would push the caret away from the
+            title it opens. */}
+        {meta !== undefined && (
+          <span className="ml-auto flex flex-wrap items-center justify-end gap-2">{meta}</span>
+        )}
       </button>
-      {open && <div className="v-sect__body">{children}</div>}
+      {open && <div className="flex flex-col gap-3 p-4.5">{children}</div>}
     </section>
   );
 }

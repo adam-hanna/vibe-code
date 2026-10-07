@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { MetaChip, StateKicker } from '../design';
+import { Badge } from '@/ui/badge';
+import { Button } from '@/ui/button';
 import { Section } from './Disclosure';
 import { ofKind, planText } from './artifacts';
+import { DOCUMENT, EMPTY, FILE, HEAD, NOTE, PANE } from './pane';
 import { useArtifact, useArtifacts, noText } from './useArtifacts';
 import type { Classified } from './artifacts';
 
@@ -53,12 +55,12 @@ function PlanBody({
   const missing = noText(read, failure);
 
   if (loading && read === null && missing === null) {
-    return <p className="v-doc__note">reading {name}…</p>;
+    return <p className={NOTE}>reading {name}…</p>;
   }
   if (missing !== null) {
     return (
-      <p className="v-doc__note">
-        <StateKicker tone="quiet">no text</StateKicker> {missing}
+      <p className={NOTE}>
+        <Badge>no text</Badge> {missing}
       </p>
     );
   }
@@ -71,9 +73,9 @@ function PlanBody({
   // shown. A heading that lost its `##` is a heading somebody has to guess at.
   return (
     <>
-      <pre className="v-doc__text">{body}</pre>
+      <pre className={DOCUMENT}>{body}</pre>
       {body.trim() === '' && (
-        <p className="v-doc__note">
+        <p className={NOTE}>
           This file is empty. That is what is on disk, not a failure to read it.
         </p>
       )}
@@ -138,9 +140,9 @@ export function PlansPane({
 
   if (runId === null) {
     return (
-      <div className="v-doc v-doc--empty">
-        <StateKicker tone="quiet">no run</StateKicker>
-        <p>
+      <div className={EMPTY}>
+        <Badge>no run</Badge>
+        <p className="m-0 max-w-md">
           Plans are read out of a run’s own directory, so there has to be a run. Start one and its
           first plan lands here as soon as the planner’s turn ends.
         </p>
@@ -150,21 +152,21 @@ export function PlansPane({
 
   if (failure !== null) {
     return (
-      <div className="v-doc v-doc--empty">
-        <StateKicker tone="alarm">no plans</StateKicker>
-        <p>{failure}</p>
-        <button className="v-doc__again" onClick={reload}>
+      <div className={EMPTY}>
+        <Badge variant="alarm">no plans</Badge>
+        <p className="m-0 max-w-md">{failure}</p>
+        <Button variant="secondary" size="sm" onClick={reload}>
           try again
-        </button>
+        </Button>
       </div>
     );
   }
 
   if (plans.length === 0) {
     return (
-      <div className="v-doc v-doc--empty">
-        <StateKicker tone="quiet">{loading ? 'reading' : 'no plans yet'}</StateKicker>
-        <p>
+      <div className={EMPTY}>
+        <Badge>{loading ? 'reading' : 'no plans yet'}</Badge>
+        <p className="m-0 max-w-md">
           {loading
             ? 'asking the host what this run has written…'
             : 'The planner writes plan-0.json when its first turn ends, and PLAN.md once the plan is approved. Neither is there yet.'}
@@ -174,14 +176,14 @@ export function PlansPane({
   }
 
   return (
-    <div className="v-doc">
-      <div className="v-doc__head">
+    <div className={PANE}>
+      <div className={HEAD}>
         <span>
           {plans.length} version{plans.length === 1 ? '' : 's'} of the plan
         </span>
-        <button className="v-doc__again" onClick={reload}>
+        <Button variant="quiet" size="sm" onClick={reload}>
           reread
-        </button>
+        </Button>
       </div>
       {plans.map((plan) => (
         <Section
@@ -200,10 +202,10 @@ export function PlansPane({
           }
           meta={
             <>
-              <code className="v-doc__file">{plan.name}</code>
+              <code className={FILE}>{plan.name}</code>
               {/* Absent rather than `0 B` when the listing carried no size,
                   which is every entry that is not a plain file. */}
-              {plan.bytes !== null && <MetaChip>{sizeOf(plan.bytes)}</MetaChip>}
+              {plan.bytes !== null && <Badge className="normal-case tracking-normal">{sizeOf(plan.bytes)}</Badge>}
             </>
           }
         >

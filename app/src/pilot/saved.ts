@@ -29,8 +29,8 @@ import { DRAFT_PREFIX } from '../cockpit/pending';
  * (#145). Writing a conversation into the run's directory would reverse that in
  * the most expensive possible way — a chat about a run is not part of the run's
  * record, which is the same sentence `pilotchat.ts` uses to explain why a pilot
- * turn does not narrate. So this is `localStorage`, beside the projects, the
- * pins and the spend ceiling.
+ * turn does not narrate. So this is the window's own memory - the host's chat
+ * files (`chatstore.ts`), beside the projects, the pins and the spend ceiling.
  */
 
 const PREFIX = 'vibe.chat.';

@@ -15,7 +15,7 @@
  * bent here. **Which repositories you have open is not a fact about any run** —
  * no run knows about a sibling project, and `vibe.config.json` is a file meant
  * to be committed, so one machine's list of paths is the wrong thing to put in
- * it. `localStorage` already holds the repository and the pilot's spend ceiling
+ * it. the window's memory (`memory.ts`) already holds the repository and the pilot's spend ceiling
  * for exactly this reason. What is *in* a project still comes from the host.
  *
  * ## The pin carries the title, and that is not a cached measurement

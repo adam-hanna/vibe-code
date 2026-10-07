@@ -83,8 +83,11 @@ describe('the tab bar the rail emptied', () => {
   // because each one drifting back is how twelve tabs happened.
   //
   // Sliced between the container and the first pane render rather than matched
-  // with a `</div>`, which a nested element closes first.
-  const from = cockpit.indexOf('<div className="v-cockpit__tabs">');
+  // with a `</nav>`, which a nested element closes first.
+  //
+  // Case 2 (the UI rework): the bar is found by its accessible name rather than
+  // by a class that left with the stylesheet. Every claim below is unchanged.
+  const from = cockpit.indexOf('aria-label="panes"');
   const to = cockpit.indexOf("{tab === 'pilot' && ", from);
   const bar = from < 0 ? '' : cockpit.slice(from, to < 0 ? cockpit.length : to);
   /** Where a label first appears in the bar, or Infinity. Order, not pixels. */
@@ -94,7 +97,8 @@ describe('the tab bar the rail emptied', () => {
   };
 
   test('the bar was found and is the bar', () => {
-    expect(bar).toMatch(/v-cockpit__tab/);
+    // Every tab says which one is current, which is what makes it a tab bar.
+    expect(bar).toMatch(/aria-current=\{tab === /);
     expect(bar).toMatch(/Questions/);
   });
 
@@ -103,16 +107,22 @@ describe('the tab bar the rail emptied', () => {
     expect(bar).not.toMatch(/>\s*Settings\b/);
     expect(bar).not.toMatch(/>\s*Runs\b/);
     expect(cockpit).toMatch(/onSettings=/);
-    expect(cockpit).toMatch(/onRuns=/);
+    // Case 2 (the UI rework): `1b` was reached by a per-project link in the
+    // sidebar (`onRuns`), which the owner asked to remove. The claim that
+    // survives is that the view is still reachable without a tab: the palette's
+    // `goRuns` action is its route now.
+    expect(cockpit).toMatch(/goRuns: \(\) => setTab\('runs'\)/);
+    expect(cockpit).not.toMatch(/onRuns=/);
   });
 
   test('usage is a readout in the heading rather than an artifact tab', () => {
     // Hi-fi 1 puts `1.9M tok · codex 5h 41%` right-aligned in this bar. The
     // pane behind it survives - the readout is the way in - but it costs no tab.
-    expect(bar).not.toMatch(/v-cockpit__tab[^>]*>\s*Spend/);
+    expect(bar).not.toMatch(/>\s*Spend\s*</);
     // The redesign moves the same readout one row up to give navigation room.
-    expect(cockpit).toMatch(/className="v-workspace__usage" onClick=\{\(\) => setTab\('spend'\)\}/);
-    expect(cockpit.indexOf('className="v-workspace__usage"')).toBeLessThan(from);
+    // Found by its title rather than a class (case 2, the UI rework).
+    expect(cockpit).toMatch(/onClick=\{\(\) => setTab\('spend'\)\} title="Usage for the live run"/);
+    expect(cockpit.indexOf('title="Usage for the live run"')).toBeLessThan(from);
   });
 
   test('the readout says nothing rather than zero before anything is charged', () => {
@@ -132,8 +142,17 @@ describe('the tab bar the rail emptied', () => {
     // positions for, this build has six of - so something had to decide the
     // interleaving, and the rule is below.
     // Labels have changed; the original navigation order is still the contract.
-    expect(at("setTab('pilot')")).toBeLessThan(at("setTab('output')"));
-    expect(at("setTab('output')")).toBeLessThan(at("open('plans')"));
+    //
+    // Case 2 (the UI rework): `Output` left the bar for the bottom panel, with
+    // `Commands` - both are terminal-shaped, and an editor docks its terminal
+    // under the work rather than beside it in the tabs. The order of what
+    // remains is unchanged, and the two are asserted to be in the bottom panel
+    // rather than silently gone.
+    expect(at("setTab('pilot')")).toBeLessThan(at("open('plans')"));
+    expect(bar).not.toMatch(/setTab\('output'\)/);
+    expect(bar).not.toMatch(/setTab\('commands'\)/);
+    expect(cockpit).toMatch(/bottom === 'output' && \(/);
+    expect(cockpit).toMatch(/bottom === 'commands' && \(/);
     // The ones that postdate the artwork come after the ones it names, and the
     // readout is last because it is right-aligned.
     //
@@ -150,7 +169,6 @@ describe('the tab bar the rail emptied', () => {
     // first and the readout is last — so it is anchored on the last tab that
     // still exists rather than deleted with the tab it happened to name.
     expect(at('Questions')).toBeLessThan(at('Verify'));
-    expect(at("setTab('verify')")).toBeLessThan(at("setTab('commands')"));
     // Named absent, so a build that quietly reinstates either fails here. Both
     // are reachable — one from Settings, one as Settings.
     expect(bar).not.toMatch(/>\s*Prompt\s*</);
@@ -182,10 +200,10 @@ describe('the tab bar the rail emptied', () => {
     // could not answer what a single round changed. A tab for either coming
     // back is two answers to one question, which is how twelve tabs happened.
     expect(bar).not.toMatch(/>\s*Findings\b/);
-    expect(bar).not.toMatch(/v-cockpit__tab[^>]*>\s*Diff\b/);
+    expect(bar).not.toMatch(/>\s*Diff\s*</);
     // And `Versions` is no longer a dashed placeholder saying the window cannot
     // read a run's artifacts, because it can.
-    expect(bar).not.toMatch(/v-cockpit__tab--off[^>]*>\s*Versions/);
+    expect(bar).not.toMatch(/>\s*Versions\s*</);
   });
 
   test('a fresh window lands on the pilot', () => {

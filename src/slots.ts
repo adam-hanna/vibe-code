@@ -55,7 +55,7 @@ import type { Config, ForkedConversation, ForkPendingEntry, RunState } from '@sr
  * half of one convention and half of the other.
  */
 
-export type SlotName = 'main' | 'judge' | 'review';
+export type SlotName = 'main' | 'judge' | 'review' | 'write';
 
 /**
  * Who mints the id.
@@ -315,6 +315,37 @@ export const SLOTS: Record<SlotName, SlotSpec> = {
       // says out loud rather than inventing a second number here.
       window: (cfg) => cfg.codex.contextWindow ?? null,
     },
+  },
+  /**
+   * A Codex seat that writes: one fresh `codex exec` per turn, always.
+   *
+   * `codex exec resume` takes no `-s` flag, so a resumed turn runs read-only
+   * whatever it was started with - an implementer on a carried thread can write
+   * on its first turn and silently cannot on any after it. That used to be
+   * refused, which made a Codex implementer cost the whole run its Codex memory
+   * (`codex.persistSession` off for the critic and the reviewer too): *"explain
+   * this keeping session between turns?!"* A writer has no memory worth that,
+   * because `revisePlanPrompt` and `fixPrompt` are written for a seat that may
+   * have none - `planInPrompt` hands it the plan of record when it starts cold.
+   *
+   * So the writer is never on a carried thread, whatever `persistSession` says,
+   * and the read-only seats keep theirs. Nothing is stored: no id is adopted and
+   * no turn is marked, so a state written before this slot existed is exactly
+   * the state of one that has used it.
+   */
+  write: {
+    provider: 'codex',
+    origin: 'provider',
+    id: () => null,
+    started: () => false,
+    markStarted: () => {},
+    registered: () => false,
+    markRegistered: () => {},
+    persists: () => false,
+    reset: null,
+    // A one-shot turn's prompt is not a conversation's occupancy, and there is
+    // no thread to attribute it to.
+    occupancy: null,
   },
 };
 

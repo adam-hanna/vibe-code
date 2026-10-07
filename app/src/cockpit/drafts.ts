@@ -83,8 +83,8 @@ export function removeDraft(
  * Read the library, or an empty one.
  *
  * Whole-list-or-nothing on the shape, per entry on the content — the rule
- * `readPins` and `readNames` follow, for the reason they give: `localStorage` is
- * one namespace for the whole origin, and losing one malformed draft is better
+ * `readPins` and `readNames` follow, for the reason they give: the window's memory
+ * is one namespace for the whole window, and losing one malformed draft is better
  * than losing the other nine with it.
  */
 export function readDrafts(raw: string | null): readonly Draft[] {

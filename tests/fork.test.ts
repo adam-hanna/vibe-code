@@ -366,8 +366,21 @@ test('an existing branch of the derived name refuses when branching', async () =
   // correct but it exercised the rollback path far more than the claim.
   //
   // Relative to now, never a fixed instant - the rule AGENTS.md states.
-  const blocked = [0, 1, 2].map((seconds) => `vibe/${idInSeconds(parent.task, seconds)}`);
-  assert.equal(new Set(blocked).size, 3, 'the three ids differ, so the window really is three seconds wide');
+  //
+  // **Both spellings of each second, because the parent is in the way too.**
+  // The fork mints its id from the parent's task, so its stamp and slug are
+  // the parent's whenever the two land in one second - and then the parent
+  // already owns that run directory, `commitFork` claims the `-2` variant, and
+  // the branch it derives is one this list did not block. That is the fast
+  // case, not the slow one: the test failed in 585ms, on the run where nothing
+  // else was loading the machine, and passed whenever setup crossed a second
+  // boundary first (2026-10-06, two of three re-runs green). The claim was
+  // always right; the fixture only established half of its precondition.
+  const blocked = [0, 1, 2].flatMap((seconds) => {
+    const id = idInSeconds(parent.task, seconds);
+    return [`vibe/${id}`, `vibe/${id}-2`];
+  });
+  assert.equal(new Set(blocked).size, 6, 'the six refs differ, so the window really is three seconds wide');
   for (const branch of blocked) {
     if (!gitHas(parent.targetDir, branch)) {
       execFileSync('git', ['branch', branch, 'HEAD'], { cwd: parent.targetDir });
