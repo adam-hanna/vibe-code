@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'vitest';
-import { interleave } from './log';
+import { chatRun, interleave } from './log';
+import { emptyRun } from '../cockpit/model';
+import type { Run } from '../cockpit/model';
 import type { RoundCard } from '../cockpit/rounds';
 import type { Reply } from './transcript';
 
@@ -92,5 +94,47 @@ describe('placing rounds in a conversation', () => {
 
   test('rounds with no conversation are all of it', () => {
     expect(shape(interleave([card(1), card(2)], []))).toEqual(['round:k1', 'round:k2']);
+  });
+});
+
+describe('which run a conversation\'s log is about (#247)', () => {
+  // Every chat used to carry the live run's cards: an opened past run's, a
+  // draft's, another project's. `chatRun` is the one answer, so each case below
+  // is a conversation and the run its cards must come from.
+  const named = (runId: string): Run => ({
+    ...emptyRun(),
+    identity: { runId, dir: `/repo/.vibe/runs/${runId}`, repo: '/repo', workDir: null, task: 't', resumed: false, at: 0 },
+  });
+  const live = named('live-1');
+  const replay = named('past-1');
+  const base = { drafting: false, holding: false, live, opened: null };
+
+  test('the live run\'s own chat carries the live run', () => {
+    expect(chatRun({ ...base, runId: 'live-1' })).toBe(live);
+  });
+
+  test('an opened past run\'s chat carries its replay, never the live run', () => {
+    const opened = { runId: 'past-1', run: replay };
+    expect(chatRun({ ...base, runId: 'past-1', opened })).toBe(replay);
+  });
+
+  test('an opened run still loading carries nothing rather than another run\'s cards', () => {
+    const opened = { runId: 'past-1', run: null };
+    expect(chatRun({ ...base, runId: 'past-1', opened })).toBeNull();
+  });
+
+  test('a draft\'s chat and a project\'s pre-run chat carry no run', () => {
+    expect(chatRun({ ...base, runId: 'draft-abc', drafting: true })).toBeNull();
+    expect(chatRun({ ...base, runId: null })).toBeNull();
+  });
+
+  test('a chat held through a launch carries the run it is starting', () => {
+    // `holdChat` keeps the proposing chat on screen until `run_started` names
+    // the run, and that run's cards are the ones it is about to adopt.
+    expect(chatRun({ ...base, runId: null, holding: true })).toBe(live);
+  });
+
+  test('a run id that matches neither the live nor the opened run carries nothing', () => {
+    expect(chatRun({ ...base, runId: 'elsewhere-9', opened: { runId: 'past-1', run: replay } })).toBeNull();
   });
 });

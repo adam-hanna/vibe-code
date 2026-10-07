@@ -58,6 +58,49 @@ export function interleave(cards: readonly RoundCard[], replies: readonly Reply[
 }
 
 /** The whole log for a run and a conversation. The pane's one call. */
-export function logOf(run: Run, replies: readonly Reply[]): Entry[] {
-  return interleave(rounds(run), replies);
+export function logOf(run: Run | null, replies: readonly Reply[]): Entry[] {
+  return interleave(run === null ? [] : rounds(run), replies);
+}
+
+/** What `chatRun` is told: which conversation is shown, and the runs it could be about. */
+export interface ChatRunArgs {
+  /** The conversation's run id: `pilotRunId`. Null is the project's pre-run chat. */
+  runId: string | null;
+  /** The conversation is a draft's, keyed by its `draft-…` id. */
+  drafting: boolean;
+  /** A launch is holding the chat that proposed it until the run has an id (`holdChat`). */
+  holding: boolean;
+  /** The run this window is narrating. */
+  live: Run;
+  /** An opened past run: its id, and its replay once it has loaded. */
+  opened: { runId: string; run: Run | null } | null;
+}
+
+/**
+ * The run a conversation is about, whose rounds go in its log (#247).
+ *
+ * The pane was handed the live run whatever conversation was on screen, so the
+ * live run's cards were placed into every chat: an opened past run's, a draft's,
+ * another project's - *"showing up in EVERY run pilot chat, not just the run
+ * that it's running in"*. The conversation followed `pilotRunId` and the cards
+ * followed `run`, which is two answers to *which run is this*.
+ *
+ * - **A launch being held** is the live run's: the chat on screen proposed the
+ *   run that is starting, and its rounds are about to be adopted with it.
+ * - **A draft or a project's pre-run chat** is about no run yet, so its log is
+ *   the conversation alone.
+ * - **The live run's own chat** gets the live run.
+ * - **An opened past run's chat** gets its replay - the same `Run` the column
+ *   draws - and nothing while that is still loading, rather than another run's
+ *   cards in the meantime.
+ *
+ * Only the log moves. What the pilot's tools act on stays the live run, because
+ * a proposal from any chat still addresses the loop that is running.
+ */
+export function chatRun(args: ChatRunArgs): Run | null {
+  if (args.holding) return args.live;
+  if (args.drafting || args.runId === null) return null;
+  if (args.runId === args.live.identity?.runId) return args.live;
+  if (args.opened !== null && args.runId === args.opened.runId) return args.opened.run;
+  return null;
 }

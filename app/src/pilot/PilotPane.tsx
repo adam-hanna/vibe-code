@@ -692,6 +692,12 @@ export interface PilotPaneProps {
   /** The run as the cockpit holds it. What `read_run` and `read_output` see. */
   run: Run;
   /**
+   * The run the conversation on screen is about, whose rounds its log carries
+   * (#247). Not `run`: that is the live one, and its cards belong in its own
+   * chat only. Null for a draft or a project's pre-run chat. `chatRun` decides.
+   */
+  logRun: Run | null;
+  /**
    * Fire an accepted proposal.
    *
    * Handed up rather than sent from here, so a pilot-proposed launch goes
@@ -828,6 +834,7 @@ export interface PilotPaneProps {
 
 export function PilotPane({
   run,
+  logRun,
   launched,
   dir,
   runId,
@@ -1039,7 +1046,7 @@ export function PilotPane({
    * the reply count - because the question it answers is *where is the reader
    * looking*, and only the reader can move that.
    */
-  const log = useFollow<HTMLDivElement>(conversation.replies.length > 0 || conversation.live !== null || run.cycles.length > 0);
+  const log = useFollow<HTMLDivElement>(conversation.replies.length > 0 || conversation.live !== null || (logRun?.cycles.length ?? 0) > 0);
   /**
    * The clock behind the elapsed on an open turn (#211).
    *
@@ -1701,8 +1708,8 @@ ${frame.text}`, turn, origin.current))) {
    * that is a clock ticking, not a run changing.
    */
   const entries = useMemo(
-    () => logOf(run, conversation.replies),
-    [run, conversation.replies],
+    () => logOf(logRun, conversation.replies),
+    [logRun, conversation.replies],
   );
 
   return (
