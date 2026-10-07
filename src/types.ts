@@ -1715,7 +1715,7 @@ export interface RunState {
    *
    * Neither existing field can do this job. `pendingAnswers` is *consumed* by
    * the loop the moment it revises against them, so it is gone by the time
-   * anything reports; `answeredQuestions` is marked for every question **asked**
+   * anything reports, and since #169 it holds the answerer's answers too; `answeredQuestions` is marked for every question **asked**
    * whatever came back, so reconciling `ASSUMED.md` against it would empty the
    * file including the entries that are true.
    *
@@ -1974,6 +1974,15 @@ export interface RunState {
    */
   config?: Config;
   plan: Plan | null;
+  /**
+   * Answers no revision has consumed yet.
+   *
+   * Two writers (#169): `resolveQuestions`, on the same write that marks the
+   * questions answered, so a stop between the answerer and the revision keeps
+   * what the turn bought; and a NEEDS-INPUT resume, which merges the person's
+   * answers over those (`mergeHumanAnswers` - the person wins). One consumer:
+   * `revisePlan`, which nulls it on the write that persists the plan.
+   */
   pendingAnswers: Answer[] | null;
   /**
    * Findings the run has paid for that no revision or fix round has yet

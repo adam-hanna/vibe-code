@@ -885,7 +885,18 @@ async function planPhase(
     ({ plan, activity: planActivity } = await runPlan(state, cfg, cwd, roles, turns));
   }
 
-  // Answers supplied by a human in NEEDS-INPUT.md, picked up on resume.
+  // Answers a previous process held and no revision consumed, picked up on
+  // resume. Since #169 there are two writers: a human in NEEDS-INPUT.md (merged
+  // over the answerer's, the person winning - `mergeHumanAnswers`), and
+  // `resolveQuestions` itself, which persists the answerer's usable answers on
+  // the write that marks their questions answered. Either way this block is the
+  // one road back in, so a stop between the answerer and the revision costs a
+  // planner turn and never the answers.
+  //
+  // `markAnswered` no longer saves; the keys land on `revisePlan`'s opening
+  // `saveState`, and the answers are consumed on its plan write - not on a
+  // second write after it, which was a window where a stop bought the revision
+  // again.
   //
   // Deliberately does not clear `pendingFindings`: this revises with `answers`
   // *instead of* the findings, so it has not answered them, and treating a
@@ -903,8 +914,6 @@ async function planPhase(
       turns,
       host,
     ));
-    state.pendingAnswers = null;
-    saveState(state);
   }
 
   // Only the first iteration can be a re-entry, and only a re-entry is worth
@@ -3632,7 +3641,13 @@ async function revisePlan(
   // `answers` *instead of* the findings, and has therefore consumed nothing.
   // Assigned rather than routed through `clearPendingFindings` precisely so it
   // rides on this `saveState` and not a later one.
+  //
+  // The answers are consumed here for the same reason (#169). They are durable
+  // in `pendingAnswers` from the moment the answerer's turn is recorded, so
+  // clearing them anywhere later leaves a window in which the plan answering
+  // them is on disk and a resume revises against them again.
   if (args.findings !== undefined) state.pendingFindings = null;
+  if (args.answers !== undefined) state.pendingAnswers = null;
   saveState(state);
   // **`plan-<n>.json` is the plan of record for round n, which is the version
   // the critic will judge** - so a non-advancing revision replaces it rather
@@ -4574,6 +4589,29 @@ async function resolveQuestions(
   const usable = answers.filter((a) => !declined(a));
   const refused = answers.filter(declined);
 
+  // **The marks and the answers they stand for land on one write** (#169).
+  //
+  // Marking stays here, before the revision, and that order is #65's: a stop
+  // after this turn and before the mark would put the same question to the
+  // answerer again. But a mark is a promise that the answer reaches a plan, and
+  // until #169 the answers lived only in this function's return value - so
+  // every way of stopping before `revisePlan` persisted the plan kept the marks
+  // and lost the answers, and the resumed loop critiqued a plan whose questions
+  // `isAnswered` now suppressed and nothing had resolved. Four exits did it: a
+  // kill, the declined-blocking escalation below, and a `stop` gate or a
+  // stopped `step` hold at `question-round`.
+  //
+  // So the usable answers ride on the same `saveState` as the keys, before any
+  // of those exits can be reached, and `planPhase`'s re-entry block - the
+  // resume path NEEDS-INPUT already used - revises against them. The whole
+  // usable list, unpaired answers included, because that is what the revision
+  // would have been given; declined answers never reached a revision and do
+  // not here either. A consequence that is intended: the post-answerer
+  // `question-round` checkpoint (#139) now carries them, so a fork from it
+  // revises against what this turn bought instead of losing it.
+  state.pendingAnswers = usable.length > 0 ? [...usable] : null;
+  saveState(state);
+
   // **The pairing, and it is no longer string equality** (#211). The answerer is
   // asked to echo the question and echoes what it was shown, which
   // `formatQuestion` renders with the kind and the blocking tag after it - so a
@@ -4708,11 +4746,15 @@ async function resolveQuestions(
  * suppressed wording recurring in a later round is caught by the fuzzy scan
  * against the original rather than by the exact path below - which is what the
  * scores in `src/questions.ts` leave room for.
+ *
+ * **It does not save** (#169). A key on disk is a promise that the answer
+ * reaches a plan, so the caller persists the marks on the same write as the
+ * answers they stand for - one `saveState` per batch, never one per key with a
+ * window after the last of them.
  */
 function markAnswered(state: RunState, question: string): void {
   const key = normalize(question);
   if (key && !state.answeredQuestions.includes(key)) state.answeredQuestions.push(key);
-  saveState(state);
 }
 
 function isAnswered(state: RunState, question: string): boolean {
