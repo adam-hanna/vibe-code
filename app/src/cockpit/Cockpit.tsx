@@ -20,6 +20,7 @@ import type { KeyStatus } from '../pilot/keys';
 // `PilotPane`, not `Pilot`: `pilot.ts` beside it is the wire, and two files
 // differing only in case is a compile error on Windows and macOS both.
 import { PilotPane } from '../pilot/PilotPane';
+import { chatRun } from '../pilot/log';
 import { noCommands, reduceCommands, restore, running } from './commands';
 import { NOWHERE, readWhere, WHERE_KEY, writableWhere } from './where';
 import type { BottomTab, Panels, Viewing, Where } from './where';
@@ -1231,6 +1232,15 @@ export function Cockpit() {
    * one run while claiming to show another is the confusion this set out to fix.
    */
   const columnRun = past && opened.run !== null ? opened.run : run;
+  // The run the pilot's conversation is about, for its log's round cards (#247).
+  // The pane still takes the live `run` for its tools.
+  const pilotLogRun = chatRun({
+    runId: pilotRunId,
+    drafting: drafting !== null,
+    holding: holdChat !== null,
+    live: run,
+    opened: past && viewing !== null ? { runId: viewing.runId, run: opened.run } : null,
+  });
 
   /**
    * Every action the shell offers, by id (`shell/actions.ts`). The palette, the
@@ -1725,6 +1735,7 @@ export function Cockpit() {
           <div className={cn('min-h-0 flex-1 flex-col', tab === 'pilot' ? 'flex' : 'hidden')} hidden={tab !== 'pilot'}>
             <PilotPane
               run={run}
+              logRun={pilotLogRun}
               launched={sentLaunch}
               // **The run's repository, not the window's** (#223). Every other
               // pane that reads a run moved onto `shownDir` and this one was

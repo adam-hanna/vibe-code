@@ -111,6 +111,17 @@ describe('an opened run is drawn by the column that drew it live', () => {
     expect(cockpit.match(/back to the live run/g)?.length).toBe(1);
   });
 
+  test('the pilot\'s log is told which run its conversation is about (#247)', () => {
+    // The pane takes the live run for its tools and a separate run for its
+    // log's round cards, decided once by `chatRun` beside `pilotRunId`. Handing
+    // the log the live run is what put its cards in every chat.
+    const pane = cockpit.slice(cockpit.indexOf('<PilotPane'), cockpit.indexOf('onEffect={onEffect}'));
+    expect(pane).toContain('logRun={pilotLogRun}');
+    expect(cockpit).toMatch(/const pilotLogRun = chatRun\(\{\s*runId: pilotRunId,/);
+    expect(pilot).toContain('logOf(logRun, conversation.replies)');
+    expect(pilot).not.toContain('logOf(run, conversation.replies)');
+  });
+
   test('a failed replay leaves the live run drawn rather than an empty column', () => {
     // `columnRun` falls back to `run`, so the column never goes blank — and the
     // failure is said beside it rather than in place of everything.
