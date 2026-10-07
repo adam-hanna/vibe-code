@@ -47,6 +47,7 @@ import {
   DRAFTS_KEY,
   addDraft,
   bindDraft,
+  namesAfterStart,
   markLaunched,
   newDraft,
   readDrafts,
@@ -710,6 +711,18 @@ export function Cockpit() {
     if (launchedFrom.current !== drafting.id) return;
     launchedFrom.current = null;
     saveDrafts((list) => bindDraft(list, drafting.id, startedId));
+    // A title typed in the dialog becomes the run's name now, so the row does
+    // not swap it for the brief the pilot wrote the moment the run starts (#262).
+    if (drafting.name !== null) {
+      try {
+        const names = namesAfterStart(readNames(memory.getItem(NAMES_KEY)), drafting, startedId);
+        memory.setItem(NAMES_KEY, JSON.stringify(names));
+        setProjectsEpoch((n) => n + 1);
+      } catch {
+        // Storage off: the row falls back to the task, which is a rename lost
+        // rather than a run lost.
+      }
+    }
     setDraftId(null);
   }, [startedId, drafting, saveDrafts]);
   /** Pilot proposals waiting on a person, so a hidden tab can say so (#144). */
@@ -1352,12 +1365,13 @@ export function Cockpit() {
           // draft is the run as far as the person is concerned; the core has
           // nothing until the proposal is pressed, and the draft is what the
           // sidebar draws in between.
-          onBrief={(message, task) => {
+          onBrief={(message, task, title) => {
             const draft = newDraft(
               composing.dir,
               task,
               Date.now(),
               Math.random().toString(36).slice(2, 8),
+              title,
             );
             saveDrafts((list) => addDraft(list, draft));
             setDraftId(draft.id);

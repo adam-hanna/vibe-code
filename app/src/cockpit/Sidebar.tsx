@@ -40,7 +40,7 @@ import {
 import type { ReactNode } from 'react';
 import type { Pin, ProjectName, ProjectNode, RunName } from './projects';
 import type { RailRun } from './squares';
-import { draftsIn, settled } from './pending';
+import { draftsIn, draftTitle, settled } from './pending';
 import { memory, useMemoryFailure } from '../memory';
 import type { Draft } from './pending';
 import type { ArchiveRun } from '../host';
@@ -548,7 +548,7 @@ function Project({
           {mine.map((d) => (
             <DraftRow
               key={d.id}
-              title={preview(d.task)}
+              title={draftTitle(d)}
               launched={d.launched}
               current={d.id === draftId}
               onOpen={() => onDraft(d)}
@@ -996,7 +996,7 @@ export function Sidebar({
         <Confirm
           tone="quiet"
           kicker="deletes a conversation"
-          title={`Discard “${preview(pending.draft.task)}”`}
+          title={`Discard “${draftTitle(pending.draft)}”`}
           lead="This run was never started, so there is nothing on disk to delete. What goes is the conversation with the pilot about it, which is kept only in this window."
           facts={[
             { label: 'asked to', value: pending.draft.task, scroll: true },
