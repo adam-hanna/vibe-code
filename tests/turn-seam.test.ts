@@ -16,7 +16,7 @@ import {
 import type { AgentTurns, Role, TurnRequest } from '@src/orchestrator.js';
 import { handoffContext, taskContext } from '@src/prompts.js';
 import { createRun, recordContextMeasurement } from '@src/run.js';
-import { ANSWERS_SCHEMA, FINDINGS_SCHEMA } from '@src/schemas.js';
+import { ANSWERS_SCHEMA, FINDINGS_SCHEMA, REVIEW_SCHEMA } from '@src/schemas.js';
 import type { ClaudeTurnOptions } from '@src/claude.js';
 import type { CodexTurnOptions } from '@src/codex.js';
 import type { ClaudeTurnResult, Config, RunState, TokenUsage, TurnActivity } from '@src/types.js';
@@ -197,10 +197,14 @@ test('the output schema rides on the role rather than on the turn label', async 
   await runTurn(freshState(), config(), request('answerer', { label: 'answers-0' }), answerer.turns);
   assert.equal(answerer.codexCalls[0]?.schema, ANSWERS_SCHEMA);
 
+  // The critic and the reviewer no longer share one: the reviewer's adds the
+  // per-file verdicts on changes to the judge, which the critic has no diff to
+  // give (#112). The claim - the schema is the role's - is unchanged.
+  const expected = { critic: FINDINGS_SCHEMA, reviewer: REVIEW_SCHEMA } as const;
   for (const role of ['critic', 'reviewer'] as const) {
     const rec = recorder();
     await runTurn(freshState(), config(), request(role, { label: `${role}-0` }), rec.turns);
-    assert.equal(rec.codexCalls[0]?.schema, FINDINGS_SCHEMA);
+    assert.equal(rec.codexCalls[0]?.schema, expected[role]);
   }
 });
 

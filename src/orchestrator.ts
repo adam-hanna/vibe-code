@@ -98,11 +98,20 @@ import {
   gate,
   parseAnswers,
   parseFindings,
+  parseTestVerdicts,
   parsePlan,
   readEvidence,
   reproducerOutcomesOf,
   reproductionAt,
 } from '@src/validate.js';
+import {
+  attachVerdicts,
+  judgeChanges,
+  judgePatterns,
+  recordedPatterns,
+  testChangeCounts,
+} from '@src/judge.js';
+import type { RawVerdict } from '@src/judge.js';
 import {
   markOccupancyWarned,
   occupancyWarning,
@@ -138,6 +147,8 @@ import type {
   Config,
   Finding,
   FindingsReport,
+  FileChange,
+  TestChanges,
   GateOutcome,
   OpenQuestion,
   ReproducerOutcome,
@@ -4098,7 +4109,7 @@ async function runReview(
   plan: Plan,
   roles: RoleTable,
   turns: AgentTurns,
-): Promise<FindingsReport> {
+): Promise<FindingsReport & { testChanges?: TestChanges }> {
   // Before `log.step`, so the run never claims a reviewer started on a diff it
   // could not read. The decision that a gitless run is refused rather than
   // degraded is NOT made here - it is made by `gitPrecondition` in the preflight
@@ -4133,7 +4144,11 @@ async function runReview(
     id: 'turn_started',
     data: { role: 'reviewer', kind: 'review', round: state.reviewRound },
   });
-  const { chunks, files } = await git.diffChunks(cwd, state.baseSha);
+  const { chunks, files, changes } = await git.diffChunks(cwd, state.baseSha);
+  // From the same read as the diff, so the files the reviewer is asked to judge
+  // are the files it is shown (#112).
+  const patterns = judgePatterns(cfg.verify);
+  const judged = judgeChanges(changes, patterns);
 
   // **An empty diff is refused, not reviewed.** There was a guard for a diff too
   // BIG for one turn and none at all for one with nothing in it, and
@@ -4179,6 +4194,9 @@ async function runReview(
   // would claim the reviewer saw every file the instant before that turn failed,
   // which is the shape of overclaim this field exists to prevent.
   state.reviewCoverage = undefined;
+  // The judge record goes with it, for the same reason: a verdict carried over
+  // from the previous round would be a verdict on a diff nobody showed (#112).
+  state.testChanges = undefined;
   saveState(state);
 
   // Read once, before the loop, and handed to EVERY part. Each part sees a
@@ -4205,7 +4223,16 @@ async function runReview(
   // to would make that a round trip through a value this function owns.
   const seen: string[] = [];
   const cut: string[] = [];
+  // Per part, because a verdict only counts from the part that listed the file.
+  const listedPerPart: FileChange[][] = [];
+  const verdictsPerPart: RawVerdict[][] = [];
   for (const [i, chunk] of chunks.entries()) {
+    // Only this part's judge files. A rename is listed wherever either of its
+    // paths is shown, since `chunk.files` names both sides (`--no-renames`).
+    const listed = judged.filter(
+      (c) =>
+        chunk.files.includes(c.path) || (c.oldPath !== null && chunk.files.includes(c.oldPath)),
+    );
     // Read inside the loop: the slot is marked started by the turn that
     // succeeds, so with a persistent thread part 1 is memoryless and parts 2..n
     // continue the conversation without anything new (#45).
@@ -4257,6 +4284,9 @@ async function runReview(
           // the one before #113. Only gates with a command: a gate the run
           // cannot execute is not a choice the reviewer has.
           reproducerGates(cfg, cwd),
+          // Absent unless this part shows a judge file, which is what keeps every
+          // other round's prompt byte-identical (#112).
+          listed.length > 0 ? listed : undefined,
         ),
         cwd,
         // Unchanged when there is one chunk: this string is Codex's output name
@@ -4267,6 +4297,7 @@ async function runReview(
       turns,
       roles,
     );
+    const structured = readStructured(outcome);
     reports.push(
       // Per chunk turn, deliberately: a chunked round is several reviewer turns,
       // and each one's findings are judged against what that turn did rather
@@ -4276,10 +4307,12 @@ async function runReview(
         cwd,
         'reviewer',
         roles,
-        parseFindings(readStructured(outcome)),
+        parseFindings(structured),
         outcome.activity,
       ),
     );
+    listedPerPart.push(listed);
+    verdictsPerPart.push(parseTestVerdicts(structured));
 
     // After the turn, never before it: this says what the reviewer was actually
     // handed. A round that stops here leaves a record of the parts it got.
@@ -4291,6 +4324,16 @@ async function runReview(
       files: [...seen],
       truncated: [...cut],
     };
+    // After the turn, like the coverage above: a verdict is recorded only once
+    // the turn that gave it has returned. Nothing at all until a part has
+    // listed a judge file - a round that touches none records no field (#112).
+    if (listedPerPart.some((l) => l.length > 0)) {
+      state.testChanges = {
+        round: state.reviewRound + 1,
+        patterns: recordedPatterns(patterns),
+        files: attachVerdicts(listedPerPart, verdictsPerPart),
+      };
+    }
     saveState(state);
     for (const file of chunk.truncated) {
       recordAndSay(
@@ -4301,6 +4344,23 @@ async function runReview(
         { file },
       );
     }
+  }
+
+  const testChanges = state.testChanges;
+  if (testChanges !== undefined) {
+    // Narration with no event, under `recordAndSay`'s rule: the fact is already
+    // durable in `state.testChanges` and in the round's artifact, and a census of
+    // a round is exactly what that rule keeps out of `state.events`. Warn only
+    // when something was not judged justified - a round that only added tests
+    // the reviewer accepted is information, not a caveat (#112).
+    const counts = testChangeCounts(testChanges.files);
+    const say = counts.notJustified + counts.unjudged > 0 ? log.warn : log.info;
+    say(
+      `Review round ${testChanges.round}: ${counts.files} change(s) to the judge - ` +
+        `${counts.justified} justified, ${counts.notJustified} not justified, ` +
+        `${counts.unjudged} unjudged`,
+      { id: 'test_changes_judged', data: { round: testChanges.round, ...counts } },
+    );
   }
 
   const [only] = reports;
@@ -4321,7 +4381,11 @@ async function runReview(
   // here too: that file is the record of what the reviewer produced. Written
   // once, containing what the reviewer said and what vibe observed about it, is
   // exactly what it already does for `downgraded`.
-  return proveFindings(state, cfg, cwd, roles, merged);
+  const proven = await proveFindings(state, cfg, cwd, roles, merged);
+  // Into the round's `code-review-<n>.json`, which the caller writes once from
+  // this. Absent rather than empty when no judge file was touched, so that
+  // artifact is byte-for-byte what it was before (#112).
+  return testChanges === undefined ? proven : { ...proven, testChanges };
 }
 
 /**

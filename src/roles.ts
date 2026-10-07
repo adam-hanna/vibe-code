@@ -1,4 +1,4 @@
-import { ANSWERS_SCHEMA, FINDINGS_SCHEMA, PLAN_SCHEMA } from '@src/schemas.js';
+import { ANSWERS_SCHEMA, FINDINGS_SCHEMA, PLAN_SCHEMA, REVIEW_SCHEMA } from '@src/schemas.js';
 import { SLOTS, slotMeasured, slotRotatable } from '@src/slots.js';
 import type { SlotName } from '@src/slots.js';
 import { setOwn } from '@src/runtime.js';
@@ -108,7 +108,7 @@ const JOBS: Readonly<
   implementer: { access: 'write' },
   critic: { access: 'read-only', schema: FINDINGS_SCHEMA, tools: READ_ONLY_TOOLS },
   answerer: { access: 'read-only', schema: ANSWERS_SCHEMA, tools: READ_ONLY_TOOLS },
-  reviewer: { access: 'read-only', schema: FINDINGS_SCHEMA, tools: READ_ONLY_TOOLS },
+  reviewer: { access: 'read-only', schema: REVIEW_SCHEMA, tools: READ_ONLY_TOOLS },
 };
 
 /**

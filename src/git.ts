@@ -2,6 +2,7 @@ import { readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { run, resolveBin } from '@src/proc.js';
 import { detail, warn } from '@src/log.js';
+import type { FileChange } from '@src/types.js';
 
 let cachedBin: string | null = null;
 
@@ -620,7 +621,7 @@ export async function diffChunks(
   cwd: string,
   baseSha: string | null,
   options: { maxChars?: number } = {},
-): Promise<{ chunks: DiffChunk[]; files: string[] }> {
+): Promise<{ chunks: DiffChunk[]; files: string[]; changes: FileChange[] }> {
   const maxChars = options.maxChars ?? DIFF_MAX_CHARS;
   // `revealUntracked` because this is the REVIEW's read: a round that only added
   // files must not look empty to the reviewer. `diffSince` has its own reader and
@@ -640,9 +641,16 @@ export async function diffChunks(
   const listArgs = ['--literal-pathspecs', ...prefix, '--name-only', '-z', '--no-renames'];
   const { stdout: listed } = await git(cwd, listArgs, { raw: true });
   const files = splitNul(listed);
+  // Through the same `prefix` for the reason the list above is: a status read
+  // taken separately could describe a different change from the diff the
+  // reviewer is handed, and then the files it is asked to judge would not be
+  // the files it read (#112). Rename detection on here, unlike the list, because
+  // a rename is a fact the judge record needs - moving a test out of `tests/` is
+  // how it would otherwise vanish.
+  const changes = await fileChanges(cwd, prefix);
 
   if (whole.length <= maxChars) {
-    return { chunks: [{ files: [...files], diff: whole, truncated: [] }], files };
+    return { chunks: [{ files: [...files], diff: whole, truncated: [] }], files, changes };
   }
 
   const chunks: DiffChunk[] = [];
@@ -685,7 +693,92 @@ export async function diffChunks(
   // nothing packed still gets one chunk, because "no chunks" is not a thing the
   // caller can review.
   if (current.files.length > 0 || chunks.length === 0) chunks.push(current);
-  return { chunks, files };
+  return { chunks, files, changes };
+}
+
+/**
+ * Status and line counts for every file in one resolved diff (#112).
+ *
+ * Two reads, `--name-status` and `--numstat`, both `-z` so a path is never
+ * quoted or escaped, joined on the new path. Neither tolerates failure: they
+ * run where the `--name-only` read above runs, and a git that cannot answer
+ * one should fail the round the same way rather than produce a record that is
+ * silently missing files.
+ *
+ * `-` in `--numstat` is a binary file and becomes null, never 0: "lines were
+ * not counted" is not "no lines changed". A file `--numstat` did not mention
+ * at all is null for the same reason.
+ */
+async function fileChanges(cwd: string, prefix: readonly string[]): Promise<FileChange[]> {
+  const base = ['--literal-pathspecs', ...prefix, '-z', '-M'];
+  const [named, counted] = await Promise.all([
+    git(cwd, [...base, '--name-status'], { raw: true }),
+    git(cwd, [...base, '--numstat'], { raw: true }),
+  ]);
+
+  const counts = new Map<string, { added: number | null; removed: number | null }>();
+  const num = (v: string): number | null => {
+    if (v === '-') return null;
+    const n = Number(v);
+    return Number.isInteger(n) && n >= 0 ? n : null;
+  };
+  // `a\td\tpath\0`, or for a rename `a\td\t\0old\0new\0`.
+  const nums = counted.stdout.split('\0');
+  for (let i = 0; i < nums.length; i += 1) {
+    // Only the first two tabs separate fields: `-z` leaves a pathname verbatim,
+    // and a path may itself contain a tab.
+    const record = nums[i] as string;
+    const first = record.indexOf('\t');
+    const second = first === -1 ? -1 : record.indexOf('\t', first + 1);
+    if (second === -1) continue;
+    const add = record.slice(0, first);
+    const del = record.slice(first + 1, second);
+    const inline = record.slice(second + 1);
+    let file = inline;
+    if (inline === '') {
+      // A rename: the next two entries are the old and new paths.
+      file = nums[i + 2] ?? '';
+      i += 2;
+    }
+    if (file !== '') counts.set(file, { added: num(add), removed: num(del) });
+  }
+
+  const out: FileChange[] = [];
+  const entries = named.stdout.split('\0');
+  for (let i = 0; i < entries.length; i += 1) {
+    const code = entries[i] as string;
+    if (code === '') continue;
+    const kind = code[0];
+    let file: string;
+    let oldPath: string | null = null;
+    let status: FileChange['status'];
+    if (kind === 'R' || kind === 'C') {
+      const from = entries[i + 1] ?? '';
+      file = entries[i + 2] ?? '';
+      i += 2;
+      // A copy leaves its source in place, so the new path is a new file.
+      if (kind === 'R') {
+        oldPath = from;
+        status = 'renamed';
+      } else {
+        status = 'added';
+      }
+    } else {
+      file = entries[i + 1] ?? '';
+      i += 1;
+      status = kind === 'A' ? 'added' : kind === 'D' ? 'deleted' : 'modified';
+    }
+    if (file === '') continue;
+    const count = counts.get(file);
+    out.push({
+      path: file,
+      oldPath,
+      status,
+      added: count?.added ?? null,
+      removed: count?.removed ?? null,
+    });
+  }
+  return out;
 }
 
 

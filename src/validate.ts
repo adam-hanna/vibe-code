@@ -1,3 +1,4 @@
+import type { RawVerdict } from '@src/judge.js';
 import type {
   AcceptanceCriterion,
   Answer,
@@ -260,6 +261,34 @@ export function parseFindings(raw: unknown): FindingsReport {
     summary: typeof summaryRaw === 'string' ? summaryRaw : '',
     findings,
   };
+}
+
+/**
+ * The reviewer's per-file verdicts on changes to the judge (#112).
+ *
+ * Tolerant, and every tolerance points the same way: a missing array, or an
+ * entry without a string `file`, a boolean `justified` and a string `reason`,
+ * yields no verdict - so the file it was about stays `unjudged`. Nothing here
+ * can make a file read as justified that the reviewer did not say was. Kept out
+ * of `parseFindings`, which the critic's reports go through too.
+ */
+export function parseTestVerdicts(raw: unknown): RawVerdict[] {
+  if (typeof raw !== 'object' || raw === null) return [];
+  const list = (raw as Record<string, unknown>)['test_verdicts'];
+  if (!Array.isArray(list)) return [];
+  const out: RawVerdict[] = [];
+  for (const entry of list as unknown[]) {
+    if (typeof entry !== 'object' || entry === null) continue;
+    const r = entry as Record<string, unknown>;
+    const file = r['file'];
+    const justified = r['justified'];
+    const reason = r['reason'];
+    if (typeof file !== 'string' || typeof justified !== 'boolean' || typeof reason !== 'string') {
+      continue;
+    }
+    out.push({ file, justified, reason });
+  }
+  return out;
 }
 
 export function parseAnswers(raw: unknown): AnswersReport {

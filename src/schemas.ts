@@ -389,6 +389,51 @@ export const FINDINGS_SCHEMA = {
   },
 } as const satisfies object;
 
+/**
+ * The reviewer's schema: the findings, plus one verdict per change to the judge
+ * (#112).
+ *
+ * Its own constant rather than a field on `FINDINGS_SCHEMA`, because that one is
+ * the plan critic's too and the critic has no diff and no judge files to rule
+ * on. Required and an empty array when the prompt lists nothing, because Codex
+ * refuses a closed object whose `required` does not cover every property (#68) -
+ * so "optional" is spelled `[]`, never an absent key.
+ */
+export const REVIEW_SCHEMA = {
+  ...FINDINGS_SCHEMA,
+  required: [...FINDINGS_SCHEMA.required, 'test_verdicts'],
+  properties: {
+    ...FINDINGS_SCHEMA.properties,
+    test_verdicts: {
+      type: 'array',
+      description:
+        'One entry per file listed under "Changes to the judge" in the prompt, and an empty ' +
+        'array when the prompt lists none. A listed file you leave out is recorded as unjudged.',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['file', 'justified', 'reason'],
+        properties: {
+          file: {
+            type: 'string',
+            description: 'The path exactly as it is listed in the prompt.',
+          },
+          justified: {
+            type: 'boolean',
+            description:
+              'True only when the change is justified under the definition in the prompt. ' +
+              'Never true merely because the change makes the gate pass.',
+          },
+          reason: {
+            type: 'string',
+            description: 'Why, citing what in the plan or the code settles it.',
+          },
+        },
+      },
+    },
+  },
+} as const satisfies object;
+
 /** Codex answering Claude's blocking questions. */
 export const ANSWERS_SCHEMA = {
   type: 'object',
