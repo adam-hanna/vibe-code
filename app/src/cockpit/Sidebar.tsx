@@ -392,7 +392,6 @@ function Project({
   onRename,
   onRenamed,
   onDeleteRun,
-  onAll,
   onNewIn,
   onProjectSettings,
   onForget,
@@ -436,7 +435,6 @@ function Project({
   onRename: (dir: string, runId: string) => void;
   onRenamed: (name: string | null) => void;
   onDeleteRun: (dir: string, runId: string, title: string, task: string) => void;
-  onAll: (dir: string) => void;
   /** Start a run in THIS project, with its directory already settled. */
   onNewIn: (dir: string) => void;
   /** This project's own settings — its `vibe.config.json` (#223). */
@@ -590,11 +588,9 @@ function Project({
               Show {hidden} more
             </button>
           )}
-          {runs.length > 0 && (
-            <button className={MORE} onClick={() => onAll(dir)}>
-              All runs, with status and cost
-            </button>
-          )}
+          {/* `1b` — all runs with status and cost — used to be a link here and
+              went at the owner's word; the palette's `All runs in this project`
+              is its route now. */}
           {nested}
         </div>
       )}
@@ -612,10 +608,8 @@ export function Sidebar({
   dir,
   epoch,
   currentId,
-  onNew,
   onNewIn,
   onProjectSettings,
-  onRuns,
   onShow,
   onProject,
   onDeleted,
@@ -630,14 +624,11 @@ export function Sidebar({
   /** Bumped when the lists were rewritten elsewhere — a project moved (#223). */
   epoch: number;
   currentId: string | null;
-  onNew: () => void;
   /** Compose a run in one project, with the directory already settled (#223). */
   onNewIn: (dir: string) => void;
   /** One project's settings — the ⚙ on its row. The settings for all
       projects are the activity bar's ⚙, not this panel's (#223). */
   onProjectSettings: (dir: string) => void;
-  /** Open `1b` for a project, which is where a lock can be overruled. */
-  onRuns: (dir: string) => void;
   onShow: (dir: string, runId: string, task: string) => void;
   /** Point the window at a project. */
   onProject: (dir: string) => void;
@@ -950,7 +941,6 @@ export function Sidebar({
           setRefused(null);
           setPending({ kind: 'run', dir: d, runId, title, task });
         }}
-        onAll={onRuns}
         onNewIn={onNewIn}
         onProjectSettings={onProjectSettings}
         onForget={(d) => setPending({ kind: 'project', dir: d })}
@@ -1035,15 +1025,10 @@ export function Sidebar({
         />
       )}
 
-      <div className="flex flex-col gap-2">
-        <button
-          className="flex min-h-9 w-full cursor-pointer items-center gap-2.5 rounded-sm border border-accent-border-dim bg-accent-tint px-3 py-2 text-left text-body text-accent-on-tint hover:border-accent-border hover:bg-active-hdr"
-          onClick={onNew}
-        >
-          <Plus size={16} className="flex-none text-accent" aria-hidden="true" /> New run
-        </button>
-      </div>
-
+      {/* No `New run` at the head of this panel. The activity bar's ＋ (and ⌘N)
+          starts one where the window is pointed, and each project row's ＋
+          starts one there - a third button saying the same thing was asked
+          to go. */}
       {pins.length > 0 && (
         <section className="flex flex-col">
           <h3 className="m-0 px-2.5 pb-3 text-chip uppercase tracking-[0.12em] text-tertiary">Pinned</h3>

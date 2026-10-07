@@ -29,6 +29,7 @@ export type ActionId =
   | 'goSpend'
   | 'goOutput'
   | 'goCommands'
+  | 'goRuns'
   | 'pause'
   | 'stop'
   | 'gateContinue'
@@ -62,6 +63,11 @@ export const ACTIONS: readonly Action[] = [
   { id: 'goSpend', label: 'Usage', group: 'Go to', shortcut: { code: 'Digit8', shift: false } },
   { id: 'goOutput', label: 'Output', group: 'Go to' },
   { id: 'goCommands', label: 'Commands', group: 'Go to' },
+  // `1b`: every run in the project with status, cost and liveness, and the one
+  // control that may overrule a lock. It was a link at the foot of each project
+  // in the sidebar and the owner asked for that gone; this is its only route
+  // now, so `1b` is still reachable and still has no tab of its own.
+  { id: 'goRuns', label: 'All runs in this project', group: 'Go to' },
   { id: 'backToLive', label: 'Back to the live run', group: 'Go to' },
 
   { id: 'newRun', label: 'New run…', group: 'Run', shortcut: { code: 'KeyN', shift: false } },

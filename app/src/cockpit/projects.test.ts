@@ -214,9 +214,10 @@ describe('the sidebar is the navigator, and 1b is where a lock is overruled', ()
   });
 
   test('1b is still reachable, and still has no tab of its own', () => {
-    // The same arrangement `settings` has: reached from the sidebar, absent from
-    // the bar. Two places able to force a lock is one too many, and a tab for it
-    // is how the bar got to twelve.
+    // The same arrangement `settings` has: reached from the palette (`goRuns`,
+    // since the sidebar's link went at the owner's word), absent from the bar.
+    // Two places able to force a lock is one too many, and a tab for it is how
+    // the bar got to twelve.
     expect(cockpit).toMatch(/tab === 'runs' &&/);
     expect(cockpit).toMatch(/<Workstreams/);
     const from = cockpit.indexOf('aria-label="panes"');

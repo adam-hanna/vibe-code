@@ -1811,8 +1811,11 @@ ${frame.text}`, turn, origin.current))) {
             sentence look like a halt banner. */}
         <span className="flex flex-wrap items-center gap-2">
           <span className={cn(NOTE, contextLine.alarm && 'text-emphasis')}>{contextLine.text}</span>
+          {/* `secondary`, not `quiet`: a bordered button on the card ground.
+              Drawn quiet, the two read as labels beside the figure and were
+              reported as not looking clickable. */}
           <Button
-            variant="quiet"
+            variant="secondary"
             size="sm"
             disabled={!canCompact}
             title="The pilot writes a summary of this conversation, and carries on from the summary in a fresh context. The log above stays."
@@ -1821,7 +1824,7 @@ ${frame.text}`, turn, origin.current))) {
             compact
           </Button>
           <Button
-            variant="quiet"
+            variant="secondary"
             size="sm"
             disabled={!canClear}
             title="The pilot forgets this conversation and starts its next turn with nothing. The log above stays."

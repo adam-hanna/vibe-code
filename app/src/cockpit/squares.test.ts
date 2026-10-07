@@ -107,7 +107,12 @@ describe('the tab bar the rail emptied', () => {
     expect(bar).not.toMatch(/>\s*Settings\b/);
     expect(bar).not.toMatch(/>\s*Runs\b/);
     expect(cockpit).toMatch(/onSettings=/);
-    expect(cockpit).toMatch(/onRuns=/);
+    // Case 2 (the UI rework): `1b` was reached by a per-project link in the
+    // sidebar (`onRuns`), which the owner asked to remove. The claim that
+    // survives is that the view is still reachable without a tab: the palette's
+    // `goRuns` action is its route now.
+    expect(cockpit).toMatch(/goRuns: \(\) => setTab\('runs'\)/);
+    expect(cockpit).not.toMatch(/onRuns=/);
   });
 
   test('usage is a readout in the heading rather than an artifact tab', () => {

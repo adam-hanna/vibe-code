@@ -1213,6 +1213,10 @@ export function Cockpit() {
     goSpend: () => setTab('spend'),
     goOutput: () => open('output'),
     goCommands: () => open('commands'),
+    // `1b` in the main pane, which is where a lock can be overruled with a
+    // confirmation. Reached from the palette only: the sidebar's per-project
+    // link went at the owner's word, and a tab for it is how the bar got to twelve.
+    goRuns: () => setTab('runs'),
     pause: () => pause(),
     stop: () => setConfirmStop(true),
     gateContinue: () => {
@@ -1376,7 +1380,6 @@ export function Cockpit() {
             // run you had just left - or on nothing when none was going. A
             // draft on screen is no run at all.
             currentId={viewing?.runId ?? (draftId !== null ? null : (run.identity?.runId ?? null))}
-            onNew={() => setComposing({ dir: repoDir, locked: false })}
             // A run in THIS project, with the repository already answered. It
             // also points the window there, because the run about to start is
             // the one the panes should be reading.
@@ -1389,12 +1392,6 @@ export function Cockpit() {
             onProjectSettings={(next) => {
               rememberRepo(next);
               openSettings('project');
-            }}
-            // `1b` in the main pane, which is where a lock can be overruled with
-            // a confirmation. A sidebar row must not be a second way to force.
-            onRuns={(next) => {
-              rememberRepo(next);
-              setTab('runs');
             }}
             // Reads only. Points the window at the run and leaves the loop
             // alone — no probe, no lock, no turn.
@@ -1607,7 +1604,7 @@ export function Cockpit() {
               onSaved={() => setConfigEpoch((n) => n + 1)}
             />
           )}
-          {/* `1b`, opened from a project in the sidebar. The columns the sidebar
+          {/* `1b`, opened from the palette (`goRuns`). The columns the sidebar
               has no room for — status, cost, liveness — and the one control that
               may overrule a lock, which confirms and says what it is overruling. */}
           {tab === 'runs' && (
