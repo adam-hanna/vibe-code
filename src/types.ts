@@ -1715,8 +1715,8 @@ export interface RunState {
    *
    * Neither existing field can do this job. `pendingAnswers` is *consumed* by
    * the loop the moment it revises against them, so it is gone by the time
-   * anything reports, and since #169 it holds the answerer's answers too; `answeredQuestions` is marked for every question **asked**
-   * whatever came back, so reconciling `ASSUMED.md` against it would empty the
+   * anything reports, and since #169 it holds the answerer's answers too;
+   * `answeredQuestions` is marked for every question **asked** whatever came back, so reconciling `ASSUMED.md` against it would empty the
    * file including the entries that are true.
    *
    * Optional, so a state written before this existed loads with no repair and a
