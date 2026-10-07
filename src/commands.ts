@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { closeSync, existsSync, mkdirSync, openSync, readSync, statSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readSync, realpathSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import { appendLog, highestId, logFile, pastCommands, prune, tailOf, writeMeta } from '@src/commandlog.js';
@@ -348,23 +348,46 @@ function onPath(name: string): string | null {
  * Walks up from the shim looking for the entry, because the layouts differ:
  * `C:\Program Files\nodejs\npm.cmd` has it under `node_modules/npm/...` beside
  * it, and a Unix install has it a directory up under `lib/`.
+ *
+ * **A Unix shim is usually a symlink to the entry itself, so its target is
+ * asked first** (#251). Fedora's `/usr/bin/npm` links to
+ * `/usr/lib/node_modules_22/npm/bin/npm-cli.js`, a directory name no walk from
+ * `/usr/bin` would guess, so `npm` fell through to being spawned as the link -
+ * which is a shell script's interpreter line deciding what runs, and failed the
+ * gate's own test of this function. nvm's and Homebrew's links point at the
+ * entry too. The walk stays for the layouts with a real shim, Windows' among
+ * them, and it now starts from the target as well as the link.
  */
 function nodeEntry(program: string): string | null {
   const relatives = NODE_CLIS[program];
   if (relatives === undefined) return null;
   const shim = onPath(program);
   if (shim === null) return null;
-  let dir = path.dirname(shim);
-  for (let up = 0; up < 4; up += 1) {
-    for (const relative of relatives) {
-      for (const base of [dir, path.join(dir, 'lib')]) {
-        const candidate = path.join(base, relative);
-        if (existsSync(candidate)) return candidate;
+  let real = shim;
+  try {
+    real = realpathSync(shim);
+  } catch {
+    // A link that cannot be resolved is searched as the path PATH gave.
+  }
+  for (const relative of relatives) {
+    // `node_modules/npm/bin/npm-cli.js` -> `npm/bin/npm-cli.js`: the part of the
+    // entry's path that every layout agrees on, whatever its node_modules is called.
+    const tail = relative.split('/').slice(1).join(path.sep);
+    if (real !== shim && real.endsWith(path.sep + tail) && existsSync(real)) return real;
+  }
+  for (const start of real === shim ? [shim] : [real, shim]) {
+    let dir = path.dirname(start);
+    for (let up = 0; up < 4; up += 1) {
+      for (const relative of relatives) {
+        for (const base of [dir, path.join(dir, 'lib')]) {
+          const candidate = path.join(base, relative);
+          if (existsSync(candidate)) return candidate;
+        }
       }
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
     }
-    const parent = path.dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
   }
   return null;
 }
