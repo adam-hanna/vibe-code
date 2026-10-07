@@ -27,6 +27,27 @@ npm run watch       # tsc --watch
 would pass or fail by machine. A case about the global layer points the variable at a file of
 its own and puts it back (`global-config.test.ts`). Running `node --test` directly skips this.
 
+**`npm test` also owns where the suite's temporary files go, and removes them** (#234). The
+suite makes about 1,600 temporary directories a run, 411 of them git repositories, and for a
+long time removed none: on the Linux dev machine's tmpfs that used up a million inodes in about
+thirty runs, and the next run failed 673 tests with `ENOSPC`, which looks like a broken suite
+rather than a full disk. The fix is where a directory comes from, not 225 `mkdtempSync` sites
+each remembering `rmSync`: `scripts/test.mjs` points `TMPDIR`, `TMP` and `TEMP` at one
+`vibe-test-run-*` root, so `os.tmpdir()` answers that root in every test file and every child,
+and the root is removed when the run ends. Three rules travel with it, pinned by
+`test-sandbox.test.ts`:
+
+- **`GIT_TEMPLATE_DIR` is an empty directory**, so a fixture repository holds 9 entries
+  rather than 27. The sample hooks were two-thirds of what a test repository cost, and no test
+  runs one. A run fell from about 30,000 inodes and 174 MB to about 22,800 and 148 MB; most of
+  what is left is the deliberately large states in `fork-kill` and the chat-store cases.
+- **Ctrl-C, SIGTERM and a closed terminal still remove the root**; the script waits for the runner and then cleans up. **A SIGKILL or a crash is swept by the next run**: each root holds the pid that made it,
+  and a root whose pid has gone is removed at the start of the next run.
+- **Anything that appears in the real temp directory fails the run, by name.** That is a test
+  writing to a hard-coded `/tmp` or spawning a child with a hand-built environment, and it would
+  otherwise bring the leak back silently. Put a new fixture under `os.tmpdir()` and it is
+  covered without any cleanup of its own; `VIBE_KEEP_TEST_TMP=1` keeps the root and prints it.
+
 **`npm test` runs the compiled output, not the sources.** `pretest` builds, so a stale `dist/`
 is never what you tested — but if you invoke `node --test` directly, build first or you are
 testing the last change rather than this one.

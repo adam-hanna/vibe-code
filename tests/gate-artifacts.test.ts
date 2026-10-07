@@ -565,7 +565,11 @@ test('a backup that cannot be deleted does not un-report an installed round', (t
     assert.ok((result.bytes ?? 0) > 0);
     assert.equal(readFileSync(path.join(roundDir(f), 'report', 'index.html'), 'utf8'), 'SECOND');
   } finally {
-    chmodSync(nested, 0o700);
+    // The retry renamed the mode-0 directory into the backup, so restoring the
+    // path it started at reaches nothing. Restore it wherever it ended up, or it
+    // outlives the run as a directory nobody can list or remove (#234).
+    const backup = path.join(path.dirname(roundDir(f)), 'round-1.superseded-0', 'report', 'nested');
+    for (const dir of [nested, backup]) if (existsSync(dir)) chmodSync(dir, 0o700);
   }
 });
 
