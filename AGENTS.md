@@ -1951,7 +1951,7 @@ src/codex.ts         Codex adapter (codex exec --json)
 src/appserver.ts     Codex app-server JSON-RPC client (rate limits only)
 src/ratelimits.ts    rate-limit windows and the brake
 src/charge.ts        the one seam every token and dollar is charged through
-src/slots.ts         session-slot lifecycle (main = Claude, judge + review = Codex)
+src/slots.ts         session-slot lifecycle (main = Claude, judge + review = Codex, write = one-shot Codex)
 src/context.ts       context measurement, compaction, session rotation
 src/preflight.ts     toolchain contract enforcement, `vibe doctor`
 src/verify.ts        the verification gates — the list, every run, and broken vs flaky
@@ -3351,8 +3351,14 @@ needs new evidence, not a fresh opinion.
 - **The Codex context window is a setting, not a derivation.** `modelContextWindow` exists
   only on an app-server push notification, and `vibe` drives Codex as a plain child process.
 - **A persisted Codex thread cannot hold a writing role.** `codex exec resume` takes no `-s`
-  flag, so the sandbox silently reverts after the first turn. The config is refused, not
-  repaired.
+  flag, so the sandbox silently reverts after the first turn. What changed is where a writer
+  sits, not the rule: a Codex implementer used to be *refused* while `codex.persistSession`
+  was on, so choosing one cost the critic and the reviewer their threads too, and the
+  settings screen had no way to say why (*"explain this keeping session between turns?!"*).
+  It is now seated on `SLOTS.write`, which never carries a thread — every writer turn is a
+  fresh `codex exec` with its sandbox set, handed the plan of record like any memoryless
+  generative seat — and the read-only seats keep theirs. `roleRefusals` still refuses a
+  table that puts a writer on a carried thread, asked of the slot rather than the setting.
 - **`/compact` does not work headless.** It is a CLI command, not a model instruction.
   Compaction is explicit session rotation with a handoff briefing.
 - **Prompts go over stdin, never argv.** Claude's variadic flags swallow positional

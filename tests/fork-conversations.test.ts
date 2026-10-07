@@ -193,7 +193,10 @@ test('a conversation the parent never ran is not forked, and the loss is stated'
   assert.equal(fields.forkPending, undefined, 'nothing was owed');
   for (const conversation of conversations) {
     assert.equal(conversation.parentId, null);
-    assert.equal(conversation.why, 'never-started');
+    // Case 2: the one-shot `write` slot (a Codex writer) never carries a
+    // thread, so its loss is the other stated reason. Every carried slot still
+    // says never-started.
+    assert.equal(conversation.why, conversation.slot === 'write' ? 'not-persisted' : 'never-started');
   }
 });
 

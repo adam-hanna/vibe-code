@@ -303,14 +303,16 @@ describe('a turn that has gone quiet has a ceiling, and it is on the screen', ()
     expect(body.match(/<Badge>/g)).toHaveLength(1);
   });
 
-  test('a refusal stays on screen, and the setting it names has a control', () => {
+  test('a refusal stays on screen wherever the page is scrolled', () => {
     // *"I can't seem to change my implementer from claude to codex. No error
     // appears."* The core refused it - a writing Codex seat with
     // `codex.persistSession` on - and the sentence was drawn at the top of a
-    // page scrolled to the role table, with no control for the key it named.
+    // page scrolled to the role table. The core no longer refuses that table,
+    // and any refusal now stays in view.
     expect(settings).toMatch(/cn\(S\.refused, 'sticky top-0/);
-    expect(settings).toContain("save({ codex: { persistSession: e.target.value === 'on' } })");
-    expect(settings).toContain("{source('codex', 'persistSession')}");
+    // The key that refusal named has no control any more, because the core no
+    // longer needs it: a Codex writer is one-shot by itself (\`SLOTS.write\`).
+    expect(settings).not.toContain('persistSession');
   });
 
   test('changing a seat’s agent does not carry the old agent’s model onto it', () => {

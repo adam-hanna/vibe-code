@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { applyOverrides, DEFAULTS, loadConfig } from '@src/config.js';
 import { shouldRotate, withConcurrentCompaction } from '@src/context.js';
+import { roleRefusals, slotForRole } from '@src/roles.js';
+import { SLOTS } from '@src/slots.js';
 import {
   DEFAULT_ROLE_PROVIDERS,
   enabledRolesFor,
@@ -317,18 +319,33 @@ test('a memoryless generative role is handed the plan of record; a judging one i
 
 // ---- 6. The refusal --------------------------------------------------------
 
-test('a writing Codex role with persistSession on is refused, naming the flag', () => {
+// Case 2 (owner's decision): a Codex implementer used to be refused while
+// `codex.persistSession` was on, which made it cost the critic and the reviewer
+// their threads. A writer is now seated on the one-shot `write` slot, so the
+// same table loads with persistSession on - and the refusal it was guarding
+// stands for any table that DOES put a writer on a carried thread.
+test('a writing Codex role is one-shot, and the read-only seats keep their threads', () => {
   const stored = { ...structuredClone(DEFAULTS), roles: SWAP } as Config;
 
-  assert.throws(() => applyOverrides(stored, {}), /--no-codex-session/);
-  assert.throws(() => applyOverrides(stored, {}), /roles\.implementer/);
-  assert.throws(
-    () => loadConfig(repoWith({ roles: SWAP })),
-    /--no-codex-session/,
-  );
+  assert.doesNotThrow(() => applyOverrides(stored, {}));
+  const cfg = loadConfig(repoWith({ roles: SWAP }));
+  assert.equal(cfg.codex.persistSession, true);
+  const roles = rolesFor(cfg);
+  assert.equal(slotForRole('implementer', roles), 'write');
+  assert.equal(SLOTS.write.persists(cfg), false, 'a writer never resumes a thread');
+  assert.deepEqual(roleRefusals(cfg, roles), []);
+});
 
-  // Turning it off is what makes the same table legal.
-  assert.doesNotThrow(() => loadConfig(repoWith({ roles: SWAP, codex: { persistSession: false } })));
+test('a writing Codex role on a carried thread is still refused, naming the flag', () => {
+  const cfg = loadConfig(repoWith({ roles: SWAP }));
+  const onJudge = { ...rolesFor(cfg), implementer: { ...rolesFor(cfg).implementer, slot: 'judge' as const } };
+  const refused = roleRefusals(cfg, onJudge);
+  assert.equal(refused.length, 1);
+  assert.match(refused[0] ?? '', /roles\.implementer/);
+  assert.match(refused[0] ?? '', /--no-codex-session/);
+  // Off, the judge thread is one-shot too, and the same table is legal.
+  const off = { ...cfg, codex: { ...cfg.codex, persistSession: false } };
+  assert.deepEqual(roleRefusals(off, onJudge), []);
 });
 
 // ---- 7. Validation ---------------------------------------------------------

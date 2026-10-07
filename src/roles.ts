@@ -210,11 +210,12 @@ function isRecord(v: unknown): v is Record<string, unknown> {
  * role keeps the one they have always had.
  */
 const CODEX_SLOT: Readonly<Record<Role, SlotName>> = {
-  // A writing role on Codex is refused outright while `codex.persistSession` is
-  // on (see `roleRefusals`) and is one-shot without it, so it carries nothing
-  // either way. It stays on `judge` so nothing about such a table changes here.
+  // The planner reads (plan mode), so it may carry a thread like any judge.
   planner: 'judge',
-  implementer: 'judge',
+  // The one writing role, and the one slot that never carries a thread: a
+  // resumed Codex turn cannot write (see `SLOTS.write`). This used to be `judge`
+  // and refused while `codex.persistSession` was on.
+  implementer: 'write',
   critic: 'judge',
   // Deliberately `judge`, not `review`. Answering the planner's blocking
   // questions is plan-side work, and the conversation that has argued about the
@@ -704,7 +705,19 @@ export function codexProbeSandbox(cfg: Config, roles: RoleTable = rolesFor(cfg))
  * switched off reports none rather than describing a conversation nothing opens.
  */
 export function codexConversations(cfg: Config, roles: RoleTable = rolesFor(cfg)): number {
-  return new Set(enabledRolesFor('codex', cfg, roles).map((role) => slotForRole(role, roles))).size;
+  // Only the conversations that are carried: a one-shot seat holds none.
+  return new Set(
+    enabledRolesFor('codex', cfg, roles)
+      .map((role) => slotForRole(role, roles))
+      .filter((slot) => SLOTS[slot].persists(cfg)),
+  ).size;
+}
+
+/** The Codex roles that start every turn fresh whatever `persistSession` says. */
+export function codexOneShotRoles(cfg: Config, roles: RoleTable = rolesFor(cfg)): Role[] {
+  return enabledRolesFor('codex', cfg, roles).filter(
+    (role) => SLOTS.judge.persists(cfg) && !SLOTS[slotForRole(role, roles)].persists(cfg),
+  );
 }
 
 /** Which providers hold these roles, deduped and in a stable order. */
@@ -835,9 +848,14 @@ export const GENERATIVE_ROLES: readonly Role[] = ['planner', 'implementer'];
  * user's.
  */
 export function roleRefusals(cfg: Config, roles: RoleTable = rolesFor(cfg)): string[] {
-  if (!cfg.codex.persistSession) return [];
+  // Asked of the slot, not of the setting: a writer is seated on `write`, which
+  // never carries a thread, so a table built here is never refused. What is
+  // still refused is a table that puts a writer on a carried Codex thread.
   return ROLE_NAMES.filter(
-    (role) => roles[role].provider === 'codex' && roles[role].access === 'write',
+    (role) =>
+      roles[role].provider === 'codex' &&
+      roles[role].access === 'write' &&
+      SLOTS[slotForRole(role, roles)].persists(cfg),
   ).map(
     (role) =>
       `roles.${role} is Codex and codex.persistSession is on. \`codex exec resume\` takes no ` +
@@ -878,8 +896,8 @@ export function roleWarnings(cfg: Config, roles: RoleTable = rolesFor(cfg)): str
     // rather than of the first: a provider no longer has one conversation (#45),
     // so "does any of them sit in the implementer's conversation, and is that
     // conversation carried" is now two questions this has to actually ask. Every
-    // table that runs today answers exactly as it did - a Codex implementer
-    // needs `persistSession` off before `roleRefusals` will let it run at all.
+    // table that runs today answers exactly as it did - a Codex implementer is
+    // on the one-shot `write` slot, which no judge shares and nothing carries.
     const implementerSlot = slotForRole('implementer', roles);
     const persists =
       shared.some((role) => slotForRole(role, roles) === implementerSlot) &&
@@ -935,7 +953,15 @@ export function roleWarnings(cfg: Config, roles: RoleTable = rolesFor(cfg)): str
   // still uncompactable, but it is no longer unmeasured. A warning that
   // contradicts the feature beside it teaches users to skip the next one, so the
   // measurement clause is conditional and the compaction clause is not.
-  if (!slotRotatable(rotatingSlot(roles))) {
+  if (!SLOTS[rotatingSlot(roles)].persists(cfg)) {
+    // A Codex implementer is one-shot (`SLOTS.write`): there is no thread to
+    // measure or compact, so neither claim is made about one.
+    warnings.push(
+      `roles.implementer is ${implementer}, which starts every turn in a fresh conversation. ` +
+        'Session rotation and context compaction are off for this run: there is no conversation ' +
+        'for them to act on, and each turn is handed the plan of record instead.',
+    );
+  } else if (!slotRotatable(rotatingSlot(roles))) {
     const measured = slotMeasured(cfg, rotatingSlot(roles));
     warnings.push(
       `roles.implementer is ${implementer}, whose conversation has no rotation mechanism. ` +
@@ -957,22 +983,25 @@ export function roleWarnings(cfg: Config, roles: RoleTable = rolesFor(cfg)): str
     // *measures* it is now a question about `codex.contextWindow`, so the sentence
     // this shipped with is only said while it is still true. What never changes is
     // that nothing can compact the thread.
-    if (cfg.codex.persistSession) {
+    // Only the roles actually on a carried thread: a Codex implementer is
+    // seated on the one-shot `write` slot, and a thread it does not have cannot
+    // grow.
+    const carried = generativeOnCodex.filter((role) => SLOTS[slotForRole(role, roles)].persists(cfg));
+    if (carried.length > 0) {
+      const carriedNames = namePaths(carried);
       // Asked of every named role, not of the first. What is still true is that
       // each Codex conversation is measured against the same setting -
       // `codex.contextWindow` is a fact about the model - so the answer is the
       // same for all of them; what is no longer true is that a provider has one
       // conversation to ask about (#45), and a warning must not rest on it.
-      const measured = generativeOnCodex.every((role) =>
-        slotMeasured(cfg, slotForRole(role, roles)),
-      );
+      const measured = carried.every((role) => slotMeasured(cfg, slotForRole(role, roles)));
       warnings.push(
         measured
-          ? `${named} run on a persisted Codex thread. Its context is measured against ` +
+          ? `${carriedNames} run on a persisted Codex thread. Its context is measured against ` +
             'codex.contextWindow and warned about above context.compactAboveRatio, but nothing ' +
             'can compact it: it grows across every plan revision, question round and fix round ' +
             'with no handoff.'
-          : `${named} run on a persisted Codex thread and nothing measures its context. It grows ` +
+          : `${carriedNames} run on a persisted Codex thread and nothing measures its context. It grows ` +
             'across every plan revision, question round and fix round with no threshold and no ' +
             'handoff.',
       );

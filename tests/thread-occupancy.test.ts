@@ -562,7 +562,11 @@ test('a generative role on a persisted Codex thread is called unmeasured only wh
   assert.ok(has(measured, CANNOT_COMPACT), measured.join('\n'));
 });
 
-test('the rotation warning stops claiming the thread is unmeasured once it is', () => {
+// Case 2: a Codex implementer is one-shot (`SLOTS.write`), so the warning has
+// no thread to call measured or unmeasured - the claim that it never says
+// something false about measurement now holds by saying nothing about it, with
+// or without a window. That rotation and compaction are off is still said.
+test('the rotation warning makes no measurement claim about a one-shot implementer', () => {
   const roles = {
     planner: 'codex' as const,
     implementer: 'codex' as const,
@@ -570,17 +574,17 @@ test('the rotation warning stops claiming the thread is unmeasured once it is', 
     answerer: 'claude' as const,
     reviewer: 'claude' as const,
   };
-  // persistSession must be off for a writing Codex role: roleRefusals says so.
-  const base = { ...DEFAULTS.codex, readRateLimits: false, persistSession: false };
+  const base = { ...DEFAULTS.codex, readRateLimits: false };
 
-  const unset = roleWarnings(config({ roles, codex: base }));
-  assert.ok(has(unset, UNMEASURED_W2), unset.join('\n'));
-  assert.ok(has(unset, CANNOT_COMPACT));
-
-  const measured = roleWarnings(config({ roles, codex: { ...base, contextWindow: 200_000 } }));
-  assert.equal(has(measured, UNMEASURED_W2), false, measured.join('\n'));
-  assert.ok(has(measured, CANNOT_COMPACT), measured.join('\n'));
-  assert.ok(has(measured, /rotation and context compaction are off/i));
+  for (const codex of [base, { ...base, contextWindow: 200_000 }]) {
+    const warnings = roleWarnings(config({ roles, codex }));
+    assert.equal(has(warnings, UNMEASURED_W2), false, warnings.join('\n'));
+    assert.ok(has(warnings, /rotation and context compaction are off/i), warnings.join('\n'));
+    assert.ok(has(warnings, /starts every turn in a fresh conversation/i), warnings.join('\n'));
+    // The planner is still on a carried thread, and still cannot be compacted.
+    assert.ok(has(warnings, /roles\.planner run on a persisted Codex thread/), warnings.join('\n'));
+    assert.equal(has(warnings, /roles\.implementer run on a persisted/), false, warnings.join('\n'));
+  }
 });
 
 test('the default table still warns about nothing, window or no window', () => {

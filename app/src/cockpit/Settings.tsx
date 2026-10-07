@@ -883,7 +883,7 @@ export function Settings({
     git?: Record<string, string | number | boolean | null | undefined>;
     verify?: Record<string, unknown>;
     claude?: { model?: string };
-    codex?: { model?: string; persistSession?: boolean };
+    codex?: { model?: string };
   };
   const gates = effective.gates ?? {};
   const loop = effective.loop ?? {};
@@ -1905,34 +1905,6 @@ export function Settings({
             })}
           </tbody>
         </table>
-        {/* **The setting the implementer refusal names had no control.** A Codex
-            seat that writes cannot keep its thread — `codex exec resume` takes no
-            `-s` flag, so the sandbox reverts to read-only after the first turn —
-            and the core refuses the combination by name. Without this the
-            sentence said what to change and the screen offered no way to. It is
-            not switched off on the person's behalf: it applies to every Codex
-            seat, so the critic and the reviewer lose their threads too, and that
-            is a decision rather than a side effect of picking an implementer. */}
-        <div className={S.row}>
-          <label className={S.label} htmlFor="codex-session">
-            Codex keeps its conversation between turns
-          </label>
-          <select
-            id="codex-session"
-            value={effective.codex?.persistSession === false ? 'off' : 'on'}
-            disabled={busy}
-            onChange={(e) => save({ codex: { persistSession: e.target.value === 'on' } })}
-          >
-            <option value="on">on — each Codex seat resumes its own thread</option>
-            <option value="off">off — every Codex turn starts fresh</option>
-          </select>
-          {source('codex', 'persistSession')}
-        </div>
-        <p className={S.note}>
-          A <strong>Codex implementer needs this off.</strong> A resumed Codex turn cannot write, so
-          the loop refuses a writing Codex seat while it is on. Turning it off applies to every Codex
-          seat: the critic and the reviewer start each turn without their earlier rounds.
-        </p>
       </section>
 
       {/* ---- what every turn is told ------------------------------------- */}
