@@ -70,6 +70,8 @@ import { line, outcome } from '../cockpit/commands';
 import { memory } from '../memory';
 import { Markdown } from './Markdown';
 import { splitBrief } from '../cockpit/argv';
+import { CopyText } from './CopyText';
+import { copyOf } from './copy';
 import type { Command, Commands } from '../cockpit/commands';
 import type { Run } from '../cockpit/model';
 
@@ -579,6 +581,7 @@ function ReplyCard({
   // The composer's settings ride under the brief for the model, and are drawn as
   // chips rather than as words the person wrote (#258).
   const yours = reply.asked === null ? null : splitBrief(reply.asked);
+  const copy = copyOf(reply);
   return (
     <div className="flex flex-col gap-2">
       {/* What you said, above the answer to it (#211). The pane drew replies
@@ -606,7 +609,11 @@ function ReplyCard({
           survive, because they are the reason shift+enter exists. */}
       {yours !== null && (
         <div className="flex max-w-[80%] flex-col items-end gap-1.5 self-end rounded-md border border-rule-card bg-active px-3.5 py-2.5">
-          <Badge>you</Badge>
+          {/* Copy beside the label (#256): what you typed, newlines included. */}
+          <div className="flex items-center gap-1">
+            {copy.asked !== null && <CopyText text={copy.asked} label="Copy your message" />}
+            <Badge>you</Badge>
+          </div>
           <div className="self-stretch select-text whitespace-pre-wrap text-left text-body text-primary [overflow-wrap:anywhere]">
             {yours.brief}
           </div>
@@ -655,6 +662,9 @@ function ReplyCard({
         {outcome?.kind === 'ended' && outcome.stop !== null && <Badge>{outcome.stop}</Badge>}
         {outcome?.kind === 'cancelled' && <Badge>stopped</Badge>}
         {outcome?.kind === 'failed' && <Badge variant="alarm">failed</Badge>}
+        {/* The reply's Markdown source, as drawn below (#256), at the end of
+            the row so it sits in the same place on every reply. */}
+        {copy.said !== null && <CopyText text={copy.said} label="Copy the pilot's reply" className="ml-auto" />}
       </div>
 
       {/* `visible`, not the raw text: a tool call the subscription backend made
