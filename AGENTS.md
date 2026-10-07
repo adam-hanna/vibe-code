@@ -760,7 +760,7 @@ they are waiting on. Four things in it are worth carrying:
   allowlist: `validateRoleSetting` is unchanged and still takes any non-empty
   string. Every entry is a name this repository already ships — `opus` is
   `DEFAULTS.claude.model`, `haiku` is `preflight.ts`'s `PROBE_MODEL`, `sonnet` is
-  `README.md`'s role-table example, `gpt-5.6-luna` is `DEFAULTS.codex.model`, and
+  the role-table example the README carried before it was cut down, `gpt-5.6-luna` is `DEFAULTS.codex.model`, and
   `gpt-5.6-pro` is what `--help` prints beside `--role` — so the list is a fact
   about this build rather than a claim about a catalogue. It lives in the core
   beside the defaults it has to agree with, for the reason `pilot.MODELS` gives
@@ -3083,7 +3083,7 @@ Beyond the compiler:
   stays `null` rather than being guessed from a model name; Codex cost is reported as absent
   rather than derived from a price table; a missing progress field is omitted rather than
   filled in. Partial information beats a convincing fabrication, and most of the design notes
-  in `README.md` exist to explain a place this rule was applied.
+  in this file exist to explain a place this rule was applied.
 - **A proxy is allowed; a proxy wearing another measurement's clothes is not.** `src/work.ts`
   is the worked example. The wireframes draw `step 9/14` over an implement turn and no such
   number exists, so what ships is *"9 of the 14 files the plan names"* — every part of it
