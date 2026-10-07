@@ -338,6 +338,14 @@ export type Outbound =
   /** A conversation was written or removed, answering `chat_save`. */
   | { type: 'chat_saved'; id: number; key: string }
   /**
+   * Everything else the window remembers, answering `memory` (#223,
+   * `src/chatstore.ts`'s `memoryDir`): projects, pins, names, drafts, the type
+   * scale, the pilot's books and where the window was pointed.
+   */
+  | { type: 'memory'; id: number; entries: readonly { key: string; value: string }[] }
+  /** One of those was written or removed, answering `memory_save`. */
+  | { type: 'memory_saved'; id: number; key: string }
+  /**
    * The commands a previous host left on disk, answering `commands_past`
    * (#223, `src/commandlog.ts`). Oldest first; none of them is running.
    */
@@ -625,6 +633,10 @@ export type Inbound =
   | { type: 'chats'; id: number }
   /** Store one conversation, or remove it with a null value. */
   | { type: 'chat_save'; id: number; key: string; value: string | null }
+  /** The window's stored memory, everything that is not a conversation (#223). */
+  | { type: 'memory'; id: number }
+  /** Store one entry of it, or remove it with a null value. */
+  | { type: 'memory_save'; id: number; key: string; value: string | null }
   /** The commands earlier launches ran, read back from their logs (#223). */
   | { type: 'commands_past'; id: number }
   /** Which models each CLI offers. `fresh` asks the CLIs again. */
@@ -919,6 +931,22 @@ export function decode(line: string): Decoded {
     }
     case 'chats':
       return { ok: true, message: { type: 'chats', id } };
+    case 'memory':
+      return { ok: true, message: { type: 'memory', id } };
+    case 'memory_save': {
+      const key = parsed['key'];
+      const value = parsed['value'];
+      // The window's own namespace, and never a conversation: those have their
+      // own frame and their own directory, and one key reachable by both roads
+      // would be two files that could disagree about one chat.
+      if (typeof key !== 'string' || !key.startsWith('vibe.') || key.startsWith('vibe.chat.')) {
+        return { ok: false, id, reason: 'memory_save carried no window key' };
+      }
+      if (value !== null && typeof value !== 'string') {
+        return { ok: false, id, reason: 'memory_save carried no value - send null to remove' };
+      }
+      return { ok: true, message: { type: 'memory_save', id, key, value } };
+    }
     case 'commands_past':
       return { ok: true, message: { type: 'commands_past', id } };
     case 'models':

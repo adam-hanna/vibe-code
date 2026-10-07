@@ -41,6 +41,7 @@ import type { ReactNode } from 'react';
 import type { Pin, ProjectName, ProjectNode, RunName } from './projects';
 import type { RailRun } from './squares';
 import { draftsIn, settled } from './pending';
+import { memory, useMemoryFailure } from '../memory';
 import type { Draft } from './pending';
 import type { ArchiveRun } from '../host';
 
@@ -91,8 +92,8 @@ import type { ArchiveRun } from '../host';
  *
  * ## The four controls on a row, and which of them touch a disk
  *
- * Exactly one does. **Pin** and **rename** are this window's own memory and are
- * `localStorage`; they change nothing in any repository, which is why neither
+ * Exactly one does. **Pin** and **rename** are this window's own memory
+ * (`memory.ts`); they change nothing in any repository, which is why neither
  * confirms. **New run** in a project opens the composer with that project's
  * directory already settled — that is the whole of what *"In this window, I
  * shouldn't have to select the project folder, it's already known"* asked for,
@@ -649,6 +650,8 @@ export function Sidebar({
   /** Which project has its rename box open, or null. */
   const [renamingProject, setRenamingProject] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
+  /** Why this window's lists are not being kept, if they are not (#223, `memory.ts`). */
+  const unkept = useMemoryFailure();
   const [typed, setTyped] = useState('');
   /** Which run has its rename box open, or null. At most one, sidebar-wide. */
   const [renaming, setRenaming] = useState<{ dir: string; runId: string } | null>(null);
@@ -677,10 +680,10 @@ export function Sidebar({
   // are this window's own memory, so every other write goes through the setters.
   useEffect(() => {
     try {
-      setProjects(readProjects(localStorage.getItem(PROJECTS_KEY)));
-      setPins(readPins(localStorage.getItem(PINNED_KEY)));
-      setNames(readNames(localStorage.getItem(NAMES_KEY)));
-      setProjectNames(readProjectNames(localStorage.getItem(PROJECT_NAMES_KEY)));
+      setProjects(readProjects(memory.getItem(PROJECTS_KEY)));
+      setPins(readPins(memory.getItem(PINNED_KEY)));
+      setNames(readNames(memory.getItem(NAMES_KEY)));
+      setProjectNames(readProjectNames(memory.getItem(PROJECT_NAMES_KEY)));
     } catch {
       // Storage can be unavailable or full. An empty sidebar is a smaller
       // failure than a window that will not render.
@@ -689,7 +692,7 @@ export function Sidebar({
 
   const save = useCallback((key: string, value: unknown) => {
     try {
-      localStorage.setItem(key, JSON.stringify(value));
+      memory.setItem(key, JSON.stringify(value));
     } catch {
       // The list still works for this session. See above.
     }
@@ -824,7 +827,7 @@ export function Sidebar({
    * Do what the open confirmation says, and nothing else.
    *
    * The two branches are as different as the dialog claims they are: forgetting
-   * a project touches `localStorage` and stops there, and deleting a run is a
+   * a project touches the window's memory and stops there, and deleting a run is a
    * host request that can be refused. The refusal stays on the dialog — a window
    * that closed on it would look exactly like one that had succeeded.
    */
@@ -1113,9 +1116,15 @@ export function Sidebar({
       {/* No settings entry down here: the activity bar's ⚙ is the one door to
           the settings for all projects, and a second one at the foot of this
           panel was the same control drawn twice ("get rid of it"). */}
-      {!host.inShell() && (
-        <div className="mt-auto border-t border-rule-structure pt-4">
-          <p className="m-0 px-3 text-label leading-relaxed text-tertiary">Preview mode · run agents in the desktop app.</p>
+      {/* A setting that is not being kept is said here, beside the lists it
+          would lose: a sidebar that quietly forgot its projects on the next
+          launch is the defect `memory.ts` exists to end. */}
+      {(unkept !== null || !host.inShell()) && (
+        <div className="mt-auto flex flex-col gap-2 border-t border-rule-structure pt-4">
+          {unkept !== null && <p className="m-0 px-3 text-label leading-relaxed text-loss">{unkept}</p>}
+          {!host.inShell() && (
+            <p className="m-0 px-3 text-label leading-relaxed text-tertiary">Preview mode · run agents in the desktop app.</p>
+          )}
         </div>
       )}
     </nav>

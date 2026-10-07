@@ -1409,7 +1409,44 @@ writes debounced per key. Three rules travel with it:
 - **The migration out of `localStorage` removes a key only after the host has
   confirmed it.**
 - **A failed save is drawn in the pane.** The swallowed failure was the whole defect.
-  Everything else in `localStorage` is small and stays where it is.
+  This bullet once ended *"everything else in `localStorage` is small and stays where it
+  is"*. That was wrong, and the next paragraph is why.
+
+**Everything else the window remembers is files too, because a small store could still be
+refused whole** (#223). On 2026-10-06 the app came up looking factory-reset: no projects, no
+repository, an empty ledger. All eleven remaining keys were still on disk, 29 KB of values,
+but WebKitGTK's storage file was **5,267,456 bytes**. Deleting the migrated chat keys had
+freed 1,275 pages and sqlite never shrinks a file on its own, so the file stayed just over
+the 5 MiB per-origin quota, and WebKit then refused the origin's **whole** storage: every
+read came back empty. The page cannot compact that file, so the size of what is *stored*
+was never the measure that mattered. `VACUUM` with the app closed brought it back, and the
+durable fix is for nothing the product needs to live there.
+
+`app/src/memory.ts` is the window's half and `memoryDir` in `src/chatstore.ts` the host's:
+one file per key under `$VIBE_APP_DATA/memory`, the chats' format and rules exactly, in a
+directory of its own so the `chats` read stays a list of conversations. The `memory_save`
+frame refuses a `vibe.chat.` key, so one conversation cannot be reachable by two roads. Four
+things carry it:
+- **It loads before the cockpit mounts.** Every reader is a `useState` initialiser or an
+  effect that wants the value now, so `main.tsx` awaits `loadMemory()` and renders after.
+  `memory` keeps `localStorage`'s three methods, which made each call site a one-word change.
+  Rewriting twelve reads around a promise would have been twelve chances to draw a default
+  and save it over the stored value.
+- **The move removes a `localStorage` key only after the host has confirmed it**, and an
+  entry the host already holds wins. A key that will not move stays, is read from there,
+  and the sidebar says so.
+- **A host that cannot be read is the old behaviour, said.** After a few retries, because
+  the host may still be starting, the window falls back to `localStorage` for that launch
+  and writes nothing to the host it never read. The sentence is drawn at the foot of the
+  sidebar.
+- **The ledger's store is injected**, because `ledger.test.ts` pins its imports to keep any
+  route to the core's charge seam out, and `memory.ts` reaches the host client.
+  `memory.test.ts` globs the app's sources and fails on any other module that touches
+  `localStorage`.
+
+What this does **not** do is rescue an install whose storage file is already over the
+quota: the page reads nothing from it, so there is nothing to move. Compacting the file from
+Rust before the webview opens would. It was offered as the short-term fix and not built.
 
 **A command's output is on disk too, and so is where the window was pointed** (#223). The
 two other things that lived only in memory after the chats moved: the host held every
@@ -1975,6 +2012,7 @@ app/src/pilot/ledger.ts    the pilot's own books - the one place a dollar is a d
 app/src/cockpit/argv.ts    a form to an argv, and the composer's settings as the pilot is told them
 app/src/cockpit/commands.ts  commands this window ran - pure, and not part of any run
 app/src/cockpit/where.ts     where the window was pointed, kept between launches
+app/src/memory.ts            what the window remembers - host files behind a synchronous cache
 app/src/cockpit/models.ts    the four model listings the pickers draw, and nothing else
 app/src-tauri/src/pilot/models.rs  which models a stored key may use, asked of the vendor
 app/src-tauri/src/host.rs    supervising the host process, and the \\?\ path fix

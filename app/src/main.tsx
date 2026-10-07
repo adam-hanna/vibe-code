@@ -2,6 +2,8 @@ import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Boundary } from './Boundary';
 import { Cockpit } from './cockpit/Cockpit';
+import { flushMemory, loadMemory, memory } from './memory';
+import { keepLedgerIn } from './pilot/ledger';
 import './cockpit/cockpit.css';
 import './design/workspace.css';
 // Tailwind over the tokens, and the two typefaces the rework moves to. Neither
@@ -37,6 +39,12 @@ async function render(into: HTMLElement): Promise<void> {
     );
     return;
   }
+  // The window's memory is read before the cockpit exists (#223, `memory.ts`):
+  // every setting is read synchronously at mount, and a mount that ran first
+  // would draw defaults and then save them over what was stored.
+  await loadMemory();
+  keepLedgerIn(memory);
+  window.addEventListener('pagehide', flushMemory);
   createRoot(into).render(
     <StrictMode>
       <Boundary>

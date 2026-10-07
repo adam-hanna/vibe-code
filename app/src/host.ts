@@ -343,6 +343,20 @@ export interface ChatsFrame {
   chats: readonly { key: string; value: string }[];
 }
 
+/** Everything else the window remembers, as the host stored it (#223, `memory.ts`). */
+export interface MemoryFrame {
+  type: 'memory';
+  id: number;
+  entries: readonly { key: string; value: string }[];
+}
+
+/** One entry of the window's memory was written or removed. */
+export interface MemorySavedFrame {
+  type: 'memory_saved';
+  id: number;
+  key: string;
+}
+
 /**
  * A command an earlier launch ran, read back from its log (#223,
  * `src/commandlog.ts`). `lost` is a host that went away while it was running.
@@ -501,6 +515,8 @@ export type Frame =
   | PromptsFrame
   | ChatsFrame
   | ChatSavedFrame
+  | MemoryFrame
+  | MemorySavedFrame
   | PastCommandsFrame
   | ModelsFrame
   | ReplayFrame
@@ -555,6 +571,10 @@ export function isFrame(v: unknown): v is Frame {
     // say nothing about the run being narrated.
     type === 'chats' ||
     type === 'chat_saved' ||
+    // The rest of the window's memory (#223), which `memory.ts` reads before
+    // the cockpit mounts and the reducer has no use for.
+    type === 'memory' ||
+    type === 'memory_saved' ||
     // A past run's narration, ignored by THIS reducer for a sharper version of
     // the same reason: it describes a run this process is NOT narrating, and
     // folding it into the live run is exactly the confusion it exists to end.
@@ -972,6 +992,24 @@ export async function chats(): Promise<ChatsFrame['chats']> {
   const id = nextRequestId();
   const frame = await ask<ChatsFrame>({ type: 'chats', id }, id, 'chats', 'the host did not answer with the stored conversations');
   return frame.chats;
+}
+
+/** The window's stored memory, everything but the conversations (#223). */
+export async function memory(): Promise<MemoryFrame['entries']> {
+  const id = nextRequestId();
+  const frame = await ask<MemoryFrame>({ type: 'memory', id }, id, 'memory', "the host did not answer with the window's memory");
+  return frame.entries;
+}
+
+/** Store one entry of it, or remove it with null. Rejects with the host's sentence. */
+export async function saveMemory(key: string, value: string | null): Promise<void> {
+  const id = nextRequestId();
+  await ask<MemorySavedFrame>(
+    { type: 'memory_save', id, key, value },
+    id,
+    'memory_saved',
+    'the host did not confirm the setting was saved',
+  );
 }
 
 /** Which models each CLI offers (#223). `fresh` asks the CLIs again. */

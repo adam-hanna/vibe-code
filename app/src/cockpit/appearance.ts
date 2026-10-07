@@ -20,7 +20,7 @@
  * The same rule `projects.ts` states for the project list: **how big you like
  * your text is not a fact about any run**, and `vibe.config.json` is a project
  * file meant to be committed, so one person's eyesight is the wrong thing to put
- * in it. `localStorage`, beside the repository and the pilot's spend ceiling.
+ * in it. the window's memory (`memory.ts`), beside the repository and the pilot's spend ceiling.
  *
  * Pure, and applied by its one caller, so the clamp and the read are testable
  * without a DOM — the app has no jsdom, and a module that touched `document` at
@@ -59,7 +59,7 @@ export const MAX = 1.5;
  * A stored scale, or 1.
  *
  * **Every failure is 1**, which is what the product looked like before this
- * existed: `localStorage` is one namespace for the whole origin, a value
+ * existed: the window's memory is one namespace for the whole window, a value
  * somebody else wrote is not ours to interpret, and a window that would not
  * render because a string was not a number is a worse outcome than text at the
  * size it always was. A number outside the range is clamped rather than

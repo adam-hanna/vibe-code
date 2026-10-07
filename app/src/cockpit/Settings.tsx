@@ -16,6 +16,7 @@ import { DRAFTS_KEY, draftsFor, readDrafts, removeDraft, saveDraft } from './dra
 import type { Draft } from './drafts';
 import type { KeyStatus } from '../pilot/keys';
 import type { ConfigFrame, PromptsFrame } from '../host';
+import { memory } from '../memory';
 import { CLI_DEFAULT, loadCliModels, optionsFor, useModels, whyNot } from './models';
 import type { Listing } from './models';
 
@@ -72,7 +73,7 @@ const S = {
  *
  * - **The project's** — gates, roles. `vibe.config.json`, meant to be committed,
  *   and every run in this repository gets it.
- * - **This window's** — the type scale. `localStorage`, this machine only. How
+ * - **This window's** — the type scale. the window's memory (`memory.ts`), this machine only. How
  *   big you like your text is not a fact about any run, which is the same rule
  *   `projects.ts` states for the project list.
  * - **This machine's secrets** — the pilot's API keys. The OS keychain, and
@@ -763,7 +764,7 @@ export function Settings({
   const [drafts, setDrafts] = useState<readonly Draft[]>([]);
   useEffect(() => {
     try {
-      setDrafts(readDrafts(localStorage.getItem(DRAFTS_KEY)));
+      setDrafts(readDrafts(memory.getItem(DRAFTS_KEY)));
     } catch {
       // Storage can be unavailable. An empty library is a smaller failure than
       // a settings screen that will not render.
@@ -771,7 +772,7 @@ export function Settings({
   }, []);
   const keep = useCallback((key: string, value: unknown) => {
     try {
-      localStorage.setItem(key, JSON.stringify(value));
+      memory.setItem(key, JSON.stringify(value));
     } catch {
       // The library still works for this session. See above.
     }
@@ -1078,7 +1079,7 @@ export function Settings({
                 that is about the conversation in front of you.
 
                 It is a **third** kind of setting on a screen that already names
-                three, and it lands in the second: this window's, in `localStorage`,
+                three, and it lands in the second: this window's, in its memory (`memory.ts`),
                 this machine only. Not the project's file, which is committed, and
                 not the keychain, which holds one kind of secret. */}
             <div className={S.fact}>

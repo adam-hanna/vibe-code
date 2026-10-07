@@ -78,6 +78,7 @@ import type { PilotLimits } from '../pilot/ledger';
 import type { Launched, Raise } from './argv';
 import type { Caps } from './Footer';
 import type { Effect } from '../pilot/tools';
+import { memory } from '../memory';
 import type { Frame } from '../host';
 import type { Run } from './model';
 
@@ -126,7 +127,7 @@ const REPO_KEY = 'vibe.repo';
 /** Where the window was pointed when it last closed. See `where.ts`. */
 function storedWhere(): Where {
   try {
-    return readWhere(localStorage.getItem(WHERE_KEY));
+    return readWhere(memory.getItem(WHERE_KEY));
   } catch {
     return NOWHERE;
   }
@@ -192,7 +193,7 @@ export function Cockpit() {
    */
   const [scale, setScale] = useState(() => {
     try {
-      return readScale(localStorage.getItem(SCALE_KEY));
+      return readScale(memory.getItem(SCALE_KEY));
     } catch {
       // Storage can be unavailable. Text at the size it was designed is a
       // smaller failure than a window that will not render.
@@ -205,7 +206,7 @@ export function Cockpit() {
   const rescale = useCallback((next: number) => {
     setScale(readScale(String(next)));
     try {
-      localStorage.setItem(SCALE_KEY, writable(next));
+      memory.setItem(SCALE_KEY, writable(next));
     } catch {
       // It still applies for this session. See above.
     }
@@ -222,7 +223,7 @@ export function Cockpit() {
    * the state is one level up, exactly as the type scale is and for the same
    * reason: a change in Settings has to reach a pane that is already open.
    *
-   * `localStorage` and not `vibe.config.json`, unchanged: this is the *pilot's*
+   * The window's memory (`memory.ts`) and not `vibe.config.json`, unchanged: this is the *pilot's*
    * ceiling, it is this machine's, and the run's two ceilings are the project's.
    */
   const [limits, setLimits] = useState<PilotLimits>(readLimits);
@@ -238,7 +239,7 @@ export function Cockpit() {
    * **Both start open, and neither is persisted.** A collapse is a gesture — put
    * the runs away to read a diff — not a decision, and a window that opened three
    * days later still folded would be answering a question nobody asked twice.
-   * `localStorage` holds the repository and the pilot's spend ceiling because
+   * The window's memory holds the repository and the pilot's spend ceiling because
    * those are decisions.
    */
   /**
@@ -302,7 +303,7 @@ export function Cockpit() {
    * **App-side state, and it belongs nowhere else.** It is not run state - a run
    * carries its own directory and always has - and it is not `vibe.config.json`,
    * which is a project file meant to be committed and would be the wrong place
-   * for one machine's path. `localStorage` is where the pilot's spend ceiling
+   * for one machine's path. The window's memory is where the pilot's spend ceiling
    * lives for the same reason.
    *
    * It is persisted because `1b` and ⌘K are most useful **before** a launch, and
@@ -311,7 +312,7 @@ export function Cockpit() {
    */
   const [repoDir, setRepoDir] = useState(() => {
     try {
-      return localStorage.getItem(REPO_KEY) ?? '';
+      return memory.getItem(REPO_KEY) ?? '';
     } catch {
       // Storage can be unavailable or full. A repository field that starts empty
       // is a smaller failure than a window that will not render.
@@ -321,7 +322,7 @@ export function Cockpit() {
   const rememberRepo = useCallback((dir: string) => {
     setRepoDir(dir);
     try {
-      localStorage.setItem(REPO_KEY, dir);
+      memory.setItem(REPO_KEY, dir);
     } catch {
       // See above. Nothing here is worth failing a render over.
     }
@@ -535,7 +536,7 @@ export function Cockpit() {
    */
   const [drafts, setDrafts] = useState<readonly Draft[]>(() => {
     try {
-      return readDrafts(localStorage.getItem(DRAFTS_KEY));
+      return readDrafts(memory.getItem(DRAFTS_KEY));
     } catch {
       return [];
     }
@@ -551,7 +552,7 @@ export function Cockpit() {
     setDrafts((list) => {
       const next = change(list);
       try {
-        localStorage.setItem(DRAFTS_KEY, JSON.stringify(next));
+        memory.setItem(DRAFTS_KEY, JSON.stringify(next));
       } catch {
         // The drafts still work for this session; they will not be back next time.
       }
@@ -568,16 +569,16 @@ export function Cockpit() {
       let moved: ReturnType<typeof moveProject>;
       try {
         moved = moveProject(repoDir, to, {
-          projects: readProjects(localStorage.getItem(PROJECTS_KEY)),
-          pins: readPins(localStorage.getItem(PINNED_KEY)),
-          names: readNames(localStorage.getItem(NAMES_KEY)),
-          projectNames: readProjectNames(localStorage.getItem(PROJECT_NAMES_KEY)),
+          projects: readProjects(memory.getItem(PROJECTS_KEY)),
+          pins: readPins(memory.getItem(PINNED_KEY)),
+          names: readNames(memory.getItem(NAMES_KEY)),
+          projectNames: readProjectNames(memory.getItem(PROJECT_NAMES_KEY)),
         });
         if (!moved.ok) return moved.why;
-        localStorage.setItem(PROJECTS_KEY, JSON.stringify(moved.held.projects));
-        localStorage.setItem(PINNED_KEY, JSON.stringify(moved.held.pins));
-        localStorage.setItem(NAMES_KEY, JSON.stringify(moved.held.names));
-        localStorage.setItem(PROJECT_NAMES_KEY, JSON.stringify(moved.held.projectNames));
+        memory.setItem(PROJECTS_KEY, JSON.stringify(moved.held.projects));
+        memory.setItem(PINNED_KEY, JSON.stringify(moved.held.pins));
+        memory.setItem(NAMES_KEY, JSON.stringify(moved.held.names));
+        memory.setItem(PROJECT_NAMES_KEY, JSON.stringify(moved.held.projectNames));
       } catch (err: unknown) {
         return `this window could not save that: ${err instanceof Error ? err.message : String(err)}`;
       }
@@ -599,7 +600,7 @@ export function Cockpit() {
   const drafting = drafts.find((d) => d.id === draftId) ?? null;
   useEffect(() => {
     try {
-      localStorage.setItem(WHERE_KEY, writableWhere({ tab, viewing, draftId, bottom, panels }));
+      memory.setItem(WHERE_KEY, writableWhere({ tab, viewing, draftId, bottom, panels }));
     } catch {
       // Storage switched off: the next launch lands on the pilot, as it used to.
     }

@@ -468,7 +468,8 @@ export function today(ledger: Ledger, at: Date): DayTotal | null {
 /**
  * Where the ledger and the limits live between sessions.
  *
- * `localStorage`, and deliberately none of the three other candidates. Not
+ * The window's memory (`memory.ts`, injected below), and deliberately none of
+ * the three other candidates. Not
  * `state.json`, which is the run archive and must gain no pilot field. Not the
  * OS keychain, which holds one kind of secret and should not become a settings
  * store. Not `vibe.config.json`, which is a project file meant to be committed -
@@ -489,7 +490,25 @@ export function today(ledger: Ledger, at: Date): DayTotal | null {
 const LEDGER_KEY = 'vibe.pilot.ledger';
 const LIMITS_KEY = 'vibe.pilot.limits';
 
-function store(): Storage | null {
+/** What the books are kept in: `localStorage`'s two methods, nothing more. */
+export type LedgerStore = Pick<Storage, 'getItem' | 'setItem'>;
+
+/**
+ * Set by `main.tsx` to the window's memory (`../memory`), which the app keeps
+ * in files rather than `localStorage` (#223). Injected rather than imported,
+ * because this module's imports are pinned: `ledger.test.ts` holds them to
+ * `./backend`, `./keys` and `./pilot` so there is no path to the core's charge
+ * seam, and `../memory` reaches the host client. Until it is set - this
+ * module's own tests - the books are `localStorage`, as they always were.
+ */
+let held: LedgerStore | null = null;
+
+export function keepLedgerIn(next: LedgerStore): void {
+  held = next;
+}
+
+function store(): LedgerStore | null {
+  if (held !== null) return held;
   try {
     return globalThis.localStorage;
   } catch {

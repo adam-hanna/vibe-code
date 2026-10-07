@@ -71,12 +71,17 @@ describe('the saved prompt library is the window’s, not the project’s', () =
     expect(removeDraft(two, 'review breadth', 'loose')).toHaveLength(1);
   });
 
-  test('the library is localStorage and the config is what a turn reads', () => {
+  test('the library is the window\'s memory and the config is what a turn reads', () => {
     // Three places, and the screen says which is which. A draft nobody has
     // adopted is not a fact about any run and has no business in a file the
     // whole team commits.
+    //
+    // Case 2 (#223): the window's memory moved out of `localStorage` into host
+    // files (`memory.ts`), because WebKit refuses the whole origin's storage once
+    // its file passes 5 MiB. The claim - the library is this window's, not the
+    // project's - holds; only the store's name changed.
     expect(DRAFTS_KEY).toMatch(/^vibe\./);
-    expect(settings).toMatch(/localStorage\.getItem\(DRAFTS_KEY\)/);
+    expect(settings).toMatch(/memory\.getItem\(DRAFTS_KEY\)/);
     // Adopting is the one that writes the project's file, and it is a separate
     // control from saving.
     expect(settings).toMatch(/save\(\{ prompts: \{ \[name\]: text \} \}\)/);

@@ -67,6 +67,7 @@ import type { Effect, Settlement } from './tools';
 import type { Call, Conversation, Reply } from './transcript';
 import type { Launched } from '../cockpit/argv';
 import { line, outcome } from '../cockpit/commands';
+import { memory } from '../memory';
 import type { Command, Commands } from '../cockpit/commands';
 import type { Run } from '../cockpit/model';
 
@@ -177,13 +178,13 @@ const ALARM = 'bg-alarm px-4 py-1.5 text-body-sm text-emphasis';
  * Whether the pilot takes a turn when the loop stops at a gate (#211).
  *
  * **Off unless somebody turned it on**, and it is remembered because a setting
- * that reset every launch is one nobody uses. `localStorage` for the reason the
+ * that reset every launch is one nobody uses. The window's memory for the reason the
  * spend ceiling is there: it is this window's preference, not a project fact,
  * and `vibe.config.json` is a file meant to be committed.
  */
 function readWatch(): boolean {
   try {
-    return localStorage.getItem(WATCH_KEY) === 'on';
+    return memory.getItem(WATCH_KEY) === 'on';
   } catch {
     // Storage can be unavailable. Falling back to off is the fail-closed
     // direction: the cost of a wrong default here is unattended spend.
@@ -1024,7 +1025,7 @@ export function PilotPane({
   /** The composer's field, so a starter can hand it focus without a selector. */
   const entryRef = useRef<HTMLTextAreaElement>(null);
   const [live, setLive] = useState<number | null>(null);
-  // The pilot's own books (#145). Read from `localStorage` at mount, because a
+  // The pilot's own books (#145). Read from the window's memory at mount, because a
   // per-day ceiling that reset when the app restarted would not be a ceiling.
   const [ledger, setLedger] = useState<Ledger>(readLedger);
   /** Turns already in the books, so a re-render cannot bill one twice. */
@@ -1774,7 +1775,7 @@ ${frame.text}`, turn, origin.current))) {
             onChange={(e) => {
               setWatching(e.target.checked);
               try {
-                localStorage.setItem(WATCH_KEY, e.target.checked ? 'on' : 'off');
+                memory.setItem(WATCH_KEY, e.target.checked ? 'on' : 'off');
               } catch {
                 // The switch still works for this session. A preference that
                 // could not be saved is not worth an error in the pane.
