@@ -166,8 +166,10 @@ const WHY = 'whitespace-pre-wrap text-body-sm text-emphasis [overflow-wrap:anywh
 const BLOCK =
   'm-0 overflow-auto whitespace-pre-wrap rounded-sm border border-rule-inner bg-panel font-mono text-mono-sm [overflow-wrap:anywhere]';
 /** A field in the pane's own chrome: the two pickers and a proposal's reply. */
+// A floor, not a height: WebKitGTK draws a native select with its own padding,
+// and pinned at 28px the label lost its descenders at the default type scale.
 const FIELD =
-  'h-7 min-w-0 rounded-sm border border-rule-control bg-card px-2 font-sans text-body-sm text-primary outline-none placeholder:text-tertiary focus-visible:ring-1 focus-visible:ring-accent-border';
+  'min-h-7 py-0.5 min-w-0 rounded-sm border border-rule-control bg-card px-2 font-sans text-body-sm text-primary outline-none placeholder:text-tertiary focus-visible:ring-1 focus-visible:ring-accent-border';
 /** A tool call as one row of the reply: the name, then what came of it. */
 const CALL = 'flex flex-wrap items-baseline gap-2 rounded-sm border border-rule-inner px-2.5 py-1.5';
 /** Why send is off, on its own line. Named so `composer.test.ts` can find the one line that draws it. */
