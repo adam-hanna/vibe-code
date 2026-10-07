@@ -48,6 +48,91 @@ export function isSameQuestion(a: string, b: string): boolean {
   return key !== '' && key === normalize(b);
 }
 
+/**
+ * Which question each answer answers (#211).
+ *
+ * **The join used to be `a.question.trim() === q.question.trim()`, and it did
+ * not hold.** The answerer is asked to *"echo the question"*, and the question
+ * it is shown is `formatQuestion`'s rendering - the text, then the kind and the
+ * blocking tag. A real run came back with
+ *
+ *     "...reported as untested? *(technical, advisory)*"
+ *
+ * against a planner question ending at the question mark, so the strings
+ * differed and every pairing failed. Silently, and in two places at once: the
+ * Questions pane drew *"No answer yet"* over two answered questions, and - much
+ * worse - `refusedBlocking` came back empty, so **`escalateOnDefer` could not
+ * fire**. A declined blocking question is supposed to stop the run for a human;
+ * with the join broken it would have been counted as answered.
+ *
+ * So the pairing is the module's own question - *when are two wordings one
+ * question* - and it belongs here beside the guard that already answers it,
+ * using the same `normalize` and the same threshold rather than a second rule.
+ *
+ * Three passes, in order, and the order is what keeps it safe:
+ *
+ *   1. **Exact**, after `normalize`. Unchanged behaviour for every answer that
+ *      already paired, which is most of them.
+ *   2. **Fuzzy**, at or above `REPHRASE_THRESHOLD`, best score first across all
+ *      remaining pairs so the assignment does not depend on input order.
+ *   3. **Unpaired**, reported as such. An answer that matched nothing is not
+ *      attached to the nearest question going: `refusedBlocking` acts on this,
+ *      and pairing a decline onto the wrong question would stop a run for a
+ *      question nobody declined.
+ *
+ * Each question takes at most one answer and each answer at most one question.
+ */
+export interface Pairing<Q, A> {
+  /** The pairs, question first. Deterministic: exact matches, then best score. */
+  paired: readonly { question: Q; answer: A; score: number }[];
+  /** Answers that matched no question. Never forced onto the nearest one. */
+  unpaired: readonly A[];
+}
+
+export function pairAnswers<Q, A>(
+  questions: readonly Q[],
+  answers: readonly A[],
+  textOfQuestion: (q: Q) => string,
+  textOfAnswer: (a: A) => string,
+): Pairing<Q, A> {
+  const paired: { question: Q; answer: A; score: number }[] = [];
+  const freeQuestions = new Set(questions);
+  const freeAnswers = new Set(answers);
+
+  // 1. Exact. In question order, so a corpus with two identical questions pairs
+  //    the first with the first - deterministic, and the only sane reading.
+  for (const q of questions) {
+    for (const a of freeAnswers) {
+      if (!isSameQuestion(textOfQuestion(q), textOfAnswer(a))) continue;
+      paired.push({ question: q, answer: a, score: 1 });
+      freeQuestions.delete(q);
+      freeAnswers.delete(a);
+      break;
+    }
+  }
+
+  // 2. Fuzzy, best first. Scored over what is left, then taken in descending
+  //    order, so the strongest pairing wins regardless of the order the two
+  //    lists happen to be in. Ties resolve to the earlier question.
+  const candidates: { question: Q; answer: A; score: number }[] = [];
+  for (const q of freeQuestions) {
+    for (const a of freeAnswers) {
+      const score = similarity(textOfQuestion(q), textOfAnswer(a));
+      if (score >= REPHRASE_THRESHOLD) candidates.push({ question: q, answer: a, score });
+    }
+  }
+  candidates.sort((x, y) => y.score - x.score);
+  for (const candidate of candidates) {
+    if (!freeQuestions.has(candidate.question) || !freeAnswers.has(candidate.answer)) continue;
+    paired.push(candidate);
+    freeQuestions.delete(candidate.question);
+    freeAnswers.delete(candidate.answer);
+  }
+
+  // 3. What is left is left. Reported, never attached to the nearest question.
+  return { paired, unpaired: [...freeAnswers] };
+}
+
 export interface Rephrase {
   candidate: string;
   score: number;

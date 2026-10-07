@@ -1,6 +1,9 @@
+import { modelArgs } from '@src/modelflag.js';
 import { attachSpend } from '@src/charge.js';
-import { resolveBin, run } from '@src/proc.js';
-import type { RunFn } from '@src/proc.js';
+import { attachEnding, describeEnding, resolveBin, run } from '@src/proc.js';
+import { configuredBin } from '@src/clipaths.js';
+import { agentEnv } from '@src/auth.js';
+import type { ChildEnding, RunFn } from '@src/proc.js';
 import { detail, warn } from '@src/log.js';
 import { createHeartbeat, parseClaudeLine, withHeartbeat } from '@src/progress.js';
 import type { ProgressOptions } from '@src/progress.js';
@@ -9,6 +12,12 @@ import type { ClaudeTurnResult, ContextUsage, Effort, PermissionMode, TokenUsage
 let cachedBin: string | null = null;
 
 export function claudeBin(): string {
+  // The environment variable first, then the settings, then the search (#223).
+  // `resolveBin` handles the variable itself, so the settings are read only when
+  // it is unset - and they are not cached, so a change in Settings reaches the
+  // next turn. Only the search is, because it spawns `which`.
+  const configured = process.env['VIBE_CLAUDE_BIN'] ? null : configuredBin('claude');
+  if (configured !== null) return configured;
   cachedBin ??= resolveBin('claude', {
     envVar: 'VIBE_CLAUDE_BIN',
     fallbacks: [
@@ -102,6 +111,25 @@ function num(v: unknown): number {
  * without spawning a real agent, as `rotateSession` and `ClaudeProbeExecutor`
  * already are.
  */
+/**
+ * What a turn under `--permission-mode plan` has to be told about that flag.
+ *
+ * Exported so a test can assert it travels with the mode and with nothing else,
+ * and so the sentence lives beside the argv that carries it.
+ *
+ * It corrects, it does not add a task: every clause here is about work the CLI's
+ * own plan-mode prompt asks for that this product does not want and does not
+ * read. Nothing about *what* to plan belongs here - that is `prompts.ts`, and a
+ * second place saying what the turn is for is how the two come to disagree.
+ */
+export const PLAN_MODE_NOTE =
+  'You are running inside vibe as one step of an automated loop, and your answer is taken ' +
+  'from this turn as structured JSON. Ignore any instruction to write or save a plan ' +
+  'document to disk, including under ~/.claude/plans, and any instruction to delegate to ' +
+  'Explore, Plan or Task subagents: nothing here reads such a file, no subagent is ' +
+  'available, and the tokens are spent for nothing. Do the work in this turn and answer in ' +
+  'the schema you were given. Read-only tools are yours to use as much as you need.';
+
 export async function claudeTurn(
   options: ClaudeTurnOptions,
   exec: RunFn = run,
@@ -125,6 +153,27 @@ export async function claudeTurn(
     '--verbose',
     '--permission-mode', permissionMode,
   ];
+  // Plan mode brings its own instructions, and they describe a different job.
+  //
+  // `--permission-mode plan` is the sandbox a read-only seat runs under - it is
+  // why the planner cannot write - but the CLI also injects its own plan-mode
+  // system prompt underneath, telling the model to research, produce a plan
+  // *document*, save it under `~/.claude/plans`, and delegate to Explore, Plan
+  // and Task subagents. None of that is this turn's job: vibe takes the answer
+  // as structured JSON off the final message, and a file written outside the
+  // repository is read by nothing here.
+  //
+  // Observed rather than reasoned about. A planner turn in a manual pass spent
+  // its last two minutes - of ten - on `Write C:\Users\Adam\.claude\plans\...`,
+  // with context going 255k to 306k while it did, and the artifact landed
+  // somewhere no part of this product looks. The same leakage was found on the
+  // pilot first (#211) and fixed there in its own system prompt; this is the
+  // same defect on every Claude-seated read-only role, so it is fixed at the
+  // adapter that knows which flag causes it rather than in each prompt.
+  //
+  // `--append-system-prompt`, never `--system-prompt`: replacing it would drop
+  // whatever else the CLI relies on being told, to fix one paragraph.
+  if (permissionMode === 'plan') args.push('--append-system-prompt', PLAN_MODE_NOTE);
   // Fork, resume, or start fresh - one of exactly three. The fork names the
   // parent to `--resume` and the child to `--session-id`, which is the only
   // form that both carries the history and leaves the parent resumable.
@@ -133,7 +182,8 @@ export async function claudeTurn(
   } else {
     args.push(resume ? '--resume' : '--session-id', sessionId);
   }
-  args.push('--model', model, '--effort', effort);
+  // No `--model` at all for the CLI's own default (#223, `models.ts`).
+  args.push(...modelArgs('--model', model), '--effort', effort);
   if (jsonSchema) args.push('--json-schema', JSON.stringify(jsonSchema));
   args.push(...sessionArgs);
   // Variadic flags must come last: they greedily consume following tokens.
@@ -141,34 +191,59 @@ export async function claudeTurn(
 
   detail(`claude ${args.filter((a) => !a.startsWith('{')).join(' ')}`);
 
+  // How much of this turn's output the parent is holding (#211). Closed over
+  // rather than passed, because the heartbeat is built before the child starts
+  // and has to read the figure as it grows.
+  let outputBytes = 0;
   const heartbeat = options.progress
     ? createHeartbeat({
         ...options.progress,
         parse: parseClaudeLine,
         unit: 'tool use',
         provider: 'claude',
+        held: () => outputBytes,
       })
     : null;
+  // How the child ended, in a holder rather than a closed-over `let`, so it can
+  // be read from the catch below whether or not the closure got as far as
+  // setting it. Null there means `exec` itself rejected - a timeout, which
+  // attaches its own ending in proc.ts, or a spawn that never produced a child -
+  // and in that case there is nothing here to add (#131).
+  const ended: { seen: ChildEnding | null } = { seen: null };
   // Validation runs inside the heartbeat's work, not after it: the end-of-turn
   // flush is a claim that the turn completed, and while only `run()` was wrapped
   // a turn whose output failed every check below still persisted as one that
   // had.
   return withHeartbeat(heartbeat, async () => {
-    const { code, stdout, stderr } = await exec(claudeBin(), args, {
+    const { code, signal, stdout, stderr } = await exec(claudeBin(), args, {
       input: prompt,
       cwd,
       timeoutMs,
+      // Billed to the road Settings names for Anthropic (#223).
+      env: agentEnv('claude'),
+      // One of the two children a person may stop mid-flight (#209). Off by
+      // default everywhere else on purpose: `git`, the verification gate and
+      // the app-server client all come through the same `run()`, and none of
+      // them is something "stop the turn" gives permission to kill.
+      interruptible: true,
+      onBytes: (bytes) => {
+        outputBytes = bytes;
+      },
       ...(heartbeat === null ? {} : { onLine: heartbeat.onLine }),
     });
+    ended.seen = { code, signal };
 
     if (!stdout.trim()) {
-      throw new Error(`claude produced no output (exit ${code}). stderr:\n${stderr.slice(-2000)}`);
+      throw new Error(
+        `claude produced no output (${describeEnding({ code, signal })}). ` +
+          `stderr:\n${stderr.slice(-2000)}`,
+      );
     }
 
     const { result: parsed, lastAssistantUsage } = parseStream(stdout);
     if (!parsed) {
       throw new Error(
-        `claude emitted no result event (exit ${code}):\n${stdout.slice(-2000)}`,
+        `claude emitted no result event (${describeEnding({ code, signal })}):\n${stdout.slice(-2000)}`,
       );
     }
 
@@ -195,11 +270,15 @@ export async function claudeTurn(
     const denialsRaw = parsed['permission_denials'];
     const text = typeof parsed['result'] === 'string' ? parsed['result'] : '';
 
-    if (code !== 0) {
+    if (code !== 0 || signal !== null) {
       // Logged, not thrown: see the exit-status note above. Worth saying out
       // loud so that if it ever becomes routine, it is visible in the run log
-      // rather than being mistaken for an oversight.
-      warn(`claude exited ${String(code)} but returned a complete successful result; accepting it.`);
+      // rather than being mistaken for an oversight. The signal is named here
+      // too, because "was killed and returned a complete result anyway" is a far
+      // stranger sentence than a non-zero exit and should not read as one (#131).
+      warn(
+        `claude ${describeEnding({ code, signal })} but returned a complete successful result; accepting it.`,
+      );
     }
 
     // Read here, inside the heartbeat's work and after the output was accepted:
@@ -219,6 +298,14 @@ export async function claudeTurn(
       usage: extractUsage(parsed, lastAssistantUsage),
       tokens: extractTokens(parsed),
     };
+  }).catch((err: unknown) => {
+    // One attach point rather than one per throw site, so a failure mode added
+    // to the body later carries the ending without anybody remembering to. The
+    // ending is the child's, not the turn's: `attachEnding` records it even for
+    // an exit 0, because "the child finished and the adapter refused its output"
+    // and "the child was killed" are different findings that used to arrive
+    // here as the same error (#131).
+    throw ended.seen === null ? err : attachEnding(err, ended.seen);
   });
 }
 
@@ -226,8 +313,13 @@ export async function claudeTurn(
  * Total tokens moved by the turn. The envelope's aggregated `usage` is exactly
  * right for this - it is only wrong for measuring live context, which is what
  * extractUsage handles separately.
+ *
+ * Exported for `pilotchat.ts` (#193), which reads the same `result` envelope off
+ * the same `--output-format stream-json` stream. A second reader of the same four
+ * fields would be a second answer to "what did this turn spend", and the two
+ * would disagree the first time the CLI renamed one.
  */
-function extractTokens(envelope: Record<string, unknown>): TokenUsage {
+export function extractTokens(envelope: Record<string, unknown>): TokenUsage {
   const usage = envelope['usage'];
   if (!isRecord(usage)) {
     return { input: 0, output: 0, cacheRead: 0, cacheCreation: 0, total: 0 };
@@ -348,6 +440,33 @@ function parseStream(stdout: string): StreamParse {
     }
   }
   return { result, lastAssistantUsage };
+}
+
+/**
+ * How full the conversation was at the end of a turn, read off a whole stream.
+ *
+ * `extractUsage`'s arithmetic, and its rule: the prompt of the **last assistant
+ * message**, never the envelope's aggregate. Exported for the pilot (#223),
+ * which wants the size even when the envelope names no window - a count with
+ * no denominator is still a count, where `ContextUsage` needs both because a
+ * rotation decision divides by it.
+ */
+export function promptContext(stdout: string): { tokens: number; window: number | null } | null {
+  const { result, lastAssistantUsage } = parseStream(stdout);
+  if (lastAssistantUsage === null) return null;
+  const tokens =
+    num(lastAssistantUsage['input_tokens']) +
+    num(lastAssistantUsage['cache_read_input_tokens']) +
+    num(lastAssistantUsage['cache_creation_input_tokens']);
+  if (tokens <= 0) return null;
+  let window = 0;
+  const modelUsage = result?.['modelUsage'];
+  if (isRecord(modelUsage)) {
+    for (const entry of Object.values(modelUsage)) {
+      if (isRecord(entry)) window = Math.max(window, num(entry['contextWindow']));
+    }
+  }
+  return { tokens, window: window > 0 ? window : null };
 }
 
 /** What one probe turn reported, beside the text a plain `-p` run would print. */

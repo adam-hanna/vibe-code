@@ -6,7 +6,7 @@ import path from 'node:path';
 import { DEFAULTS } from '@src/config.js';
 import { runTurn } from '@src/orchestrator.js';
 import type { AgentTurns, TurnRequest } from '@src/orchestrator.js';
-import { planPrompt } from '@src/prompts.js';
+import { planPrompt, taskContext } from '@src/prompts.js';
 import { createRun } from '@src/run.js';
 import type { ClaudeTurnResult, Config, Plan, RunState } from '@src/types.js';
 
@@ -163,7 +163,7 @@ test('a rehydrated implementer is not given the index', async () => {
   assert.equal(occurrences(prompt, HEADING), 0);
 });
 
-test('a planner whose session already remembers gets no prefix and no index', async () => {
+test('a planner whose session already remembers gets its brief without rehydration or another index', async () => {
   const state = runWithArchive('continuing planner');
   state.plan = planFixture();
 
@@ -178,6 +178,6 @@ test('a planner whose session already remembers gets no prefix and no index', as
   // The first turn marked the slot started, so the second resumes it.
   const second = await promptFor(state, req);
 
-  assert.equal(second, 'revise the plan');
+  assert.equal(second, taskContext(state.task, state.extraContext) + 'revise the plan');
   assert.equal(occurrences(second, HEADING), 0);
 });

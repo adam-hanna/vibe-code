@@ -51,7 +51,11 @@ function handoffResult(costUsd: number, total: number): ClaudeTurnResult {
 }
 
 /** A measured session over the threshold: the ordinary rotation path. */
-function measuredRun(task: string, model = 'opus'): RunState {
+// Case 2 (#223): this was the literal `'opus'`, standing for the configured
+// model when that was the default. The default is now the CLI's own
+// (`default`), and a measurement only counts under the model the run is
+// configured with - so the fixture names that, rather than a constant.
+function measuredRun(task: string, model = DEFAULTS.claude.model): RunState {
   const state = runFor(task);
   recordContextMeasurement(state, model, 0.6, 200_000);
   state.sessionStarted = true;

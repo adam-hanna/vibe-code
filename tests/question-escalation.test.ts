@@ -55,15 +55,20 @@ test('a blocking question is put to the answerer, and its answer is revised in',
     agents(
       {
         claude: planner(),
-        codex: (label) => (label === 'answers-0' ? answersReport([{}]) : report([])),
+        codex: (label) => (label.startsWith('answers-') ? answersReport([{}]) : report([])),
       },
       calls,
     ),
   );
 
-  assert.deepEqual(calls, ['plan', 'answers-0', 'revise-1', 'critique-1']);
-  assert.equal(existsSync(path.join(state.dir, 'answers-0.json')), true);
+  // **The plan round does not move**, and the labels are what say so. A
+  // question round is not half of a plan round - nothing judged anything - so
+  // the revision that answers it is `revise-q1`, keyed by the question round it
+  // belongs to, and the critique that follows is still judging plan 0.
+  assert.deepEqual(calls, ['plan', 'answers-1', 'revise-q1', 'critique-0']);
+  assert.equal(existsSync(path.join(state.dir, 'answers-1.json')), true);
   assert.equal(state.questionRound, 1);
+  assert.equal(state.planRound, 0);
 });
 
 test('a question the answerer defers to a human stops the run', async () => {
@@ -80,7 +85,7 @@ test('a question the answerer defers to a human stops the run', async () => {
           {
             claude: planner(),
             codex: (label) =>
-              label === 'answers-0' ? answersReport([{ defer_to_human: true }]) : report([]),
+              label.startsWith('answers-') ? answersReport([{ defer_to_human: true }]) : report([]),
           },
           calls,
         ),
@@ -93,7 +98,7 @@ test('a question the answerer defers to a human stops the run', async () => {
 
   // Building on a guess about product intent is expensive to undo, so the run
   // stops rather than revising against an answer nobody gave.
-  assert.deepEqual(calls, ['plan', 'answers-0']);
+  assert.deepEqual(calls, ['plan', 'answers-1']);
 });
 
 test('a low-confidence answer to a blocking question stops the run too', async () => {
@@ -109,7 +114,7 @@ test('a low-confidence answer to a blocking question stops the run too', async (
           {
             claude: planner(),
             codex: (label) =>
-              label === 'answers-0' ? answersReport([{ confidence: 'low' }]) : report([]),
+              label.startsWith('answers-') ? answersReport([{ confidence: 'low' }]) : report([]),
           },
           [],
         ),
@@ -133,7 +138,7 @@ test('a declined advisory question is recorded and the loop carries on', async (
             ? planFixture({ open_questions: [questionFixture({ blocking: false })] })
             : planFixture(),
         codex: (label) =>
-          label === 'answers-0' ? answersReport([{ defer_to_human: true }]) : report([]),
+          label.startsWith('answers-') ? answersReport([{ defer_to_human: true }]) : report([]),
       },
       calls,
     ),
@@ -141,7 +146,7 @@ test('a declined advisory question is recorded and the loop carries on', async (
 
   // The planner already said its fallback was survivable, so halting here would
   // trade an unattended run for a question it was willing to answer itself.
-  assert.deepEqual(calls, ['plan', 'answers-0', 'critique-0']);
+  assert.deepEqual(calls, ['plan', 'answers-1', 'critique-0']);
   assert.deepEqual(state.deferredQuestions.map((q) => q.question), [QUESTION]);
 });
 
@@ -156,7 +161,7 @@ test('a human answer in NEEDS-INPUT.md is read back and resumed against', async 
       {
         claude: planner(),
         codex: (label) =>
-          label === 'answers-0' ? answersReport([{ defer_to_human: true }]) : report([]),
+          label.startsWith('answers-') ? answersReport([{ defer_to_human: true }]) : report([]),
       },
       [],
     ),
@@ -187,7 +192,10 @@ test('a human answer in NEEDS-INPUT.md is read back and resumed against', async 
 
   // The answers are revised in first, and the question is not put to the
   // answerer a second time however the revision rephrases it.
-  assert.deepEqual(resumed, ['revise-1', 'critique-1']);
+  // `revise-q1`, not `revise-1`: a human answering the question round's own
+  // questions is still the question round being answered, so it revises plan 0
+  // in place and the critique that follows judges plan 0.
+  assert.deepEqual(resumed, ['revise-q1', 'critique-0']);
   assert.equal(state.pendingAnswers, null);
 });
 

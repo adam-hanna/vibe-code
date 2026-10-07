@@ -3,6 +3,8 @@ import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { DEFAULTS } from '@src/config.js';
+import { describeEnding, readEnding } from '@src/ending.js';
+import type { RunEnding } from '@src/ending.js';
 
 /**
  * Whether a run is being worked on right now, and by whom.
@@ -56,6 +58,20 @@ export interface LivenessVerdict {
    * fact about output, never as a verdict about life.
    */
   quietMs: number | null;
+  /**
+   * What the last process to hold this run said about its own ending, or null.
+   *
+   * The other half of `interrupted` (#131). A dead pid alone cannot say whether
+   * vibe chose to stop or something stopped it, and those want opposite
+   * reactions from a reader; the stamp beside the lock is what separates them.
+   * Null means no stamp was found, which - beside a dead pid - is the finding
+   * rather than the absence of one. See `@src/ending.js`.
+   *
+   * Read here rather than by each caller so the pair is never available apart:
+   * a verdict of `interrupted` presented without its ending is the ambiguous
+   * answer this field exists to stop being given.
+   */
+  ending: RunEnding | null;
 }
 
 export interface LockHandle {
@@ -138,6 +154,35 @@ function parseLock(text: string): RunLock | null {
 }
 
 /**
+ * How the verdict asks the OS whether a pid is alive.
+ *
+ * A parameter with a default rather than a bare call, and the reason is a defect
+ * in this repo's own suite rather than an anticipated second implementation
+ * (#164). There is **no such thing as a portably dead pid**, so a test wanting
+ * the `interrupted` verdict had to *obtain* one - spawn a process, read its pid,
+ * let it exit - and that returns the pid at the top of the OS's allocation
+ * pointer, which is the single likeliest number for the next spawn to be handed
+ * back. This suite spawns a great many (`node --test` runs files in parallel,
+ * the loop harness runs real `git`, the preflight suites spawn probes), and it
+ * duly came back: a green `develop` went red with `livenessOf` giving the
+ * correct answer to the question it had been asked.
+ *
+ * The two obvious escapes do not exist. **A pid the OS cannot issue** is refused
+ * upstream of here - `parseLock` rejects any pid that is not a positive integer,
+ * so a lock naming `0` or `-1` reads as `unknown`, never as `interrupted`, and
+ * the probe never sees it. **A number simply larger than any real pid** is a
+ * guess about `pid_max` on one kernel that says nothing about Windows.
+ *
+ * So the premise becomes something a case can state instead of arrange. This is
+ * the same shape as `execute`'s `preflightGate` and `loop` parameters: a seam
+ * with a real default, not a mutable hook that production code has to consult.
+ * The real probe keeps its coverage - `pid-liveness.test.ts` drives it directly,
+ * and every case about a *live* process still uses a genuinely live one, because
+ * that half was never the flaky one.
+ */
+export type PidProbe = (pid: number) => 'running' | 'interrupted' | 'unknown';
+
+/**
  * What a pid probe can honestly conclude - three answers, not two.
  *
  * `process.kill(pid, 0)` sends no signal and only asks. Success and `EPERM` both
@@ -155,7 +200,7 @@ function parseLock(text: string): RunLock | null {
  * command line) is another platform-specific probe that can be wrong in the
  * unsafe direction.
  */
-function probePid(pid: number): 'running' | 'interrupted' | 'unknown' {
+export const probePid: PidProbe = (pid) => {
   try {
     process.kill(pid, 0);
     return 'running';
@@ -165,7 +210,7 @@ function probePid(pid: number): 'running' | 'interrupted' | 'unknown' {
     if (code === 'ESRCH') return 'interrupted';
     return 'unknown';
   }
-}
+};
 
 /**
  * Whether the run's stored config had the progress heartbeat switched off.
@@ -210,30 +255,39 @@ function quietSince(raw: unknown): number | null {
  *
  * `raw` is the parsed `state.json` when the caller already has it, and is only
  * used for the quiet figure. Omitting it costs the colour, never the verdict.
+ *
+ * `probe` defaults to the real one and exists so a caller can state a premise
+ * the OS will not reliably supply - see `PidProbe`.
  */
-export function livenessOf(dir: string, raw?: unknown): LivenessVerdict {
+export function livenessOf(dir: string, raw?: unknown, probe: PidProbe = probePid): LivenessVerdict {
   const quietMs = quietSince(raw);
+  // Read unconditionally, including on the paths that go on to report a live
+  // process. A stamp beside a live lock is a contradiction worth being able to
+  // see - it is either an ending from a process that has already gone or a pid
+  // that has been recycled - and suppressing it on the healthy path would hide
+  // exactly that. `readEnding` never throws, which `livenessOf` requires.
+  const ending = readEnding(dir);
   const read = readLockFile(dir);
 
   // The only reading that means nobody claims this run: the file is genuinely
   // not there. One read, so there is no gap between "does it exist" and "what
   // does it say" for another process to acquire in - and no `existsSync`, which
   // reports an unreadable file and an absent one with the same `false`.
-  if (read.kind === 'absent') return { liveness: 'not-running', lock: null, quietMs };
+  if (read.kind === 'absent') return { liveness: 'not-running', lock: null, quietMs, ending };
 
   // Present but unreadable, unparseable or malformed. Fails closed: a lock vibe
   // cannot read cannot rule out a live process, and treating it as absent is
   // what would let a torn write or a permission error license a second writer.
-  if (read.kind === 'unreadable') return { liveness: 'unknown', lock: null, quietMs };
+  if (read.kind === 'unreadable') return { liveness: 'unknown', lock: null, quietMs, ending };
 
   const { lock } = read;
   // Another machine cannot be probed at all, so there is no verdict to give.
-  if (lock.host !== os.hostname()) return { liveness: 'unknown', lock, quietMs };
+  if (lock.host !== os.hostname()) return { liveness: 'unknown', lock, quietMs, ending };
 
   // Tri-state on purpose: a probe that failed for any reason other than "no such
   // process" is `unknown`, which refuses, rather than `interrupted`, which
   // proceeds. See `probePid`.
-  return { liveness: probePid(lock.pid), lock, quietMs };
+  return { liveness: probe(lock.pid), lock, quietMs, ending };
 }
 
 function formatQuiet(ms: number): string {
@@ -253,6 +307,35 @@ function formatQuiet(ms: number): string {
  * a large figure means the run is between turns at least as often as it means
  * anything is wrong.
  */
+/**
+ * The clause that replaced "it was interrupted" (#131).
+ *
+ * That phrase was the run's whole account of a dead pid, and it asserted more
+ * than the pid could support: a process that finished, released nothing because
+ * it was killed *after* deciding to stop, and a process that was terminated
+ * mid-turn both leave a dead pid behind, and only one of them was interrupted.
+ * The stamp is what tells them apart, so the sentence now reports which of the
+ * three cases this is rather than naming the worst one.
+ *
+ * A stamp whose pid or host disagrees with the lock is an earlier process's and
+ * is ignored: `installEndingStamp` clears one on the way in, so a surviving
+ * mismatch means the clearing failed, and reporting a stranger's ending as this
+ * process's would be worse than reporting none.
+ */
+function howItEnded(verdict: LivenessVerdict): string {
+  const { lock, ending } = verdict;
+  if (ending === null || lock === null) {
+    return ' nothing recorded how it ended, so it was stopped without running any of its own code.';
+  }
+  if (ending.pid !== lock.pid || ending.host !== lock.host) {
+    return (
+      ' the only ending recorded here belongs to a different process ' +
+      `(pid ${ending.pid} on ${ending.host}), so how this one ended was not recorded.`
+    );
+  }
+  return ` ${describeEnding(ending)}.`;
+}
+
 export function describeLiveness(verdict: LivenessVerdict): string {
   const { lock, liveness, quietMs } = verdict;
   const quiet = quietMs === null ? '' : ` vibe last observed activity ${formatQuiet(quietMs)} ago.`;
@@ -264,7 +347,7 @@ export function describeLiveness(verdict: LivenessVerdict): string {
   const who = `pid ${lock.pid} on ${lock.host}, started ${lock.startedAt}`;
   if (liveness === 'running') return `held by a live process: ${who}.${quiet}`;
   if (liveness === 'interrupted') {
-    return `held by ${who}, which is no longer running - it was interrupted.${quiet}`;
+    return `held by ${who}, which is no longer running -${howItEnded(verdict)}${quiet}`;
   }
   // `unknown` with a readable lock has two causes: another machine, or a pid
   // probe on this one that failed for a reason other than "no such process".
@@ -300,11 +383,15 @@ function permits(liveness: Liveness): boolean {
  * dead - which reads as `interrupted`, which is exactly what happened and the
  * case the whole design is built around. Installing one would change how the
  * process exits and what code it returns, to make a stale lock slightly tidier.
+ *
+ * `probe` is passed straight to `livenessOf` and defaults to the real one; see
+ * `PidProbe` for why it is a parameter.
  */
 export function acquireLock(
   dir: string,
   id: string,
   force: boolean,
+  probe: PidProbe = probePid,
 ): { ok: boolean; verdict: LivenessVerdict; handle: LockHandle | null } {
   let raw: unknown;
   try {
@@ -314,7 +401,7 @@ export function acquireLock(
     // quiet figure is simply absent, which is what it is for.
     raw = undefined;
   }
-  const verdict = livenessOf(dir, raw);
+  const verdict = livenessOf(dir, raw, probe);
   if (!permits(verdict.liveness) && !force) return { ok: false, verdict, handle: null };
 
   const lock: RunLock = {

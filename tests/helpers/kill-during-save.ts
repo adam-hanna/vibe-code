@@ -7,6 +7,7 @@ import {
   ALLOC_MODEL,
   ARTIFACT_BODY_A,
   ARTIFACT_BODY_B,
+  STARTING_LINE,
 } from './kill-markers.js';
 
 /**
@@ -202,6 +203,13 @@ function hangMode(): void {
 }
 
 function main(): void {
+  // Before argv, before any mode, before a single syscall against targetDir: the
+  // whole value of this line is that reaching it proves nothing else has been
+  // attempted yet, so a parent that never saw it knows the child left no trace
+  // (#181). Anything above it - including the usage throw below - would make it
+  // a report of progress rather than of arrival.
+  process.stdout.write(`${STARTING_LINE}\n`);
+
   const targetDir = process.argv[2];
   const mode = process.argv[3] ?? 'save';
   if (targetDir === undefined) throw new Error('usage: kill-during-save <targetDir> [mode]');

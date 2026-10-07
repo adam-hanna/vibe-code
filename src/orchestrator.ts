@@ -6,13 +6,25 @@ import {
   parseStructured,
   RateLimitError,
 } from '@src/claude.js';
+import { Cancelled, cancelRequested, sleepUnlessCancelled } from '@src/cancel.js';
 import { codexTurn } from '@src/codex.js';
 import type { CodexTurnOptions, CodexTurnResult } from '@src/codex.js';
 import { preserveGateArtifacts, sweepGateArtifacts } from '@src/artifacts.js';
-import { downgradeInert, groundFindings, refusePlaceholderPlan } from '@src/evidence.js';
+import {
+  applyReproducerOutcomes,
+  downgradeInert,
+  groundFindings,
+  refusePlaceholderPlan,
+} from '@src/evidence.js';
+import { describeOutcome, observe } from '@src/reproducer.js';
+import { gateMode } from '@src/gates.js';
+import { moveSection, raisePhase, raiseSection } from '@src/raise.js';
 import * as git from '@src/git.js';
+import { readDecision, readOrigin } from '@src/host.js';
+import type { GateContext, Host } from '@src/host.js';
 import * as log from '@src/log.js';
 import type { PathStyle } from '@src/pathstyle.js';
+import type { CheckpointBoundary } from '@src/types.js';
 import * as P from '@src/prompts.js';
 import {
   claudePermission,
@@ -56,6 +68,8 @@ import {
   measuredRatio,
   p1Signature,
   persistenceNotice,
+  readArtifact,
+  recordAndSay,
   recordEvent,
   recordPendingFindings,
   recordRound,
@@ -73,17 +87,21 @@ import {
   findRephrase,
   isSameQuestion,
   normalize,
+  pairAnswers,
   reconcileQuestionRecords,
   recordSuppressed,
 } from '@src/questions.js';
 import { hasFindingShape, isReportBasename } from '@src/stored.js';
 import {
+  authorOf,
   blockers as blockingFindings,
   gate,
   parseAnswers,
   parseFindings,
   parsePlan,
   readEvidence,
+  reproducerOutcomesOf,
+  reproductionAt,
 } from '@src/validate.js';
 import {
   markOccupancyWarned,
@@ -91,6 +109,7 @@ import {
   withConcurrentCompaction,
   recordTurnContext,
   rotateSession,
+  seedContextWindows,
   shouldRotate,
   turnOccupancy,
 } from '@src/context.js';
@@ -104,7 +123,14 @@ import {
   readCodexRateLimits,
   recordLimits,
 } from '@src/ratelimits.js';
-import { describeFailure, resolveGates, runGateCommand } from '@src/verify.js';
+import {
+  describeFailure,
+  failedRuns,
+  resolveGates,
+  runGateCommand,
+  suggestedFix,
+  verdictOf,
+} from '@src/verify.js';
 import type {
   Answer,
   CheckpointCommitNote,
@@ -114,6 +140,7 @@ import type {
   FindingsReport,
   GateOutcome,
   OpenQuestion,
+  ReproducerOutcome,
   RoundRecord,
   Plan,
   RunState,
@@ -139,6 +166,15 @@ export {
 } from '@src/charge.js';
 export type { ExitCode, TurnCharge, TurnSpend } from '@src/charge.js';
 
+// Aliased on import, because `describeEnding` also names the *process*-ending
+// renderer in @src/ending.js and the two answer different questions - "the
+// child was killed by SIGKILL" against "this vibe process was sent SIGTERM".
+// One name for both in the file that records the first would be the confusion
+// the pair exists to remove (#131).
+import { describeEnding as describeChildEnding, endingOf, isAbnormal } from '@src/proc.js';
+import { workDirOf } from '@src/worktree.js';
+import { formatWork, withWorkProgress, workData } from '@src/work.js';
+
 /**
  * A write turn is about to start, so this run can no longer vouch for any
  * report (#50).
@@ -162,6 +198,64 @@ function beginReport(state: RunState): void {
 }
 
 /**
+ * A write turn, with the tree measured underneath it (#136).
+ *
+ * One function for the same four sites `recordReport` covers, and for a weaker
+ * version of the same reason: a fifth that forgot this would run correctly and
+ * only report less, where a fifth that forgot `recordReport` would point the
+ * reviewer at the wrong round.
+ *
+ * `runTurn` is called through unchanged when progress is off, so a run with the
+ * heartbeat disabled spawns no `git` and behaves exactly as it did. When it is
+ * on, the sampler narrates readings during the turn and hands over the last one
+ * for the single durable record - see `withWorkProgress` for why those are
+ * different things.
+ *
+ * The plan comes from `state`, not from a parameter: it is the plan of record,
+ * three of these four sites do not have the local variable in scope, and a
+ * proxy measured against something other than the approved plan would be a
+ * proxy over the wrong denominator.
+ */
+function writeTurn(
+  state: RunState,
+  cfg: Config,
+  cwd: string,
+  req: TurnRequest,
+  turns: AgentTurns,
+  roles: RoleTable,
+): Promise<TurnOutcome> {
+  if (!cfg.progress.enabled) return runTurn(state, cfg, req, turns, roles);
+  return withWorkProgress(
+    {
+      cwd,
+      baseSha: state.baseSha,
+      plan: state.plan,
+      label: req.label,
+      intervalMs: cfg.progress.workIntervalMs,
+      onReading: (work) => {
+        const line = formatWork(work);
+        // Once per write turn, where the samples during it were narration only.
+        // This is the fact worth keeping: what that turn left in the tree.
+        //
+        // Recorded even when that is *nothing*, and said in those words. A
+        // write turn that changed no file is the most interesting reading this
+        // ever produces - the run has just paid for a turn that produced no
+        // work - and it is the one case a "report only what there is to report"
+        // rule would have thrown away.
+        recordAndSay(
+          state,
+          'info',
+          'work_measured',
+          line === null ? `${req.label}: changed nothing in the tree` : `${req.label}: ${line}`,
+          { label: req.label, ...workData(work) },
+        );
+      },
+    },
+    () => runTurn(state, cfg, req, turns, roles),
+  );
+}
+
+/**
  * That turn's report: on disk, and pointed at.
  *
  * One function for all four write sites - implement, verify-fix, review-fix,
@@ -176,12 +270,23 @@ function recordReport(state: RunState, name: string, text: string): void {
 /**
  * The last write turn's report, or null when this run has none it can vouch for.
  *
- * Null for four causes - no pointer at all, a pointer `beginReport` cleared for
+ * Null for five causes - no pointer at all, a pointer `beginReport` cleared for
  * a turn that never finished recording, a pointer this version will not join
- * onto a path, and a file that is missing, unreadable or blank - and every one
- * of them renders the same notice. What differs is the record: the first two
- * are silence, the other two are run events, because a pointer that does not
- * resolve is a fact about this run rather than about the reviewer's job (#50).
+ * onto a path, a file that is a link out of the archive, and a file that is
+ * missing, unreadable or blank - and every one of them renders the same notice.
+ * What differs is the record: the first two are silence, the other three are run
+ * events, because a pointer that does not resolve is a fact about this run
+ * rather than about the reviewer's job (#50).
+ *
+ * **The link is degraded, not fatal** (#129), and that is the choice the issue
+ * asks for rather than a detail. `planFork` can refuse outright because nothing
+ * has run; this is called mid-run with a prompt half-built, and ending an
+ * otherwise healthy run over one artifact would cost more than the artifact is
+ * worth. Option 2 of the three, and it has a precedent rather than being
+ * invented here: the reviewer is *told* there is no report, and told explicitly
+ * that this is not a statement that there were no concerns. What it must not do
+ * is share `report_unreadable`, which says a file was opened and could not be
+ * used - the one thing that is not true of a file vibe refused to open.
  */
 function latestReport(state: RunState): string | null {
   const name = state.lastReport;
@@ -189,17 +294,190 @@ function latestReport(state: RunState): string | null {
   // The same predicate `validateStoredState` applies on the way in, asked again
   // here because this is the call that turns the value into a path.
   if (!isReportBasename(name)) {
-    log.warn(`The recorded report name is not one vibe will read: ${name}`);
-    recordEvent(state, 'report_unusable', { name });
+    recordAndSay(
+      state,
+      'warn',
+      'report_unusable',
+      `The recorded report name is not one vibe will read: ${name}`,
+      { name },
+    );
     return null;
   }
-  const text = artifactText(state, name);
-  if (text === null || text.trim() === '') {
-    log.warn(`The recorded report ${name} could not be read - the reviewer is told so`);
-    recordEvent(state, 'report_unreadable', { name });
+  const read = readArtifact(state, name);
+  if (read.kind === 'linked') {
+    recordAndSay(state, 'warn', 'report_linked', `The recorded report ${read.reason}`, { name });
     return null;
   }
-  return text;
+  if (read.kind === 'absent' || read.text.trim() === '') {
+    recordAndSay(
+      state,
+      'warn',
+      'report_unreadable',
+      `The recorded report ${name} could not be read - the reviewer is told so`,
+      { name },
+    );
+    return null;
+  }
+  return read.text;
+}
+
+/**
+ * Hold at a boundary and ask the host what to do next.
+ *
+ * **Called after the checkpoint, never before.** That ordering is the whole
+ * promise: `CheckpointBoundary` names the points at which the work of a round is
+ * recorded and the next has not begun, so a gate that fires there can say
+ * "nothing is lost" and mean it. A gate before the write could not.
+ *
+ * With no host this returns immediately and the run behaves exactly as it always
+ * has - which is what makes this shippable as groundwork.
+ *
+ * **The await is the pause.** Nothing here spins, polls or sets a timer: a host
+ * that has not answered yet simply has not resolved its promise, the process
+ * stays alive, and the agent sessions stay warm. That is the property the app
+ * exists to buy, and it costs no machinery at all.
+ *
+ * Which boundaries hold, and how, is `cfg.gates` since #140 - see `src/gates.ts`
+ * for the table and for the two boundaries that have no row.
+ */
+async function holdAt(
+  state: RunState,
+  cfg: Config,
+  host: Host | undefined,
+  boundary: CheckpointBoundary,
+  /**
+   * What a person would have to answer if they stopped here, or none.
+   *
+   * **Only `question-round` has any**, and it is the boundary where stopping is
+   * most obviously a decision to answer something yourself - so it was the one
+   * boundary where stopping produced a `NEEDS-INPUT.md` with no questions in it.
+   * `writeEscalation` renders a *Your answer:* block per question and the resume
+   * parses them back; with the list empty it wrote the section not at all, and
+   * the only thing a person could actually do was press continue.
+   *
+   * Not invented for this: `resolveQuestions` already throws
+   * `new Escalation(EXIT.NEEDS_HUMAN, ..., [...blockers])` when the answerer is
+   * off, and the defer path does the same. This carries the same list through
+   * the same field on the gate's own stop, so both ways of stopping at a
+   * question round hand back the same document.
+   */
+  questions: readonly OpenQuestion[] = [],
+): Promise<void> {
+  const mode = gateMode(cfg.gates, boundary);
+
+  // A pause asked for mid-run (#210). Taken before the mode is acted on, and
+  // taken *whatever* the mode is, so the request is consumed exactly once - a
+  // boundary that read it, ran through on `auto`, and left it armed would hold
+  // at some later boundary nobody was looking at.
+  //
+  // It only changes an `auto` row. A `step` row is already holding and a `stop`
+  // row is already ending, so on those this is a request the loop was about to
+  // honour anyway.
+  const paused = host?.takePause?.() === true;
+  if (mode === 'auto' && !paused) return;
+
+  // `stop` asks nobody. That is what makes it mean the same thing in both front
+  // ends: the CLI has no host and never will - a promise is not answerable from
+  // a prompt - so a mode that consulted one would be a setting that worked in
+  // the app and did nothing in a terminal. The run ends here on the exit-
+  // resumable path the round caps already use.
+  if (mode === 'stop') {
+    const why = 'the gate matrix stops the run at this boundary';
+    recordAndSay(state, 'warn', 'gate_stopped', `Stopped at ${boundary} - ${why}`, {
+      boundary,
+      reason: why,
+      // Named, and not left absent: nobody shaped this decision at the time, so
+      // "who released this" has an answer and it is the configuration. An
+      // absent origin here would read as an operator whose identity was lost.
+      origin: 'gates',
+    });
+    throw new Escalation(EXIT.NEEDS_HUMAN, `Stopped at the ${boundary} boundary. ${why}`, [
+      ...questions,
+    ]);
+  }
+
+  // `step` holds and asks, and asking needs somebody who can answer. A terminal
+  // cannot, so from the CLI this runs through - the mode's definition rather
+  // than a failure of it, and `vibe doctor` prints it per row so it is not
+  // something you discover by not seeing it.
+  if (host === undefined) return;
+
+  const ctx: GateContext = {
+    boundary,
+    // Absent rather than guessed. `validateStoredState` turns an unrecognised
+    // phase into ABSENCE, and a host told 'planning' about a run whose phase
+    // nobody could read would be told something no writer ever wrote.
+    phase: state.phase ?? null,
+    planRound: state.planRound,
+    // Beside the other three since #140, which is what let `question-round`
+    // become gateable: a host asked to hold at the second of three question
+    // rounds was previously told everything except which round it was, and that
+    // is the only number the decision turns on.
+    questionRound: state.questionRound,
+    reviewRound: state.reviewRound,
+    verifyRound: state.verifyRound,
+  };
+
+  // Narrated with an id, and deliberately NOT recorded. By the durability rule
+  // in `recordAndSay`: a gate that is waiting is not a transition - nothing
+  // resumes from "was waiting", and nothing judges the run by it. #133 named
+  // `gate_waiting` as exactly this case when it asked for stable ids.
+  // `requested` says which of the two reasons this hold has: the matrix, or a
+  // person who pressed pause. A window that could not tell them apart would show
+  // an armed pause as a gate the user configured and never say the pause was
+  // honoured (#210).
+  log.step(`Holding at ${boundary} - waiting on you`, {
+    id: 'gate_waiting',
+    data: { ...ctx, requested: paused },
+  });
+
+  // Two readings of one answer, because they are two facts. `readDecision` says
+  // what to do and fails closed to `stop`; `readOrigin` says who shaped it and
+  // fails to absent. Neither can make the other's mistake.
+  const answer = await host.decide(ctx);
+  const decision = readDecision(answer);
+  const origin = readOrigin(answer);
+
+  if (decision.kind === 'continue') {
+    // A released gate is not a transition and leaves no row - the durability
+    // rule in `recordAndSay`, and #133 named `gate_released` as exactly this
+    // case. It becomes one the moment something other than the operator shaped
+    // it (#144): "who released this gate" is a question a later reader has, and
+    // an unattributed release cannot answer it while an attributed one can.
+    //
+    // So the carve-out is precisely the attribution and nothing else. A person
+    // pressing continue in the window still records nothing, which is what
+    // keeps `state.events` from becoming the transcript #133 forbids.
+    if (origin === null) {
+      log.ok(`Released at ${boundary}`, { id: 'gate_released', data: { boundary } });
+    } else {
+      recordAndSay(state, 'ok', 'gate_released', `Released at ${boundary} - ${origin}`, {
+        boundary,
+        origin,
+      });
+    }
+    return;
+  }
+
+  // A stop IS a transition - the run ends here and a later process has to know
+  // why - so this one is recorded as well as said.
+  const why = decision.reason ?? 'the host stopped the run at this boundary';
+  recordAndSay(state, 'warn', 'gate_stopped', `Stopped at ${boundary} - ${why}`, {
+    boundary,
+    reason: decision.reason,
+    origin,
+  });
+  // The exit-resumable path the round caps already use: `writeEscalation` ->
+  // `status: 'needs-input'` -> `vibe resume`. A CLI run has no host to ask, so
+  // it never reaches here; an app that stops gets the same durable outcome its
+  // user would get from the terminal.
+  //
+  // The questions ride along for the reason the parameter documents: stopping at
+  // a question round is a person saying they will answer these, and the document
+  // they get has to contain them.
+  throw new Escalation(EXIT.NEEDS_HUMAN, `Stopped at the ${boundary} boundary. ${why}`, [
+    ...questions,
+  ]);
 }
 
 export async function orchestrate(
@@ -226,6 +504,15 @@ export async function orchestrate(
    * caller including `RunLoop` in cli.ts is unchanged.
    */
   turns: AgentTurns = REAL_AGENTS,
+  /**
+   * Something outside the loop that may hold it at a boundary (#134).
+   *
+   * Trailing and optional for the reason `turns` is: every existing caller,
+   * `RunLoop` in `cli.ts` included, compiles and behaves unchanged. The CLI
+   * passes none and never will - it has no host to ask, and a terminal cannot
+   * answer a promise.
+   */
+  host?: Host,
 ): Promise<RunState> {
   try {
     // Before any phase runs. On a fresh run `state.plan` is null and this does
@@ -246,7 +533,13 @@ export async function orchestrate(
     // for ever. Here rather than in `createRun`/`loadRun` because that would put
     // `run.ts` in a cycle with this module's - `artifacts.ts` imports it (#111).
     sweepArtifacts(state);
-    return await runPhases(state, cfg, resume, turns);
+    // Before the first turn, because the turn it exists for is the first one:
+    // the context window arrives on a turn's result envelope, so the planner has
+    // never had one to report a `ctx%` against. This borrows the denominator
+    // from the newest archived run that measured it under the same model, and
+    // supplies nothing at all when no such run exists.
+    seedContextWindows(state);
+    return await runPhases(state, cfg, resume, turns, host);
   } finally {
     // A `finally`, not a tail call: the phases below return early at the
     // "already finished" check and at the plan-only exit, and a persistent
@@ -290,8 +583,15 @@ async function runPhases(
   cfg: Config,
   resume: boolean,
   turns: AgentTurns,
+  host?: Host,
 ): Promise<RunState> {
-  const cwd = state.targetDir;
+  // **Where the work happens, which is not necessarily the run's home** (#223).
+  // `state.targetDir` is the repository the archive and the lock live in;
+  // `workDirOf` is the tree this run writes in, and they differ when the run has
+  // a worktree of its own. Resolved once and threaded, so no step below can
+  // answer "which tree" from a different field while holding a state that says
+  // otherwise - which is the same reason `roles` is resolved here.
+  const cwd = workDirOf(state);
   // Resolved once and threaded, so no step below can answer "who does this job"
   // from the module default while holding a config that says otherwise.
   const roles = rolesFor(cfg);
@@ -315,16 +615,30 @@ async function runPhases(
   // than about the task.
   let plan: Plan;
   if (phase === 'planning') {
-    plan = await planPhase(state, cfg, cwd, roles, turns);
+    plan = await planPhase(state, cfg, cwd, roles, turns, host);
     if (state.planOnly) {
       state.status = 'planned';
       advancePhase(state, 'complete');
       writeCheckpoint(state, 'complete', NO_COMMIT);
-      log.ok('Plan-only run: stopping before implementation.');
+      // Narrated with an id since #223, and it is the promotion AGENTS.md keeps
+      // describing: `planOnly` is a fact the run has held since `createRun` and
+      // never said, so a window could not tell a plan-only run that FINISHED
+      // from any other run that finished - and the two want opposite next
+      // actions. Without it the only way back to this plan was a new run that
+      // re-derives it, which is what *"it kicked off another run from scratch"*
+      // cost. Narration only: `planOnly` is already durable, so recording it
+      // would store one fact twice.
+      log.ok('Plan-only run: stopping before implementation.', {
+        id: 'plan_only_stopped',
+        // What the plan is carrying, so the offer to implement it can say so.
+        // A count of what the tolerance let through, not a judgement about it.
+        data: { carried: (state.carried ?? []).length },
+      });
       return state;
     }
     advancePhase(state, 'implementing');
     writeCheckpoint(state, 'plan-approved', NO_COMMIT);
+    await holdAt(state, cfg, host, 'plan-approved');
   } else {
     const approved = state.plan;
     if (approved === null) {
@@ -343,10 +657,43 @@ async function runPhases(
     // turn must not leave the reviewer pointed at an earlier round's report.
     beginReport(state);
 
-    log.heading('Implementing');
-    const impl = await runTurn(
+    // The base travels with the phase that establishes it (#223, `1d`). It is
+    // the commit every diff in this run is taken against, and a window has no
+    // other way to learn it - `state.baseSha` is run state, and the wire carries
+    // no run state by design. Null when the repository had nothing to mark, which
+    // is a real state and not a missing field.
+    log.heading('Implementing', {
+      id: 'phase_started',
+      data: { phase: 'implementing', baseSha: state.baseSha },
+    });
+    // **The turn the window could not see** (#223). Every other turn in the loop
+    // announces itself - plan, revise, critique, answer, review, and all three
+    // fix kinds - and the implement turn, which `charge.ts` calls "the single
+    // most expensive step in a run", did not. `reduce` builds a `Turn` and sets
+    // `run.running` from this id and from nothing else, so without it the
+    // cockpit drew `IDLE - no turn is open` for the whole of it, the CODE group
+    // had no row, and - worst - **every heartbeat was dropped**, because a beat
+    // with no turn open cannot be attributed and is discarded by the reducer.
+    //
+    // Measured on a run of 2026-09-16: the terminal printed `implement: 14m30s ·
+    // 63 tool uses · Write …TodoToggle… · 13.7M tok · ctx 25%` every thirty
+    // seconds while the window showed an idle run, so the turn was stopped by
+    // somebody who reasonably concluded it had hung. 14.2M tokens and 50 files
+    // of finished work, killed because the product said nothing was happening.
+    // That is "one channel, two renderers" breaking in the one place it costs
+    // the most.
+    //
+    // `round` is the review round for the reason the fix kinds use it: the CODE
+    // group re-opens on every fix, and the round is what tells one pass through
+    // it from the next.
+    log.step(`${holderLabel('implementer', roles)} is implementing the plan`, {
+      id: 'turn_started',
+      data: { role: 'implementer', kind: 'implement', round: state.reviewRound },
+    });
+    const impl = await writeTurn(
       state,
       cfg,
+      cwd,
       {
         role: 'implementer',
         // Re-filtered rather than trusted, as `writeFollowUps` re-filters:
@@ -360,7 +707,9 @@ async function runPhases(
           // The snapshot, never `plan.acceptance_criteria`: a criterion the
           // critic never saw is not an approved criterion.
           state.acceptanceCriteria,
+          plan.out_of_scope,
         ),
+        planInPrompt: true,
         cwd,
         label: 'implement',
       },
@@ -390,18 +739,115 @@ async function runPhases(
     state.status = 'reviewing';
     saveState(state);
     writeCheckpoint(state, 'implemented', committed);
+    await holdAt(state, cfg, host, 'implemented');
   }
 
   // ---- Review --------------------------------------------------------------
   state.status = 'reviewing';
   saveState(state);
 
-  await reviewPhase(state, cfg, cwd, plan, roles, turns);
+  await reviewPhase(state, cfg, cwd, plan, roles, turns, host);
 
   state.status = 'done';
   advancePhase(state, 'complete');
   writeCheckpoint(state, 'complete', NO_COMMIT);
   return state;
+}
+
+/**
+ * Say what a round's findings were and what the gate made of them (#223).
+ *
+ * **Narration, and deliberately not an event.** `recordAndSay`'s durability rule
+ * is that narration never creates one, and every fact here is already durable
+ * somewhere better: the findings are in the round's own `code-review-N.json`,
+ * and the decision is in `plan_approved` / `review_approved` or in the
+ * escalation that follows. This is the same census at the density a window can
+ * draw, on the precedent `questions_opened` set - an id with data and no entry
+ * in `state.events`.
+ *
+ * It is what makes the gate decision legible rather than merely announced. `1e`
+ * asks for severity counters *against the tolerance*, because the question a
+ * person actually has at a review boundary is not "how many findings" but "why
+ * did the loop choose to fix again rather than finish", and that is a
+ * four-number comparison nothing on the wire could previously supply.
+ *
+ * **Zeros are sent.** The four-chip form in the design shows them on purpose -
+ * where a gate decision is being made, an absence is information - so a count of
+ * zero is a measurement here and is not omitted the way an unmeasured field is.
+ */
+function sayFindings(
+  phase: 'plan' | 'review',
+  findings: readonly Finding[],
+  decision: ReturnType<typeof gate>,
+  tolerance: number,
+): void {
+  const counts = { P0: 0, P1: 0, P2: 0, P3: 0 };
+  for (const f of findings) counts[f.severity] += 1;
+  log.info(
+    `${phase === 'plan' ? 'Critique' : 'Review'}: ` +
+      `${String(counts.P0)} P0 · ${String(counts.P1)} P1 · ` +
+      `${String(counts.P2)} P2 · ${String(counts.P3)} P3 ` +
+      `(tolerance ${String(tolerance)} P1)`,
+    {
+      id: 'findings_reported',
+      data: {
+        phase,
+        counts,
+        tolerance,
+        pass: decision.pass,
+        // Null rather than absent when the gate passed: "the loop may proceed"
+        // is the answer, not a missing one.
+        reason: decision.reason,
+        tolerated: decision.tolerated.map((f) => f.id),
+        // Enough to draw `1e` and open `4c`, and no more. The detail and the
+        // suggested fix are in the artifact, which is where a pane deep enough
+        // to want them should read them from - a frame carrying every finding in
+        // full would put a review's whole prose on the wire every round.
+        findings: findings.map((f) => ({
+          id: f.id,
+          severity: f.severity,
+          title: f.title,
+          // Absent stays absent (#141): a renderer that cannot name the author
+          // names nobody, and `authorOf` returns null rather than guessing.
+          raisedBy: authorOf(f),
+          // Whether the claim points anywhere, which is what `4c` flags as
+          // **ungrounded**. A count rather than the entries: the pane needs to
+          // know there is nothing to open, not what would have been in it.
+          evidence: f.evidence?.length ?? 0,
+          // Both severity histories, kept apart exactly as #142 keeps them: a
+          // guard's downgrade is not a person's restore, and one field serving
+          // both is how they come to disagree.
+          downgraded: f.downgraded ?? null,
+          severityChanges: f.severityChanges ?? null,
+          // What the reviewer's own test observed, if it wrote one (#113,
+          // #223). Hi-fi 9's third case is the one this supplies: a finding that
+          // is grounded and still **uncheckable**, which is a different state
+          // from grounded-and-proved and from ungrounded, and the pane could not
+          // draw it because the verdict never left the archive.
+          //
+          // The whole list, not the latest: the same reproducer is run at
+          // `review` and again after the final fix, and they answer two
+          // different questions - does the defect happen at all, and is it gone.
+          // Collapsing them would throw away the second, which is the only
+          // evidence OUTSTANDING.md has ever had for closing a carried finding.
+          reproducer:
+            f.reproducerOutcomes?.map((o) => ({
+              verdict: o.verdict,
+              at: o.at,
+              // Why it could not tell, which is most of the value of `unproven`.
+              // Null on the two verdicts that observed a run.
+              reason: o.reason,
+            })) ?? null,
+          // The reviewer declining to have it fixed *here*: real, worth doing,
+          // separate work. This is the one field where absent and false say the
+          // same thing to a reader - a report from before the field existed had
+          // no third option to take - so they collapse rather than becoming a
+          // named absence nobody could act on.
+          deferred: f.defer === true,
+        })),
+      },
+    },
+  );
 }
 
 /** Plan, resolve questions, and critique until the critic raises no P1s. */
@@ -411,6 +857,7 @@ async function planPhase(
   cwd: string,
   roles: RoleTable,
   turns: AgentTurns,
+  host?: Host,
 ): Promise<Plan> {
   let plan: Plan;
   /**
@@ -426,7 +873,15 @@ async function planPhase(
   if (state.plan) {
     plan = state.plan;
   } else {
-    log.heading('Planning');
+    // The round travels, exactly as the critique heading below carries it, and
+    // for the same reason: this phase writes `plan-${state.planRound}.json`, so
+    // the number is what correlates a card with the file behind it. It was the
+    // one `phase_started` in the plan cycle that carried none, which left the
+    // first row of the loop column unnumbered beside numbered siblings.
+    log.heading('Planning', {
+      id: 'phase_started',
+      data: { phase: 'planning', round: state.planRound },
+    });
     ({ plan, activity: planActivity } = await runPlan(state, cfg, cwd, roles, turns));
   }
 
@@ -446,6 +901,7 @@ async function planPhase(
       { answers: state.pendingAnswers },
       roles,
       turns,
+      host,
     ));
     state.pendingAnswers = null;
     saveState(state);
@@ -480,6 +936,7 @@ async function planPhase(
         { findings: carried },
         roles,
         turns,
+        host,
       ));
       continue;
     }
@@ -531,6 +988,37 @@ async function planPhase(
       saveState(state);
 
       const answers = await resolveQuestions(state, cfg, cwd, pending, plan, roles, turns);
+      // The snapshot for this round, taken here and in both branches below (#139).
+      //
+      // Here rather than inside the `answers.length > 0` branch, because *this*
+      // is the point the round's work is recorded and the next has not begun:
+      // the answerer's turn is charged, `answers-<n>.json` is on disk and every
+      // question asked is marked answered. The declined-everything path used to
+      // reach `continue` having written no snapshot at all - the one round in the
+      // loop that left none - so a fork of that run had to go back to the plan
+      // round before it and buy the answerer turn again.
+      //
+      // And it is `question-round`, not `plan-round`, because that is what this
+      // is: a plan revised because the critic objected and a plan revised
+      // because it answered its own questions are different diagnoses, and they
+      // used to share a name.
+      //
+      // They no longer share a counter either. `revisePlan` writes a second
+      // `question-round` checkpoint a moment later on the revising branch and
+      // advances nothing, so this whole round leaves `state.planRound` where it
+      // found it - see `advancesRound`.
+      writeCheckpoint(state, 'question-round', NO_COMMIT);
+      // Gateable since #140, which is when `GateContext` gained the counter that
+      // makes the decision answerable: this is the round of `maxQuestionRounds`
+      // a planner is spending on questions it raised itself, and a run doing
+      // that for a third time is the one an operator most wants to stop.
+      // The round's own questions travel with the hold, so a stop here writes a
+      // `NEEDS-INPUT.md` a person can actually answer. `pending` rather than the
+      // ones the answerer declined: at this boundary the answerer has already
+      // taken its turn, and someone who stops is overriding what it produced -
+      // narrowing the list to the declines would decide for them which answers
+      // were worth revisiting.
+      await holdAt(state, cfg, host, 'question-round', pending);
       // The answerer may have declined every one; only revise if something came
       // back - and when nothing did, the plan and the turn that wrote it are
       // both still the ones already in hand.
@@ -542,12 +1030,20 @@ async function planPhase(
           { answers },
           roles,
           turns,
+          host,
         ));
       }
       continue;
     }
 
-    log.heading(`Plan critique (round ${state.planRound + 1})`);
+    log.heading(`Plan critique (round ${state.planRound + 1})`, {
+      id: 'phase_started',
+      // The RAW round, not the `+ 1` the sentence shows. The artifact this round
+      // writes is `plan-critique-${state.planRound}.json`, so this is the number
+      // that correlates a card with the file behind it; the display adds one
+      // because humans count from one and the archive does not.
+      data: { phase: 'critique', round: state.planRound },
+    });
     // The record of the turn is written by the callback, not after the wrapper
     // returns: a concurrent rotation can now raise a budget escalation, and
     // `withConcurrentCompaction` surfaces it once `work` has resolved. Anything
@@ -565,8 +1061,13 @@ async function planPhase(
         const planFile = `plan-${state.planRound}.json`;
         const { report: found, raised } = refusePlaceholderPlan(critiqued, plan.plan_md, planFile);
         if (raised !== null) {
-          log.fail(`${planFile} holds a pointer, not a plan - refusing to implement it.`);
-          recordEvent(state, 'plan_placeholder_refused', { artifact: planFile, id: raised.id });
+          recordAndSay(
+            state,
+            'error',
+            'plan_placeholder_refused',
+            `${planFile} holds a pointer, not a plan - refusing to implement it.`,
+            { artifact: planFile, id: raised.id },
+          );
         }
         artifact(state, `plan-critique-${state.planRound}.json`, found);
         collectDeferred(state, found.findings);
@@ -585,19 +1086,23 @@ async function planPhase(
 
     const decision = gate(critique.findings, cfg.loop.p1Tolerance);
     const stoppers = blockingFindings(critique.findings);
+    // Before the branch, so the census is the same shape whichever way the gate
+    // goes. A window drawing it only on a failure would have four counts while
+    // the news was bad and nothing while it was good.
+    sayFindings('plan', critique.findings, decision, cfg.loop.p1Tolerance);
     if (decision.pass) {
-      if (decision.tolerated.length > 0) {
-        // Carried, not forgiven. The implementation is told about these so the
-        // phase that can actually settle them does.
-        state.carried = decision.tolerated;
-        log.ok(
-          `Plan accepted with ${decision.tolerated.length} P1(s) carried into implementation - ` +
-            decision.tolerated.map((f) => f.id).join(', '),
-        );
-        for (const f of decision.tolerated) log.info(`  ~ ${f.title}`);
-      } else {
-        log.ok(`Plan approved - ${critique.findings.length} non-blocking finding(s)`);
-      }
+      // Carried, not forgiven. The implementation is told about these so the
+      // phase that can actually settle them does.
+      if (decision.tolerated.length > 0) state.carried = decision.tolerated;
+      // The sentence, chosen before it is said, because since #223 saying it and
+      // recording it are one call and the call sits below the two assignments
+      // its data reads. The two branches and their wording are unchanged, and so
+      // is the order they reach a terminal in: this line, then the `~` list.
+      const approved =
+        decision.tolerated.length > 0
+          ? `Plan accepted with ${decision.tolerated.length} P1(s) carried into implementation - ` +
+            decision.tolerated.map((f) => f.id).join(', ')
+          : `Plan approved - ${critique.findings.length} non-blocking finding(s)`;
       // The one round whose findings reach nobody otherwise: a revising round
       // hands its deferrals to the planner through `pendingFindings`, and this
       // one is about to clear them. Recorded, not acted on - `defer` decides
@@ -618,7 +1123,7 @@ async function planPhase(
       // reason `declined` is - an approving round must not leave an earlier
       // round's bar standing - and on the same state save.
       state.acceptanceCriteria = plan.acceptance_criteria?.map((c) => ({ ...c }));
-      recordEvent(state, 'plan_approved', {
+      recordAndSay(state, 'ok', 'plan_approved', approved, {
         findings: critique.findings.length,
         carried: decision.tolerated.map((f) => f.id),
         declined: state.declined.map((f) => f.id),
@@ -629,6 +1134,7 @@ async function planPhase(
           ? {}
           : { criteria: state.acceptanceCriteria.map((c) => c.id) }),
       });
+      for (const f of decision.tolerated) log.info(`  ~ ${f.title}`);
       // An approved plan has nothing outstanding: what the gate tolerated
       // travels on `state.carried` into implementation, and leaving these set
       // would have a resume revise a plan the critic just passed.
@@ -669,6 +1175,7 @@ async function reviewPhase(
   plan: Plan,
   roles: RoleTable,
   turns: AgentTurns,
+  host?: Host,
 ): Promise<void> {
   // As in `planPhase`: only the first iteration can be a re-entry.
   let firstPass = true;
@@ -686,7 +1193,7 @@ async function reviewPhase(
         );
       }
       firstPass = false;
-      await runFixRound(state, cfg, cwd, carried, roles, turns);
+      await runFixRound(state, cfg, cwd, carried, roles, turns, host);
       // No OUTSTANDING.md here, even when these were the final round's
       // findings: the artifact says the fix ran *and verification still
       // passed*, and the gate has not run yet. It is written below, on the
@@ -719,10 +1226,14 @@ async function reviewPhase(
       saveState(state);
       beginReport(state);
 
-      log.step('Fixing the verification failure');
-      const repair = await runTurn(
+      log.step('Fixing the verification failure', {
+        id: 'turn_started',
+        data: { role: 'implementer', kind: 'verify-fix', round: state.verifyRound },
+      });
+      const repair = await writeTurn(
         state,
         cfg,
+        cwd,
         {
           role: 'implementer',
           prompt: P.fixPrompt(
@@ -733,7 +1244,9 @@ async function reviewPhase(
             // is read by the reviewer exactly as the implementer's is, so it is
             // held to the same bar (#50).
             state.acceptanceCriteria,
+            plan,
           ),
+          planInPrompt: true,
           cwd,
           label: `verify-fix-${state.verifyRound}`,
         },
@@ -746,6 +1259,7 @@ async function reviewPhase(
         'verify-round',
         await maybeCommit(cfg, cwd, `vibe: fix verification failure (round ${state.verifyRound})`),
       );
+      await holdAt(state, cfg, host, 'verify-round');
       continue;
     }
 
@@ -772,7 +1286,12 @@ async function reviewPhase(
       break;
     }
 
-    log.heading(`Code review (round ${state.reviewRound + 1})`);
+    log.heading(`Code review (round ${state.reviewRound + 1})`, {
+      id: 'phase_started',
+      // Raw, for the reason the critique heading above gives: this round writes
+      // `code-review-${state.reviewRound}.json`.
+      data: { phase: 'review', round: state.reviewRound },
+    });
     // Inside the callback, for the reason given at the critique call site: a
     // held budget escalation must not cost the run the record of the review it
     // paid for.
@@ -797,10 +1316,16 @@ async function reviewPhase(
 
     const decision = gate(review.findings, cfg.loop.p1Tolerance);
     const stoppers = blockingFindings(review.findings);
+    sayFindings('review', review.findings, decision, cfg.loop.p1Tolerance);
     if (decision.pass) {
       if (decision.tolerated.length === 0) {
-        log.ok(`Review clean - ${review.findings.length} non-blocking finding(s)`);
-        recordEvent(state, 'review_approved', { findings: review.findings.length });
+        recordAndSay(
+          state,
+          'ok',
+          'review_approved',
+          `Review clean - ${review.findings.length} non-blocking finding(s)`,
+          { findings: review.findings.length },
+        );
         // Nothing blocking came back, so there is nothing for a resume to fix.
         clearPendingFindings(state);
         break;
@@ -823,15 +1348,25 @@ async function reviewPhase(
       log.step(
         `Incorporating ${decision.tolerated.length} carried P1(s), then finishing: ` +
           decision.tolerated.map((f) => f.id).join(', '),
+        {
+          id: 'turn_started',
+          data: {
+            role: 'implementer',
+            kind: 'final-fix',
+            carried: decision.tolerated.map((f) => f.id),
+          },
+        },
       );
       for (const f of decision.tolerated) log.info(`  ~ ${f.title}`);
 
-      const finalFix = await runTurn(
+      const finalFix = await writeTurn(
         state,
         cfg,
+        cwd,
         {
           role: 'implementer',
-          prompt: P.fixPrompt(review.findings, state.reviewRound, state.acceptanceCriteria),
+          prompt: P.fixPrompt(review.findings, state.reviewRound, state.acceptanceCriteria, plan),
+          planInPrompt: true,
           cwd,
           label: `final-fix-${state.reviewRound}`,
         },
@@ -847,14 +1382,20 @@ async function reviewPhase(
       // once the gate has passed. Same order as `runFixRound`.
       clearPendingFindings(state);
 
+      // After the fix and before the artifact that describes it. This is the
+      // round the loop deliberately never reviews again, so OUTSTANDING.md has
+      // always had to say the findings were "worked on, and nobody has confirmed
+      // they are gone" - and for a finding that carried a reproducer, running it
+      // once more is the only thing that has ever been able to replace that
+      // sentence with a fact (#113).
+      const settled = await confirmFixed(state, cfg, cwd, roles, decision.tolerated);
+      state.outstanding = settled;
+      saveState(state);
+
       // Written `pending`: the gate has not run yet at this point in the loop,
       // so the file cannot say how it went. `finaliseOutstanding` rewrites it
       // from the completion branch once it has.
-      const file = artifact(
-        state,
-        'OUTSTANDING.md',
-        renderOutstanding(state, decision.tolerated, 'pending'),
-      );
+      const file = artifact(state, 'OUTSTANDING.md', renderOutstanding(state, settled, 'pending'));
       log.info(`Carried findings and what was done about them: ${path.relative(cwd, file)}`);
 
       writeCheckpoint(
@@ -862,10 +1403,27 @@ async function reviewPhase(
         'final-fix',
         await maybeCommit(cfg, cwd, `vibe: address carried review findings (final round)`),
       );
-      recordEvent(state, 'review_approved', {
-        findings: review.findings.length,
-        carriedAndFixed: decision.tolerated.map((f) => f.id),
-      });
+      // No hold here, and it is the one boundary that lost one (#140). The
+      // checkpoint stays - a fork of this point is worth having - but `final-fix`
+      // has no row in the matrix, so `holdAt` could only ever have returned. Two
+      // lines below is `continue`, which takes the loop back to the top so the
+      // verification gate proves this fix broke nothing; stopping in between is
+      // the same decision with less information behind it. See `UNGATEABLE`.
+      // Said as well as recorded (#223). The clean branch above has announced
+      // itself since #133 and this one never did, so the two ways a review can
+      // approve looked different to a window for no reason anybody chose: one
+      // arrived as `review_approved`, the other as silence.
+      recordAndSay(
+        state,
+        'ok',
+        'review_approved',
+        `Review approved with ${decision.tolerated.length} carried finding(s) fixed - ` +
+          decision.tolerated.map((f) => f.id).join(', '),
+        {
+          findings: review.findings.length,
+          carriedAndFixed: decision.tolerated.map((f) => f.id),
+        },
+      );
       // Back to the top once, so the gate proves the final fix broke nothing.
       continue;
     }
@@ -902,18 +1460,29 @@ async function runFixRound(
   findings: readonly Finding[],
   roles: RoleTable,
   turns: AgentTurns,
+  host?: Host,
 ): Promise<void> {
   state.reviewRound += 1;
   saveState(state);
   beginReport(state);
 
-  log.step(`Fixing ${blockingFindings(findings).length} blocking finding(s)`);
-  const fix = await runTurn(
+  log.step(`Fixing ${blockingFindings(findings).length} blocking finding(s)`, {
+    id: 'turn_started',
+    data: {
+      role: 'implementer',
+      kind: 'review-fix',
+      round: state.reviewRound,
+      blocking: blockingFindings(findings).length,
+    },
+  });
+  const fix = await writeTurn(
     state,
     cfg,
+    cwd,
     {
       role: 'implementer',
-      prompt: P.fixPrompt(findings, state.reviewRound, state.acceptanceCriteria),
+      prompt: P.fixPrompt(findings, state.reviewRound, state.acceptanceCriteria, state.plan),
+      planInPrompt: state.plan !== null,
       cwd,
       label: `fix-${state.reviewRound}`,
     },
@@ -931,6 +1500,89 @@ async function runFixRound(
     'review-round',
     await maybeCommit(cfg, cwd, `vibe: address review round ${state.reviewRound}`),
   );
+  await holdAt(state, cfg, host, 'review-round');
+}
+
+/**
+ * Run the carried findings' reproducers once more, after the round nothing
+ * reviews (#113).
+ *
+ * The prize the issue names, and the one weakness in the loop it can actually
+ * remove: a tolerated P1 is fixed in a round that is *by design* not re-reviewed,
+ * so OUTSTANDING.md has never been able to say more than that somebody worked on
+ * it. A test that failed before the fix and passes after it says the rest.
+ *
+ * **Only the findings whose reproducer reproduced.** A finding whose test passed
+ * against the unfixed code was downgraded to P2 and is not in `tolerated` at all;
+ * one that was `unproven` had nothing observed to confirm, and running it again
+ * would produce another unattributable result at the same price. This is the
+ * question "is the thing we saw still there", and it is only a question for the
+ * findings something was seen for.
+ *
+ * **The baseline is deliberately empty here**, and that is why a failure comes
+ * back `unproven` rather than as "still broken". `state.gateOutcomes` names the
+ * gates that passed *before* the review, and the fix round has changed the tree
+ * since - so a failing gate now could be this finding or could be the fix having
+ * broken something else. The very next thing the loop does is run the gates for
+ * real, and `verificationCaveat` is what reports that. A pass needs no baseline,
+ * for the reason `observe` gives, so the answer this exists to get is the one it
+ * can still give honestly.
+ */
+async function confirmFixed(
+  state: RunState,
+  cfg: Config,
+  cwd: string,
+  roles: RoleTable,
+  carried: readonly Finding[],
+): Promise<Finding[]> {
+  if (!cfg.verify.reproducers || !cfg.verify.enabled) return [...carried];
+
+  const gates = resolveGates(cfg.verify, cwd);
+  const settled: Finding[] = [];
+  for (const f of carried) {
+    const reproducer = f.reproducer;
+    if (reproducer === undefined || reproductionAt(f, 'review')?.verdict !== 'reproduced') {
+      settled.push(f);
+      continue;
+    }
+
+    log.step(`Re-running the reproducer for ${f.id} after the fix`, {
+      id: 'reproducer_started',
+      data: { id: f.id, path: reproducer.path, gate: reproducer.gate ?? null },
+    });
+    const outcome = await observe(f, reproducer, {
+      cwd,
+      runDir: state.dir,
+      gates,
+      contract: cfg.toolchain,
+      style: pathStyleFor(state, 'reviewer', roles),
+      // See the header: the tree has changed since the last observed gate pass.
+      passedGates: new Set<string>(),
+      at: 'final-fix',
+    });
+    recordAndSay(
+      state,
+      outcome.verdict === 'did-not-reproduce' ? 'ok' : 'warn',
+      'reproducer_observed',
+      `Reproducer for ${f.id} after the fix: ${outcome.verdict} - ${describeOutcome(outcome)}`,
+      {
+        id: f.id,
+        verdict: outcome.verdict,
+        at: outcome.at,
+        gate: outcome.gate,
+        command: outcome.command,
+        exitCode: outcome.exitCode ?? null,
+        baseline: outcome.baseline,
+        reason: outcome.reason,
+        archived: outcome.archived,
+      },
+    );
+    // Appended to the finding, not through `applyReproducerOutcomes`: that
+    // function's job is the severity, and there is no severity left to move -
+    // the run ends after this and the finding is a record rather than an input.
+    settled.push({ ...f, reproducerOutcomes: [...reproducerOutcomesOf(f), outcome] });
+  }
+  return settled;
 }
 
 /**
@@ -1035,11 +1687,34 @@ function renderOutstanding(
   stage: 'pending' | 'settled',
 ): string {
   const body = findings
-    .map(
-      (f) =>
-        `## ${f.title} \`${f.id}\`\n\n${f.detail}\n\n*Suggested fix:* ${f.suggested_fix}\n`,
-    )
+    .map((f) => {
+      // Only the observation from *after* the fix. The review-time one says the
+      // defect was real, which the finding above already says; this section is
+      // answering "and is it gone" (#113).
+      const after = reproductionAt(f, 'final-fix');
+      const proof = after === null ? '' : `\n*Reproducer:* ${describeOutcome(after)}\n`;
+      return `## ${f.title} \`${f.id}\`\n\n${f.detail}\n\n*Suggested fix:* ${f.suggested_fix}\n${proof}`;
+    })
     .join('\n');
+
+  // "Nobody has confirmed they are gone" is the whole point of this document and
+  // it stops being true the moment a reproducer passes after the fix. Counted
+  // rather than assumed, and the sentence names the split: a run where one of
+  // three carried findings closed by evidence must not read as though all three
+  // did, and must not read as though none did either.
+  const closed = findings.filter(
+    (f) => reproductionAt(f, 'final-fix')?.verdict === 'did-not-reproduce',
+  ).length;
+  const confirmation =
+    closed === 0
+      ? 'So these were worked on, and nobody has confirmed they are gone.'
+      : closed === findings.length
+        ? 'Every one of them carried a test the reviewer wrote to make it fail, and every one of ' +
+          'those tests passes now. That is an observation rather than an assertion, and it is ' +
+          'what closes them - not a second opinion about the fix.'
+        : `${closed} of them carried a test the reviewer wrote to make it fail, and those tests ` +
+          'pass now, which closes them by evidence. The rest were worked on and nobody has ' +
+          'confirmed they are gone.';
 
   const caveat = verificationCaveat(state);
   const verification =
@@ -1061,7 +1736,7 @@ function renderOutstanding(
     `The last review raised ${findings.length} P1 finding(s), within \`loop.p1Tolerance\`. ` +
     `${verification}, but that round was ` +
     `deliberately **not reviewed again** - re-reviewing would reopen the loop the tolerance ` +
-    `exists to close. So these were worked on, and nobody has confirmed they are gone.\n\n` +
+    `exists to close. ${confirmation}\n\n` +
     `Worth a human eye. Set \`loop.p1Tolerance\` to 0 to require a spotless review instead, ` +
     `at the cost of runs that cannot converge.\n\n` +
     body
@@ -1462,7 +2137,43 @@ async function noticeStrandedWork(state: RunState, cwd: string): Promise<void> {
   });
 }
 
-async function prepareGit(
+/**
+ * Which branch this run's commits will land on, said out loud (#223, hi-fi 1).
+ *
+ * **A promotion, not an invention.** `state.branch` has been durable since the
+ * field existed and `prepareGit` has always known which of its six outcomes it
+ * took; what it never did was say so on a channel a host can read, so the window
+ * could not put the branch in the loop column's identity header the way every
+ * frame of the design draws it.
+ *
+ * Narration with no event, on the `findings_reported` precedent: `state.branch`
+ * is already in `state.json`, a resume re-reads it from there, and recording it
+ * again would be a second copy of one fact.
+ *
+ * **`null` is a real answer and is not "unknown".** Branch isolation off,
+ * `--no-branch`, or a directory that is not a repository all mean the same
+ * thing to a reader — commits land on whatever is checked out — so they collapse
+ * honestly, and `why` carries which of them it was.
+ *
+ * The four sites that already printed keep their level and their wording, so
+ * the terminal does not change on any path that was already saying something.
+ * The three that said nothing take `detail`: a run whose branch isolation is
+ * off does not want a fresh sentence about it every pass, and dim is how this
+ * codebase says *restating what you already know*.
+ */
+function sayBranch(
+  branch: string | null,
+  why: string | null,
+): { id: string; data: Record<string, unknown> } {
+  return { id: 'run_branch', data: { branch, why } };
+}
+
+/**
+ * Exported for `worktree.test.ts` only (#223): the case that a branch made as a
+ * ref before a worktree script ran is adopted rather than re-created needs the
+ * function itself, and the whole loop is a heavy way to reach one branch.
+ */
+export async function prepareGit(
   state: RunState,
   cfg: Config,
   cwd: string,
@@ -1514,6 +2225,15 @@ async function prepareGit(
         error === null
           ? 'Not a git repository - running without branch isolation or commits.'
           : `git could not be run (${error}) - running without branch isolation or commits.`,
+        sayBranch(null, error === null ? 'not a git repository' : `git could not be run: ${error}`),
+      );
+    } else {
+      // A resume said this once already and repeating it would be new output for
+      // an unchanged situation - but a window that connected on this pass has
+      // never been told, so the fact travels at `detail`.
+      log.detail(
+        'Running without branch isolation or commits.',
+        sayBranch(null, error === null ? 'not a git repository' : `git could not be run: ${error}`),
       );
     }
     return;
@@ -1531,7 +2251,13 @@ async function prepareGit(
 
   // With branch isolation off nothing below runs, which is also what makes
   // `vibe resume <id> --no-branch` the documented escape from the refusal.
-  if (!cfg.git.useBranch) return;
+  if (!cfg.git.useBranch) {
+    log.detail(
+      'Branch isolation is off; commits land on whatever is checked out.',
+      sayBranch(null, 'branch isolation is off'),
+    );
+    return;
+  }
 
   if (state.branch === null) {
     // A run that has no branch is one that never got one - it was started with
@@ -1539,12 +2265,38 @@ async function prepareGit(
     // Creating one now would move HEAD on a run that has already done work
     // somewhere else, which is a bigger change than the wrong-branch refusal
     // this function exists to make. Branch creation stays a fresh-run act.
-    if (resume) return;
-    const branch = `${cfg.git.branchPrefix}${state.id}`;
-    await git.createBranch(cwd, branch);
+    if (resume) {
+      log.detail(
+        'This run never had a branch of its own; commits land on whatever is checked out.',
+        sayBranch(null, 'this run never had a branch'),
+      );
+      return;
+    }
+    const branch = git.runBranch(cfg, state) ?? `${cfg.git.branchPrefix}${state.id}`;
+    // **It may already exist**, and only for one reason (#223): a run with a
+    // worktree has its branch created as a ref before the setup script runs, so
+    // the script can be told `VIBE_BRANCH` and put the worktree on it. Adopt it
+    // rather than `checkout -b` it again, which would fail on a branch that is
+    // there. Run ids are unique, so nothing else leaves one of these behind.
+    if (await git.branchExists(cwd, branch)) {
+      if ((await git.currentBranch(cwd)) !== branch) {
+        const result = await git.checkoutBranch(cwd, branch);
+        if (!result.ok) {
+          throw new Escalation(
+            EXIT.ERROR,
+            `Run ${state.id} could not be put on its branch "${branch}": ${result.error}\n` +
+              'Nothing has run and no turn was dispatched. If the worktree setup command checked ' +
+              'it out somewhere else, check it out in the worktree instead (git worktree add ' +
+              '"$VIBE_WORKTREE" "$VIBE_BRANCH"), then resume.',
+          );
+        }
+      }
+    } else {
+      await git.createBranch(cwd, branch);
+    }
     state.branch = branch;
     saveState(state);
-    log.ok(`Isolated on branch ${branch}`);
+    log.ok(`Isolated on branch ${branch}`, sayBranch(branch, null));
     return;
   }
 
@@ -1564,7 +2316,10 @@ async function prepareGit(
           'checked out.',
       );
     }
-    log.warn(`The branch this run recorded ("${branch}") no longer exists - continuing on HEAD.`);
+    log.warn(
+      `The branch this run recorded ("${branch}") no longer exists - continuing on HEAD.`,
+      sayBranch(null, `the recorded branch "${branch}" no longer exists`),
+    );
     return;
   }
 
@@ -1575,6 +2330,7 @@ async function prepareGit(
       delete state.branchPending;
       saveState(state);
     }
+    log.detail(`On branch ${branch}`, sayBranch(branch, null));
     return;
   }
 
@@ -1590,7 +2346,7 @@ async function prepareGit(
     }
     delete state.branchPending;
     saveState(state);
-    log.ok(`On branch ${branch}`);
+    log.ok(`On branch ${branch}`, sayBranch(branch, null));
     return;
   }
 
@@ -1621,6 +2377,18 @@ async function maybeCommit(
 ): Promise<{ sha: string | null; note: CheckpointCommitNote }> {
   if (!cfg.git.commitEachRound) return { sha: null, note: 'commits-disabled' };
   if (!(await git.isRepo(cwd))) return { sha: null, note: 'not-a-repo' };
+  // **Read before the commit, because that is the only moment it is knowable.**
+  // A round's diff is `what HEAD was`..`what HEAD became`, and once the commit
+  // has landed the first half is gone unless something wrote it down. The
+  // alternative a host would be left with is pairing consecutive commits in
+  // narration order - which is a derivation, and one that silently produces a
+  // cumulative diff labelled as a single round the first time a run is resumed
+  // and the earlier commits were narrated to a process that has exited.
+  //
+  // `markBase` rather than a second `rev-parse` spelled out here: it already
+  // answers null in a repository with no commits yet, which is the greenfield
+  // first round and a real state rather than a failure.
+  const since = await git.markBase(cwd);
   const result = await git.commitAll(cwd, message);
   if (result.sha === null) {
     return { sha: null, note: result.why === 'failed' ? 'commit-failed' : 'nothing-to-commit' };
@@ -1631,7 +2399,25 @@ async function maybeCommit(
     log.warn(`git named the new commit "${result.sha}", which is not an object id - not recorded`);
     return { sha: null, note: 'sha-unusable' };
   }
-  log.ok(`Committed ${result.sha.slice(0, 7)}`);
+  /*
+   * What this round put in the history, and the range that is (#223).
+   *
+   * **Narration with no event, on the `recordAndSay` rule**: it is already
+   * durable, twice over - the commit is in git, and the checkpoint this becomes
+   * records the sha in its own meta. What was missing was any way for something
+   * watching the run to learn it *while the run was going*, which is what the
+   * Code tab is: a run can be committing every round for ninety minutes and a
+   * host could not show one of them.
+   *
+   * `since` travels with it because a range with one end is not a range. Null is
+   * a real answer here - a first commit in a repository that had none - and the
+   * honest reading of it is "everything up to this commit", which is exactly
+   * what `git diff` does with an empty tree on the left.
+   */
+  log.ok(`Committed ${result.sha.slice(0, 7)}`, {
+    id: 'round_committed',
+    data: { sha: result.sha, since, message },
+  });
   return { sha: result.sha, note: 'committed' };
 }
 
@@ -1675,19 +2461,35 @@ async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Findi
         required: gate.required,
       });
     }
-    recordEvent(state, 'verify_disabled', { gates: gates.map((g) => g.name) });
-    saveState(state);
+    // Said as well as recorded (#223). This is the one promoted site that adds a
+    // line a terminal did not print before, and it is the one that most needed
+    // it: a run with verification off looked exactly like a run whose gate had
+    // not come round yet, in the terminal and on the wire both.
+    recordAndSay(
+      state,
+      'info',
+      'verify_disabled',
+      `Verification is disabled - ${String(gates.length)} gate(s) will not run`,
+      { gates: gates.map((g) => g.name), round: state.reviewRound },
+    );
     return null;
   }
 
   for (const gate of gates) {
-    log.step(`Verifying: ${gate.name}`);
+    // The round travels with every verify frame (#223). `state.gateOutcomes` is
+    // reset on each pass, so a window watching the stream has no other way to
+    // tell the second gate of one pass from the first gate of the next - and
+    // `5d`'s failed-runs trend is a comparison ACROSS passes, which needs them
+    // separated. `reviewRound` rather than `verifyRound` because that is what
+    // the verify artifacts are keyed by, and a pane numbering them differently
+    // would not match the filenames.
+    log.step(`Verifying: ${gate.name}`, {
+      id: 'verify_started',
+      data: { gate: gate.name, round: state.reviewRound },
+    });
     const result = await runGateCommand(cwd, gate, cfg.toolchain);
 
     if (result.unavailable !== null) {
-      // Say so rather than letting silence read as a pass - and carry on to the
-      // next gate, which may well have a command.
-      log.warn(`Gate ${gate.name} unavailable: ${result.unavailable}`);
       // Pushed before the event, which persists: the outcome and the event that
       // explains it then land in one write rather than two.
       outcomes.push({
@@ -1697,11 +2499,16 @@ async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Findi
         runs: 0,
         required: gate.required,
       });
-      recordEvent(state, 'verify_unavailable', {
-        gate: gate.name,
-        reason: result.unavailable,
-        required: gate.required,
-      });
+      // Say so rather than letting silence read as a pass - and carry on to the
+      // next gate, which may well have a command. One call rather than two since
+      // #223: the same sentence at the same level, now carrying the id.
+      recordAndSay(
+        state,
+        'warn',
+        'verify_unavailable',
+        `Gate ${gate.name} unavailable: ${result.unavailable}`,
+        { gate: gate.name, reason: result.unavailable, required: gate.required, round: state.reviewRound },
+      );
       continue;
     }
 
@@ -1722,7 +2529,6 @@ async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Findi
     }
 
     if (result.ok) {
-      log.ok(`Gate ${gate.name} passed: ${result.command} (${result.runs}x)`);
       outcomes.push({
         name: gate.name,
         status: 'passed',
@@ -1730,31 +2536,67 @@ async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Findi
         runs: result.runs,
         required: gate.required,
       });
-      recordEvent(state, 'verify_passed', {
-        gate: gate.name,
-        command: result.command,
-        runs: result.runs,
-      });
+      recordAndSay(
+        state,
+        'ok',
+        'verify_passed',
+        `Gate ${gate.name} passed: ${result.command} (${result.runs}x)`,
+        {
+          gate: gate.name,
+          command: result.command,
+          runs: result.runs,
+          round: state.reviewRound,
+          attempts: result.attempts,
+        },
+      );
       continue;
     }
 
-    log.warn(
-      `Gate ${gate.name} failed: ${result.command} (attempt ${result.failedRun} of ${result.runs})`,
-    );
+    // "failed 1 of 3 runs" rather than "attempt 1 of 3" (#135). The old line was
+    // read as a fraction and was not one: the loop returned on the first
+    // non-zero exit, so `runs` was the attempt that failed and the sentence said
+    // "attempt 1 of 1" for every failure of a three-run gate.
+    const flaky = verdictOf(result) === 'flaky';
     const failed: GateOutcome = {
       name: gate.name,
       status: 'failed',
       command: result.command,
       runs: result.runs,
+      failed: failedRuns(result),
       required: gate.required,
     };
     outcomes.push(failed);
-    recordEvent(state, 'verify_failed', {
-      gate: gate.name,
-      command: result.command,
-      failedRun: result.failedRun,
-      exitCode: result.exitCode,
-    });
+    recordAndSay(
+      state,
+      'warn',
+      'verify_failed',
+      `Gate ${gate.name} failed ${failedRuns(result)} of ${result.runs} run(s): ${result.command}` +
+        (flaky ? ' - it is not deterministic' : ''),
+      {
+        gate: gate.name,
+        command: result.command,
+        failedRun: result.failedRun,
+        exitCode: result.exitCode,
+        // The fraction, on the durable record: a reader of the archive asking
+        // "was this suite ever noisy" has no other way to find out, and the
+        // preserved output is one run's.
+        runs: result.runs,
+        failed: failedRuns(result),
+        verdict: verdictOf(result),
+        round: state.reviewRound,
+        // What every attempt did, in order (#135's own field). `failedRun` says
+        // which one failed and this says what the others did, which is the whole
+        // difference between "this suite is broken" and "this suite is not
+        // deterministic" - and `5d` draws a card per attempt from it rather than
+        // placing one failure among N slots and guessing at the rest.
+        //
+        // On the durable record as well, which the fraction beside it already
+        // argued for: a reader of the archive asking "was this suite ever noisy"
+        // has no other way to find out, and three small objects on the gates
+        // that failed is not what #133 was protecting `state.events` from.
+        attempts: result.attempts,
+      },
+    );
     artifact(state, `verify-failure-${state.reviewRound}.txt`, result.output);
 
     // What the failing command PRODUCED, on the failing branch only (#62). Not
@@ -1814,10 +2656,12 @@ async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Findi
       // the fixer is pointed at the output it has to read (#48).
       evidence: [{ kind: 'artifact', path: `verify-failure-${state.reviewRound}.txt` }],
       detail: describeFailure(result),
-      suggested_fix:
-        `Make the ${result.name} gate's command pass. If it fails only sometimes, the defect ` +
-        'is a race - fix the underlying synchronisation rather than retrying or loosening ' +
-        'the test.',
+      // Beside `describeFailure` in `verify.ts` rather than written here (#135).
+      // The two sentences have to agree about which kind of failure this is -
+      // a detail that says "not deterministic" over a fix that says "make it
+      // pass" is worse than either alone - and they cannot disagree if one
+      // module owns both.
+      suggested_fix: suggestedFix(result),
     };
   }
 
@@ -1906,6 +2750,8 @@ export type { IdOrigin, SlotName, SlotSpec } from '@src/slots.js';
 export interface TurnRequest {
   role: Role;
   prompt: string;
+  /** The builder already supplied the plan; a fresh session need not repeat it. */
+  planInPrompt?: boolean | undefined;
   cwd: string;
   /** The retry label, the progress label, and - for Codex - the output name. */
   label: string;
@@ -1981,6 +2827,14 @@ export function runTurn(
   const spec = roles[req.role];
   const dispatch: DispatchRequest = {
     ...req,
+    // Restate the immutable brief for every role, including continuing judges.
+    // The initial planning builder already renders it; user decisions still
+    // travel separately so a model's recommendations cannot acquire authority.
+    prompt:
+      (req.role === 'planner' && req.label === 'plan'
+        ? ''
+        : P.taskContext(state.task, state.extraContext)) +
+      P.userDecisions(state.humanAnswers) + req.prompt,
     timeoutMs: req.timeoutMs ?? turnTimeoutMs(req.role, cfg, roles),
     // The schema and the tool list are the role's, and the request still wins
     // for a caller with a reason of its own. Both ride on the role for the same
@@ -2005,8 +2859,9 @@ export function runTurn(
  *
  * Not conditional on there being a briefing: a rotation that could not summarise
  * the outgoing session still starts a fresh one, and the plan of record has to
- * travel with it either way - `revisePlanPrompt` and the fix prompts all assume
- * the plan is already in the conversation. The full plan document, not
+ * travel with it either way. Revision and fix builders now restate the plan on
+ * every turn; `planInPrompt` avoids duplicating it in the fresh-session prefix.
+ * Other callers retain the restoration fallback. The full plan document, not
  * `plan_md`: the boundary the plan drew is part of the plan of record, and a
  * session rehydrated without it can revise the plan into a different one without
  * ever being told it had a boundary.
@@ -2015,14 +2870,21 @@ export function runTurn(
  * implementer must run with `--no-codex-session` (config refuses the pair), so
  * it has no thread memory at all - without this it would be asked to fix code
  * against a plan it cannot see. A judging role is excluded: its prompts restate
- * the plan themselves and take an explicit `hasMemory`, so today's first Codex
- * critique turn is unchanged, as is every Claude turn under the default table -
- * where Claude holds exactly the two generative roles.
+ * the plan themselves and take an explicit `hasMemory`.
  */
-function freshConversationPrefix(state: RunState, role: Role, hasMemory: boolean): string {
+function freshConversationPrefix(
+  state: RunState,
+  role: Role,
+  hasMemory: boolean,
+  planInPrompt = false,
+): string {
   if (hasMemory || !GENERATIVE_ROLES.includes(role)) return '';
   return (
-    P.handoffContext(state.handoff, planOfRecord(state, role), state.handoffStale === true) +
+    P.handoffContext(
+      state.handoff,
+      planInPrompt ? null : planOfRecord(state, role),
+      state.handoffStale === true,
+    ) +
     rehydratedPriorRuns(state, role)
   );
 }
@@ -2265,7 +3127,9 @@ async function claudeDispatch(
         // one, and a retry carrying the first attempt's prefix would start that
         // fresh session without the handoff or the plan of record.
         const prompt =
-          freshConversationPrefix(state, req.role, slotContinuity(state, cfg, slot)) + req.prompt;
+          freshConversationPrefix(
+            state, req.role, slotContinuity(state, cfg, slot), req.planInPrompt,
+          ) + req.prompt;
         // A registered id with no successful turn means an attempt was made here
         // and never returned: a previous process died on it, or - since #91 - an
         // earlier attempt of this very turn was rate limited. A failure that left
@@ -2439,6 +3303,28 @@ async function withRateLimitRetry<T>(
       return await work();
     } catch (err) {
       onFailure?.(err);
+      // How the child ended, before the charge and independent of it (#131).
+      //
+      // Not folded into `turn_failed`: `chargeFailure` returns early without an
+      // event when the attempt spent nothing, and a turn killed in its first
+      // seconds is exactly the case that spends nothing AND is exactly the case
+      // whose ending a reader most wants. Tying the record of *how* to the
+      // record of *how much* would have lost it precisely there.
+      //
+      // Silent when the failure carried no ending, because most do not: a rate
+      // limit detected mid-stream and a schema the adapter refused are not
+      // children ending, and reporting `exit 0` for them would put an ending on
+      // every failure in the run and make the real ones unfindable.
+      const ending = endingOf(err);
+      if (ending !== null && isAbnormal(ending)) {
+        recordAndSay(
+          state,
+          'warn',
+          'child_ended',
+          `The ${provider} process for "${label}" ${describeChildEnding(ending)}.`,
+          { label, provider, code: ending.code, signal: ending.signal },
+        );
+      }
       // What this attempt spent, whether or not it is retryable, and per attempt
       // rather than per turn: a turn that burns tokens, fails, waits and burns
       // them again used to have nothing consulted between the two. Any ceiling
@@ -2475,10 +3361,45 @@ async function withRateLimitRetry<T>(
       }
 
       state.rateLimitWaits += 1;
-      recordEvent(state, 'rate_limited', { label, waitMs, resetsAt: err.resetsAt?.toISOString() ?? null });
-      log.warn(`Rate limited during "${label}". ${describeReset(err)} Waiting ${minutes} min.`);
-      await sleep(waitMs);
-      log.step(`Resuming "${label}" after rate-limit wait`);
+      // One call rather than two since #223, same sentence at the same level.
+      // `7e` is drawn on this and on `rate_limit_resumed` below, and the pair is
+      // why the design can call this **waiting** rather than halted: a window
+      // told when the wait began and when it ended needs no decision from a
+      // person in between, and must not look as though it does.
+      recordAndSay(
+        state,
+        'warn',
+        'rate_limited',
+        `Rate limited during "${label}". ${describeReset(err)} Waiting ${minutes} min.`,
+        {
+          label,
+          waitMs,
+          resetsAt: err.resetsAt?.toISOString() ?? null,
+          // The provider, so a window can say which account is out of headroom
+          // and leave the other one's work alone. Already in hand at this site
+          // and previously dropped, which made "run this phase on the other
+          // agent" un-offerable without the window guessing who "the other" was.
+          provider,
+        },
+      );
+      // **Interruptible since #223.** This used to be a bare `setTimeout`, which
+      // is the one place a run spends real time with nothing to kill - so `stop`
+      // did nothing for the length of the window, and because `serve.ts` holds
+      // the one-at-a-time gate for the whole of `main()`, neither could anything
+      // else be started. A fifteen-minute wait locked the window for fifteen
+      // minutes: *"I ended a run, and now I can't create a new one."*
+      const slept = await sleepUnlessCancelled(waitMs);
+      if (!slept) {
+        // Woken by a cancel. Thrown here rather than letting the next turn's
+        // refusal do it, for two reasons: the loop would otherwise narrate
+        // `rate_limit_resumed` on a wait that did not resume, and it would
+        // announce a turn it is about to refuse to start.
+        throw new Cancelled(cancelRequested() ?? 'the run was stopped during a rate-limit wait');
+      }
+      log.step(`Resuming "${label}" after rate-limit wait`, {
+        id: 'rate_limit_resumed',
+        data: { label },
+      });
     }
   }
 }
@@ -2497,7 +3418,6 @@ function describeReset(err: RateLimitError): string {
   return err.resetsAt ? `Resets at ${err.resetsAt.toLocaleString()}.` : 'No reset time reported.';
 }
 
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * What previous runs on this repository decided, for the planner's index (#52).
@@ -2543,7 +3463,10 @@ async function runPlan(
   roles: RoleTable,
   turns: AgentTurns,
 ): Promise<PlannedTurn> {
-  log.step(`${holderLabel('planner', roles)} is planning (read-only)`);
+  log.step(`${holderLabel('planner', roles)} is planning (read-only)`, {
+    id: 'turn_started',
+    data: { role: 'planner', kind: 'plan' },
+  });
   const outcome = await runTurn(
     state,
     cfg,
@@ -2583,6 +3506,35 @@ interface ReviseArgs {
   answers?: readonly Answer[] | undefined;
 }
 
+/**
+ * Whether this revision is a new plan round, or the same one revised.
+ *
+ * **A plan round is the pair — the planner produces a version, the critic judges
+ * it — and only one of the two things that reach here is half of that pair.**
+ * A revision answering the critic's findings is the producer's side of the next
+ * round: something judged version N and this is version N+1, which is exactly
+ * what `maxPlanRounds` counts and what `plan-<n>.json` is numbered by.
+ *
+ * A revision answering the planner's *own* questions is not. Nothing judged
+ * anything: the planner asked, the answerer replied, and the plan was rewritten
+ * before it was ever shown to the critic. The loop column has said so in as many
+ * words since the question group was drawn — *"a question round produces no
+ * critique, so it cannot advance the plan round"* — and the core disagreed with
+ * its own screen, which is how a run came to read *"plan round 0 has a critique,
+ * then plan round 1 asked questions, and when those questions were answered it
+ * moved to plan round 2"*.
+ *
+ * It was not only a renumbering. `guardProgress` measures `state.planRound`
+ * against `loop.maxPlanRounds`, so every question round spent one of the rounds
+ * the run had for *disagreeing with the critic* — a run allowed five plan rounds
+ * and asking three rounds of questions had two critiques left, and nothing said
+ * so. `loop.maxQuestionRounds` already caps the question loop, and it is the cap
+ * that should.
+ */
+function advancesRound(args: ReviseArgs): boolean {
+  return args.findings !== undefined;
+}
+
 async function revisePlan(
   state: RunState,
   cfg: Config,
@@ -2590,10 +3542,58 @@ async function revisePlan(
   args: ReviseArgs,
   roles: RoleTable,
   turns: AgentTurns,
+  host?: Host,
 ): Promise<PlannedTurn> {
-  state.planRound += 1;
+  const advancing = advancesRound(args);
+  if (advancing) state.planRound += 1;
   saveState(state);
-  log.step(`${holderLabel('planner', roles)} is revising the plan (round ${state.planRound})`);
+  /*
+   * A revision opens a new plan round, and until now it said so to nobody.
+   *
+   * `revisePlan` emitted a `turn_started` and no `phase_started`, so the turn
+   * that produces the *next* version of the plan landed inside whichever phase
+   * group was still open — the **critique that caused it**. The loop column drew
+   * a planner turn under a heading that says `critique`, which is the producer
+   * of round 2 filed under round 1's judge.
+   *
+   * `planning`, not a phase of its own, because it is the same phase: the
+   * planner producing a version of the plan. On the advancing path the round has
+   * just been incremented, so this group and the critique that follows it carry
+   * the same number — which is what lets a reader (and `rounds()`) pair them. On
+   * the non-advancing path it carries the round it is still in, which is the
+   * whole point: the answered revision is drawn under the round that raised the
+   * questions rather than opening one beside it.
+   *
+   * The heading is deliberately still `log.step` below rather than being folded
+   * into this: a `log.heading` here would change what the terminal prints for
+   * every revision, and this is a frame for a host, not a new section for a
+   * person. `phase_started` has never required a heading beside it.
+   */
+  log.info(
+    advancing
+      ? `Plan round ${state.planRound}`
+      : `Revising plan ${state.planRound} against the answers`,
+    {
+      id: 'phase_started',
+      data: { phase: 'planning', round: state.planRound },
+    },
+  );
+  // The label names the round the turn belongs to, and for a non-advancing
+  // revision that is the QUESTION round: `planRound` no longer moves, so two
+  // question rounds under one plan round would otherwise charge two turns under
+  // one label and the archive could not tell them apart.
+  const label = advancing
+    ? `revise-${state.planRound}`
+    : `revise-q${state.questionRound}`;
+  log.step(
+    advancing
+      ? `${holderLabel('planner', roles)} is revising the plan (round ${state.planRound})`
+      : `${holderLabel('planner', roles)} is revising the plan against the answers`,
+    {
+      id: 'turn_started',
+      data: { role: 'planner', kind: 'revise', round: state.planRound },
+    },
+  );
 
   const outcome = await runTurn(
     state,
@@ -2601,6 +3601,7 @@ async function revisePlan(
     {
       role: 'planner',
       prompt: P.revisePlanPrompt({
+        planMd: state.plan?.plan_md,
         findings: args.findings,
         answers: args.answers,
         // The plan of record's boundary, restated: a revision returns the whole
@@ -2612,8 +3613,9 @@ async function revisePlan(
         acceptanceCriteria: state.plan?.acceptance_criteria,
         round: state.planRound,
       }),
+      planInPrompt: state.plan !== null,
       cwd,
-      label: `revise-${state.planRound}`,
+      label,
     },
     turns,
     roles,
@@ -2632,6 +3634,14 @@ async function revisePlan(
   // rides on this `saveState` and not a later one.
   if (args.findings !== undefined) state.pendingFindings = null;
   saveState(state);
+  // **`plan-<n>.json` is the plan of record for round n, which is the version
+  // the critic will judge** - so a non-advancing revision replaces it rather
+  // than writing beside it, and `refusePlaceholderPlan` goes on citing a file
+  // whose contents are the ones it read. What that costs is the draft that
+  // raised the questions, and the cost is accepted rather than hidden: the
+  // questions and the answers that changed it are both durable, in
+  // `answers-<question-round>.json`, which is the half a reader is actually
+  // asking about when a plan changed between two critiques.
   artifact(state, `plan-${state.planRound}.json`, plan);
   // With the new plan persisted, the follow-ups artifact is reconciled against
   // it immediately - including deleting it when this revision dropped the last
@@ -2640,7 +3650,28 @@ async function revisePlan(
   // After the artifact and its save, so the snapshot describes a round whose
   // record is complete. No commit here: the planning phase does not touch the
   // tree, and the note says that rather than implying a failure.
-  writeCheckpoint(state, 'plan-round', NO_COMMIT);
+  //
+  // **The boundary is the one this revision actually crossed.** A findings-driven
+  // revision closes a plan round and takes `plan-round`, exactly as it always
+  // has. An answers-driven one closes nothing of the sort, and writing a
+  // `plan-round` checkpoint for it would put a plan round in the record that
+  // `state.planRound` says did not happen — the two halves of #139's own
+  // complaint, which is that a plan revised because the critic objected and a
+  // plan revised because it answered its own questions are different diagnoses
+  // that used to share a name.
+  //
+  // It does not hold. The caller inside the question loop has already held at
+  // `question-round` a moment ago, with this round's questions attached, so a
+  // second hold here would stop the same round twice for one decision. The one
+  // caller that reaches this without a hold in front of it is the resume
+  // consuming `NEEDS-INPUT.md`, and a resume that halts again before running
+  // anything is a resume that did not resume.
+  if (advancing) {
+    writeCheckpoint(state, 'plan-round', NO_COMMIT);
+    await holdAt(state, cfg, host, 'plan-round');
+  } else {
+    writeCheckpoint(state, 'question-round', NO_COMMIT);
+  }
   return { plan, ...(outcome.activity === undefined ? {} : { activity: outcome.activity }) };
 }
 
@@ -2672,7 +3703,9 @@ async function codexDispatch(
   // inputs no attempt changes.
   const model = modelFor(req.role, cfg, roles);
   const forkFrom = noteSpawn(state, cfg, slot);
-  const prompt = freshConversationPrefix(state, req.role, slotContinuity(state, cfg, slot)) + req.prompt;
+  const prompt =
+    freshConversationPrefix(state, req.role, slotContinuity(state, cfg, slot), req.planInPrompt) +
+    req.prompt;
 
   // Through the same retry the Claude turns use, so a Codex rate limit gets the
   // wait, the maxWaitMinutes cap and the resumable exit that already exist
@@ -2920,6 +3953,26 @@ function pathStyleFor(state: RunState, role: Role, roles: RoleTable): PathStyle 
  * wrong. The *tally* is recorded for every role either way, so the question can
  * be reopened later on evidence the runs themselves recorded.
  */
+/**
+ * Stamp a finding with the role that produced it (#141).
+ *
+ * Here rather than in `parseFindings`, because the parser reads a report and has
+ * no idea who wrote it - this function is the single point both writers pass
+ * through, and it is already given the role. A finding that arrives already
+ * attributed keeps what it has: nothing produces one today, and the rule that
+ * matters is that this never overwrites an author with a different one.
+ *
+ * **Fail closed on an unattributable role.** Only `critic` and `reviewer` can
+ * produce a report; anything else leaves the field off rather than claiming a
+ * position that does not raise findings. Absent already means "nothing here says
+ * who", which is true, where `planner` would be a fabrication.
+ */
+function attribute(f: Finding, role: Role): Finding {
+  if (f.raisedBy !== undefined) return f;
+  if (role !== 'critic' && role !== 'reviewer') return f;
+  return { ...f, raisedBy: role };
+}
+
 function groundAndRecord(
   state: RunState,
   cwd: string,
@@ -2929,20 +3982,33 @@ function groundAndRecord(
   /** What the turn that produced `found` did. Absent when nothing measured it. */
   activity: TurnActivity | undefined,
 ): FindingsReport {
-  const grounded = groundFindings(found, cwd, state.dir, pathStyleFor(state, role, roles));
+  const attributed = { ...found, findings: found.findings.map((f) => attribute(f, role)) };
+  const grounded = groundFindings(attributed, cwd, state.dir, pathStyleFor(state, role, roles));
   const inert =
     role === 'reviewer'
       ? downgradeInert(grounded.report, activity)
       : { report: grounded.report, downgraded: [] as Finding[] };
   const report = inert.report;
-  const downgraded = [...grounded.downgraded, ...inert.downgraded];
+  recordDowngrades(state, [...grounded.downgraded, ...inert.downgraded]);
+  return report;
+}
 
+/**
+ * Say and record that a guard moved a severity - one sentence, whichever guard
+ * fired.
+ *
+ * Its own function since #113 added a fourth guard that runs *after*
+ * `groundAndRecord` rather than inside it: the reproducer cannot be observed
+ * until the whole round's findings are merged, because a chunked review produces
+ * the same id in two parts. Two copies of this loop would be two wordings for
+ * one event, and `finding_downgraded` is what a reader greps for.
+ */
+function recordDowngrades(state: RunState, downgraded: readonly Finding[]): void {
   for (const f of downgraded) {
     // Set by construction in `groundFindings`; narrowed rather than asserted.
     const d = f.downgraded;
     if (d === undefined) continue;
-    log.warn(`Downgraded ${f.id} from ${d.from} to P2 - ${d.reason}`);
-    recordEvent(state, 'finding_downgraded', {
+    recordAndSay(state, 'warn', 'finding_downgraded', `Downgraded ${f.id} from ${d.from} to P2 - ${d.reason}`, {
       id: f.id,
       from: d.from,
       reason: d.reason,
@@ -2954,7 +4020,6 @@ function groundAndRecord(
       kinds: [...new Set(readEvidence(f.evidence).map((e) => e.kind))],
     });
   }
-  return report;
 }
 
 async function runCritique(
@@ -2971,7 +4036,10 @@ async function runCritique(
    */
   planActivity?: TurnActivity | undefined,
 ): Promise<FindingsReport> {
-  log.step(`${holderLabel('critic', roles)} is critiquing the plan`);
+  log.step(`${holderLabel('critic', roles)} is critiquing the plan`, {
+    id: 'turn_started',
+    data: { role: 'critic', kind: 'critique', round: state.planRound },
+  });
   const outcome = await runTurn(
     state,
     cfg,
@@ -3046,8 +4114,44 @@ async function runReview(
     );
   }
 
-  log.step(`${holderLabel('reviewer', roles)} is reviewing the implementation`);
+  log.step(`${holderLabel('reviewer', roles)} is reviewing the implementation`, {
+    id: 'turn_started',
+    data: { role: 'reviewer', kind: 'review', round: state.reviewRound },
+  });
   const { chunks, files } = await git.diffChunks(cwd, state.baseSha);
+
+  // **An empty diff is refused, not reviewed.** There was a guard for a diff too
+  // BIG for one turn and none at all for one with nothing in it, and
+  // `diffChunks` answers the empty case with a perfectly well-formed result -
+  // one chunk, no files, an empty string - so nothing downstream could tell
+  // "here is the change" from "there is no change to read". The reviewer was
+  // spawned with a prompt that said *here is the diff* followed by nothing.
+  //
+  // Measured on a run of 2026-09-15: it improvised, ran 32 shell commands in
+  // five minutes looking for the change by hand, went silent, and was killed 39
+  // minutes later at the Codex turn ceiling. The run ended `status: error` on a
+  // tree whose implementation was complete and whose verification gate had just
+  // passed three times out of three.
+  //
+  // This is the rule the file above already applies to a directory that is not a
+  // repository, in almost the same words, and it is the same refusal: the
+  // reviewer's only input is a diff produced by git, and there is no second
+  // source for it. `EXIT.PREFLIGHT` because that code is documented for exactly
+  // this - *"the target directory cannot host those phases at all ... whose
+  // review phase has no diff to read"* - and it is resumable, so the round is
+  // still there once the cause is fixed.
+  if (files.length === 0 && chunks.every((c) => c.diff === '')) {
+    throw new Escalation(
+      EXIT.PREFLIGHT,
+      `The review phase has no diff to read: git reported no change ${
+        state.baseSha === null
+          ? 'in this repository at all'
+          : `since ${state.baseSha.slice(0, 7)}`
+      }. The reviewer's only input is a diff, and there is no second source for ` +
+        'it, so no review turn was started and nothing was spent. Either the implement phase ' +
+        'wrote nothing, or its work is somewhere this range cannot see it.',
+    );
+  }
 
   // The round's own report, before the round is bought again. A process that
   // died between the artifact write and `recordPendingFindings` leaves a
@@ -3069,10 +4173,15 @@ async function runReview(
   const report = latestReport(state);
 
   if (chunks.length > 1) {
-    log.info(`Diff too large for one turn - reviewing ${files.length} file(s) in ${chunks.length} parts`);
     // How the round was SPLIT, which is true before any turn runs. What was
     // actually seen is `reviewCoverage`, recorded per completed part below.
-    recordEvent(state, 'review_chunked', { chunks: chunks.length, files: files.length });
+    recordAndSay(
+      state,
+      'info',
+      'review_chunked',
+      `Diff too large for one turn - reviewing ${files.length} file(s) in ${chunks.length} parts`,
+      { chunks: chunks.length, files: files.length },
+    );
   }
 
   const reports: FindingsReport[] = [];
@@ -3128,6 +4237,11 @@ async function runReview(
           // nothing, and a real round must always say something about the
           // report, even when the thing it says is that there is none (#50).
           report,
+          // Absent unless this run would actually place and run one, which is
+          // what keeps a `verify.reproducers: false` review byte-identical to
+          // the one before #113. Only gates with a command: a gate the run
+          // cannot execute is not a choice the reviewer has.
+          reproducerGates(cfg, cwd),
         ),
         cwd,
         // Unchanged when there is one chunk: this string is Codex's output name
@@ -3164,14 +4278,147 @@ async function runReview(
     };
     saveState(state);
     for (const file of chunk.truncated) {
-      log.warn(`${file} is larger than one review turn - the reviewer was shown a cut diff`);
-      recordEvent(state, 'review_file_truncated', { file });
+      recordAndSay(
+        state,
+        'warn',
+        'review_file_truncated',
+        `${file} is larger than one review turn - the reviewer was shown a cut diff`,
+        { file },
+      );
     }
   }
 
   const [only] = reports;
-  if (reports.length === 1 && only !== undefined) return only;
-  return mergeReviewReports(reports);
+  const merged = reports.length === 1 && only !== undefined ? only : mergeReviewReports(reports);
+  // Inside `runReview` and after the merge, which are two separate decisions
+  // (#113).
+  //
+  // After the merge, because a chunked round is several turns and the same id
+  // can come back from two of them - `mergeReviewReports` picks the most
+  // blocking, and running a reproducer per part would place the same file twice
+  // and observe a severity the round did not end up with.
+  //
+  // Inside `runReview` rather than beside it in `reviewPhase`, because the
+  // caller writes `code-review-<n>.json` and `recordPendingFindings` from what
+  // this returns. Doing it outside would mean either a record written before the
+  // observations - which a resume could not see - or rewriting the round's own
+  // artifact afterwards, which #142 settled against for the reason that applies
+  // here too: that file is the record of what the reviewer produced. Written
+  // once, containing what the reviewer said and what vibe observed about it, is
+  // exactly what it already does for `downgraded`.
+  return proveFindings(state, cfg, cwd, roles, merged);
+}
+
+/**
+ * The gate names a reproducer could be run by, or undefined when none could
+ * (#113).
+ *
+ * Undefined and not `[]`, because the two are different instructions to
+ * `reviewPrompt`: undefined renders no section at all, which is what a run with
+ * the feature off has to produce. It also collapses to undefined for a config
+ * with no runnable gate, since offering a reviewer a choice between nothing is
+ * how a field gets filled in with an invented name.
+ */
+function reproducerGates(cfg: Config, cwd: string): readonly string[] | undefined {
+  if (!cfg.verify.reproducers || !cfg.verify.enabled) return undefined;
+  const names = resolveGates(cfg.verify, cwd)
+    .filter((g) => g.command !== null)
+    .map((g) => g.name);
+  return names.length > 0 ? names : undefined;
+}
+
+/**
+ * Run every blocking finding's reproducer, attach what was observed, and
+ * downgrade the ones whose own test passed (#113).
+ *
+ * ## Which findings, and why not all of them
+ *
+ * Blocking only - P0 and P1. A reproducer's whole effect is on whether a finding
+ * blocks, so running one for a P3 buys a gate execution to change nothing. This
+ * is also the issue's open question *"which severities require one"*, answered
+ * in the direction that costs nothing: none of them require one. A reviewer that
+ * cannot express a defect as a failing test keeps its finding and is judged as
+ * findings have always been judged, and the schema says so.
+ *
+ * ## The cost, stated rather than capped
+ *
+ * One gate execution per blocking finding that carries a reproducer, at that
+ * gate's own timeout, on a tree the gate just passed on. There is deliberately
+ * no cap: a number here would be invented, and against the alternative - the
+ * measured case is a false P1 that bought a ~1.3M-token fix round editing
+ * working code - a 90-second suite run is not a close call. `verify.reproducers:
+ * false` is the off switch, and it is one setting rather than a ceiling because
+ * a ceiling would silently drop the reproducers past it.
+ *
+ * ## The baseline
+ *
+ * `state.gateOutcomes` is reset by every `runGate` call and this runs after the
+ * one that just came back clean, so it names the gates observed to pass on this
+ * exact tree. Nothing else in this function assumes a baseline: a gate that was
+ * disabled, unavailable, or simply not in that list produces `unproven` on a
+ * failure rather than a proof.
+ */
+async function proveFindings(
+  state: RunState,
+  cfg: Config,
+  cwd: string,
+  roles: RoleTable,
+  report: FindingsReport,
+): Promise<FindingsReport> {
+  if (!cfg.verify.reproducers || !cfg.verify.enabled) return report;
+
+  const pending = report.findings.filter(
+    (f) => (f.severity === 'P0' || f.severity === 'P1') && f.reproducer !== undefined,
+  );
+  if (pending.length === 0) return report;
+
+  const gates = resolveGates(cfg.verify, cwd);
+  const passed = new Set(
+    (state.gateOutcomes ?? []).filter((o) => o.status === 'passed').map((o) => o.name),
+  );
+  const outcomes = new Map<string, ReproducerOutcome>();
+
+  for (const f of pending) {
+    const reproducer = f.reproducer;
+    if (reproducer === undefined) continue;
+    log.step(`Running the reproducer for ${f.id}`, {
+      id: 'reproducer_started',
+      data: { id: f.id, path: reproducer.path, gate: reproducer.gate ?? null },
+    });
+    const outcome = await observe(f, reproducer, {
+      cwd,
+      runDir: state.dir,
+      gates,
+      contract: cfg.toolchain,
+      // The *reviewer's* convention, because the reviewer typed the path - the
+      // same read `groundAndRecord` makes for the same reason.
+      style: pathStyleFor(state, 'reviewer', roles),
+      passedGates: passed,
+      at: 'review',
+    });
+    outcomes.set(f.id, outcome);
+    recordAndSay(
+      state,
+      outcome.verdict === 'unproven' ? 'warn' : 'info',
+      'reproducer_observed',
+      `Reproducer for ${f.id}: ${outcome.verdict} - ${describeOutcome(outcome)}`,
+      {
+        id: f.id,
+        verdict: outcome.verdict,
+        at: outcome.at,
+        gate: outcome.gate,
+        command: outcome.command,
+        exitCode: outcome.exitCode ?? null,
+        baseline: outcome.baseline,
+        reason: outcome.reason,
+        archived: outcome.archived,
+      },
+    );
+  }
+
+  const applied = applyReproducerOutcomes(report, outcomes);
+  recordDowngrades(state, applied.downgraded);
+  return applied.report;
 }
 
 /** Most blocking first, so a later chunk can only ever raise a finding's severity. */
@@ -3250,6 +4497,32 @@ async function resolveQuestions(
   const blockingCount = questions.filter((q) => q.blocking).length;
   log.heading(
     `${questions.length} open question(s) - ${blockingCount} blocking, ${questions.length - blockingCount} advisory`,
+    {
+      id: 'questions_opened',
+      data: {
+        total: questions.length,
+        blocking: blockingCount,
+        // Hi-fi 14 draws the question loop as a nested group with **its own
+        // counter and its own cap** - `round 2/3` sitting inside `round 1/5` -
+        // and the frame carried neither, so the group could not say where in
+        // its own loop it was. Both, because a position with no cap is a number
+        // and a position in something is a fact somebody can act on: `at the
+        // cap` is the state the frame's whole escalation is about.
+        round: state.questionRound,
+        cap: cfg.loop.maxQuestionRounds,
+        // The questions themselves, carried on the frame that already announces
+        // them (#223). `1f` is an inbox and cannot be one over two counts - and
+        // the alternative was for a window to scrape the `- [kind] text` lines
+        // printed immediately below, which is the English-matching #133 exists
+        // to prevent. Nothing a terminal prints changes: this is data on a
+        // narration id, and narration ids carry no entry in `state.events`.
+        questions: questions.map((q) => ({
+          kind: q.kind,
+          question: q.question,
+          blocking: q.blocking,
+        })),
+      },
+    },
   );
   for (const q of questions) log.info(`- [${q.kind}${q.blocking ? ', blocking' : ''}] ${q.question}`);
 
@@ -3261,22 +4534,33 @@ async function resolveQuestions(
     throw new Escalation(EXIT.NEEDS_HUMAN, 'Blocking questions need answers.', [...blockers]);
   }
 
-  log.step(`${answerer} is answering`);
+  log.step(`${answerer} is answering`, {
+    id: 'turn_started',
+    data: { role: 'answerer', kind: 'answer', questions: questions.length },
+  });
   const outcome = await runTurn(
     state,
     cfg,
     {
       role: 'answerer',
-      prompt: P.answerPrompt(questions, plan.plan_md),
+      prompt: P.answerPrompt(questions, P.renderPlanDoc(plan)),
       cwd,
-      label: `answers-${state.planRound}`,
+      // **The question round, not the plan round.** These were keyed by
+      // `planRound` and could be because every question round used to advance it
+      // - which is the defect above, and this is the collision that fell out of
+      // fixing it: two question rounds under one plan round both wrote
+      // `answers-0.json`, and the second silently replaced the first. The
+      // question round is the counting this turn actually belongs to, it is
+      // monotonic for the whole run, and `state.questionRound` was incremented
+      // by the caller before this was reached - so the first is `answers-1`.
+      label: `answers-${state.questionRound}`,
     },
     turns,
     roles,
   );
 
   const { answers } = parseAnswers(readStructured(outcome));
-  artifact(state, `answers-${state.planRound}.json`, answers);
+  artifact(state, `answers-${state.questionRound}.json`, answers);
 
   // Every question asked is marked answered regardless of outcome, so a
   // rephrased repeat in the next revision cannot re-enter this branch.
@@ -3290,12 +4574,40 @@ async function resolveQuestions(
   const usable = answers.filter((a) => !declined(a));
   const refused = answers.filter(declined);
 
-  const matches = (q: OpenQuestion, a: Answer): boolean => a.question.trim() === q.question.trim();
-  const refusedBlocking = questions.filter((q) => q.blocking && refused.some((a) => matches(q, a)));
-  const refusedAdvisory = questions.filter((q) => !q.blocking && refused.some((a) => matches(q, a)));
+  // **The pairing, and it is no longer string equality** (#211). The answerer is
+  // asked to echo the question and echoes what it was shown, which
+  // `formatQuestion` renders with the kind and the blocking tag after it - so a
+  // real run produced `"...untested? *(technical, advisory)*"` against a question
+  // ending at the question mark, and every pair failed. That was not only a pane
+  // drawing "No answer yet" over answered questions: `refusedBlocking` came back
+  // empty, so a declined blocking question would have been counted as answered
+  // and `escalateOnDefer` could not fire.
+  //
+  // `pairAnswers` is the module that already owns "when are two wordings one
+  // question", using the same normalize and the same threshold as the re-ask
+  // guard rather than a second rule that would drift from it.
+  const pairing = pairAnswers(
+    questions,
+    refused,
+    (q) => q.question,
+    (a) => a.question,
+  );
+  const answerFor = (q: OpenQuestion): Answer | undefined =>
+    pairing.paired.find((p) => p.question === q)?.answer;
+  const refusedBlocking = questions.filter((q) => q.blocking && answerFor(q) !== undefined);
+  const refusedAdvisory = questions.filter((q) => !q.blocking && answerFor(q) !== undefined);
+
+  // A decline that paired with nothing. Named rather than dropped and never
+  // attached to the nearest question: this is the answerer refusing to guess,
+  // and losing it in silence is the failure this whole change is about. It does
+  // not escalate, because nothing here can say which question it was about, and
+  // stopping a run over a question nobody can name is worse than saying so.
+  for (const a of pairing.unpaired) {
+    log.warn(`${answerer} declined an answer that matches no question asked: ${a.question}`);
+  }
 
   for (const q of refusedAdvisory) {
-    const reason = refused.find((a) => matches(q, a))?.rationale ?? `${answerer} declined to answer.`;
+    const reason = answerFor(q)?.rationale ?? `${answerer} declined to answer.`;
     state.deferredQuestions.push({
       question: q.question,
       kind: q.kind,
@@ -3315,7 +4627,76 @@ async function resolveQuestions(
     );
   }
 
-  log.ok(`${answerer} answered ${usable.length} of ${questions.length} question(s)`);
+  /**
+   * Answers as rows keyed by the question the *planner* wrote.
+   *
+   * The join happens here because this is the only side that has both the
+   * questions and `similarity`. An answer that paired with nothing keeps its own
+   * wording and travels anyway - dropping it would hide what the answerer said,
+   * and attaching it to the nearest question would state that it was about a
+   * question nobody has established it was about.
+   */
+  const asked = (
+    list: readonly Answer[],
+  ): {
+    question: string;
+    answer: string;
+    confidence: string;
+    rationale: string;
+    deferToHuman: boolean;
+  }[] => {
+    const pairs = pairAnswers(
+      questions,
+      list,
+      (q) => q.question,
+      (a) => a.question,
+    );
+    const row = (question: string, a: Answer) => ({
+      question,
+      answer: a.answer,
+      confidence: a.confidence,
+      rationale: a.rationale,
+      deferToHuman: a.defer_to_human,
+    });
+    return [
+      ...pairs.paired.map((p) => row(p.question.question, p.answer)),
+      ...pairs.unpaired.map((a) => row(a.question, a)),
+    ];
+  };
+
+  log.ok(`${answerer} answered ${usable.length} of ${questions.length} question(s)`, {
+    // The other half of `1f` (#223). The pane is an inbox of open questions with
+    // **the adversary's draft and its confidence** beside each, and until now
+    // the questions reached the wire without the answers - so a window could
+    // show what was asked and never what came back.
+    //
+    // A narration id with no event, like `questions_opened`, and the same
+    // sentence at the same level: `answers-N.json` is where this is durable.
+    id: 'questions_answered',
+    data: {
+      answered: usable.length,
+      total: questions.length,
+      // Both, and labelled, because they are different outcomes rather than a
+      // count and a remainder: a declined answer is the answerer refusing to
+      // guess at product intent, which `escalateOnDefer` then acts on.
+      //
+      // **Keyed by the question as the PLANNER wrote it**, not as the answerer
+      // echoed it (#211). A window joins these back onto `questions_opened` and
+      // the only string that appears on both frames has to be one string - the
+      // echo is the rendered form, tag and all, and joining on it drew "No
+      // answer yet" over two answered questions. Doing the pairing here rather
+      // than in the window is also what keeps *one* definition of it: the
+      // window has no `similarity`, and a second matcher over there would drift
+      // from this one on the first wording either side did not expect.
+      answers: asked(usable),
+      declined: asked(refused).map((row) => ({
+        question: row.question,
+        confidence: row.confidence,
+        rationale: row.rationale,
+        deferToHuman: row.deferToHuman,
+      })),
+    },
+  });
   return usable;
 }
 
@@ -3367,6 +4748,23 @@ export function writeEscalation(state: RunState, escalation: Escalation): string
       lines.push(`### ${f.title} \`${f.id}\`\n${f.detail}\n\n*Suggested fix:* ${f.suggested_fix}\n`);
     }
   }
+
+  // Before the raise block, because it is the cheaper decision of the two: a
+  // person who disagrees with a finding's severity does not have to write one
+  // (#142). Rendered from what the run is actually carrying rather than from
+  // `escalation.findings`, which is a message about the stop - a severity moved
+  // on a finding nothing will read changes nothing, and the two lists differ on
+  // every stop that reported questions.
+  const carry = raisePhase(resumePhase(state));
+  const carried = carry === null ? null : takePendingFindings(state, carry);
+  if (carried !== null) lines.push(moveSection(carried));
+
+  // Last, and on every stop rather than only on the ones that asked something
+  // (#141). The thing a person most wants to raise a finding about is the diff,
+  // which exists at every stop after the plan - and a stop that reported
+  // findings rather than questions is exactly the moment somebody has read them
+  // and disagrees. Left untouched it parses to nothing.
+  lines.push(raiseSection(state.id));
 
   return artifact(state, 'NEEDS-INPUT.md', lines.join('\n'));
 }

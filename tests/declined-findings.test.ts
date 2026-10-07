@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { orchestrate } from '@src/orchestrator.js';
-import { fixPrompt, implementPrompt } from '@src/prompts.js';
+import { fixPrompt, implementPrompt, taskContext } from '@src/prompts.js';
 import { loadRun } from '@src/run.js';
 import {
   agents,
@@ -177,10 +177,15 @@ test('carried P1s and declined findings are two sections, not one list', async (
   assert.ok(declinedIdAt > declinedAt);
 });
 
-test('a run that defers nothing produces the implementation prompt it always did', async () => {
-  const prompt = implementPromptOf(await drive([]));
+test('a run that defers nothing supplies its brief and scope without inventing deferrals', async () => {
+  const driven = await drive([]);
+  const prompt = implementPromptOf(driven);
 
-  assert.equal(prompt, implementPrompt(planFixture().plan_md, []));
+  assert.equal(
+    prompt,
+    taskContext(driven.state.task, driven.state.extraContext) +
+      implementPrompt(planFixture().plan_md, [], [], [], planFixture().out_of_scope),
+  );
   assert.ok(!prompt.includes(DECLINED_HEADING));
 });
 

@@ -1,0 +1,602 @@
+import { describe, expect, test } from 'vitest';
+import {
+  ask,
+  decide,
+  emptyConversation,
+  follow,
+  reduce,
+  refuse,
+  retext,
+  settle,
+  spendParts,
+  unanswered,
+  unrecognised,
+  wake,
+} from './transcript';
+import type { Conversation } from './transcript';
+import type { PilotEvent, Usage } from './pilot';
+
+/**
+ * The pilot conversation, on the events the two adapters actually emit (#143).
+ *
+ * The Rust side has the adapters' own tests, folding recorded streams from both
+ * vendors; this is the other end of the same wire. **Nothing here asserts on
+ * English** and nothing adds a number up — a `spent` event carries the turn's
+ * running total, assembled in Rust where the vendor difference lives.
+ */
+
+const usage = (over: Partial<Usage> = {}): Usage => ({
+  input: null,
+  output: null,
+  cache_read: null,
+  cache_write: null,
+  ...over,
+});
+
+/** Fold a list of events into a conversation with one open turn. */
+function fold(events: readonly PilotEvent[], turn = 1): Conversation {
+  return events.reduce(
+    (state, event) => reduce(state, event),
+    ask(emptyConversation(), 'hello', turn, 'anthropic'),
+  );
+}
+
+describe('what you typed is on the turn it opened', () => {
+  test('a message reaches the reply as well as the wire', () => {
+    // The pane draws replies and never drew messages, so what a person typed
+    // was invisible: send, the composer empties, and the next thing on screen
+    // is an answer to a question that is not there. Carried on the reply rather
+    // than interleaved from `messages`, so the order cannot be got wrong.
+    const asked = ask(emptyConversation(), 'what is this run doing?', 1, 'anthropic');
+    expect(asked.live?.asked).toBe('what is this run doing?');
+    // And `messages` is untouched: it is what goes on the wire, and the wire
+    // has not changed.
+    expect(asked.messages).toEqual([{ role: 'user', content: 'what is this run doing?' }]);
+  });
+
+  test('it survives onto the finished reply, where the pane reads it', () => {
+    const done = fold([{ kind: 'ended', turn: 1, stop: 'end_turn' }]);
+    expect(done.replies[0]?.asked).toBe('hello');
+  });
+
+  test('a turn nobody typed has none', () => {
+    // A tool follow-up appends no message and opens no question: `follow` is
+    // the other half of a loop, and drawing an empty line above it would be a
+    // message nobody wrote.
+    expect(follow(emptyConversation(), 2, 'anthropic').live?.asked).toBeNull();
+    // A wake carries a message because a vendor needs something to answer, and
+    // it is deliberately NOT `asked` - drawing it as typed would be the app
+    // putting words in somebody's mouth.
+    const woken = wake(emptyConversation(), 'the loop stopped at a gate', 3, 'anthropic');
+    expect(woken.live?.asked).toBeNull();
+    expect(woken.live?.woke).toBe('the loop stopped at a gate');
+  });
+
+  test('a refused turn still shows what did not go', () => {
+    // It matters more here than anywhere: this is the card saying the request
+    // failed, so the thing that failed has to be on it.
+    const refused = refuse(emptyConversation(), 'do the thing', 'anthropic', 'no key');
+    expect(refused.replies[0]?.asked).toBe('do the thing');
+    expect(refuse(emptyConversation(), null, 'anthropic', 'x').replies[0]?.asked).toBeNull();
+  });
+});
+
+describe('an open turn says it is open, and for how long (#211)', () => {
+  /**
+   * The report this answers: between pressing send and the first token there
+   * was a two-word kicker and nothing else, and it was repeatedly read as a
+   * stall. The fix is a wave plus an elapsed - and the elapsed is the half that
+   * can be wrong, so it is the half with cases.
+   */
+
+  test('every way a turn opens carries when it opened', () => {
+    // All three, because a wait is the same wait however it started - and the
+    // subscription path's `follow` is the one that opens with no text at all,
+    // which is exactly the card with nothing else on it to look at.
+    const at = 1_700_000_000_000;
+    expect(ask(emptyConversation(), 'hello', 1, 'anthropic', at).live?.startedAt).toBe(at);
+    expect(wake(emptyConversation(), 'a gate', 2, 'anthropic', at).live?.startedAt).toBe(at);
+    expect(follow(emptyConversation(), 3, 'anthropic', { startedAt: at }).live?.startedAt).toBe(at);
+  });
+
+  test('a caller that does not say gets null, never a zero', () => {
+    // The absence rule on a duration. Zero would render as an elapsed counted
+    // from 1970 - an eight-week wait on a turn that took four seconds - and it
+    // is also what every reply made by a build older than this field has.
+    expect(ask(emptyConversation(), 'hello', 1, 'anthropic').live?.startedAt).toBeNull();
+    expect(follow(emptyConversation(), 2, 'anthropic').live?.startedAt).toBeNull();
+  });
+
+  test('a turn that never started has no start', () => {
+    // `refuse` is the one outcome that never reaches the wire. Stamping it with
+    // the instant of the refusal would put a duration on a wait nobody had.
+    const at = 1_700_000_000_000;
+    const refused = refuse(emptyConversation(), 'do the thing', 'anthropic', 'no key');
+    expect(refused.replies[0]?.startedAt).toBeNull();
+    expect(refused.replies[0]?.startedAt).not.toBe(at);
+  });
+
+  test('the start survives every delta, and the settled reply keeps it', () => {
+    // The elapsed ticks for as long as the turn is open, so the field has to
+    // survive `reduce` - a spread that dropped it would show the counter
+    // vanishing the moment the first token landed, which is the worst possible
+    // second for it to go.
+    const at = 1_700_000_000_000;
+    let conversation = ask(emptyConversation(), 'hello', 1, 'anthropic', at);
+    conversation = reduce(conversation, { kind: 'text', turn: 1, delta: 'hi' });
+    expect(conversation.live?.startedAt).toBe(at);
+    conversation = reduce(conversation, { kind: 'ended', turn: 1, stop: 'end_turn' });
+    expect(conversation.replies[0]?.startedAt).toBe(at);
+  });
+
+  test('what the pane calls it depends on whether anything has come back', () => {
+    // `streaming` was drawn from the instant the turn opened, including for the
+    // whole wait before a single byte - when nothing was streaming. The text
+    // being empty is the whole of the distinction, and it is asserted here
+    // rather than in a component because it is the claim, not the markup.
+    const opened = ask(emptyConversation(), 'hello', 1, 'anthropic', 1);
+    expect(opened.live?.text).toBe('');
+    expect(opened.live?.outcome).toBeNull();
+    const streaming = reduce(opened, { kind: 'text', turn: 1, delta: 'once' });
+    expect(streaming.live?.text).not.toBe('');
+    expect(streaming.live?.outcome).toBeNull();
+  });
+});
+
+describe('a turn the run caused is not a turn somebody typed', () => {
+  test('the reason reaches the model as the message and the reader as the kicker', () => {
+    // One sentence for both, so the message being answered and the label above
+    // the answer cannot disagree about why the turn happened.
+    const reason = '[the app woke you] the loop stopped at "plan-approved"';
+    const woken = wake(emptyConversation(), reason, 1, 'anthropic');
+
+    // A vendor needs something in `messages` to answer, so there is a user
+    // message either way. `woke` is the only thing that tells the two apart.
+    expect(woken.messages).toEqual([{ role: 'user', content: reason }]);
+    expect(woken.live?.woke).toBe(reason);
+    expect(ask(emptyConversation(), 'hello', 1, 'anthropic').live?.woke).toBeNull();
+  });
+
+  test('it survives to the finished reply, which is where the pane reads it', () => {
+    const reason = 'woken';
+    const done = [
+      { kind: 'text', turn: 1, delta: 'here is what I would do' } as const,
+      { kind: 'ended', turn: 1, stop: 'end_turn' } as const,
+    ].reduce<Conversation>(
+      (state, event) => reduce(state, event),
+      wake(emptyConversation(), reason, 1, 'anthropic'),
+    );
+    expect(done.replies[0]?.woke).toBe(reason);
+  });
+
+  test('a wake refused on its way out still says what set it off', () => {
+    // It records how the turn STARTED, not how it ended. Without this a refused
+    // wake draws as the pilot failing spontaneously, which is the one thing an
+    // unattended turn must not look like.
+    const refused = refuse(emptyConversation(), 'woken', 'anthropic', 'no key', 'woken');
+    expect(refused.replies[0]?.woke).toBe('woken');
+    expect(refuse(emptyConversation(), 'hi', 'anthropic', 'no key').replies[0]?.woke).toBeNull();
+  });
+});
+
+describe('the final message wins over the deltas, where there are two answers', () => {
+  test('the CLI-reported reply replaces the blocks that streamed on the way to it', () => {
+    // The subscription backend is the only one with two answers to "what did it
+    // say". `claude -p` streams every assistant block in the turn - including
+    // what it writes between its own Read and Glob calls - and reports the final
+    // message separately. Concatenating the deltas kept all of it, run together
+    // with no separator, because a block boundary is not a `text_delta`.
+    const streamed = fold([
+      { kind: 'text', turn: 1, delta: 'Let me look at the directory itself.' },
+      { kind: 'text', turn: 1, delta: 'Three prior attempts are sitting in .vibe/runs' },
+    ]);
+    expect(streamed.live?.text).toBe(
+      'Let me look at the directory itself.Three prior attempts are sitting in .vibe/runs',
+    );
+
+    const settled = retext(streamed, 1, 'Three prior attempts are sitting in .vibe/runs');
+    expect(settled.live?.text).toBe('Three prior attempts are sitting in .vibe/runs');
+  });
+
+  test('it names the turn, so a late reply cannot rewrite the one that followed it', () => {
+    // The rule `reduce` follows for an event about the wrong turn, for the same
+    // reason: a fact that cannot be attributed is not recorded.
+    const live = fold([{ kind: 'text', turn: 1, delta: 'mine' }]);
+    expect(retext(live, 2, 'somebody else’s').live?.text).toBe('mine');
+    expect(retext(emptyConversation(), 1, 'anything')).toEqual(emptyConversation());
+  });
+});
+
+describe('a reply is assembled from deltas and from nothing else', () => {
+  test('the text is the deltas, in order, concatenated', () => {
+    const done = fold([
+      { kind: 'started', turn: 1, provider: 'anthropic', model: 'claude-opus-5-20260501' },
+      { kind: 'text', turn: 1, delta: 'Hel' },
+      { kind: 'text', turn: 1, delta: 'lo.' },
+      { kind: 'ended', turn: 1, stop: 'end_turn' },
+    ]);
+    expect(done.replies[0]?.text).toBe('Hello.');
+    expect(done.replies[0]?.model).toBe('claude-opus-5-20260501');
+    expect(done.replies[0]?.outcome).toEqual({ kind: 'ended', stop: 'end_turn' });
+    expect(done.live).toBeNull();
+  });
+
+  test('the model is what answered, and stays absent until the vendor says', () => {
+    // Never filled in from the request: an alias resolves to a dated version,
+    // and showing the alias back would claim something nobody was told.
+    const open = fold([{ kind: 'text', turn: 1, delta: 'x' }]);
+    expect(open.live?.model).toBeNull();
+  });
+
+  test('a finished reply joins the conversation the next turn is sent', () => {
+    const done = fold([
+      { kind: 'text', turn: 1, delta: 'Hello.' },
+      { kind: 'ended', turn: 1, stop: 'end_turn' },
+    ]);
+    expect(done.messages).toEqual([
+      { role: 'user', content: 'hello' },
+      { role: 'assistant', content: 'Hello.' },
+    ]);
+  });
+
+  test('a reply with nothing in it does not become an assistant message', () => {
+    // Sending an empty message would have the vendor answer a conversation that
+    // never happened - and both APIs reject an empty content block anyway.
+    const done = fold([{ kind: 'failed', turn: 1, message: 'overloaded_error: Overloaded' }]);
+    expect(done.messages).toEqual([{ role: 'user', content: 'hello' }]);
+    expect(done.replies[0]?.outcome).toEqual({
+      kind: 'failed',
+      message: 'overloaded_error: Overloaded',
+    });
+  });
+
+  test('what was said is recorded even when the reply never arrives', () => {
+    // The user's message is appended when the turn opens, not when it succeeds.
+    // A transcript that kept only successful turns would be missing exactly the
+    // ones somebody needs to look at.
+    const open = ask(emptyConversation(), 'hello', 1, 'openai');
+    expect(open.messages).toEqual([{ role: 'user', content: 'hello' }]);
+  });
+});
+
+describe('spend is reported, never computed', () => {
+  test('each event replaces the total rather than adding to it', () => {
+    // Anthropic reports usage twice and each event carries the running total,
+    // merged in Rust. Accumulating here would double every input count.
+    const done = fold([
+      { kind: 'spent', turn: 1, usage: usage({ input: 120, cache_read: 4000 }) },
+      { kind: 'spent', turn: 1, usage: usage({ input: 120, cache_read: 4000, output: 38 }) },
+      { kind: 'ended', turn: 1, stop: 'end_turn' },
+    ]);
+    expect(done.replies[0]?.usage).toEqual(
+      usage({ input: 120, output: 38, cache_read: 4000 }),
+    );
+  });
+
+  test('a count the vendor never reported is left out, not drawn as zero', () => {
+    // OpenAI has no cache-write charge to report. A zero would say it wrote
+    // nothing to cache; the absence says the vendor did not tell us.
+    expect(spendParts(usage({ input: 120, output: 38, cache_read: 64 }))).toEqual([
+      '120 in',
+      '38 out',
+      '64 cache read',
+    ]);
+  });
+
+  test('a zero the vendor did report is shown, because it is a measurement', () => {
+    expect(spendParts(usage({ cache_write: 0 }))).toEqual(['0 cache write']);
+  });
+
+  test('a turn that never got a report has no usage at all', () => {
+    const done = fold([{ kind: 'failed', turn: 1, message: 'no key' }]);
+    expect(done.replies[0]?.usage).toBeNull();
+  });
+});
+
+describe('an event that cannot be attributed is not recorded', () => {
+  test('an event for another turn changes nothing', () => {
+    // Applying it to whatever happens to be open would append one reply's text
+    // into another's bubble.
+    const open = ask(emptyConversation(), 'hello', 7, 'anthropic');
+    expect(reduce(open, { kind: 'text', turn: 8, delta: 'not mine' })).toEqual(open);
+  });
+
+  test('an event with no turn open changes nothing', () => {
+    const empty = emptyConversation();
+    expect(reduce(empty, { kind: 'text', turn: 1, delta: 'x' })).toEqual(empty);
+  });
+
+  test('an event after the turn ended changes nothing', () => {
+    // Rust guarantees one terminal event and that it is last, so this is the
+    // belt to that braces: a duplicate would otherwise reopen a closed reply.
+    const done = fold([{ kind: 'ended', turn: 1, stop: 'end_turn' }]);
+    expect(reduce(done, { kind: 'text', turn: 1, delta: 'more' })).toEqual(done);
+  });
+});
+
+describe('a refusal is part of the history', () => {
+  test('a turn refused before it started is recorded as a failed reply', () => {
+    // `pilot_send` validates and can reject without emitting an event, so this
+    // outcome never arrives on the wire. It goes in the transcript rather than
+    // a toast, because a toast is not history.
+    const done = refuse(emptyConversation(), 'hello', 'openai', 'no model was named');
+    expect(done.messages).toEqual([{ role: 'user', content: 'hello' }]);
+    expect(done.replies[0]?.outcome).toEqual({
+      kind: 'failed',
+      message: 'no model was named',
+    });
+    expect(done.live).toBeNull();
+  });
+
+  test('a refused turn cannot collide with an id Rust handed out', () => {
+    // Rust's ids start at 1 and only go up; these are negative. Two replies
+    // sharing a key is how React draws one into the other.
+    const one = refuse(emptyConversation(), 'a', 'openai', 'no');
+    const two = refuse(one, 'b', 'openai', 'no');
+    expect(two.replies.map((r) => r.turn)).toEqual([-1, -2]);
+  });
+});
+
+describe('an event this build does not know is counted, never discarded', () => {
+  test('unrecognised events are visible', () => {
+    expect(unrecognised(unrecognised(emptyConversation())).unknown).toBe(2);
+  });
+});
+
+describe('a tool call is recorded as the model asked it (#144)', () => {
+  test('a call joins the reply, with its arguments parsed and nothing run', () => {
+    const done = fold([
+      { kind: 'tool_call', turn: 1, id: 'toolu_A', name: 'start_run', arguments: '{"task":"x"}' },
+      { kind: 'ended', turn: 1, stop: 'tool_use' },
+    ]);
+    expect(done.replies[0]?.calls).toEqual([
+      {
+        id: 'toolu_A',
+        name: 'start_run',
+        // The vendor's own bytes, kept as the record even though they parsed.
+        arguments: '{"task":"x"}',
+        input: { task: 'x' },
+        unreadable: null,
+        // The reducer reads a call; it does not run one. `settle` is what turns
+        // this into an outcome, and it takes the run as an argument - which is
+        // the seam that keeps this file pure.
+        settlement: null,
+      },
+    ]);
+  });
+
+  test('a call with no arguments is a tool that takes no input, not a broken one', () => {
+    // A tool whose schema takes nothing gets no argument fragments at all, and
+    // an empty string must not be read as a parse failure.
+    const done = fold([
+      { kind: 'tool_call', turn: 1, id: 'toolu_A', name: 'list_runs', arguments: '' },
+      { kind: 'ended', turn: 1, stop: 'tool_use' },
+    ]);
+    expect(done.replies[0]?.calls[0]?.input).toEqual({});
+    expect(done.replies[0]?.calls[0]?.unreadable).toBeNull();
+  });
+
+  test('arguments that do not parse are reported, not thrown', () => {
+    // A model emits truncated JSON when a turn hits its ceiling mid-call. The
+    // honest report is a call that cannot be run; a reducer that threw would
+    // take the whole pane down with it.
+    const done = fold([
+      { kind: 'tool_call', turn: 1, id: 'toolu_A', name: 'start_run', arguments: '{"task":' },
+      { kind: 'ended', turn: 1, stop: 'max_tokens' },
+    ]);
+    const call = done.replies[0]?.calls[0];
+    expect(call?.input).toBeUndefined();
+    expect(call?.unreadable).toBeTruthy();
+    // And the bytes survive, because they are the evidence.
+    expect(call?.arguments).toBe('{"task":');
+  });
+
+  test('a turn that said nothing and asked for something is not empty', () => {
+    // The common shape of a tool-calling turn. A test on the text alone would
+    // drop the assistant message and have the vendor answer a conversation
+    // that never happened.
+    const done = fold([
+      { kind: 'tool_call', turn: 1, id: 'toolu_A', name: 'start_run', arguments: '{}' },
+      { kind: 'ended', turn: 1, stop: 'tool_use' },
+    ]);
+    expect(done.messages).toEqual([
+      { role: 'user', content: 'hello' },
+      {
+        role: 'assistant',
+        content: '',
+        calls: [{ id: 'toolu_A', name: 'start_run', input: {} }],
+      },
+    ]);
+  });
+
+  test('calls keep the order they were asked in', () => {
+    const done = fold([
+      { kind: 'tool_call', turn: 1, id: 'a', name: 'first', arguments: '{}' },
+      { kind: 'tool_call', turn: 1, id: 'b', name: 'second', arguments: '{}' },
+      { kind: 'ended', turn: 1, stop: 'tool_use' },
+    ]);
+    expect(done.replies[0]?.calls.map((c) => c.id)).toEqual(['a', 'b']);
+  });
+});
+
+describe('a conversation that owes a result cannot be sent', () => {
+  test('an unanswered call is named', () => {
+    // Both vendors reject an assistant turn whose tool_use has no matching
+    // result. A real precondition, not a nicety.
+    const done = fold([
+      { kind: 'tool_call', turn: 1, id: 'toolu_A', name: 'start_run', arguments: '{}' },
+      { kind: 'ended', turn: 1, stop: 'tool_use' },
+    ]);
+    expect(unanswered(done).map((c) => c.id)).toEqual(['toolu_A']);
+  });
+
+  test('a result settles it, matched by the vendor id and nothing else', () => {
+    const done = fold([
+      { kind: 'tool_call', turn: 1, id: 'toolu_A', name: 'start_run', arguments: '{}' },
+      { kind: 'ended', turn: 1, stop: 'tool_use' },
+    ]);
+    const answered: Conversation = {
+      ...done,
+      messages: [
+        ...done.messages,
+        { role: 'tool', id: 'toolu_A', name: 'start_run', content: 'started' },
+      ],
+    };
+    expect(unanswered(answered)).toEqual([]);
+    // A result for a different id settles nothing - which is the case that
+    // would otherwise send a 400 and blame the wrong call.
+    const mismatched: Conversation = {
+      ...done,
+      messages: [
+        ...done.messages,
+        { role: 'tool', id: 'toolu_OTHER', name: 'start_run', content: 'started' },
+      ],
+    };
+    expect(unanswered(mismatched).map((c) => c.id)).toEqual(['toolu_A']);
+  });
+
+  test('an ordinary conversation owes nothing', () => {
+    expect(
+      unanswered(
+        fold([
+          { kind: 'text', turn: 1, delta: 'Hello.' },
+          { kind: 'ended', turn: 1, stop: 'end_turn' },
+        ]),
+      ),
+    ).toEqual([]);
+  });
+});
+
+describe('propose only, enforced by the data rather than by a component (#144)', () => {
+  /** A conversation whose one turn asked for `name`, nothing settled yet. */
+  function asked(name: string, id = 'toolu_A'): Conversation {
+    return fold([
+      { kind: 'tool_call', turn: 1, id, name, arguments: '{}' },
+      { kind: 'ended', turn: 1, stop: 'tool_use' },
+    ]);
+  }
+
+  test('a read is answered immediately, and the conversation can go on', () => {
+    const done = settle(asked('read_run'), 'toolu_A', { kind: 'ran', content: '{"gate":null}' });
+    expect(done.messages.at(-1)).toEqual({
+      role: 'tool',
+      id: 'toolu_A',
+      name: 'read_run',
+      content: '{"gate":null}',
+    });
+    expect(unanswered(done)).toEqual([]);
+  });
+
+  test('a proposal appends nothing, so the conversation cannot be sent', () => {
+    // The whole enforcement. A pane that forgot to draw the card could not send
+    // around it, because the call is still owed a result and both vendors reject
+    // a conversation that leaves one open.
+    const done = settle(asked('start_run'), 'toolu_A', {
+      kind: 'proposes',
+      summary: 'plan only, in /repo',
+      effect: { kind: 'invoke', argv: ['plan', 'x', '-C', '/repo'] },
+    });
+    expect(done.messages.filter((m) => m.role === 'tool')).toEqual([]);
+    expect(unanswered(done).map((c) => c.id)).toEqual(['toolu_A']);
+    expect(done.replies[0]?.calls[0]?.settlement?.kind).toBe('proposes');
+  });
+
+  test('only a person clears a proposal, and the model is told which way', () => {
+    const proposed = settle(asked('start_run'), 'toolu_A', {
+      kind: 'proposes',
+      summary: 'plan only, in /repo',
+      effect: { kind: 'invoke', argv: ['plan', 'x', '-C', '/repo'] },
+    });
+
+    const yes = decide(proposed, 'toolu_A', true, 'go ahead');
+    expect(unanswered(yes)).toEqual([]);
+    expect(yes.messages.at(-1)).toMatchObject({ role: 'tool', id: 'toolu_A' });
+
+    // A declined proposal answered with silence would leave the model reasoning
+    // about a request it has no idea was refused, and building on that.
+    const no = decide(proposed, 'toolu_A', false, 'wrong directory');
+    expect(unanswered(no)).toEqual([]);
+    const said = no.messages.at(-1);
+    expect(said?.role === 'tool' && said.content).toContain('declined');
+    expect(said?.role === 'tool' && said.content).toContain('wrong directory');
+  });
+
+  test('a call is settled once, and a second attempt changes nothing', () => {
+    // Two results for one call is a 400 from both vendors, and the second would
+    // be the one that survived - so the first answer wins by construction.
+    const once = settle(asked('read_run'), 'toolu_A', { kind: 'ran', content: 'first' });
+    expect(settle(once, 'toolu_A', { kind: 'ran', content: 'second' })).toEqual(once);
+    expect(decide(once, 'toolu_A', true, '')).toEqual(once);
+  });
+
+  test('a settlement for a call nobody made is dropped', () => {
+    // The same rule `reduce` follows for an event about the wrong turn: a fact
+    // that cannot be attributed is not recorded.
+    const conversation = asked('read_run');
+    expect(settle(conversation, 'toolu_MISSING', { kind: 'ran', content: 'x' })).toEqual(
+      conversation,
+    );
+  });
+
+  test('a proposal is settled long after its turn ended, and finds its own call', () => {
+    // A person can take as long as they like, and another turn can happen first
+    // - so the lookup is by id across every reply rather than the last one.
+    const first = settle(asked('start_run'), 'toolu_A', {
+      kind: 'proposes',
+      summary: 'plan only',
+      effect: { kind: 'invoke', argv: ['plan'] },
+    });
+    const later: Conversation = {
+      ...first,
+      replies: [
+        ...first.replies,
+        {
+          turn: 2,
+          provider: 'anthropic',
+          model: null,
+          text: 'still waiting',
+          calls: [],
+          usage: null,
+          outcome: { kind: 'ended', stop: 'end_turn' },
+          // A turn somebody typed, which is what this case is about: the
+          // proposal is still waiting while an ordinary conversation carries on
+          // around it.
+          asked: 'and another thing',
+          woke: null,
+          // Null rather than a time: this fixture is a turn that has already
+          // ended, and nothing here is about how long it took. It also stands
+          // for the replies every build before #211 produced, none of which
+          // carry one.
+          startedAt: null,
+        },
+      ],
+    };
+    const decided = decide(later, 'toolu_A', true, '');
+    expect(unanswered(decided)).toEqual([]);
+  });
+});
+
+describe('a tool follow-up is a turn nobody typed', () => {
+  test('it opens a reply and appends no message', () => {
+    // Sharing `ask`'s body would mean a user message with empty content, which
+    // is a message the vendor is asked to answer and nobody wrote.
+    const done = settle(
+      fold([
+        { kind: 'tool_call', turn: 1, id: 'toolu_A', name: 'read_run', arguments: '{}' },
+        { kind: 'ended', turn: 1, stop: 'tool_use' },
+      ]),
+      'toolu_A',
+      { kind: 'ran', content: '{}' },
+    );
+    const next = follow(done, 2, 'anthropic');
+    expect(next.messages).toEqual(done.messages);
+    expect(next.live?.turn).toBe(2);
+  });
+
+  test('and one that fails leaves the transcript as it was, plus the failure', () => {
+    const conversation = fold([{ kind: 'ended', turn: 1, stop: 'end_turn' }]);
+    const failed = refuse(conversation, null, 'anthropic', 'overloaded');
+    expect(failed.messages).toEqual(conversation.messages);
+    expect(failed.replies.at(-1)?.outcome).toEqual({ kind: 'failed', message: 'overloaded' });
+  });
+});

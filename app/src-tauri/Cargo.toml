@@ -1,0 +1,57 @@
+[package]
+name = "vibe-desktop"
+version = "0.1.0"
+description = "The vibe desktop app: window, tray, and the process that does the work"
+authors = ["Adam Hanna"]
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+# Tauri's mobile targets need a cdylib and the desktop binary needs a lib to call
+# into. `_lib` because a lib and a bin cannot share a name.
+name = "vibe_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2"
+
+# The native directory chooser behind the Launch form's repository field (#189).
+# It is the one place the window is allowed to learn a path it did not already
+# hold, and it launches nothing: the OS draws the dialog, a person drives it, and
+# what comes back is a string. `dialog:allow-open` is the only permission granted
+# in `capabilities/default.json` - `save`, `message`, `ask` and `confirm` come
+# with `dialog:default` and none of them has a caller.
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# The OS keychain for the pilot's credentials (#143): Windows Credential
+# Manager, macOS Keychain, the Secret Service on Linux. `apple-native` and
+# `windows-native` are the platform stores themselves rather than a file-backed
+# fallback - a fallback would put the key on disk, which is the one thing this
+# dependency exists to avoid.
+keyring = { version = "3", features = [
+  "apple-native",
+  "windows-native",
+  "sync-secret-service",
+] }
+ureq = { version = "3.2.1", default-features = false, features = ["rustls", "json"] }
+
+# One timestamp, in the shape `transcript.log` already uses, so the app's log and
+# a run's transcript can be read against each other (#186). Already in the tree
+# via Tauri, so this adds nothing to the build; `default-features = false` keeps
+# it to the clock and drops the serialisation and localisation nobody here wants.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+# The job object that makes a killed app take the host with it (#157). Already
+# in the tree via Tauri, so this adds nothing to the build; `windows-sys` rather
+# than `windows` because three raw calls do not need the safe wrapper's weight.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_System_JobObjects",
+] }

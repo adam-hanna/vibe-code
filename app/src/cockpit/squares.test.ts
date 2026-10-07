@@ -1,0 +1,217 @@
+import { describe, expect, test } from 'vitest';
+import cockpit from './Cockpit.tsx?raw';
+import { initials, rail } from './squares';
+import { NOWHERE, readWhere } from './where';
+import type { ArchiveRun } from '../host';
+
+/**
+ * The left rail (hi-fi 1, §1.1 and §1.2 of `design/AUDIT.md`).
+ *
+ * Two claims are pinned here. The rail draws only what the archive vouched for,
+ * and the tab bar it emptied stays empty — a `Settings` or `Runs` tab creeping
+ * back would put the bar's twelve tabs back one at a time, which is exactly how
+ * it got to twelve in the first place.
+ */
+
+const run = (over: Partial<ArchiveRun> = {}): ArchiveRun => ({
+  id: '20260908-163330-build-a-todo-app',
+  status: 'done',
+  task: 'build a todo app',
+  costUsd: null,
+  ...over,
+});
+
+describe('the two letters on a square', () => {
+  test('words, not characters — so a hyphenated task is not two letters of one word', () => {
+    expect(initials('build a todo app')).toBe('BT');
+    expect(initials('fix-ratelimit-wait')).toBe('FR');
+  });
+
+  test('articles are skipped, or every square would read the same', () => {
+    // A rail of `AT`, `TH` and `AN` abbreviates every workstream to nothing.
+    expect(initials('the appserver auth')).toBe('AA');
+    expect(initials('a plan for the diff pane')).toBe('PD');
+  });
+
+  test('one word takes two of its own letters', () => {
+    expect(initials('appserver')).toBe('AP');
+  });
+
+  test('nothing legible gets the absence mark, never a letter from an id', () => {
+    // `··` is the same "no value" mark the loop column uses. Picking a letter
+    // out of the run id would be a label about something the reader is not
+    // looking at.
+    expect(initials('')).toBe('··');
+    expect(initials('!!! ???')).toBe('··');
+  });
+});
+
+describe('what gets a square', () => {
+  test('an entry the archive refused is not drawn at all', () => {
+    // A square is an invitation to open something, and a symlink (#53) or an
+    // entry `lstat` could not classify are exactly the ones nothing should
+    // open. Filtered rather than drawn and disabled.
+    const squares = rail(
+      [run({ id: 'a' }), run({ id: 'b', linked: true }), run({ id: 'c', unverified: true })],
+      null,
+    );
+    expect(squares.map((s) => s.id)).toEqual(['a']);
+  });
+
+  test('live is the archive’s verdict, never one derived here', () => {
+    // `livenessOf` reads the lock, probes the pid and reads the ending stamp. A
+    // rail deciding a run "looks running" would be a second classifier, and the
+    // one on screen would be the one disagreeing with `vibe list`.
+    expect(rail([run({ liveness: 'running' })], null)[0]?.live).toBe(true);
+    expect(rail([run({ liveness: 'interrupted' })], null)[0]?.live).toBe(false);
+    // No verdict at all is not "running". Fail closed.
+    expect(rail([run()], null)[0]?.live).toBe(false);
+  });
+
+  test('the current run is the one the window says it is showing', () => {
+    const squares = rail([run({ id: 'a' }), run({ id: 'b' })], 'b');
+    expect(squares.map((s) => s.current)).toEqual([false, true]);
+    // And nothing is current when the window has no run — an empty column must
+    // not select the first square in the archive.
+    expect(rail([run({ id: 'a' })], null)[0]?.current).toBe(false);
+  });
+});
+
+describe('the tab bar the rail emptied', () => {
+  // The bar is markup, so this reads the source. The claim is not about pixels:
+  // it is that three specific things moved off the bar and must stay off it,
+  // because each one drifting back is how twelve tabs happened.
+  //
+  // Sliced between the container and the first pane render rather than matched
+  // with a `</nav>`, which a nested element closes first.
+  //
+  // Case 2 (the UI rework): the bar is found by its accessible name rather than
+  // by a class that left with the stylesheet. Every claim below is unchanged.
+  const from = cockpit.indexOf('aria-label="panes"');
+  const to = cockpit.indexOf("{tab === 'pilot' && ", from);
+  const bar = from < 0 ? '' : cockpit.slice(from, to < 0 ? cockpit.length : to);
+  /** Where a label first appears in the bar, or Infinity. Order, not pixels. */
+  const at = (label: string): number => {
+    const i = bar.indexOf(label);
+    return i < 0 ? Number.POSITIVE_INFINITY : i;
+  };
+
+  test('the bar was found and is the bar', () => {
+    // Every tab says which one is current, which is what makes it a tab bar.
+    expect(bar).toMatch(/aria-current=\{tab === /);
+    expect(bar).toMatch(/Questions/);
+  });
+
+  test('Settings and Runs are on the rail, not on the bar', () => {
+    // `⚙` and the rail's squares. A tab for either is the divergence returning.
+    expect(bar).not.toMatch(/>\s*Settings\b/);
+    expect(bar).not.toMatch(/>\s*Runs\b/);
+    expect(cockpit).toMatch(/onSettings=/);
+    // Case 2 (the UI rework): `1b` was reached by a per-project link in the
+    // sidebar (`onRuns`), which the owner asked to remove. The claim that
+    // survives is that the view is still reachable without a tab: the palette's
+    // `goRuns` action is its route now.
+    expect(cockpit).toMatch(/goRuns: \(\) => setTab\('runs'\)/);
+    expect(cockpit).not.toMatch(/onRuns=/);
+  });
+
+  test('usage is a readout in the heading rather than an artifact tab', () => {
+    // Hi-fi 1 puts `1.9M tok · codex 5h 41%` right-aligned in this bar. The
+    // pane behind it survives - the readout is the way in - but it costs no tab.
+    expect(bar).not.toMatch(/>\s*Spend\s*</);
+    // The redesign moves the same readout one row up to give navigation room.
+    // Found by its title rather than a class (case 2, the UI rework).
+    expect(cockpit).toMatch(/onClick=\{\(\) => setTab\('spend'\)\} title="Usage for the live run"/);
+    expect(cockpit.indexOf('title="Usage for the live run"')).toBeLessThan(from);
+  });
+
+  test('the readout says nothing rather than zero before anything is charged', () => {
+    // A run that has spent nothing has not spent zero; it has not been measured.
+    expect(cockpit).toMatch(/run\.spend\.tokens === null \? 'No usage reported'/);
+  });
+
+  test('the design’s order, as far as the design names it', () => {
+    // Hi-fi 1: Pilot chat · Output · Versions · Diff · Findings · Questions ·
+    // Prompt. `Pilot chat` first is hi-fi 5 in as many words, and it is where
+    // the window lands.
+    //
+    // **Three of those seven labels are gone and the positions are not.** The
+    // artwork's `Versions` is a version history of an artifact, which is what
+    // `Plans` is; `Diff` is `Code`; and `Findings` was one round of one judge,
+    // which is `Plan critique` and `Code review`. What the design names four
+    // positions for, this build has six of - so something had to decide the
+    // interleaving, and the rule is below.
+    // Labels have changed; the original navigation order is still the contract.
+    //
+    // Case 2 (the UI rework): `Output` left the bar for the bottom panel, with
+    // `Commands` - both are terminal-shaped, and an editor docks its terminal
+    // under the work rather than beside it in the tabs. The order of what
+    // remains is unchanged, and the two are asserted to be in the bottom panel
+    // rather than silently gone.
+    expect(at("setTab('pilot')")).toBeLessThan(at("open('plans')"));
+    expect(bar).not.toMatch(/setTab\('output'\)/);
+    expect(bar).not.toMatch(/setTab\('commands'\)/);
+    expect(cockpit).toMatch(/bottom === 'output' && \(/);
+    expect(cockpit).toMatch(/bottom === 'commands' && \(/);
+    // The ones that postdate the artwork come after the ones it names, and the
+    // readout is last because it is right-aligned.
+    //
+    // **`Prompt` and `Keys` used to be the last two and both are gone (#223),
+    // for opposite reasons.** `Prompt` was a dashed placeholder that never had
+    // anything behind it, and what it stood for is now a section of Settings —
+    // *"remove the prompt tab"* and *"the prompts being used for each turn
+    // should also go there"* are one instruction. `Keys` was real and its
+    // content moved whole, because a tab holding one form was the wrong shape
+    // for a question that is half about credentials and half about there being
+    // none: a run's agents are your own logins and have no key to enter.
+    //
+    // The claim this case makes is unchanged — the design's own positions come
+    // first and the readout is last — so it is anchored on the last tab that
+    // still exists rather than deleted with the tab it happened to name.
+    expect(at('Questions')).toBeLessThan(at('Verify'));
+    // Named absent, so a build that quietly reinstates either fails here. Both
+    // are reachable — one from Settings, one as Settings.
+    expect(bar).not.toMatch(/>\s*Prompt\s*</);
+    expect(bar).not.toMatch(/>\s*Keys\s*</);
+  });
+
+  test('the four artifact tabs read in the loop’s own order', () => {
+    // `CycleKind` is plan · critique · code · review, it is the order the loop
+    // reaches them in, and it is the order the column beside this bar draws its
+    // groups. Making the bar agree with the column is a rule; keeping `Diff`
+    // between the plan and the findings because that is where the artwork put
+    // it would be a coincidence somebody has to remember.
+    //
+    // Read off the click handlers rather than the labels: `Code` is a substring
+    // of `Code review` and of the comment above the buttons explaining the
+    // substitutions, so a label search finds the wrong one. There is exactly one
+    // `open('code')` in the bar.
+    const opens = (name: string): number => at(`open('${name}')`);
+    expect(opens('plans')).toBeLessThan(opens('critique'));
+    expect(opens('critique')).toBeLessThan(opens('code'));
+    expect(opens('code')).toBeLessThan(opens('review'));
+    expect(opens('review')).toBeLessThan(opens('questions'));
+  });
+
+  test('the two panes those four replaced are gone, and stay gone', () => {
+    // Each is a tab that showed strictly less than the one that replaced it:
+    // `Findings` had the four counts and a title, from the wire, for the latest
+    // round of whichever judge spoke last; `Diff` had one cumulative diff and
+    // could not answer what a single round changed. A tab for either coming
+    // back is two answers to one question, which is how twelve tabs happened.
+    expect(bar).not.toMatch(/>\s*Findings\b/);
+    expect(bar).not.toMatch(/>\s*Diff\s*</);
+    // And `Versions` is no longer a dashed placeholder saying the window cannot
+    // read a run's artifacts, because it can.
+    expect(bar).not.toMatch(/>\s*Versions\s*</);
+  });
+
+  test('a fresh window lands on the pilot', () => {
+    // Case 2 (#223): a relaunch now comes back to the tab it closed on, so the
+    // literal moved into `where.ts`. What still holds is that a window with
+    // nothing to come back to - and one whose record is unreadable - opens here.
+    expect(cockpit).toMatch(/>\(\(\) => storedWhere\(\)\.tab\);/);
+    expect(readWhere(null).tab).toBe('pilot');
+    expect(NOWHERE.tab).toBe('pilot');
+  });
+});

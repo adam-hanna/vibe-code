@@ -86,11 +86,21 @@ async function captureLog<T>(work: () => Promise<T>): Promise<{ result: T; lines
 
 // ---- The adapters: the value rides out on the error -------------------------
 
-/** A child that printed `lines` and exited with `code`. */
-function fakeExec(code: number | null, lines: readonly string[], after?: () => void): RunFn {
+/** A child that printed `lines` and exited with `code`, or died on `signal`. */
+function fakeExec(
+  code: number | null,
+  lines: readonly string[],
+  after?: () => void,
+  signal: NodeJS.Signals | null = null,
+): RunFn {
   return (_bin, _args, _options): Promise<RunResult> => {
     after?.();
-    return Promise.resolve({ code, stdout: lines.map((line) => `${line}\n`).join(''), stderr: '' });
+    return Promise.resolve({
+      code,
+      signal,
+      stdout: lines.map((line) => `${line}\n`).join(''),
+      stderr: '',
+    });
   };
 }
 

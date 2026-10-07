@@ -1,3 +1,4 @@
+﻿import { CLI_DEFAULT } from '@src/modelflag.js';
 import { readFileSync, existsSync, renameSync } from 'node:fs';
 import path from 'node:path';
 import {
@@ -6,10 +7,13 @@ import {
   EFFORTS,
   environmentStale,
   loadConfig,
+  globalConfigPath,
+  withProjectFile,
 } from '@src/config.js';
 import {
   allocateRun,
   assertUnlinkedRun,
+  continueIntoImplementation,
   createRun,
   listRuns,
   loadRun,
@@ -17,20 +21,28 @@ import {
   resumePhase,
   saveState,
   statePresence,
+  takePendingFindings,
+  tryRecordEvent,
   unavailableGates,
   verificationCaveat,
   verificationIncomplete,
 } from '@src/run.js';
 import type { AllocatedRun } from '@src/run.js';
 import { acquireLock, describeLiveness } from '@src/lock.js';
+import { Cancelled, cancelRequested, clearCancel } from '@src/cancel.js';
+import { installPromptOverrides } from '@src/prompts.js';
+import { describeEnding as describeProcessEnding, installEndingStamp } from '@src/ending.js';
 import { commitFork, listForkPoints, planFork } from '@src/fork.js';
 import type { Liveness, LockHandle } from '@src/lock.js';
 import { reconcileAssumed, reconcileQuestionRecords } from '@src/questions.js';
+import { acceptMoves, acceptRaised, parseMoves, parseRaised, raisePhase } from '@src/raise.js';
+import type { RaiseProblem, RequestedMove, RequestedMoves } from '@src/raise.js';
 import { assertUsableRunId } from '@src/stored.js';
 import { Escalation, EXIT, orchestrate, writeEscalation } from '@src/orchestrator.js';
 import type { ExitCode } from '@src/orchestrator.js';
 import {
   codexConversations,
+  codexOneShotRoles,
   DEFAULT_ROLE_PROVIDERS,
   effortFor,
   modelFor,
@@ -46,10 +58,13 @@ import { codexBin } from '@src/codex.js';
 // The accounting seam, from the leaf it lives in: orchestrator.js re-exports
 // applyCharge but not fmtTokens, and charge.js imports nothing that imports this.
 import { applyCharge, fmtTokens, takeInFlight } from '@src/charge.js';
-import { gitPrecondition, preflight, REAL_PROBES } from '@src/preflight.js';
+import { gitPrecondition, preflight, PROBE_ORDER, REAL_PROBES } from '@src/preflight.js';
 import type { PreflightProbes, PreflightReport } from '@src/preflight.js';
 import { closeCodexRateLimits, describeLimits, readCodexRateLimits } from '@src/ratelimits.js';
+import { describeGates } from '@src/gates.js';
+import { renderScorecard, scoreArchive } from '@src/scorecard.js';
 import { resolveGates } from '@src/verify.js';
+import { createWorktree, workDirOf } from '@src/worktree.js';
 import type { AgentPreflight } from '@src/preflight.js';
 import * as git from '@src/git.js';
 import * as log from '@src/log.js';
@@ -59,9 +74,12 @@ import type {
   Config,
   ConfigOverrides,
   Effort,
+  Finding,
   LoadedConfig,
   RunState,
+  RunSummary,
 } from '@src/types.js';
+import { findGateScratch } from '@src/artifacts.js';
 
 const USAGE = `
 vibe - automated plan/critique/implement/review loop (Claude Code + Codex)
@@ -70,8 +88,10 @@ Usage
   vibe run "<task>" [options]      Plan, critique to zero P1s, implement, review to zero P1s
   vibe plan "<task>" [options]     Stop after the plan is approved; do not implement
   vibe resume <run-id> [--force]   Continue a run that stopped for input
+  vibe resume <run-id> --implement Take a finished plan-only run into implementation
   vibe fork <run-id> --at <n>      Start a new run from a point in an old one
   vibe list                        Show runs in this repo
+  vibe stats [--json]              What every run in this repo says about the loop
   vibe doctor [options]            Verify both CLIs, and preview the config those options give
 
   "vibe fork <run-id>" with no --at lists the points that run can be forked from.
@@ -82,9 +102,9 @@ Options
   -C, --cwd <dir>            Target repository (default: cwd)
   --at <n>                   Which checkpoint of the run to fork from
   --context <file>           Extra context file appended to the planning prompt
-  --claude-model <m>         Default: opus
+  --claude-model <m>         Default: default (claude's own; no --model is sent)
   --claude-effort <e>        low|medium|high|xhigh|max (default: medium)
-  --codex-model <m>          Default: gpt-5.6-luna
+  --codex-model <m>          Default: default (codex's own; no -m is sent)
   --codex-effort <e>         Default: xhigh
   --role <r>:<k>=<v>         Per-role setting, repeatable. The role is one of planner,
                              implementer, critic, answerer, reviewer; the key is provider,
@@ -92,6 +112,13 @@ Options
                              rather than replacing it, so --role reviewer:effort=max keeps a
                              model vibe.config.json named, and provider is not required.
                              e.g. --role reviewer:model=gpt-5.6-pro --role critic:timeoutMs=600000
+  --gate <boundary>=<mode>   Where the loop hands control back, repeatable. The boundary is
+                             one of plan-round, question-round, plan-approved, implemented,
+                             verify-round, review-round; the mode is auto (run through),
+                             step (hold and ask - needs the desktop app, since a terminal
+                             cannot answer, so from here it runs through) or stop (end the
+                             run there, resumably with vibe resume).
+                             e.g. --gate implemented=stop --gate plan-round=auto
   --codex-context-window <n> The Codex model's context window in tokens. Unset by default:
                              the protocol never reports it for a codex exec thread, so
                              occupancy is reported in tokens with no ratio until you say
@@ -171,6 +198,15 @@ interface ParsedArgs {
     blockingQuestionsOnly?: boolean;
     skipProbe?: boolean;
     force?: boolean;
+    /**
+     * Turn a finished plan-only run into an implementing one (#223).
+     *
+     * Resume-only, and it changes what the run IS rather than where it picks
+     * up - so it is a flag somebody types rather than something the loop can
+     * reach on its own. `continueIntoImplementation` holds the rule and every
+     * refusal; this is only how it is asked for.
+     */
+    implement?: boolean;
     noVerify?: boolean;
     verifyCommand?: string;
     verifyRuns?: number;
@@ -186,11 +222,34 @@ interface ParsedArgs {
      * parser and half in the consumer.
      */
     role?: string[];
+    /** Raw `--gate <boundary>=<mode>` arguments, unparsed for `--role`'s reason (#140). */
+    gate?: string[];
+    /** `vibe stats --json`: the document, rather than the table over it (#114). */
+    json?: boolean;
     help?: boolean;
   };
 }
 
-export async function main(argv: readonly string[]): Promise<ExitCode> {
+export async function main(
+  argv: readonly string[],
+  /**
+   * The loop these commands run, injected for the same reason `execute` already
+   * takes one (#153).
+   *
+   * The host process is a second entry point over exactly these functions, and
+   * the only thing it needs to change about them is that `orchestrate` is called
+   * with a `Host` attached. Threading the loop rather than re-implementing the
+   * command is what keeps ONE definition of a legal invocation - which flags
+   * exist, when the lock is taken relative to the first state write, what a
+   * resume does with NEEDS-INPUT.md. Trailing and optional, so `src/main.ts` and
+   * every test calling `main(argv)` is unchanged.
+   *
+   * Only `run`, `plan` and `resume` take it, because they are the only commands
+   * that run a loop. `fork` deliberately creates and stops; `list` and `doctor`
+   * never start one.
+   */
+  loop: RunLoop = orchestrate,
+): Promise<ExitCode> {
   const cmd = argv[0];
   if (cmd === undefined || cmd === '-h' || cmd === '--help') {
     console.log(USAGE);
@@ -200,15 +259,17 @@ export async function main(argv: readonly string[]): Promise<ExitCode> {
   try {
     switch (cmd) {
       case 'run':
-        return await cmdRun(argv.slice(1), false);
+        return await cmdRun(argv.slice(1), false, loop);
       case 'plan':
-        return await cmdRun(argv.slice(1), true);
+        return await cmdRun(argv.slice(1), true, loop);
       case 'resume':
-        return await cmdResume(argv.slice(1));
+        return await cmdResume(argv.slice(1), loop);
       case 'fork':
         return await cmdFork(argv.slice(1));
       case 'list':
         return cmdList(argv.slice(1));
+      case 'stats':
+        return cmdStats(argv.slice(1));
       case 'doctor':
         return await cmdDoctor(argv.slice(1));
       default:
@@ -223,6 +284,15 @@ export async function main(argv: readonly string[]): Promise<ExitCode> {
 }
 
 /** Exported for the flag tests: the whole flag contract without running main(). */
+/**
+ * A model as a person reads it. `default` is not a model, it is the absence of
+ * one (#223, `modelflag.ts`), and printing it bare would read as a model called
+ * "default".
+ */
+export function shownModel(model: string, agent: 'claude' | 'codex'): string {
+  return model === CLI_DEFAULT ? `${agent}'s default` : model;
+}
+
 export function parseArgs(args: readonly string[]): ParsedArgs {
   const out: ParsedArgs = { positional: [], flags: {} };
 
@@ -260,6 +330,10 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       case '--codex-context-window': out.flags.codexContextWindow = nextNum(); break;
       // Repeatable, and collected raw: see the field's comment.
       case '--role': (out.flags.role ??= []).push(next()); break;
+      case '--gate': (out.flags.gate ??= []).push(next()); break;
+      // Not a config setting and deliberately absent from `buildOverrides`: it
+      // chooses a rendering, and nothing about a run turns on it.
+      case '--json': out.flags.json = true; break;
       case '--max-plan-rounds': out.flags.maxPlanRounds = nextNum(); break;
       case '--max-review-rounds': out.flags.maxReviewRounds = nextNum(); break;
       case '--max-verify-rounds': out.flags.maxVerifyRounds = nextNum(); break;
@@ -283,6 +357,7 @@ export function parseArgs(args: readonly string[]): ParsedArgs {
       // describes one invocation's willingness to take a lock, not anything the
       // run should carry forward into the next resume.
       case '--force': out.flags.force = true; break;
+      case '--implement': out.flags.implement = true; break;
       case '--no-verify': out.flags.noVerify = true; break;
       case '--verify-command': out.flags.verifyCommand = next(); break;
       case '--verify-runs': out.flags.verifyRuns = nextNum(); break;
@@ -429,6 +504,24 @@ export function buildOverrides(flags: ParsedArgs['flags']): ConfigOverrides {
   const context: Partial<Config['context']> = {};
   const verify: Partial<Config['verify']> = {};
   const progress: Partial<Config['progress']> = {};
+  const gates: Partial<Config['gates']> = {};
+
+  // Split here and judged in config.ts, so `--gate implemented=never` and a
+  // `"gates": {"implemented": "never"}` in the file get the same sentence. Only
+  // the shape is this parser's business - `mergeGates` keeps whatever comes out
+  // of here so `validateGates` can name it, which is why a bad boundary does not
+  // need catching twice.
+  for (const raw of flags.gate ?? []) {
+    const at = raw.indexOf('=');
+    if (at <= 0 || at === raw.length - 1) {
+      throw new Error(
+        `--gate expects <boundary>=<mode>, got "${raw}". e.g. --gate implemented=stop`,
+      );
+    }
+    // Last wins, as `--role` does, and for the same reason: one rule, resolved
+    // in one place.
+    setOwn(gates as Record<string, unknown>, raw.slice(0, at), raw.slice(at + 1));
+  }
 
   if (flags.claudeModel !== undefined) claude.model = flags.claudeModel;
   if (flags.claudeEffort !== undefined) claude.effort = asEffort(flags.claudeEffort, '--claude-effort');
@@ -465,10 +558,14 @@ export function buildOverrides(flags: ParsedArgs['flags']): ConfigOverrides {
   // Seconds here rather than minutes: a heartbeat cadence is on that scale.
   if (flags.progressInterval !== undefined) progress.intervalMs = flags.progressInterval * 1000;
 
-  return { claude, codex, loop, budget, git: gitCfg, questions, context, verify, progress };
+  return { claude, codex, loop, budget, git: gitCfg, questions, context, gates, verify, progress };
 }
 
-async function cmdRun(args: readonly string[], planOnly: boolean): Promise<ExitCode> {
+async function cmdRun(
+  args: readonly string[],
+  planOnly: boolean,
+  loop: RunLoop = orchestrate,
+): Promise<ExitCode> {
   const { positional, flags } = parseArgs(args);
   if (flags.help) {
     console.log(USAGE);
@@ -515,7 +612,17 @@ async function cmdRun(args: readonly string[], planOnly: boolean): Promise<ExitC
   }
 
   try {
-    return await startRun(targetDir, task, planOnly, cfg, allocated, extraContext, flags, handle);
+    return await startRun(
+      targetDir,
+      task,
+      planOnly,
+      cfg,
+      allocated,
+      extraContext,
+      flags,
+      handle,
+      loop,
+    );
   } finally {
     // Every path out, including the ones that never reach `execute`: the throws
     // from `loadConfig`-adjacent work, an escalation, or an ordinary return.
@@ -538,20 +645,57 @@ async function startRun(
   extraContext: string | null,
   flags: ParsedArgs['flags'],
   handle: LockHandle,
+  loop: RunLoop = orchestrate,
 ): Promise<ExitCode> {
-  const state = createRun(targetDir, task, planOnly, { allocated, config: cfg, extraContext });
+  // The decision is taken here and the directory is made by the preflight gate.
+  // Recorded in the FIRST state write, so a resume cannot come back believing it
+  // has no worktree while its branch is checked out in one (#223).
+  const state = createRun(targetDir, task, planOnly, {
+    allocated,
+    config: cfg,
+    extraContext,
+    worktree: cfg.git.worktree,
+  });
 
   log.attachTranscript(path.join(state.dir, 'transcript.log'));
-  log.heading(`Run ${state.id}`);
+  log.heading(`Run ${state.id}`, {
+    // `repo` and `task` are the other two thirds of hi-fi 1's identity header
+    // (#223), and both were already certain here. `dir` is the *run's*
+    // directory - where `PLAN.md` and the artifacts live - and it is not the
+    // repository, which is what somebody asking "which project am I looking at"
+    // means. Two facts, two fields, rather than one that has to be guessed from
+    // the other by trimming `.vibe/runs/<id>` off the end.
+    //
+    // The comment sits above the pair rather than between them: `contract.test.ts`
+    // reads this site as source, and its regex walks from the id straight to the
+    // data.
+    id: 'run_started',
+    data: {
+      runId: state.id,
+      dir: state.dir,
+      repo: targetDir,
+      // Where the WORK happens, which is the repo unless this run has a worktree
+      // (#223). A fact the run holds and did not say, which is the shape
+      // AGENTS.md calls a screen that cannot be built: the pilot reads the
+      // repository, and with a worktree the code it should be reading sits in a
+      // subdirectory it would otherwise never look in.
+      workDir: workDirOf(state),
+      task,
+      resumed: false,
+    },
+  });
   log.info(`Repo:    ${targetDir}`);
-  log.info(`Claude:  ${cfg.claude.model} / ${cfg.claude.effort}`);
+  log.info(`Claude:  ${shownModel(cfg.claude.model, 'claude')} / ${cfg.claude.effort}`);
   // The thread count is read off the table rather than stated: since #45 the
   // reviewer holds its own Codex conversation, so a default persisted run
   // carries two and "single thread" would be a false summary of it.
   const threads = codexConversations(cfg);
+  // A Codex writer is one-shot whatever `persistSession` says (`SLOTS.write`),
+  // so a run that carries threads says which seat does not.
+  const fresh = codexOneShotRoles(cfg);
   log.info(
-    `Codex:   ${cfg.codex.model} / ${cfg.codex.effort}` +
-      `${cfg.codex.persistSession ? ` (${threads} thread${threads === 1 ? '' : 's'}, carried across turns)` : ' (one-shot per turn)'}`,
+    `Codex:   ${shownModel(cfg.codex.model, 'codex')} / ${cfg.codex.effort}` +
+      `${cfg.codex.persistSession ? ` (${threads} thread${threads === 1 ? '' : 's'}, carried across turns${fresh.length > 0 ? `; ${fresh.join(', ')} one-shot per turn` : ''})` : ' (one-shot per turn)'}`,
   );
   log.info(
     `Ceiling: ~$${cfg.budget.maxCostUsd} API-equivalent, Claude only` +
@@ -588,7 +732,7 @@ async function startRun(
     );
   }
 
-  return execute(state, cfg, false, flags.skipProbe === true, REAL_GATE, orchestrate, handle);
+  return execute(state, cfg, false, flags.skipProbe === true, REAL_GATE, loop, handle);
 }
 
 /**
@@ -612,7 +756,11 @@ export function resumeConfig(targetDir: string, state: RunState, flags: ParsedAr
   const load = (overrides: ConfigOverrides, roles: RolePatches): Config =>
     stored === undefined
       ? loadConfig(targetDir, overrides, roles)
-      : applyOverrides(stored, overrides, roles);
+      // **The project's file on top of the run's memory** (#223). Without it the
+      // settings screen could not reach a run that had already started, so a run
+      // stopped on a ceiling could not be resumed past it by raising that
+      // ceiling - which is the one moment the screen is most wanted.
+      : applyOverrides(withProjectFile(stored, targetDir), overrides, roles);
 
   // What this resume would have run on with no flags at all. Compared against
   // the effective config so the event below records the user's change, and not
@@ -647,7 +795,10 @@ export function resumeConfig(targetDir: string, state: RunState, flags: ParsedAr
   return cfg;
 }
 
-async function cmdResume(args: readonly string[]): Promise<ExitCode> {
+async function cmdResume(
+  args: readonly string[],
+  loop: RunLoop = orchestrate,
+): Promise<ExitCode> {
   const { positional, flags } = parseArgs(args);
   if (flags.help) {
     console.log(USAGE);
@@ -705,11 +856,14 @@ async function cmdResume(args: readonly string[]): Promise<ExitCode> {
     // it finds an in-flight entry: a run killed between turns, or one killed
     // with progress disabled, has nothing to recover and would otherwise resume
     // in silence, with no indication that the last process did not finish.
-    log.info(`Previous process was interrupted: ${describeLiveness(verdict)}`);
+    // Not "was interrupted" any more. A dead pid has always had two causes and
+    // the sentence now says which one this was, so a prefix that named the
+    // worse of them would contradict the clause it introduces (#131).
+    log.info(`Picking up after another process: ${describeLiveness(verdict)}`);
   }
 
   try {
-    return await resumeRun(targetDir, id, flags, handle);
+    return await resumeRun(targetDir, id, flags, handle, loop);
   } finally {
     // Covers the no-answers early return and every throw between here and the
     // end of `execute`, which is why acquisition and this sit in one function.
@@ -723,35 +877,96 @@ async function resumeRun(
   id: string,
   flags: ParsedArgs['flags'],
   handle: LockHandle,
+  loop: RunLoop = orchestrate,
 ): Promise<ExitCode> {
   const state = loadRun(targetDir, id);
   const stored = state.config;
   const cfg = resumeConfig(targetDir, state, flags);
   if (stored !== undefined) {
-    log.detail(`resuming with the run's settings: claude ${cfg.claude.model}/${cfg.claude.effort}`);
+    log.detail(`resuming with the run's settings: claude ${shownModel(cfg.claude.model, 'claude')}/${cfg.claude.effort}`);
   }
   log.attachTranscript(path.join(state.dir, 'transcript.log'));
+
+  // **Before anything else reads the phase**, because this changes it. A
+  // plan-only run that finished is at `complete`, so every path below - the
+  // answers file, `resumedFrom`, `execute`'s own phase dispatch - would
+  // otherwise be told there is nothing left to do, which is the dead end this
+  // closes. `continueIntoImplementation` holds the rule and refuses with a
+  // sentence; saving here is what makes the conversion survive a process that
+  // dies before the first turn, so a second attempt is a resume rather than a
+  // second conversion.
+  if (flags.implement === true) {
+    continueIntoImplementation(state);
+    saveState(state);
+    log.ok(
+      `Plan-only run ${state.id} is now an implementing run. The approved plan, its frozen ` +
+        'acceptance bar, the P1s it carried and the findings it declined all travel with it - ' +
+        'nothing is re-planned.',
+    );
+  }
 
   const answersFile = path.join(state.dir, 'NEEDS-INPUT.md');
   if (existsSync(answersFile)) {
     const raw = readFileSync(answersFile, 'utf8');
+
+    // Checked before anything else and acted on last (#141). An unfinished
+    // "### Finding:" block stops the resume here, where nothing has been spent
+    // and the file is still on disk to be corrected; the findings themselves are
+    // taken in only on the two paths that retire the file, because this function
+    // has an early return that leaves it in place and a raise consumed twice
+    // would record a re-raise nobody made.
+    const raised = parseRaised(raw);
+    // Both parses before either is acted on, so an unfinished block anywhere in
+    // the file stops the resume before half of it has been applied (#142).
+    const moves = parseRequestedMoves(state, raw);
+    if (!reportIncompleteRaises([...moves.problems, ...raised.problems])) return EXIT.NEEDS_HUMAN;
+
+    // Moves before raises, on both paths below. A move can only name a finding
+    // the run was already carrying - it is rendered from that list - so nothing
+    // raised in the same file can be its target, and applying them the other way
+    // round would make the order of two independent decisions matter.
+    const applyEdits = (): void => {
+      takeRequestedMoves(state, moves.moves);
+      takeRaisedFindings(state, targetDir, raised.findings);
+    };
+
     // A round-cap or oscillation stall writes the same filename but reports
     // findings rather than questions. Demanding answers there made those runs
     // unresumable: there was nothing to answer, and the only way forward was
     // to delete the file by hand.
     if (!raw.includes('**Your answer:**')) {
       log.info('Previous stop reported findings, not questions - continuing with raised limits.');
+      applyEdits();
       renameSync(answersFile, path.join(state.dir, `stalled-${state.planRound}.md`));
-      log.heading(`Resuming ${state.id}`);
-      return execute(state, cfg, true, flags.skipProbe === true, REAL_GATE, orchestrate, handle);
+      log.heading(`Resuming ${state.id}`, {
+        id: 'run_started',
+        data: {
+          runId: state.id,
+          dir: state.dir,
+          repo: targetDir,
+          workDir: workDirOf(state),
+          task: state.task,
+          resumed: true,
+          from: resumedFrom(state),
+        },
+      });
+      return execute(state, cfg, true, flags.skipProbe === true, REAL_GATE, loop, handle);
     }
 
     const answers = parseHumanAnswers(raw);
     if (answers.length === 0) {
       log.fail(`No answers found in ${answersFile}`);
       log.info('Fill in the "**Your answer:**" blocks (replace the empty "> " line), then resume.');
+      const pending = raised.findings.length + moves.moves.length;
+      if (pending > 0) {
+        log.info(
+          `The ${pending} edit(s) you made are still in the file and will be taken in once the ` +
+            'answers are there - nothing was lost and nothing was recorded.',
+        );
+      }
       return EXIT.NEEDS_HUMAN;
     }
+    applyEdits();
     log.ok(`Picked up ${answers.length} answer(s) from NEEDS-INPUT.md`);
     state.pendingAnswers = answers;
     // On the same write that stores them, so there is no window where the run
@@ -769,8 +984,76 @@ async function resumeRun(
     renameSync(answersFile, path.join(state.dir, `answered-${state.planRound}.md`));
   }
 
-  log.heading(`Resuming ${state.id}`);
-  return execute(state, cfg, true, flags.skipProbe === true, REAL_GATE, orchestrate, handle);
+  // Both resume paths carry it, and both are `run_started` rather than a
+  // `run_resumed` of their own. A host asking "which run am I looking at" has
+  // the same question either way, and `resumed` is the field that answers the
+  // one thing that differs (#207).
+  log.heading(`Resuming ${state.id}`, {
+    id: 'run_started',
+    data: {
+      runId: state.id,
+      dir: state.dir,
+      repo: targetDir,
+      workDir: workDirOf(state),
+      task: state.task,
+      resumed: true,
+      from: resumedFrom(state),
+    },
+  });
+  return execute(state, cfg, true, flags.skipProbe === true, REAL_GATE, loop, handle);
+}
+
+/**
+ * Where a resume is picking the run up from (#211).
+ *
+ * **A window that resumes a run starts from an empty column**, because the
+ * narration it receives is only what happens from now on - the rounds, turns
+ * and spend of every earlier session were narrated to a process that has since
+ * exited. So a run resumed at review round 3 drew as though it were beginning,
+ * and the pilot, whose picture of the run is `describeRun`, described a run
+ * that had done nothing. Reported as *"when I resume a past run, the pilot et
+ * al should be brought back to wherever we're resuming from."*
+ *
+ * **Read from state, not replayed as narration.** The tempting fix is to
+ * re-emit `phase_started` and `turn_started` for the history so the column
+ * fills in - and it would be a lie in the exact shape this repo refuses: those
+ * turns are not starting, and a card drawn from them would report work as
+ * happening now. This is one frame that says what the earlier sessions left
+ * behind, and a window draws it as history because it is labelled as history.
+ *
+ * Every field is one the run already recorded. Nothing here is derived, and
+ * nothing is filled in: a run with no `phase` yet reports null rather than a
+ * guess, which is the same rule `GateContext` follows for the same field.
+ */
+function resumedFrom(state: RunState): Record<string, unknown> {
+  return {
+    // Where the loop is about to pick up. `status` is what the last session
+    // ended as - `needs-input`, `error` - and the phase is where in the loop
+    // that happened; a reader wants both, because "stopped for input" and
+    // "stopped for input during review" are different situations.
+    status: state.status,
+    phase: state.phase ?? null,
+    planRound: state.planRound,
+    questionRound: state.questionRound,
+    reviewRound: state.reviewRound,
+    verifyRound: state.verifyRound,
+    // What earlier sessions already spent. The window's own totals start at
+    // zero on every invoke, so without this a resumed run reports the cost of
+    // its last leg as the cost of the whole thing.
+    tokensUsed: state.tokensUsed,
+    costUsd: state.costUsd,
+    codexTokens: state.codexTokens,
+    // What is still open. A resume exists to deal with these, so a screen that
+    // does not show them is missing the reason the run is being resumed.
+    //
+    // The phase travels with the count because `PendingFindings` carries it and
+    // the two answer different questions: how many are outstanding, and which
+    // reviewer raised them. Null when there are none at all, rather than a
+    // phase with a zero beside it.
+    pendingFindings: state.pendingFindings?.findings.length ?? 0,
+    pendingFrom: state.pendingFindings?.phase ?? null,
+    carried: state.carried?.length ?? 0,
+  };
 }
 
 /**
@@ -824,9 +1107,17 @@ async function cmdFork(args: readonly string[]): Promise<ExitCode> {
         continue;
       }
       const commit = meta.commit === null ? `no commit (${meta.commitNote})` : meta.commit.slice(0, 7);
+      // Omitted rather than shown as zero on a checkpoint written before #139:
+      // absent means the file never carried the counter, which is a different
+      // fact from a run that asked itself nothing, and only one of them is a
+      // measurement. Old snapshots therefore print exactly the line they always
+      // did.
+      const questions = meta.questionRound === undefined ? '' : ` / question ${meta.questionRound}`;
       console.log(
-        `  ${String(n).padStart(3)}  ${meta.boundary.padEnd(14)} ${meta.phase.padEnd(12)} ` +
-          `plan ${meta.planRound} / review ${meta.reviewRound} / verify ${meta.verifyRound}  ${commit}`,
+        // 15 rather than 14: `question-round` is exactly fourteen characters, so
+        // the old width left the longest boundary touching the column beside it.
+        `  ${String(n).padStart(3)}  ${meta.boundary.padEnd(15)} ${meta.phase.padEnd(12)} ` +
+          `plan ${meta.planRound}${questions} / review ${meta.reviewRound} / verify ${meta.verifyRound}  ${commit}`,
       );
     }
     log.info(`Fork one with: vibe fork ${sourceId} --at <n>`);
@@ -880,6 +1171,83 @@ async function cmdFork(args: readonly string[]): Promise<ExitCode> {
 }
 
 /**
+ * Severity changes a person asked for, checked against what the run is carrying
+ * (#142).
+ *
+ * The carried list is read here rather than inside `parseMoves` so that parsing
+ * stays pure and so both front ends check a move against the same list the
+ * acceptance will merge into. A completed run carries nothing, which is the
+ * right answer rather than a special case: there is no next round to read a
+ * severity, so every block in the file names an id that cannot be moved and each
+ * is reported as such.
+ */
+function parseRequestedMoves(state: RunState, raw: string): RequestedMoves {
+  const carry = raisePhase(resumePhase(state));
+  const carried = carry === null ? [] : (takePendingFindings(state, carry) ?? []);
+  return parseMoves(raw, carried);
+}
+
+/** Apply them, and say what moved. Nothing at all when nobody asked for one. */
+function takeRequestedMoves(state: RunState, moves: readonly RequestedMove[]): void {
+  if (moves.length === 0) return;
+  const carry = raisePhase(resumePhase(state));
+  if (carry === null) return;
+
+  const { applied } = acceptMoves(state, carry, moves);
+  for (const a of applied) log.ok(`Severity changed by hand: ${a.id} ${a.from} -> ${a.to}`);
+}
+
+/**
+ * A block somebody began and did not finish stops the resume. True to continue.
+ *
+ * **Refuse, never repair**, and the direction is the point. A block missing its
+ * severity could be defaulted to P2 - it would resume, and put a severity nobody
+ * chose into the one record that exists to say who chose what. It could be
+ * dropped - it would resume, and a person's work would vanish with no sign. So
+ * it is reported: nothing has been spent, the file is still there, and the run
+ * is still at its checkpoint.
+ */
+function reportIncompleteRaises(problems: readonly RaiseProblem[]): boolean {
+  if (problems.length === 0) return true;
+  log.fail(`${problems.length} block(s) in NEEDS-INPUT.md could not be acted on.`);
+  for (const p of problems) log.info(`  - ${p.heading}: ${p.reason}`);
+  log.info('Nothing was raised and nothing was spent. Complete or delete those blocks, then resume.');
+  return false;
+}
+
+/**
+ * Findings a human wrote into `NEEDS-INPUT.md`, taken into the run (#141).
+ *
+ * Beside `parseHumanAnswers` rather than inside `resumeRun`, for the reason that
+ * one is exported: this is a decision about a file, and both front ends reach it
+ * through `main()`.
+ */
+function takeRaisedFindings(state: RunState, cwd: string, findings: readonly Finding[]): void {
+  if (findings.length === 0) return;
+
+  const phase = raisePhase(resumePhase(state));
+  if (phase === null) {
+    // Said rather than dropped, and it does not stop the resume: the run has
+    // finished, so there is no turn left to hand this to, and recording it as
+    // carried would be a claim that something will act on it.
+    log.warn(
+      `${findings.length} finding(s) were raised in NEEDS-INPUT.md, but this run has already ` +
+        'finished - there is no round left to fix them. "vibe fork" a checkpoint to reopen it.',
+    );
+    return;
+  }
+
+  const { added, downgraded } = acceptRaised(state, cwd, phase, findings);
+  log.ok(`Raised ${findings.length} finding(s) by hand; ${added.length} carried into the next round.`);
+  if (downgraded.length > 0) {
+    log.warn(
+      `${downgraded.length} of them cited nothing that resolves and are carried as P2 - the same ` +
+        'rule the reviewer\'s findings are held to.',
+    );
+  }
+}
+
+/**
  * Answers live under "**Your answer:**" as blockquote lines. The template ships
  * an empty "> " so an untouched file is distinguishable from a real answer.
  */
@@ -927,9 +1295,13 @@ export function parseHumanAnswers(md: string): Answer[] {
  * nothing.
  */
 export function recordHumanAnswers(state: RunState, answers: readonly Answer[]): void {
-  const fresh = answers.map((a) => a.question).filter((q) => q.trim() !== '');
+  const supplied = answers.filter((a) => a.question.trim() !== '' && a.answer.trim() !== '');
+  const fresh = supplied.map((a) => a.question);
   if (fresh.length === 0) return;
   state.humanAnswered = [...(state.humanAnswered ?? []), ...fresh];
+  // The existing keys say which questions a person answered, but cannot carry
+  // their decisions past consumption of pendingAnswers or a session rotation.
+  state.humanAnswers = [...(state.humanAnswers ?? []), ...supplied.map((a) => ({ ...a }))];
 }
 
 /**
@@ -1195,6 +1567,18 @@ export async function execute(
    */
   lock?: LockHandle,
 ): Promise<ExitCode> {
+  // A latch from a previous run in this process, cleared before this one starts
+  // (#209). The host allows a second `invoke` once the first has settled, and a
+  // cancel that survived into it would kill its first agent turn instantly -
+  // reported as the run being stopped by somebody who stopped a different one.
+  clearCancel();
+  // The prompt overrides this run's config asks for (#223), installed in the
+  // same breath and for the same reason the latch above is cleared: it is a
+  // module latch, one run per process, and one left standing from a previous
+  // run would put a different project's standing instructions into this one's
+  // reviewer. Installed unconditionally, so an empty table is what clears it -
+  // there is no path that leaves the previous run's overrides in place.
+  installPromptOverrides(cfg.prompts);
   const started = Date.now();
   const recovery = emptyRecovery();
   let reported = false;
@@ -1206,6 +1590,30 @@ export async function execute(
   };
 
   reportRoles(cfg);
+
+  // Installed here and released in the `finally`, so the stamp's lifetime is
+  // exactly the lock's: this process is either driving this run or it is not,
+  // and an ending recorded outside that window would be attributed to a run
+  // nobody was working on. Both front ends get it from one place, because both
+  // reach the loop through here (#131).
+  const stamp = installEndingStamp(state.dir);
+  // The ending this installation displaced, recorded before anything overwrites
+  // it. `installEndingStamp` clears the file, so this is the only moment the
+  // previous process's account of itself still exists - and it is the account
+  // this issue exists to create, which a resume must not delete on its way to
+  // reading it. Recorded even when it says "exited cleanly": the resume's own
+  // recovery path reports what the interruption COST, and this reports what the
+  // interruption WAS, which are different questions with different answers.
+  if (stamp.previous !== null) {
+    tryRecordEvent(state, 'previous_ending', {
+      how: stamp.previous.how,
+      code: stamp.previous.code,
+      signal: stamp.previous.signal,
+      pid: stamp.previous.pid,
+      at: stamp.previous.at,
+    });
+    log.info(`How the previous process ended: ${describeProcessEnding(stamp.previous)}.`);
+  }
 
   try {
     // After the lock and before preflight: this is spend that has already
@@ -1225,6 +1633,9 @@ export async function execute(
     // gate's deterministic half is not skippable, and only it knows which half
     // is which.
     const gate = await preflightGate(state, cfg, { skipProbe });
+    // Also here, for a gate that returned without checking: a stop that landed
+    // after the last probe must not buy the first turn.
+    stopIfCancelled();
     if (gate !== null) {
       // Summarised, where it used to return in silence. The probes have
       // already been charged through `chargePreflight`, and after a recovery
@@ -1267,11 +1678,34 @@ export async function execute(
           'state.json was repaired on load. See OUTSTANDING.md for what was actually carried.',
       );
     } else if (incomplete === null) {
-      log.ok(
-        state.planOnly
-          ? 'Plan cleared critique with zero P1s. Not implemented (plan-only run).'
-          : 'Plan and implementation both cleared review with zero P1s.',
-      );
+      // **A plan-only run carries its P1s in `carried`, not in `outstanding`.**
+      // The guard above is the implementation-side one: `outstanding` is written
+      // by the final fix round, which a plan-only run never reaches, so it is
+      // empty on every one of them and the branch fell through to "zero P1s"
+      // over a plan the tolerance had let through with findings open. Reported
+      // exactly - *"It says I did plan only mode but then it seemed to stop,
+      // even though it still had p1 issues"* - and the narration contradicted
+      // itself in the same run: `Plan accepted with 1 P1(s) carried into
+      // implementation` four lines above `Plan cleared critique with zero P1s`.
+      //
+      // The comment on `left` above already stated the rule this breaks -
+      // *"Never claim a spotless finish when a P1 was carried"* - so this is the
+      // same rule reaching the one path that was not checking it.
+      const tolerated = state.planOnly ? (state.carried ?? []) : [];
+      if (tolerated.length > 0) {
+        log.warn(
+          `Plan-only run finished with ${tolerated.length} P1(s) carried on tolerance: ` +
+            `${tolerated.map((f) => f.id).join(', ')}. The plan was accepted DESPITE them, not ` +
+            'without them - they are stated in the implementation prompt, so whatever implements ' +
+            'this plan is told about them.',
+        );
+      } else {
+        log.ok(
+          state.planOnly
+            ? 'Plan cleared critique with zero P1s. Not implemented (plan-only run).'
+            : 'Plan and implementation both cleared review with zero P1s.',
+        );
+      }
     }
     // Here rather than in `summary()`, and here rather than only in a log line
     // emitted forty minutes ago: the run may exit 0 with a gate that never ran,
@@ -1289,6 +1723,28 @@ export async function execute(
     // report holding what was recovered before it fired, which is the case the
     // one-shot guard exists for: the walk's own flush never ran.
     flushRecovery();
+    // Before the `Escalation` branch, and it becomes one (#209).
+    //
+    // **A cancel is not a second way for a run to end.** #131 closed the
+    // ambiguity between "vibe chose to stop" and "something killed it", and a
+    // cancel that exited some other way would reopen it with a button attached.
+    // So it takes the ending a round cap already takes: `needs-input`, a
+    // `NEEDS-INPUT.md` naming why, `EXIT.NEEDS_HUMAN`, and a process that leaves
+    // under its own control - which is what gets `ending.json` written saying
+    // vibe stopped rather than that it died.
+    //
+    // Caught here rather than at the turn, because between the two are the
+    // retry logic and the loop's own handlers: whatever any of them made of the
+    // killed child, the latch is still set and this is the one place every path
+    // out of `orchestrate` passes through.
+    const cancelled = cancelRequested();
+    if (cancelled !== null && !(err instanceof Escalation)) {
+      err = new Escalation(
+        EXIT.NEEDS_HUMAN,
+        `The run was stopped: ${cancelled}. The turn in flight was killed and is redone from ` +
+          'the top on resume; its spend is already charged. Nothing before it was lost.',
+      );
+    }
     if (err instanceof Escalation) {
       state.status = err.code === EXIT.NEEDS_HUMAN ? 'needs-input' : 'stalled';
       // recordEvent persists, so the status and the event that explains it land
@@ -1296,16 +1752,31 @@ export async function execute(
       recordEvent(state, 'escalation', { code: err.code, message: err.message });
       const file = writeEscalation(state, err);
       log.heading('Stopped for input');
-      log.warn(err.message);
+      // The id, and the reason a host needs one here (#162). An app watching
+      // this stream has the exit code from the `result` frame - which says the
+      // CATEGORY of the ending - and nothing at all saying what happened, unless
+      // it picks the most recent alarming-looking line out of the output pane.
+      // That is the English-matching #133 exists to prevent, and it would pick
+      // the wrong line: this path narrates at `warn`, and the run before it is
+      // full of warnings that are not the ending.
+      log.warn(err.message, { id: 'run_escalated', data: { code: err.code, file } });
       log.info(`Details: ${file}`);
       log.info(`Resume:  vibe resume ${state.id}`);
       summary(state, started, recovery);
       return err.code;
     }
     state.status = 'error';
-    recordEvent(state, 'error', { message: err instanceof Error ? err.message : String(err) });
+    const failure = err instanceof Error ? err.message : String(err);
+    recordEvent(state, 'error', { message: failure });
     log.heading('Failed');
-    log.fail(err instanceof Error ? (err.stack ?? err.message) : String(err));
+    // The stack is printed and the sentence is carried, because they are for
+    // different readers. A terminal wants the stack; a footer wants the one line
+    // that says what went wrong, and a stack rendered into a banner is a wall of
+    // frames where the answer to "what now" is supposed to be.
+    log.fail(err instanceof Error ? (err.stack ?? err.message) : String(err), {
+      id: 'run_failed',
+      data: { code: EXIT.ERROR, reason: failure },
+    });
     summary(state, started, recovery);
     return EXIT.ERROR;
   } finally {
@@ -1313,6 +1784,11 @@ export async function execute(
     // for an exit neither of them covers - and it must still fire, because the
     // facts are the point and losing them to an unfamiliar path is the defect.
     flushRecovery();
+    // Every path that reaches here unwound, which means the process was never
+    // stopped - so there is nothing for the stamp to record and it comes off
+    // with the run it was covering. The signal path never gets here, which is
+    // the point: it dies inside the handler, having written first.
+    stamp.uninstall();
   }
 }
 
@@ -1377,6 +1853,21 @@ function environmentFacts(
  * This is also the one place the run path derives `phases` from `planOnly`;
  * both halves read that single derivation rather than each computing its own.
  */
+/**
+ * End the run now if a stop was pressed (#223).
+ *
+ * Preflight is the stretch between launching a run and its first turn - a
+ * worktree script, then two probe turns - and a stop pressed during it set the
+ * latch and then waited: the run carried on for minutes and ended the instant
+ * planning began, which read as a run that had stalled and then died on its
+ * own. Thrown as `Cancelled`, so `execute`'s handler gives it the ending every
+ * other stop takes.
+ */
+function stopIfCancelled(): void {
+  const why = cancelRequested();
+  if (why !== null) throw new Cancelled(why);
+}
+
 export async function runPreflight(
   state: RunState,
   cfg: Config,
@@ -1394,12 +1885,77 @@ export async function runPreflight(
   // its own blast radius, and this is the half that must not over-refuse.
   const ahead: readonly Phase[] = resumePhase(state) === 'complete' ? [] : phases;
 
+  // **The worktree, before anything is spent and before `prepareGit` runs** (#223).
+  //
+  // One creation site, and it is here rather than beside `createRun` for two
+  // reasons. A **resume** reaches it too, so a run whose worktree was pruned
+  // between sessions gets it back instead of failing one git command at a time
+  // with nothing naming the cause. And this gate is already the place that
+  // refuses a directory which cannot host the phases ahead - `gitPrecondition`
+  // is four lines below - so the refusal has a home, an exit code and a
+  // sentence, rather than a third mechanism beside them.
+  //
+  // Ordering is what makes it correct: `execute` awaits this gate before it
+  // calls the loop, and `runPhases` opens with `prepareGit`. So the tree exists
+  // before the branch is decided in it, which is the whole arrangement - this
+  // decides WHERE, `prepareGit` still decides WHICH BRANCH.
+  if (state.worktree === true) {
+    // The branch, as a ref, before the script runs - so `VIBE_BRANCH` names a
+    // branch that exists on a fresh run and on a resume alike, and one line of
+    // script (`git worktree add "$VIBE_WORKTREE" "$VIBE_BRANCH"`) is right for
+    // both. `prepareGit` adopts it. A repository with no commit has no HEAD to
+    // put it at, so the script is told no branch and `prepareGit` makes it as it
+    // always has (#223).
+    let branch = git.runBranch(cfg, state);
+    if (branch !== null && !(await git.branchExists(state.targetDir, branch))) {
+      const head = await git.markBase(state.targetDir);
+      if (head === null || !(await git.createBranchRef(state.targetDir, branch, head)).ok) {
+        branch = null;
+      }
+    }
+    const made = await createWorktree({
+      targetDir: state.targetDir,
+      id: state.id,
+      command: cfg.git.worktreeCommand,
+      timeoutMs: cfg.git.worktreeTimeoutMs,
+      branch,
+    });
+    // The setup script is the person's own and is not killed mid-way (a half
+    // made tree is what `createWorktree` repairs on resume), but a stop pressed
+    // while it ran ends the run the moment it returns rather than after both
+    // probes as well (#223).
+    stopIfCancelled();
+    if (!made.ok) {
+      log.heading('Preflight');
+      log.fail(made.reason, { id: 'run_failed', data: { code: EXIT.PREFLIGHT, reason: made.reason } });
+      state.status = 'error';
+      recordEvent(state, 'preflight-failed', { reasons: [made.reason] });
+      return EXIT.PREFLIGHT;
+    }
+    // Said rather than left to be inferred from a path, and only when something
+    // happened: a resume that found its worktree already there has nothing to
+    // announce. `how` is the half a reader cannot see from the directory - a
+    // tree made by `git worktree add` and one made by somebody's own script look
+    // identical afterwards, and which it was decides where to look when the
+    // contents are wrong.
+    if (made.created) {
+      log.step(`Working in ${made.dir}`, {
+        id: 'worktree_created',
+        data: { dir: made.dir, how: made.how },
+      });
+    }
+  }
+
   // Before the probes, so a refusal costs nothing: the run that produced #71
   // spent 30M tokens before the review phase found this out for itself.
-  const blocked = await gitPrecondition(state.targetDir, ahead);
+  // The tree the run will WRITE in, which is the worktree when it has one (#223).
+  // Asking this of `targetDir` would check the repository's cleanliness and then
+  // let the loop write somewhere else - a precondition about the wrong directory
+  // is worse than none, because it passes.
+  const blocked = await gitPrecondition(workDirOf(state), ahead);
   if (blocked !== null) {
     log.heading('Preflight');
-    log.fail(blocked);
+    log.fail(blocked, { id: 'run_failed', data: { code: EXIT.PREFLIGHT, reason: blocked } });
     state.status = 'error';
     recordEvent(state, 'preflight-failed', { reasons: [blocked] });
     // Deliberately NOT followed by the probe path's "re-run with --skip-probe
@@ -1436,16 +1992,33 @@ export async function runPreflight(
   // nothing before #71 and still prints nothing now.
   if (options.skipProbe === true) return null;
 
-  log.heading('Preflight');
+  // Carries the agents it is about to probe, in the order it will probe them,
+  // so a window can draw the whole step before the first child starts rather
+  // than discovering it one line at a time (#205). `PROBE_ORDER` rather than a
+  // literal, so the announcement cannot describe a different sequence from the
+  // one `preflight` runs.
+  log.heading('Preflight', { id: 'preflight_started', data: { agents: [...PROBE_ORDER] } });
 
   let report: Awaited<ReturnType<typeof preflight>>;
   try {
-    report = await preflight(state.targetDir, cfg, phases, state.dir, probes);
+    report = await preflight(state.targetDir, cfg, phases, state.dir, probes, (agent) => {
+      // Said before each probe, because each one spawns a child and the two of
+      // them are the whole of the silence between launching a run and its first
+      // phase (#205). Naming what is being probed is not a prediction: the
+      // order is `PROBE_ORDER` and preflight always runs first.
+      log.step(`Probing ${agent}`, { id: 'probe_started', data: { agent } });
+    });
   } catch (err) {
-    log.fail(`environment probe failed: ${err instanceof Error ? err.message : String(err)}`);
+    // A probe killed by a stop is a stopped run, not a broken environment.
+    stopIfCancelled();
+    const why = `environment probe failed: ${err instanceof Error ? err.message : String(err)}`;
+    log.fail(why, { id: 'run_failed', data: { code: EXIT.PREFLIGHT, reason: why } });
     return EXIT.PREFLIGHT;
   }
 
+  // A probe that was stopped reports a failure of its own, which is not the
+  // finding: the person pressed stop.
+  stopIfCancelled();
   for (const [label, result] of [
     ['claude', report.claude],
     ['codex', report.codex],
@@ -1468,13 +2041,25 @@ export async function runPreflight(
     // the other's environment from its own.
     state.environment = environmentFacts(report, cfg, state.targetDir);
     if (repairArgs.length > 0) log.info('Environment repair will be applied to every Claude turn');
-    log.ok('Toolchain contract satisfied');
+    // The step is over. A window drawing preflight needs the end as well as the
+    // start, or the row stays mid-probe for the rest of the run (#205). The
+    // failure path already has an ending: `run_failed`.
+    log.ok('Toolchain contract satisfied', { id: 'preflight_passed' });
     recordEvent(state, 'preflight-ok', { repairArgs: repairArgs.length > 0 });
   } else {
     for (const reason of report.blockingReasons) log.fail(reason);
     state.status = 'error';
     recordEvent(state, 'preflight-failed', { reasons: report.blockingReasons });
-    log.info('Fix the environment, or re-run with --skip-probe to proceed anyway.');
+    // The `run_failed` id goes here and not on the `log.fail` loop above,
+    // because this is the only line on this path that is about the ending
+    // rather than about one of its causes (#162). Tagging the loop would make
+    // whichever reason happened to be last look like *the* reason, and the
+    // order of `blockingReasons` carries no such claim - so the whole list
+    // travels, exactly as it does into the event record on the line above.
+    log.info('Fix the environment, or re-run with --skip-probe to proceed anyway.', {
+      id: 'run_failed',
+      data: { code: EXIT.PREFLIGHT, reason: report.blockingReasons.join('; ') },
+    });
   }
 
   // Charged after the verdict has been logged and recorded, so the run record
@@ -1758,7 +2343,21 @@ function summary(state: RunState, started: number, recovery?: RecoveryReport): v
     }
   }
   if (state.rateLimitWaits > 0) log.info(`Waits:    ${state.rateLimitWaits} rate-limit pause(s)`);
-  log.info(`Rounds:   ${state.planRound} plan revision(s), ${state.reviewRound} fix round(s)`);
+  // Question rounds sit beside the other two rather than being folded into the
+  // plan count, and they are the reason #139 exists: three revisions the critic
+  // asked for is the loop working, and three the planner asked itself is a
+  // planner circling something it cannot resolve from the repo. Those read the
+  // same as `3 plan revision(s)` and they are different diagnoses.
+  //
+  // Printed only when there were any, unlike the two beside it. This counter is
+  // zero on most runs, and a `0 question round(s)` on every clean summary would
+  // bury the line on the runs it was written for. It is a display choice about a
+  // number that is always measured, not an absence dressed as one.
+  const asked =
+    state.questionRound > 0 ? `, ${state.questionRound} question round(s)` : '';
+  log.info(
+    `Rounds:   ${state.planRound} plan revision(s)${asked}, ${state.reviewRound} fix round(s)`,
+  );
   if (state.sessionRotations > 0) log.info(`Compacted: ${state.sessionRotations} time(s)`);
   // A record of what `forkedFrom` holds, never a computation over it: the totals
   // above include the inherited spend, and this is what says so. Nothing here
@@ -1786,6 +2385,65 @@ function summary(state: RunState, started: number, recovery?: RecoveryReport): v
   log.info(`Files:    ${state.dir}`);
 }
 
+/** Bytes as a person reads them. Never rounded to zero: `0 B` means no bytes. */
+function fmtBytes(n: number): string {
+  if (n >= 1024 * 1024 * 1024) return `${(n / 1024 / 1024 / 1024).toFixed(1)} GB`;
+  if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${String(n)} B`;
+}
+
+/**
+ * What a run is still holding from a killed artifact preservation (#130).
+ *
+ * `sweepGateArtifacts` clears this at the top of every pass, so a run that
+ * resumes tidies itself. A run that is never resumed again never executes
+ * anything, and nothing else was ever going to look - which is the hole #111
+ * wrote into its own comment and left for this issue.
+ *
+ * **It reports and removes nothing**, which is option 3 of the three the issue
+ * offered and the one that composes with the other two later. The reasons are
+ * in `findGateScratch`; the short version is that a sweep needs a retention
+ * rule, a retention rule is a number, and the census taken for #130 found no
+ * evidence to derive one from.
+ *
+ * Two things it must get right, and both are about not overstating:
+ *
+ * - **A live run's scratch may be in flight.** `run.lock` is what says so, and
+ *   #77's probe already refuses to guess, so `running` and `unknown` get a
+ *   different sentence rather than being called leftovers or being hidden.
+ * - **An entry nothing may follow is not looked into at all.** `listRuns`
+ *   classified it (#53); a listing that walked inside a linked entry would be
+ *   enumerating somebody else's directory.
+ */
+function scratchLines(targetDir: string, r: RunSummary): string[] {
+  if (r.linked === true || r.unverified === true) return [];
+  const found = findGateScratch(path.join(targetDir, '.vibe', 'runs', r.id));
+  if (found.entries.length === 0 && found.unresolved.length === 0) return [];
+
+  const lines: string[] = [];
+  if (found.entries.length > 0) {
+    // `bytes` is null when the walk could not finish counting, and a partial
+    // total that reads as a whole one is the fabrication this repo refuses
+    // everywhere else.
+    const size =
+      found.bytes === null || found.files === null
+        ? 'size could not be measured'
+        : `${String(found.files)} file(s), ${fmtBytes(found.bytes)}`;
+    const claimed = r.liveness === 'running' || r.liveness === 'unknown';
+    lines.push(
+      claimed
+        ? `leftover gate scratch: ${String(found.entries.length)} entr(ies), ${size} - ` +
+            'something may still be writing them; do not delete while the run is claimed'
+        : `leftover gate scratch: ${String(found.entries.length)} entr(ies), ${size} - ` +
+            'nothing will remove these unless the run is resumed',
+    );
+    for (const e of found.entries) lines.push(`  ${e.at}`);
+  }
+  for (const u of found.unresolved) lines.push(`  ${u.at} - ${u.why}`);
+  return lines;
+}
+
 function cmdList(args: readonly string[]): ExitCode {
   const { flags } = parseArgs(args);
   const targetDir = path.resolve(flags.cwd ?? process.cwd());
@@ -1810,7 +2468,41 @@ function cmdList(args: readonly string[]): ExitCode {
     // for the rows that are not forks.
     const fork = r.forkedFrom === undefined ? '' : `  [fork of ${r.forkedFrom.runId}@${r.forkedFrom.checkpoint}]`;
     console.log(log.dim(`    ${r.task}${fork}`));
+    // Below the task line and only when there is something to say, so a healthy
+    // archive prints exactly what it printed before (#130).
+    for (const line of scratchLines(targetDir, r)) log.warn(`    ${line}`);
   }
+  return EXIT.OK;
+}
+
+/**
+ * What the archive says about the loop (#114).
+ *
+ * **A sixth command rather than `vibe list --stats`**, and the argument is
+ * cardinality: `vibe list` produces one row per run and answers "what runs
+ * exist"; this produces one document about the archive and answers "how is the
+ * loop behaving". A flag that replaces a command's entire output is a second
+ * command wearing the first one's name - and `--json` behind it would then mean
+ * two incompatible documents under one contract, which is the half the app has
+ * to depend on.
+ *
+ * Both renderings come out of one `scoreArchive`, so the table and the JSON
+ * cannot report different numbers.
+ */
+function cmdStats(args: readonly string[]): ExitCode {
+  const { flags } = parseArgs(args);
+  const targetDir = path.resolve(flags.cwd ?? process.cwd());
+  const card = scoreArchive(targetDir);
+
+  if (flags.json === true) {
+    // Straight to stdout, unindented by nothing else: this is the shape #114
+    // promises a later GUI can depend on, and `log.*` would put prose beside it.
+    console.log(JSON.stringify(card, null, 2));
+    return EXIT.OK;
+  }
+
+  log.heading(`Runs in ${targetDir}`);
+  for (const line of renderScorecard(card)) console.log(line === '' ? '' : `  ${line}`);
   return EXIT.OK;
 }
 
@@ -1890,7 +2582,12 @@ async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
       `config: ${cfg.configPath ?? 'defaults'}` +
         (moved.length === 0 ? '' : ` (command line also sets ${moved.join(', ')})`),
     );
-    log.info(`  claude ${cfg.claude.model}/${cfg.claude.effort} - codex ${cfg.codex.model}/${cfg.codex.effort}`);
+    // The global layer, said on its own line so the line above keeps the shape
+    // scripts already read (#223). Only when the file exists: a machine with no
+    // global settings is every machine before this, and does not need telling.
+    const globalAt = globalConfigPath();
+    if (globalAt !== null && existsSync(globalAt)) log.info(`  also your settings for all projects: ${globalAt}`);
+    log.info(`  claude ${shownModel(cfg.claude.model, 'claude')}/${cfg.claude.effort} - codex ${shownModel(cfg.codex.model, 'codex')}/${cfg.codex.effort}`);
     reportResolvedRoles(cfg);
     log.info(
       `  budget $${cfg.budget.maxCostUsd} (Claude) / ` +
@@ -1922,6 +2619,12 @@ async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
     } else {
       log.info('  verify: off - the loop will not check that the code runs');
     }
+    // The effective matrix, which is the thing about a gate a reader cannot work
+    // out from anywhere else: a `step` row does nothing from a terminal, and the
+    // only other way to learn that is to run and watch a boundary go past. One
+    // line per mode rather than per row - six lines of `auto` is six lines of
+    // nothing happening.
+    for (const line of describeGates(cfg.gates)) log.info(`  ${line}`);
   } catch (err) {
     log.fail(`config: ${err instanceof Error ? err.message : String(err)}`);
     bad++;

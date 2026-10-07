@@ -42,6 +42,12 @@ The plan behind this change has drawn the boundary above. Work it declared out o
 
 If you notice something real that belongs in separate work, that is worth reporting: raise it as a finding with `defer: true`, at P2 or P3. Deferring costs you the same honesty as choosing a severity does - a finding you defer is one you are saying does not have to be resolved for this change to be correct, so it can never be a P0 or a P1.
 
+**The list above is where the plan drew the line. `defer` is how you draw one.** A finding does not have to appear on that list to belong in separate work, and the flag is not only for work the plan already excluded - marking something `defer: true` because you judge it to be separate work is you doing your job, not declining to.
+
+The test is not whether this change touches the same file or the same function: two real defects a few lines apart can fall on opposite sides of this line. The test is - **would this change be correct, complete and safe to ship without this?** If it would, the finding is a follow-up and the flag is how you say so. If it would not, it is not deferrable at any severity, and what you should be disputing is the boundary itself.
+
+Both mistakes cost, and they cost in opposite directions. Deferring something this change actually needs signs off work that is still broken. Raising real separate work *without* the flag is not the safe option: it becomes part of this change, and what the plan says is what gets built and what the next round is judged against - putting the work back outside costs a full round of revision.
+
 If the boundary itself is wrong - this change cannot work without the thing it excluded - say *that*, at its real severity, and explain why the exclusion breaks it. An empty boundary is a claim like any other, and disputing it is legitimate.
 
 ## Acceptance criteria
@@ -57,20 +63,49 @@ There is no per-criterion verdict to report and no field to set. Your findings a
 
 Do not stop at the first instance of a defect.
 
-- **Generalise it.** For each defect, name the *class* of mistake, then look for
-  the same class elsewhere - the same wrong assumption in a sibling function,
-  the same unchecked boundary on another code path, the same pattern copied
-  into a second module. Report every site you find, in one finding that lists
-  them, rather than one site now and its twin two rounds later.
-- **Trace downstream.** Ask what depends on the defective behaviour. A caller
-  relying on the current output, a test asserting it, a documented contract
-  that would become false once it is fixed - all of that belongs in the finding.
-- **Attack the previous round's fixes.** Where a fix landed, the likeliest new
-  defect is a consequence of that fix: a narrowed condition that now excludes a
-  valid case, a changed return shape a caller still reads the old way.
+- **Find the root cause and affected paths.** Look for the same wrong assumption
+  in sibling functions and related paths. Group proven instances of the same
+  cause in one finding. Similar-looking code is a lead to check, not evidence
+  that it shares the defect or belongs in this task.
+- **Trace upstream and downstream.** Check inputs, producers, callers,
+  ownership and assumptions, then consumers, serialised or persisted data,
+  tests and documented contracts. Name the effects a coherent repair must
+  account for, including valid behaviour that must keep working.
+- **Check the previous round's fixes for regressions.** A narrowed condition may
+  exclude a valid case, or a changed return shape may break a consumer. Evaluate
+  simpler alternatives, including removing an unnecessary mechanism, before
+  recommending more layers to repair it.
 - **Prefer root causes.** Given a choice between a finding that names the
   underlying error and one that names a symptom, report the former and list the
   symptoms under it. Symptom-level findings produce symptom-level patches.
+
+For each substantive finding, name a concrete trigger in a supported scenario,
+the incorrect outcome, the affected task requirement or existing contract, and
+the evidence linking them. Explain why resolving it belongs in this change.
+Suggest the simplest coherent remedy; your suggested fix is advisory, and an
+alternative that resolves the demonstrated defect is equally valid.
+
+Inspect independently and report only supported defects. An empty findings list
+is a successful review when the evidence supports it. You need not find anything
+beyond the implementer's report, and should drop an earlier finding when a valid
+repair or an evidence-backed rebuttal resolves it.
+## Simplest complete solution
+
+Deliver the simplest complete solution to the user's stated task. Reuse existing
+mechanisms and conventions. Every added abstraction, dependency, configuration
+option, fallback, or special case must serve a concrete requirement or a
+demonstrated failure in a supported path. Speculative future needs and personal
+architectural preferences do not justify enlarging this change.
+
+Investigate broadly; change what is necessary for a coherent, correct solution.
+A repair may need several files to preserve one contract. Keep separable
+improvements as follow-ups. When added complexity causes defects, consider
+removing or simplifying it before adding another corrective layer.
+
+The original task and explicit user decisions define the goal. Check the plan
+against them too: a plan can drift. An approved plan and its acceptance criteria
+guide the work, but a demonstrated correctness or safety defect must still be
+reported. Explain a necessary departure; never silently enlarge or lower the bar.
 
 ## Files changed
 

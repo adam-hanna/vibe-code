@@ -7,7 +7,7 @@ import { CRITERIA, DIFF, FILES, OUT_OF_SCOPE, PLAN_MD } from './helpers/prompt-f
 import { scopeBlock, spliceScope } from './helpers/scope-block.js';
 
 /**
- * What #49 promised not to change, and the one thing it did.
+ * Reviewed first-round, continuing and fresh-session prompt shapes.
  *
  * The bar the chunking work was accepted against is that a change under the
  * diff limit is reviewed with *byte-identical* prompt to the one develop sent.
@@ -16,15 +16,11 @@ import { scopeBlock, spliceScope } from './helpers/scope-block.js';
  * `src/prompts.ts` was touched, from the arguments this file imports - the same
  * module the generator used, so the two cannot drift apart.
  *
- * #56 narrowed that bar deliberately, and this file was edited for the second
- * of the two reasons AGENTS.md allows: the claim *byte-identical* is no longer
- * the contract. `scopeGuidance` gained the other half of the deferral decision,
- * and it renders into every one of these prompts. The fixtures were NOT
- * regenerated - each case now asserts equality with its baseline with the
- * `## Scope` block as the single replacement, which is strictly stronger than a
- * regenerated fixture because it proves nothing else moved. `spliceScope`
- * throws rather than passing vacuously if the region goes missing or turns out
- * not to have changed.
+ * #56 deliberately replaced only the scope region. The prompt-discipline change
+ * now changes standing instructions across the whole prompt: independent review
+ * with no finding quota, scope-conscious breadth and the shared simplicity rule.
+ * The fixtures are deliberately regenerated for that new contract, as recorded
+ * in their README and the PR; substantive guards still have separate assertions.
  */
 
 function fixture(name: string): string {
@@ -49,29 +45,16 @@ function prompt(round: number, hasMemory: boolean): string {
   );
 }
 
-test('a first-round review prompt moved by the scope block alone', () => {
-  const now = prompt(1, false);
-  assert.equal(
-    now,
-    spliceScope(fixture('review-round1.txt'), now),
-    'something other than the ## Scope block moved',
-  );
+test('a first-round review matches the reviewed prompt baseline', () => {
+  assert.equal(prompt(1, false), fixture('review-round1.txt'));
 });
 
-test('a continuing review prompt moved by the scope block alone', () => {
-  const now = prompt(3, true);
-  assert.equal(
-    now,
-    spliceScope(fixture('review-round3-memory.txt'), now),
-    'something other than the ## Scope block moved',
-  );
+test('a continuing review matches the reviewed prompt baseline', () => {
+  assert.equal(prompt(3, true), fixture('review-round3-memory.txt'));
 });
 
 test('the replaced scope block still carries every guard it had before', () => {
-  // The splice above proves only that the delta is confined to one region. What
-  // is *inside* that region is the thing #56 changed, and these are the parts of
-  // it that were never meant to move: a reviewer that may defer more freely
-  // needs the counterweights more, not less.
+  // #56's deferral counterweights still apply under the new standing rules.
   const block = scopeBlock(prompt(1, false));
 
   assert.ok(block.includes('is a defect in your finding'));
@@ -82,8 +65,7 @@ test('the replaced scope block still carries every guard it had before', () => {
 /**
  * The helper's own contract.
  *
- * Every case above asserts `current === splice(baseline, current)`, and that
- * assertion is only worth anything because `spliceScope` refuses the two ways it
+ * The historical compatibility check relied on `spliceScope` refusing the two ways it
  * could be satisfied while proving nothing: a region it cannot find (it would
  * hand back the baseline, or a silently wrong slice) and a region that did not
  * change (it would hand back the baseline, which for an unchanged prompt equals
@@ -112,17 +94,13 @@ test('the splice refuses a baseline or a current whose scope region is gone', ()
   }
 });
 
-test('the memoryless round note changed by exactly one paragraph, and nothing else moved', () => {
+test('a fresh review matches its baseline and never claims to carry earlier findings', () => {
   // The deliberate change. The old note told a reviewer that its earlier
   // findings were "quoted below" - `reviewPrompt` has never quoted a finding -
   // and then told it not to re-litigate points that were addressed. Under
   // `codex.persistSession: false` every review turn takes that branch, so a
   // reviewer that had never seen a finding was being asked to stay silent about
   // it, and silence is what an APPROVE is made of.
-  const before =
-    '\n\nThis is review round 3. The change has already been revised in response to earlier ' +
-    'findings, which are quoted below. Re-raise one with its original `id` only if it is ' +
-    'genuinely still unresolved - do not re-litigate points that were addressed.';
   const after =
     '\n\nThis is review round 3. The change has already been revised in response to findings ' +
     'from earlier rounds, but **you do not have those findings** - this turn starts a fresh ' +
@@ -132,32 +110,22 @@ test('the memoryless round note changed by exactly one paragraph, and nothing el
     'whatever `id` you would naturally choose - repeats are reconciled by the tool.';
 
   const baseline = fixture('review-round3-nomemory.txt');
-  assert.ok(baseline.includes(before), 'the baseline fixture no longer holds the old paragraph');
-
-  // Two replacements on this one path, and they belong to different changes:
-  // the paragraph swap is #49's delta, already baked into a baseline frozen at
-  // `f0312d6`, and the scope splice is #56's. This change moved one region, not
-  // two - the rule that a second region is a defect is about regions moved by
-  // the same change.
   const now = prompt(3, false);
-  assert.equal(
-    now,
-    spliceScope(baseline.replace(before, after), now),
-    'something other than that paragraph and the ## Scope block moved',
-  );
+  assert.ok(now.includes(after));
+  assert.equal(now, baseline);
   assert.equal(now.includes('quoted below'), false);
   assert.equal(now.includes('re-litigate'), false);
 });
 
-test('the plan-side note is untouched, so the critic reads exactly what it always did', () => {
-  // The critic takes the same memoryless branch and has the same problem, and
-  // it was left alone deliberately rather than missed: it is out of scope for
-  // #49, and moving the plan loop's prompt inside a change to the review loop
-  // would be a second behaviour change with no evidence behind it. Asserted so
-  // that "unchanged" is a fact rather than an intention.
+test('a fresh plan critic is not told it has earlier findings it cannot see', () => {
+  // The old #49 boundary deliberately preserved this defect on the plan side.
+  // Both judge prompts omit earlier findings, so the broader prompt overhaul
+  // applies the same honest memoryless framing to both.
   const critique = critiquePrompt(PLAN_MD, [], OUT_OF_SCOPE, 3, false, null, undefined, CRITERIA);
-  assert.ok(critique.includes('which are quoted below'));
-  assert.ok(critique.includes('do not re-litigate points that were addressed'));
+  assert.ok(critique.includes('**you do not have those findings**'));
+  assert.ok(critique.includes('Use whatever `id` you would naturally choose'));
+  assert.equal(critique.includes('quoted below'), false);
+  assert.equal(critique.includes('do not re-litigate'), false);
 });
 
 test('a chunked part is told which part it is, and a first part is told it has seen no others', () => {

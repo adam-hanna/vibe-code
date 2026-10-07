@@ -20,8 +20,18 @@ function repoWith(config: unknown): string {
   return dir;
 }
 
-test('progress is on by default, at a 30s cadence', () => {
-  assert.deepEqual(DEFAULTS.progress, { enabled: true, intervalMs: 30_000 });
+test('progress is on by default, at a 30s cadence and a 60s work reading', () => {
+  // Two cadences, because the two readings cost different things: a heartbeat
+  // increments a counter off a line that had already arrived, and a work
+  // reading spawns three `git` processes against a tree an agent is writing to.
+  assert.deepEqual(DEFAULTS.progress, {
+    enabled: true,
+    intervalMs: 30_000,
+    workIntervalMs: 60_000,
+    // A third figure since #223, and a ceiling rather than a cadence: how long a
+    // turn may produce nothing at all before it is stopped.
+    maxQuietMs: 600_000,
+  });
 });
 
 test('--no-progress switches the heartbeat off', () => {

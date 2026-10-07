@@ -1,0 +1,712 @@
+//! Supervising the process that does the work.
+//!
+//! Everything about a run lives on the Node side. This module starts that
+//! process, forwards bytes in both directions, and reports when it dies. It
+//! parses **one** thing - whether a line of stdout is JSON at all - and only so
+//! that a line which is not can be labelled rather than passed off as a frame.
+//!
+//! The rule the whole file is written to: **Rust is transport plus OS.** The
+//! moment it starts deciding something about a run there are two definitions of
+//! a legal run, and the argument settled in #134 reopens with a window attached.
+
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+use serde::Serialize;
+use tauri::{AppHandle, Emitter, Manager};
+
+use crate::reaper::Reaper;
+
+/// `DETACHED_PROCESS` — the host gets no console, and so cannot be sent a
+/// console control event.
+///
+/// **This is a lifetime fix, not a cosmetic one.** `node.exe` is a
+/// console-subsystem binary, so spawning it with no creation flags attaches it
+/// to a console: the parent's if there is one, a freshly allocated one if not.
+/// Whichever it lands in, tearing that console down sends `CTRL_CLOSE_EVENT` to
+/// every process attached to it, and libuv delivers that to Node as **SIGHUP** —
+/// which `src/ending.ts` stamps and exits `EXIT_UNRAISED` on, correctly and
+/// fatally.
+///
+/// That is not hypothetical. A run was killed four minutes into a plan turn,
+/// mid-phase, with `ending.json` reading `"how": "signal", "signal": "SIGHUP"`
+/// and the window reporting `host exited with code 1`. Redirecting all three
+/// streams does not prevent the allocation.
+///
+/// **`CREATE_NO_WINDOW` is the wrong flag and was tried first.** It suppresses
+/// the console *window*; the process still holds a console and can still be sent
+/// a control event. Measured with `AttachConsole` against four children spawned
+/// exactly as below, all stdio piped:
+///
+/// | creation flags                | console? |
+/// |------------------------------|----------|
+/// | none                         | yes      |
+/// | `CREATE_NO_WINDOW` (0x0800_0000) | yes  |
+/// | `DETACHED_PROCESS` (0x0000_0008) | **no** |
+/// | both                         | no       |
+///
+/// The two are documented as mutually exclusive — `CREATE_NO_WINDOW` is ignored
+/// beside `DETACHED_PROCESS` — so this is the one flag rather than both, and
+/// there is no window to hide on a process with no console to put one on.
+///
+/// Note what this does *not* say about `src/proc.ts`. That file passes
+/// `windowsHide: true` for `claude` and `codex`, which is Node's name for
+/// `CREATE_NO_WINDOW` — so those children do hold a console. That is fine and
+/// is not the same bug: with the host detached each gets its own fresh,
+/// window-less console rather than sharing one whose teardown would take the
+/// whole run with it.
+#[cfg(windows)]
+const DETACHED_PROCESS: u32 = 0x0000_0008;
+
+/// A line the host process wrote to stdout, on its way to the webview.
+pub const FRAME_EVENT: &str = "host://frame";
+/// A line the host process wrote to stderr, or a line of stdout that was not a
+/// frame. Prose either way, never protocol.
+pub const LOG_EVENT: &str = "host://log";
+/// The host process ended. Emitted exactly once per start.
+pub const EXIT_EVENT: &str = "host://exit";
+
+/// How long a quit waits for the host to leave on its own before killing it.
+///
+/// **A ceiling, not a wait.** The host reads a closed stdin as *the supervisor
+/// has gone* and leaves at once, abandoning an in-flight run rather than
+/// finishing it - `closing()` in `src/serve.ts` says why, and until #206 it
+/// waited for the whole run instead, so this five seconds expired every single
+/// time and the "graceful" path was the kill path in every case that mattered.
+///
+/// What is left is the fallback for a host that will not go: killing after this
+/// is safe *because* the run is resumable, which the CLI already guarantees and
+/// the app inherits unchanged. It costs the `ending.json` stamp, which is
+/// exactly why the ordinary path no longer comes here.
+const QUIT_GRACE: Duration = Duration::from_secs(5);
+
+/// Strip Windows' extended-length prefix from a path.
+///
+/// **The bug the packaging spike found, and the reason this file has tests.**
+/// `BaseDirectory::Resource` returns a verbatim path - `\\?\C:\Program
+/// Files\...` - and Node refuses one as a main module, failing with `EISDIR ...
+/// lstat 'C:'`. It is invisible under `tauri dev`, where resources resolve to an
+/// ordinary relative path, and appears only in a built bundle. Which is why
+/// nothing about resource paths may be verified from the dev server.
+///
+/// Only the drive-letter form is stripped. `\\?\UNC\server\share` is a genuine
+/// network path whose prefix is load-bearing, and turning it into
+/// `UNC\server\share` would produce something that resolves nowhere.
+pub fn strip_verbatim(path: &Path) -> PathBuf {
+    let Some(text) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    let Some(rest) = text.strip_prefix(r"\\?\") else {
+        return path.to_path_buf();
+    };
+    let bytes = rest.as_bytes();
+    let drive = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/');
+    // Refuse rather than repair. Half-stripping a prefix nobody can classify
+    // produces something that looks resolvable and is not.
+    if drive {
+        PathBuf::from(rest)
+    } else {
+        path.to_path_buf()
+    }
+}
+
+/// What the webview is told when the host ends.
+#[derive(Clone, Serialize)]
+pub struct Ended {
+    /// The exit code, or null where the process was signalled and has none.
+    /// Absent is reported as absent; a signalled process did not "exit 0".
+    pub code: Option<i32>,
+}
+
+/// Which build this is (#201).
+///
+/// **Two builds of one version are otherwise identical**, and single-instance
+/// makes that expensive: a fresh build launched while an installed copy is
+/// running raises the old window and exits, so the app under test is the old
+/// one and every symptom reads as the fix not working.
+///
+/// `commit` and `at` are `Option` because a tree with no git cannot answer, and
+/// an absence is reported as one. `version` always exists - it is the crate's,
+/// which `tauri.conf.json` and `Cargo.toml` agree on.
+#[derive(Clone, Serialize)]
+pub struct Build {
+    pub version: String,
+    pub commit: Option<String>,
+    /// Milliseconds since the epoch, formatted by the window in the viewer's own
+    /// locale rather than in the builder's.
+    pub at: Option<i64>,
+}
+
+/// Read the stamp `build.rs` compiled in.
+///
+/// The empty string is the agreed spelling of *this tree could not say*, and it
+/// becomes `None` here rather than reaching a window that would print it.
+pub fn build_stamp() -> Build {
+    let commit = env!("VIBE_BUILD_COMMIT");
+    let at = env!("VIBE_BUILD_AT");
+    Build {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        commit: if commit.is_empty() {
+            None
+        } else {
+            Some(commit.to_string())
+        },
+        at: at.parse::<i64>().ok(),
+    }
+}
+
+/// What the webview is told when it asks.
+///
+/// **The `ready` frame is in here because the window cannot have heard it.** The
+/// host is started in `setup`, before a webview exists to listen, and Tauri
+/// events emitted with no listener are simply gone. So the one frame that states
+/// the protocol version is kept, and a window that missed it asks for it.
+///
+/// Nothing else needs the same treatment: every other frame is a consequence of
+/// a request, and there are no requests before the window is up.
+///
+/// **The build stamp rides here rather than on a command of its own** (#201).
+/// `keys.rs` pins the registered handler list precisely so a new door into this
+/// process is a decision somebody makes on purpose, and this is not one: three
+/// of the four facts the diagnostics panel shows already arrive on this call, so
+/// they cannot disagree about which process they describe.
+/// Renamed for the window's benefit, and safe to add now: every field that
+/// existed before `uptime_secs` is one word, so camelCase leaves all of them
+/// exactly as they were. A field added later gets the window's spelling for
+/// free instead of arriving as a snake_case key nothing reads.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Status {
+    pub running: bool,
+    pub pid: Option<u32>,
+    /// How long the running host has been up, or null when none is. Measured
+    /// from a monotonic clock on this side, so it carries no question about
+    /// which process's wall clock is right.
+    pub uptime_secs: Option<u64>,
+    pub ready: Option<serde_json::Value>,
+    /// Why there is no host, when there is none. Null while one is running.
+    pub failure: Option<String>,
+    /// Why a kill of this app would leave the host running, or null if it would
+    /// not. Reported rather than assumed either way - see `reaper.rs`.
+    pub uncontained: Option<String>,
+    /// Which build the window is running in. Static; asked for with the rest.
+    pub build: Build,
+}
+
+/// The running host, if there is one.
+#[derive(Default)]
+pub struct HostProcess {
+    inner: Mutex<Option<Running>>,
+    ready: Mutex<Option<serde_json::Value>>,
+    failure: Mutex<Option<String>>,
+    /// Why the running host is not contained, when it is not (#157).
+    uncontained: Mutex<Option<String>>,
+    /// Created on the first spawn and held for the app's lifetime.
+    ///
+    /// **Held here on purpose.** The Windows mechanism is "the kernel kills
+    /// everything in the job when the last handle to it closes", so the handle's
+    /// lifetime IS the guarantee. Dropping it early would kill the host; not
+    /// holding it at all would do nothing.
+    reaper: Mutex<Option<Reaper>>,
+}
+
+struct Running {
+    child: Child,
+    stdin: ChildStdin,
+    pid: u32,
+    /// When this host was spawned, on a monotonic clock (#201).
+    started: Instant,
+    /// What a `keys` frame must carry for the host to take it (#223). Put in
+    /// the host's environment at spawn and never sent to the window, so the
+    /// window - which can write frames - cannot forge one.
+    secret: String,
+}
+
+/// A secret for one host's lifetime: 128 bits from the OS, through the random
+/// keys every `RandomState` is seeded with - std has no other source, and this
+/// guards a pipe between two of our own processes rather than anything at rest.
+fn keys_secret() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let half = || {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u128(Instant::now().elapsed().as_nanos());
+        h.finish()
+    };
+    format!("{:016x}{:016x}", half(), half())
+}
+
+/// Where the two staged pieces ended up in the bundle.
+///
+/// Both located through the runtime rather than assumed, because both differ
+/// between a dev run and a bundle, and getting that wrong is the failure above.
+fn locate(app: &AppHandle) -> Result<(PathBuf, PathBuf), String> {
+    // The externalBin lands beside the app executable with its target triple
+    // stripped - that is what makes it a *sidecar* rather than a resource, and
+    // it is also what gets it the executable bit on macOS and Linux.
+    let exe = std::env::current_exe().map_err(|e| format!("no current exe: {e}"))?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| "the app executable has no directory".to_string())?;
+    let node = strip_verbatim(&dir.join(if cfg!(windows) { "node.exe" } else { "node" }));
+
+    let entry = app
+        .path()
+        .resolve(
+            "host/dist/src/hostmain.js",
+            tauri::path::BaseDirectory::Resource,
+        )
+        .map_err(|e| format!("no resource directory: {e}"))?;
+    let entry = strip_verbatim(&entry);
+
+    // Checked here, where both paths are still in hand and can be named. A
+    // spawn failure would report only "the system cannot find the file", which
+    // does not say which of the two was missing.
+    if !node.exists() {
+        return Err(format!("no node runtime at {}", node.display()));
+    }
+    if !entry.exists() {
+        return Err(format!("no host entry point at {}", entry.display()));
+    }
+    Ok((node, entry))
+}
+
+impl HostProcess {
+    /// Start the host and wire both of its output streams to the webview.
+    ///
+    /// Idempotent by refusal, not by restart. A second host is a second writer,
+    /// and `src/lock.ts` is written expecting one process per run.
+    pub fn start(&self, app: &AppHandle) -> Result<u32, String> {
+        let mut guard = self.inner.lock().map_err(|_| "host lock poisoned")?;
+        if let Some(running) = guard.as_ref() {
+            return Err(format!("the host is already running as pid {}", running.pid));
+        }
+
+        let (node, entry) = locate(app)?;
+        // A neutral, predictable working directory. Every request carries its
+        // own `-C`, so nothing depends on this - but a process inheriting
+        // whatever directory the OS launched the app from is a thing that
+        // behaves differently depending on how it was started, and that is worth
+        // spending one line to remove.
+        let cwd = app
+            .path()
+            .home_dir()
+            .unwrap_or_else(|_| PathBuf::from("."));
+
+        let secret = keys_secret();
+        let mut command = Command::new(&node);
+        command
+            .arg(&entry)
+            .env("VIBE_HOST_KEYS_SECRET", &secret);
+        // Where the pilot's conversations are kept (#223, `src/chatstore.ts`).
+        // They were the webview's `localStorage`, which has a quota they
+        // outgrew; the host writes them as files under the app's own data
+        // directory instead. Absent when the platform has none, and the host
+        // then refuses the frame by name rather than guessing a directory.
+        if let Ok(data) = app.path().app_data_dir() {
+            command.env("VIBE_APP_DATA", data);
+        }
+        command
+            .current_dir(&cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        // No console, so no console control event can reach it. See the constant
+        // for the run this cost.
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(DETACHED_PROCESS);
+        }
+        let mut child = command
+            .spawn()
+            .map_err(|e| format!("could not start {}: {e}", node.display()))?;
+
+        let pid = child.id();
+
+        // The two paths and the pid, kept. `strip_verbatim` is the bug this
+        // resolves around, and it is invisible from a dev build - so when the
+        // app is inert, what the bundle actually resolved is the first thing
+        // worth being able to read afterwards (#186).
+        crate::applog::app(&format!(
+            "host started as pid {pid}: {} {} (cwd {})",
+            node.display(),
+            entry.display(),
+            cwd.display()
+        ));
+
+        // Immediately after the spawn and before anything else touches the
+        // child. There is a window between `spawn` and this in which a kill
+        // would still orphan the host - it cannot be closed, because a process
+        // has to exist before it can be assigned to a job - but it is
+        // microseconds wide and it is the smallest this can be made (#157).
+        {
+            let mut slot = self.reaper.lock().map_err(|_| "reaper lock poisoned")?;
+            let reaper = slot.get_or_insert_with(Reaper::new);
+            let why = reaper.adopt(&child);
+            if let Ok(mut record) = self.uncontained.lock() {
+                *record = why.clone();
+            }
+            // Said out loud as well as recorded. A host nothing will clean up is
+            // worth a line in whatever captured this app's stderr, because the
+            // person who finds the orphan later will be looking there.
+            if let Some(reason) = why {
+                crate::applog::app(&format!("host is not contained: {reason}"));
+            }
+        }
+
+        let stdout = child.stdout.take().ok_or("the host has no stdout")?;
+        let stderr = child.stderr.take().ok_or("the host has no stderr")?;
+        let stdin = child.stdin.take().ok_or("the host has no stdin")?;
+
+        // stdout: the protocol, forwarded a line at a time and uninterpreted.
+        //
+        // When the stream ends the process has ended too, so this thread also
+        // reaps it and reports the exit. A separate thread whose only job was to
+        // wait would be a second claimant on the same child.
+        let to_webview = app.clone();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if line.trim().is_empty() {
+                    continue;
+                }
+                // The ONE thing this side parses, and only to label a line it
+                // could not forward as a frame. A relay that interpreted a
+                // message would be a second reader of the protocol, drifting
+                // from the real one on the next field anybody adds.
+                match serde_json::from_str::<serde_json::Value>(&line) {
+                    Ok(frame) => {
+                        // Kept, for a window that was not up yet. See `Status`.
+                        if frame.get("type").and_then(|t| t.as_str()) == Some("ready") {
+                            if let Ok(mut slot) = to_webview.state::<HostProcess>().ready.lock() {
+                                *slot = Some(frame.clone());
+                            }
+                        }
+                        let _ = to_webview.emit(FRAME_EVENT, frame);
+                    }
+                    // Reported, never dropped. An unparseable line on this stream
+                    // is exactly the failure the stdout/stderr split exists to
+                    // prevent, and dropping it is how that would go unnoticed.
+                    Err(_) => {
+                        let notice = format!("unparseable line on the protocol stream: {line}");
+                        crate::applog::host(&notice);
+                        let _ = to_webview.emit(LOG_EVENT, notice);
+                    }
+                }
+            }
+            let state = to_webview.state::<HostProcess>();
+            let code = state.reap();
+            crate::applog::app(&match code {
+                Some(code) => format!("host exited with code {code}"),
+                // Not "code 0" and not a guess: on Windows a child killed from
+                // outside closes without one, and that absence is the finding.
+                None => "host ended without an exit code".to_string(),
+            });
+            // Emitted whatever the code, and emitted even for an ordinary quit.
+            // A host that ends is a fact the window owns - the run is resumable
+            // and the user is the one who has to be told that is what happened.
+            let _ = to_webview.emit(EXIT_EVENT, Ended { code });
+        });
+
+        // stderr: the prose. The same sentences the CLI prints, kept as a log a
+        // user can be shown when something has gone wrong.
+        let to_log = app.clone();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines() {
+                let Ok(line) = line else { break };
+                // Kept as well as shown. The window is the live view and it goes
+                // away when the window does; a person debugging afterwards has
+                // only the file (#186).
+                crate::applog::host(&line);
+                let _ = to_log.emit(LOG_EVENT, line);
+            }
+        });
+
+        *guard = Some(Running {
+            child,
+            stdin,
+            pid,
+            started: Instant::now(),
+            secret,
+        });
+        drop(guard);
+        // First thing on the wire, so a run started the moment the window is up
+        // is already billed the way Settings says.
+        let _ = self.send_keys();
+        Ok(pid)
+    }
+
+    /// Hand the host both API keys from the keychain (#223).
+    ///
+    /// Runs use them as well as the pilot - *"If we have api keys set, we
+    /// should use them everywhere"* - and a run is a `claude` or `codex` child of
+    /// the host, so the host has to hold them. This is the one place a key
+    /// leaves this crate other than a request header: written straight to the
+    /// host's stdin, never logged, never emitted, and an absent or unreadable
+    /// key travels as null. Sent at spawn and again whenever a key changes.
+    pub fn send_keys(&self) -> Result<(), String> {
+        let read = |p: crate::keys::Provider| crate::keys::read(p).ok();
+        let mut guard = self.inner.lock().map_err(|_| "host lock poisoned")?;
+        let running = guard.as_mut().ok_or("the host is not running")?;
+        let frame = serde_json::json!({
+            "type": "keys",
+            "secret": running.secret,
+            "anthropic": read(crate::keys::Provider::Anthropic),
+            "openai": read(crate::keys::Provider::Openai),
+        });
+        running
+            .stdin
+            .write_all(format!("{frame}\n").as_bytes())
+            .and_then(|()| running.stdin.flush())
+            // The error describes the pipe, never the frame.
+            .map_err(|e| format!("could not hand the keys to the host: {e}"))
+    }
+
+    /// Wait for a host whose output has ended, and clear it. Returns its code.
+    fn reap(&self) -> Option<i32> {
+        let Ok(mut guard) = self.inner.lock() else {
+            return None;
+        };
+        // Already taken by `stop`, which is the ordinary quit path.
+        let mut running = guard.take()?;
+        drop(running.stdin);
+        running.child.wait().ok().and_then(|s| s.code())
+    }
+
+    /// Write one line to the host's stdin.
+    ///
+    /// The newline is added here rather than trusted from the caller. The
+    /// protocol is one object per line, and a caller that forgot would not
+    /// produce a bad frame - it would produce a frame that never arrives, which
+    /// is far harder to see.
+    pub fn send(&self, line: &str) -> Result<(), String> {
+        let mut guard = self.inner.lock().map_err(|_| "host lock poisoned")?;
+        let running = guard.as_mut().ok_or("the host is not running")?;
+        running
+            .stdin
+            .write_all(format!("{}\n", line.trim_end_matches('\n')).as_bytes())
+            .map_err(|e| format!("could not write to the host: {e}"))?;
+        running
+            .stdin
+            .flush()
+            .map_err(|e| format!("could not flush to the host: {e}"))
+    }
+
+    pub fn status(&self) -> Status {
+        let ready = self.ready.lock().ok().and_then(|slot| slot.clone());
+        let failure = self.failure.lock().ok().and_then(|slot| slot.clone());
+        let uncontained = self.uncontained.lock().ok().and_then(|slot| slot.clone());
+        match self.inner.lock() {
+            Ok(guard) => Status {
+                running: guard.is_some(),
+                pid: guard.as_ref().map(|r| r.pid),
+                uptime_secs: guard.as_ref().map(|r| r.started.elapsed().as_secs()),
+                ready,
+                failure,
+                uncontained,
+                build: build_stamp(),
+            },
+            // A poisoned lock means a panic happened while it was held, which is
+            // not the same fact as "no host is running" - so the reason says so
+            // rather than the window being told a confident false.
+            Err(_) => Status {
+                running: false,
+                pid: None,
+                // Not zero. A lock nobody could read says nothing about how long
+                // the host has been up, and zero would read as "just started".
+                uptime_secs: None,
+                ready,
+                failure: Some("cannot tell: the host lock was poisoned by a panic".into()),
+                uncontained,
+                // Still answerable: the stamp is compiled in and needs no lock.
+                build: build_stamp(),
+            },
+        }
+    }
+
+    /// Close stdin, wait up to `QUIT_GRACE`, then kill.
+    ///
+    /// Closing stdin is what `serve()` reads as the supervisor going away, so
+    /// the host stops now and leaves the run resumable with an `ending.json`
+    /// stamp beside its lock. The kill is the fallback for a host that will not
+    /// go, and reaching it is a fact worth recording rather than a normal quit.
+    pub fn stop(&self) {
+        let Ok(mut guard) = self.inner.lock() else {
+            return;
+        };
+        let Some(mut running) = guard.take() else {
+            return;
+        };
+        let pid = running.pid;
+        drop(running.stdin);
+        let deadline = Instant::now() + QUIT_GRACE;
+        loop {
+            match running.child.try_wait() {
+                Ok(Some(_)) => return,
+                // Cannot tell. Treated as "still there" and killed at the
+                // deadline, which is the fail-closed direction: a process left
+                // running is a second writer against a run directory.
+                Ok(None) | Err(_) => {}
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        // Said out loud, because after #206 this is the path that should not
+        // happen: the host leaving on its own is what writes the stamp, and a
+        // kill writes none. Somebody looking at a run with no ending needs to be
+        // able to find out here whether the quit is what did it.
+        crate::applog::app(&format!(
+            "host pid {pid} did not leave within {}s of stdin closing; killed",
+            QUIT_GRACE.as_secs()
+        ));
+        let _ = running.child.kill();
+        let _ = running.child.wait();
+    }
+}
+
+/// Start the host and remember what happened.
+///
+/// Called from `setup` at launch and again by the window if the first attempt
+/// failed. **Not called by the window on the happy path**, and that is the
+/// point: the host process is the app, so Rust owns its lifetime. Waiting to be
+/// asked would mean a webview that failed to load leaves the app with no host
+/// and - worse - no record of why.
+pub fn launch(app: &AppHandle) -> Result<u32, String> {
+    let state = app.state::<HostProcess>();
+    let result = state.start(app);
+    if let Ok(mut slot) = state.failure.lock() {
+        *slot = result.as_ref().err().cloned();
+    }
+    // To stderr as well as to the record. If the reason the host failed is that
+    // the bundle is wrong, the window is exactly the thing that may not be able
+    // to report it. A debug build has a console; a release build's stderr is
+    // still capturable by whatever launched it.
+    if let Err(reason) = &result {
+        crate::applog::app(&format!("host failed to start: {reason}"));
+    }
+    result
+}
+
+#[tauri::command]
+pub fn host_start(app: AppHandle) -> Result<u32, String> {
+    launch(&app)
+}
+
+#[tauri::command]
+pub fn host_send(line: String, state: tauri::State<'_, HostProcess>) -> Result<(), String> {
+    state.send(&line)
+}
+
+#[tauri::command]
+pub fn host_status(state: tauri::State<'_, HostProcess>) -> Status {
+    state.status()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_serialises_the_keys_the_window_reads() {
+        // The one failure mode that is silent in both directions. serde's
+        // default is the Rust spelling, so `uptime_secs` would arrive at a
+        // window reading `uptimeSecs` as `undefined` - which the panel would
+        // render as "up for an unknown time" on a host that is up and fine.
+        // Nothing goes red on either side; the number is simply always missing.
+        let status = HostProcess::default().status();
+        let json = serde_json::to_value(&status).expect("Status serialises");
+        let object = json.as_object().expect("Status is an object");
+
+        for key in [
+            "running",
+            "pid",
+            "uptimeSecs",
+            "ready",
+            "failure",
+            "uncontained",
+            "build",
+        ] {
+            assert!(object.contains_key(key), "Status no longer sends {key}");
+        }
+        assert!(
+            !object.contains_key("uptime_secs"),
+            "Status is sending the Rust spelling; the window reads uptimeSecs"
+        );
+
+        // No host is running, so both of these are absences rather than zeroes.
+        assert_eq!(object["pid"], serde_json::Value::Null);
+        assert_eq!(object["uptimeSecs"], serde_json::Value::Null);
+
+        let build = object["build"].as_object().expect("build is an object");
+        for key in ["version", "commit", "at"] {
+            assert!(build.contains_key(key), "Build no longer sends {key}");
+        }
+    }
+
+    #[test]
+    fn the_build_stamp_reports_an_absence_rather_than_a_placeholder() {
+        // #201's whole point is that a reader can tell two builds apart, so a
+        // value that cannot be established has to be visibly missing. A tree
+        // with no git produces `None` here, never `"unknown"` and never `""` -
+        // both of which a window would happily print beside the real fields.
+        let build = build_stamp();
+        assert_eq!(build.version, env!("CARGO_PKG_VERSION"));
+        if let Some(commit) = &build.commit {
+            assert!(!commit.is_empty(), "an empty commit must be None, not Some");
+            assert!(
+                commit.chars().all(|c| c.is_ascii_hexdigit()),
+                "a commit that is not hex was not read from git: {commit}"
+            );
+        }
+        // The build happened, so the clock was readable; a stamp of zero would
+        // mean 1970 and is not something to report as a build time.
+        assert!(build.at.is_none_or(|at| at > 0));
+    }
+
+    #[test]
+    fn a_verbatim_drive_path_loses_its_prefix() {
+        // The exact shape `BaseDirectory::Resource` returned in the spike, and
+        // the exact shape Node refused with `EISDIR ... lstat 'C:'`.
+        assert_eq!(
+            strip_verbatim(Path::new(
+                r"\\?\C:\Program Files\Vibe\host\dist\src\hostmain.js"
+            )),
+            PathBuf::from(r"C:\Program Files\Vibe\host\dist\src\hostmain.js")
+        );
+    }
+
+    #[test]
+    fn a_unc_path_keeps_its_prefix_because_it_needs_it() {
+        // `\\?\UNC\server\share` is a real network path. Stripping it yields
+        // `UNC\server\share`, which resolves nowhere - a fix that breaks the
+        // case it was not written for.
+        let unc = Path::new(r"\\?\UNC\build-server\share\Vibe\hostmain.js");
+        assert_eq!(strip_verbatim(unc), unc.to_path_buf());
+    }
+
+    #[test]
+    fn an_ordinary_path_is_left_alone() {
+        for path in [
+            r"C:\Users\a\vibe\hostmain.js",
+            "/Applications/Vibe.app/Contents/Resources/host/dist/src/hostmain.js",
+            "relative/host/dist/src/hostmain.js",
+        ] {
+            assert_eq!(strip_verbatim(Path::new(path)), PathBuf::from(path));
+        }
+    }
+
+    #[test]
+    fn a_prefix_with_nothing_usable_after_it_is_left_alone() {
+        for path in [r"\\?\", r"\\?\C", r"\\?\C:", r"\\?\Volume{9f8a}\host"] {
+            assert_eq!(strip_verbatim(Path::new(path)), PathBuf::from(path));
+        }
+    }
+}

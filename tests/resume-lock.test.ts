@@ -1,6 +1,5 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -11,6 +10,7 @@ import type { RunLock } from '@src/lock.js';
 import { createRun, saveState } from '@src/run.js';
 import { DEFAULTS } from '@src/config.js';
 import type { Config, RunState } from '@src/types.js';
+import { absentPid } from './helpers/pids.js';
 
 /**
  * What `vibe resume` does before it has permission.
@@ -63,13 +63,16 @@ function plant(dir: string, over: Partial<RunLock>): void {
   writeFileSync(lockPath(dir), JSON.stringify(lock, null, 2), 'utf8');
 }
 
-function deadPid(): number {
-  return Number(
-    execFileSync(process.execPath, ['-e', 'process.stdout.write(String(process.pid))'], {
-      encoding: 'utf8',
-    }).trim(),
-  );
-}
+/**
+ * The two cases below plant a pid the OS is not using, from `helpers/pids.js`.
+ *
+ * They drive the real `main`, so the real probe is part of the path they are
+ * about and there is nowhere to inject a `PidProbe` - unlike a case about what
+ * a verdict *means*, which now states its premise instead (#164). What they had
+ * before was a pid harvested by spawning a process and letting it exit, which is
+ * the number the OS is about to hand out next; the helper says what replaced it
+ * and what residual is left.
+ */
 
 /** Both streams: `log.fail` writes to stderr, and the refusals under test are fails. */
 async function captureLog<T>(work: () => Promise<T>): Promise<{ result: T; lines: string[] }> {
@@ -254,7 +257,7 @@ test('--force takes a live lock and says what it overrode', async () => {
 
 test('a resume over an interrupted lock needs no force', async () => {
   const { targetDir, state } = completed();
-  plant(state.dir, { pid: deadPid() });
+  plant(state.dir, { pid: absentPid() });
 
   const { result, lines } = await captureLog(() =>
     main(['resume', state.id, '-C', targetDir, '--skip-probe', '--no-progress']),
@@ -265,13 +268,21 @@ test('a resume over an interrupted lock needs no force', async () => {
   assert.equal(existsSync(lockPath(state.dir)), false, 'and the lock was released at the end');
 });
 
-test('a resume over an interrupted lock says the previous process was interrupted', async () => {
+test('a resume over a dead lock says who held it, and how it went away', async () => {
   // A completed run with nothing in flight: the recovery report has nothing to
   // say, and before this the resume was silent about the kill entirely. The
   // fact that the last process did not finish is the lock's to report, not the
   // accounting's, and it is true whether or not anything was left to charge.
+  //
+  // This used to assert the word "interrupted", and that part of the claim did
+  // not survive #131: a dead pid has two opposite causes and the pid alone was
+  // never evidence for the worse one. What it was really pinning - that the
+  // resume announces the previous process, names it and says when it started -
+  // is unchanged and is still asserted. The new clause is the third fact, which
+  // is the one the pid could not supply: with no `ending.json` beside the lock,
+  // the process ran none of its own code on the way out.
   const { targetDir, state } = completed();
-  const pid = deadPid();
+  const pid = absentPid();
   plant(state.dir, { pid, startedAt: '2026-08-26T09:00:00.000Z' });
 
   const { result, lines } = await captureLog(() =>
@@ -280,7 +291,8 @@ test('a resume over an interrupted lock says the previous process was interrupte
 
   assert.equal(result, EXIT.OK);
   const said = lines.join('\n');
-  assert.match(said, /interrupted/);
+  assert.match(said, /no longer running/);
+  assert.match(said, /nothing recorded how it ended/);
   assert.match(said, new RegExp(`pid ${String(pid)}`), 'names who it was');
   assert.match(said, /2026-08-26T09:00:00\.000Z/, 'and when it started');
 });

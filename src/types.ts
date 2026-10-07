@@ -362,6 +362,61 @@ export interface GitConfig {
   useBranch: boolean;
   branchPrefix: string;
   commitEachRound: boolean;
+  /**
+   * Run in a git worktree of its own rather than in the repository (#223).
+   *
+   * **Off by default, and that is not timidity.** A bare `git worktree add`
+   * produces a checkout with no `node_modules` and nothing built, so on most
+   * projects the verification gate cannot run in it — which means turning this on
+   * without `worktreeCommand` would break runs that work today. The feature is
+   * only useful *with* its setup command, so the default cannot be on; AGENTS.md
+   * states the same rule generally as *"groundwork ships separately, with no
+   * behaviour change"*.
+   *
+   * What it buys is what AGENTS.md already tells a human to do by hand: the tree
+   * being edited is not the tree you are working in, several runs can exist side
+   * by side, and a run's branch is checked out somewhere that is not your
+   * desk. What it costs is disk — a worktree per run, and AGENTS.md measures a
+   * built one at gigabytes — so nothing here deletes them and nothing pretends
+   * to: `.worktrees/<run-id>` is named after the run precisely so the ones worth
+   * pruning can be identified.
+   */
+  worktree: boolean;
+  /**
+   * The user's own command, run instead of `git worktree add` (#223).
+   *
+   * **The main path rather than an exotic escape hatch.** A worktree that cannot
+   * build is not useful, so the real shape of this setting is
+   * `git worktree add --detach "$VIBE_WORKTREE" HEAD && cd "$VIBE_WORKTREE" && npm ci`,
+   * and the default path exists mostly so the setting means something before
+   * anybody has written one.
+   *
+   * It runs through a shell, which is allowed for exactly the reason
+   * `verify.command` is: it is a line a **person** wrote into a file they commit,
+   * and being a sequence is the whole point of it. `runUserCommand` in
+   * `verify.ts` is shared rather than copied so "a shell is used in one place"
+   * stays true — and no model can reach this key, since there is no config tool
+   * (#144 decision 3).
+   *
+   * It is told `VIBE_WORKTREE`, `VIBE_REPO` and `VIBE_RUN_ID` through the
+   * environment rather than as arguments, so a path with a space in it cannot be
+   * re-split into two words, and it must leave a working tree at
+   * `VIBE_WORKTREE` — checked afterwards, because a script that exits 0 and
+   * leaves nothing behind would otherwise fail one git command at a time with
+   * nothing naming the cause. Deliberately **not** told a branch: `prepareGit`
+   * names that, and a second answer to it is how the two come to disagree.
+   */
+  worktreeCommand: string | null;
+  /**
+   * How long that command may take.
+   *
+   * **Borrowed from `verify.timeoutMs` rather than chosen**, and the borrowing is
+   * the honest part: this is the same kind of thing — the user's own command,
+   * doing project work on this machine — and `npm ci` on a cold cache is the case
+   * that decides it. Nothing here has measured a setup script, so taking a figure
+   * that was measured for a comparable command beats inventing one.
+   */
+  worktreeTimeoutMs: number;
 }
 
 export interface ContextConfig {
@@ -460,13 +515,125 @@ export interface VerifyConfig {
    * and nothing yet wants two.
    */
   artifactMaxBytes: number | null;
+  /**
+   * Whether a reviewer's reproducer is placed and run (#113).
+   *
+   * True by default. Two things make that the right default rather than an
+   * opt-in: a run whose reviewer supplies no reproducer is byte-identical either
+   * way, so nothing changes for anyone until a reviewer writes one; and a
+   * feature nobody turns on proves nothing about false findings, which is the
+   * whole point of it.
+   *
+   * What turning it off buys is the one thing it costs: a gate run per blocking
+   * finding that carries a reproducer, at that gate's own timeout. There is no
+   * cap on how many, deliberately - a number here would be invented, and the
+   * ceiling that exists is the reviewer's own willingness to write tests.
+   *
+   * Off also means the file is never written into the working tree. That is a
+   * real reason to want it off on a repository where an unexpected file would
+   * matter, even though the implementer writes files there every round.
+   */
+  reproducers: boolean;
 }
 
 export interface ProgressConfig {
   enabled: boolean;
   /** Minimum gap between heartbeat lines, and the tick interval for a silent turn. */
   intervalMs: number;
+  /**
+   * Gap between readings of what a write turn has changed in the tree (#136).
+   *
+   * Its own number rather than `intervalMs`, because the two cost different
+   * things. A heartbeat is a counter incremented by a line that had already
+   * arrived; a work reading is three `git` child processes against a tree an
+   * agent is writing to, and on a large repository that is not free. Halving
+   * the cadence halves the cost of the only part of in-turn progress that has
+   * one.
+   *
+   * `progress.enabled: false` turns this off with everything else - there is no
+   * second switch, because a run that does not want progress does not want this
+   * either.
+   */
+  workIntervalMs: number;
+  /**
+   * How long a turn may produce nothing at all before it is stopped. 0 disables.
+   *
+   * **A ceiling on silence, which is a different question from the turn ceiling
+   * beside it.** `codex.timeoutMs` and `claude.*TimeoutMs` bound how long a turn
+   * may *take*; this bounds how long it may say nothing while taking it. A run
+   * on 2026-09-15 shows why both are needed: a review turn went silent 5m14s in
+   * and was killed 39m17s later at the 45-minute Codex ceiling, having done
+   * nothing for the whole of it. Raising that ceiling would only have made it
+   * hang for longer.
+   *
+   * **Silence is measured from the child's last line**, not from its last
+   * completed item, because that is the finer of the two signals `progress.ts`
+   * holds and the one a stall trips first.
+   *
+   * The default is the owner's, taken with the separation in front of them: the
+   * longest any healthy turn in that run went without speaking was 3m30, on a
+   * 12m30 critique, and an 11m30 implement turn never went more than 32 seconds
+   * - so ten minutes is roughly three times the worst observed and an order of
+   * magnitude under the stall. It is a decision rather than a census, which is
+   * why it is a setting and why the number is here to be changed.
+   *
+   * Off with `enabled: false`, like `workIntervalMs`: a run that does not want
+   * progress does not want this either, and there is no second switch.
+   */
+  maxQuietMs: number;
 }
+
+/**
+ * What the loop does when it reaches a boundary that has a row in the matrix.
+ *
+ * Three modes, and the difference between the two that hold is **what a hold
+ * costs**, not how often it happens:
+ *
+ * - **`auto`** - the loop runs through. Nothing is asked and nothing is written.
+ * - **`step`** - the loop holds and asks. That costs nothing, because the app
+ *   links this source and a gate is an `await` at a phase boundary: the process
+ *   stays alive and the agent session stays warm. It needs somebody who can be
+ *   asked, and a terminal is not one - `vibe run` passes no host and a promise
+ *   is not answerable from a prompt - so from the CLI a `step` row runs through.
+ *   That is the mode's definition rather than a failure of it, and `vibe doctor`
+ *   prints it per row so it is not something you find out by not seeing it.
+ * - **`stop`** - the run **ends** here, resumably: `Escalation(NEEDS_HUMAN)` ->
+ *   `NEEDS-INPUT.md` -> `status: 'needs-input'` -> `vibe resume`. It asks
+ *   nobody, so it means exactly the same thing in both front ends, and it is the
+ *   mode to reach for from a terminal.
+ *
+ * The earlier reading of `step` - "hold the second and every later time this
+ * boundary is reached, where `stop` holds the first" - was rejected because it
+ * needs a durable per-boundary record of whether the run has been here before,
+ * and nothing in `RunState` carries one. Two modes that differ only in a count
+ * nobody stores is a distinction that survives a process and not a resume.
+ */
+export type GateMode = 'auto' | 'step' | 'stop';
+
+/**
+ * The boundaries that get a row. Two of the eight deliberately do not.
+ *
+ * **`complete`.** A gate holds *before the next thing*, and at `complete` there
+ * is no next thing. `holdAt` has excluded it since #134 and the reasoning is
+ * recorded there; this makes the exclusion a fact about the vocabulary rather
+ * than a line in one function.
+ *
+ * **`final-fix`.** Drawn locked in the settings design - *"notifies, never
+ * gates"* - and the loop agrees: the checkpoint is written, and then the loop
+ * goes *back to the top so the verification gate proves the final fix broke
+ * nothing*. Holding before that offers a decision made with strictly less
+ * information than the same decision one step later, and it converts a run that
+ * was one gate from finished into one that reports needing input. #134 shipped
+ * it gateable because nothing could configure a gate yet; naming it here is
+ * where that gets decided rather than defaulted.
+ *
+ * Both are refused by name in `vibe.config.json`, each with its own reason -
+ * dropping the key silently would leave someone believing they had armed a gate.
+ */
+export type GateableBoundary = Exclude<CheckpointBoundary, 'final-fix' | 'complete'>;
+
+/** A mode per gateable boundary. Every row is present; `auto` is a value, not an absence. */
+export type GatesConfig = Record<GateableBoundary, GateMode>;
 
 export interface Config {
   /**
@@ -487,6 +654,19 @@ export interface Config {
   questions: QuestionsConfig;
   git: GitConfig;
   context: ContextConfig;
+  /**
+   * Where the loop hands control back, and what that costs.
+   *
+   * One setting for both front ends. Before this there was exactly one gate in
+   * the product and it was a command name - `vibe plan` - and the six boundaries
+   * #134 made holdable were held at unconditionally by anything that passed a
+   * host, which is to say the app asked you to release every plan round and
+   * every review round of every run.
+   *
+   * `planOnly` is deliberately NOT folded in here, and that is a decision rather
+   * than an omission - see `RunState.planOnly`.
+   */
+  gates: GatesConfig;
   /**
    * Does the code actually run.
    *
@@ -513,7 +693,33 @@ export interface Config {
    * review loop, where they consumed a round as a plan-stage P1.
    */
   toolchain: ToolchainContract;
+  /**
+   * Prompt blocks this project replaces, by the name `promptBlocks()` gives them.
+   *
+   * **A reversal, and the reasoning it reverses is recorded rather than quietly
+   * dropped** (#223). The settings screen said these were *"deliberately not
+   * configuration: they are the product's behaviour, and a per-project override
+   * would mean two runs of the same version could not be compared."* That cost
+   * is real and is now paid on purpose: *"We need to be able to edit the
+   * prompts."* An owner who wants a reviewer under different standing
+   * instructions has no other way to get one, and telling them the product knows
+   * better is not an answer.
+   *
+   * What keeps the cost visible rather than merely accepted: an overridden block
+   * is **named on the run's own config** - `configDiff` reports `prompts.<block>`
+   * like any other setting - so a run whose reviewer was told something
+   * different says so in its record, which is the half that makes two runs
+   * comparable again.
+   *
+   * Empty by default, so a project that sets none is byte-identical to one that
+   * predates this key.
+   */
+  prompts: PromptOverrides;
 }
+
+/** Block name to replacement text. Open-ended keys, checked against the real list. */
+export type PromptOverrides = Readonly<Record<string, string>>;
+
 
 export interface LoadedConfig extends Config {
   configPath: string | null;
@@ -640,12 +846,178 @@ export interface Evidence {
   ref?: string;
 }
 
+/**
+ * Who made a claim (#141).
+ *
+ * A severity is an assertion with an owner - that is the whole design of #48 and
+ * #66 - and until this existed the archive could not name one. Every finding came
+ * from `parseFindings` reading a model's structured output, so "absent means an
+ * agent said it" was true by construction and therefore never written down. The
+ * moment a human can raise one, that inference is wrong, and a human finding
+ * indistinguishable from the reviewer's in `code-review-N.json` would corrupt the
+ * one record that says what the reviewer thought.
+ *
+ * Four members, and each is a different kind of claim:
+ *
+ * - `critic` / `reviewer` - a model's judgement, bought with a turn. Stamped by
+ *   `groundAndRecord`, which is the single point both writers pass through and
+ *   the only place that knows which role produced the report.
+ * - `human` - a person, through `src/raise.ts`. Costs no tokens and no turn.
+ * - `vibe` - a mechanical fact about an artifact on disk, asserted by the tool
+ *   itself. `refusePlaceholderPlan` is the only one today, and it used to be
+ *   indistinguishable from the critic's own P1 about the same defect.
+ *
+ * The seated *provider* is deliberately not part of this. `roles.ts` already
+ * records who holds a seat and it can change mid-run; this names the position
+ * that made the claim, which is what a later reader is asking about.
+ */
+export type FindingAuthor = 'critic' | 'reviewer' | 'human' | 'vibe';
+
+/**
+ * One move of a severity, and who made it (#142).
+ *
+ * `by` is `FindingAuthor` rather than a second vocabulary: #141 already answered
+ * "how does this record name a source", on the same record, and inventing a
+ * parallel enum a month later is how two fields come to disagree about what
+ * `human` means. Only `human` is ever written today - the guards write
+ * `downgraded`, which says the same thing in the field that is theirs - and the
+ * type is the shared one so that a later writer has a name already waiting.
+ *
+ * `from` is captured by `move` in `src/evidence.ts` at the instant of the change
+ * and can never be supplied by a caller. That is the whole reason the guards
+ * share a construction, and it is why widening it was the right shape rather
+ * than adding a third path beside it: a `from` a caller could type is a `from`
+ * that eventually names a severity the finding never had.
+ */
+export interface SeverityChange {
+  from: Severity;
+  to: Severity;
+  by: FindingAuthor;
+  /** Why, in the person's own words. Required: a move nobody explained is noise. */
+  reason: string;
+  /** ISO 8601, so the order in the list is checkable rather than asserted. */
+  at: string;
+}
+
+/**
+ * A test the reviewer wrote to make its own finding fail - the executable
+ * witness (#113).
+ *
+ * `src/evidence.ts` says what grounding can and cannot do, in its own words:
+ * *"Not whether it is correct. Nothing here can judge a claim; it can only check
+ * that the claim names a real place."* A finding that is **wrong** and cites a
+ * real line is passed by both guards and cannot be told from a true one - #44's
+ * P1 is the standing example, and it bought a fix round that edited working code
+ * to satisfy a premise `tsc` refutes in four seconds. This is the field that
+ * makes that case observable.
+ *
+ * **A file, never a command**, and that is the whole shape of the design.
+ * `src/verify.ts` states the rule at the one place a shell is used at all -
+ * *"Model-authored text is never passed to a shell"* - so a reviewer-supplied
+ * `command` would hand a Codex turn the user's own privileges on the user's own
+ * machine. What ships instead: the reviewer returns a test file, vibe places it,
+ * and the command executed is **byte-identical to the gate the user configured**.
+ * No new execution authority, and nothing model-authored on a command line.
+ *
+ * Writing a model-authored *file* into the tree is not new authority either -
+ * the implementer does it every round, and the gate runs what it wrote. What is
+ * new is that vibe does the writing, so the containment, the refusal to
+ * overwrite and the removal afterwards are all in `src/reproducer.ts` rather
+ * than in an agent's judgement.
+ */
+export interface Reproducer {
+  /**
+   * Where the file goes, repo-relative.
+   *
+   * Model-authored, so it is resolved through the same containment
+   * `checkEvidence` applies to a citation - and then held to more, because this
+   * one writes: an existing path is refused rather than overwritten, and a
+   * symlinked ancestor is refused rather than followed.
+   */
+  path: string;
+  /** The file itself, written verbatim. */
+  contents: string;
+  /**
+   * Which configured gate runs it, by name.
+   *
+   * A name matched against `resolveGates`, never a command: the reviewer chooses
+   * *which* of the user's own gates observes the file, and cannot choose what
+   * that gate runs. Absent is legal and resolves to the sole gate when there is
+   * exactly one - which is every legacy config, since `resolveGates` synthesizes
+   * a single gate named `verification`.
+   */
+  gate?: string;
+}
+
+/**
+ * What running a reproducer observed. Three answers, and one of them is "cannot
+ * tell" (#113).
+ *
+ * - `reproduced` - the gate passed on this tree without the file and failed with
+ *   it. The finding points at something that actually happens.
+ * - `did-not-reproduce` - the gate passed with the file present. The test the
+ *   reviewer wrote to make its own finding fail did not fail.
+ * - `unproven` - nothing was observed: the file could not be placed, no gate
+ *   could be resolved, the gate could not run, or it failed with no observed
+ *   baseline to attribute the failure to.
+ *
+ * **The two directions need different amounts of evidence, and that asymmetry is
+ * the design.** A *pass* is self-certifying: the added test ran inside a suite
+ * that exited 0, so nothing else was broken and the test itself passed. A
+ * *failure* is not: without an observed pass of the same gate on the same tree
+ * without the file, the failure may be any other test in the suite. So
+ * `reproduced` requires the baseline and `did-not-reproduce` does not, and a
+ * failure with no baseline is `unproven` rather than a proof.
+ */
+export type ReproducerVerdict = 'reproduced' | 'did-not-reproduce' | 'unproven';
+
+export interface ReproducerOutcome {
+  verdict: ReproducerVerdict;
+  /**
+   * Which moment this observation is from.
+   *
+   * `review` is before the fix, and is what decides whether the finding blocks.
+   * `final-fix` is after the round that is deliberately never re-reviewed, and
+   * is the one thing that has ever been able to turn OUTSTANDING.md's *"worked
+   * on and unconfirmed"* into a fact.
+   */
+  at: 'review' | 'final-fix';
+  /** The gate that ran it, or null when none could be resolved. */
+  gate: string | null;
+  /** What was executed - the configured gate's command, unchanged. Null when nothing ran. */
+  command: string | null;
+  /** Null when the command never ran, or ended without one. */
+  exitCode?: number | null;
+  /**
+   * Whether a pass of the same gate on the same tree *without* the file was
+   * observed. Only `gate-passed` can support `reproduced`.
+   */
+  baseline: 'gate-passed' | 'not-observed';
+  /** Why it is unproven. Null on the two verdicts that observed a run. */
+  reason: string | null;
+  /** Where the file was kept under the run directory, or null when it was not. */
+  archived: string | null;
+}
+
 export interface Finding {
   id: string;
   severity: Severity;
   title: string;
   detail: string;
   suggested_fix: string;
+  /**
+   * Who raised it, or absent (#141).
+   *
+   * **Absent is not "an agent".** Every finding recorded before this field
+   * existed has none, and so does one whose author could not be attributed -
+   * `groundAndRecord` stamps only the two roles that can produce a report, and
+   * leaves the field off for anything else rather than guessing. A renderer that
+   * needs the value narrows it through `authorOf`, which returns null for
+   * anything outside the four members above: this rides through `readFinding`
+   * unvalidated, exactly as `evidence` does, because refusing a whole finding
+   * over a bad label would delete a claim to protect a caption.
+   */
+  raisedBy?: FindingAuthor;
   /**
    * Where this finding says to look. At least one entry, per the schema.
    *
@@ -664,8 +1036,66 @@ export interface Finding {
    * On the finding itself, not only in the event log: a downgrade that appeared
    * in a log line alone would be invisible by the time anyone read the round's
    * artifact.
+   *
+   * **The guards' field, and theirs alone** (#142). `toP2` is the only writer,
+   * nothing clears it, and a person restoring the severity afterwards does not
+   * touch it - overwriting it on a restore would erase the fact that a guard
+   * fired, which is the exact thing #48 added the field for. What a person did
+   * lands in `severityChanges` beside it, so the two questions a reader has -
+   * *did a guard fire, and why* and *how did this reach the severity it has* -
+   * each have their own answer rather than one answer that has to serve both.
    */
   downgraded?: { from: Severity; reason: string };
+  /**
+   * Severity changes a **person** made, oldest first (#142).
+   *
+   * Until this existed a severity moved in exactly one direction, was written by
+   * exactly one function, and could never be moved back: every instance came
+   * from `toP2`, always landing on P2, always for a mechanical reason, and
+   * permanent. That is correct for a rule running unattended - grounding
+   * *"cannot judge a claim; it can only check that the claim names a real
+   * place"* - and it means a true P1 that cited a file the reviewer described
+   * from memory is demoted for the same reason a false one is. The only thing in
+   * the system that can tell those apart is a person reading the finding, and
+   * they could see the downgrade, agree it was wrong, and do nothing about it.
+   *
+   * A list rather than a field, because a finding grounding demoted and a person
+   * restored has a history of two steps and the artifact should show both.
+   * Append-only: nothing here is ever rewritten, so the guard's reason stays
+   * readable after the restore that overrode it.
+   *
+   * Absent on every finding nobody touched, which is almost all of them, and an
+   * empty list is never written - a run in which no severity moved produces the
+   * artifacts it produced before this existed, byte for byte.
+   */
+  severityChanges?: SeverityChange[];
+  /**
+   * The test the reviewer wrote to make this finding fail (#113).
+   *
+   * Optional, and its absence is never held against the finding. Requiring one
+   * would mean a reviewer that cannot write a failing test loses its finding,
+   * which is the opposite of what a guard should cost - and it would put a
+   * schema requirement on a field the loop can only *sometimes* act on. A
+   * finding with none behaves exactly as every finding did before this existed.
+   */
+  reproducer?: Reproducer;
+  /**
+   * What running that test observed, oldest first (#113).
+   *
+   * A list because the same reproducer is run at two different moments and they
+   * answer two different questions: at `review`, does the defect happen at all;
+   * after the final fix, is it gone. Append-only, like `severityChanges` and for
+   * the same reason - each entry is a record of an observation, and an
+   * observation is not corrected by a later one.
+   *
+   * A `did-not-reproduce` at `review` costs the finding its blocking severity
+   * through `toP2`, so `downgraded` carries the demotion and this carries the
+   * evidence for it. Nothing here ever *raises* a severity: `reproduced` records
+   * that the finding is real and leaves it exactly where the reviewer put it,
+   * because promoting on a machine's say-so is the move #142 reserved for a
+   * person.
+   */
+  reproducerOutcomes?: ReproducerOutcome[];
   /**
    * Real, worth doing, and belongs in separate work rather than in this change.
    *
@@ -781,6 +1211,20 @@ export interface GateOutcome {
   command: string | null;
   /** Executions actually performed. Zero for unavailable and disabled. */
   runs: number;
+  /**
+   * How many of those `runs` failed (#135).
+   *
+   * The fraction is the whole point: `failed: 1` of `runs: 3` is a suite that is
+   * not deterministic, and `failed: 3` of `runs: 3` is one that is broken. Until
+   * this existed a failing gate returned on its first non-zero exit, so `runs`
+   * was the attempt that failed and no archive entry could tell the two apart.
+   *
+   * **Optional, and absent is not zero.** Every gate outcome recorded before
+   * this field existed has none, and a `0` there would assert that a failing
+   * gate failed nothing. Present on a `failed` outcome and absent on every other
+   * status, where the count is either meaningless or already implied by `runs`.
+   */
+  failed?: number;
   required: boolean;
   /**
    * What was preserved of what the failing command produced (#62).
@@ -898,9 +1342,18 @@ export interface RunEvent {
  * looked like at any earlier point. These are the points at which a snapshot is
  * a coherent thing to resume from: each is taken after the work of a round has
  * been recorded and before the next round has begun.
+ *
+ * `question-round` joined them in #139, and its absence had been the one hole in
+ * that sentence: the question loop has its own counter and its own cap, it buys
+ * an answerer turn every time round, and it was the only round in the loop that
+ * left no snapshot. It also ends the blur - a revision driven by the planner's
+ * own questions used to be recorded as a plan round, which is a different
+ * diagnosis about a run wearing the same name.
  */
 export type CheckpointBoundary =
   | 'plan-round'
+  /** After the answerer's turn, whether or not a revision followed it (#139). */
+  | 'question-round'
   | 'plan-approved'
   | 'implemented'
   | 'verify-round'
@@ -943,6 +1396,23 @@ export interface RunCheckpointMeta {
   planRound: number;
   reviewRound: number;
   verifyRound: number;
+  /**
+   * Question rounds spent so far. **Absent means the checkpoint predates #139**,
+   * which is not the same fact as zero and must not be drawn as one.
+   *
+   * Optional for exactly that reason: `readCheckpointShape` refuses a snapshot
+   * missing any field it requires, so requiring this would make every checkpoint
+   * written before this change unreadable - and `vibe fork` would report a
+   * directory of healthy snapshots as damaged.
+   *
+   * It is here rather than only in the snapshot body (which is a whole
+   * `RunState` and has always carried the counter) because this is the summary a
+   * reader actually gets: the fork listing and `ForkOrigin` read the meta, and a
+   * rounds fingerprint like `q3 p1` is unreadable without it - three rounds of
+   * the planner answering itself is a recognisable and unhealthy shape, and it
+   * looked identical to `p4`.
+   */
+  questionRound?: number;
   /** A full 40-hex object id, or null. Never abbreviated, never symbolic. */
   commit: string | null;
   commitNote: CheckpointCommitNote;
@@ -1006,7 +1476,43 @@ export interface ForkPendingEntry {
 export interface RunState {
   id: string;
   dir: string;
+  /**
+   * The repository this run belongs to.
+   *
+   * **Where the archive is, which since #223 is not necessarily where the work
+   * happens.** `dir` is `<targetDir>/.vibe/runs/<id>`, the lock sits inside that,
+   * and `listRuns` reads `<targetDir>/.vibe/runs` for the planner's past-run
+   * index — so this is the run's *home*. When `worktree` is set the loop's git
+   * operations, verification gate and agent children all run in a separate
+   * checkout instead, and `workDirOf` is the one place that difference is
+   * resolved.
+   *
+   * Keeping the archive here rather than in the worktree is the decision that
+   * makes auto-worktrees usable at all: a record written into a tree somebody is
+   * about to prune is a record the next run's planner cannot read, and
+   * `AGENTS.md` has a hand-written `cp -r` recipe for exactly that problem.
+   */
   targetDir: string;
+  /**
+   * Whether this run works in a git worktree of its own (#223).
+   *
+   * **A decision, not a path, and that split is the design.** The path is
+   * `worktreePath(targetDir, id)` — derived, never stored — for the same reason
+   * `loadRun` re-derives `dir` and `targetDir`: a repository legitimately moves,
+   * and a stored absolute path is the thing that breaks when it does. What
+   * cannot be re-derived is whether this run was *started* with worktrees on,
+   * because the setting may have been toggled since; so that is what is kept.
+   *
+   * It also means vibe owns the location rather than a custom script choosing
+   * one. A script that printed its own path would be a path this field would
+   * have to store, and a resume after a move would then look in a place that no
+   * longer exists.
+   *
+   * Absent on every run that predates this and on every run with the setting
+   * off, which is what makes `workDirOf` collapse to `targetDir` — so a run that
+   * never had a worktree behaves exactly as it did.
+   */
+  worktree?: boolean;
   task: string;
   /**
    * The Claude conversation's id - `SLOTS.main`'s storage. Minted before the
@@ -1177,6 +1683,29 @@ export interface RunState {
    * never here.
    */
   sessionRegistered?: boolean;
+  /**
+   * This run has one phase, and it is planning.
+   *
+   * **Not a gate, and #140 deliberately did not make it one.** That issue asked
+   * for `vibe plan` to resolve to `gates['plan-approved'] = 'stop'` so there
+   * would not be two mechanisms for "stop after planning". They are not two
+   * mechanisms for one thing; they are two different things, and the difference
+   * is the one #140 itself insists on elsewhere - *a gate stop and a run that
+   * finished are not the same event*:
+   *
+   * - `planOnly` says there is no next phase. The run **completes**: `status:
+   *   'planned'`, `phase: 'complete'`, a `complete` checkpoint, exit 0. Nothing
+   *   is being held back, which is the same reason `complete` has no row in the
+   *   matrix at all.
+   * - `gates['plan-approved'] = 'stop'` says a full run halts before
+   *   implementing. It exits 2 with `status: 'needs-input'`, and `vibe resume`
+   *   carries on into the implementation it was always going to do.
+   *
+   * Folding the first into the second would make `vibe plan` exit 2 and report
+   * needing input on a run that produced exactly what it was asked for - which
+   * is the failure #140 describes as *"makes every scripted caller treat a
+   * planned stop as a problem"*, arrived at from the other direction.
+   */
   planOnly: boolean;
   answeredQuestions: string[];
   deferredQuestions: DeferredQuestion[];
@@ -1194,6 +1723,8 @@ export interface RunState {
    * run nobody answered writes no field at all.
    */
   humanAnswered?: string[];
+  /** Human-supplied answers in arrival order, retained as explicit brief amendments. */
+  humanAnswers?: Answer[];
   /**
    * Re-asks the guard suppressed as rephrasings, with what each matched.
    *
@@ -1464,6 +1995,42 @@ export interface RunState {
    */
   pendingFindings?: PendingFindings | null;
   extraContext: string | null;
+}
+
+/**
+ * What is at an artifact's name: its text, nothing usable, or a link.
+ *
+ * Three answers rather than two, and the third exists for the distinction #53
+ * drew and #102 kept: `absent` says a file was opened and could not be used,
+ * `linked` says vibe never looked inside it. A caller that narrates must be able
+ * to tell a reader which of those happened, and a reader must never be told a
+ * file was unreadable when it was never read.
+ *
+ * Here rather than in `run.ts` beside `readArtifact`, because `protocol.ts`
+ * carries one on a frame and that file is a leaf on purpose: the vocabulary two
+ * processes agree on should not have to import the loop to be read.
+ */
+export type ArtifactRead =
+  | { kind: 'text'; text: string }
+  | { kind: 'absent' }
+  | { kind: 'linked'; reason: string };
+
+/**
+ * One entry in a run directory, as `lstat` classified it.
+ *
+ * `kind` rather than a filter, because a run directory legitimately holds things
+ * that are not files - `gate-artifacts-<n>/` is a directory #111 writes - and an
+ * entry silently missing from a listing reads as an artifact that was never
+ * produced. A link is reported as one for the same reason `readArtifact` refuses
+ * rather than following: vibe never creates one, so its presence is the finding.
+ *
+ * `bytes` is null for anything but a plain file. A size for a thing that has no
+ * meaningful size is a number nobody measured.
+ */
+export interface RunArtifact {
+  name: string;
+  kind: 'file' | 'directory' | 'link' | 'unknown';
+  bytes: number | null;
 }
 
 export interface RunSummary {

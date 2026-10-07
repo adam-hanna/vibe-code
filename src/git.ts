@@ -1,3 +1,5 @@
+import { readFileSync, statSync } from 'node:fs';
+import path from 'node:path';
 import { run, resolveBin } from '@src/proc.js';
 import { detail, warn } from '@src/log.js';
 
@@ -234,6 +236,23 @@ export async function stashesFor(cwd: string, branch: string): Promise<StashEntr
   return out;
 }
 
+/**
+ * The branch a run is on, or will be on: the one it recorded, else the one a
+ * fresh run gets — or null when branch isolation is off (#223).
+ *
+ * **One expression, two callers.** `prepareGit` creates the branch and the
+ * worktree site tells a setup script its name as `VIBE_BRANCH`; if each spelled
+ * `branchPrefix + id` itself, the script and the loop would disagree the first
+ * time either changed.
+ */
+export function runBranch(
+  cfg: { git: { useBranch: boolean; branchPrefix: string } },
+  state: { id: string; branch: string | null },
+): string | null {
+  if (!cfg.git.useBranch) return null;
+  return state.branch ?? `${cfg.git.branchPrefix}${state.id}`;
+}
+
 export async function createBranch(cwd: string, name: string): Promise<void> {
   await git(cwd, ['checkout', '-b', name]);
   detail(`on branch ${name}`);
@@ -403,6 +422,68 @@ export async function diffSince(
   return out;
 }
 
+/**
+ * `diffSince`, plus whether it had to cut (#223, `1d`).
+ *
+ * **The flag rather than the marker**, and that is the whole reason this exists.
+ * The truncation notice is a sentence with a number in it, so a host asking *"was
+ * this cut"* would have to match English - the exact failure #133 was written to
+ * prevent, and it would break the next time somebody improved the wording.
+ *
+ * It matters more here than most places it would: the design's truncation band
+ * is a judgement about **what the reviewer actually read**, so a window that
+ * silently missed it would present a partial diff as a whole one at the moment
+ * somebody is deciding whether a review was thorough.
+ */
+export async function diffSinceWithLimit(
+  cwd: string,
+  baseSha: string | null,
+  options: { maxChars?: number } = {},
+): Promise<{ patch: string; truncated: boolean }> {
+  const maxChars = options.maxChars ?? DIFF_MAX_CHARS;
+  const patch = await diffSince(cwd, baseSha, options);
+  // Measured against the ceiling rather than read out of the text: the marker is
+  // appended after the slice, so a cut diff is always longer than the ceiling
+  // and an uncut one is never longer than it.
+  return { patch, truncated: patch.length > maxChars };
+}
+
+/**
+ * One round's diff: what the tree became, against what it was (#223).
+ *
+ * **A separate function rather than a third parameter on `diffSince`**, and the
+ * reason is that they answer different questions with different failure modes.
+ * `diffSince` is *the change so far* and is written to be useful when it is
+ * given nothing - no base means stage the working tree, an empty range means
+ * fall back to `git diff HEAD` - because the reviewer must be handed something.
+ * Neither of those fallbacks is wanted here: a round that changed nothing is a
+ * measurement, and answering it with the working tree would show a person the
+ * edits they made themselves and call them a round's output.
+ *
+ * So both ends are required, it runs exactly one command, and an empty result
+ * comes back empty.
+ *
+ * `from` may be null, which is the first commit in a repository that had none.
+ * `git diff <empty-tree>..<sha>` is the whole of that commit, which is the true
+ * answer rather than a special case: `EMPTY_TREE` is git's own constant for it
+ * and is the same in every repository.
+ */
+const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+
+export async function diffRange(
+  cwd: string,
+  from: string | null,
+  to: string,
+  options: { maxChars?: number } = {},
+): Promise<{ patch: string; truncated: boolean }> {
+  const maxChars = options.maxChars ?? DIFF_MAX_CHARS;
+  const { stdout } = await git(cwd, ['diff', `${from ?? EMPTY_TREE}..${to}`]);
+  if (stdout.length > maxChars) {
+    return { patch: stdout.slice(0, maxChars) + truncationMarker(maxChars), truncated: true };
+  }
+  return { patch: stdout, truncated: false };
+}
+
 /** One reviewer turn's worth of the change: whole files, in git's order. */
 export interface DiffChunk {
   files: string[];
@@ -433,16 +514,83 @@ export interface DiffChunk {
 async function resolveDiffMode(
   cwd: string,
   baseSha: string | null,
+  options: { revealUntracked?: boolean } = {},
 ): Promise<{ prefix: string[]; whole: string }> {
   if (baseSha) {
     let { stdout: whole } = await git(cwd, ['diff', `${baseSha}..HEAD`]);
     if (whole) return { prefix: ['diff', `${baseSha}..HEAD`], whole };
+    // **The round is uncommitted, and `git diff HEAD` cannot see a file git has
+    // never seen.** This fallback exists for `git.commitEachRound: false`, where
+    // the implementation stays in the working tree - and an implementation is
+    // mostly *new files*, every one of them untracked and therefore invisible
+    // here. A round that only added files produced an empty diff and the
+    // reviewer was handed nothing, which is the same defect the no-base branch
+    // below had by a different route.
+    //
+    // `add -N` is intent-to-add: it registers the paths so a diff can describe
+    // them and stages **no content** - measured, `git diff --cached` stays empty
+    // after it. That matters because this is somebody's working tree.
+    //
+    // Only when the caller says so, and only `diffChunks` does. `diffSince` is
+    // what the `diff` read frame reaches, and a read frame that touched the
+    // index would be the surprise `protocol.ts` refuses a null base to avoid.
+    if (options.revealUntracked === true) {
+      await git(cwd, ['add', '-N', '.'], { allowFail: true });
+    }
     ({ stdout: whole } = await git(cwd, ['diff', 'HEAD']));
     return { prefix: ['diff', 'HEAD'], whole };
   }
   await git(cwd, ['add', '-A'], { allowFail: true });
-  const { stdout: whole } = await git(cwd, ['diff', '--cached']);
-  return { prefix: ['diff', '--cached'], whole };
+  // **Against the empty tree, not against HEAD.** `git diff --cached` alone
+  // compares the index to HEAD, and falls back to the empty tree only while
+  // there is no HEAD - so the moment the implement round committed, a greenfield
+  // run's review diff became EMPTY. Measured on a run of 2026-09-15: 40 files
+  // and 5,915 insertions committed as `ceba37d`, and `git diff --cached`
+  // returned 0 characters, while the same command against the empty tree
+  // returned 210,111. The reviewer was handed nothing, said so in its own
+  // summary, went looking through the tree by hand and then stalled.
+  //
+  // Naming the base explicitly is safe here and nowhere else, and `markBase` is
+  // why: it returns null if and only if the repository had **no commits** when
+  // the implement phase began. So with no base, everything from the empty tree
+  // onward is this run's own work - there is no earlier history for this to
+  // sweep up. In a repository that had commits, `baseSha` is a sha and the
+  // branch above is taken.
+  //
+  // It covers both `git.commitEachRound` settings in one command rather than
+  // branching on whether a commit happened: `git add -A` has just staged
+  // everything, so the index holds the round's work whether or not it was
+  // committed, and the empty tree is the right left-hand side either way.
+  const empty = await emptyTree(cwd);
+  const prefix = empty === null ? ['diff', '--cached'] : ['diff', '--cached', empty];
+  const { stdout: whole } = await git(cwd, prefix);
+  return { prefix, whole };
+}
+
+/**
+ * The name of the empty tree in this repository, or null if git will not say.
+ *
+ * **Asked for rather than hardcoded.** `4b825dc…` is the SHA-1 spelling and is
+ * the one nearly every reference gives, but a repository created with
+ * `--object-format=sha256` has a different empty tree - so a constant here would
+ * be right on this machine and silently wrong on somebody else's. `hash-object`
+ * computes it from the repository's own object format, which is the only answer
+ * that cannot go stale.
+ *
+ * `/dev/null` rather than empty stdin because `git()` spawns without one, and
+ * Git for Windows maps that path itself - measured working on this platform.
+ *
+ * Null on any failure, and the caller falls back to the plain `--cached` form:
+ * that is the behaviour every run had before this, so a git that will not answer
+ * leaves the review exactly as it was rather than failing the phase.
+ */
+async function emptyTree(cwd: string): Promise<string | null> {
+  const { code, stdout } = await git(cwd, ['hash-object', '-t', 'tree', '/dev/null'], {
+    allowFail: true,
+  });
+  if (code !== 0) return null;
+  const sha = stdout.trim();
+  return /^[0-9a-f]{40,64}$/.test(sha) ? sha : null;
 }
 
 /**
@@ -474,7 +622,10 @@ export async function diffChunks(
   options: { maxChars?: number } = {},
 ): Promise<{ chunks: DiffChunk[]; files: string[] }> {
   const maxChars = options.maxChars ?? DIFF_MAX_CHARS;
-  const { prefix, whole } = await resolveDiffMode(cwd, baseSha);
+  // `revealUntracked` because this is the REVIEW's read: a round that only added
+  // files must not look empty to the reviewer. `diffSince` has its own reader and
+  // is what the read frame reaches, so nothing there touches the index.
+  const { prefix, whole } = await resolveDiffMode(cwd, baseSha, { revealUntracked: true });
 
   // Before the size branch, not after it: both paths return this list, and the
   // caller needs it for the prompt and for the coverage record even when there
@@ -537,3 +688,157 @@ export async function diffChunks(
   return { chunks, files };
 }
 
+
+/**
+ * What the run has changed so far, measured rather than reported (#136).
+ *
+ * The one thing about a live implement turn that is a *measurement* and not a
+ * model's word for itself: git can be asked at any moment what is different
+ * from where the run started, and the answer is a fact about the tree.
+ *
+ * **Against `baseSha`, so this is the run's change set and not the turn's.**
+ * The first write turn is the whole of it, which is what the cockpit's running
+ * row is drawn during; a later fix round includes the rounds before it, which
+ * is still exactly "what this run has changed" and is what the label says.
+ *
+ * **Never throws, never writes, never stages.** `diffSince` runs `git add -A`
+ * on its no-base path and can afford to, because it runs between turns. This
+ * runs *while an agent is working in the same tree*, where touching the index
+ * would race with the agent's own git use - so untracked files are found with
+ * `ls-files --others` and counted by reading them, and the index is left alone.
+ */
+export interface ChangeSet {
+  /** Every path the run has changed, tracked and untracked, git's spelling. */
+  paths: string[];
+  /** How many of `paths` are new files git is not yet tracking. */
+  added: number;
+  /**
+   * Lines added and removed, or null where git could not be asked at all.
+   *
+   * Null rather than zero, for the reason every other measurement here is:
+   * "the diff reported nothing changed" and "the diff could not be run" are
+   * different facts, and only one of them is a number.
+   */
+  insertions: number | null;
+  deletions: number | null;
+  /**
+   * Files whose lines are in no total: binary, over `MAX_NEW_FILE_BYTES`, or
+   * past `MAX_NEW_FILES_READ`.
+   *
+   * Reported rather than silently dropped, because their absence is what makes
+   * `insertions` an undercount, and an undercount nobody flagged reads as a
+   * measurement.
+   */
+  uncounted: number;
+}
+
+/**
+ * A new file is read to count its lines, and both caps exist to bound that.
+ *
+ * The byte cap keeps one enormous generated file out of a progress reading; the
+ * file cap keeps a repo with no `.gitignore` from turning a 30-second sample
+ * into a directory walk. `--exclude-standard` already removes everything the
+ * repo ignores, so hitting either is unusual - and when it happens the count
+ * moves to `uncounted` rather than being approximated.
+ */
+const MAX_NEW_FILE_BYTES = 2_000_000;
+const MAX_NEW_FILES_READ = 200;
+
+/** Lines in a new file, or null when it should not be counted at all. */
+function countLines(file: string): number | null {
+  let text: Buffer;
+  try {
+    const stat = statSync(file);
+    if (!stat.isFile() || stat.size > MAX_NEW_FILE_BYTES) return null;
+    text = readFileSync(file);
+  } catch {
+    // Deleted between the listing and the read, or unreadable. Uncounted, which
+    // is the honest answer, rather than zero.
+    return null;
+  }
+  // Binary, by the same test git uses to decide a diff is not showable: a NUL
+  // byte near the start. A `+8000` on a compiled artifact would be a number
+  // about bytes wearing a label about lines.
+  if (text.subarray(0, 8000).includes(0)) return null;
+  if (text.length === 0) return 0;
+  let lines = 0;
+  for (const byte of text) if (byte === 0x0a) lines += 1;
+  // A last line with no trailing newline is still a line - git counts it as one.
+  return text[text.length - 1] === 0x0a ? lines : lines + 1;
+}
+
+export async function changeSet(cwd: string, baseSha: string | null): Promise<ChangeSet | null> {
+  try {
+    // `HEAD` when the run recorded no base: a repo with no commits has neither,
+    // and `allowFail` turns that into an unmeasured diff rather than a throw.
+    const rev = baseSha ?? 'HEAD';
+    const [numstat, named, others] = await Promise.all([
+      git(cwd, ['diff', '--numstat', rev], { allowFail: true, raw: true }),
+      git(cwd, ['diff', '--name-only', '-z', rev], { allowFail: true, raw: true }),
+      git(cwd, ['ls-files', '--others', '--exclude-standard', '-z'], { allowFail: true, raw: true }),
+    ]);
+
+    let insertions: number | null = null;
+    let deletions: number | null = null;
+    let uncounted = 0;
+    if (numstat.code === 0) {
+      insertions = 0;
+      deletions = 0;
+      for (const line of numstat.stdout.split('\n')) {
+        const parts = line.split('\t');
+        if (parts.length < 3) continue;
+        const add = parts[0];
+        const del = parts[1];
+        // git prints `-\t-\t<path>` for a binary file. Counted as uncounted
+        // rather than as zero changes, which is what it would otherwise add up
+        // to - and a binary file that changed is not a file that did not.
+        if (add === '-' || del === '-') {
+          uncounted += 1;
+          continue;
+        }
+        const plus = Number(add);
+        const minus = Number(del);
+        if (!Number.isFinite(plus) || !Number.isFinite(minus)) continue;
+        insertions += plus;
+        deletions += minus;
+      }
+    }
+
+    // Nothing could be listed at all - not a repository, or a git that would
+    // not run. There is no reading to give, and the empty one this would
+    // otherwise return says something quite different: an empty path set beside
+    // a plan that names fourteen files renders as "0 of the 14 files the plan
+    // names", which is a measurement of a tree nobody managed to look at.
+    if (named.code !== 0 && others.code !== 0) return null;
+    const tracked = named.code === 0 ? splitNul(named.stdout) : [];
+    const untracked = others.code === 0 ? splitNul(others.stdout) : [];
+
+    let read = 0;
+    for (const rel of untracked) {
+      if (read >= MAX_NEW_FILES_READ) {
+        uncounted += 1;
+        continue;
+      }
+      read += 1;
+      const lines = countLines(path.join(cwd, rel));
+      if (lines === null) {
+        uncounted += 1;
+        continue;
+      }
+      // Only where the tracked half was measured. Adding new-file lines onto a
+      // null would turn "the diff could not be run" into a partial figure that
+      // looks like the whole one.
+      if (insertions !== null) insertions += lines;
+    }
+
+    // Deduplicated because the two listings can legitimately overlap - a path
+    // deleted from the index and rewritten on disk appears in both - and a file
+    // counted twice would inflate the only number on the row that is a count of
+    // things rather than of lines.
+    const paths = [...new Set([...tracked, ...untracked])];
+    return { paths, added: untracked.length, insertions, deletions, uncounted };
+  } catch {
+    // A progress reading, and losing one must never cost a turn.
+    return null;
+  }
+}

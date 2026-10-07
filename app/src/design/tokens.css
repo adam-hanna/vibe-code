@@ -1,0 +1,359 @@
+/*
+ * The design system, as tokens.
+ *
+ * October 2026: the workspace redesign replaces the palette and type direction.
+ * WORKSPACE.md records the new composition. The notes below retain the history
+ * behind the token semantics; their original color ratios and font counts are
+ * historical, while scripts/contrast.mjs checks the current values.
+ *
+ * 2026-10-06: the values are VS Code's Dark Modern, at the owner's decision -
+ * the green-steel palette was the one thing the rework had left and it was
+ * rejected on sight ("I don't like the old color scheme"). Neutral charcoal
+ * grounds (#1f1f1f editor, #181818 chrome), #cccccc body text, #0078d4 as the
+ * one solid fill and #4daafc as the accent that is read rather than pressed.
+ * Every token NAME and every rule below is unchanged: the floor, the ramps and
+ * the diff pair are re-measured in the comments and checked by the audit. The
+ * typefaces are the two the rework bundles, Inter and JetBrains Mono.
+ *
+ * Transcribed from `Vibe Design Spec.dc.html` §1-§3, which is itself the
+ * distillation of fourteen hi-fi screens over nine review rounds: 51 distinct
+ * hexes resolved to 42 tokens, 70 font declarations collapsed to 9 named styles
+ * across 8 sizes, and 19 padding plus 18 gap values collapsed to 8 steps.
+ *
+ * The semantics here were argued about. The mechanics were not - they were
+ * decided seventy and nineteen times independently and collapsed once, and this
+ * file is the collapse. Reaching past a token for a raw hex re-derives a
+ * decision that has already been made twice.
+ *
+ * Two rules the spec names as the ones most likely to slip, both checkable:
+ *
+ *   - The text floor is `--text-tertiary`. Anything dimmer is a border, not
+ *     text. Recession below it is built with size and weight.
+ *   - Solid fill means interactive. The one exception is the single state label
+ *     that leads a banner. Never two solids of the same fill in one region.
+ *
+ * **The floor moved up one step in revision 2, and the reason is #190.** It sat
+ * at #8f9498 - the last step that passes 4.5:1 on every ground, at 4.78 on the
+ * accent tint - and being *the last passing step* was treated as the argument
+ * for it. It is not one. 4.5:1 is a threshold for normal text, and the places
+ * this floor is actually spent are 11-12px monospace log lines; a ratio 6% clear
+ * of a threshold that was never about them is a floor with no margin in it.
+ * The first manual pass of the built app reported all three dense panes as hard
+ * to read, and the audit passed on every one, which is what a floor set at the
+ * limit buys you.
+ */
+
+:root {
+  /* ---------------------------------------------------------------- surfaces
+   * Ten grounds, page-dark to card-light, plus the three that carry meaning:
+   * `active` for the live thing, `accent-tint` for selection, `alarm` for a
+   * halt. Ordered here as they stack.
+   */
+  --surface-page: #1f1f1f;          /* desk behind the window */
+  --surface-chrome: #181818;        /* titlebar, rail, tab bar */
+  --surface-column: #181818;        /* loop column, table header, footers */
+  --surface-panel: #1f1f1f;         /* window body, content panes */
+  --surface-card: #262626;          /* cards, fields, and the modal */
+  --surface-active: #2a2d2e;        /* the live card, your turns, selected row */
+  --surface-active-hdr: #303030;    /* the live cycle's header band */
+  --surface-accent-tint: #03304f;   /* P2 chip, selected segment, evidence chip */
+  --surface-alarm: #3b2424;         /* halt banner and stale strip ground */
+  --surface-tray: #181818;          /* menubar strip, the app with no window */
+
+  /* ------------------------------------------------------- text: 3 tiers, 2 emphases
+   * Ratios are against `--surface-panel`, the most common ground. The floor
+   * holds across all ten surfaces; the others have headroom.
+   */
+  --text-display: #ffffff;          /* titles */
+  --text-emphasis: #f0f0f0;         /* the live value */
+  --text-primary: #cccccc;         /* measurements, body */
+  --text-secondary: #b3b3b3;       /* prose, log history */
+  --text-tertiary: #a0a0a0;        /* labels, timestamps. THE FLOOR */
+
+  /* #8f9498 was the floor until #190 and is deliberately NOT listed below with
+   * the retired greys, because it does not belong there and the audit says so:
+   * check 2 fails a `--retired-*` that passes on all ten surfaces, and this one
+   * passes on all ten. It was not too dim to be text. It was too dim to be the
+   * *floor*, which is a different claim - a floor has to hold at the smallest
+   * size the system permits, and 11px mono is that size. It is gone rather than
+   * renamed, so nothing can reach for it by habit. */
+
+  /* Documentation only - never ship as text. Retired in ramp revision 2 and
+   * kept named so the retirement stays legible: someone reaching for a quieter
+   * grey should find these already refused rather than invent one. */
+  --retired-aa-limit: #7b8085;      /* the AA limit itself */
+  --retired-1: #6c7176;
+  --retired-2: #5f6469;
+  --retired-3: #565b60;
+  --retired-4: #4e5358;
+
+  /* ------------------------------------------------- rules and borders: never text
+   * The four retired greys above are good at exactly this, and that is what
+   * they became.
+   */
+  --rule-strong: #454545;           /* dashed chips, card outline */
+  --rule-control: #3c3c3c;          /* buttons, fields */
+  --rule-control-dim: #313131;      /* unselected segment, locked cell */
+  --rule-structure: #2b2b2b;        /* window, pane and bar edges */
+  --rule-card: #333333;             /* card and panel outline */
+  --rule-inner: #2d2d2d;            /* inside a card, empty bar track */
+  --rule-hatch: #292929;            /* absence fill, 135deg at 5px */
+
+  /* ------------------------------------------------- accent: solid means interactive
+   * Two blues since the Dark Modern flip, because VS Code reads one and presses
+   * the other: `--accent-solid` is the link blue, light enough to be TEXT on
+   * every ground (6.6 on the page), and `--accent-fill` is the button blue,
+   * which white sits on at 4.5 and dark text does not. One token for both was
+   * the old palette's arrangement and it only worked because that green was
+   * light enough to carry the page colour as its label.
+   */
+  --accent-solid: #4daafc;          /* selected tab, links, the activity mark, P1 */
+  --accent-on-tint: #ffffff;        /* text on --surface-accent-tint */
+  --accent-border: #0078d4;         /* live card, focus ring, modal edge, P2 */
+  --accent-border-dim: #264f78;     /* rule under an active header */
+  --accent-base: #0078d4;           /* rail selection */
+  --accent-muted: #8fb6d6;          /* metadata inside an active region */
+  --accent-fill: #0078d4;           /* primary button and the mark: VS Code's button ground */
+  --accent-fill-hover: #026ec1;     /* its hover, one step darker rather than lighter */
+  --accent-on-fill: #ffffff;        /* text on --accent-fill */
+  --shadow-overlay: 0 24px 80px rgba(0, 0, 0, 0.45);
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --font-editorial: Georgia, 'Times New Roman', serif;
+
+  /* ------------------------------------------------------ severity: a ramp with an order
+   * Weight ascends with severity. On a dark ground the ramp is rebuilt, not
+   * flipped - P0 takes the highest luminance AND a doubled rule. No chip
+   * carries a fill, because a fill would mean pressable.
+   *
+   * `--text-emphasis` is reserved for alarm across the whole product: P0,
+   * banner kickers, the stale strip, a failing sliver, headroom near a cap. It
+   * is never a quantity.
+   */
+  --severity-p0-rule: var(--text-emphasis);
+  --severity-p0-text: var(--text-emphasis);
+  --severity-p0-width: 2px;
+  --severity-p1-rule: var(--accent-solid);
+  --severity-p1-text: var(--accent-solid);
+  --severity-p2-rule: var(--accent-border);
+  --severity-p2-fill: var(--surface-accent-tint);
+  --severity-p3-rule: var(--rule-strong);
+  --severity-zero-rule: var(--rule-strong);   /* dashed; digit at the text floor */
+
+  /* ------------------------------------------------------- quantity: proportions only
+   * A run bar is a proportion, not a severity. Charts and share bars take this
+   * ramp and nothing else does. `--accent-solid` must never appear as a bar
+   * fill: it means pressable.
+   */
+  --quantity-1: #7fa3c4;            /* largest share, oscillation high */
+  --quantity-2: #4a6b8c;            /* second share, passing tests */
+  --quantity-3: #33475a;            /* remainder, unattributed */
+  --quantity-track: #232a30;        /* the empty part of a bar */
+
+  /* ------------------------------------------------------ diff: two rules, one per axis
+   * Contrast ratio answers "is the row visible" and "is the code readable". It
+   * cannot answer "added or removed" - it measures luminance only, so two
+   * equal-luminance hues score 1.0 while being perfectly discriminable.
+   *
+   * So: luminance is symmetric (rows at 1.38 and 1.28 against the panel, both
+   * above every card in the app) and HUE carries the pair, at 12-17% saturation
+   * on the neutral grounds - the old 6.8% was against a green-tinted panel that
+   * supplied some of the hue itself. Revision 3 of this decision; revision 2
+   * cut saturation to 2.4% and made the two rows differ only in brightness,
+   * which is what this replaces.
+   */
+  --diff-added-row: #2d3a2d;        /* 1.38 vs panel */
+  --diff-added-gutter: #3a4d3a;
+  --diff-added-glyph: #3fb950;
+  --diff-added-number: #c9d9c9;
+  --diff-added-code: #d4e6d4;
+  --diff-removed-row: #402d2d;      /* 1.28 vs panel */
+  --diff-removed-gutter: #553a3a;
+  --diff-removed-glyph: #f14c4c;
+  --diff-removed-number: #e0c8c8;
+  --diff-removed-code: #ecd3d3;
+
+  /* --------------------------------------------- semantic: the only two hues outside grey and blue
+   * Neither is a status colour, and a build that reaches for green-for-good or
+   * red-for-bad has left the system.
+   *
+   * Green means "a process is alive" and nothing else - never success, because
+   * a passing verify is a word. Red means "lines were deleted" (and, on the one
+   * alarm chip, "this value disagrees") and nothing else - never danger as a
+   * ground, because the halt states are built from weight instead. VS Code's
+   * own two, so the diff reads as the editor's.
+   */
+  --semantic-live: #3fb950;         /* liveness dot, and +n line counts */
+  --semantic-loss: #f14c4c;         /* -n line counts only */
+
+  /* ============================================================ type
+   * 70 declarations across 15 sizes -> 9 named styles across 8 sizes.
+   *
+   * Two families, one job each. Inter for every sentence, label, heading, tab
+   * and button (the condensed face is gone; labels are still uppercase and
+   * tracked). JetBrains Mono for every value. If a string is a number, a path,
+   * an id or a config key it is mono; if it is a sentence it is not. That rule
+   * alone removed most of the seventy. Both are bundled by `main.tsx` through
+   * `@fontsource-variable`, so the fallbacks after them are for a build that
+   * lost the files, not for a platform.
+   *
+   * Collapsed away: 8px existed only inside two chips (use micro at 9). The
+   * 16/20/22/26 sizes were canvas annotation headings - spec document type, not
+   * product type. 15px survives only as `kicker`.
+   */
+  --font-sans: 'Inter Variable', 'Segoe UI Variable', 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-condensed: var(--font-sans);
+  --font-mono: 'JetBrains Mono Variable', ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
+
+  /**
+   * The type scale, split in two since #223, and the split is what makes the
+   * whole product resizable without a second set of sizes.
+   *
+   * `--size-*` is the DESIGN's size: the number the build spec chose, in px,
+   * which is what `audit:contrast` §8 reads and what any argument about type
+   * is about. `--type-*` is the composed shorthand every component uses, and it
+   * is the design's size times whatever the reader asked for.
+   *
+   * **`--type-scale` is the only thing a person changes**, and it multiplies
+   * every size at once - so the ramp the spec chose survives being scaled and
+   * nothing here can drift relative to anything else. It is 1 by default, which
+   * is byte-identical to what the product had before this existed. Reported as
+   * *"the font is a little too small for me"*, and the honest fix for that is
+   * the reader's own multiplier rather than a second opinion about 13px.
+   *
+   * Browser zoom would have been the other answer and is worse here: it scales
+   * layout as well as type, and `100vh` does not scale with it - which would
+   * make a `max-height: calc(100vh - …)` dialog taller than the window at any
+   * zoom above 1.
+   */
+  --type-scale: 1;
+
+  --size-display: 32px;
+  --size-title: 24px;
+  --size-section: 17px;
+  --size-kicker: 15px;
+  --size-tab: 13px;
+  --size-label: 11px;
+  --size-lead: 15px;
+  --size-body: 14px;
+  --size-body-sm: 13px;
+  --size-mono: 13px;
+  --size-mono-sm: 12px;
+  --size-chip: 10px;
+  --size-chip-micro: 9px;
+
+  --type-display: 600 calc(var(--size-display) * var(--type-scale)) / 1 var(--font-condensed);
+  --type-title: 600 calc(var(--size-title) * var(--type-scale)) / 1.1 var(--font-condensed);
+  --type-section: 600 calc(var(--size-section) * var(--type-scale)) / 1 var(--font-condensed);
+  --type-kicker: 600 calc(var(--size-kicker) * var(--type-scale)) / 1 var(--font-condensed);
+  --type-tab: 600 calc(var(--size-tab) * var(--type-scale)) / 1 var(--font-condensed);
+  --type-label: 600 calc(var(--size-label) * var(--type-scale)) / 1 var(--font-condensed);
+  --type-lead: 400 calc(var(--size-lead) * var(--type-scale)) / 1.62 var(--font-sans);
+  --type-body: 400 calc(var(--size-body) * var(--type-scale)) / 1.6 var(--font-sans);
+  --type-body-sm: 400 calc(var(--size-body-sm) * var(--type-scale)) / 1.55 var(--font-sans);
+  /* Both moved up one step in #190, and the leading is the half that mattered.
+   * `--type-mono-sm` was `11px/1`, and a line-height of 1 in a wrapping
+   * monospace log means the wrapped rows of one entry touch - the output pane's
+   * `pre-wrap` plus `overflow-wrap: anywhere` makes that the common case rather
+   * than the edge one. The per-line padding hid it between entries and could not
+   * hide it inside one. 11px is gone from the product; nothing was set in it
+   * that is not better at 12. */
+  --type-mono: 400 calc(var(--size-mono) * var(--type-scale)) / 1.55 var(--font-mono);
+  --type-mono-sm: 400 calc(var(--size-mono-sm) * var(--type-scale)) / 1.5 var(--font-mono);
+  /* The two chip styles keep a RATIO rather than the px leading they had, which
+   * is what lets them scale with everything else: a fixed 16px line box around
+   * 10px text becomes a 16px line box around 14px text the moment the scale
+   * moves, and the chip's own padding then decides its height instead. 1.6 and
+   * 1.55 are the ratios those px pairs already were. */
+  --type-chip: 700 calc(var(--size-chip) * var(--type-scale)) / 1.6 var(--font-sans);
+  --type-chip-micro: 700 calc(var(--size-chip-micro) * var(--type-scale)) / 1.55 var(--font-sans);
+
+  /* Tracking is per-style and not optional: the condensed faces are unreadable
+   * as caps without it, and that is the only reason they are tracked. */
+  --track-display: 0.02em;
+  --track-title: 0.01em;
+  --track-section: 0.02em;
+  --track-kicker: 0.03em;
+  --track-tab: 0.01em;
+  --track-label: 0.1em;
+  --track-chip: 0.05em;
+  --track-chip-micro: 0.1em;
+
+  /* ============================================================ spacing
+   * 19 padding values and 18 gap values -> 8 steps. What each absorbed is in
+   * the comment, because the collapse is the decision: the difference between 9
+   * and 11 was not carrying meaning anywhere.
+   */
+  --space-1: 4px;                   /* absorbs 2, 5  - chip rows, icon-to-label */
+  --space-2: 6px;                   /* absorbs 7     - chip padding, label-to-control */
+  --space-3: 8px;                   /* absorbs 9     - sibling controls, button padding */
+  --space-4: 12px;                  /* absorbs 10,11,13 - card padding. THE DEFAULT */
+  --space-5: 16px;                  /* absorbs 14,15,18 - pane padding, between cards */
+  --space-6: 22px;                  /* absorbs 20,24,26 - modal padding, form sections */
+  --space-7: 32px;                  /* absorbs 28    - above a section starting a new subject */
+  --space-8: 44px;                  /* absorbs 40,56 - the deliberate fold below a scrolling section */
+
+  /* --------------------------------------------- fixed dimensions, NOT spacing
+   * Deliberately off the scale. These are sized by their content, and rounding
+   * a 32px field to 36 or a 34px row to 32 costs alignment for nothing.
+   */
+  --dim-rail: 54px;
+  /* The leading glyph column in the navigator. Fixed so `＋ ⌘K ⚙`, the folder
+     carets and the run bullets all start their labels at one place — three
+     glyphs of different widths left-aligning their own text is what makes a
+     sidebar read as three lists instead of one. */
+  --dim-nav-glyph: 20px;
+  --dim-loop-column: 372px;
+  --dim-titlebar: 38px;
+  --dim-tab-bar: 40px;
+  --dim-sub-bar: 34px;
+  --dim-table-header: 30px;
+  --dim-table-row: 34px;
+  --dim-field: 32px;
+  --dim-switch: 32px;
+  --dim-radio: 12px;
+  --dim-checkbox: 13px;
+  --dim-bar-track: 8px;
+  --dim-liveness-dot: 5px;
+  --dim-corner-mark: 8px;
+  --dim-scroll-track: 4px;
+
+  /* ============================================================ motion
+   * One pulse, and that is the whole system rather than an omission: this is a
+   * screen watched for forty minutes at a time, and the one moving thing on it
+   * should be the one that means something is still alive.
+   *
+   * Consequence worth stating: state changes are instant. No cross-fades
+   * between phases, no sliding panels, no skeleton shimmer.
+   */
+  --pulse-duration: 2.4s;
+  /*
+   * A second duration, and deliberately not a second animation (#211).
+   *
+   * The pilot's thinking indicator is three dots taking `v-pulse` in turn - the
+   * one keyframe this system has, run at three offsets, which is why "one pulse"
+   * still describes the whole of it. What it cannot share is the period: 2.4s is
+   * chosen for a dot that says *a run is still alive* and is read at a glance
+   * every few minutes, and at that speed a wave reads as three dots fading
+   * independently rather than as one thing moving.
+   *
+   * The reason it exists at all is a report, not a preference: a turn between
+   * pressing send and the first token drew a two-word kicker and nothing else,
+   * and was repeatedly read as stalled. Motion is what says the wait is being
+   * waited on; the elapsed beside it is what says how long for.
+   */
+  --wave-duration: 1.2s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    /* The pulse becomes a static filled dot, which loses nothing - the label
+     * beside it already says `live - updated 2s ago`. */
+    --pulse-duration: 0s;
+    /* And the wave becomes three solid dots. Also nothing lost: the indicator
+     * is drawn only while a turn is open, so its presence is the claim and the
+     * motion was only ever the emphasis. The elapsed still counts. */
+    --wave-duration: 0s;
+  }
+}

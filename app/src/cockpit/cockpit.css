@@ -1,0 +1,344 @@
+/*
+ * The cockpit, at the slice #159 scopes it to.
+ *
+ * Every value is a token. Reaching past one for a raw hex re-derives a decision
+ * that has already been made twice, and `audit:contrast` refuses a hex literal
+ * outside `tokens.css` regardless.
+ *
+ * The fixed dimensions here - the 364px loop column - are held deliberately OFF
+ * the spacing scale, exactly as `tokens.css` holds the rail at 54 and the field
+ * at 32. They are sized by their content, and rounding 364 to the nearest step
+ * would cost the alignment the design chose it for.
+ */
+
+.v-cockpit {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: var(--surface-panel);
+}
+
+/*
+ * There is no `--off` tab any more (#223). It dressed one placeholder - `Prompt`,
+ * dashed, with "not built yet" on its tooltip - and what that stood for is now a
+ * section of Settings, so the last tab in the bar with nothing behind it is gone
+ * and the rule went with it.
+ *
+ * The rule it carried is the one worth keeping in mind if another placeholder is
+ * ever needed: dashed and NEVER dimmed, because dimming reads as "disabled for
+ * you" where dashed reads as "nothing has filled this in".
+ */
+
+/* ---------------------------------------------------------------- diagnostics
+ * Hi-fi 15. `HOST 43804` and `PROTOCOL 1` came out of the titlebar and landed
+ * here; what stays in the chrome is a `•••` and, only when something disagrees,
+ * one alarm chip.
+ *
+ * **A popover, not a modal, and the difference is the missing scrim.** It wears
+ * the modal's border, corner marks and the product's one shadow - elevation is
+ * carried by those rather than by a pale surface, because this palette spent its
+ * light end on severity. What it does not do is block: diagnostics are read
+ * while looking at whatever went wrong, so this is the only elevated surface in
+ * the product you can see past.
+ */
+
+.v-diag {
+  position: absolute;
+  top: var(--space-7);
+  right: var(--space-4);
+  z-index: 20;
+  min-width: 26rem;
+  max-width: min(34rem, calc(100vw - var(--space-6)));
+  padding: var(--space-4);
+  border: 1px solid var(--accent-border);
+  background: var(--surface-card);
+  box-shadow: 0 18px 48px rgb(0 0 0 / 55%);
+}
+
+/* The modal's corner marks, so it reads as the same kind of surface. */
+.v-diag::before,
+.v-diag::after {
+  content: '';
+  position: absolute;
+  width: var(--dim-corner-mark);
+  height: var(--dim-corner-mark);
+  border-color: var(--accent-solid);
+  border-style: solid;
+}
+
+.v-diag::before {
+  top: -1px;
+  left: -1px;
+  border-width: 1px 0 0 1px;
+}
+
+.v-diag::after {
+  bottom: -1px;
+  right: -1px;
+  border-width: 0 1px 1px 0;
+}
+
+.v-diag__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--rule-inner);
+  margin-bottom: var(--space-3);
+}
+
+.v-diag__title {
+  font: var(--type-label);
+  letter-spacing: 0.08em;
+  color: var(--text-display);
+}
+
+.v-diag__close {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+.v-diag__close:hover {
+  color: var(--text-primary);
+}
+
+.v-diag__fact {
+  display: grid;
+  grid-template-columns: 5rem 1fr auto;
+  align-items: baseline;
+  gap: var(--space-2) var(--space-3);
+  padding: var(--space-2) 0;
+}
+
+.v-diag__label {
+  font: var(--type-label);
+  letter-spacing: 0.08em;
+  color: var(--text-tertiary);
+}
+
+/* Mono because these are strings destined for a bug report, and a run id
+ * retyped from a proportional face is how the wrong run gets investigated. */
+.v-diag__value {
+  font: var(--type-mono);
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.v-diag__copy {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  background: none;
+  border: 1px solid var(--rule-control);
+  padding: 0 var(--space-2);
+  cursor: pointer;
+}
+
+.v-diag__copy:hover {
+  color: var(--text-primary);
+  border-color: var(--rule-strong);
+}
+
+/* The sentence that makes the value usable, under it and across the row. */
+.v-diag__note {
+  grid-column: 2 / -1;
+  font: var(--type-body-sm);
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+/* A fact this build cannot establish, named with its reason. Never a blank and
+ * never a placeholder that reads like a value. */
+.v-diag__absent {
+  grid-column: 2 / -1;
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+}
+
+/* The appearance steps, each drawn AT the size it would set — a radio labelled
+   "large" beside four identical labels says nothing, and the point of the
+   control is what the text will look like. */
+
+/* ------------------------------------------------------- the window that threw
+ *
+ * `Boundary`'s fallback (#211). Not a designed screen and deliberately plain:
+ * it is reached only when the design system's own components may be what threw,
+ * so it leans on tokens and nothing else. Everything is selectable and every
+ * value is monospace, because these are strings destined for a bug report -
+ * the same reasoning as the diagnostics popover.
+ */
+.v-crash {
+  padding: var(--space-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  overflow-y: auto;
+  height: 100vh;
+  background: var(--surface-app);
+}
+.v-crash__head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.v-crash__kicker {
+  font: var(--type-kicker);
+  letter-spacing: var(--tracking-kicker);
+  text-transform: uppercase;
+  color: var(--text-alarm);
+}
+.v-crash__title {
+  font: var(--type-body);
+  color: var(--text-emphasis);
+  max-width: 76ch;
+}
+.v-crash__label {
+  font: var(--type-kicker);
+  letter-spacing: var(--tracking-kicker);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin-top: var(--space-3);
+}
+.v-crash__pre {
+  font: var(--type-mono-sm);
+  color: var(--text-primary);
+  background: var(--surface-inset);
+  border: 1px solid var(--rule-inner);
+  padding: var(--space-3);
+  white-space: pre-wrap;
+  overflow-x: auto;
+  margin: 0;
+}
+.v-crash__reload {
+  align-self: flex-start;
+  font: var(--type-control);
+  color: var(--text-emphasis);
+  background: var(--surface-control);
+  border: 1px solid var(--rule-control);
+  padding: var(--space-2) var(--space-4);
+  cursor: pointer;
+}
+.v-crash__note {
+  font: var(--type-body-sm);
+  color: var(--text-tertiary);
+  max-width: 76ch;
+  margin: 0;
+}
+
+/*
+ * The left rail (hi-fi 1, hi-fi 5).
+ *
+ * 54px, which is `--dim-rail` - the token layer has held that value since the
+ * design system was transcribed, a year before anything drew a rail. It is the
+ * chrome surface, like the titlebar and the tab bar, because that is what it is:
+ * navigation around the window rather than content in it.
+ */
+.v-rail {
+  width: var(--dim-rail);
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) 0;
+  background: var(--surface-chrome);
+  border-right: 1px solid var(--rule-structure);
+  min-height: 0;
+}
+
+.v-rail__all {
+  font: var(--type-label);
+  letter-spacing: 0.08em;
+  color: var(--text-tertiary);
+  background: none;
+  cursor: pointer;
+}
+
+.v-rail__all:hover {
+  color: var(--text-primary);
+}
+
+/* Scrolls rather than truncating. An archive grows without limit and a rail
+   that dropped the oldest squares would be a list that silently stopped being
+   the whole list - the overclaim `scorecard.ts` exists to prevent, in a strip. */
+.v-rail__list {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  width: 100%;
+}
+
+.v-rail__square {
+  position: relative;
+  width: 34px;
+  height: 34px;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-card);
+  border: 1px solid var(--rule-card);
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.v-rail__square:hover {
+  border-color: var(--rule-control);
+  color: var(--text-primary);
+}
+
+/* The design's rail selection, and the one place `--accent-base` is used: the
+   token names it *"Industry's own steel, rail selection"*, so this is the value
+   it was chosen for. */
+.v-rail__square--on {
+  background: var(--surface-active);
+  border-color: var(--accent-base);
+  color: var(--text-emphasis);
+}
+
+.v-rail__mark {
+  font: var(--type-tab);
+  letter-spacing: 0.04em;
+}
+
+/* Top-right of the square, `4e`'s needs-you position. */
+.v-rail__dot {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+}
+
+.v-rail__none {
+  font: var(--type-tab);
+  color: var(--text-tertiary);
+}
+
+.v-rail__foot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+  border-top: 1px solid var(--rule-structure);
+  padding-top: var(--space-3);
+  width: 100%;
+}
+
+.v-rail__control {
+  font: var(--type-tab);
+  color: var(--text-tertiary);
+  background: none;
+  cursor: pointer;
+  padding: var(--space-1) var(--space-2);
+}
+
+.v-rail__control:hover {
+  color: var(--text-emphasis);
+}
+

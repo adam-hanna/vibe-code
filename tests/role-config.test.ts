@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { applyOverrides, DEFAULTS, loadConfig } from '@src/config.js';
 import { shouldRotate, withConcurrentCompaction } from '@src/context.js';
+import { roleRefusals, slotForRole } from '@src/roles.js';
+import { SLOTS } from '@src/slots.js';
 import {
   DEFAULT_ROLE_PROVIDERS,
   enabledRolesFor,
@@ -20,6 +22,7 @@ import type { AgentTurns, Role, RoleProviders, TurnRequest } from '@src/orchestr
 import { adjudicate, preflight } from '@src/preflight.js';
 import type { AgentPreflight, PreflightProbes } from '@src/preflight.js';
 import { codexTurn } from '@src/codex.js';
+import { taskContext } from '@src/prompts.js';
 import type { CodexTurnOptions } from '@src/codex.js';
 import { createRun, recordContextMeasurement } from '@src/run.js';
 import type {
@@ -306,28 +309,43 @@ test('a memoryless generative role is handed the plan of record; a judging one i
   assert.match(implementer.codexCalls[0]?.prompt ?? '', /do the thing$/);
 
   // The critic restates the plan in its own prompt and takes an explicit
-  // hasMemory, so today's first Codex critique turn must be untouched.
+  // hasMemory, so it gets the original brief without another copy of the plan.
   const critic = recorder();
   const judging = freshState();
   judging.plan = PLAN;
   await captureLog(() => runTurn(judging, config(), request('critic'), critic.turns));
-  assert.equal(critic.codexCalls[0]?.prompt, 'do the thing');
+  assert.equal(critic.codexCalls[0]?.prompt, taskContext(judging.task, judging.extraContext) + 'do the thing');
 });
 
 // ---- 6. The refusal --------------------------------------------------------
 
-test('a writing Codex role with persistSession on is refused, naming the flag', () => {
+// Case 2 (owner's decision): a Codex implementer used to be refused while
+// `codex.persistSession` was on, which made it cost the critic and the reviewer
+// their threads. A writer is now seated on the one-shot `write` slot, so the
+// same table loads with persistSession on - and the refusal it was guarding
+// stands for any table that DOES put a writer on a carried thread.
+test('a writing Codex role is one-shot, and the read-only seats keep their threads', () => {
   const stored = { ...structuredClone(DEFAULTS), roles: SWAP } as Config;
 
-  assert.throws(() => applyOverrides(stored, {}), /--no-codex-session/);
-  assert.throws(() => applyOverrides(stored, {}), /roles\.implementer/);
-  assert.throws(
-    () => loadConfig(repoWith({ roles: SWAP })),
-    /--no-codex-session/,
-  );
+  assert.doesNotThrow(() => applyOverrides(stored, {}));
+  const cfg = loadConfig(repoWith({ roles: SWAP }));
+  assert.equal(cfg.codex.persistSession, true);
+  const roles = rolesFor(cfg);
+  assert.equal(slotForRole('implementer', roles), 'write');
+  assert.equal(SLOTS.write.persists(cfg), false, 'a writer never resumes a thread');
+  assert.deepEqual(roleRefusals(cfg, roles), []);
+});
 
-  // Turning it off is what makes the same table legal.
-  assert.doesNotThrow(() => loadConfig(repoWith({ roles: SWAP, codex: { persistSession: false } })));
+test('a writing Codex role on a carried thread is still refused, naming the flag', () => {
+  const cfg = loadConfig(repoWith({ roles: SWAP }));
+  const onJudge = { ...rolesFor(cfg), implementer: { ...rolesFor(cfg).implementer, slot: 'judge' as const } };
+  const refused = roleRefusals(cfg, onJudge);
+  assert.equal(refused.length, 1);
+  assert.match(refused[0] ?? '', /roles\.implementer/);
+  assert.match(refused[0] ?? '', /--no-codex-session/);
+  // Off, the judge thread is one-shot too, and the same table is legal.
+  const off = { ...cfg, codex: { ...cfg.codex, persistSession: false } };
+  assert.deepEqual(roleRefusals(off, onJudge), []);
 });
 
 // ---- 7. Validation ---------------------------------------------------------
@@ -483,7 +501,7 @@ function fakeExec(write: (args: readonly string[]) => void): {
     exec: (_bin, args): Promise<RunResult> => {
       argv.push([...args]);
       write(args);
-      return Promise.resolve({ code: 0, stdout: '', stderr: '' });
+      return Promise.resolve({ code: 0, signal: null, stdout: '', stderr: '' });
     },
   };
 }

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { claudeTurn } from '@src/claude.js';
+import { claudeTurn, PLAN_MODE_NOTE } from '@src/claude.js';
 import type { ClaudeTurnOptions } from '@src/claude.js';
 import { codexTurn, parseOptionTokens, resetCodexForkProbe } from '@src/codex.js';
 import type { CodexTurnOptions } from '@src/codex.js';
@@ -46,11 +46,22 @@ function progressRecorder(): { options: ProgressOptions; sources: string[] } {
  * Without it there would be no line for `flush` to persist, and every assertion
  * about flushing would pass vacuously.
  */
-function fakeExec(code: number | null, lines: readonly string[], after?: () => void): RunFn {
+function fakeExec(
+  code: number | null,
+  lines: readonly string[],
+  after?: () => void,
+  /** How the child died, where the case is about that rather than about output. */
+  signal: NodeJS.Signals | null = null,
+): RunFn {
   return (_bin, _args, options): Promise<RunResult> => {
     for (const line of lines) options?.onLine?.(line);
     after?.();
-    return Promise.resolve({ code, stdout: lines.map((line) => `${line}\n`).join(''), stderr: '' });
+    return Promise.resolve({
+      code,
+      signal,
+      stdout: lines.map((line) => `${line}\n`).join(''),
+      stderr: '',
+    });
   };
 }
 
@@ -360,6 +371,7 @@ function capture(): { args: string[][]; exec: RunFn } {
       for (const line of [ASSISTANT, SUCCESS]) options?.onLine?.(line);
       return Promise.resolve({
         code: 0,
+        signal: null,
         stdout: `${ASSISTANT}\n${SUCCESS}\n`,
         stderr: '',
       });
@@ -404,6 +416,40 @@ test('claude: an ordinary turn sends no fork flag at all', async () => {
   assert.equal((args[0] ?? []).includes('--fork-session'), false);
 });
 
+test('claude: plan mode carries the note that plan mode needs, and only plan mode', async () => {
+  // `--permission-mode plan` is the sandbox a read-only seat runs under, and the
+  // CLI injects its own plan-mode system prompt underneath it - research,
+  // produce a plan *document*, save it under `~/.claude/plans`, delegate to
+  // Explore/Plan/Task. None of that is a vibe turn's job: the answer is taken as
+  // structured JSON off the final message and a file outside the repository is
+  // read by nothing here.
+  //
+  // Observed rather than argued: a planner turn in a manual pass spent its last
+  // two minutes of ten on `Write C:\Users\Adam\.claude\plans\...`, context going
+  // 255k to 306k, for an artifact nothing reads (#211).
+  const { options } = progressRecorder();
+
+  const planning = capture();
+  await claudeTurn({ ...claudeOptions(options), permissionMode: 'plan' }, planning.exec);
+  const argv = planning.args[0] ?? [];
+  const at = argv.indexOf('--append-system-prompt');
+  assert.ok(at >= 0, `the note is sent under plan mode: ${argv.join(' ')}`);
+  assert.equal(argv[at + 1], PLAN_MODE_NOTE, 'and it is the exported sentence, not a copy');
+  // Appended, never replacing: `--system-prompt` would drop whatever else the
+  // CLI relies on being told, to correct one paragraph.
+  assert.equal(argv.includes('--system-prompt'), false);
+
+  // A writing seat has no plan-mode prompt to correct, so it gets no note. The
+  // asymmetry is the point: this is a correction to a specific flag's own
+  // instructions and not a thing vibe wants said on every turn.
+  const writing = capture();
+  await claudeTurn(
+    { ...claudeOptions(options), permissionMode: 'acceptEdits' },
+    writing.exec,
+  );
+  assert.equal((writing.args[0] ?? []).includes('--append-system-prompt'), false);
+});
+
 test('claude: forking a conversation it is also resuming is a programming error', async () => {
   const { options } = progressRecorder();
   const { exec } = capture();
@@ -433,12 +479,17 @@ function codexWithFork(
     if (argv[2] === '--help') {
       return Promise.resolve(
         flags === null
-          ? { code: 1, stdout: '', stderr: '' }
-          : { code: 0, stdout: `Usage: codex exec fork\n\n${flags.join('\n')}\n`, stderr: '' },
+          ? { code: 1, signal: null, stdout: '', stderr: '' }
+          : {
+              code: 0,
+              signal: null,
+              stdout: `Usage: codex exec fork\n\n${flags.join('\n')}\n`,
+              stderr: '',
+            },
       );
     }
     writeFileSync(outPath(dir), JSON.stringify({ verdict: 'APPROVE' }), 'utf8');
-    return Promise.resolve({ code: 0, stdout: '', stderr: '', ...extra(argv) });
+    return Promise.resolve({ code: 0, signal: null, stdout: '', stderr: '', ...extra(argv) });
   };
   return { args, exec };
 }
@@ -474,7 +525,7 @@ test('codex: an ordinary one-shot turn is still `exec`, and a resume still `exec
   const exec: RunFn = (_bin, argv): Promise<RunResult> => {
     args.push([...argv]);
     writeFileSync(outPath(dir), JSON.stringify({ verdict: 'APPROVE' }), 'utf8');
-    return Promise.resolve({ code: 0, stdout: '', stderr: '' });
+    return Promise.resolve({ code: 0, signal: null, stdout: '', stderr: '' });
   };
 
   await codexTurn(codexOptions(dir, options), exec);

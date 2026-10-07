@@ -1,8 +1,11 @@
 ﻿import { writeFileSync, readFileSync, existsSync, renameSync, rmSync } from 'node:fs';
+import { CLI_DEFAULT, modelArgs } from '@src/modelflag.js';
 import path from 'node:path';
 import { attachSpend } from '@src/charge.js';
-import { resolveBin, run } from '@src/proc.js';
-import type { RunFn } from '@src/proc.js';
+import { attachEnding, describeEnding, resolveBin, run } from '@src/proc.js';
+import { configuredBin } from '@src/clipaths.js';
+import { agentEnv } from '@src/auth.js';
+import type { ChildEnding, RunFn } from '@src/proc.js';
 import { detail, warn } from '@src/log.js';
 import { createHeartbeat, parseCodexLine, withHeartbeat } from '@src/progress.js';
 import type { ProgressOptions } from '@src/progress.js';
@@ -11,6 +14,10 @@ import type { Effort, Sandbox, TokenUsage, TurnActivity } from '@src/types.js';
 let cachedBin: string | null = null;
 
 export function codexBin(): string {
+  // The environment variable, then the settings, then the search - see
+  // `claudeBin` (#223).
+  const configured = process.env['VIBE_CODEX_BIN'] ? null : configuredBin('codex');
+  if (configured !== null) return configured;
   cachedBin ??= resolveBin('codex', {
     envVar: 'VIBE_CODEX_BIN',
     // `.sandbox-bin` appears on PATH ahead of the real install on this layout,
@@ -150,7 +157,7 @@ function extractTokens(usage: Record<string, unknown>): TokenUsage {
  * failing the turn, because the structured output file is the actual result
  * and losing a token count is not worth losing the work for.
  */
-function parseEvents(stdout: string): CodexEvents {
+export function parseEvents(stdout: string): CodexEvents {
   const out: CodexEvents = { threadId: null, tokens: ZERO_TOKENS, failure: null, failed: false };
 
   for (const line of stdout.split(/\r?\n/)) {
@@ -440,7 +447,9 @@ export async function codexTurn(
   // `resume` accepts neither -C nor -s: it takes its working directory from the
   // spawned process cwd, and its sandbox defaults to read-only. It does NOT
   // inherit -m or the reasoning effort either, so both are re-sent every turn -
-  // omitting them silently drops back to the config.toml default model.
+  // omitting them silently drops back to the config.toml default model. That
+  // drop is exactly what `default` asks for (#223), so `modelArgs` omits -m
+  // there on every verb alike, and a thread never changes model between turns.
   // `--json` turns stdout into JSONL, which is the only way Codex reports token
   // usage. It does not change what lands in `outFile`, so the result path is
   // unaffected; it is accepted by both `exec` and `exec resume`.
@@ -478,7 +487,7 @@ export async function codexTurn(
       const minted = await exec(
         codexBin(),
         wantsJson ? ['exec', 'fork', forkFrom, '--json'] : ['exec', 'fork', forkFrom],
-        { input: '', cwd, timeoutMs },
+        { input: '', cwd, timeoutMs, env: agentEnv('codex') },
       );
       // With `--json` the id arrives as a `thread.started` event; without it,
       // the human-readable banner is all there is, and it is printed to either
@@ -503,7 +512,7 @@ export async function codexTurn(
     ? [
         'exec', 'resume', resumeAfterFork,
         '--json',
-        '-m', model,
+        ...modelArgs('-m', model),
         '-c', `model_reasoning_effort="${effort}"`,
         '--skip-git-repo-check',
         ...schemaArgs,
@@ -514,7 +523,7 @@ export async function codexTurn(
     ? [
         'exec', 'fork', forkFrom,
         '--json',
-        '-m', model,
+        ...modelArgs('-m', model),
         '-c', `model_reasoning_effort="${effort}"`,
         '--skip-git-repo-check',
         ...schemaArgs,
@@ -525,7 +534,7 @@ export async function codexTurn(
     ? [
         'exec', 'resume', sessionId,
         '--json',
-        '-m', model,
+        ...modelArgs('-m', model),
         '-c', `model_reasoning_effort="${effort}"`,
         '--skip-git-repo-check',
         ...schemaArgs,
@@ -535,7 +544,7 @@ export async function codexTurn(
     : [
         'exec',
         '--json',
-        '-m', model,
+        ...modelArgs('-m', model),
         '-c', `model_reasoning_effort="${effort}"`,
         '-s', sandbox,
         '--skip-git-repo-check',
@@ -546,26 +555,45 @@ export async function codexTurn(
       ];
 
   const verb = forkFrom ? (resumeAfterFork === null ? 'fork' : 'fork+resume') : sessionId ? 'resume' : 'exec';
-  detail(`codex ${verb} -m ${model} (${effort}) -> ${schemaName}`);
+  detail(`codex ${verb} -m ${model === CLI_DEFAULT ? '(codex default)' : model} (${effort}) -> ${schemaName}`);
 
+  // See the same holder in claude.ts (#211). Both adapters report it, because a
+  // measurement present on one provider and absent on the other is a gap that
+  // reads as a zero the first time somebody compares two turns.
+  let outputBytes = 0;
   const heartbeat = options.progress
     ? createHeartbeat({
         ...options.progress,
         parse: parseCodexLine,
         unit: 'event',
         provider: 'codex',
+        held: () => outputBytes,
       })
     : null;
+  // See the note at the same point in claude.ts: one holder, read from the one
+  // attach point below (#131).
+  const ended: { seen: ChildEnding | null } = { seen: null };
   // Validation runs inside the heartbeat's work, not after it: the end-of-turn
   // flush is a claim that the turn completed, and while only `run()` was wrapped
   // a turn that wrote no usable output still persisted as one that had.
   return withHeartbeat(heartbeat, async () => {
-    const { code, stdout, stderr } = await exec(codexBin(), args, {
+    const { code, signal, stdout, stderr } = await exec(codexBin(), args, {
       input: prompt,
       cwd,
       timeoutMs,
+      // Billed to the road Settings names for OpenAI (#223).
+      env: agentEnv('codex'),
+      // The other agent turn a person may stop mid-flight (#209). The `exec
+      // fork` call above is deliberately NOT interruptible: it mints a thread
+      // id and takes no model turn, so killing it buys nothing and could leave
+      // a registered id with no conversation behind it (#74).
+      interruptible: true,
+      onBytes: (bytes) => {
+        outputBytes = bytes;
+      },
       ...(heartbeat === null ? {} : { onLine: heartbeat.onLine }),
     });
+    ended.seen = { code, signal };
 
     const events = parseEvents(stdout);
     // `resumeAfterFork` is in the chain because the two-call path takes its turn
@@ -593,7 +621,7 @@ export async function codexTurn(
       const cause = events.failure === null ? '' : `\ncodex reported: ${events.failure}`;
       throw attachSpend(
         new Error(
-          `codex wrote no structured output (exit ${code}).${cause}\n` +
+          `codex wrote no structured output (${describeEnding({ code, signal })}).${cause}\n` +
             `stderr:\n${stderr.slice(-2000)}\nstdout:\n${stdout.slice(-1000)}`,
         ),
         spent,
@@ -606,7 +634,10 @@ export async function codexTurn(
       // earlier phase of the same turn; accepting it would hand the loop a
       // result the agent said was not one.
       throw attachSpend(
-        new Error(`codex reported the turn failed (exit ${code}): ${events.failure ?? 'no detail'}`),
+        new Error(
+          `codex reported the turn failed (${describeEnding({ code, signal })}): ` +
+            `${events.failure ?? 'no detail'}`,
+        ),
         spent,
       );
     }
@@ -630,9 +661,13 @@ export async function codexTurn(
       }
     }
 
-    if (code !== 0) {
-      // Logged, not thrown: see the exit-status note above.
-      warn(`codex exited ${String(code)} but wrote schema-conformant output; accepting it.`);
+    if (code !== 0 || signal !== null) {
+      // Logged, not thrown: see the exit-status note above, and the matching one
+      // in claude.ts for why the signal is named rather than folded into the
+      // exit code (#131).
+      warn(
+        `codex ${describeEnding({ code, signal })} but wrote schema-conformant output; accepting it.`,
+      );
     }
 
     // See the note at the same point in claude.ts: read after the output was
@@ -646,5 +681,8 @@ export async function codexTurn(
       tokens: events.tokens,
       ...(activity === undefined ? {} : { activity }),
     };
+  }).catch((err: unknown) => {
+    // See the note at the same point in claude.ts.
+    throw ended.seen === null ? err : attachEnding(err, ended.seen);
   });
 }

@@ -9,7 +9,8 @@ import { DEFAULTS } from '@src/config.js';
 import { Escalation, EXIT, orchestrate, writeEscalation } from '@src/orchestrator.js';
 import type { AgentTurns } from '@src/orchestrator.js';
 import { reconcileQuestionRecords } from '@src/questions.js';
-import { createRun, saveState } from '@src/run.js';
+import { acceptMoves, acceptRaised, parseMoves, parseRaised, raisePhase } from '@src/raise.js';
+import { createRun, resumePhase, saveState, takePendingFindings } from '@src/run.js';
 import type {
   Answer,
   ClaudeTurnResult,
@@ -21,6 +22,7 @@ import type {
   OpenQuestion,
   Plan,
   RunState,
+  Severity,
   TokenUsage,
   TurnActivity,
 } from '@src/types.js';
@@ -297,6 +299,85 @@ export interface RunOptions {
   commit?: boolean;
 }
 
+/** One `git` invocation against a fixed directory. A seam, so a case can decide what fails. */
+export type GitRunner = (args: readonly string[]) => void;
+
+/**
+ * What git said, or an honest account of it having said nothing.
+ *
+ * `stdio: 'ignore'` used to discard this, so a failure read `Command failed: git
+ * config user.email vibe@example.invalid` with `stderr: null` and the cause was
+ * a guess forever after - an index lock, a handle held on a just-created
+ * `.git/config`, a scanner, all consistent with the evidence and none of them
+ * distinguishable from it (#182). An empty stderr is itself a finding and is
+ * reported as one rather than dressed up: git failing silently and git failing
+ * with a reason are different things to be told.
+ */
+function gitSaid(err: unknown): string {
+  const said = (err as { stderr?: unknown } | null)?.stderr;
+  const text = typeof said === 'string' ? said.trim() : '';
+  if (text !== '') return text;
+  const message = (err as { message?: unknown } | null)?.message;
+  return `git said nothing on stderr (${typeof message === 'string' ? message : String(err)})`;
+}
+
+/** The real runner. Exported so a case can watch a genuine git failure carry git's own words. */
+export function gitIn(targetDir: string): GitRunner {
+  return (args) => {
+    try {
+      // stderr piped rather than ignored: it is the whole point. stdout is piped
+      // and dropped, which is what `ignore` achieved for the quiet commands here.
+      execFileSync('git', [...args], {
+        cwd: targetDir,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (err: unknown) {
+      throw new Error(`git ${args.join(' ')} failed in ${targetDir}: ${gitSaid(err)}`);
+    }
+  };
+}
+
+/**
+ * Whether a failed `git <args>` may simply be run again.
+ *
+ * A property, not a list of what has been seen to fail: these three leave the
+ * same repository whether they run once or twice, so a second attempt cannot
+ * make anything worse than the first already did. `commit` is deliberately not
+ * among them - an attempt that committed and then failed on the way out would
+ * meet `nothing to commit` on the retry, turning an environmental blip into a
+ * failure that means something else entirely.
+ *
+ * This is the harness catching up with the product rather than going past it:
+ * `commitAll` already warns and returns null when git fails, so the loop has
+ * always tolerated what the fixture treated as impossible.
+ */
+export function gitRetryable(args: readonly string[]): boolean {
+  return args[0] === 'init' || args[0] === 'config' || args[0] === 'add';
+}
+
+/** Run it, and once more if that is safe - saying so either way. */
+function runGit(run: GitRunner, args: readonly string[]): void {
+  try {
+    run(args);
+    return;
+  } catch (err: unknown) {
+    if (!gitRetryable(args)) throw err;
+    // On stderr and not swallowed: a suite that went green because of a retry
+    // has to say so in its own output, or this becomes the retry that hides a
+    // real defect - the move `src/verify.ts` names as one of the three cheap
+    // ways to make a noisy gate pass.
+    process.stderr.write(`initGit: retrying once after a failure (#182): ${String(err)}\n`);
+    try {
+      run(args);
+    } catch (second: unknown) {
+      throw new Error(
+        `git ${args.join(' ')} failed twice. First: ${String(err)} Second: ${String(second)}`,
+      );
+    }
+  }
+}
+
 /**
  * A git repo the loop can be pointed at.
  *
@@ -304,19 +385,27 @@ export interface RunOptions {
  * `commitAll` warns and returns null when `git commit` fails, so a missing
  * `user.email` would make a commit assertion read as "the loop did not commit"
  * instead of "the fixture is broken".
+ *
+ * That sentence is also what rules out the tidiest-looking fix for #182 -
+ * dropping the three `git config` calls and passing `-c user.email=...` on the
+ * invocations that need them. It would remove three processes and three writes
+ * to `.git/config`, and it would fix the wrong git: `src/git.ts` builds its own
+ * argv and spawns its own child, so the identity has to be *in the repository*
+ * for the loop's commits to work at all. The harness's own flags never reach it.
  */
-export function initGit(targetDir: string, options: { commit?: boolean } = {}): void {
-  const git = (...args: string[]): void => {
-    execFileSync('git', args, { cwd: targetDir, stdio: 'ignore' });
-  };
-  git('init', '-q', '-b', 'main');
-  git('config', 'user.email', 'vibe@example.invalid');
-  git('config', 'user.name', 'vibe tests');
-  git('config', 'commit.gpgsign', 'false');
+export function initGit(
+  targetDir: string,
+  options: { commit?: boolean; run?: GitRunner } = {},
+): void {
+  const run = options.run ?? gitIn(targetDir);
+  runGit(run, ['init', '-q', '-b', 'main']);
+  runGit(run, ['config', 'user.email', 'vibe@example.invalid']);
+  runGit(run, ['config', 'user.name', 'vibe tests']);
+  runGit(run, ['config', 'commit.gpgsign', 'false']);
   if (options.commit === true) {
     writeFileSync(path.join(targetDir, 'README.md'), '# base\n', 'utf8');
-    git('add', '-A');
-    git('commit', '-q', '-m', 'base');
+    runGit(run, ['add', '-A']);
+    runGit(run, ['commit', '-q', '-m', 'base']);
   }
 }
 
@@ -326,12 +415,31 @@ export function freshRun(options: RunOptions = {}): RunState {
   return createRun(dir, options.task ?? 'loop harness', options.planOnly ?? true);
 }
 
-/** A run parked at the review phase, in a repo `git diff` can be asked about. */
-export function reviewingRun(options: RunOptions = {}): RunState {
+/**
+ * A run parked at the review phase, in a repo `git diff` can be asked about.
+ *
+ * **It has to hold a change, and until #223 it did not.** The review phase now
+ * refuses an empty diff rather than spawning a reviewer with nothing — which is
+ * the defect that cost a real run forty-five minutes — so a fixture that parks
+ * here over an untouched tree builds a run the product will not run. That is the
+ * same vacuity `work` already warns about one function below: a fake turn that
+ * changes nothing makes every commit assertion meaningless, and an empty tree
+ * here made every *review* assertion rest on a diff no real run ever has.
+ *
+ * One file, written and left unstaged, because that is the least a real
+ * implement phase leaves behind and `diffChunks` stages before it reads.
+ *
+ * `change: false` is for the cases that write their own tree — the chunking and
+ * coverage ones, which count files and would be measuring this fixture's extra
+ * one. They still get a non-empty diff; they just get it from the files they
+ * put there on purpose.
+ */
+export function reviewingRun(options: RunOptions & { change?: boolean } = {}): RunState {
   const state = freshRun({ ...options, git: options.git ?? true, planOnly: options.planOnly ?? false });
   state.plan = planFixture();
   state.phase = 'reviewing';
   state.baseSha = null;
+  if (options.change !== false) work(state, 'implemented.ts', 'export const implemented = true;\n');
   return state;
 }
 
@@ -541,6 +649,50 @@ export function gateRuns(state: RunState, name: string): number {
 }
 
 /**
+ * A gate whose verdict depends on the file a reproducer places (#113).
+ *
+ * Every other gate fixture here decides its outcome from a run counter, which
+ * cannot show the thing this one exists to show: that the *contents* the
+ * reviewer wrote are what the user's own command observed. This walks a
+ * directory and exits non-zero when any file in it contains `FAIL`, so a
+ * reproducer that asserts a real defect and one that asserts nothing are two
+ * different files producing two different exit codes through one unchanged
+ * command.
+ *
+ * It exits 0 when the directory does not exist, which is the baseline the loop
+ * observes before any reproducer is placed - and the thing that makes
+ * `reproduced` attributable rather than a guess.
+ *
+ * `fixedBy` names a marker file that makes it pass whatever is in the directory:
+ * a defect that has been repaired, so the same reproducer that failed before the
+ * fix passes after it. That sequence is the only way to reach the "closed by
+ * evidence" branch of OUTSTANDING.md, and it cannot be reached by varying the
+ * reproducer, because the reproducer is the one thing the fix turn cannot edit.
+ */
+export function reproducerGate(
+  state: RunState,
+  options: { dir?: string; fixedBy?: string } = {},
+): string {
+  const script = 'vibe-repro-gate.mjs';
+  const fixed =
+    options.fixedBy === undefined
+      ? ''
+      : `if (existsSync(${JSON.stringify(options.fixedBy)})) process.exit(0);\n`;
+  writeFileSync(
+    path.join(state.targetDir, script),
+    "import { existsSync, readdirSync, readFileSync } from 'node:fs';\n" +
+      `const dir = ${JSON.stringify(options.dir ?? 'repro')};\n` +
+      fixed +
+      'if (!existsSync(dir)) process.exit(0);\n' +
+      'const bad = readdirSync(dir).some((f) => ' +
+      "readFileSync(`${dir}/${f}`, 'utf8').includes('FAIL'));\n" +
+      'process.exit(bad ? 1 : 0);\n',
+    'utf8',
+  );
+  return `node ${script}`;
+}
+
+/**
  * A `package.json` with a real `test` script in the target tree.
  *
  * For the cases that have to prove auto-detection did NOT happen: without a
@@ -618,6 +770,109 @@ export function answerNeedsInput(
   reconcileQuestionRecords(state);
   renameSync(file, path.join(state.dir, `answered-${state.planRound}.md`));
   return answers;
+}
+
+/** One block, written the way a person filling in the template would leave it. */
+export interface RaiseInput {
+  title: string;
+  severity: Severity;
+  detail: string;
+  fix?: string;
+  /** The `*File:*` line, verbatim. Omitted leaves the placeholder in place. */
+  file?: string;
+}
+
+/**
+ * What `vibe resume` does with a NEEDS-INPUT.md somebody raised a finding in
+ * (#141).
+ *
+ * The sibling of `answerNeedsInput`, and it mirrors `resumeRun` for the same
+ * reason and to the same depth: the two exported halves - `parseRaised` and
+ * `acceptRaised` - are the real ones, and only the CLI glue between them is
+ * uncovered. A case that pushed findings onto `state.pendingFindings` by hand
+ * would be asserting on a fixture rather than on the flow.
+ *
+ * The blocks are appended rather than substituted into the template, because
+ * that is what a person does with a template: the one the file ships with is
+ * left untouched below them, which is also the case that must parse to nothing.
+ */
+export function raiseInNeedsInput(
+  state: RunState,
+  cwd: string,
+  inputs: readonly RaiseInput[],
+): ReturnType<typeof acceptRaised> {
+  const file = path.join(state.dir, 'NEEDS-INPUT.md');
+  // `orchestrate` throws the `Escalation`; `execute` is what turns one into this
+  // file, and the stall drivers stop at the first of those. Written through the
+  // real `writeEscalation` rather than forged, so the block being filled in is
+  // the block a run actually ships - and written afresh on every call, because
+  // `resumeRun` retires the file the moment it takes the raise in. Appending to
+  // the previous one would present a person's earlier blocks back to the parser
+  // a second time, which no resume ever does.
+  writeEscalation(state, new Escalation(EXIT.NO_CONVERGENCE, 'the round cap'));
+  const blocks = inputs.map(
+    (r) =>
+      `### Finding: ${r.title}\n\n` +
+      `*Severity:* ${r.severity}\n` +
+      (r.file === undefined ? '' : `*File:* ${r.file}\n`) +
+      `\n**What is wrong:**\n\n> ${r.detail}\n\n` +
+      `**Suggested fix:**\n\n> ${r.fix ?? ''}\n`,
+  );
+  writeFileSync(file, `${readFileSync(file, 'utf8')}\n${blocks.join('\n')}`, 'utf8');
+
+  const { findings, problems } = parseRaised(readFileSync(file, 'utf8'));
+  if (problems.length > 0) {
+    throw new Error(`the harness wrote a block the parser refused: ${problems[0]?.reason ?? ''}`);
+  }
+  const phase = raisePhase(resumePhase(state));
+  if (phase === null) throw new Error('this run has finished, so nothing can be raised on it');
+  return acceptRaised(state, cwd, phase, findings);
+}
+
+/**
+ * What `vibe resume` does with a NEEDS-INPUT.md somebody moved a severity in
+ * (#142).
+ *
+ * The third of these, and it mirrors `resumeRun` to the same depth as the other
+ * two: the exported `parseMoves` and `acceptMoves` are the real ones, and only
+ * the CLI glue between them is uncovered. The file is written afresh through the
+ * real `writeEscalation` on every call, so the block being edited is the block a
+ * run actually ships - including the `*Currently:*` clause, which is what a
+ * person reads before deciding to override a guard.
+ */
+export function moveInNeedsInput(
+  state: RunState,
+  moves: readonly { id: string; to: Severity; why: string }[],
+): ReturnType<typeof acceptMoves> {
+  writeEscalation(state, new Escalation(EXIT.NO_CONVERGENCE, 'the round cap'));
+  const file = path.join(state.dir, 'NEEDS-INPUT.md');
+
+  let filled = readFileSync(file, 'utf8');
+  for (const m of moves) {
+    // Anchored on the block's own heading, so a file with several rows has each
+    // one edited where a person would edit it rather than all at the first.
+    const head = filled.indexOf(`### Move: \`${m.id}\``);
+    if (head === -1) throw new Error(`no move block for ${m.id} - it is not being carried`);
+    const rest = filled
+      .slice(head)
+      .replace(/\*Move to:\* <[^>]*>/, `*Move to:* ${m.to}`)
+      .replace(/\*\*Why:\*\*\n\n>/, `**Why:**\n\n> ${m.why}`);
+    filled = `${filled.slice(0, head)}${rest}`;
+  }
+  writeFileSync(file, filled, 'utf8');
+
+  const carry = raisePhase(resumePhase(state));
+  if (carry === null) throw new Error('this run has finished, so it carries nothing to move');
+  const { moves: parsed, problems } = parseMoves(readFileSync(file, 'utf8'), takeCarried(state, carry));
+  if (problems.length > 0) {
+    throw new Error(`the harness wrote a block the parser refused: ${problems[0]?.reason ?? ''}`);
+  }
+  return acceptMoves(state, carry, parsed);
+}
+
+/** What the run is carrying for a phase, or an empty list. */
+export function takeCarried(state: RunState, phase: 'plan' | 'review'): Finding[] {
+  return takePendingFindings(state, phase) ?? [];
 }
 
 // ---- known stalls ----------------------------------------------------------

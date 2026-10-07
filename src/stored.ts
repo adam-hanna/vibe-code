@@ -248,6 +248,7 @@ const PROVIDERS = {
 
 const BOUNDARIES = {
   'plan-round': 'plan-round',
+  'question-round': 'question-round',
   'plan-approved': 'plan-approved',
   implemented: 'implemented',
   'verify-round': 'verify-round',
@@ -270,6 +271,7 @@ const SLOT_NAMES = {
   main: 'main',
   judge: 'judge',
   review: 'review',
+  write: 'write',
 } satisfies Record<SlotName, SlotName>;
 
 const FORK_WHYS = {
@@ -1072,11 +1074,17 @@ function readGateOutcome(entry: unknown, at: string, ctx: ReadContext): GateOutc
   if (!(command === null || isString(command))) return null;
   if (!isCounter(entry['runs']) || !isBool(entry['required'])) return null;
   const artifacts = readGateArtifacts(`${at}.artifacts`, entry['artifacts'], ctx);
+  // Optional, and repaired to absent rather than to zero (#135). Every outcome
+  // recorded before this field existed has none, and a `0` on a failed gate
+  // would assert that nothing failed - which is the one reading the field exists
+  // to make impossible.
+  const failed = optionalNumber(`${at}.failed`, entry['failed'], ctx, isCounter);
   return {
     name: entry['name'],
     status,
     command,
     runs: entry['runs'],
+    ...(failed === undefined ? {} : { failed }),
     required: entry['required'],
     ...(artifacts === undefined ? {} : { artifacts }),
   };
@@ -1306,6 +1314,13 @@ export function readCheckpointShape(raw: unknown): RunCheckpointMeta | null {
   if (!isCounter(raw['planRound']) || !isCounter(raw['reviewRound']) || !isCounter(raw['verifyRound'])) {
     return null;
   }
+  // Absent is legal and means the checkpoint predates #139; present-and-unusable
+  // refuses the whole meta, exactly as the three counters above do. The two are
+  // different facts and only one of them is a damaged file - every snapshot in
+  // the archive today is missing this field, and treating that as damage would
+  // report a healthy run as unforkable.
+  const questionRound = raw['questionRound'];
+  if (questionRound !== undefined && !isCounter(questionRound)) return null;
   if (!(commit === null || (isString(commit) && FULL_SHA.test(commit)))) return null;
   return {
     n: raw['n'],
@@ -1315,6 +1330,10 @@ export function readCheckpointShape(raw: unknown): RunCheckpointMeta | null {
     planRound: raw['planRound'],
     reviewRound: raw['reviewRound'],
     verifyRound: raw['verifyRound'],
+    // Spread rather than assigned: `exactOptionalPropertyTypes` makes
+    // `questionRound: undefined` a different type from the property being
+    // missing, and it is the missing one that means "this file never had it".
+    ...(questionRound === undefined ? {} : { questionRound }),
     commit,
     commitNote,
   };
@@ -1686,6 +1705,22 @@ const READERS = {
   createdAt: (raw, ctx) => refusedTimestamp('createdAt', raw, ctx),
   status: (raw, ctx) => refusedEnum('status', raw, STATUSES, ctx),
   planOnly: (raw, ctx) => refusedBool('planOnly', raw, ctx),
+  /**
+   * Whether this run works in a worktree of its own (#223).
+   *
+   * **Optional, so it fails to absent, and that is the safe direction.** An
+   * unreadable value becomes "no worktree", which means the run works in the
+   * repository — where its archive, its lock and the branch's refs already are,
+   * so it degrades to exactly what every run did before this field existed, and
+   * `repairs.replaced` reports that it happened rather than letting it pass.
+   *
+   * The other direction would be the dangerous one and is worth stating: reading
+   * absent as *true* would point a resume at a directory that may never have been
+   * created. Even that fails loudly rather than quietly — git refuses to check
+   * out a branch that is checked out in another worktree — but a refusal nobody
+   * can explain is a worse outcome than the honest degrade.
+   */
+  worktree: (raw, ctx) => optionalBool('worktree', raw, ctx),
   costUsd: (raw, ctx) =>
     refusedNumber('costUsd', raw, ctx, isMoney, 'a number of dollars', CEILING_NOTE),
   tokensUsed: (raw, ctx) =>
@@ -1784,6 +1819,8 @@ const READERS = {
   // migrates and nothing is repaired.
   humanAnswered: (raw, ctx) =>
     raw === undefined ? undefined : repairedArray('humanAnswered', raw, ctx, readString),
+  humanAnswers: (raw, ctx) =>
+    raw === undefined ? undefined : repairedArray('humanAnswers', raw, ctx, readAnswer),
   suppressedQuestions: (raw, ctx) =>
     raw === undefined
       ? undefined

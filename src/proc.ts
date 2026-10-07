@@ -2,6 +2,14 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+// The one import, and it points the other way from everything else here:
+// `cancel.ts` is a leaf that imports only this module's types, so the kill
+// mechanism lives beside the spawn rather than being threaded down to it.
+import { Cancelled, CANCEL_ENDING, cancelRequested, registerInterruptible } from '@src/cancel.js';
+// The other exception: what a child prints is redacted of every key this
+// process could have put in its environment (#223) - a vendor's 401 quotes the
+// key it was sent, and everything below hands stdout and stderr to a log.
+import { redact, secrets } from '@src/heldkeys.js';
 
 const isWin = process.platform === 'win32';
 
@@ -49,7 +57,20 @@ export function resolveBin(name: string, options: ResolveOptions = {}): string {
   const finder = isWin
     ? path.join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'where.exe')
     : 'which';
-  const found = spawnSync(finder, [name], { encoding: 'utf8' });
+  // `windowsHide` here as well as on the long-lived spawns, and it is not
+  // cosmetic since #223. The host is spawned `DETACHED_PROCESS`, so it holds no
+  // console at all - which means a console-subsystem child spawned WITHOUT this
+  // flag allocates a fresh console of its own, and a fresh console comes with a
+  // visible window. `where.exe` runs for a few milliseconds and the window
+  // flashes for exactly that long, once per binary this resolves. Reported as
+  // *"there are a whole bunch of windows that popup and quickly disappear when
+  // I run"*, which is precisely the count: claude, codex, git, node.
+  //
+  // Before the detach it inherited the host's own (window-less) console and
+  // nothing showed, so this is the second half of that change rather than a new
+  // defect - the same reasoning `host.rs` records for why `CREATE_NO_WINDOW` is
+  // the wrong flag there and the right one here.
+  const found = spawnSync(finder, [name], { encoding: 'utf8', windowsHide: true });
   const allHits =
     found.status === 0
       ? found.stdout.split(/\r?\n/).map((s) => s.trim()).filter(Boolean)
@@ -112,12 +133,144 @@ export interface RunOptions {
    * signal, and losing it must never cost the turn.
    */
   onLine?: ((line: string) => void) | undefined;
+  /**
+   * How many bytes of this child's stdout the parent is now holding (#211).
+   *
+   * **Not a limit and not a stream - a measurement of a buffer that only
+   * grows.** `stdout` here is built by concatenation and every reader of it
+   * splits it again, so a turn that talks for half an hour is holding at least
+   * two copies of everything it said. A 27-minute implement turn reporting 8.8M
+   * tokens is what made that worth being able to see: the host died during it
+   * with no stack, no narration and nothing on stderr, and its last heartbeat
+   * had nothing to say about memory at all.
+   *
+   * Reported rather than acted on. Nothing here decides a buffer is too large,
+   * because nothing has measured what too large is on this platform.
+   */
+  onBytes?: ((bytes: number) => void) | undefined;
+  /**
+   * Whether a cancel may kill this child (#209).
+   *
+   * **Off by default, and the default is the safe one.** The two agent adapters
+   * set it and nothing else does: `git`, the verification gate and the
+   * app-server client all come through here, and none of them is something
+   * "stop the turn" gives permission to kill. A `git commit` killed mid-write
+   * leaves an index a later resume has to recover from, and the verification
+   * gate is the *user's own command* - a suite killed half-way is a `failing`
+   * verdict about a run nobody completed (#135).
+   */
+  interruptible?: boolean | undefined;
+  /**
+   * Kill THIS child when it fires, and nothing else (#223).
+   *
+   * The pilot's stop button. `interruptible` is the run's latch and kills every
+   * agent child of the run, which is exactly wrong for a chat turn: stopping a
+   * conversation must not stop the run it is about. A signal is one child's own
+   * off switch, held by whoever spawned it. It settles the same way a cancel
+   * does - `Cancelled`, rejected at once rather than left to `close`.
+   */
+  signal?: AbortSignal | undefined;
+  /**
+   * The child's whole environment, when it is not this process's (#223). The
+   * agent adapters pass `agentEnv`, which is how a run turn is billed to the
+   * route Settings names rather than to whatever the shell happened to hold.
+   */
+  env?: NodeJS.ProcessEnv | undefined;
 }
 
 export interface RunResult {
   code: number | null;
+  /**
+   * The signal that ended the child, or null when it exited under its own power.
+   *
+   * `close` has always carried this and it was always thrown away, so a turn
+   * whose child was killed and one whose child exited non-zero arrived here as
+   * the same fact - `code: null` - and the run record could not tell them apart
+   * (#131). Exactly one of the two is ever set: Node gives `(code, null)` on an
+   * exit and `(null, signal)` on a signal death, and both null is the shape a
+   * child that could not be spawned at all leaves behind, which never reaches
+   * `close`.
+   *
+   * Required rather than optional, so every producer - including a test's fake
+   * transport - has to say which it observed. An absent signal defaulted to
+   * `null` would read as "exited normally" on a killed turn, which is the one
+   * claim this field exists to stop being made.
+   *
+   * **`signal === null` does not mean the child was not killed, on Windows.**
+   * Windows has no signals: an outside kill - Task Manager, `Stop-Process`, a
+   * parent that did not spawn this child - becomes `TerminateProcess`, and the
+   * child closes with an exit code and no signal at all. Only a kill vibe sends
+   * to its *own* child handle, as the timeout path does, survives as a signal
+   * there. So this field is the sharper answer where it is available and never
+   * the complete one, which is why `isAbnormal` and not `signal !== null` is
+   * what the recording site asks - and why #131's other half stamps the parent.
+   */
+  signal: NodeJS.Signals | null;
   stdout: string;
   stderr: string;
+}
+
+/**
+ * How a child process ended, keyed by the error raised because it ended that
+ * way.
+ *
+ * A side table for the reason `SPENT` in `src/charge.ts` is one, and modelled on
+ * it deliberately: every error raised today must still be raised with the same
+ * type and reach the same handler, and this value has to ride on a
+ * `RateLimitError` as readily as on a plain `Error`. Nothing in `err.message`,
+ * `err.stack` or the `error` event changes.
+ *
+ * Unlike `SPENT`, an ending of "exit 0, no signal" is still recorded when a
+ * throw site attaches one. The accounting can treat a spend of nothing as
+ * nothing to say; a *cause of death* has no equivalent zero, and "the child
+ * exited cleanly and the adapter rejected its output anyway" is a different
+ * finding from "the child was killed", which is the distinction #131 exists to
+ * preserve.
+ */
+const ENDED = new WeakMap<object, ChildEnding>();
+
+/** What `close` reported about a child, carried out on the error it caused. */
+export interface ChildEnding {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+}
+
+/**
+ * Record how the child ended on the error that ends this turn. Returns `err`,
+ * so a throw site can attach and throw in one expression.
+ */
+export function attachEnding<E>(err: E, ending: ChildEnding): E {
+  if (typeof err === 'object' && err !== null) ENDED.set(err, ending);
+  return err;
+}
+
+/**
+ * How the child behind this error ended, or null when nobody attached one.
+ *
+ * Null is a real answer and is not the same as `{code: null, signal: null}`: it
+ * means this failure did not come from a child ending at all - a rate limit
+ * detected mid-stream, a schema the adapter refused - so the reader must not
+ * report an ending for it. Read without consuming, because unlike a spend an
+ * ending is not paid and cannot be double-counted.
+ */
+export function endingOf(err: unknown): ChildEnding | null {
+  if (typeof err !== 'object' || err === null) return null;
+  return ENDED.get(err) ?? null;
+}
+
+/** Whether an ending is worth a reader's attention: a signal, or a bad exit. */
+export function isAbnormal(ending: ChildEnding): boolean {
+  return ending.signal !== null || ending.code !== 0;
+}
+
+/** "killed by SIGKILL", "exit 1", or "neither an exit code nor a signal". */
+export function describeEnding(ending: ChildEnding): string {
+  if (ending.signal !== null) return `killed by ${ending.signal}`;
+  if (ending.code !== null) return `exit ${ending.code}`;
+  // Not reachable from `close`, which always supplies one of the two - but a
+  // caller may construct an ending from a source that observed neither, and
+  // saying so is the point of the issue rather than an oversight in it.
+  return 'neither an exit code nor a signal';
 }
 
 /**
@@ -139,12 +292,26 @@ export type RunFn = (
  * positional prompt argument.
  */
 export function run(bin: string, args: readonly string[], options: RunOptions = {}): Promise<RunResult> {
-  const { input, cwd, timeoutMs, onLine } = options;
+  const { input, cwd, timeoutMs, onLine, onBytes, interruptible, signal, env } = options;
+  const keys = secrets();
+  const clean = (text: string): string => (keys.length === 0 ? text : redact(text, keys));
 
   return new Promise<RunResult>((resolve, reject) => {
+    // Before the spawn, and the ordering is the fail-closed half of #209. A
+    // cancelled turn's error has to travel up through the retry logic and the
+    // loop's own handlers, any one of which could plausibly decide to have
+    // another go; refusing here means the next agent child does not start at
+    // all, rather than every layer in between having to remember not to.
+    const stopped = interruptible === true ? cancelRequested() : null;
+    if (stopped !== null) {
+      reject(new Cancelled(stopped));
+      return;
+    }
+
     const needsShell = isWin && /\.(cmd|bat)$/i.test(bin);
     const child = spawn(bin, [...args], {
       ...(cwd === undefined ? {} : { cwd }),
+      ...(env === undefined ? {} : { env }),
       shell: needsShell,
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -164,7 +331,7 @@ export function run(bin: string, args: readonly string[], options: RunOptions = 
     const emitLine = (line: string): void => {
       if (settled || onLine === undefined || line === '') return;
       try {
-        onLine(line);
+        onLine(clean(line));
       } catch {
         // A progress hook must never take down a run.
       }
@@ -186,6 +353,10 @@ export function run(bin: string, args: readonly string[], options: RunOptions = 
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', (d: string) => {
       stdout += d;
+      // Per chunk, not per line: chunks arrive in tens of kilobytes and lines in
+      // thousands, and this is a measurement nobody is watching closely enough
+      // to want at line resolution (#211).
+      if (onBytes !== undefined) onBytes(stdout.length);
       if (onLine === undefined) return;
       pending += d;
       drain(false);
@@ -194,12 +365,50 @@ export function run(bin: string, args: readonly string[], options: RunOptions = 
       stderr += d;
     });
 
+    // Unregistered on every path out, in `settle`, so a child that ended on its
+    // own is never in the set when a later cancel walks it - a stale entry is a
+    // kill aimed at a pid the OS may have handed to somebody else by then.
+    let unregister: (() => void) | null = null;
+
     const settle = (fn: () => void): void => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      unregister?.();
       fn();
     };
+
+    if (interruptible === true) {
+      unregister = registerInterruptible(() => {
+        child.kill('SIGKILL');
+        // Rejected here rather than left to `close`, for the reason the timeout
+        // path settles itself: the caller has been given up on, and a `close`
+        // arriving afterwards would resolve a turn somebody stopped as though
+        // it had merely exited. `Cancelled` is a class rather than a message so
+        // the layers above can tell it from an ordinary failure without
+        // matching English - a turn that failed may be worth retrying, and a
+        // turn somebody stopped never is.
+        settle(() =>
+          reject(attachEnding(new Cancelled(cancelRequested() ?? 'asked to stop'), CANCEL_ENDING)),
+        );
+      });
+    }
+
+    if (signal !== undefined) {
+      const onAbort = (): void => {
+        child.kill('SIGKILL');
+        settle(() => reject(attachEnding(new Cancelled('stopped from the window'), CANCEL_ENDING)));
+      };
+      if (signal.aborted) onAbort();
+      else {
+        signal.addEventListener('abort', onAbort, { once: true });
+        const before = unregister;
+        unregister = () => {
+          before?.();
+          signal.removeEventListener('abort', onAbort);
+        };
+      }
+    }
 
     // The accumulated `stdout` dies with this closure, and that is deliberate.
     // A timed-out turn's usage is not a number worth charging: Codex reports
@@ -215,17 +424,29 @@ export function run(bin: string, args: readonly string[], options: RunOptions = 
     if (timeoutMs !== undefined) {
       timer = setTimeout(() => {
         child.kill('SIGKILL');
-        settle(() => reject(new Error(`${path.basename(bin)} timed out after ${timeoutMs}ms`)));
+        // The SIGKILL is attached even though vibe sent it, and that is not a
+        // false alarm: the reader of a run record wants to know the child died
+        // on a signal, and the message beside it already says who sent it and
+        // why. An ending omitted here because "we know this one" is a hole the
+        // next reader has to know about (#131).
+        settle(() =>
+          reject(
+            attachEnding(new Error(`${path.basename(bin)} timed out after ${timeoutMs}ms`), {
+              code: null,
+              signal: 'SIGKILL',
+            }),
+          ),
+        );
       }, timeoutMs);
     }
 
     child.on('error', (err: Error) => settle(() => reject(err)));
-    child.on('close', (code: number | null) => {
+    child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
       // Before `settle`: a single-line output with no trailing newline must
       // still reach the hook, while on the timeout path `settled` is already
       // true and this emits nothing.
       drain(true);
-      settle(() => resolve({ code, stdout, stderr }));
+      settle(() => resolve({ code, signal, stdout: clean(stdout), stderr: clean(stderr) }));
     });
 
     if (input !== undefined) child.stdin.write(input, 'utf8');

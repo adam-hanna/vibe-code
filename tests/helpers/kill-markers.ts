@@ -5,6 +5,19 @@
  * `main()` on import, so a test that imported the markers from it would spawn a
  * run inside the test process instead of reading two strings.
  */
+/**
+ * The first line every mode prints, before it reads argv or touches a disk.
+ *
+ * Without it, a child that had not reached its first line and a child that
+ * started and then stalled are the same observation from outside - both are
+ * `stdout ""` when the parent's readiness wait gives up - and they want opposite
+ * responses: the first has done nothing and can simply be spawned again, the
+ * second is the hang #100 added that wait to diagnose and must never be retried
+ * past. #181 is the run where that mattered: two failures, `stdout ""` both
+ * times, and no way to tell which of the two had happened.
+ */
+export const STARTING_LINE = 'starting';
+
 export const ALLOC_MODEL = 'marker-model';
 export const ALLOC_CONTEXT_PREFIX = 'the brief:';
 /** Large, so the single write it produces is wide enough to be cut in half. */

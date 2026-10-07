@@ -354,7 +354,7 @@ function clearStaging(gateDir: string, round: number): string[] {
 }
 
 /** One thing the sweep would not remove, and why a reader is being told. */
-interface KeptEntry {
+export interface KeptEntry {
   /** Run-relative, POSIX, so it is a path a reader can act on. */
   at: string;
   why: string;
@@ -363,6 +363,182 @@ interface KeptEntry {
 export interface ArtifactSweep {
   removed: string[];
   kept: KeptEntry[];
+}
+
+/**
+ * One entry in a gate directory that a killed preservation could have left.
+ *
+ * `keepBecause` is what makes this shared rather than two nearly-agreeing
+ * walks (#130): whether an entry may be removed is a judgement with reasons -
+ * a superseded round with no `round-N` beside it may be the only copy of that
+ * evidence - and a reporter that decided it separately from the sweep would
+ * eventually name something the sweep keeps, or stay silent about something it
+ * takes. Both go through `walkScratch`.
+ */
+export interface ScratchEntry {
+  /** Run-relative, POSIX. */
+  at: string;
+  shape: 'staging' | 'superseded';
+  /** Null when the sweep would remove it; the reason when it would not. */
+  keepBecause: string | null;
+}
+
+/** The shape and the reason the sweep gives when it will not touch an entry. */
+const UNCLASSIFIABLE = 'is a link, or could not be classified';
+
+/**
+ * Every scratch entry under a run's `artifacts/`, classified and not touched.
+ *
+ * The one walk. `sweepGateArtifacts` acts on what it yields and `findGateScratch`
+ * reports it, in the same order, so the two cannot come to disagree about what
+ * scratch *is* - which is the drift `clearStaging` already warns about in its
+ * own comment for the same pair of call sites.
+ *
+ * `onUnreadable` is separate from `onEntry` because they are separate facts: one
+ * is a leftover this module could describe, the other is a place it could not
+ * look. Neither is ever silently skipped.
+ */
+function walkScratch(
+  runDir: string,
+  onEntry: (entry: ScratchEntry) => void,
+  onUnreadable: (kept: KeptEntry) => void,
+): void {
+  const artifactsDir = path.join(runDir, 'artifacts');
+  if (entryKind(artifactsDir) === 'missing') return;
+  if (entryKind(artifactsDir) !== 'directory') {
+    onUnreadable({ at: 'artifacts', why: 'is not a plain directory; nothing was swept' });
+    return;
+  }
+
+  let gates: string[];
+  try {
+    gates = readdirSync(artifactsDir, { withFileTypes: true }).map((e) => e.name);
+  } catch (err: unknown) {
+    onUnreadable({ at: 'artifacts', why: `could not be read (${reason(err)})` });
+    return;
+  }
+
+  for (const gate of gates) {
+    const gateDir = path.join(artifactsDir, gate);
+    if (entryKind(gateDir) !== 'directory') {
+      onUnreadable({ at: `artifacts/${gate}`, why: 'is not a plain directory' });
+      continue;
+    }
+    let names: string[];
+    try {
+      names = readdirSync(gateDir, { withFileTypes: true }).map((e) => e.name);
+    } catch (err: unknown) {
+      onUnreadable({ at: `artifacts/${gate}`, why: `could not be read (${reason(err)})` });
+      continue;
+    }
+
+    for (const name of names) {
+      const rel = `artifacts/${gate}/${name}`;
+      const at = path.join(gateDir, name);
+
+      // `.staging-round-N-<stamp>` and the `.partial-<i>` beside it, which
+      // shares the prefix on purpose - see `preserveGateArtifacts`.
+      if (name.startsWith(STAGING)) {
+        const kind = scratchKind(at);
+        const removable = kind === 'directory' || kind === 'file' || kind === 'missing';
+        onEntry({ at: rel, shape: 'staging', keepBecause: removable ? null : UNCLASSIFIABLE });
+        continue;
+      }
+
+      // `round-<n>.superseded-<stamp>`: the previous round, held while a swap
+      // was in flight. It is scratch only once the round it backs up is
+      // installed, which is the same rule `recoverInterrupted` applies and for
+      // the same reason - with no `round-<n>` beside it, this may be the ONLY
+      // copy of that evidence, and the ambiguity is not one a sweep may resolve.
+      const backup = /^(round-\d+)\.superseded-/.exec(name);
+      if (backup === null) continue;
+      const round = backup[1] ?? '';
+      if (entryKind(path.join(gateDir, round)) !== 'directory') {
+        onEntry({
+          at: rel,
+          shape: 'superseded',
+          keepBecause: `${round} is not installed beside it, so this may be the only copy`,
+        });
+        continue;
+      }
+      const kind = scratchKind(at);
+      const removable = kind === 'directory' || kind === 'file' || kind === 'missing';
+      onEntry({ at: rel, shape: 'superseded', keepBecause: removable ? null : UNCLASSIFIABLE });
+    }
+  }
+}
+
+/** What one run is carrying, and where the walk could not look. */
+export interface RunScratch {
+  /** Only the entries the sweep would remove. See `unresolved` for the rest. */
+  entries: ScratchEntry[];
+  /**
+   * Entries that match a scratch name but must not be removed, and places the
+   * walk could not read. Named rather than dropped, for the reason the
+   * scorecard lists its skipped runs: a report that quietly omits some of what
+   * is there looks complete while being partial.
+   */
+  unresolved: KeptEntry[];
+  /**
+   * Bytes across `entries`, or **null when they could not be measured** - a
+   * count that stopped part way is not a smaller count. Zero is a real answer
+   * and means the leftovers hold no bytes.
+   */
+  bytes: number | null;
+  /** Files across `entries`, on the same terms as `bytes`. */
+  files: number | null;
+}
+
+/**
+ * What a run that will never resume again is still holding (#130).
+ *
+ * The half `sweepGateArtifacts` cannot reach, stated as a reading rather than
+ * an action. That is deliberate and it is option 3 of the three the issue
+ * offered: a sweep across `.vibe/runs` needs a retention rule, every retention
+ * rule is a number, and **this repo does not invent numbers**. What the census
+ * taken for #130 found is that the number cannot be borrowed from evidence
+ * either - across 349 run records in 28 archives, 20 runs recorded a gate
+ * failure and **not one had configured any gate `artifacts` paths**, so the
+ * mechanism has never had anything to copy and 0 MB is a fact about
+ * configuration rather than about accumulation.
+ *
+ * So: report it, name it, size it, and let a person delete what they like.
+ * Nothing here removes anything, which is the property that makes it safe to
+ * run over runs this process does not own.
+ *
+ * **Never throws**, like everything else on `vibe list`'s path: one damaged run
+ * must not take out the listing of the healthy ones beside it.
+ */
+export function findGateScratch(runDir: string): RunScratch {
+  const found: RunScratch = { entries: [], unresolved: [], bytes: 0, files: 0 };
+  try {
+    walkScratch(
+      runDir,
+      (entry) => {
+        if (entry.keepBecause !== null) {
+          found.unresolved.push({ at: entry.at, why: entry.keepBecause });
+          return;
+        }
+        found.entries.push(entry);
+        try {
+          const m = measure(path.join(runDir, ...entry.at.split('/')));
+          if (found.bytes !== null) found.bytes += m.bytes;
+          if (found.files !== null) found.files += m.files;
+        } catch {
+          // Absent rather than partial: a total that silently stopped counting
+          // reads as a smaller total, which is the fabrication this file's
+          // `preserveGateArtifacts` header refuses in the same words.
+          found.bytes = null;
+          found.files = null;
+        }
+      },
+      (kept) => found.unresolved.push(kept),
+    );
+  } catch {
+    // `walkScratch` guards its own reads, so this is the belt: whatever it was,
+    // the listing still prints.
+  }
+  return found;
 }
 
 /**
@@ -382,7 +558,10 @@ export interface ArtifactSweep {
  * because that run never executes anything - only a pass over `.vibe/runs`
  * would, and archive-wide retention is a bigger question that #62 ruled out of
  * scope and that applies to every artifact rather than to this one. Said here
- * rather than implied: the never-resumed case is not covered.
+ * rather than implied: the never-resumed case is not covered **by the sweep**.
+ * Since #130 it is *reported* by `findGateScratch`, which reads and removes
+ * nothing - and the two share `walkScratch`, so what the listing names and what
+ * this takes are one definition rather than two.
  *
  * **Never throws.** It runs at the top of a pass, and failing to tidy must not
  * stop a run - the same rule `preserveGateArtifacts` itself follows.
@@ -394,65 +573,21 @@ export interface ArtifactSweep {
  */
 export function sweepGateArtifacts(state: RunState): ArtifactSweep {
   const sweep: ArtifactSweep = { removed: [], kept: [] };
-  const artifactsDir = path.join(state.dir, 'artifacts');
-  if (entryKind(artifactsDir) === 'missing') return sweep;
-  if (entryKind(artifactsDir) !== 'directory') {
-    sweep.kept.push({ at: 'artifacts', why: 'is not a plain directory; nothing was swept' });
-    return sweep;
-  }
-
-  let gates: string[];
-  try {
-    gates = readdirSync(artifactsDir, { withFileTypes: true }).map((e) => e.name);
-  } catch (err: unknown) {
-    sweep.kept.push({ at: 'artifacts', why: `could not be read (${reason(err)})` });
-    return sweep;
-  }
-
-  for (const gate of gates) {
-    const gateDir = path.join(artifactsDir, gate);
-    if (entryKind(gateDir) !== 'directory') {
-      sweep.kept.push({ at: `artifacts/${gate}`, why: 'is not a plain directory' });
-      continue;
-    }
-    let names: string[];
-    try {
-      names = readdirSync(gateDir, { withFileTypes: true }).map((e) => e.name);
-    } catch (err: unknown) {
-      sweep.kept.push({ at: `artifacts/${gate}`, why: `could not be read (${reason(err)})` });
-      continue;
-    }
-
-    for (const name of names) {
-      const rel = `artifacts/${gate}/${name}`;
-      const at = path.join(gateDir, name);
-
-      if (name.startsWith(STAGING)) {
-        if (removeScratch(at)) sweep.removed.push(rel);
-        else sweep.kept.push({ at: rel, why: 'is a link, or could not be classified' });
-        continue;
+  walkScratch(
+    state.dir,
+    (entry) => {
+      if (entry.keepBecause !== null) {
+        sweep.kept.push({ at: entry.at, why: entry.keepBecause });
+        return;
       }
-
-      // `round-<n>.superseded-<stamp>`: the previous round, held while a swap
-      // was in flight. It is deleted only once the round it backs up is
-      // installed, which is the same rule `recoverInterrupted` applies and for
-      // the same reason - with no `round-<n>` beside it, this may be the ONLY
-      // copy of that evidence, and the ambiguity is not one a sweep may resolve.
-      const backup = /^(round-\d+)\.superseded-/.exec(name);
-      if (backup === null) continue;
-      const installed = path.join(gateDir, backup[1] ?? '');
-      if (entryKind(installed) !== 'directory') {
-        sweep.kept.push({
-          at: rel,
-          why: `${backup[1] ?? ''} is not installed beside it, so this may be the only copy`,
-        });
-        continue;
-      }
-      if (removeScratch(at)) sweep.removed.push(rel);
-      else sweep.kept.push({ at: rel, why: 'is a link, or could not be classified' });
-    }
-  }
-
+      // Re-asked at the moment of removal rather than trusted from the walk: the
+      // classification and the delete are two syscalls, and `removeScratch` is
+      // the one that must be right about what it is about to unlink.
+      if (removeScratch(path.join(state.dir, ...entry.at.split('/')))) sweep.removed.push(entry.at);
+      else sweep.kept.push({ at: entry.at, why: UNCLASSIFIABLE });
+    },
+    (kept) => sweep.kept.push(kept),
+  );
   return sweep;
 }
 

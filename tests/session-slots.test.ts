@@ -17,7 +17,7 @@ import {
   slotStarted,
 } from '@src/orchestrator.js';
 import type { AgentTurns, Role, RoleTable, TurnRequest } from '@src/orchestrator.js';
-import { handoffContext } from '@src/prompts.js';
+import { handoffContext, taskContext } from '@src/prompts.js';
 import {
   noteSlotRegistered,
   recoverDeadSlot,
@@ -172,7 +172,7 @@ test('a Claude slot whose first turn fails is not established on the next turn',
   const rec = recorder();
   await captureLog(() => runTurn(state, cfg, request('planner', { prompt: 'second' }), rec.turns));
   assert.equal(rec.claudeCalls[0]?.resume, false);
-  assert.equal(rec.claudeCalls[0]?.prompt, handoffContext(null, null, false) + 'second');
+  assert.equal(rec.claudeCalls[0]?.prompt, handoffContext(null, null, false) + taskContext(state.task, state.extraContext) + 'second');
 });
 
 test('a Codex slot whose first turn fails is not established on the next turn', async () => {
@@ -301,7 +301,7 @@ test('a started run stored before this change still carries its conversations', 
   const rec = recorder({ codexSession: 'thread-legacy' });
   await captureLog(() => runTurn(state, cfg, request('planner', { prompt: 'go on' }), rec.turns));
   assert.equal(rec.claudeCalls[0]?.resume, true);
-  assert.equal(rec.claudeCalls[0]?.prompt, 'go on');
+  assert.equal(rec.claudeCalls[0]?.prompt, taskContext(state.task, state.extraContext) + 'go on');
   assert.equal(rec.claudeCalls[0]?.sessionId, 'session-legacy');
 
   await captureLog(() => runTurn(state, cfg, request('critic'), rec.turns));
@@ -460,7 +460,9 @@ test('compaction never rotates the conversation the concurrent work is using', a
   const before = slotId(state, 'main');
   let rotations = 0;
 
-  assert.equal(rotatingSlot(SWAPPED), 'judge');
+  // Case 2: a Codex implementer is seated on the one-shot `write` slot now,
+  // not on `judge`. The claim is unchanged: the rotation must not fire.
+  assert.equal(rotatingSlot(SWAPPED), 'write');
   assert.equal(shouldRotate(state, cfg, SWAPPED), false);
   assert.equal(shouldRotate(state, cfg), true, 'the default table would rotate here');
 
@@ -560,4 +562,35 @@ test('a table that names no slot falls back to each role default conversation', 
   assert.equal(slotForRole('planner', unnamed), 'main');
   assert.equal(slotForRole('critic', unnamed), 'judge');
   assert.equal(rotatingSlot(unnamed), 'main');
+});
+
+// ---- A Codex writer is one-shot --------------------------------------------
+
+test('a Codex implementer never resumes a thread, and leaves the critic’s alone', async () => {
+  // `codex exec resume` takes no -s flag, so a resumed turn cannot write. The
+  // writer is seated on the one-shot `write` slot rather than refusing the whole
+  // run its Codex memory - which is what a Codex implementer used to cost.
+  const state = freshState();
+  const cfg = config();
+  assert.equal(cfg.codex.persistSession, true);
+  assert.equal(slotForRole('implementer', SWAPPED), 'write');
+
+  // The critic's thread under a table whose critic is on Codex.
+  const judged: RoleTable = { ...SWAPPED, critic: { provider: 'codex', access: 'read-only', schema: FINDINGS_SCHEMA } };
+  const rec = recorder({ codexSession: 'critic-thread' });
+  await captureLog(() => runTurn(state, cfg, request('critic'), rec.turns, judged));
+  assert.equal(state.codexSessionId, 'critic-thread');
+
+  const writer = recorder({ codexSession: 'writer-thread' });
+  for (const label of ['implement', 'fix-1']) {
+    await captureLog(() => runTurn(state, cfg, request('implementer', { label }), writer.turns, judged));
+  }
+  assert.deepEqual(writer.codexCalls.map((c) => c.sessionId ?? null), [null, null], 'every writer turn starts fresh');
+  assert.deepEqual(writer.codexCalls.map((c) => c.sandbox), ['workspace-write', 'workspace-write']);
+  assert.equal(state.codexSessionId, 'critic-thread', 'the writer adopted nothing into the judge');
+
+  // And the critic still resumes its own.
+  const again = recorder({ codexSession: 'critic-thread' });
+  await captureLog(() => runTurn(state, cfg, request('critic', { label: 'critique-1' }), again.turns, judged));
+  assert.equal(again.codexCalls[0]?.sessionId, 'critic-thread');
 });
