@@ -71,8 +71,8 @@ export const ACTIONS: readonly Action[] = [
   { id: 'backToLive', label: 'Back to the live run', group: 'Go to' },
 
   { id: 'newRun', label: 'New run…', group: 'Run', shortcut: { code: 'KeyN', shift: false } },
-  { id: 'pause', label: 'Pause at the next gate', group: 'Run' },
-  { id: 'stop', label: 'Stop this turn…', group: 'Run' },
+  { id: 'pause', label: 'Pause after this step', group: 'Run' },
+  { id: 'stop', label: 'Stop run…', group: 'Run' },
   { id: 'gateContinue', label: 'Continue past the gate', group: 'Run' },
   { id: 'gateStop', label: 'Stop at the gate', group: 'Run' },
 

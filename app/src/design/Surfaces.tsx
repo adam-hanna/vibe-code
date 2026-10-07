@@ -77,6 +77,12 @@ export function Banner({
  * of what a caller passes in is not something this component can be asked to
  * trust.
  */
+/** Whether a key event's target keeps the browser's own select-all: a field. */
+function editable(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return target.isContentEditable || target.tagName === 'INPUT' || target.tagName === 'TEXTAREA';
+}
+
 export function Modal({
   children,
   width = 520,
@@ -91,6 +97,7 @@ export function Modal({
   onDismiss: () => void;
 }) {
   const scrim = useRef<HTMLDivElement>(null);
+  const dialog = useRef<HTMLDivElement>(null);
 
   /**
    * Focus the scrim **once**, so a keystroke has somewhere to land.
@@ -134,10 +141,33 @@ export function Modal({
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') onDismiss();
+      // Select-all inside a dialog selects the dialog (#253). The pilot's log is
+      // selectable text, so the browser's own select-all painted the whole
+      // conversation blue behind the scrim. A field keeps its own select-all.
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a' && !editable(event.target)) {
+        event.preventDefault();
+        const box = dialog.current;
+        const selection = window.getSelection();
+        if (box !== null && selection !== null) {
+          const range = document.createRange();
+          range.selectNodeContents(box);
+          selection.removeAllRanges();
+          selection.addRange(range);
+        }
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [onDismiss]);
+
+  /**
+   * A selection made behind the dialog does not stay painted under it (#253).
+   * The scrim is translucent, so a selection in the log read as part of the
+   * dialog. Cleared once, when it opens.
+   */
+  useEffect(() => {
+    window.getSelection()?.removeAllRanges();
+  }, []);
 
   // Styled with utilities (the UI rework), and every rule the stylesheet carried
   // is here: the scrim is fixed over the whole window at z-50, above the palette;
@@ -166,6 +196,7 @@ export function Modal({
         role="dialog"
         aria-modal="true"
         aria-label={label}
+        ref={dialog}
       >
         {/* The scrolling half, a wrapper rather than `overflow` on the dialog
             itself, so the dialog keeps its border and shadow while a long body
