@@ -34,7 +34,7 @@ import { installPromptOverrides } from '@src/prompts.js';
 import { describeEnding as describeProcessEnding, installEndingStamp } from '@src/ending.js';
 import { commitFork, listForkPoints, planFork } from '@src/fork.js';
 import type { Liveness, LockHandle } from '@src/lock.js';
-import { reconcileAssumed, reconcileQuestionRecords } from '@src/questions.js';
+import { mergeHumanAnswers, reconcileAssumed, reconcileQuestionRecords } from '@src/questions.js';
 import { acceptMoves, acceptRaised, parseMoves, parseRaised, raisePhase } from '@src/raise.js';
 import type { RaiseProblem, RequestedMove, RequestedMoves } from '@src/raise.js';
 import { assertUsableRunId } from '@src/stored.js';
@@ -968,10 +968,17 @@ async function resumeRun(
     }
     applyEdits();
     log.ok(`Picked up ${answers.length} answer(s) from NEEDS-INPUT.md`);
-    state.pendingAnswers = answers;
+    // Merged, never overwritten (#169): the answerer's usable answers are
+    // already durable in `pendingAnswers` when a run stops after its turn, and
+    // a `question-round` stop hands every question back - answered or not. The
+    // person wins where both answered one question; the answerer's answer
+    // stands where the person left it blank.
+    state.pendingAnswers = mergeHumanAnswers(state.pendingAnswers, answers);
     // On the same write that stores them, so there is no window where the run
     // is holding answers it has no durable record of having been given (#65).
-    // `pendingAnswers` is consumed by the loop and cannot be that record.
+    // `pendingAnswers` is consumed by the loop and cannot be that record - and
+    // only the human answers go here, because `humanAnswered` means a person
+    // answered and the merged list includes the answerer's.
     recordHumanAnswers(state, answers);
     saveState(state);
     // Immediately, and before preflight: `ASSUMED.md` is authored at the end of

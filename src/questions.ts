@@ -25,7 +25,13 @@
 import * as log from '@src/log.js';
 import { artifact, hasArtifact, removeArtifact, saveState } from '@src/run.js';
 import { normalize, REPHRASE_THRESHOLD, similarity } from '@src/similarity.js';
-import type { DeferredQuestion, ResolvedQuestion, RunState, SuppressedQuestion } from '@src/types.js';
+import type {
+  Answer,
+  DeferredQuestion,
+  ResolvedQuestion,
+  RunState,
+  SuppressedQuestion,
+} from '@src/types.js';
 
 /**
  * The metric, the threshold and the token rule live in `src/similarity.ts` since
@@ -131,6 +137,38 @@ export function pairAnswers<Q, A>(
 
   // 3. What is left is left. Reported, never attached to the nearest question.
   return { paired, unpaired: [...freeAnswers] };
+}
+
+/**
+ * The answers a NEEDS-INPUT resume revises against: the person's, plus the
+ * answerer's to every question the person left blank (#169).
+ *
+ * **The person wins.** Since #169 the answerer's usable answers are durable in
+ * `pendingAnswers` from the moment its turn is recorded, so a run that stops
+ * before the revision still holds them when somebody fills in the file. On a
+ * `question-round` stop that collision is the normal case rather than an edge:
+ * the gate deliberately hands back *every* question the round put, including
+ * the ones the answerer already answered, so that the person - not the loop -
+ * decides which answers are worth revisiting. Overwriting would throw away the
+ * answerer's work on every question the person did not touch; appending would
+ * revise against two answers to one question.
+ *
+ * "About the same question" is `pairAnswers`, the same exact-then-fuzzy rule
+ * the re-ask guard and the answerer's own join use - not a third matcher.
+ * Human answers come first, so the planner reads them before anything else.
+ */
+export function mergeHumanAnswers(
+  pending: readonly Answer[] | null,
+  human: readonly Answer[],
+): Answer[] {
+  const pairing = pairAnswers(
+    pending ?? [],
+    human,
+    (a) => a.question,
+    (h) => h.question,
+  );
+  const overridden = new Set(pairing.paired.map((p) => p.question));
+  return [...human, ...(pending ?? []).filter((a) => !overridden.has(a))];
 }
 
 export interface Rephrase {
