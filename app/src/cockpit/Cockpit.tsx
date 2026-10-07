@@ -23,7 +23,7 @@ import { PilotPane } from '../pilot/PilotPane';
 import { chatRun } from '../pilot/log';
 import { noCommands, reduceCommands, restore, running } from './commands';
 import { NOWHERE, readWhere, WHERE_KEY, writableWhere } from './where';
-import type { BottomTab, Panels, Viewing, Where } from './where';
+import type { BottomTab, Panels, Tab, Viewing, Where } from './where';
 import { CommandsPane } from './CommandsPane';
 import { CodePane } from './CodePane';
 import { Diagnostics } from './Diagnostics';
@@ -544,7 +544,9 @@ export function Cockpit() {
    * naming convention in the one process that cannot be kept in step with it.
    */
   const [openAt, setOpenAt] = useState<number | null>(null);
-  const open = useCallback((next: string, round?: number | null) => {
+  // A pane by name, never a string: `'activity'` was cast into the tab and the
+  // window drew a tab that does not exist, with nothing selected (#260).
+  const open = useCallback((next: Tab | BottomTab, round?: number | null) => {
     // A round card's `open verify` and the pilot's `read_command` still name
     // the two panes by their old tab names; they live in the bottom panel now,
     // so opening one opens that panel on it rather than a main tab that is gone.
@@ -553,7 +555,7 @@ export function Cockpit() {
       setPanels((p) => (p.bottom ? p : { ...p, bottom: true }));
       return;
     }
-    setTab(next as typeof tab);
+    setTab(next);
     setOpenAt(round ?? null);
   }, []);
   /**
