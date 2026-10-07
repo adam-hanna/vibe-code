@@ -196,7 +196,17 @@ export const FINDINGS_SCHEMA = {
     verdict: {
       type: 'string',
       enum: ['APPROVE', 'REVISE'],
-      description: 'APPROVE if and only if there are zero P0 and zero P1 findings.',
+      // This used to read "APPROVE if and only if there are zero P0 and zero P1
+      // findings", which was both an instruction about what the loop does and
+      // false: `gate()` decides from the findings and `loop.p1Tolerance`, carries
+      // up to that many P1s (default 1), and never reads this field (#115). It
+      // states no threshold on purpose - a reviewer told how many P1s are free is
+      // invited to grade toward the line rather than on the merits.
+      description:
+        'Your own judgement of whether this is right. It is recorded, not acted on: what ' +
+        'happens next is decided from your findings and their severities under the ' +
+        "project's settings. APPROVE is a correct and expected outcome when inspection " +
+        'supports it. Grade each finding on its merits, never to reach or avoid a verdict.',
     },
     summary: { type: 'string' },
     findings: {

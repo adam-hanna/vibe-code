@@ -1883,7 +1883,7 @@ export function writeFollowUps(state: RunState, plan: Plan): string | null {
       `**Task:** ${state.task}\n\n` +
       `Work this run identified and deliberately did not do, as of the latest round.\n\n` +
       `Each finding below was **non-blocking at the moment it was deferred** - P2 or P3, ` +
-      `below both the reviewer's APPROVE rule and the loop gate, which stops only on a P0 ` +
+      `below the loop gate, which stops only on a P0 ` +
       `or on more P1s than \`loop.p1Tolerance\`. A later round may have re-raised the same ` +
       `id at a blocking severity; the severity shown is the one it carried when it was ` +
       `deferred, so check the \`plan-critique-*.json\` and \`code-review-*.json\` artifacts ` +

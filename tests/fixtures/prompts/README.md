@@ -18,6 +18,16 @@ Their scope, evidence, report-absence and chunk-coverage assertions remain in pl
 verification repairs and final fixes. These tests check instructions and wiring, not whether
 a model follows them on real work.
 
+## #115: one reviewer paragraph, spliced rather than regenerated
+
+`reviewPrompt` gained `APPROVE_COST`, one paragraph after the "Do not wave through a real defect"
+line, saying that approving is an equally correct outcome and what an invented finding costs. The
+three review baselines were **not** regenerated for it. Every comparison against them goes through
+[`tests/helpers/approve-cost.ts`](../../helpers/approve-cost.ts), which inserts exactly that
+paragraph and throws if its anchor is missing, so each case still proves nothing else in the
+reviewer's prompt moved. `plan-no-runs.txt` is untouched: the planner and the critic are not given
+the paragraph.
+
 ## Historical fixture contracts
 
 The sections below record the baselines and deliberate deltas before this regeneration.
