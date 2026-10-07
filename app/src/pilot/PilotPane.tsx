@@ -68,6 +68,7 @@ import type { Call, Conversation, Reply } from './transcript';
 import type { Launched } from '../cockpit/argv';
 import { line, outcome } from '../cockpit/commands';
 import { memory } from '../memory';
+import { Markdown } from './Markdown';
 import type { Command, Commands } from '../cockpit/commands';
 import type { Run } from '../cockpit/model';
 
@@ -644,14 +645,11 @@ function ReplyCard({
       {/* `visible`, not the raw text: a tool call the subscription backend made
           arrives as a fenced block inside the prose, and the card two lines down
           is a better rendering of it than the JSON that produced it. The raw
-          text stays in `Reply.text`, which is the record (#211). `pre-wrap`,
-          because a reply's own line breaks are the model's and not ours to
-          normalise away. */}
-      {visible(reply.text) !== '' && (
-        <div className="select-text whitespace-pre-wrap text-body text-primary [overflow-wrap:anywhere]">
-          {visible(reply.text)}
-        </div>
-      )}
+          text stays in `Reply.text`, which is the record (#211). Drawn as
+          Markdown (`Markdown.tsx`), because that is what the pilot writes and
+          the prompt now says it is rendered: as preformatted text a table
+          arrived as rows of pipes. */}
+      {visible(reply.text) !== '' && <Markdown text={visible(reply.text)} />}
       {outcome?.kind === 'failed' && <div className={WHY}>{outcome.message}</div>}
       {reply.compacts === true && outcome?.kind === 'ended' && reply.text !== '' && reply.calls.length === 0 && (
         <div className={NOTE}>
