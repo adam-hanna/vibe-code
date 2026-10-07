@@ -94,11 +94,6 @@ pub fn open(app: &AppHandle) -> Option<PathBuf> {
     .map(|sink| sink.path.clone())
 }
 
-/// Where the log is, once it has been opened.
-pub fn path() -> Option<PathBuf> {
-    SINK.get().and_then(|s| s.as_ref()).map(|s| s.path.clone())
-}
-
 /// This crate's own sentence: said on stderr **and** kept.
 ///
 /// Both, in that order, for the reason `log.ts` gives about the same pair - a
