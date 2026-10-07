@@ -345,21 +345,49 @@ export function failedRuns(result: VerifyResult): number {
 /**
  * PATH for the verification command.
  *
- * Prepends the host directories of contracted tools for the same reason the
+ * Adds the host directories of contracted tools for the same reason the
  * agents need repairing: vibe may itself be running under a shell whose PATH
  * cannot resolve node, and a verification step that fails with ENOENT would
  * be indistinguishable from a genuine test failure.
+ *
+ * **Only for a tool the gate's PATH cannot already find, and appended, never
+ * prepended** (#251). Putting the directories first also decided WHICH tool
+ * ran: with `/usr/bin` at the front, a suite on an nvm Node ran under the
+ * system's, and one test of this repo's own failed under it. So the gate ran
+ * something its author's terminal never runs, failed 3 of 3, and the fixer -
+ * whose shell had the normal PATH - could not reproduce it, round after round.
+ * A repair is for a tool that is missing; a tool that is present is the
+ * person's choice, and the gate runs their toolchain.
  */
-function verificationEnv(contract: ToolchainContract): NodeJS.ProcessEnv {
+export function verificationEnv(
+  contract: ToolchainContract,
+  env: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const separator = process.platform === 'win32' ? ';' : ':';
+  const current = env['PATH'] ?? '';
   const dirs: string[] = [];
   for (const tool of Object.keys(contract)) {
+    if (findsOnPath(tool, current, env)) continue;
     const dir = hostDirectoryFor(tool);
     if (dir !== null && !dirs.includes(dir)) dirs.push(dir);
   }
-  if (dirs.length === 0) return { ...process.env };
+  if (dirs.length === 0) return { ...env };
+  // An empty entry means the working directory on POSIX, so none is introduced.
+  const entries = [...current.split(separator).filter((e) => e !== ''), ...dirs];
+  return { ...env, PATH: entries.join(separator) };
+}
 
-  const separator = process.platform === 'win32' ? ';' : ':';
-  return { ...process.env, PATH: `${dirs.join(separator)}${separator}${process.env['PATH'] ?? ''}` };
+/** Whether a directory on `pathVar` holds `tool`, as a shell's lookup would find it. */
+function findsOnPath(tool: string, pathVar: string, env: NodeJS.ProcessEnv): boolean {
+  const win = process.platform === 'win32';
+  const names = win
+    ? ['', ...(env['PATHEXT'] ?? '.COM;.EXE;.BAT;.CMD').split(';')].map((ext) => tool + ext.toLowerCase())
+    : [tool];
+  for (const dir of pathVar.split(win ? ';' : ':')) {
+    if (dir === '') continue;
+    for (const name of names) if (existsSync(path.join(dir, name))) return true;
+  }
+  return false;
 }
 
 /** `npm test` when the project defines one. Deliberately conservative. */

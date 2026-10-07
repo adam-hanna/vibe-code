@@ -34,8 +34,9 @@ export interface ResolveOptions {
  * A real `.exe` always wins over a `.cmd`/`.ps1` shim: spawning a shim on
  * Windows requires `shell: true`, which drags in quoting rules we do not want
  * anywhere near model-authored text. npm-installed CLIs put only a shim on
- * PATH while the real binary sits in node_modules, so the known fallback paths
- * are checked before settling for one.
+ * PATH while the real binary sits in node_modules, so on Windows the known
+ * fallback paths are checked before settling for one. Elsewhere a PATH hit is
+ * the program itself and is taken first (#251).
  */
 export function resolveBin(name: string, options: ResolveOptions = {}): string {
   const { envVar, fallbacks = [], deprioritize } = options;
@@ -79,6 +80,15 @@ export function resolveBin(name: string, options: ResolveOptions = {}): string {
 
   const exe = hits.find((h) => h.toLowerCase().endsWith('.exe'));
   if (exe) return exe;
+  // **Off Windows, what PATH found is the program, and it wins** (#251). The
+  // fallbacks are ahead of a hit for one reason, and it is a Windows one: a hit
+  // there is often a `.cmd` shim with the real `.exe` somewhere else. A POSIX hit
+  // is never that, and putting the list ahead of it made `/usr/bin/node` beat
+  // the nvm Node `which` returned first - which `verificationEnv` then put at
+  // the front of the gate's PATH, so a green suite ran under a different Node
+  // and failed. `hosttools.ts` says the list is consulted only after normal
+  // resolution fails; this is what makes that true everywhere.
+  if (!isWin && hits[0]) return hits[0];
 
   for (const candidate of fallbacks) {
     const expanded = expandHome(candidate);
@@ -92,7 +102,6 @@ export function resolveBin(name: string, options: ResolveOptions = {}): string {
 
   const shim = hits.find((h) => /\.(cmd|bat)$/i.test(h));
   if (shim) return shim;
-  if (!isWin && hits[0]) return hits[0];
 
   throw new Error(
     `Could not locate "${name}". Set ${envVar ?? 'its path'} or add it to PATH. ` +
