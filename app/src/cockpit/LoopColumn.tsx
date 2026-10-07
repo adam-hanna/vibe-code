@@ -8,6 +8,7 @@ import { Counts } from './Counts';
 import { Caret } from './Disclosure';
 import { boundary, clock, elapsed } from './format';
 import { censusByPhase, questionsByPhase, title, unplacedQuestions } from './rounds';
+import type { BottomTab, Tab } from './where';
 import { RunningRow } from './RunningRow';
 import type { KeyboardEvent } from 'react';
 import { CYCLE_OF, runningRow } from './model';
@@ -22,7 +23,12 @@ import type { Census, CycleKind, PhaseGroup, Preflight, QuestionRound, ResumedFr
  * convention in a third place, in the one process that cannot be kept in step
  * with it.
  */
-export type OpenAt = (tab: string, round?: number | null) => void;
+/**
+ * Open a pane, at a round when it has one. A pane by name, never a string: a
+ * name that is not one used to become the current tab and blank the window
+ * (#260).
+ */
+export type OpenAt = (tab: Tab | BottomTab, round?: number | null) => void;
 
 /**
  * The centre column from `3a`, at the width the design fixes it at.
@@ -1131,7 +1137,7 @@ function RunRail({ run, now, onOpen }: { run: Run; now: number; onOpen?: OpenAt 
           <div className={cn(LABEL, 'flex items-center justify-between text-secondary')}>
             <span>Current activity</span>
             {onOpen !== undefined && (
-              <Button variant="quiet" size="icon-sm" onClick={() => onOpen('activity')} title="Open full activity" aria-label="Open full activity">
+              <Button variant="quiet" size="icon-sm" onClick={() => onOpen('output')} title="Open full activity" aria-label="Open full activity">
                 <Activity size={14} aria-hidden="true" />
               </Button>
             )}

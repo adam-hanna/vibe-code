@@ -71,6 +71,7 @@ import { memory } from '../memory';
 import { Markdown } from './Markdown';
 import type { Command, Commands } from '../cockpit/commands';
 import type { Run } from '../cockpit/model';
+import type { OpenAt } from '../cockpit/LoopColumn';
 
 /**
  * The pilot pane: the conversation that drives the session (#143, #144).
@@ -829,7 +830,7 @@ export interface PilotPaneProps {
    * link that opened the pane at whichever round was newest would be the wrong
    * one every time but the last.
    */
-  onOpen?: (tab: string, round?: number | null) => void;
+  onOpen?: OpenAt;
 }
 
 export function PilotPane({
