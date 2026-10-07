@@ -185,3 +185,51 @@ test('leaves a locked directory', () => {
   assert.equal(code, 0, stderr);
   assert.deepEqual(entries(p.machineTmp), []);
 });
+
+// A fixture test that says it has started and then waits, so a signal can be
+// sent while the run is in the middle of something.
+const WAITER = `
+import { test } from 'node:test';
+import { writeFileSync } from 'node:fs';
+test('waits', async () => {
+  writeFileSync(process.env.STARTED_PATH, 'started');
+  await new Promise((resolve) => setTimeout(resolve, 60_000));
+});
+`;
+
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
+  test(`a run stopped by ${signal} still removes its root`, { skip: process.platform === 'win32' }, async (t) => {
+    // Sent to the whole process group, which is what a terminal does for
+    // Ctrl-C and for closing the window. SIGHUP left the root behind until the
+    // script handled it.
+    const p = project(t, { 'wait.test.js': WAITER });
+    const started = path.join(p.cwd, 'started');
+    const { NODE_TEST_CONTEXT: _context, VIBE_KEEP_TEST_TMP: _keep, ...inherited } = process.env;
+    const child = spawn(process.execPath, [script], {
+      cwd: p.cwd,
+      detached: true,
+      env: { ...inherited, TMPDIR: p.machineTmp, TMP: p.machineTmp, TEMP: p.machineTmp, STARTED_PATH: started },
+      stdio: 'ignore',
+    });
+    const closed = new Promise<void>((resolve) => child.on('close', () => resolve()));
+    t.after(() => {
+      try {
+        process.kill(-(child.pid ?? 0), 'SIGKILL');
+      } catch {
+        // already gone
+      }
+    });
+
+    const deadline = Date.now() + 20_000;
+    while (!existsSync(started)) {
+      if (child.exitCode !== null) assert.fail('the run ended before its test started');
+      if (Date.now() > deadline) assert.fail('the fixture test did not start within 20s');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.equal(entries(p.machineTmp).filter((name) => name.startsWith('vibe-test-run-')).length, 1);
+
+    process.kill(-(child.pid ?? 0), signal);
+    await closed;
+    assert.deepEqual(entries(p.machineTmp), []);
+  });
+}

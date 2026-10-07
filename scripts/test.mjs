@@ -25,10 +25,11 @@
 //   two-thirds of what a fixture repository costs is files no test reads.
 //   `GIT_TEMPLATE_DIR` names an empty directory, which is git's own way to say
 //   "copy nothing".
-// - **A run killed part-way is swept by the next one.** Ctrl-C reaches this
-//   process too and is waited out, but a SIGKILL or a closed terminal runs no
-//   code here at all, so each root holds the pid that made it and a root whose
-//   pid is gone is removed at the start of the next run.
+// - **A run killed part-way is swept by the next one.** Ctrl-C, SIGTERM and a
+//   closed terminal (SIGHUP) are waited out and the root is removed as usual,
+//   but a SIGKILL, a crash of this process or a power cut runs no code here at
+//   all, so each root holds the pid that made it and a root whose pid is gone
+//   is removed at the start of the next run.
 // - **Anything that reaches the real temp directory fails the run, by name.** A
 //   fixture that hard-codes `/tmp`, or a child spawned with a hand-built
 //   environment, would otherwise bring the leak back silently. `vibe-pilot-` is
@@ -146,11 +147,13 @@ const child = spawn(
   },
 );
 
-// Ctrl-C reaches the runner and this process together; staying alive until the
-// runner has gone is what lets the root be removed afterwards. A signal sent to
-// this process alone is passed on.
+// Ctrl-C and a closing terminal reach the runner and this process together;
+// staying alive until the runner has gone is what lets the root be removed
+// afterwards. A signal sent to this process alone is passed on. SIGHUP was
+// measured leaving the root behind before it was handled here.
 process.on('SIGINT', () => {});
 process.on('SIGTERM', () => child.kill('SIGTERM'));
+process.on('SIGHUP', () => child.kill('SIGHUP'));
 
 const status = await new Promise((resolve) => {
   child.on('exit', (code) => resolve(code ?? 1));

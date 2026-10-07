@@ -41,7 +41,7 @@ and the root is removed when the run ends. Three rules travel with it, pinned by
   rather than 27. The sample hooks were two-thirds of what a test repository cost, and no test
   runs one. A run fell from about 30,000 inodes and 174 MB to about 22,800 and 148 MB; most of
   what is left is the deliberately large states in `fork-kill` and the chat-store cases.
-- **A run that was killed is swept by the next one.** Each root holds the pid that made it,
+- **Ctrl-C, SIGTERM and a closed terminal still remove the root**; the script waits for the runner and then cleans up. **A SIGKILL or a crash is swept by the next run**: each root holds the pid that made it,
   and a root whose pid has gone is removed at the start of the next run.
 - **Anything that appears in the real temp directory fails the run, by name.** That is a test
   writing to a hard-coded `/tmp` or spawning a child with a hand-built environment, and it would
