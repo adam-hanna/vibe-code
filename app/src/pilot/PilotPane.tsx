@@ -69,6 +69,7 @@ import type { Launched } from '../cockpit/argv';
 import { line, outcome } from '../cockpit/commands';
 import { memory } from '../memory';
 import { Markdown } from './Markdown';
+import { splitBrief } from '../cockpit/argv';
 import type { Command, Commands } from '../cockpit/commands';
 import type { Run } from '../cockpit/model';
 
@@ -575,6 +576,9 @@ function ReplyCard({
   busy: boolean;
 }) {
   const outcome = reply.outcome;
+  // The composer's settings ride under the brief for the model, and are drawn as
+  // chips rather than as words the person wrote (#258).
+  const yours = reply.asked === null ? null : splitBrief(reply.asked);
   return (
     <div className="flex flex-col gap-2">
       {/* What you said, above the answer to it (#211). The pane drew replies
@@ -600,12 +604,21 @@ function ReplyCard({
           left-aligned: a right-aligned paragraph has a ragged left edge, and
           the left edge is the one the eye returns to on every line. Newlines
           survive, because they are the reason shift+enter exists. */}
-      {reply.asked !== null && (
+      {yours !== null && (
         <div className="flex max-w-[80%] flex-col items-end gap-1.5 self-end rounded-md border border-rule-card bg-active px-3.5 py-2.5">
           <Badge>you</Badge>
           <div className="self-stretch select-text whitespace-pre-wrap text-left text-body text-primary [overflow-wrap:anywhere]">
-            {reply.asked}
+            {yours.brief}
           </div>
+          {yours.settings.length > 0 && (
+            <div className="flex flex-wrap justify-end gap-1" title="Set in the new-run dialog, and passed to the pilot with this message">
+              {yours.settings.map((chip) => (
+                <Badge key={chip} variant="quiet">
+                  {chip}
+                </Badge>
+              ))}
+            </div>
+          )}
         </div>
       )}
       <div className="flex flex-col gap-2 self-stretch border-l-2 border-accent-border-dim py-1 pl-4">
