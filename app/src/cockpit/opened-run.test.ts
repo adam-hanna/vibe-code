@@ -93,6 +93,19 @@ describe('an opened run is drawn by the column that drew it live', () => {
     expect(cockpit).toMatch(/past && opened\.run !== null \? opened\.run : run/);
   });
 
+  test('the Code tab diffs the opened run, in its own repository', () => {
+    // *"in a run that produced code changes, when I go to the code tab, it
+    // still says 'No base yet'"*. The pane was handed the LIVE run, whose base
+    // is null when nothing is running, while every other pane followed the
+    // opened one. The replay carries the opened run's base and each commit's
+    // range, so the pane takes that run and diffs where its commits are.
+    expect(cockpit).toMatch(/<CodePane run=\{opened\.run\} dir=\{shownDir\}/);
+    expect(cockpit).toMatch(/!past \? \(\s*<CodePane run=\{run\} dir=\{liveRepo\}/);
+    // And it never draws the live run's shas against the opened run's
+    // repository while the replay is still being read.
+    expect(cockpit).not.toMatch(/<CodePane run=\{columnRun\}/);
+  });
+
   test('an absolute stamp carries the day, not just the time', () => {
     // `clock` renders a moment inside the run you are watching, where the date
     // is today by construction. A record may be a week old, and `15:33` with no

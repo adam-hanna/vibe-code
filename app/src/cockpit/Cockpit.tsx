@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
-import { Activity, Terminal, X } from 'lucide-react';
-import type { Layout, LayoutChangedMeta } from 'react-resizable-panels';
+import { Activity, PanelRightClose, PanelRightOpen, Terminal, X } from 'lucide-react';
+import { usePanelRef } from 'react-resizable-panels';
+import type { Layout, LayoutChangedMeta, PanelImperativeHandle } from 'react-resizable-panels';
 import { Badge } from '@/ui/badge';
 import { Button } from '@/ui/button';
+import { LivenessDot } from '../design';
 import { ActivityBar } from '../shell/ActivityBar';
 import { Palette } from '../shell/Palette';
 import { StatusBar } from '../shell/StatusBar';
@@ -251,15 +253,55 @@ export function Cockpit() {
   const [panels, setPanels] = useState<Panels>(() => storedWhere().panels);
   /** The bottom panel's tab: Output or Commands, the two terminal-shaped panes. */
   const [bottom, setBottom] = useState<BottomTab>(() => storedWhere().bottom);
+  /**
+   * The two side panels, driven through the library rather than mounted and
+   * unmounted (the UI rework). Unmounting one changed the set of panels in the
+   * row, and the library then rebuilt the whole row from each panel's default
+   * size - deferring it when it measured the row at zero width. Shutting the
+   * sidebar was reported as shutting the run status column too: *"It looks like
+   * the left pane collapse button also collapses the right pane?"* A panel that
+   * stays mounted and collapses is a resize of one panel, and the others keep
+   * the sizes they had.
+   */
+  const sidebarPanel = usePanelRef();
+  const loopPanel = usePanelRef();
   const saveLayout = useCallback(
     (group: string) => (layout: Layout, meta: LayoutChangedMeta) => {
       // A layout the library recomputed after a window resize is not a
       // decision anybody made; only a drag is.
       if (!meta.isUserInteraction) return;
-      setPanels((p) => ({ ...p, sizes: { ...p.sizes, [group]: layout } }));
+      // A drag past a side panel's minimum collapses it, and a drag out of the
+      // collapsed edge opens it: the flags follow, so the toggles say what the
+      // screen shows.
+      const shut = (ref: { current: PanelImperativeHandle | null }, was: boolean): boolean =>
+        ref.current === null ? was : !ref.current.isCollapsed();
+      setPanels((p) => ({
+        ...p,
+        ...(group === 'shell' ? { sidebar: shut(sidebarPanel, p.sidebar), loop: shut(loopPanel, p.loop) } : {}),
+        sizes: { ...p.sizes, [group]: layout },
+      }));
     },
-    [],
+    [sidebarPanel, loopPanel],
   );
+  // The flags drive the panels. Checked again a frame later because the
+  // library defers its first layout until the row has a width, and a collapse
+  // asked for before then does nothing.
+  useEffect(() => {
+    const apply = (): void => {
+      for (const [ref, open] of [
+        [sidebarPanel, panels.sidebar],
+        [loopPanel, panels.loop],
+      ] as const) {
+        const panel = ref.current;
+        if (panel === null) continue;
+        if (open && panel.isCollapsed()) panel.expand();
+        else if (!open && !panel.isCollapsed()) panel.collapse();
+      }
+    };
+    apply();
+    const frame = requestAnimationFrame(apply);
+    return () => cancelAnimationFrame(frame);
+  }, [panels.sidebar, panels.loop, sidebarPanel, loopPanel]);
   /**
    * A past run this window is reading, or null for the live one (#223).
    *
@@ -1358,9 +1400,18 @@ export function Cockpit() {
             the two were the same archive twice, reported as *"there are two Runs
             bars on the left now"*. The activity bar is the strip now, and the
             sidebar is a region that can be put away. */}
-        {panels.sidebar && (
-          <>
-          <ResizablePanel id="sidebar" defaultSize="300px" minSize="240px" maxSize="50%" className="flex min-h-0 min-w-0 flex-col bg-column">
+        {/* Always mounted, collapsed to nothing when shut: see `sidebarPanel`. */}
+        <ResizablePanel
+          id="sidebar"
+          panelRef={sidebarPanel}
+          collapsible
+          collapsedSize={0}
+          defaultSize="300px"
+          minSize="240px"
+          maxSize="50%"
+          className="flex min-h-0 min-w-0 flex-col bg-column"
+        >
+          {panels.sidebar && (
           <Sidebar
             dir={repoDir}
             epoch={projectsEpoch}
@@ -1419,10 +1470,9 @@ export function Cockpit() {
               );
             }}
           />
-          </ResizablePanel>
-          <ResizableSeparator orientation="horizontal" />
-          </>
-        )}
+          )}
+        </ResizablePanel>
+        <ResizableSeparator orientation="horizontal" />
 
         <ResizablePanel id="center" minSize="30%" className="flex min-h-0 min-w-0 flex-col">
         <ResizableGroup
@@ -1650,7 +1700,24 @@ export function Cockpit() {
               revision={run.artifacts.length}
             />
           )}
-          {tab === 'code' && <CodePane run={run} dir={liveRepo} openAt={openAt} />}
+          {/* **The run on screen, and its repository** (UI rework). This took
+              the live run because an opened run had no shas on this side; the
+              replay gives it `baseSha` and every commit's range now, so a past
+              run's Code tab was diffing the live run's shas - none, when
+              nothing was running - and said *"No base yet"* over a run that
+              committed three rounds. While the opened run is still being read
+              the pane says that, rather than drawing the live run's shas
+              against the opened run's repository. */}
+          {tab === 'code' &&
+            (!past ? (
+              <CodePane run={run} dir={liveRepo} openAt={openAt} />
+            ) : opened.run !== null ? (
+              <CodePane run={opened.run} dir={shownDir} openAt={openAt} />
+            ) : (
+              <p className="m-0 p-6 text-body-sm text-secondary">
+                {opened.failure ?? 'Reading this run…'}
+              </p>
+            ))}
           {/* Mounted whatever tab is showing, and hidden rather than unmounted.
               A conversation is state nobody can get back, and a proposal waiting
               on a person would be destroyed by a glance at the output pane -
@@ -1802,10 +1869,57 @@ export function Cockpit() {
             draws — Plans, Plan critique, Code, Code review — and reading a card
             and then its artifact is the shortest path in the product. The runs
             take the left, next to the rail they are drawn from. */}
-        {panels.loop && (
+        <ResizableSeparator orientation="horizontal" />
+        {/* Always mounted, like the sidebar, and collapsed to a strip rather
+            than to nothing: *"The right pane should have a collapse button.
+            When collapsed, I think the only thing that should be visible is the
+            collapse button (now expand) unless you can think of a smart way to
+            display the info collapsed."* The strip holds the way back and one
+            fact: the liveness dot while a run is going. The footer that
+            otherwise carries that dot is inside the column, and a run working
+            behind a shut panel with nothing on screen saying so is the idle
+            window that cost a fourteen-million-token turn. */}
+        <ResizablePanel
+          id="loop"
+          panelRef={loopPanel}
+          collapsible
+          collapsedSize="36px"
+          defaultSize="364px"
+          minSize="240px"
+          maxSize="50%"
+          className="flex min-h-0 min-w-0 flex-col bg-column"
+        >
+          {!panels.loop ? (
+            <div className="flex flex-col items-center gap-3 py-2">
+              <Button
+                variant="quiet"
+                size="icon-sm"
+                aria-label="Show run status"
+                title="Show run status (Ctrl+Shift+B)"
+                onClick={act.toggleLoop}
+              >
+                <PanelRightOpen className="size-4" aria-hidden />
+              </Button>
+              {!past && launched && run.completed === null && (
+                <span title={run.running === null ? 'the run is waiting' : 'a turn is running'}>
+                  <LivenessDot state={run.running === null ? 'waiting' : 'live'} />
+                </span>
+              )}
+            </div>
+          ) : (
           <>
-          <ResizableSeparator orientation="horizontal" />
-          <ResizablePanel id="loop" defaultSize="364px" minSize="240px" maxSize="50%" className="flex min-h-0 min-w-0 flex-col bg-column">
+          <div className="flex h-9 flex-none items-center justify-between pr-1.5 pl-4">
+            <span className="text-chip uppercase tracking-[0.12em] text-tertiary">Run status</span>
+            <Button
+              variant="quiet"
+              size="icon-sm"
+              aria-label="Hide run status"
+              title="Hide run status (Ctrl+Shift+B)"
+              onClick={act.toggleLoop}
+            >
+              <PanelRightClose className="size-4" aria-hidden />
+            </Button>
+          </div>
           <div className="flex min-h-0 flex-1 flex-col">
             {/* **The column follows the run the window is pointed at** (#223),
                 and it is the SAME column. Opening a run used to change six panes
@@ -1936,9 +2050,9 @@ export function Cockpit() {
               pausing={pausing}
             />
           </div>
-          </ResizablePanel>
           </>
-        )}
+          )}
+        </ResizablePanel>
         </ResizableGroup>
       </div>
 
