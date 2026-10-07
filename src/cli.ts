@@ -1721,6 +1721,7 @@ export async function execute(
     // limits; this is a statement about what the run did and did not establish.
     reportGates(state);
     reportReviewCoverage(state);
+    reportTestChanges(state);
     reportDeferred(state);
     summary(state, started, recovery);
     return incomplete === null ? EXIT.OK : EXIT.UNVERIFIED;
@@ -2213,6 +2214,33 @@ function reportGates(state: RunState): void {
     );
   }
   log.warn(parts.join(' '));
+}
+
+/**
+ * Changes to the run's own judge that the last review did not call justified
+ * (#112).
+ *
+ * One line, and only when there is something to say: a file the reviewer judged
+ * not justified, or one it never judged at all. Silent when every change was
+ * justified or none was touched - a list of fine edits at the end of a run is
+ * noise that teaches people to skip the line that matters. The exit code does
+ * not move for this; the issue's decision is record and surface, never block.
+ */
+function reportTestChanges(state: RunState): void {
+  const record = state.testChanges;
+  if (record === undefined) return;
+  const named = (files: readonly { path: string }[]): string =>
+    files.map((f) => `\`${f.path}\``).join(', ');
+  const unjudged = record.files.filter((f) => f.verdict === 'unjudged');
+  const rejected = record.files.filter((f) => f.verdict !== 'unjudged' && !f.verdict.justified);
+  if (unjudged.length === 0 && rejected.length === 0) return;
+  const parts: string[] = [];
+  if (rejected.length > 0) parts.push(`not justified: ${named(rejected)}`);
+  if (unjudged.length > 0) parts.push(`unjudged: ${named(unjudged)}`);
+  log.warn(
+    `Review round ${record.round} changed the run's own tests or config - ${parts.join('; ')}. ` +
+      'The reasons are in state.json under testChanges and in the round\'s code-review artifact.',
+  );
 }
 
 /**

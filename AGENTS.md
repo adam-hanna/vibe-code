@@ -1976,6 +1976,7 @@ src/slots.ts         session-slot lifecycle (main = Claude, judge + review = Cod
 src/context.ts       context measurement, compaction, session rotation
 src/preflight.ts     toolchain contract enforcement, `vibe doctor`
 src/verify.ts        the verification gates — the list, every run, and broken vs flaky
+src/judge.ts         which changed files are the run's own judge, and the reviewer's verdict on each
 src/reproducer.ts    a reviewer's test: placed, run by the user's own gate, taken back out
 src/progress.ts      in-turn heartbeat
 src/work.ts          how far a write turn has got - measured, and labelled a proxy
@@ -3021,6 +3022,46 @@ module. Four things carry it:
   to say the finding was *"worked on, and nobody has confirmed they are gone"*. A reproducer
   that failed before the fix and passes after it closes it by evidence, and the sentence
   changes — counted, so a run where one of three closed does not read as though all three did.
+
+**A change that touches the run's own judge is recorded and judged, never silent** (#112).
+PR #110's run rewrote an assertion in `tests/fork.test.ts`. The gate went green and the reviewer
+said nothing; only a human noticed. The tests and `vibe.config.json` are what decide a run
+passed, so a round that edits them is grading its own work. This is option 1 of the issue,
+*record and surface*: nothing blocks, and nothing about the gate or APPROVE moved. What changed
+is that such an edit can no longer pass in silence. `src/judge.ts` decides which files count,
+`diffChunks` measures them and `runReview` asks for and records the verdicts in
+`state.testChanges` and the round's `code-review-<n>.json`. Six decisions travel with it:
+
+- **Facts, not a classifier.** Each file's status, old path and lines added and removed, read
+  through the **same** resolved diff mode as the reviewer's diff (`resolveDiffMode`'s rule),
+  so the list judged is the list read. Nothing counts assertions or test cases in any language,
+  because recognising an assertion is the semantic classifier the issue rules out. There are no
+  thresholds: *N removed lines is suspicious* is an invented number. A binary file's counts
+  are `null`, never 0.
+- **`vibe.config.json` is always in**, matched at the work directory's root, whatever
+  `verify.testPaths` says, including `[]`. The gates live in it, so it is the most direct way to
+  change the judge. The record's `patterns` name it beside the configured ones, so an empty
+  result reads as *nothing matched these*, never as *no test was touched*. `verify.testPaths`
+  **replaces** the default list, because those defaults are a naming convention rather than a
+  measurement.
+- **A rename counts if either side matches.** Otherwise moving a test out of `tests/` is how
+  it would disappear.
+- **"Justified" is defined in the prompt**, as this file's own rule for editing a test. An edit
+  is justified only when the test's claim is no longer the contract: the behaviour genuinely
+  moved, or the test asserted more than the thing it guards. It is never justified because it
+  makes the gate pass. Adding a test is not suspicious. For `vibe.config.json`, the question is
+  whether the plan called for the change.
+- **`unjudged` is the fail-closed answer.** A listed file with no verdict from the part that
+  showed it is recorded as `unjudged`, never as justified, because that is the case the issue
+  exists to catch. A verdict naming an unlisted file attaches to nothing. If two verdicts name
+  one file, the **first wins**: deterministic, and a later contradiction cannot quietly replace
+  what the record already said.
+- **The reviewer has its own schema.** `REVIEW_SCHEMA` is `FINDINGS_SCHEMA` plus a required
+  `test_verdicts` array, which is `[]` when nothing is listed, because Codex requires every
+  property to be listed in `required` (#68). The critic's schema and prompt are untouched.
+  A round that touches no judge file gives the reviewer a byte-identical prompt and writes no
+  field. `test_changes_judged` is narration with no event, because the record is already durable
+  in two places. It is said at `warn` only when a file is unjudged or not justified.
 
 **Nothing under `.vibe/runs/` is read through a link, and there is one predicate for all
 three levels.** `linkageOf` in `src/run.ts` is `lstat(...).isSymbolicLink()`, which is true of

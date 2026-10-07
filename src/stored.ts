@@ -29,6 +29,9 @@ import type {
   QuestionKind,
   ResolvedQuestion,
   ReviewCoverage,
+  FileChangeStatus,
+  JudgeFile,
+  TestChanges,
   RoundClaim,
   RoundRecord,
   RunCheckpointMeta,
@@ -273,6 +276,13 @@ const SLOT_NAMES = {
   review: 'review',
   write: 'write',
 } satisfies Record<SlotName, SlotName>;
+
+const FILE_CHANGE_STATUSES = {
+  added: 'added',
+  modified: 'modified',
+  deleted: 'deleted',
+  renamed: 'renamed',
+} satisfies Record<FileChangeStatus, FileChangeStatus>;
 
 const FORK_WHYS = {
   'never-started': 'never-started',
@@ -1289,6 +1299,66 @@ function readReviewCoverage(raw: unknown, ctx: ReadContext): ReviewCoverage | un
   return { round: raw['round'], chunks: raw['chunks'], files, truncated };
 }
 
+/**
+ * What the last review round did to the judge, or nothing at all (#112).
+ *
+ * Dropped whole rather than repaired, for `readReviewCoverage`'s reason one
+ * function up and a sharper one: a verdict is the reviewer's word, and a
+ * repaired entry would be a word nobody said. A count that is neither a
+ * non-negative integer nor null is not something the writer produces - null is
+ * how it says "not counted" - so it is damage rather than a value to coerce.
+ * The repair is still logged, so the corruption is visible.
+ */
+function readTestChanges(raw: unknown, ctx: ReadContext): TestChanges | undefined {
+  if (raw === undefined) return undefined;
+  const drop = (): undefined => {
+    ctx.repairs.dropped('testChanges', 'testChanges');
+    return undefined;
+  };
+  if (
+    !isRecord(raw) ||
+    !isPositiveInt(raw['round']) ||
+    !Array.isArray(raw['patterns']) ||
+    !raw['patterns'].every(isString) ||
+    !Array.isArray(raw['files'])
+  ) {
+    return drop();
+  }
+  const count = (v: unknown): v is number | null => v === null || isCounter(v);
+  const files: JudgeFile[] = [];
+  for (const entry of raw['files'] as unknown[]) {
+    if (!isRecord(entry)) return drop();
+    const status = enumOf(entry['status'], FILE_CHANGE_STATUSES);
+    const file = entry['path'];
+    const oldPath = entry['oldPath'];
+    const added = entry['added'];
+    const removed = entry['removed'];
+    const verdict = entry['verdict'];
+    if (
+      status === null ||
+      !isString(file) ||
+      !(oldPath === null || isString(oldPath)) ||
+      !count(added) ||
+      !count(removed)
+    ) {
+      return drop();
+    }
+    let read: JudgeFile['verdict'];
+    if (verdict === 'unjudged') read = 'unjudged';
+    else if (
+      isRecord(verdict) &&
+      typeof verdict['justified'] === 'boolean' &&
+      isString(verdict['reason'])
+    ) {
+      read = { justified: verdict['justified'], reason: verdict['reason'] };
+    } else {
+      return drop();
+    }
+    files.push({ path: file, oldPath, status, added, removed, verdict: read });
+  }
+  return { round: raw['round'], patterns: [...(raw['patterns'] as string[])], files };
+}
+
 /** A full object id, never an abbreviation. The same rule `src/git.ts` applies. */
 const FULL_SHA = /^[0-9a-f]{40}$/;
 
@@ -1796,6 +1866,9 @@ const READERS = {
   // review part has completed, and a damaged record is dropped to absence
   // rather than guessed into one (#49).
   reviewCoverage: (raw, ctx) => readReviewCoverage(raw, ctx),
+  // Absent stays absent: a round that touched no judge file records nothing,
+  // and a damaged record is dropped rather than guessed into one (#112).
+  testChanges: (raw, ctx) => readTestChanges(raw, ctx),
   // Absent stays absent again, and a present value is checked rather than
   // trusted: this one becomes a path under the run directory and its contents
   // are rendered into a prompt, so a stored `../../something` would read a file

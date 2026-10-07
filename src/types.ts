@@ -534,6 +534,15 @@ export interface VerifyConfig {
    * matter, even though the implementer writes files there every round.
    */
   reproducers: boolean;
+  /**
+   * The path patterns that make a changed file part of the run's own judge
+   * (#112), replacing - never extending - the built-in convention list in
+   * `src/judge.ts`. `vibe.config.json` at the root is judged whatever this says.
+   *
+   * Optional in the type only so a hand-built `VerifyConfig` need not spell it;
+   * `DEFAULTS.verify` always carries it.
+   */
+  testPaths?: string[] | undefined;
 }
 
 export interface ProgressConfig {
@@ -1310,6 +1319,56 @@ export interface ReviewCoverage {
   truncated: string[];
 }
 
+/** How git described one file in a diff, with rename detection on (#112). */
+export type FileChangeStatus = 'added' | 'modified' | 'deleted' | 'renamed';
+
+/**
+ * One file in the diff a reviewer was handed: facts git reported, nothing else.
+ *
+ * `added` and `removed` are null where git printed `-` - a binary file - and
+ * never 0, because "no lines changed" and "lines were not counted" are
+ * different facts and only one of them is a number (#112).
+ */
+export interface FileChange {
+  path: string;
+  /** The path before a rename; null for every other status. */
+  oldPath: string | null;
+  status: FileChangeStatus;
+  added: number | null;
+  removed: number | null;
+}
+
+/** The reviewer's word on one change to the judge (#112). */
+export interface JudgeVerdict {
+  justified: boolean;
+  reason: string;
+}
+
+/**
+ * A change to the run's own judge, with what the reviewer said about it.
+ *
+ * `'unjudged'` is the fail-closed answer: the file was listed and no verdict
+ * for it came back from the part that showed it. It is never read as justified.
+ */
+export interface JudgeFile extends FileChange {
+  verdict: JudgeVerdict | 'unjudged';
+}
+
+/**
+ * What the most recent review round's diff did to the judge - test files and
+ * `vibe.config.json` - and what the reviewer said about each (#112).
+ *
+ * `patterns` names what was matched against, `vibe.config.json` included, so
+ * an absence of a file reads as "nothing matched these", never as "no test was
+ * touched".
+ */
+export interface TestChanges {
+  /** 1-based, matching `ReviewCoverage.round`. */
+  round: number;
+  patterns: string[];
+  files: JudgeFile[];
+}
+
 /**
  * One turn's observed-but-uncharged spend. See `RunState.inFlight`.
  *
@@ -1632,6 +1691,15 @@ export interface RunState {
    * (#49).
    */
   reviewCoverage?: ReviewCoverage | undefined;
+  /**
+   * Changes the most recent review round's diff made to the run's own judge,
+   * and the reviewer's verdict on each (#112).
+   *
+   * Written the way `reviewCoverage` is: cleared at the start of the round and
+   * extended only after a part's turn has returned. Absent when the round
+   * touched no judge file, or no part has completed - never an empty record.
+   */
+  testChanges?: TestChanges | undefined;
   /**
    * The **basename** of the most recent write turn's report artifact.
    *

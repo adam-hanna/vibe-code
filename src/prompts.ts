@@ -6,6 +6,7 @@ import { authorOf, readEvidence, reproductionAt, severityChangesOf } from '@src/
 import type { RoleTable } from '@src/roles.js';
 import type { EnvironmentFacts } from '@src/runtime.js';
 import type {
+  FileChange,
   AcceptanceCriterion,
   Answer,
   Assumption,
@@ -1116,6 +1117,41 @@ A question or concern raised here is a **review lead** - somewhere to go and loo
 `;
 }
 
+/** One line of the judge block: the facts git reported, and nothing inferred. */
+function judgeLine(change: FileChange): string {
+  const lines =
+    change.added === null || change.removed === null
+      ? 'binary - lines not counted'
+      : `+${change.added} / -${change.removed} lines`;
+  const from = change.oldPath === null ? '' : ` from \`${change.oldPath}\``;
+  return `- \`${change.path}\` - ${change.status}${from}, ${lines}`;
+}
+
+/**
+ * The block asking for a verdict on each change to the judge (#112).
+ *
+ * The definition of "justified" is AGENTS.md's rule for when a test may be
+ * edited, closely paraphrased, because without it `justified: true` means
+ * nothing - a reviewer would mark whatever made the gate pass. It states no
+ * threshold: "N removed lines" is a fact the reviewer reads, never a trigger.
+ */
+function judgeSection(judge: readonly FileChange[] | undefined): string {
+  if (judge === undefined || judge.length === 0) return '';
+  return `
+## Changes to the judge
+
+This change touches files that decide whether the work passes - its tests, or \`vibe.config.json\`, where the verification gates are configured. A change here can make the gate go green without the code getting any better, so each one needs your verdict.
+
+${judge.map(judgeLine).join('\n')}
+
+For each file above, return exactly one entry in \`test_verdicts\` - \`file\` spelled exactly as listed, \`justified\`, and a \`reason\`.
+
+**What justified means.** Editing or removing a test is justified ONLY when the test's claim is no longer the contract: the behaviour it checks genuinely moved, as the plan intended, or the test asserted more than the thing it was guarding. It is NEVER justified merely because it makes the gate pass - a test changed to agree with the code is the defect this check exists to catch. A newly added test is fine to mark justified; adding tests is not suspicious. For \`vibe.config.json\`, the question is whether the change to the gates or the configuration is something the plan called for.
+
+A listed file you leave out is recorded as unjudged, never as justified. This does not block the run and it is not a finding: if a change here is wrong, ALSO raise it as an ordinary finding at its true severity.
+`;
+}
+
 export function reviewPrompt(
   diff: string,
   changedFiles: readonly string[],
@@ -1154,6 +1190,16 @@ export function reviewPrompt(
    * the field being usable and being a guess.
    */
   gates?: readonly string[] | undefined,
+  /**
+   * The files in THIS part's diff that are part of the run's own judge - test
+   * files and `vibe.config.json` - or absent when there are none (#112).
+   *
+   * Trailing and absent-renders-nothing for the reason `chunk` is: a round that
+   * touches no judge file must produce exactly the prompt it produced before
+   * this existed. An empty list renders nothing too, so a caller cannot ask for
+   * verdicts on no files.
+   */
+  judge?: readonly FileChange[] | undefined,
 ): string {
   return `You are reviewing a code change against the plan it was meant to implement.${
     round > 1 ? continuityNote(round, hasMemory, 'change') : ''
@@ -1198,7 +1244,7 @@ There is no per-criterion verdict to report and no field to set. Your findings a
 
 ${block(BLOCK.review, REVIEW_BREADTH)}
 ${block(BLOCK.simple, SIMPLE_SOLUTION)}
-${chunk === undefined ? '' : chunkNote(chunk)}${reportSection(report)}
+${chunk === undefined ? '' : chunkNote(chunk)}${reportSection(report)}${judgeSection(judge)}
 ## Files changed
 
 ${changedFiles.length > 0 ? changedFiles.map((f) => `- ${f}`).join('\n') : '(none detected)'}

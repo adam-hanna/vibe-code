@@ -16,6 +16,7 @@ import type { Role, RoleProviders, RolePatches, RoleTable } from '@src/roles.js'
 import { setOwn } from '@src/runtime.js';
 import type { AgentProvider, ToolchainContract, ToolRequirement, Phase } from '@src/runtime.js';
 import { DEFAULT_GATES, validateGates } from '@src/gates.js';
+import { DEFAULT_TEST_PATHS } from '@src/judge.js';
 import { promptBlockNames } from '@src/prompts.js';
 import { readPilotAccess, refuseProjectPilot } from '@src/pilotaccess.js';
 import { readCliPaths, refuseProjectCli } from '@src/clipaths.js';
@@ -189,6 +190,9 @@ export const DEFAULTS: Config = {
     // that is wrong and cites a real line, is invisible to both existing guards
     // by their own admission (#113).
     reproducers: true,
+    // Copied, so a caller mutating its config cannot edit the constant. The list
+    // is a naming convention, not a measurement - see `DEFAULT_TEST_PATHS` (#112).
+    testPaths: [...DEFAULT_TEST_PATHS],
   },
   progress: {
     enabled: true,
@@ -1216,6 +1220,24 @@ function validateVerify(verify: VerifyConfig): void {
   const reproducers: unknown = verify.reproducers;
   if (reproducers !== undefined && typeof reproducers !== 'boolean') {
     throw new Error('verify.reproducers must be true or false');
+  }
+
+  // Above the `gates === null` return for the same reason again: a property of
+  // the whole section. `[]` is legal and means no test patterns at all -
+  // `vibe.config.json` is still judged, because that one is not configurable
+  // (#112). An empty pattern is refused rather than ignored: it matches only a
+  // path that is the empty string, so it would look like a setting and do
+  // nothing.
+  const testPaths: unknown = verify.testPaths;
+  if (testPaths !== undefined) {
+    if (!Array.isArray(testPaths)) {
+      throw new Error('verify.testPaths must be a list of path patterns, such as "tests/**"');
+    }
+    testPaths.forEach((p: unknown, i) => {
+      if (typeof p !== 'string' || p.trim() === '') {
+        throw new Error(`verify.testPaths[${i}] must be a non-empty path pattern string`);
+      }
+    });
   }
 
   const gates: unknown = verify.gates;
