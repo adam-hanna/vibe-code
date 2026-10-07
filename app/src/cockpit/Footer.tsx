@@ -64,6 +64,8 @@ export interface FooterProps {
   order: readonly string[];
   /** Whether a pause is armed and waiting for the next boundary. */
   pausing: boolean;
+  /** Whether this window asked for a stop the core has not answered yet (#253). */
+  stopping: boolean;
   busy: boolean;
 }
 
@@ -180,6 +182,7 @@ export function Footer({
   gates,
   order,
   pausing,
+  stopping: stopAsked,
   busy,
 }: FooterProps) {
   const [reason, setReason] = useState('');
@@ -659,6 +662,29 @@ export function Footer({
     );
   }
 
+  // **A stop that is waiting says so** (#253). Between pressing stop and the core
+  // narrating its ending, the footer used to look exactly as it did before the
+  // press. An agent turn is killed at once, so this is usually brief - but the
+  // verification gate and git are never killed, and a stop pressed during the
+  // gate waits minutes for it. No controls: the stop has been asked for, and a
+  // pause on top of it would be a request the loop will never reach.
+  if (stopAsked) {
+    return (
+      <div className={cn(FOOT, 'border-t-2 border-emphasis bg-active')}>
+        <div className="flex items-center gap-2">
+          <Badge variant="alarm">stopping</Badge>
+          <span className={DETAIL}>the run stops when the current step returns.</span>
+        </div>
+        <div className={NOTE}>
+          {run.running !== null
+            ? 'The agent turn is being cancelled now.'
+            : 'Checks and git steps are left to finish rather than cut off, so this can take a few minutes.'}{' '}
+          You can resume the run afterwards.
+        </div>
+      </div>
+    );
+  }
+
   const canControl = run.preflight !== null || run.running !== null;
   const boundaryTitle = gates === null
     ? 'Gate settings have not been read yet.'
@@ -691,19 +717,19 @@ export function Footer({
               size="sm"
               disabled={busy || pausing}
               onClick={onPause}
-              title={pausing ? 'The loop will hold at the next boundary.' : 'Let the current turn finish, then hold at the next boundary.'}
-              aria-label="Pause at the next gate"
+              title={pausing ? 'The run will wait after the current step.' : 'Let the current step finish, then wait before the next one. Nothing is lost.'}
+              aria-label={pausing ? 'Pausing after this step' : 'Pause after this step'}
             >
               <Pause size={14} aria-hidden="true" />
-              <span>{pausing ? 'Pause armed' : 'Pause at gate'}</span>
+              <span>{pausing ? 'Pausing after this step' : 'Pause'}</span>
             </Button>
             <Button
               variant="secondary"
               size="sm"
               disabled={busy}
               onClick={onStop}
-              title="Stop the active turn now. The run will be resumable from its last checkpoint."
-              aria-label="Stop this turn now — ends the run"
+              title="Stop the run now. The current turn is cancelled, and you can resume the run later."
+              aria-label="Stop run"
             >
               <Square size={12} className="text-emphasis" aria-hidden="true" />
               <span>Stop run</span>

@@ -2263,6 +2263,9 @@ real; **the control did not exist**, and the only way to make a run hold was to 
 it at the next boundary, and `holdAt` takes it **before** acting on the mode and **whatever**
 the mode is — a boundary that read it, ran through on `auto` and left it armed would hold at
 some later boundary nobody was looking at, which is indistinguishable from a stall.
+**And it belongs to one run** (#253): `serve.ts` clears it when a run's command returns, so
+a run that stops or finishes before any boundary does not leave the next run to hold for a
+request nobody made of it. A pause asked for before a run starts still holds that run.
 
 Three things it is not, each for its own reason. Not a **gate mode**: `cfg.gates` is the run's
 standing answer to where control comes back, decided before the run starts, and a mode would

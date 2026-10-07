@@ -423,3 +423,31 @@ export function recorded(iso: string | null): string {
     minute: '2-digit',
   });
 }
+
+/**
+ * What a turn of each kind is doing, said to a person (#253).
+ *
+ * The stop confirmation's title was `Stop implementer · verify-fix now`, which
+ * is the frame's two fields joined by a dot. These are the loop's own turn
+ * kinds - every `kind:` its `turn_started` narrations carry - and the map is
+ * closed in the way `ending` is: a kind this build does not know is said as
+ * itself rather than as a phrase invented for it.
+ */
+const TURN_PHRASE: Readonly<Record<string, string>> = {
+  plan: 'writing the plan',
+  revise: 'revising the plan',
+  critique: 'critiquing the plan',
+  answer: "answering the planner's questions",
+  implement: 'implementing the plan',
+  'verify-fix': 'fixing the failing checks',
+  review: 'reviewing the code',
+  'review-fix': 'fixing what the review found',
+  'final-fix': 'fixing the last review findings',
+};
+
+export function turnSentence(turn: { role: string; kind: string }): string {
+  const phrase = TURN_PHRASE[turn.kind];
+  return phrase === undefined
+    ? `The ${turn.role} is running ${/^[aeiou]/i.test(turn.kind) ? 'an' : 'a'} ${turn.kind} turn.`
+    : `The ${turn.role} is ${phrase}.`;
+}

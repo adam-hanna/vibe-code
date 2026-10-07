@@ -377,6 +377,9 @@ export function Cockpit() {
    * being pressed twice while nothing appears to happen.
    */
   const [pausing, setPausing] = useState(false);
+  // A stop this window asked for and the core has not answered yet (#253). See
+  // `stop` below for why the answer can take minutes.
+  const [stopping, setStopping] = useState(false);
   /** Whether the stop confirmation is up. Hi-fi 18: a stop confirms first. */
   const [confirmStop, setConfirmStop] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -1045,7 +1048,16 @@ export function Cockpit() {
   const stop = useCallback(
     (reason: string) => {
       setConfirmStop(false);
-      void host.cancel(reason).catch((err: unknown) => note('log', String(err)));
+      // **Said, because the answer can take minutes** (#253). A stop latches at
+      // once and kills an agent turn at once, but the verification gate and git
+      // are never killed, so a stop pressed during either waits for it to
+      // return - and until the core narrated its ending the footer went on
+      // saying `Live run` with both controls live, as if nothing was pressed.
+      setStopping(true);
+      void host.cancel(reason).catch((err: unknown) => {
+        setStopping(false);
+        note('log', String(err));
+      });
     },
     [note],
   );
@@ -1056,6 +1068,24 @@ export function Cockpit() {
   useEffect(() => {
     if (run.gate !== null) setPausing(false);
   }, [run.gate]);
+
+  // **A pause and a stop belong to one run** (#253). A pause armed in a run that
+  // then ended without reaching a boundary used to stay `armed` on screen, and
+  // disabled the next run's pause. The host clears its own half when the run's
+  // command returns; this is the window's. Keyed on the run's id as well, so a
+  // new run starts with neither.
+  const runKey = run.identity?.runId ?? null;
+  const ended = run.completed !== null || run.reason !== null;
+  useEffect(() => {
+    if (ended) {
+      setPausing(false);
+      setStopping(false);
+    }
+  }, [ended]);
+  useEffect(() => {
+    setPausing(false);
+    setStopping(false);
+  }, [runKey]);
 
   /**
    * Commands this window started (#211).
@@ -2056,6 +2086,7 @@ export function Cockpit() {
               gates={gates}
               order={order}
               pausing={pausing}
+              stopping={stopping}
             />
           </div>
           </>
@@ -2081,6 +2112,7 @@ export function Cockpit() {
         onPause={pause}
         onStop={() => setConfirmStop(true)}
         pausing={pausing}
+        stopping={stopping}
         onSpend={() => setTab('spend')}
         build={wire.status?.build ?? null}
         diagnosticsOpen={diagnostics}

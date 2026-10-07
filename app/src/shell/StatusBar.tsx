@@ -43,6 +43,7 @@ export function StatusBar({
   onPause,
   onStop,
   pausing,
+  stopping,
   onSpend,
   build,
   diagnosticsOpen,
@@ -63,6 +64,8 @@ export function StatusBar({
   onPause: () => void;
   onStop: () => void;
   pausing: boolean;
+  /** A stop was asked for and the core has not answered yet (#253). */
+  stopping: boolean;
   onSpend: () => void;
   build: Build | null;
   diagnosticsOpen: boolean;
@@ -135,14 +138,21 @@ export function StatusBar({
           <Button
             size="sm"
             variant="quiet"
-            disabled={busy || pausing}
+            disabled={busy || pausing || stopping}
             onClick={onPause}
-            title={pausing ? 'The loop will hold at the next boundary.' : 'Let the current turn finish, then hold at the next boundary.'}
+            title={pausing ? 'The run will wait after the current step.' : 'Let the current step finish, then wait before the next one. Nothing is lost.'}
           >
-            <Pause className="size-3" aria-hidden /> {pausing ? 'pause armed' : 'pause'}
+            <Pause className="size-3" aria-hidden /> {pausing ? 'pausing after this step' : 'pause'}
           </Button>
-          <Button size="sm" variant="quiet" disabled={busy} onClick={onStop} title="Stop the turn now. The run stays resumable.">
-            <Square className="size-3" aria-hidden /> stop
+          {/* One name for one action (#253): the footer and the confirmation say `Stop run` too. */}
+          <Button
+            size="sm"
+            variant="quiet"
+            disabled={busy || stopping}
+            onClick={onStop}
+            title="Stop the run now. The current turn is cancelled, and you can resume the run later."
+          >
+            <Square className="size-3" aria-hidden /> {stopping ? 'stopping…' : 'stop run'}
           </Button>
         </span>
       ) : null}

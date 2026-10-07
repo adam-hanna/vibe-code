@@ -398,6 +398,13 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
         // nobody is awaiting - and, worse, silently consuming an id the next
         // gate might reuse.
         asks.clear();
+        // A pause belongs to the run it was asked during (#253). `takePause`
+        // clears it at the next boundary, but a run that stops or finishes
+        // before reaching one left it armed - and the NEXT run, minutes or days
+        // later, held at its first boundary for a request nobody made of it.
+        // A pause asked for before any run starts still holds that run: this
+        // clears only when a run returns.
+        pauseRequested = false;
         settleIfDone();
       });
   };
