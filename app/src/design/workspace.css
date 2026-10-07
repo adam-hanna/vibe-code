@@ -7,11 +7,16 @@
 ::-webkit-scrollbar-thumb { background: var(--rule-strong); border-radius: 6px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--rule-control); }
 ::-webkit-scrollbar-button { display: none; }
-button, a, select, summary { -webkit-tap-highlight-color: transparent; }
-button { transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease; }
-button:disabled { cursor: not-allowed; }
-input, textarea, select { border-radius: var(--radius-sm); }
-input[type='checkbox'] { accent-color: var(--accent-solid); }
+/* Element defaults, in Tailwind's `base` layer so a utility on the element
+   wins: unlayered, these overrode every button's transition and every field's
+   rounding (see the note in `base.css`). */
+@layer base {
+  button, a, select, summary { -webkit-tap-highlight-color: transparent; }
+  button { transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease; }
+  button:disabled { cursor: not-allowed; }
+  input, textarea, select { border-radius: var(--radius-sm); }
+  input[type='checkbox'] { accent-color: var(--accent-solid); }
+}
 ::selection { background: var(--accent-border); color: var(--text-display); }
 
 kbd { font: calc(10px * var(--type-scale))/1.5 var(--font-mono); border: 1px solid var(--rule-control); border-radius: 4px; padding: 1px 5px; color: var(--text-tertiary); }
@@ -23,5 +28,7 @@ kbd { font: calc(10px * var(--type-scale))/1.5 var(--font-mono); border: 1px sol
 .v-diag { border-radius: var(--radius-md); box-shadow: var(--shadow-overlay); }
 
 @media (prefers-reduced-motion: reduce) {
-  button { transition: none; }
+  @layer base {
+    button { transition: none; }
+  }
 }

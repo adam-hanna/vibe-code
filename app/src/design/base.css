@@ -77,79 +77,92 @@
     U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
 }
 
-/* ---------------------------------------------------------------- reset */
-*,
-*::before,
-*::after {
-  box-sizing: border-box;
-}
-
-html,
-body {
-  margin: 0;
-  padding: 0;
-  background: var(--surface-page);
-  color: var(--text-primary);
-  font: var(--type-body);
-  -webkit-font-smoothing: antialiased;
-}
-
-/* A desktop app, not a document: text selection is opt-in, so a drag on a pane
- * does not paint half the cockpit blue. Restored on anything a user reads or
- * copies - values, prose, code. */
-body {
-  user-select: none;
-}
-code,
-pre,
-.v-selectable {
-  user-select: text;
-}
-
-button,
-input,
-select,
-textarea {
-  font: inherit;
-  color: inherit;
-}
-
 /*
- * The user agent's own button chrome, removed.
- *
- * `color: inherit` above without this is the worst possible half: the text
- * becomes `--text-primary` and the ground stays the platform's near-white
- * button face, which is **1.7:1** and unreadable. Every button that goes
- * through `Button` sets its own background and never showed it; the three tab
- * buttons in `Cockpit.tsx` do not, and they were the whole of the bug - three
- * light-grey-on-white controls in the primary chrome, reported twice from a
- * manual pass.
- *
- * `audit:contrast` cannot see this and that is not a gap in the audit's rules:
- * it checks the pairings the TOKENS permit, and here no token was applied at
- * all. An element reaching for nothing is a different failure from an element
- * reaching for the wrong thing, so it gets its own check rather than a wider
- * version of the existing one.
- *
- * Scoped to `button` on purpose. The fields all set their own ground already,
- * and stripping a text input's chrome by default is how one of them ends up
- * invisible on a platform nobody tested.
+ * **In Tailwind's `base` layer, and that is load-bearing** (the UI rework).
+ * These element rules were unlayered, and an unlayered rule beats every
+ * layered one whatever its specificity - so `button { background: none;
+ * border: none }` and `font: inherit; color: inherit` silently erased the
+ * ground, border, size and colour of every `ui/button.tsx` button, whose
+ * utilities live in `@layer utilities`. Reported as compact and clear in the
+ * pilot pane "still dont look like buttons, just text" after their variant had
+ * already been changed to a bordered one. In `base`, a utility wins and an
+ * element nobody styled still gets the reset, which is what a reset is for.
  */
-button {
-  background: none;
-  border: none;
-}
+@layer base {
+  /* ---------------------------------------------------------------- reset */
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
 
-/* ============================================ the six interaction states
- * The screens draw one state per component. These are the other five, stated
- * once each, exactly as the spec words them.
- */
+  html,
+  body {
+    margin: 0;
+    padding: 0;
+    background: var(--surface-page);
+    color: var(--text-primary);
+    font: var(--type-body);
+    -webkit-font-smoothing: antialiased;
+  }
 
-/* --- focus-visible: 2px accent outline at 2px offset, on everything focusable,
- * replacing nothing. Industry's rule, unchanged on the dark ground. */
-:focus-visible {
-  outline: 2px solid var(--accent-solid);
-  outline-offset: 2px;
+  /* A desktop app, not a document: text selection is opt-in, so a drag on a pane
+   * does not paint half the cockpit blue. Restored on anything a user reads or
+   * copies - values, prose, code. */
+  body {
+    user-select: none;
+  }
+  code,
+  pre,
+  .v-selectable {
+    user-select: text;
+  }
+
+  button,
+  input,
+  select,
+  textarea {
+    font: inherit;
+    color: inherit;
+  }
+
+  /*
+   * The user agent's own button chrome, removed.
+   *
+   * `color: inherit` above without this is the worst possible half: the text
+   * becomes `--text-primary` and the ground stays the platform's near-white
+   * button face, which is **1.7:1** and unreadable. Every button that goes
+   * through `Button` sets its own background and never showed it; the three tab
+   * buttons in `Cockpit.tsx` do not, and they were the whole of the bug - three
+   * light-grey-on-white controls in the primary chrome, reported twice from a
+   * manual pass.
+   *
+   * `audit:contrast` cannot see this and that is not a gap in the audit's rules:
+   * it checks the pairings the TOKENS permit, and here no token was applied at
+   * all. An element reaching for nothing is a different failure from an element
+   * reaching for the wrong thing, so it gets its own check rather than a wider
+   * version of the existing one.
+   *
+   * Scoped to `button` on purpose. The fields all set their own ground already,
+   * and stripping a text input's chrome by default is how one of them ends up
+   * invisible on a platform nobody tested.
+   */
+  button {
+    background: none;
+    border: none;
+  }
+
+  /* ============================================ the six interaction states
+   * The screens draw one state per component. These are the other five, stated
+   * once each, exactly as the spec words them.
+   */
+
+  /* --- focus-visible: 2px accent outline at 2px offset, on everything focusable,
+   * replacing nothing. Industry's rule, unchanged on the dark ground. */
+  :focus-visible {
+    outline: 2px solid var(--accent-solid);
+    outline-offset: 2px;
+  }
 }
 /* Never remove the outline without replacing it. Kept as a rule rather than a
  * convention because it is the one accessibility affordance that is invisible
