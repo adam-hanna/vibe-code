@@ -18,9 +18,10 @@ import { cn } from '@/lib/utils';
  *   diagnostic belongs in the chrome only while it is wrong (#204), so the pid
  *   lives in the popover and the bar shows only a **protocol alarm** when the
  *   window and the core disagree - naming the disagreement, never the value.
- * - **The run's state**, in one phrase: holding at a gate (with continue and
- *   stop beside it, so a held run is answerable without finding the column),
- *   a turn in flight, or how it ended. The full gate card, with the questions
+ * - **The run's state**, in one phrase: holding at a gate, a turn in flight,
+ *   or how it ended. Continue, pause and stop sit beside it only while the run
+ *   column's footer is not showing them (#264): the column collapsed, or
+ *   showing a past run you opened. Two sets stacked was the bug. The full gate card, with the questions
  *   and the reason field, stays in the loop column; this is the summary.
  * - **Spend**, absent rather than `0 tok` before anything is charged - a run
  *   that has spent nothing has not spent zero, it has not been measured.
@@ -44,6 +45,7 @@ export function StatusBar({
   onStop,
   pausing,
   stopping,
+  controls,
   onSpend,
   build,
   diagnosticsOpen,
@@ -66,6 +68,12 @@ export function StatusBar({
   pausing: boolean;
   /** A stop was asked for and the core has not answered yet (#253). */
   stopping: boolean;
+  /**
+   * Draw continue, pause and stop, or only the state word (#264). False while
+   * the run column's footer is showing them for the same run, so the window
+   * never draws two sets one above the other. `statusBarControls` decides.
+   */
+  controls: boolean;
   onSpend: () => void;
   build: Build | null;
   diagnosticsOpen: boolean;
@@ -108,6 +116,8 @@ export function StatusBar({
         <span className="flex items-center gap-1.5">
           <Badge variant="accent">holding</Badge>
           <span>at {boundary(run.gate.boundary)}</span>
+          {controls && (
+          <>
           <Button
             size="sm"
             variant="primary"
@@ -127,6 +137,8 @@ export function StatusBar({
           >
             <Square className="size-3" aria-hidden /> stop
           </Button>
+          </>
+          )}
         </span>
       ) : run.completed !== null ? (
         <span className="flex items-center gap-1.5">
@@ -134,7 +146,9 @@ export function StatusBar({
         </span>
       ) : live ? (
         <span className="flex items-center gap-1.5">
-          <Badge variant="live">{run.running === null ? 'preflight' : 'live'}</Badge>
+          <Badge variant="live">{run.running === null ? 'preflight' : stopping ? 'stopping' : 'live'}</Badge>
+          {controls && (
+          <>
           <Button
             size="sm"
             variant="quiet"
@@ -154,6 +168,8 @@ export function StatusBar({
           >
             <Square className="size-3" aria-hidden /> {stopping ? 'stopping…' : 'stop run'}
           </Button>
+          </>
+          )}
         </span>
       ) : null}
 

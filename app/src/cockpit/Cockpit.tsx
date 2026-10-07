@@ -7,6 +7,7 @@ import { Button } from '@/ui/button';
 import { LivenessDot } from '../design';
 import { ActivityBar } from '../shell/ActivityBar';
 import { Palette } from '../shell/Palette';
+import { statusBarControls } from '../shell/controls';
 import { StatusBar } from '../shell/StatusBar';
 import { ACTIONS, available, chordLabel, shortcutFor } from '../shell/actions';
 import type { ActionId } from '../shell/actions';
@@ -2140,6 +2141,8 @@ export function Cockpit() {
         onStop={() => setConfirmStop(true)}
         pausing={pausing}
         stopping={stopping}
+        // Only while the footer is not showing them for this run (#264).
+        controls={statusBarControls(panels.loop, columnRun === run)}
         onSpend={() => setTab('spend')}
         build={wire.status?.build ?? null}
         diagnosticsOpen={diagnostics}
