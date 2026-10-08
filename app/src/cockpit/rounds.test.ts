@@ -83,6 +83,7 @@ const census = (over: Partial<Census> = {}): Census => ({
   tolerated: [],
   findings: [],
   at: 4_000,
+  seq: 0,
   ...over,
 });
 
@@ -90,6 +91,7 @@ const pass = (over: Partial<VerifyPass> = {}): VerifyPass => ({
   round: 1,
   gates: [],
   at: 4_000,
+  seq: 0,
   ...over,
 });
 
@@ -452,6 +454,7 @@ describe('the question round belongs to the round it opened during', () => {
     cap: 3,
     open: [],
     at,
+    seq: 0,
   });
 
   /** Which phase id each question round landed on, in list order. */
@@ -531,6 +534,7 @@ describe('what a round put in the history (#223)', () => {
     since: 'b'.repeat(40),
     message: 'vibe: implement approved plan',
     at: 4_000,
+    seq: 0,
     ...over,
   });
 
