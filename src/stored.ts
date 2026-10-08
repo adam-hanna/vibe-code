@@ -1927,6 +1927,8 @@ const READERS = {
     raw === undefined ? undefined : repairedArray('resolvedByHuman', raw, ctx, readResolvedQuestion),
   carried: (raw, ctx) =>
     raw === undefined ? undefined : repairedArray('carried', raw, ctx, readFinding),
+  advisoryAnswers: (raw, ctx) =>
+    raw === undefined ? undefined : repairedArray('advisoryAnswers', raw, ctx, readAnswer),
   declined: (raw, ctx) =>
     raw === undefined ? undefined : repairedArray('declined', raw, ctx, readFinding),
   acceptanceCriteria: (raw, ctx) =>
