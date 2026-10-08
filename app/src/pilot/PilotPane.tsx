@@ -1894,7 +1894,7 @@ ${frame.text}`, turn, origin.current))) {
         <div className={ALARM}>The pilot has stopped: {verdict.why}</div>
       )}
 
-      {/* `select-text`, because `base.css` turns selection off on `body` — a
+      {/* `select-text`, because `theme.css` turns selection off on `body` — a
           drag across the cockpit chrome should not paint half the app blue, and
           the rule restores it on "anything a user reads or copies". A
           conversation is the most copied thing in the product and was missed:
@@ -1940,7 +1940,7 @@ ${frame.text}`, turn, origin.current))) {
             ) : (
               <div className="m-auto flex max-w-105 flex-col items-center gap-2 text-center text-secondary">
                 <MessageSquare size={28} className="text-accent-muted" aria-hidden="true" />
-                <h2 className="m-0 text-section text-display">A fresh conversation about this run</h2>
+                <h2 className="m-0 font-bold text-section text-display">A fresh conversation about this run</h2>
                 <p className="m-0 text-body">
                   There is no saved chat here. Explore its plans and reports above, or ask the pilot
                   about the work. New messages will be saved with this run.

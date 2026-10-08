@@ -1034,7 +1034,7 @@ export function Sidebar({
           to go. */}
       {pins.length > 0 && (
         <section className="flex flex-col">
-          <h3 className="m-0 px-2.5 pb-3 text-chip uppercase tracking-[0.12em] text-tertiary">Pinned</h3>
+          <h3 className="m-0 px-2.5 pb-3 font-bold text-chip uppercase tracking-[0.12em] text-tertiary">Pinned</h3>
           {pins.map((p) => {
             const title = nameOf(names, p.dir, p.runId, p.task);
             return (
@@ -1067,7 +1067,7 @@ export function Sidebar({
       )}
 
       <section className="flex flex-col">
-        <h3 className="m-0 px-2.5 pb-3 text-chip uppercase tracking-[0.12em] text-tertiary">Projects</h3>
+        <h3 className="m-0 px-2.5 pb-3 font-bold text-chip uppercase tracking-[0.12em] text-tertiary">Projects</h3>
         {projects.length === 0 && (
           <span className={NOTE}>
             Your ideas need a home. Add a repository to get started.

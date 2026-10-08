@@ -135,7 +135,7 @@ export function Diagnostics({ status, expected, identity }: DiagnosticsProps) {
           Shown here rather than as a banner, which was removed at the owner's
           request: it is a fact that matters only when something has gone wrong. */}
       {status?.uncontained != null && (
-        <p className="mt-2 text-label text-tertiary">{status.uncontained}</p>
+        <p className="mt-2 mb-[1em] text-label text-tertiary">{status.uncontained}</p>
       )}
     </div>
   );

@@ -111,12 +111,47 @@ which is the failure mode of any allow-list somebody has to remember to extend.
 
 **Its last two sections are a different kind of check and are there for a reason vitest
 cannot cover.** §9 and §10 are both about a rule broken by the **absence** of a declaration —
-a `button` with no background taking the platform's near-white, and a `.v-modal` with no
+a `button` with no background taking the platform's near-white, and a dialog with no
 `max-height` growing past the bottom of the screen — which is invisible to a reader of the
 stylesheet and unreachable from a token pairing. They live here rather than in a vitest case
 because **vitest stubs a CSS import to the empty string, `?raw` included**, so a test cannot
 read a stylesheet at all; this script reads the file. Anything asserting the *content* of CSS
-belongs here.
+belongs here. Each check reads the file its rule lives in, and moves when the rule does:
+§9's reset is Tailwind's preflight since #237, so it checks that `theme.css` imports
+`tailwindcss/preflight.css` into the base layer and that the installed preflight still has a
+`button` rule clearing the background; §10 reads the `Modal`'s utilities off `Surfaces.tsx`;
+§8 reads `--size-*` off `tokens.css`.
+
+**The app draws with Tailwind over the tokens, and there is no other stylesheet** (#231,
+#237). `tokens.css` holds every value and is still the only file allowed a hex;
+`design/theme.css` maps the tokens into Tailwind's theme *by reference*, imports preflight,
+and holds the handful of rules that are global by nature — the page's ground and type, body
+`select-none`, focus, the scrollbar, and the one `v-pulse` keyframe. Everything a component
+draws is a utility in that component. What it reverses is the original design system's one
+rule about itself — *"Class names are `v-` prefixed and flat. No nesting, no CSS-in-JS, no
+runtime"*, sixteen primitives in `components.css` — and the reason is the one
+`design/AUDIT.md` already gave: composition does not survive being transcribed into a
+stylesheet, and 6,589 lines of hand-written CSS had drifted into nine copies of the artifact
+pane's layout. Three things the
+move had to keep, and did:
+
+- **Preflight came in with the sweep, in `base`, so a utility always wins.** The old resets were
+  unlayered, and an unlayered rule beats every layered one whatever its specificity — which
+  is how `button { background: none; border: none }` silently erased every new button's
+  ground (#231). The few platform defaults the screens were drawn against are put back by
+  name in `theme.css` with `revert` (native selects, radios and checkboxes, inline icons,
+  placeholder grey, eight-column tabs), and a heading or paragraph that leaned on the user
+  agent's weight or margin says so in its own utilities.
+- **The off-scale tokens are referenced, not rounded.** `--space-2` is 6px, and the root
+  font size is `--type-body`, so `rem` here is 13px — a `px-1.5` or a `pl-10` is not the
+  number it looks like. The moved primitives write `px-(--space-2)` and
+  `[font:var(--type-mono-sm)]`.
+- **`Modal` stayed this repo's own component rather than becoming a radix `Dialog`**, though
+  the rework's plan named one. Its safety properties are the point of it — Escape on the
+  *window*, no dismiss on a scrim click because every dialog guards something expensive, focus
+  to the scrim once on mount, a viewport bound and a body that is the flex item that scrolls —
+  and a library dialog closes on an outside click. The command palette *is* a radix dialog
+  (`ui/command.tsx`), because it guards nothing.
 
 **The screens the source keeps citing are in `app/src/design/HANDOFF.md`.** Twelve comments
 name a frame — `3a`, `4a`, `4h`, `5c`, `6a`, `7a`, `7c`, `7d`, `hi-fi 5`, `hi-fi 11` — and
@@ -381,8 +416,9 @@ they are waiting on. Four things in it are worth carrying:
   been given one job, once by hi-fi 1 and once by moving the loop column. `Sidebar.tsx` is the
   merge. **What must survive it is `＋ ⌘K ⚙`**: `design/AUDIT.md` §1.1's finding was never
   *"there should be a strip"*, it was that those three had nowhere to live and ended up in the
-  tab bar, so a panel that shut them away would put the finding straight back. They are the
-  shut strip, which is why `SidePanel` takes a `shut` slot at all.
+  tab bar, so a panel that shut them away would put the finding straight back. They were the
+  shut strip, which is why the old `SidePanel` took a `shut` slot at all; since the rework they
+  live on the activity bar (`shell/ActivityBar.tsx`), at every width.
 - **A row OPENS a run. It does not start one.** The first cut resumed on click and the report
   was immediate: *"clicking on a run automatically kicks off the pre-flight. I don't want
   that."* It is the sharper form of the narrowing the rail already made — that one said a
@@ -509,8 +545,8 @@ they are waiting on. Four things in it are worth carrying:
   would have when I click on an old run as if I had run it myself. You just added
   a summary or something and changed it entirely."* A person opening a run wants
   **the run**, not a report about it — and a second drawing of one object is two
-  things to keep in step, which is the mistake `SidePanel` and `Counts` both
-  exist to avoid.
+  things to keep in step, which is the mistake `Counts` exists to avoid (and
+  the old `SidePanel` did, before the rework's resizable panels replaced it).
 
   So the core says the run **again**. `src/replay.ts` reconstructs the narration
   and the window folds it through the **same `reduce`** a live run goes through,
@@ -704,7 +740,7 @@ they are waiting on. Four things in it are worth carrying:
   make the two disagree about that.
 - **Your half of the pilot chat is mirrored, and only your half** (#223). The
   first answer to *"it's too hard to tell which is which"* was a `you` chip and
-  a tinted ground, and `pilot.css` recorded at the time that a mirrored layout
+  a tinted ground, and `pilot.css` (since deleted) recorded at the time that a mirrored layout
   was **deliberately** not wanted: the pilot's replies carry chips, prices and
   proposal cards, so putting the one un-annotated thing in the conversation on
   its own axis would be decoration. That reasoning is right about the *reply* and
@@ -1275,7 +1311,7 @@ they are waiting on. Four things in it are worth carrying:
   together**, so the ramp the spec chose survives being scaled and no two styles can drift.
 
   Browser zoom was the other answer and is worse here: it scales layout as well as type, and
-  viewport units do not scale with it — so `.v-modal`'s `max-height: calc(100vh - …)` would
+  viewport units do not scale with it — so the `Modal`'s `max-h-[calc(100vh-44px)]` would
   compute in zoomed pixels and a dialog would be taller than the window at any zoom above 1,
   which is the exact defect that bound was added to fix.
 
@@ -1328,7 +1364,9 @@ they are waiting on. Four things in it are worth carrying:
   file. It is also the right home on the merits: a modal that bounds itself is a design-system
   invariant, not a fact about whichever screen last broke it. Same shape as §9, and found the
   same way: the rule that broke it was the **absence** of a declaration, invisible to a reader
-  of the stylesheet.
+  of the stylesheet. (`.v-modal` and `.v-modal__body` are utilities on `Modal` in
+  `design/Surfaces.tsx` since the rework (#231), which is the file §10 reads now; the corner
+  marks went with it, the scrolling wrapper and `min-h-0` did not.)
 - **A run's name is its brief, so anywhere it becomes a heading it is previewed.** That is the
   text half of the bound above and the two are not alternatives — a modal that cannot outgrow
   the viewport is what stops the *next* long string breaking it, and a heading that is a
@@ -1558,13 +1596,14 @@ landed on the pilot with no run open.
   was a *tab*, which made the archive something you left the run to look at, and the loop
   column was on the left where the design draws it — the report was that the two were the
   wrong way round: the runs belong beside the rail they are drawn from, and the loop belongs
-  beside the pane whose rounds it names. `SidePanel` is one component for both edges, because
+  beside the pane whose rounds it names. `SidePanel` was one component for both edges, because
   two implementations of *standing context you glance at* drift in the way nobody notices —
   you are never looking at both edges at once. **Collapsed is a state, not an absence**: a
   shut panel keeps its strip, its mark and its name, so the way back is where the panel was.
-  Neither is persisted, and that is deliberate — a collapse is a gesture for the next few
-  minutes, where `localStorage` holds the repository and the spend ceiling because those are
-  decisions.
+  Neither was persisted, deliberately — a collapse was a gesture for the next few minutes.
+  The rework (#231) replaced `SidePanel` with resizable panels and reversed that half:
+  with real drag handles an arrangement is a setting, so `cockpit/where.ts` keeps the sizes
+  and which panels are shut.
 
   **The width is the exception, and it is on the same side of that line** (#223): *"The two
   side bars (left and right) should be width adjustable when open."* An open panel's inner edge
@@ -1585,8 +1624,9 @@ landed on the pilot with no run open.
   anything, because a section inside them is a flex item whose automatic minimum size the spec
   resolves to **zero** when `overflow` is not `visible` — so a section holding a nine-page plan
   shrank to the space left and clipped the rest, the pane never overflowed, and the pane
-  therefore never scrolled. `flex: none` on `.v-sect` is the fix and the `overflow: hidden`
-  stays, because it is what clips the head's hover ground to the border. Worth remembering as a
+  therefore never scrolled. `flex: none` on the section is the fix — `flex-none` on
+  `Disclosure.tsx`'s `<section>` since the rework, which replaced `.v-sect` — and the clip
+  stays (`overflow-clip` there), because it is what clips the head's hover ground to the border. Worth remembering as a
   shape rather than as a rule about one class: **a scrolling column's children must not be
   allowed to shrink**, and one with `overflow` set will shrink to nothing without saying so.
 
@@ -1610,11 +1650,13 @@ releases is wrong for at most one turn.
 
 **The scrollbar is global, and the class it replaced is why.** `.v-scroll` was an opt-in and
 almost nothing opted in — every pane sets `overflow-y: auto` itself — so the product scrolled
-with the platform's own light gutter down the side of a dark window. `--dim-scroll-track` is
-the design's 4px and is the width of the **thumb**; the gutter is twice that, with the
-difference clipped away by `background-clip: padding-box`, so the stated design and a usable
-hit target are not in conflict. The track is transparent: a permanently drawn one is a
-vertical rule down every pane, which reads as structure.
+with the platform's own light gutter down the side of a dark window. The rule is in
+`design/theme.css` now (#237). This paragraph used to describe a 4px thumb in an 8px gutter,
+clipped by `background-clip: padding-box`; that was `base.css`'s rule, and the 2026 redesign
+(#226) laid a 6px gutter and a 6px `--rule-strong` thumb over it in `workspace.css`, which won
+the cascade and reset the clip. The sweep merged the two into the one set that was actually on
+screen rather than restoring the one this file described. The track is transparent: a
+permanently drawn one is a vertical rule down every pane, which reads as structure.
 
 **A fact the run records and never says is a screen that cannot be built** (#223). The loop
 has always known whether the verification gate passed, what a round's four severity counts
@@ -2066,7 +2108,7 @@ src/mcp.ts           which MCP servers a run's children reach: none unless a rol
 tests/               node:test, one file per concern
 
 app/                 the desktop app - Vite + React, its own package.json and gate
-app/src/design/      tokens.css, base.css, components.css, and the sixteen primitives
+app/src/design/      tokens.css, theme.css (Tailwind over the tokens), and the primitives still drawn
 app/src/design/HANDOFF.md  the design corpus - every screen a source comment cites, by name
 app/src/design/AUDIT.md    the built app walked against all fourteen hi-fi frames, and closed
 app/src/cockpit/rounds.ts  a round as one card, and which round a thing arrived during
@@ -2089,12 +2131,13 @@ app/src/cockpit/artifacts.ts what a run wrote: classifying a listing, and readin
 app/src/cockpit/useArtifacts.ts asking the host for a listing, and for one file when it opens
 app/src/cockpit/useStats.ts    asking the host for the archive's scorecard, and again when a run ends
 app/src/cockpit/Disclosure.tsx the one section-that-opens, at every level it appears
-app/src/cockpit/SidePanel.tsx  a column that can be put away without being lost
 app/src/cockpit/PlansPane.tsx  every version of the plan, one section per round
 app/src/cockpit/ReportPane.tsx a judge's own report - the critique and the review, one screen
 app/src/cockpit/CodePane.tsx   what each round changed, from the range its commit carries
 app/src/pilot/log.ts       rounds and conversation in one scroll, and who may reorder whom
-app/src/Gallery.tsx  every component in every state - the design system's acceptance test
+app/src/shell/       the editor-shaped frame: activity bar, status bar, palette, and their pure tables
+app/src/ui/          the shadcn components, over the tokens - button, badge, command, popover, tooltip, resizable
+app/src/cockpit/pane.ts    the artifact panes' shared layout, named once - nine subjects, one shape
 app/src/host.ts      the webview's end of the wire: typed frames, and nothing re-derived
 app/src/cockpit/model.ts   frames in, a run out - the ONLY logic in the app, and it is pure
 app/src/cockpit/format.ts  durations, counts, and the closed maps: boundaries and exit codes

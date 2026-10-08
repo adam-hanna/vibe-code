@@ -9,7 +9,7 @@ import { cn } from '@/lib/utils';
  *
  * `CommandDialog` is a modal and is bounded by the viewport - `max-h-[70vh]`
  * with the list scrolling inside - for the reason `audit:contrast` §10 bounds
- * `.v-modal`: a scrim is `position: fixed; inset: 0`, so a dialog that outgrows
+ * the `Modal`: a scrim is `position: fixed; inset: 0`, so a dialog that outgrows
  * the window is a stuck application, not a stuck dialog. Escape leaves it from
  * the window (`Cockpit`'s key handler) as well as from Radix.
  */

@@ -56,7 +56,8 @@
 >   shipped as behaviour. `4a`'s name/branch/worktree row and its setup preview have no flag
 >   and no worktree creation behind them (#208).
 > - **Not a build target.** The bundle is HTML for panning in a browser. Do not port its
->   markup; `app/src/design/` is the implementation and the two are not the same thing.
+>   markup; the implementation is `app/src/design/` (the tokens and the primitives still
+>   drawn), `app/src/ui/` and `app/src/shell/`, and the two are not the same thing.
 >
 > **Where the rest lives.** The three `.dc.html` canvases, `support.js` and nine rounds of
 > feedback are not committed — they are ~1 MB of browsable artwork with a JS runtime, and
@@ -648,6 +649,17 @@ A single combined matrix would have implied the built-in toolset was editable.
 6f's line survives verbatim: *write is not offerable to a read-only role; the dash is not an unchecked box* — true of both providers, for different reasons.
 
 ### 7i — Provenance
+
+> **2026-10-08 (#237): the build this table was measured against is gone.** Every
+> *real today* and *app-side* entry below was checked against the pre-Tailwind app — the
+> `v-` classes in `base.css`, `components.css`, `cockpit.css` and `workspace.css`, and the
+> specimen gallery at `?gallery`. The UI rework (#231) redrew every screen in Tailwind
+> utilities over the same `tokens.css`, and the sweep (#237) deleted those stylesheets and
+> the gallery. The categories are about where a frame's **data** comes from, so they still
+> read as a claim about their date — but the frames' **composition** (the rail, corner marks,
+> square controls, hatched skeletons) is no longer what the app follows: see `WORKSPACE.md`
+> and `docs/plans/2026-10-06-ui-rework-design.md`. The table in this file's header is the
+> later of the two snapshots, and both predate #237; check either before building from it.
 
 Hi-fi covers the whole app, so every frame carries where its data comes from. A wireframe that quietly mixes shipped, planned and app-invented behaviour hands the implementer three kinds of work under one visual language.
 

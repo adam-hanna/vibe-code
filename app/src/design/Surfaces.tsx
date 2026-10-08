@@ -1,59 +1,7 @@
 import { useEffect, useRef } from 'react';
 import type { ReactNode } from 'react';
-import type { Severity } from './Chips';
 
-/** Card, banner, modal, table. */
-
-export function Card({
-  state = 'settled',
-  severity,
-  children,
-}: {
-  /**
-   * `spent` is opacity 0.72 and means acted-on, not disabled - a declined
-   * finding or a settled round, still readable and no longer live.
-   */
-  state?: 'settled' | 'live' | 'spent';
-  severity?: Severity | undefined;
-  children: ReactNode;
-}) {
-  const cls = [
-    'v-card',
-    state === 'live' ? 'v-card--live' : '',
-    state === 'spent' ? 'is-spent' : '',
-    severity !== undefined ? `v-card--${severity.toLowerCase()}` : '',
-  ]
-    .filter(Boolean)
-    .join(' ');
-  return <div className={cls}>{children}</div>;
-}
-
-/**
- * Replaces the footer in place and never appears above it. A halt is not a
- * notification; it is the state of the thing already being looked at.
- */
-export function Banner({
-  kicker,
-  headline,
-  evidence,
-  actions,
-}: {
-  kicker: ReactNode;
-  headline: ReactNode;
-  evidence?: ReactNode;
-  actions?: ReactNode;
-}) {
-  return (
-    <div className="v-banner">
-      {kicker}
-      <div>
-        <div className="v-banner__headline">{headline}</div>
-        {evidence !== undefined && <div className="v-banner__evidence">{evidence}</div>}
-      </div>
-      {actions !== undefined && <div className="v-banner__actions">{actions}</div>}
-    </div>
-  );
-}
+/** The modal and the table. The card and the banner went with the gallery, their last caller (#237). */
 
 /**
  * Three instances in the whole product, so this carries the only shadow in it.
@@ -72,8 +20,8 @@ export function Banner({
  *
  * **A dialog cannot outgrow the viewport**, which is the other half of the same
  * safety property and was missing until a confirmation put a whole brief in its
- * title. `.v-modal` is height-bounded and `.v-modal__body` scrolls inside it, so
- * a dialog's own actions stay reachable however long its content is - the size
+ * title. The dialog is height-bounded and its body scrolls inside it (the
+ * `max-h-[…]` and `min-h-0 overflow-y-auto` below), so a dialog's own actions stay reachable however long its content is - the size
  * of what a caller passes in is not something this component can be asked to
  * trust.
  */
@@ -135,7 +83,7 @@ export function Modal({
    * That state was reached — *"This screen pops up and I cant click out of it"* —
    * by a confirmation whose title was a whole brief, which grew the dialog past
    * the bottom of the screen and took its own Cancel button with it. The height
-   * bound in `components.css` is what stops that happening again; this is what
+   * bound on the dialog below is what stops that happening again; this is what
    * makes the way out independent of it, and of focus, and of layout.
    */
   useEffect(() => {
@@ -212,6 +160,11 @@ export function Modal({
  * never full-bleed - a table stretched to the pane makes the eye travel across
  * whitespace to reach a value.
  */
+/** Cell styles, on the cell, from the old `.v-table th` / `td` rules. */
+const TH =
+  'h-(--dim-table-header) whitespace-nowrap border-b border-rule-structure bg-column px-(--space-4) py-0 text-left uppercase tracking-(--track-label) text-tertiary [font:var(--type-label)]';
+const TD = 'h-(--dim-table-row) whitespace-nowrap border-b border-rule-inner px-(--space-4) py-0 text-primary';
+
 export function Table({
   columns,
   rows,
@@ -222,23 +175,36 @@ export function Table({
   selected?: string | undefined;
 }) {
   return (
-    <table className="v-table">
+    <table className="w-auto border-collapse">
       <thead>
         <tr>
           {columns.map((c) => (
-            <th key={c}>{c}</th>
+            <th key={c} className={TH}>
+              {c}
+            </th>
           ))}
         </tr>
       </thead>
       <tbody>
-        {rows.map((r) => (
-          <tr key={r.key} className={r.key === selected ? 'is-selected' : ''}>
-            {r.cells.map((cell, i) => (
-              // eslint-disable-next-line react/no-array-index-key
-              <td key={i}>{cell}</td>
-            ))}
-          </tr>
-        ))}
+        {rows.map((r) => {
+          // A selected row: the active wash on every cell, and the 2px accent
+          // rule drawn as an inset on the first, so it does not move the text.
+          // The row itself also carried the global `.is-selected` rule.
+          const on = r.key === selected;
+          return (
+            <tr key={r.key} className={on ? 'border-l-2 border-accent bg-active' : ''}>
+              {r.cells.map((cell, i) => (
+                <td
+                  // eslint-disable-next-line react/no-array-index-key
+                  key={i}
+                  className={on ? `${TD} bg-active${i === 0 ? ' shadow-[inset_2px_0_0_var(--accent-solid)]' : ''}` : TD}
+                >
+                  {cell}
+                </td>
+              ))}
+            </tr>
+          );
+        })}
       </tbody>
     </table>
   );

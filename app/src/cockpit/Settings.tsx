@@ -31,7 +31,7 @@ const S = {
   note: 'm-0 max-w-[78ch] text-body-sm text-tertiary',
   row: 'flex flex-wrap items-center gap-3 text-body-sm text-secondary',
   label: 'text-body-sm text-primary',
-  h: 'm-0 text-label uppercase tracking-label text-tertiary',
+  h: 'm-0 font-bold text-label uppercase tracking-label text-tertiary',
   block: 'flex flex-col gap-2',
   inline: 'ml-2 inline-flex items-center gap-2',
   unit: 'text-body-sm text-tertiary',
@@ -2003,7 +2003,7 @@ export function Settings({
               shell in the repository, so it can be a sequence, and these are its placeholders —
               environment variables, so quote them:
             </p>
-            <ul className={S.note}>
+            <ul className={cn(S.note, 'list-disc pl-[40px]')}>
               <li>
                 <code>$VIBE_WORKTREE</code> — the directory the worktree must be created at
               </li>

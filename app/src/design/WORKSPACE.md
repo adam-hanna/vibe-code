@@ -1,5 +1,12 @@
 # Workspace design
 
+> **2026-10-08 (#237):** `workspace.css` is gone. This note describes the October redesign
+> (#226) as it was layered over the original stylesheets; the UI rework (#231) then redrew
+> the app in Tailwind and the sweep deleted every old stylesheet. What it says about the
+> composition's *behaviour* still holds; where it names `workspace.css` or the icon set in
+> `Icon.tsx`, read `theme.css` (the few global rules, including the scrollbar this file's
+> CSS set) and `lucide-react` (the icons; `Icon.tsx` keeps only the brand mark).
+
 The October 2026 redesign replaces the original visual direction in HANDOFF.md.
 The historical handoff and audit remain useful records of behavior and evidence;
 their old composition, palette, typefaces, and square controls are superseded.

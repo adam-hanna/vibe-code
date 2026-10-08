@@ -62,7 +62,7 @@ function citation(c: FullFinding['citations'][number]): string {
 /** A list of one-line facts about a finding: its history, its reproducer. */
 const FACTS = 'm-0 flex list-none flex-col gap-1 p-0 text-body-sm text-secondary';
 /** A caption over prose behind the fold: label weight, because it is not a title of its own. */
-const CAPTION = cn(LABEL, 'mt-2 mb-0');
+const CAPTION = cn(LABEL, 'mt-2 mb-0 font-bold');
 /** Prose the report carried. `pre-wrap`, because a reviewer's paragraphs are its own. */
 const PROSE = 'm-0 whitespace-pre-wrap text-body text-secondary';
 /** A field the report did not carry, named as absent rather than left blank. */

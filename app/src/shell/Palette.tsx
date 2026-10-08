@@ -120,10 +120,10 @@ export function Palette({
         ))}
         <CommandSeparator />
         <CommandGroup heading="Runs">
-          {failure !== null && <p className="px-2 py-1.5 text-body-sm text-tertiary">{failure}</p>}
-          {failure === null && runs === null && <p className="px-2 py-1.5 text-body-sm text-tertiary">reading the archive…</p>}
+          {failure !== null && <p className="my-[1em] px-2 py-1.5 text-body-sm text-tertiary">{failure}</p>}
+          {failure === null && runs === null && <p className="my-[1em] px-2 py-1.5 text-body-sm text-tertiary">reading the archive…</p>}
           {runs !== null && runs.length === 0 && (
-            <p className="px-2 py-1.5 text-body-sm text-tertiary">no runs in this repository yet</p>
+            <p className="my-[1em] px-2 py-1.5 text-body-sm text-tertiary">no runs in this repository yet</p>
           )}
           {sorted.map((run) => (
             <CommandItem
