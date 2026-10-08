@@ -156,6 +156,7 @@ test('a result with no attempts cannot tell, and does not guess', () => {
     attempts: [],
     exitCode: 1,
     output: '',
+    outputs: [],
     unavailable: null,
     unlaunchable: null,
   };

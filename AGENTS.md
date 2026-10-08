@@ -2045,6 +2045,7 @@ app/src/design/      tokens.css, base.css, components.css, and the sixteen primi
 app/src/design/HANDOFF.md  the design corpus - every screen a source comment cites, by name
 app/src/design/AUDIT.md    the built app walked against all fourteen hi-fi frames, and closed
 app/src/cockpit/rounds.ts  a round as one card, and which round a thing arrived during
+app/src/cockpit/rail.ts    what the run rail says: a turn's group, the now card, the verify row
 app/src/cockpit/Counts.tsx the four severity counts, and the one place they are a control
 app/src/cockpit/squares.ts what the navigator may draw, and the two letters standing for a run
 app/src/cockpit/Sidebar.tsx  projects, their runs, and the pins - the rail merged into one
@@ -3031,6 +3032,37 @@ short-circuit and costs exactly what it did. Three things about it:
 - **A flaky gate still blocks, and an unlaunchable one still short-circuits.** Retrying or
   excluding a flake hides a defect in the suite; re-running a command that could not start
   buys nothing, since no amount of retrying makes a mistyped path resolve.
+
+**A failing gate can be read: the fixer is shown both ends, and every attempt keeps its
+whole output** (#248). In the #169 run the `core` gate failed 3 of 3 and the fixer was
+handed the last 8,000 characters of the first failing attempt, which held `# fail 2` and
+none of the failures. Three things changed:
+
+- **Every attempt of a gate that did not pass cleanly is a file**,
+  `verify-<reviewRound>-<verifyRound>-<gate>-<n>.log`, passing attempts of a flaky gate
+  included, uncapped. Keyed by the gate and the verify round because `runGate` stops at the
+  first failing gate: two gates fail in *successive* passes under one review round, and so
+  does one gate failing again after a verify-fix. The output stays off the event (#133);
+  each attempt on `verify_failed` carries `log`, the file's name, and the Verify pane opens
+  exactly that and never composes one. A gate that passed every attempt writes nothing.
+- **The fixer gets the first 2,000 and the last 6,000 characters**, the same 8,000 as
+  before, split. A cut is stated in one line naming the full log's absolute path, and
+  `describeFailure` names the log of every failed attempt and tells the fixer to search it.
+  **Head and tail alone cannot show a failure a runner printed mid-stream**, which is the
+  #169 case: TAP writes each `not ok` where it happens and only a count at the end. The
+  named log is what fixes that case; the head catches compile errors and crashes.
+- **A turn's group is read from where `reduce` placed it, not from a kind table.** The run
+  rail mapped `plan`, `critique`, `implement` and `review` to a group and nothing else, so
+  `revise`, `answer`, `verify-fix`, `review-fix` and `final-fix` all drew the NOW card as
+  *Ready for the next turn*, above a `Current activity` card showing the same turn's tool
+  calls. `turnGroup` in `app/src/cockpit/rail.ts` reads the cycle holding the turn, which
+  covers every kind the loop has or will have, and while `run.running` is set the card is
+  never idle: a turn in no group is titled by its role.
+
+The replay says the gate's verdicts again too, `verify_started` immediately before each
+stored verdict, so an opened run's Verify tab draws that run's own attempts and opens that
+run's own logs. Until it arrives the tab draws none, rather than the live run's attempts
+read under another run's directory.
 
 **A blocking finding can be asked to prove it, and the proof is a file rather than a
 command** (#113). Both existing guards are about the *form* of a claim, and `evidence.ts`

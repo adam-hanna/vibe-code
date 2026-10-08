@@ -450,6 +450,35 @@ export function replayRun(state: RunState, sources: ReplaySources): Replay {
     }
   }
 
+  // **The verification gate's verdicts, as the run recorded them** (#248). Each
+  // `verify_passed|failed|unavailable` is a durable event, carried here whole -
+  // including every attempt's `log`, which is what lets the Verify tab of an
+  // opened run open that run's own logs rather than drawing the live run's
+  // attempts over another run's directory. `verify_started` is a step and not
+  // durable, so it is said immediately before the verdict it opened: `reduce`
+  // settles only a gate something opened, and the verdict is the evidence that
+  // one was. The gate's duration therefore collapses to nothing, which the pane
+  // already draws for a gate without one.
+  for (const event of state.events) {
+    const id = event.type;
+    if (
+      id !== 'verify_passed' &&
+      id !== 'verify_failed' &&
+      id !== 'verify_unavailable' &&
+      id !== 'verify_disabled'
+    ) {
+      continue;
+    }
+    const at = ms(typeof event['at'] === 'string' ? event['at'] : null);
+    if (at === null) continue;
+    const { at: _at, type: _type, ...data } = event;
+    if (id !== 'verify_disabled') {
+      if (typeof data['gate'] !== 'string') continue;
+      push(at, say('verify_started', `Verifying: ${data['gate']}`, { gate: data['gate'], round: data['round'] ?? null }));
+    }
+    push(at, say(id, id, data));
+  }
+
   // `since` is the commit before this one, which for the archive is the
   // previous checkpoint's commit and, for the first, the base the implement
   // phase marked. The live loop reads HEAD before it commits for the reason

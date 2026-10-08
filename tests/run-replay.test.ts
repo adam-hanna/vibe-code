@@ -605,3 +605,63 @@ test('a run that stopped on a failed turn carries its totals on that turn', () =
   });
   assert.equal(charges(state)[1]?.['runTokens'], 14_247_742);
 });
+
+test('a gate’s verdicts are said again, each attempt still naming its log (#248)', () => {
+  // The Verify tab of an opened run draws that run's own passes, so the replay
+  // has to carry them - including every attempt's `log`, or the tab of an
+  // opened run either shows nothing or the live run's attempts read under the
+  // wrong run's directory. `verify_started` is not durable, so it is said
+  // immediately before the verdict it opened, which is what `reduce` needs.
+  const attempts = [
+    { run: 1, ok: false, exitCode: 1, log: 'verify-0-0-core-1.log' },
+    { run: 2, ok: true, exitCode: 0, log: 'verify-0-0-core-2.log' },
+  ];
+  const state = stateWith({
+    events: [
+      { at: iso(60_000), type: 'claude_turn', label: 'implement', tokens: 1 },
+      { at: iso(70_000), type: 'verify_failed', gate: 'core', round: 0, runs: 2, failed: 1, verdict: 'flaky', attempts },
+      { at: iso(90_000), type: 'claude_turn', label: 'verify-fix-1', tokens: 1 },
+      { at: iso(95_000), type: 'verify_passed', gate: 'core', round: 0, runs: 2, attempts: [] },
+    ],
+  });
+  const steps = replayRun(state, NOTHING).steps;
+  assert.deepEqual(ids(steps), [
+    'run_started',
+    'phase_started',
+    'turn_started',
+    'claude_turn',
+    'verify_started',
+    'verify_failed',
+    // The fix turn's own round opens its group, as it always has.
+    'phase_started',
+    'turn_started',
+    'claude_turn',
+    'verify_started',
+    'verify_passed',
+  ]);
+  const failed = steps.find((s) => s.narration.id === 'verify_failed');
+  assert.deepEqual(failed?.narration.data?.['attempts'], attempts);
+  assert.equal(failed?.narration.data?.['type'], undefined);
+  assert.equal(steps.find((s) => s.narration.id === 'verify_started')?.narration.data?.['gate'], 'core');
+});
+
+test('a gate’s verdicts land among the turns by time, not after them (#248)', () => {
+  // Verdicts are read from `events` after the turns, so this is what pins that
+  // the timeline is sorted: a verify pass that preceded a review must be folded
+  // into the code group it ran under, not the review that came after it.
+  const state = stateWith({
+    events: [
+      { at: iso(60_000), type: 'claude_turn', label: 'implement', tokens: 1 },
+      { at: iso(70_000), type: 'verify_failed', gate: 'core', round: 0, runs: 1, failed: 1, attempts: [] },
+      { at: iso(90_000), type: 'claude_turn', label: 'verify-fix-1', tokens: 1 },
+      { at: iso(95_000), type: 'verify_passed', gate: 'core', round: 0, runs: 1, attempts: [] },
+      { at: iso(120_000), type: 'codex_turn', label: 'review-0', tokens: 1 },
+    ],
+  });
+  const steps = replayRun(state, NOTHING).steps;
+  const order = steps.map((s) => `${s.narration.id}:${String(s.narration.data?.['phase'] ?? s.narration.data?.['gate'] ?? '')}`);
+  const reviewOpens = order.indexOf('phase_started:review');
+  assert.ok(reviewOpens > order.lastIndexOf('verify_passed:core'));
+  assert.ok(order.indexOf('verify_started:core') > order.indexOf('phase_started:implementing'));
+  for (let i = 1; i < steps.length; i += 1) assert.ok(steps[i - 1]!.at <= steps[i]!.at);
+});

@@ -1,7 +1,10 @@
+import { useState } from 'react';
 import { Badge } from '@/ui/badge';
 import { cn } from '@/lib/utils';
 import { elapsed } from './format';
-import { CARD, EMPTY, LABEL, PANE } from './pane';
+import { CARD, EMPTY, FILE, LABEL, PANE } from './pane';
+import { attemptAction } from './rail';
+import { noText, useArtifact } from './useArtifacts';
 import type { GateRun, VerifyPass } from './model';
 
 /**
@@ -86,8 +89,21 @@ const ABSENT = 'mt-3 mb-0 text-body-sm text-tertiary';
  * and no attempt list knows the fraction and not which run it was, and three
  * slots with one of them arbitrarily marked would be the pane inventing the
  * thing that distinguishes broken from noisy.
+ *
+ * **An attempt that names a log is a control that opens it** (#248). A count is a
+ * control wherever it is drawn, and these were the most obvious thing on the
+ * pane to press and did nothing. What opens is the file the loop named on the
+ * event - `attemptAction` decides, and nothing here composes a filename.
  */
-function Attempts({ gate }: { gate: GateRun }) {
+function Attempts({
+  gate,
+  open,
+  onOpen,
+}: {
+  gate: GateRun;
+  open: string | null;
+  onOpen: (name: string | null) => void;
+}) {
   if (gate.attempts.length === 0) {
     if (gate.runs === 0) return null;
     return (
@@ -99,28 +115,80 @@ function Attempts({ gate }: { gate: GateRun }) {
   }
   return (
     <ol className="mt-3 mb-0 flex list-none flex-wrap gap-2 p-0">
-      {gate.attempts.map((a) => (
+      {gate.attempts.map((a) => {
+        const action = attemptAction(gate, a);
+        const body = (
+          <>
+            <span className="font-mono text-mono-sm text-tertiary">run {a.run}</span>
+            <span className={LABEL}>{a.ok ? 'passed' : 'failed'}</span>
+            {/* The exit code only where there is one. A passing run has none to
+                show and `exit 0` would be furniture. */}
+            {!a.ok && a.exitCode !== null && <Badge>exit {a.exitCode}</Badge>}
+          </>
+        );
         // Weight, not hue - the same rule the severity chips follow: a failed
         // attempt takes the P0 rule's width.
-        <li
-          key={a.run}
-          className={cn(
-            'flex items-center gap-2 rounded-sm border px-3 py-2 text-body-sm',
-            a.ok ? 'border-rule-control text-secondary' : 'border-2 border-emphasis text-primary',
-          )}
-        >
-          <span className="font-mono text-mono-sm text-tertiary">run {a.run}</span>
-          <span className={LABEL}>{a.ok ? 'passed' : 'failed'}</span>
-          {/* The exit code only where there is one. A passing run has none to
-              show and `exit 0` would be furniture. */}
-          {!a.ok && a.exitCode !== null && <Badge>exit {a.exitCode}</Badge>}
-        </li>
-      ))}
+        const frame = cn(
+          'flex items-center gap-2 rounded-sm border px-3 py-2 text-body-sm',
+          a.ok ? 'border-rule-control text-secondary' : 'border-2 border-emphasis text-primary',
+        );
+        if (action.kind === 'open') {
+          const shown = open === action.name;
+          return (
+            <li key={a.run}>
+              <button
+                type="button"
+                className={cn(
+                  frame,
+                  'cursor-pointer bg-transparent text-left outline-none hover:bg-active-hdr focus-visible:ring-1 focus-visible:ring-accent',
+                  shown && 'bg-active',
+                )}
+                aria-expanded={shown}
+                title={shown ? 'Hide this attempt’s output' : 'Show this attempt’s whole output'}
+                onClick={() => onOpen(shown ? null : action.name)}
+              >
+                {body}
+                <span className="text-tertiary">{shown ? 'hide log' : 'open log'}</span>
+              </button>
+            </li>
+          );
+        }
+        return (
+          <li key={a.run} className={cn(frame, 'flex-col items-start gap-1')}>
+            <span className="flex items-center gap-2">{body}</span>
+            {action.kind === 'absent' && <span className="text-tertiary">{action.sentence}</span>}
+          </li>
+        );
+      })}
     </ol>
   );
 }
 
-function GateCard({ gate }: { gate: GateRun }) {
+/**
+ * One attempt's whole output, read from the run's own directory when it is
+ * asked for - never before, so a pane of ten passes costs one read.
+ */
+function AttemptLog({ dir, runId, name }: { dir: string; runId: string | null; name: string }) {
+  const { read, failure, loading } = useArtifact(dir, runId, name);
+  const missing = noText(read, failure);
+  return (
+    <div className="mt-3 flex flex-col gap-1">
+      <span className={FILE}>{name}</span>
+      {loading && read === null ? (
+        <p className={ABSENT}>reading…</p>
+      ) : missing !== null ? (
+        <p className={ABSENT}>{missing}</p>
+      ) : read?.kind === 'text' ? (
+        <pre className="m-0 max-h-96 overflow-auto whitespace-pre rounded-sm border border-rule-inner bg-panel px-3 py-2 font-mono text-mono-sm text-secondary">
+          {read.text === '' ? 'This attempt printed nothing.' : read.text}
+        </pre>
+      ) : null}
+    </div>
+  );
+}
+
+function GateCard({ gate, dir, runId }: { gate: GateRun; dir: string; runId: string | null }) {
+  const [open, setOpen] = useState<string | null>(null);
   const reading = gate.verdict === null ? null : READING[gate.verdict];
   // The live gate takes the accent border and the active ground, as every
   // running card does; a settled one takes the card ground.
@@ -150,7 +218,8 @@ function GateCard({ gate }: { gate: GateRun }) {
         </pre>
       )}
 
-      <Attempts gate={gate} />
+      <Attempts gate={gate} open={open} onOpen={setOpen} />
+      {open !== null && <AttemptLog dir={dir} runId={runId} name={open} />}
 
       <p className="mt-3 mb-0 text-body-sm text-secondary">
         <span className={cn(LABEL, 'mb-1 block')}>What this means for the loop</span>
@@ -185,7 +254,32 @@ function Trend({ passes }: { passes: readonly VerifyPass[] }) {
   );
 }
 
-export function VerifyPane({ passes }: { passes: readonly VerifyPass[] }) {
+export function VerifyPane({
+  passes,
+  dir,
+  runId,
+  waiting = null,
+}: {
+  passes: readonly VerifyPass[];
+  /** Where the run that wrote these passes lives - the logs are read from it (#248). */
+  dir: string;
+  runId: string | null;
+  /**
+   * Why there are no passes to draw yet, or null when the empty list is the
+   * run's own answer. An opened run's passes come from its replay, and until
+   * that arrives - or if it fails - an empty list is not *nothing reached the
+   * gate*; saying so would be a claim about the run this pane cannot make.
+   */
+  waiting?: string | null;
+}) {
+  if (passes.length === 0 && waiting !== null) {
+    return (
+      <div className={EMPTY}>
+        <Badge>not read yet</Badge>
+        <p className="m-0 max-w-md">{waiting}</p>
+      </div>
+    );
+  }
   if (passes.length === 0) {
     return (
       <div className={EMPTY}>
@@ -211,7 +305,7 @@ export function VerifyPane({ passes }: { passes: readonly VerifyPass[] }) {
             {i === 0 && <Badge>most recent</Badge>}
           </h3>
           {pass.gates.map((gate) => (
-            <GateCard key={`${gate.name}-${String(gate.startedAt)}`} gate={gate} />
+            <GateCard key={`${gate.name}-${String(gate.startedAt)}`} gate={gate} dir={dir} runId={runId} />
           ))}
         </section>
       ))}

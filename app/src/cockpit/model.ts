@@ -230,9 +230,26 @@ export interface GateRun {
    * information that separates a broken suite from a noisy one. Empty for a
    * gate that never ran, and for a core that predates the field.
    */
-  attempts: readonly { run: number; ok: boolean; exitCode: number | null }[];
+  attempts: readonly Attempt[];
   startedAt: number;
   endedAt: number | null;
+}
+
+/** One attempt of a gate, as `verify_passed|failed` carried it. */
+export interface Attempt {
+  run: number;
+  ok: boolean;
+  exitCode: number | null;
+  /**
+   * The basename of this attempt's whole output, or null (#248).
+   *
+   * **Told, never composed.** The loop names the file on the event and the pane
+   * opens exactly that; a window building `verify-…log` out of the rounds it
+   * already has would be the loop's naming convention copied into a process that
+   * cannot be kept in step with it. Null for a gate that passed every attempt,
+   * which writes no log, and for every event written before the field existed.
+   */
+  log: string | null;
 }
 
 /** One pass of the verification gate, which is a list of gates in order. */
@@ -902,16 +919,21 @@ function strings(v: unknown): readonly string[] {
  * carried is the absent-is-not-zero rule broken on a sequence - and here it
  * would be worse than usual, because dropping one attempt from three is how a
  * flaky suite comes to look like a clean one.
+ *
+ * **`log` is optional, and its absence never rejects a row** (#248). Every
+ * attempt recorded before the field existed has none, and an attempt of a gate
+ * that passed cleanly never had one; both read as null, which the pane draws as
+ * a named absence rather than a blank.
  */
-function readAttempts(v: unknown): { run: number; ok: boolean; exitCode: number | null }[] {
+function readAttempts(v: unknown): Attempt[] {
   if (!Array.isArray(v)) return [];
-  const out: { run: number; ok: boolean; exitCode: number | null }[] = [];
+  const out: Attempt[] = [];
   for (const item of v as unknown[]) {
     if (typeof item !== 'object' || item === null) return [];
     const row = item as Record<string, unknown>;
     const run = num(row['run']);
     if (run === null || typeof row['ok'] !== 'boolean') return [];
-    out.push({ run, ok: row['ok'], exitCode: num(row['exitCode']) });
+    out.push({ run, ok: row['ok'], exitCode: num(row['exitCode']), log: str(row['log']) });
   }
   return out;
 }

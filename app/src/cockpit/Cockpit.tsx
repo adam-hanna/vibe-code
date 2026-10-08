@@ -1300,6 +1300,29 @@ export function Cockpit() {
    * one run while claiming to show another is the confusion this set out to fix.
    */
   const columnRun = past && opened.run !== null ? opened.run : run;
+  /**
+   * The verification passes the Verify tab draws, and the run whose directory
+   * their logs are read from - **one run, never two** (#248). Each attempt opens
+   * the file its own run named, so drawing the live run's attempts while reading
+   * filenames under an opened one would open the wrong run's logs, or nothing.
+   * So an opened run draws its own replayed passes, and draws none until the
+   * replay has arrived rather than borrowing the live run's as the column
+   * does: a column showing the live run says so, an attempt card cannot.
+   */
+  const verifyOf = past && viewing !== null
+    ? {
+        passes: opened.run?.verify ?? [],
+        dir: viewing.dir,
+        runId: viewing.runId,
+        // Said rather than drawn as an empty run: the replay is still being
+        // read, or could not be, and the pane must not claim no gate ran.
+        waiting: opened.run !== null
+          ? null
+          : opened.failure !== null
+            ? `This run could not be read again: ${opened.failure}`
+            : 'Reading this run’s record…',
+      }
+    : { passes: run.verify, dir: run.identity?.repo ?? shownDir, runId: run.identity?.runId ?? null, waiting: null };
   /** One reading of the live turn's quiet, for the strip and the status bar (#267). */
   const quiet = staleness(run, now);
   // The run the pilot's conversation is about, for its log's round cards (#247).
@@ -1678,7 +1701,7 @@ export function Cockpit() {
               aria-current={tab === 'verify' ? 'page' : undefined}
               onClick={() => setTab('verify')}
             >
-              Verify{run.verify.length > 0 ? ` · ${String(run.verify.length)}` : ''}
+              Verify{verifyOf.passes.length > 0 ? ` · ${String(verifyOf.passes.length)}` : ''}
             </button>
             {/*
               `5e`, in the place hi-fi 1 puts it: right-aligned in this bar,
@@ -1702,7 +1725,17 @@ export function Cockpit() {
               reading box". The loop column's own `reading` head stays, since
               that is where the one fact worth stating (turn durations are
               missing on a replay) is said. */}
-          {tab === 'verify' && <VerifyPane passes={run.verify} />}
+          {tab === 'verify' && (
+            // Keyed by the run, so an attempt log left open on one run is not
+            // carried onto the next one opened.
+            <VerifyPane
+              key={verifyOf.runId ?? 'none'}
+              passes={verifyOf.passes}
+              dir={verifyOf.dir}
+              runId={verifyOf.runId}
+              waiting={verifyOf.waiting}
+            />
+          )}
           {tab === 'spend' && <SpendPane run={run} />}
           {tab === 'questions' && (
             <QuestionsPane
