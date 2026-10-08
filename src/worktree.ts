@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSy
 import { gitBin, isRepo } from '@src/git.js';
 import { livenessOf, lockPath, probePid } from '@src/lock.js';
 import type { LivenessVerdict, PidProbe } from '@src/lock.js';
-import { RUNS_DIR, runEntryLinkage } from '@src/run.js';
+import { entryVerdict, RUNS_DIR, runEntryLinkage } from '@src/run.js';
 import type { RunEntryLinkage } from '@src/run.js';
 import { run } from '@src/proc.js';
 import { runUserCommand } from '@src/verify.js';
@@ -313,7 +313,11 @@ export type EntryConflict =
  *
  * - A **link** is skipped and nothing is read through it (#53). vibe never
  *   makes one, so it is not a run this process could be racing.
- * - An entry that is not a directory is not a run at all.
+ * - Everything else is asked of its lock, **a plain file included**: `entryVerdict`
+ *   calls it `readable`, and its lock read fails with `ENOTDIR`, which
+ *   `livenessOf` calls `unknown`. vibe never writes a file into `.vibe/runs`, so
+ *   one there is something nobody can account for - and the settled rule is that
+ *   only an absent root and a measured link are passed over.
  * - An entry `lstat` could not classify **counts, with no worktree**: it cannot
  *   be ruled out as a live run, which is `lock.ts`'s fail-closed rule.
  * - Otherwise the lock's verdict decides: `running` and `unknown` count,
@@ -327,11 +331,11 @@ export function entryConflict(
   verdict: () => LivenessVerdict,
   worktree: () => boolean,
 ): EntryConflict {
-  if (linkage.dir === 'link' || linkage.state === 'link') return null;
-  if (linkage.dir === 'unknown' || linkage.state === 'unknown') {
+  const kind = entryVerdict(linkage);
+  if (kind === 'linked') return null;
+  if (kind === 'unverified') {
     return { clause: `${id} (vibe could not classify this entry, so it cannot rule out a live run)`, worktree: false };
   }
-  if (linkage.dir !== 'directory') return null;
   const v = verdict();
   if (v.liveness === 'running') {
     return { clause: `${id} (running, pid ${v.lock?.pid ?? 'unknown'})`, worktree: worktree() };

@@ -23,10 +23,16 @@ describe('status reads', () => {
     expect(cockpit).toMatch(/if \(gen === statusGen\.current\) setWire/);
     // The startup read is stamped too, and a stale answer is asked again rather
     // than applied over a newer one.
-    const startup = cockpit.slice(cockpit.indexOf('for (;;) {'), cockpit.indexOf('break;\n        }'));
+    const startup = cockpit.slice(cockpit.indexOf('for (;;) {'), cockpit.indexOf('if (status.ready !== null)'));
     expect(startup).toMatch(/const gen = \(statusGen\.current \+= 1\);/);
-    expect(startup).toMatch(/if \(gen !== statusGen\.current\) continue;/);
-    expect(startup.indexOf('continue;')).toBeLessThan(startup.indexOf('setWire('));
+    // Both outcomes are checked before they are written: a stale rejection
+    // would otherwise put its sentence over a newer read's, or an exit's.
+    const failed = startup.slice(startup.indexOf('} catch (err) {'), startup.indexOf('break;'));
+    expect(failed).toMatch(/if \(gen !== statusGen\.current\) continue;/);
+    expect(failed.indexOf('continue;')).toBeLessThan(failed.indexOf('setWire('));
+    const answered = startup.slice(startup.indexOf('break;'));
+    expect(answered).toMatch(/if \(gen !== statusGen\.current\) continue;/);
+    expect(answered.indexOf('continue;')).toBeLessThan(answered.indexOf('setWire('));
   });
 
   test('re-read on every exit, when a run host starts and when diagnostics open — and not on a result', () => {

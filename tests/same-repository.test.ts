@@ -195,9 +195,22 @@ test('an entry lstat could not classify counts, with no worktree, and nothing is
     assert.equal(found.worktree, false);
     assert.match(found.clause, /could not classify/);
   }
-  // And the two shapes that are passed over.
+  // A measured link is the one entry shape passed over.
   assert.equal(entryConflict('l', '/x', { dir: 'link', state: null }, never, () => false), null);
-  assert.equal(entryConflict('f', '/x', { dir: 'not-a-directory', state: null }, never, () => false), null);
+  assert.equal(entryConflict('s', '/x', { dir: 'directory', state: 'link' }, never, () => false), null);
+});
+
+test('a plain file under .vibe/runs is asked of its lock, and an unreadable lock refuses', () => {
+  // Not skipped: the lock read through a file fails with ENOTDIR, which
+  // `livenessOf` calls `unknown`, and `unknown` counts. Only an absent root and
+  // a measured link are passed over.
+  const dir = repo();
+  mkdirSync(path.join(dir, RUNS_DIR), { recursive: true });
+  writeFileSync(path.join(dir, RUNS_DIR, 'stray'), 'not a run', 'utf8');
+  const why = sameRepositoryRefusal(dir, { self: null, worktree: true, probe: running });
+  assert.ok(why !== null);
+  assert.match(why, /stray \(its lock at /);
+  assert.ok(why.includes(path.join(dir, RUNS_DIR, 'stray', 'run.lock')), why);
 });
 
 // ---- through main -----------------------------------------------------------

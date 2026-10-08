@@ -468,6 +468,26 @@ fn locate(app: &AppHandle) -> Result<(PathBuf, PathBuf), String> {
     Ok((node, entry))
 }
 
+/// Why `start` will not spawn this host, checked before anything is spawned.
+///
+/// One function for both roads into a start - `HostProcess::start` and the
+/// `host_start` command's service branch, which goes through `launch` - so a
+/// request line sent with no handle is refused rather than dropped (#246).
+fn start_refusal(handle: &str, line: Option<&str>) -> Result<(), String> {
+    if handle != SERVICE && !valid_run_handle(handle) {
+        return Err(format!("{handle:?} is not a usable host handle"));
+    }
+    if handle == SERVICE && line.is_some() {
+        return Err("the service host is not started with a request".into());
+    }
+    // A run host exists to serve one invoke, so it is not started without
+    // one: refused before the spawn, not cleaned up after it.
+    if handle != SERVICE {
+        invoke_id_of(line)?;
+    }
+    Ok(())
+}
+
 impl HostProcess {
     /// Start a host and wire both of its output streams to the webview.
     ///
@@ -476,17 +496,7 @@ impl HostProcess {
     /// spawned by the same `host_command`, adopted by the same reaper and found
     /// by the same `locate` - containment applies to every host, not the first.
     pub fn start(&self, app: &AppHandle, handle: &str, line: Option<&str>) -> Result<u32, String> {
-        if handle != SERVICE && !valid_run_handle(handle) {
-            return Err(format!("{handle:?} is not a usable host handle"));
-        }
-        if handle == SERVICE && line.is_some() {
-            return Err("the service host is not started with a request".into());
-        }
-        // A run host exists to serve one invoke, so it is not started without
-        // one: refused before the spawn, not cleaned up after it.
-        if handle != SERVICE {
-            invoke_id_of(line)?;
-        }
+        start_refusal(handle, line)?;
         let (node, entry) = locate(app)?;
         // A neutral, predictable working directory. Every request carries its
         // own `-C`, so nothing depends on this - but a process inheriting
@@ -558,9 +568,7 @@ impl HostProcess {
         secret: String,
         relay: Arc<dyn Relay>,
     ) -> Result<u32, String> {
-        if handle != SERVICE {
-            invoke_id_of(line)?;
-        }
+        start_refusal(handle, line)?;
         let pid = self.spawn(handle, command, secret, relay)?;
         if handle == SERVICE {
             // First thing on the wire, so a run started the moment the window
@@ -1010,7 +1018,10 @@ pub fn launch(app: &AppHandle) -> Result<u32, String> {
 #[tauri::command]
 pub fn host_start(app: AppHandle, handle: Option<String>, line: Option<String>) -> Result<u32, String> {
     match handle {
-        None => launch(&app),
+        None => {
+            start_refusal(SERVICE, line.as_deref())?;
+            launch(&app)
+        }
         Some(handle) => app.state::<HostProcess>().start(&app, &handle, line.as_deref()),
     }
 }
@@ -1435,6 +1446,18 @@ mod tests {
         let again = start(&hosts, &collect, "run-8", Some(r#"{"type":"invoke","id":9,"argv":[]}"#), ECHO);
         assert!(again.is_err(), "two processes under one handle");
         hosts.stop();
+    }
+
+    #[test]
+    fn a_start_is_refused_before_any_spawn_on_both_roads() {
+        // The `host_start` command's no-handle road asks this too, so a line
+        // sent to the service host is refused there rather than dropped.
+        assert!(start_refusal(SERVICE, None).is_ok());
+        assert!(start_refusal(SERVICE, Some(r#"{"type":"invoke","id":1,"argv":[]}"#)).is_err());
+        assert!(start_refusal("run-1", Some(r#"{"type":"invoke","id":1,"argv":[]}"#)).is_ok());
+        assert!(start_refusal("run-1", None).is_err(), "a run host with no invoke");
+        assert!(start_refusal("run-1", Some(r#"{"type":"pause","id":1}"#)).is_err());
+        assert!(start_refusal("a/b", Some(r#"{"type":"invoke","id":1,"argv":[]}"#)).is_err());
     }
 
     #[test]
