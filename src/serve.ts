@@ -902,6 +902,7 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
         prompt: msg.prompt,
         system: msg.system,
         model: msg.model,
+        ...(msg.effort === undefined ? {} : { effort: msg.effort }),
         sessionId: msg.sessionId,
         resume: msg.resume,
         // **The repository the window named, never this process's cwd.** Under

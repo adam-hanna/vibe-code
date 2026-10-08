@@ -1,4 +1,5 @@
 import { modelArgs } from '@src/modelflag.js';
+import { codexEffortOverride } from '@src/mcp.js';
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -101,6 +102,8 @@ export function pilotCodexArgs(options: PilotChatOptions, instructions: string):
   const common = [
     '--json',
     ...modelArgs('-m', options.model),
+    // On a resume too: `exec resume` inherits neither the model nor the effort.
+    ...(options.effort === undefined ? [] : codexEffortOverride(options.effort)),
     '--skip-git-repo-check',
     '--ignore-user-config',
     ...OFF.flatMap((feature) => ['--disable', feature]),

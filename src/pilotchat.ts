@@ -3,7 +3,7 @@ import { claudeBin, detectRateLimit, extractTokens, promptContext } from '@src/c
 import { agentEnv } from '@src/auth.js';
 import { attachEnding, describeEnding, run } from '@src/proc.js';
 import type { ChildEnding, RunFn } from '@src/proc.js';
-import type { TokenUsage } from '@src/types.js';
+import type { Effort, TokenUsage } from '@src/types.js';
 
 /**
  * One pilot chat turn, on the subscription (#193).
@@ -109,6 +109,12 @@ export interface PilotChatOptions {
   /** Continue `sessionId` rather than create it. The second turn onward. */
   resume: boolean;
   model: string;
+  /**
+   * How hard the turn thinks, or absent for the CLI's own default (#296). The
+   * flag a run's seat takes - `--effort` here, `model_reasoning_effort` on
+   * Codex - so the pilot and a run mean one thing by one word.
+   */
+  effort?: Effort | undefined;
   /**
    * Where the child runs.
    *
@@ -245,6 +251,7 @@ export function pilotChatArgs(options: PilotChatOptions): readonly string[] {
     args.push('--allowedTools', ...READS, ...WRITES, ...safe.map(bashRule));
   }
   args.push(...modelArgs('--model', options.model));
+  if (options.effort !== undefined) args.push('--effort', options.effort);
   // Variadic, so last: it greedily consumes the tokens after it. YOLO names no
   // list, which is the CLI's whole default set.
   if (!yolo) args.push('--tools', ...READS, ...WRITES, 'Bash');
