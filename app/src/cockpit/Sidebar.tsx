@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Plus } from 'lucide-react';
 import { LivenessDot } from '../design';
+import { Badge } from '@/ui/badge';
 import { cn } from '@/lib/utils';
 import * as host from '../host';
 import { Confirm } from './Confirm';
@@ -44,6 +45,8 @@ import { draftsIn, draftTitle, settled } from './pending';
 import { memory, useMemoryFailure } from '../memory';
 import type { Draft } from './pending';
 import type { ArchiveRun } from '../host';
+import { gatesWaiting } from './hosts';
+import type { HostedMarks } from './hosts';
 
 /**
  * The navigator: projects, their runs, and the ones you pinned (#223).
@@ -141,10 +144,13 @@ function useArchive(
   currentId: string | null,
   /** Bumped when a run is deleted, so the list it was drawn from is re-read. */
   beat: number,
+  /** The runs this window hosts here, so a run just started is read and marked. */
+  hosted: ReadonlySet<string>,
 ): Loaded {
   const [runs, setRuns] = useState<readonly ArchiveRun[]>([]);
   const [failure, setFailure] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const hostedKey = [...hosted].sort().join('\n');
 
   useEffect(() => {
     if (!open || dir.trim() === '' || !host.inShell()) return;
@@ -171,9 +177,11 @@ function useArchive(
     return () => {
       cancelled = true;
     };
-  }, [dir, open, currentId, beat]);
+    // A run this window has just started is not in the list it read before,
+    // so a change in what it hosts here is a reason to read again.
+  }, [dir, open, currentId, beat, hostedKey]);
 
-  return { runs: rail(runs, currentId), failure, loading };
+  return { runs: rail(runs, currentId, hosted), failure, loading };
 }
 
 /**
@@ -261,10 +269,23 @@ function RenameRow({
   );
 }
 
+/**
+ * A gate held by a run nobody is looking at (#246). Without it a run can sit
+ * waiting for a person who cannot see it. The alarm variant, static.
+ */
+function GateBadge() {
+  return (
+    <Badge variant="alarm" className="ml-auto flex-none" title="waiting for a decision — open the run to answer it">
+      gate
+    </Badge>
+  );
+}
+
 function RunRow({
   title,
   task,
   live,
+  gate = false,
   current,
   pinned,
   renaming,
@@ -278,6 +299,11 @@ function RunRow({
   /** The run's own brief, so the rename box can tell a name from a task. */
   task: string;
   live: boolean;
+  /**
+   * A gate this window's run is holding while somebody looks at another run
+   * (#246). Static, like the dot: only the run on screen pulses.
+   */
+  gate?: boolean;
   current: boolean;
   pinned: boolean;
   /** Whether this row is the one being renamed. At most one is, sidebar-wide. */
@@ -307,10 +333,13 @@ function RunRow({
         onDoubleClick={onRename}
         title={`${title} — double-click to rename`}
       >
-        {/* The archive's verdict, never one derived here. A run this window is
-            showing gets the dot too, because it is the running one. */}
-        {live ? <LivenessDot state="live" /> : <span className="w-4 flex-none text-label text-tertiary">·</span>}
+        {/* The archive's verdict, or a run this window is hosting - never one
+            derived here. **Static** (#246): exactly one element on screen
+            pulses, the run on screen's live card, and with several runs going a
+            pulsing dot on every row would break that. */}
+        {live ? <LivenessDot state="live" still /> : <span className="w-4 flex-none text-label text-tertiary">·</span>}
         <span className={cn('truncate', current && 'text-accent-on-tint')}>{title}</span>
+        {gate && <GateBadge />}
       </button>
       <PinButton on={pinned} onToggle={onPin} />
       <button className={ACT} onClick={onRename} title="Rename this run">
@@ -383,7 +412,8 @@ function Project({
   onDraft,
   onForgetDraft,
   onSettled,
-  currentId,
+  showing,
+  marksFor,
   pins,
   names,
   beat,
@@ -426,7 +456,10 @@ function Project({
   onForgetDraft: (draft: Draft) => void;
   /** Drafts whose run this archive now lists, so they can be let go of. */
   onSettled: (ids: readonly string[]) => void;
-  currentId: string | null;
+  /** The run on screen, by repository and id, or null. */
+  showing: { dir: string; runId: string } | null;
+  /** The runs this window hosts in a project (#246). */
+  marksFor: (dir: string) => HostedMarks;
   pins: readonly Pin[];
   names: readonly RunName[];
   beat: number;
@@ -471,7 +504,11 @@ function Project({
     wasCurrent.current = holds;
   }, [holds]);
   const [more, setMore] = useState(false);
-  const { runs, failure, loading } = useArchive(dir, open, currentId, beat);
+  // Scoped to this project: a run id is unique only inside one repository, so
+  // an id on screen in another project is not this row (#246).
+  const currentId = showing !== null && dirKey(showing.dir) === dirKey(dir) ? showing.runId : null;
+  const marks = marksFor(dir);
+  const { runs, failure, loading } = useArchive(dir, open, currentId, beat, marks.live);
   const { shown, hidden } = visible(runs, more);
   // A draft is drawn until the archive lists the run it became, and forgotten
   // once it does — the archive's row is the run, and two rows for one run is the
@@ -500,6 +537,9 @@ function Project({
             <span className={cn('truncate', current && 'text-emphasis')}>
               {label}
             </span>
+            {/* A shut section hides its rows, and with them a gate somebody
+                is waiting on (#246). */}
+            {!open && gatesWaiting(marks) && <GateBadge />}
           </button>
           {/* Right-justified, beside the project it starts a run in. The composer
               it opens has no repository field at all — the project is the answer,
@@ -569,6 +609,7 @@ function Project({
                 title={title}
                 task={r.task}
                 live={r.live}
+                gate={marks.gates.has(r.id)}
                 current={r.current}
                 pinned={isPinned(pins, { dir, runId: r.id, task: r.task })}
                 renaming={renaming !== null && renaming.dir === dir && renaming.runId === r.id}
@@ -608,7 +649,8 @@ type Pending =
 export function Sidebar({
   dir,
   epoch,
-  currentId,
+  current,
+  marksFor,
   onNewIn,
   onProjectSettings,
   onShow,
@@ -624,7 +666,13 @@ export function Sidebar({
   dir: string;
   /** Bumped when the lists were rewritten elsewhere — a project moved (#223). */
   epoch: number;
-  currentId: string | null;
+  /**
+   * The run on screen, by repository and id (#246). An id alone is unique only
+   * inside one repository, so a highlight keyed by it lit another project's row.
+   */
+  current: { dir: string; runId: string } | null;
+  /** The runs this window hosts in one project, for that project's rows. */
+  marksFor: (dir: string) => HostedMarks;
   /** Compose a run in one project, with the directory already settled (#223). */
   onNewIn: (dir: string) => void;
   /** One project's settings — the ⚙ on its row. The settings for all
@@ -928,7 +976,8 @@ export function Sidebar({
         onDraft={onDraft}
         onForgetDraft={(d) => setPending({ kind: 'draft', draft: d })}
         onSettled={onSettled}
-        currentId={currentId}
+        showing={current}
+        marksFor={marksFor}
         pins={pins}
         names={names}
         beat={beat}
@@ -1037,16 +1086,19 @@ export function Sidebar({
           <h3 className="m-0 px-2.5 pb-3 font-bold text-chip uppercase tracking-[0.12em] text-tertiary">Pinned</h3>
           {pins.map((p) => {
             const title = nameOf(names, p.dir, p.runId, p.task);
+            const marks = marksFor(p.dir);
             return (
               <RunRow
                 key={`${p.dir}:${p.runId}`}
                 title={title}
                 task={p.task}
-                // A pin is drawn without reading its project's archive, so there
-                // is no liveness to state and none is claimed. The row says what
-                // it knows: this run, in this project, that you marked.
-                live={false}
-                current={p.runId === currentId}
+                // A pin is drawn without reading its project's archive, so the
+                // archive's liveness is not claimed. A run this window is
+                // hosting is known without reading anything (#246), so that is
+                // marked, in the pin's own project.
+                live={marks.live.has(p.runId)}
+                gate={marks.gates.has(p.runId)}
+                current={current !== null && p.runId === current.runId && dirKey(p.dir) === dirKey(current.dir)}
                 pinned
                 renaming={renaming !== null && renaming.dir === p.dir && renaming.runId === p.runId}
                 onOpen={() => onShow(p.dir, p.runId, title)}

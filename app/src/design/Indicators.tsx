@@ -30,8 +30,14 @@ const DOT_STATE: Record<Liveness, string> = {
   absent: 'border border-dashed border-rule-strong',
 };
 
-export function LivenessDot({ state }: { state: Liveness }) {
-  return <span className={`${DOT} ${DOT_STATE[state]}`} aria-label={state} />;
+/**
+ * `still` draws `live` without the pulse (#246). Exactly one element on screen
+ * pulses - the run on screen's live card - and a window hosting several runs
+ * still marks every one of them in the sidebar, so those marks are static.
+ */
+export function LivenessDot({ state, still = false }: { state: Liveness; still?: boolean }) {
+  const look = still && state === 'live' ? 'bg-live' : DOT_STATE[state];
+  return <span className={`${DOT} ${look}`} aria-label={state} />;
 }
 
 /**

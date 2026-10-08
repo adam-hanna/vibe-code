@@ -60,8 +60,13 @@ describe('the webview can store a key and can never read one', () => {
     const registered = lib
       .slice(lib.indexOf('generate_handler!['), lib.indexOf(']', lib.indexOf('generate_handler![')))
       .match(/\b\w+\b/g)
-      ?.filter((w) => /^(host|key|pilot)_/.test(w));
+      ?.filter((w) => /^(host|key|pilot|app)_/.test(w));
     expect(registered?.sort()).toEqual([
+      // Case 2 (#246): a tenth command, on purpose, and the one door the window
+      // has into ending the app. It only exits, through the same `stop()` the
+      // tray's Quit uses, once the window has confirmed a quit with runs going;
+      // a process-exit permission would be broader and could skip the stop.
+      'app_quit',
       'host_send',
       'host_start',
       'host_status',

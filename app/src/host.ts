@@ -992,7 +992,7 @@ export async function config(
   /** Which file a patch goes to. A read answers with both, so it takes none. */
   scope: 'project' | 'global' = 'project',
 ): Promise<ConfigFrame> {
-  const refused = configWriteRefusal(patch, runLive);
+  const refused = patch === undefined || configGuard === null ? null : configGuard(patch, scope, dir);
   if (refused !== null) throw new Error(refused);
   const id = nextRequestId();
   return ask<ConfigFrame>(
@@ -1018,15 +1018,42 @@ export const CONFIG_WRITE_DURING_RUN =
   'not see the change. Stop it or let it finish, then save — a resume reads the file ' +
   'again';
 
-/** Whether a config request is refused: a write while a run is live. A read never is. */
-export function configWriteRefusal(patch: unknown, live: boolean): string | null {
-  return patch !== undefined && live ? CONFIG_WRITE_DURING_RUN : null;
+/**
+ * Who decides whether a config write is refused while runs are going (#246).
+ *
+ * Installed by `Cockpit`, which holds the live runs, and decided by
+ * `writeRefusal` in `cockpit/hosts.ts`: a project write is refused only while
+ * that project has a live run, and a global one while any run is live unless it
+ * touches only `runs.maxConcurrent`. A read is never asked about. The service
+ * host that writes the file shares no variable with any run, so the window is
+ * the one place that knows.
+ */
+export type ConfigGuard = (
+  patch: Record<string, unknown>,
+  scope: 'project' | 'global',
+  dir: string,
+) => string | null;
+let configGuard: ConfigGuard | null = null;
+export function setConfigGuard(guard: ConfigGuard | null): void {
+  configGuard = guard;
 }
 
-/** Whether the window has a live run host. Set by `Cockpit`, read by `config`. */
-let runLive = false;
-export function setRunLive(live: boolean): void {
-  runLive = live;
+/**
+ * Tray Quit with runs going (#246). Rust shows the window and emits this rather
+ * than exiting, so the window can say which runs a quit would stop and confirm.
+ */
+export async function onQuitRequested(callback: () => void): Promise<() => void> {
+  return listen('app://quit-requested', () => callback());
+}
+
+/**
+ * Quit the app, after the window has confirmed (#246): the one command added for
+ * it. It does what the tray's Quit always did - close every host's stdin, then
+ * exit - and nothing else, which is narrower than handing the webview a
+ * process-exit permission.
+ */
+export function appQuit(): Promise<void> {
+  return invoke('app_quit');
 }
 
 /**

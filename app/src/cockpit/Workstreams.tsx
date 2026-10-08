@@ -122,7 +122,7 @@ function Reopen({
   onResume,
 }: {
   run: ArchiveRun;
-  onResume: (runId: string, force: boolean) => void;
+  onResume: (runId: string, force: boolean, task: string) => void;
 }) {
   const [confirming, setConfirming] = useState(false);
   const lock = forcing(run);
@@ -138,7 +138,7 @@ function Reopen({
 
   if (lock === null) {
     return (
-      <Button variant="secondary" size="sm" onClick={() => onResume(run.id, false)}>
+      <Button variant="secondary" size="sm" onClick={() => onResume(run.id, false, run.task)}>
         reopen
       </Button>
     );
@@ -155,7 +155,7 @@ function Reopen({
   return (
     <span className="flex max-w-md flex-wrap items-baseline gap-2">
       <span className="text-body-sm text-emphasis">{lock.why}</span>
-      <Button variant="secondary" size="sm" onClick={() => onResume(run.id, true)}>
+      <Button variant="secondary" size="sm" onClick={() => onResume(run.id, true, run.task)}>
         take the lock and reopen
       </Button>
       <Button variant="quiet" size="sm" onClick={() => setConfirming(false)}>
@@ -170,7 +170,7 @@ export function Workstreams({
   onResume,
 }: {
   dir: string;
-  onResume: (runId: string, force: boolean) => void;
+  onResume: (runId: string, force: boolean, task: string) => void;
 }) {
   const [runs, setRuns] = useState<readonly ArchiveRun[] | null>(null);
   const [failure, setFailure] = useState<string | null>(null);

@@ -20,7 +20,7 @@ import { readEmitted, unique, visible } from './emit';
 import { useFollow } from './follow';
 import { autoRun, NO_ACCESS } from './access';
 import { archiveContent, declare, settleCall } from './tools';
-import { chatKey, chatMove, isDraftKey, readChat, replyKey, worthSaving, writable } from './saved';
+import { chatKey, readChat, replyKey, sameExchange, worthSaving, writable } from './saved';
 import { getChat, putChat, useChats } from './chatstore';
 import {
   costOf,
@@ -796,17 +796,6 @@ export interface PilotPaneProps {
    */
   runId: string | null;
   /**
-   * Whether `runId` is a run the window was **pointed at** rather than one it
-   * started (#223).
-   *
-   * Only `Cockpit` can answer it — `viewing` is where the window is pointed and
-   * this pane cannot see it — and `chatMove` needs it to tell *adopting* from
-   * *browsing*. Without it, clicking a past run that had no conversation
-   * carried the conversation on screen into it, so the chat never changed and
-   * the exchange was written into the wrong run's key on the way past.
-   */
-  opened: boolean;
-  /**
    * Commands this window has run, so `read_command` has something to read.
    *
    * A prop rather than this pane's own state, for the reason `statuses` is one:
@@ -878,7 +867,6 @@ export function PilotPane({
   launched,
   dir,
   runId,
-  opened,
   commands,
   access,
   onEffect,
@@ -910,7 +898,7 @@ export function PilotPane({
    * The loader must fire on the **key** alone — a conversation in its deps would
    * re-run it on every reply, and a loader that runs mid-conversation is a
    * conversation that gets replaced by itself-from-disk. It still needs to see
-   * the current one for the adoption case below, so it reads it through here.
+   * the current one when it follows a run onto its adopted copy, so it reads it here.
    */
   const held = useRef(conversation);
   held.current = conversation;
@@ -923,54 +911,24 @@ export function PilotPane({
   useEffect(() => {
     if (!chats.ready) return;
     const key = chatKey(dir, runId);
-    const before = chat.current;
-    const stored = getChat(key);
-    const move = chatMove({
-      from: before,
-      to: key,
-      intoRun: runId !== null,
-      // Pointed at, rather than started here. Adoption is for the run this
-      // conversation PROPOSED; opening one from the sidebar is a read, and it
-      // used to carry the chat along with it (#223).
-      opened,
-      stored: stored !== null,
-      holding: worthSaving(held.current),
-    });
-    if (move === 'stay') return;
+    if (chat.current === key) return;
     chat.current = key;
+    const stored = getChat(key);
 
-    // **Adoption.** A run is *proposed* by a conversation, so when one starts,
-    // the exchange that decided what to build is the one already on screen —
-    // wherever it happened to be typed. That last clause is the fix: it used to
-    // adopt only out of the project bucket, so a brief typed while a past run
-    // was open went to *that* run's key and the run it proposed started empty.
+    // **Restore only** (#246). Adoption - a run that has just started taking
+    // the conversation that proposed it - is the cockpit's, decided for every
+    // live run at once in `adoptionPlan`, and this pane is held on the proposing
+    // key until that has happened. Two adopters raced each other as soon as
+    // the window could host two runs.
     //
-    // It never adopts over a conversation the target already has, which is what
-    // keeps a **resume** safe: that run has its own exchange and it is the one
-    // worth keeping.
-    if (move === 'adopt') {
-      try {
-        putChat(key, writable(held.current));
-        // Cleared, so the next run in this project starts from nothing rather
-        // than inheriting the conversation that launched the previous one. Only
-        // the project bucket is cleared: taking a *run's* key away here would
-        // delete a real conversation to tidy up after a move.
-        const bucket = chatKey(dir, null);
-        if (before === bucket) putChat(bucket, null);
-        // And a draft's, which is the same case one step later (#223): the run
-        // the draft asked for has now started and holds the conversation, so the
-        // draft's copy would only come back as a duplicate.
-        else if (before !== null && isDraftKey(before)) putChat(before, null);
-        // A run's own chat that proposed this one keeps its record but gives
-        // up its CLI session (#223): the new run carries it on, and two chats
-        // resuming one session would each answer from the other's messages.
-        else if (before !== null) {
-          putChat(before, writable({ ...held.current, session: null, carry: null }));
-        }
-      } catch {
-        // The conversation is still on screen and still correct. What is lost is
-        // its return next time.
-      }
+    // Following a run onto the key its conversation was just copied to reads
+    // back the exchange already on screen, and replacing it wholesale would drop
+    // a pilot turn still streaming - which adoption never did. So that case
+    // keeps its turn in flight and takes the rest from the store, including a
+    // session the copy gave up.
+    if (sameExchange(stored, held.current)) {
+      const back = readChat(stored);
+      dispatch({ type: 'restore', conversation: { ...back, live: held.current.live, unknown: held.current.unknown } });
       return;
     }
 
@@ -985,7 +943,7 @@ export function PilotPane({
     // reopened. They still settle, and a proposal among them is a card.
     for (const reply of back.replies) for (const call of reply.calls) restored.current.add(call.id);
     dispatch({ type: 'restore', conversation: back });
-  }, [dir, runId, opened, chats.ready]);
+  }, [dir, runId, chats.ready]);
 
   // Save on every settled change. `live` is dropped by `writable`, so a turn in
   // flight is not stored half-streamed and a window killed mid-turn leaves a

@@ -6,6 +6,8 @@ import settings from './Settings.tsx?raw';
 import footer from './Footer.tsx?raw';
 import column from './LoopColumn.tsx?raw';
 import pilot from '../pilot/PilotPane.tsx?raw';
+import saved from '../pilot/saved.ts?raw';
+import hosts from './hosts.ts?raw';
 import { chatKey, chatMove } from '../pilot/saved';
 import { recorded } from './format';
 
@@ -71,8 +73,9 @@ describe('an opened run is drawn by the column that drew it live', () => {
   test('the live host’s pid is withheld from a run this process is not running', () => {
     // A pid beside a finished run names a process that has nothing to do with
     // it. Since #246 the pid is the live run's own host, not the service host
-    // the window connected to, and it is still withheld from a past run.
-    expect(cockpit).toMatch(/hostPid=\{past \? null : runHostPid\}/);
+    // the window connected to, and it is still withheld from a past run. Case 2
+    // (#246): the pid is the entry's for the run on screen.
+    expect(cockpit).toMatch(/hostPid=\{past \? null : \(shownLive\?\.pid \?\? null\)\}/);
   });
 
   test('the strip says the one thing an archive cannot say, once', () => {
@@ -246,14 +249,20 @@ describe('a conversation belongs to the run it is about', () => {
   test('only the project bucket is cleared after an adoption', () => {
     // Taking a *run's* key away would delete a real conversation to tidy up
     // after a move.
-    // Through `putChat` since the store moved to the host's files (#223).
-    expect(pilot).toMatch(/if \(before === bucket\) putChat\(bucket, null\)/);
+    // Through `putChat` since the store moved to the host's files (#223), and
+    // decided in `cleanupWrites` since the cockpit became the one adopter (#246,
+    // case 2: the rule moved, verbatim, out of the pane).
+    expect(saved).toMatch(/if \(source === bucket\) return \[\{ key: bucket, value: null \}\];/);
+    expect(hosts).toMatch(/cleanupWrites\(source, chatKey\(ref\.dir, null\), readChat\(from\)\)/);
   });
 
   test('the decision is pure, so it is this file that checks it', () => {
     // The app has no jsdom, so a rule living inside an effect is a rule nothing
     // tests — which is how the narrow adoption survived being written down.
-    expect(pilot).toMatch(/const move = chatMove\(\{/);
+    // Case 2 (#246): the call moved from the pane to `adoptionPlan`, which is
+    // pure too, and the pane no longer adopts at all.
+    expect(hosts).toMatch(/const move = chatMove\(\{/);
+    expect(pilot).not.toMatch(/chatMove\(/);
   });
 
   test('a run with no stored conversation says so, rather than "nothing yet"', () => {
@@ -371,7 +380,10 @@ describe('a resumed run keeps the column it already had', () => {
     // and a resume narrates only what happens from the resume onwards — so a run
     // three plan rounds deep came back showing one.
     expect(cockpit).toMatch(/seed = forResume\(foldReplay\(got\.steps\)\)/);
-    expect(cockpit).toMatch(/dispatch\(\{ type: 'seed', run: seed \}\)/);
+    // Case 2 (#246): the seed is handed to `launch`, which makes it the new
+    // run's own `Run`, rather than dispatched into the one reducer.
+    expect(cockpit).toMatch(/launch\(argv, null, seed, task\);/);
+    expect(cockpit).toMatch(/run: \{ \.\.\.\(seed \?\? emptyRun\(\)\), protocol: protocolRef\.current \}/);
   });
 
   test('the seed carries no ending, because a resume has not ended', () => {
@@ -386,29 +398,27 @@ describe('a resumed run keeps the column it already had', () => {
     }
   });
 
-  test('the seed lands AFTER launch, because launch resets the column', () => {
-    // **I had this backwards on the first cut, and it was invisible.** `launch`
-    // opens with `dispatch({ type: 'reset' })`, so a seed dispatched *before* it
-    // was thrown away by the very next action — and the symptom of a discarded
-    // seed is an empty column, which is exactly what the bug looked like anyway.
-    //
-    // Both dispatches land in one batch and the reducer applies them in order:
-    // reset, then seed. And it is still before any frame can arrive, because
-    // `launch` ends at `void send(...)` and the wire delivers asynchronously —
-    // so the seed can neither be erased by the reset nor overwrite something the
-    // loop has already said.
-    const body = cockpit.slice(cockpit.indexOf('const resume = useCallback'));
-    const launched = body.indexOf('launch(argv);');
-    const seeded = body.indexOf("dispatch({ type: 'seed'");
-    expect(launched).toBeGreaterThan(-1);
-    expect(seeded).toBeGreaterThan(launched);
+  test('the seed is the new run’s column from the start, so nothing can reset it', () => {
+    // **Case 2 (#246).** This pinned that the seed was dispatched AFTER
+    // `launch`, because `launch` opened with a reset of the one reducer and a
+    // seed sent first was thrown away. There is no shared reducer to reset now:
+    // each run is its own entry, created by `launch` with the seed as its `Run`,
+    // before the invoke is sent - so no live frame can arrive ahead of it and
+    // no reset can erase it. What the old pin guarded still holds, by
+    // construction rather than by order.
+    const body = cockpit.slice(cockpit.indexOf('const continueRun = useCallback'));
+    const fold = body.indexOf('seed = forResume(foldReplay(got.steps))');
+    const launched = body.indexOf('launch(argv, null, seed, task);');
+    expect(fold).toBeGreaterThan(-1);
+    expect(launched).toBeGreaterThan(fold);
+    expect(cockpit).not.toMatch(/type: 'reset'/);
   });
 
   test('a resume does NOT seed the ending, because the run has not ended', () => {
     // `useReplay` applies the `result` because a run you opened has ended and
     // must say so. Seeding `completed` here would draw a halt banner over a run
     // that is starting.
-    const body = cockpit.slice(cockpit.indexOf('const resume = useCallback'));
+    const body = cockpit.slice(cockpit.indexOf('const continueRun = useCallback'));
     const upToLaunch = body.slice(0, body.indexOf('[launch],'));
     expect(upToLaunch).not.toMatch(/type: 'result'/);
   });
@@ -416,9 +426,9 @@ describe('a resumed run keeps the column it already had', () => {
   test('a replay that fails still resumes the run', () => {
     // Losing the history must never cost somebody the resume — an empty column
     // is what every resume had until now, not a new failure worth a banner.
-    const body = cockpit.slice(cockpit.indexOf('const resume = useCallback'));
+    const body = cockpit.slice(cockpit.indexOf('const continueRun = useCallback'));
     expect(body).toMatch(/\.catch\(\(\) => \{/);
-    expect(body).toMatch(/\.finally\(\(\) => \{[\s\S]*?launch\(argv\);/);
+    expect(body).toMatch(/\.finally\(\(\) => \{[\s\S]*?launch\(argv, null, seed, task\);/);
   });
 
   test('one fold serves the opened run and the resumed one', () => {
@@ -450,13 +460,14 @@ describe('a resume points at the repository, not at the run', () => {
     expect(footer).toMatch(/RESUMABLE\.has\(exit\) && run\.identity\?\.repo != null/);
   });
 
-  test('the seed is dispatched AFTER launch, because launch resets', () => {
-    // `launch` opens with `dispatch({ type: 'reset' })`, so a seed dispatched
-    // before it is thrown away by the very next action — and invisibly, because
-    // an empty column is exactly what the bug looked like anyway.
-    const body = cockpit.slice(cockpit.indexOf('const resume = useCallback'));
-    const launched = body.indexOf('launch(argv);\n          if (seed !== null)');
-    expect(launched).toBeGreaterThan(-1);
+  test('implement continues in the repository too, and is seeded like a resume', () => {
+    // The same mistake one button along (#246): implement passed `identity.dir`
+    // as `-C`. Both carry-ons go through one `continueRun`, so the seed is the
+    // same fold and the argv names the repository.
+    expect(footer).toMatch(/onImplement\(at\.runId, at\.repo\)/);
+    expect(footer).not.toMatch(/onImplement\(run\.identity\.runId, run\.identity\.dir\)/);
+    expect(footer).toMatch(/run\.plannedOnly !== null && run\.identity !== null && run\.identity\.repo == null/);
+    expect(cockpit).toMatch(/continueRun\(implementArgv\(runId, dir\), runId, dir, task\)/);
   });
 });
 
