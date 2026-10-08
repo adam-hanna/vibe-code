@@ -497,20 +497,23 @@ export async function codexTurn(
   let resumeAfterFork: string | null = null;
   if (forkFrom) {
     const options = await forkOptions(exec, cwd);
+    // Every fork child - the direct vector and the two-call mint alike - must
+    // carry the closure, and a fork with servers to disable may only be sent
+    // `-c` once the help has CONFIRMED it. Help that could not be read is not
+    // evidence a flag is missing, which is why `directForkWorks` takes the
+    // direct vector on it; but it is not evidence `-c` is accepted either, and
+    // with servers listed that is the one fact this turn cannot run without.
+    // So the fork is refused here, after the help probe and before any fork
+    // child, rather than made with servers open or with a flag nobody confirmed.
+    // With nothing to disable, unread help keeps its old meaning.
+    if (mcpArgs.length > 0 && options?.has('-c') !== true) {
+      throw new Error(
+        `this codex's exec fork ${options === null ? 'help could not be read, so it is not known to accept' : 'does not accept'} ` +
+          `-c, so the fork of ${forkFrom} cannot be made with its MCP servers disabled; refusing ` +
+          'rather than fork with them open',
+      );
+    }
     if (!directForkWorks(options, schema !== undefined)) {
-      // The mint is a Codex child like any other and must carry the closure -
-      // but it may only be sent flags the help confirmed, which is this path's
-      // whole reason to exist. A `codex exec fork` that does not declare `-c`
-      // cannot be told to disable anything, so with servers listed the fork is
-      // refused here, after the help probe and before the mint, rather than
-      // made with them open.
-      const mintTakesC = options?.has('-c') === true;
-      if (mcpArgs.length > 0 && !mintTakesC) {
-        throw new Error(
-          `this codex's exec fork does not accept -c, so the fork of ${forkFrom} cannot be made ` +
-            'with its MCP servers disabled; refusing rather than fork with them open',
-        );
-      }
       detail(`codex exec fork ${forkFrom} (two-call: this codex does not accept the direct flags)`);
       // The mint call sends NOTHING the probe has not confirmed. `--json` is one
       // of the flags that can be missing, and sending it here would fail on

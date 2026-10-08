@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { agentEnv } from '@src/auth.js';
 import type { RunFn } from '@src/proc.js';
+import { setOwn } from '@src/runtime.js';
 import { mcpServersFor, roleEnabled, ROLE_NAMES } from '@src/roles.js';
 import type { Role, RoleTable } from '@src/roles.js';
 import type { Config } from '@src/types.js';
@@ -187,7 +188,10 @@ export function resolveClaudeGrants(
           'or this project) or .mcp.json.',
       );
     }
-    out[name] = def;
+    // `setOwn`, not `out[name] = def`: a server legitimately named `__proto__`
+    // would otherwise set the object's prototype, and the grant would vanish
+    // from the `--mcp-config` file without a word.
+    setOwn(out, name, def);
   }
   return out;
 }

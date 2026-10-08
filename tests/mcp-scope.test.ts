@@ -148,6 +148,21 @@ test('claude: a grant is re-supplied from a 0600 file holding exactly that serve
   assert.deepEqual(call.args.slice(-3), ['--tools', 'Read', 'Grep']);
 });
 
+test('claude: a server named __proto__ is re-supplied, not lost to the prototype', () => {
+  const home = tmp('vibe-mcp-home-');
+  const cwd = tmp('vibe-mcp-cwd-');
+  writeFileSync(
+    path.join(cwd, '.mcp.json'),
+    '{"mcpServers": {"__proto__": {"command": "proto"}, "other": {"command": "o"}}}',
+    'utf8',
+  );
+  const defs = resolveClaudeGrants('planner', ['__proto__'], claudeMcpDefinitions({ cwd, repoDir: cwd, home }));
+  assert.deepEqual(Object.keys(defs), ['__proto__']);
+  assert.deepEqual(JSON.parse(JSON.stringify({ mcpServers: defs })), {
+    mcpServers: JSON.parse('{"__proto__": {"command": "proto"}}'),
+  });
+});
+
 test('claude: the preflight probe is strict too', () => {
   const args = claudeProbeArgs(['--settings', 'x.json']);
   assert.ok(args.includes('--strict-mcp-config'));
@@ -241,7 +256,8 @@ interface CodexRecording {
 function codexRecorder(
   dir: string,
   listed: readonly string[] | RunResult = ['a', 'b'],
-  forkFlags: readonly string[] = ['--json', '-m', '-c', '--skip-git-repo-check', '-o', '--output-schema'],
+  /** `null` is help that could not be read: exit 1, nothing printed. */
+  forkFlags: readonly string[] | null = ['--json', '-m', '-c', '--skip-git-repo-check', '-o', '--output-schema'],
 ): CodexRecording {
   const calls: { args: string[]; cwd: string | undefined }[] = [];
   const exec: RunFn = (_bin, argv, options): Promise<RunResult> => {
@@ -259,7 +275,11 @@ function codexRecorder(
       );
     }
     if (argv[2] === '--help') {
-      return Promise.resolve({ code: 0, signal: null, stdout: `Usage\n\n${forkFlags.join('\n')}\n`, stderr: '' });
+      return Promise.resolve(
+        forkFlags === null
+          ? { code: 1, signal: null, stdout: '', stderr: '' }
+          : { code: 0, signal: null, stdout: `Usage\n\n${forkFlags.join('\n')}\n`, stderr: '' },
+      );
     }
     if (argv[1] === 'fork' && !argv.includes('-')) {
       return Promise.resolve({
@@ -341,6 +361,27 @@ test('codex: a fork whose help does not declare -c is refused after the probe, b
   await assert.rejects(() => codexTurn(codexOptions(dir, { forkFrom: 'parent' }), rec.exec), /does not accept -c/);
   assert.ok(rec.calls.some((c) => c.args[2] === '--help'), 'the help probe ran');
   assert.deepEqual(spawned(rec), [], 'no mint and no turn followed it');
+});
+
+test('codex: a fork whose help cannot be read is refused too, when there are servers to disable', async () => {
+  resetCodexForkProbe();
+  const dir = tmp('vibe-mcp-codex-');
+  const rec = codexRecorder(dir, ['a'], null);
+
+  await assert.rejects(
+    () => codexTurn(codexOptions(dir, { forkFrom: 'parent' }), rec.exec),
+    /help could not be read, so it is not known to accept -c/,
+  );
+  assert.ok(rec.calls.some((c) => c.args[2] === '--help'), 'the help probe ran');
+  assert.deepEqual(spawned(rec), [], 'no direct fork, no mint and no turn followed it');
+});
+
+test('codex: unreadable help with nothing to disable still takes the direct fork', async () => {
+  resetCodexForkProbe();
+  const dir = tmp('vibe-mcp-codex-');
+  const rec = codexRecorder(dir, [], null);
+  await codexTurn(codexOptions(dir, { forkFrom: 'parent' }), rec.exec);
+  assert.deepEqual(spawned(rec)[0]?.slice(0, 3), ['exec', 'fork', 'parent']);
 });
 
 test('codex: a granted server is the one left enabled', async () => {
