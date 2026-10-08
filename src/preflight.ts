@@ -8,6 +8,7 @@ import * as git from '@src/git.js';
 import { hostExecutableFor } from '@src/hosttools.js';
 import { agentEnv } from '@src/auth.js';
 import { run } from '@src/proc.js';
+import { codexEffortOverride, codexMcpDisableArgs, listCodexMcpServers } from '@src/mcp.js';
 import { codexProbeSandbox, enabledRolesFor, providerAccess, rolesFor } from '@src/roles.js';
 import type { Access, RoleTable } from '@src/roles.js';
 import { contractForAgent, setOwn, validateContract } from '@src/runtime.js';
@@ -304,6 +305,53 @@ function accumulator(costed: boolean): {
   };
 }
 
+/**
+ * The Claude probe's argv around the adapter's own `args`.
+ *
+ * stream-json rather than plain output: it is the mode that reports what the
+ * turn spent, and `claude.ts` already parses it. `--verbose` is required
+ * alongside it under `-p`. `--strict-mcp-config` with no `--mcp-config` (#138):
+ * a probe is a run child and reaches no MCP server. `--tools` stays last
+ * because it is variadic.
+ */
+export function claudeProbeArgs(args: readonly string[]): string[] {
+  return [
+    '-p',
+    '--output-format', 'stream-json',
+    '--verbose',
+    '--model', PROBE_MODEL,
+    '--permission-mode', 'bypassPermissions',
+    ...args,
+    '--strict-mcp-config',
+    '--tools', 'Bash',
+  ];
+}
+
+/**
+ * The Codex probe's argv: `--json` is the only mode that reports token usage,
+ * and it changes nothing else about the turn. `mcpArgs` disables every listed
+ * MCP server by name (#138), beside the effort pair as on every turn.
+ */
+export function codexProbeArgs(
+  cfg: Config,
+  args: readonly string[],
+  cwd: string,
+  mcpArgs: readonly string[],
+): string[] {
+  return [
+    'exec',
+    '--json',
+    ...modelArgs('-m', cfg.codex.model),
+    '-c',
+    `model_reasoning_effort="${cfg.codex.effort}"`,
+    ...mcpArgs,
+    ...args,
+    '-C',
+    cwd,
+    '-',
+  ];
+}
+
 async function preflightClaude(
   targetDir: string,
   cfg: Config,
@@ -316,20 +364,10 @@ async function preflightClaude(
   const spend = accumulator(true);
 
   const adapter = new ClaudeAdapter(async ({ args, prompt, cwd, timeoutMs }) => {
-    // stream-json rather than plain output: it is the mode that reports what the
-    // turn spent, and `claude.ts` already parses it. `--verbose` is required
-    // alongside it under `-p`, and `--tools` stays last because it is variadic.
+    // The argv, and why each flag is there, is `claudeProbeArgs`.
     const result = await run(
       claudeBin(),
-      [
-        '-p',
-        '--output-format', 'stream-json',
-        '--verbose',
-        '--model', PROBE_MODEL,
-        '--permission-mode', 'bypassPermissions',
-        ...args,
-        '--tools', 'Bash',
-      ],
+      claudeProbeArgs(args),
       // The probe is billed the way the turns it stands for will be (#223).
       // Interruptible (#223): a probe is an agent turn like any other, and a
       // stop pressed while one ran used to wait it out - then the next probe -
@@ -408,21 +446,18 @@ async function preflightCodex(
   const sandbox = codexProbeSandbox(cfg);
 
   const adapter = new CodexAdapter(async ({ prompt, args, cwd, timeoutMs }) => {
-    // `--json` is the only mode that reports token usage, and it changes nothing
-    // else about the turn. `codexTurn` already sends it beside these same flags.
+    // `codexTurn` sends `--json` beside these same flags (`codexProbeArgs`).
+    // A probe is a Codex child of the run like any turn, so it is closed the
+    // same way (#138): every listed MCP server disabled by name, none granted -
+    // a probe holds no role. A listing that cannot be read throws here, which
+    // surfaces as `probeError` and refuses the run at preflight.
+    const mcpArgs = codexMcpDisableArgs(
+      await listCodexMcpServers(run, codexBin(), cwd, codexEffortOverride(cfg.codex.effort)),
+      [],
+    );
     const result = await run(
       codexBin(),
-      [
-        'exec',
-        '--json',
-        ...modelArgs('-m', cfg.codex.model),
-        '-c',
-        `model_reasoning_effort="${cfg.codex.effort}"`,
-        ...args,
-        '-C',
-        cwd,
-        '-',
-      ],
+      codexProbeArgs(cfg, args, cwd, mcpArgs),
       // Interruptible, for the Claude probe's reason above.
       { input: prompt, cwd, timeoutMs, env: agentEnv('codex'), interruptible: true },
     );

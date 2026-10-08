@@ -2059,6 +2059,7 @@ src/ending.ts        how this process ended - the stamp beside the lock
 src/git.ts           branch and commit operations
 src/worktree.ts      a checkout of its own: where the work happens, and where it does not
 src/pilotaccess.ts   what the pilot may do unasked: the safe list, YOLO, its directories, its reads
+src/mcp.ts           which MCP servers a run's children reach: none unless a role names one
 tests/               node:test, one file per concern
 
 app/                 the desktop app - Vite + React, its own package.json and gate

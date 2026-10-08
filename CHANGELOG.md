@@ -7,6 +7,16 @@ for a change that breaks an existing config or an existing run.
 Each entry links the pull request that made it and, where there is one, the issue it
 closes.
 
+## Unreleased
+
+### Added
+
+- **Each role can be granted MCP servers by name.** `roles.<role>.mcpServers` takes a list of server names in the object form of a role setting, and is empty by default. `vibe doctor` prints each role's servers and how each provider enforces them: Claude is *replaced* (`--strict-mcp-config`), and Codex is *disabled by name*, with the caveat that a server Codex does not list cannot be disabled. A grant that does not resolve stops the run before its first turn, naming the role and the server. Refs #138.
+
+### Upgrading
+
+- **Runs no longer reach any MCP server.** Before this change, every `claude` and `codex` child that a run spawned loaded your own MCP configuration. That gave every role, the read-only critic and reviewer included, every server you had set up for yourself. Now every `claude` child runs with `--strict-mcp-config`. Every `codex` child has each server that `codex mcp list` reports switched off with `-c mcp_servers.<name>.enabled=false`. This covers every turn, resume, fork and preflight probe. To give a role a server back, name it in `roles.<role>.mcpServers`. Claude re-reads it from `~/.claude.json` or the repository's `.mcp.json`. claude.ai connectors (`claude.ai Gmail` and the like) cannot be granted, because their definitions are in no file vibe can read. A `codex mcp list` that fails now refuses the Codex turn rather than running it with your servers open. Refs #138.
+
 ## 1.4.0 - 2026-10-07
 
 Fifty-seven pull requests since 1.3.0. **Nothing here breaks an existing config:** no key was renamed or removed, no flag was removed, and every new section has a default. Five behaviours a running setup can notice are listed under Upgrading.

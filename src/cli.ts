@@ -55,6 +55,8 @@ import type { RolePatches } from '@src/roles.js';
 import { setOwn } from '@src/runtime.js';
 import { claudeBin, setSessionArgs } from '@src/claude.js';
 import { codexBin } from '@src/codex.js';
+import { describeMcp, mcpRefusals } from '@src/mcp.js';
+import { run as runChild } from '@src/proc.js';
 // The accounting seam, from the leaf it lives in: orchestrator.js re-exports
 // applyCharge but not fmtTokens, and charge.js imports nothing that imports this.
 import { applyCharge, fmtTokens, takeInFlight } from '@src/charge.js';
@@ -2074,6 +2076,27 @@ export async function runPreflight(
   // explanation a user needs.
   if (ahead.length === 0) return null;
 
+  // Every MCP grant resolves, or the run does not start (#138). Before the
+  // `--skip-probe` return on purpose: that flag skips the agents' environment
+  // probe, not this - a grant that names nothing would otherwise surface as a
+  // failed turn after the run had spent. Free on a run that grants nothing,
+  // which is every run by default: no role is asked about, so nothing spawns.
+  const mcpBlocked = await mcpRefusals(cfg, rolesFor(cfg), {
+    cwd: workDirOf(state),
+    repoDir: state.targetDir,
+    exec: runChild,
+    codexBin,
+  });
+  if (mcpBlocked.length > 0) {
+    log.heading('Preflight');
+    for (const reason of mcpBlocked) {
+      log.fail(reason, { id: 'run_failed', data: { code: EXIT.PREFLIGHT, reason } });
+    }
+    state.status = 'error';
+    recordEvent(state, 'preflight-failed', { reasons: mcpBlocked });
+    return EXIT.PREFLIGHT;
+  }
+
   // After the preconditions, before the heading: a skipped probe printed
   // nothing before #71 and still prints nothing now.
   if (options.skipProbe === true) return null;
@@ -2710,6 +2733,23 @@ async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
     if (globalAt !== null && existsSync(globalAt)) log.info(`  also your settings for all projects: ${globalAt}`);
     log.info(`  claude ${shownModel(cfg.claude.model, 'claude')}/${cfg.claude.effort} - codex ${shownModel(cfg.codex.model, 'codex')}/${cfg.codex.effort}`);
     reportResolvedRoles(cfg);
+    // Which MCP servers each role reaches and how each provider enforces it
+    // (#138), in the words `src/mcp.ts` keeps for every surface that says it.
+    log.info('  mcp:');
+    const table = rolesFor(cfg);
+    for (const line of describeMcp(table)) log.info(`    ${line}`);
+    const mcpBlocked = await mcpRefusals(cfg, table, {
+      cwd: targetDir,
+      repoDir: targetDir,
+      exec: runChild,
+      codexBin,
+    });
+    for (const reason of mcpBlocked) {
+      log.fail(`mcp: ${reason}`);
+      bad++;
+    }
+    const granting = ROLE_NAMES.some((role) => (table[role].mcpServers ?? []).length > 0);
+    if (granting && mcpBlocked.length === 0) log.ok('mcp: every granted server resolves');
     log.info(
       `  budget $${cfg.budget.maxCostUsd} (Claude) / ` +
         `${cfg.budget.maxTokens > 0 ? `${cfg.budget.maxTokens.toLocaleString()} tokens (both)` : 'no token ceiling'}` +

@@ -670,7 +670,7 @@ function validateRoles(raw: unknown): void {
   if (!isRecord(raw)) {
     throw new Error(
       'roles must be an object mapping role names to "claude" or "codex", or to an object ' +
-        'naming a provider and optionally a model, an effort and a timeout',
+        'naming a provider and optionally a model, an effort, a timeout and MCP servers',
     );
   }
   for (const key of Object.keys(raw)) {

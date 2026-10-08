@@ -21,7 +21,7 @@ import {
 import type { AgentTurns, Role, RoleProviders, TurnRequest } from '@src/orchestrator.js';
 import { adjudicate, preflight } from '@src/preflight.js';
 import type { AgentPreflight, PreflightProbes } from '@src/preflight.js';
-import { codexTurn } from '@src/codex.js';
+import { codexTurnNoMcp as codexTurn } from './helpers/codex-mcp.js';
 import { taskContext } from '@src/prompts.js';
 import type { CodexTurnOptions } from '@src/codex.js';
 import { createRun, recordContextMeasurement } from '@src/run.js';
