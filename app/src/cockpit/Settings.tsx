@@ -18,6 +18,8 @@ import type { KeyStatus } from '../pilot/keys';
 import type { ConfigFrame, PromptsFrame } from '../host';
 import { memory } from '../memory';
 import { CLI_DEFAULT, loadCliModels, optionsFor, useModels, whyNot } from './models';
+import { backToCommand, convert, gatesPatch, pastedEscapes, readGates, ready, toRow } from './gateform';
+import type { Gate, GateRow } from './gateform';
 import type { Listing } from './models';
 
 /**
@@ -56,6 +58,221 @@ const S = {
   drafts: 'mt-3 flex flex-wrap items-center gap-3 border-t border-rule-inner pt-3',
   draft: 'inline-flex items-center gap-1 rounded-sm border border-rule-inner px-1',
 } as const;
+
+/**
+ * The verification gates as a list, one row per gate (#240).
+ *
+ * The single test command was the only control, so a repository with two
+ * packages joined their suites with `&&` and lost what named gates are for: a
+ * failure that says which package broke, retries of the gate that flaked rather
+ * than of everything, and a `required` and a timeout each. `gateform.ts` holds
+ * the decisions; this draws them.
+ *
+ * Saves on leaving a row, for the round caps' reason: a save per keystroke
+ * rewrites the file each time, and a half-typed command is a real, valid, wrong
+ * setting a run starting in that moment would take. A select saves at once,
+ * because choosing an option is the whole of the edit.
+ */
+function GateList({
+  gates,
+  command,
+  fileHasCommand,
+  busy,
+  onSave,
+  commandField,
+}: {
+  gates: Gate[] | null;
+  command: string | null;
+  fileHasCommand: boolean;
+  busy: boolean;
+  onSave: (patch: Record<string, unknown>) => void;
+  /** The single test command, drawn while there is no list. */
+  commandField: ReactNode;
+}) {
+  const refusals = useContext(Refusals);
+  const savedJson = JSON.stringify(gates);
+  const [rows, setRows] = useState<GateRow[] | null>(() => (gates === null ? null : gates.map(toRow)));
+  // Re-seeded from what is in force whenever that changes or a save is refused,
+  // keeping only the rows nobody has saved yet - so a refusal shows the file as
+  // it is, and a half-filled new row is not thrown away by a save of another.
+  useEffect(() => {
+    setRows((current) => {
+      // With no list in force, a list being started from nothing stays on
+      // screen; one that held a converted command goes back to the field,
+      // because the file still has that command and not the list.
+      if (gates === null) return current?.every((r) => r.saved === null) === true ? current : null;
+      return [...gates.map(toRow), ...(current ?? []).filter((r) => !ready(r))];
+    });
+    // `savedJson` stands in for `gates`, whose identity changes every render.
+  }, [savedJson, refusals]);
+
+  const commit = (next: readonly GateRow[]): void => {
+    const patch = gatesPatch(next, fileHasCommand);
+    if (patch === null) return;
+    // Nothing to write when the list sent is the list in force - leaving a row
+    // without changing it is not an edit. Both sides are in the file's shape,
+    // with the keys in one order, so the comparison is of what would be written.
+    const sent = (patch['verify'] as { gates: unknown }).gates;
+    if (gates !== null && JSON.stringify(sent) === JSON.stringify(gates)) return;
+    onSave(patch);
+  };
+  const edit = (key: string, change: Partial<GateRow>): GateRow[] => {
+    const next = (rows ?? []).map((r) => (r.key === key ? { ...r, ...change } : r));
+    setRows(next);
+    return next;
+  };
+  const remove = (key: string): void => {
+    const all = rows ?? [];
+    const gone = all.find((r) => r.key === key);
+    const next = all.filter((r) => r.key !== key);
+    if (gone === undefined) return;
+    // The last saved gate going is the list going: the core refuses an empty
+    // list, so the file goes back to one test command, holding that gate's.
+    if (gone.saved !== null && !next.some((r) => r.saved !== null)) {
+      setRows(null);
+      onSave(backToCommand(gone));
+      return;
+    }
+    setRows(next.length === 0 && gates === null ? null : next);
+    if (gone.saved !== null) commit(next);
+  };
+  const add = (): void => {
+    if (rows === null) {
+      const first = convert(command);
+      setRows(first);
+      commit(first);
+      return;
+    }
+    setRows([...rows, ...convert(null)]);
+  };
+
+  if (rows === null) {
+    return (
+      <>
+        {commandField}
+        <div className={S.row}>
+          <span className={S.hint}>
+            A repository with more than one suite can name each one, so a failure says which
+            broke and a flaky one is rerun on its own.
+          </span>
+          <Button variant="quiet" size="sm" disabled={busy} onClick={add}>
+            {command === null ? 'add a gate' : 'split into named gates'}
+          </Button>
+        </div>
+      </>
+    );
+  }
+
+  return (
+    <div className={S.block}>
+      <table className={S.matrix}>
+        <thead>
+          <tr>
+            <th>name</th>
+            <th>command</th>
+            <th>required</th>
+            <th>runs</th>
+            <th>minutes</th>
+            <th />
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, i) => {
+            const warn = pastedEscapes(row.command);
+            return (
+              <tr
+                key={row.key}
+                // Leaving the row is the save, wherever in it focus was. A move
+                // between two fields of one row is not leaving it.
+                onBlur={(e) => {
+                  if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+                  commit(rows);
+                }}
+              >
+                <td>
+                  <input
+                    aria-label={`gate ${String(i + 1)} name`}
+                    className={cn(S.text, 'min-w-[12ch]')}
+                    value={row.name}
+                    placeholder="core"
+                    spellCheck={false}
+                    disabled={busy}
+                    onChange={(e) => edit(row.key, { name: e.target.value })}
+                  />
+                </td>
+                <td className="w-full">
+                  <input
+                    aria-label={`gate ${String(i + 1)} command`}
+                    className={S.text}
+                    value={row.command}
+                    placeholder="npm run typecheck && npm test"
+                    spellCheck={false}
+                    disabled={busy}
+                    onChange={(e) => edit(row.key, { command: e.target.value })}
+                  />
+                  {warn !== null && <div className={S.hint}>{warn}</div>}
+                  {row.saved === null && !ready(row) && (
+                    <div className={S.hint}>saved once it has a name and a command</div>
+                  )}
+                </td>
+                <td>
+                  <select
+                    aria-label={`gate ${String(i + 1)} required`}
+                    value={row.required ? 'yes' : 'no'}
+                    disabled={busy}
+                    onChange={(e) => commit(edit(row.key, { required: e.target.value === 'yes' }))}
+                  >
+                    <option value="yes">yes</option>
+                    <option value="no">no</option>
+                  </select>
+                </td>
+                <td>
+                  <input
+                    aria-label={`gate ${String(i + 1)} runs`}
+                    className={S.num}
+                    value={row.runs}
+                    placeholder="all"
+                    inputMode="numeric"
+                    disabled={busy}
+                    onChange={(e) => edit(row.key, { runs: e.target.value })}
+                  />
+                </td>
+                <td>
+                  <input
+                    aria-label={`gate ${String(i + 1)} minutes`}
+                    className={S.num}
+                    value={row.minutes}
+                    placeholder="all"
+                    inputMode="numeric"
+                    disabled={busy}
+                    onChange={(e) => edit(row.key, { minutes: e.target.value })}
+                  />
+                </td>
+                <td>
+                  <Button variant="quiet" size="sm" disabled={busy} onClick={() => remove(row.key)}>
+                    remove
+                  </Button>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      <div className={S.row}>
+        <Button variant="quiet" size="sm" disabled={busy} onClick={add}>
+          add a gate
+        </Button>
+      </div>
+      <p className={S.note}>
+        Gates run in this order, and each one&apos;s failure is reported under its own name. A blank
+        runs or minutes takes the value below, which every gate shares. Required means a gate with
+        no command ends the run unverified rather than passing; a gate that runs and fails always
+        blocks. What a failing gate preserves (<code>artifacts</code>) is set in{' '}
+        <code>vibe.config.json</code>, and a save here keeps it.
+      </p>
+    </div>
+  );
+}
 
 /**
  * Everything that is a setting, in one screen (`1h`, `1i`, #223).
@@ -936,10 +1153,6 @@ export function Settings({
   const budget = effective.budget ?? {};
   const git = effective.git ?? {};
   const verify = effective.verify ?? {};
-  // A project that lists its gates owns the command inside each one, and
-  // `validateConfig` refuses `verify.command` beside a list — so this screen
-  // says where to edit them rather than offering a field that cannot save.
-  const listsGates = Array.isArray(verify['gates']);
   const roles = effective.roles ?? {};
   // Which rows the FILE claims, as opposed to which are in force, is `source`
   // below — the whole reason `raw` travels beside `effective`.
@@ -1634,29 +1847,34 @@ export function Settings({
                 <option value="off">off — nothing checks the code</option>
               </select>
             </div>
-            {listsGates ? (
-              <p className={S.note}>
-                This project lists its gates under <code>verify.gates</code> in{' '}
-                <code>vibe.config.json</code>, each with its own command, so they are edited there.
-              </p>
-            ) : (
-              <div className={S.row}>
-                <label className={S.label} htmlFor="verify-command">
-                  test command
-                  <Key name="verify.command" />
-                {source('verify', 'command', 'auto-detect')}
-                </label>
-                <TextField
-                  id="verify-command"
-                  value={typeof verify['command'] === 'string' ? verify['command'] : ''}
-                  placeholder="empty — npm test, if package.json has a test script"
-                  disabled={busy}
-                  // Empty is null, which is auto-detect — never an empty command,
-                  // which the core refuses by name.
-                  onSave={(next) => save({ verify: { command: next === '' ? null : next } })}
-                />
-              </div>
-            )}
+            <GateList
+              gates={readGates(verify['gates'])}
+              command={typeof verify['command'] === 'string' ? verify['command'] : null}
+              fileHasCommand={inFile(raw, 'verify', 'command') && typeof (raw['verify'] as Record<string, unknown>)['command'] === 'string'}
+              busy={busy}
+              onSave={save}
+              commandField={
+                <div className={S.row}>
+                  <label className={S.label} htmlFor="verify-command">
+                    test command
+                    <Key name="verify.command" />
+                    {source('verify', 'command', 'auto-detect')}
+                  </label>
+                  <TextField
+                    id="verify-command"
+                    value={typeof verify['command'] === 'string' ? verify['command'] : ''}
+                    placeholder="empty — npm test, if package.json has a test script"
+                    disabled={busy}
+                    // Empty is null, which is auto-detect — never an empty command,
+                    // which the core refuses by name.
+                    onSave={(next) => save({ verify: { command: next === '' ? null : next } })}
+                  />
+                  {typeof verify['command'] === 'string' && pastedEscapes(verify['command']) !== null && (
+                    <span className={S.hint}>{pastedEscapes(verify['command'])}</span>
+                  )}
+                </div>
+              }
+            />
             <div className={S.row}>
               <label className={S.label} htmlFor="verify-runs">
                 times it must pass
@@ -1751,6 +1969,9 @@ export function Settings({
                 disabled={busy}
                 onSave={(next) => save({ git: { worktreeCommand: next === '' ? null : next } })}
               />
+              {typeof git['worktreeCommand'] === 'string' && pastedEscapes(git['worktreeCommand']) !== null && (
+                <span className={S.hint}>{pastedEscapes(git['worktreeCommand'])}</span>
+              )}
             </div>
             {/* **A base is a setting** (#249). The #169 run started from whatever
                 HEAD happened to be in the repository - a stale branch tip - because
