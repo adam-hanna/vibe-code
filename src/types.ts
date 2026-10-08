@@ -750,6 +750,25 @@ export interface Config {
    * predates this key.
    */
   prompts: PromptOverrides;
+  /**
+   * Standing instructions from the person running vibe, given to every agent
+   * turn of every run and to the pilot (#273).
+   *
+   * Asked for as *"a way to give vibe instructions it can remember across runs.
+   * Kind of like a global agents.md."* Not a prompt block: a block is the
+   * product's own text with a default and a fixed set of turns it reaches; this
+   * is the person's text, empty unless they write some, and it reaches every
+   * turn. It lives in the **global** file as naturally as in a project's, and
+   * like every setting a project's file wins.
+   *
+   * What it buys over the vendors' own files is that one text reaches both
+   * agents - Claude's seats read `~/.claude/CLAUDE.md` and Codex's
+   * `~/.codex/AGENTS.md`, and the pilot reads neither - and that a run's
+   * record says what its agents were told, because `configDiff` names
+   * `instructions.text` like any other key. Empty by default, so a run with
+   * none is byte-identical to one that predates the key.
+   */
+  instructions: { text: string };
 }
 
 /** Block name to replacement text. Open-ended keys, checked against the real list. */

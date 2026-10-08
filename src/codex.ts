@@ -1,4 +1,5 @@
 ﻿import { writeFileSync, readFileSync, existsSync, renameSync, rmSync } from 'node:fs';
+import { withStanding } from '@src/prompts.js';
 import { CLI_DEFAULT, modelArgs } from '@src/modelflag.js';
 import path from 'node:path';
 import { attachSpend } from '@src/charge.js';
@@ -578,7 +579,8 @@ export async function codexTurn(
   // a turn that wrote no usable output still persisted as one that had.
   return withHeartbeat(heartbeat, async () => {
     const { code, signal, stdout, stderr } = await exec(codexBin(), args, {
-      input: prompt,
+      // The person's standing instructions in front, on every turn (#273).
+      input: withStanding(prompt),
       cwd,
       timeoutMs,
       // Billed to the road Settings names for OpenAI (#223).

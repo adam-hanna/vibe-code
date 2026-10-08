@@ -30,7 +30,7 @@ import {
 import type { AllocatedRun } from '@src/run.js';
 import { acquireLock, describeLiveness } from '@src/lock.js';
 import { Cancelled, cancelRequested, clearCancel } from '@src/cancel.js';
-import { installPromptOverrides } from '@src/prompts.js';
+import { installPromptOverrides, installStandingInstructions } from '@src/prompts.js';
 import { describeEnding as describeProcessEnding, installEndingStamp } from '@src/ending.js';
 import { commitFork, listForkPoints, planFork } from '@src/fork.js';
 import type { Liveness, LockHandle } from '@src/lock.js';
@@ -1594,6 +1594,7 @@ export async function execute(
   // reviewer. Installed unconditionally, so an empty table is what clears it -
   // there is no path that leaves the previous run's overrides in place.
   installPromptOverrides(cfg.prompts);
+  installStandingInstructions(cfg.instructions.text);
   const started = Date.now();
   const recovery = emptyRecovery();
   let reported = false;

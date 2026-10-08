@@ -287,6 +287,50 @@ function TextField({
  * half-typed `git` is a real, valid, much wider entry. Blank lines are dropped,
  * so a trailing newline is not an empty pattern.
  */
+/**
+ * A paragraph of prose, saved on blur (#273). `ListField`'s rule and its
+ * reason: a save per keystroke would rewrite the settings file mid-sentence,
+ * and every run starting in that moment would take the half-written text.
+ * Kept whole - no trimming of lines - because it is instructions, and a blank
+ * line between two of them is part of what was written. Escape puts it back.
+ */
+function ProseField({
+  id,
+  value,
+  placeholder,
+  disabled,
+  onSave,
+}: {
+  id: string;
+  value: string;
+  placeholder: string;
+  disabled: boolean;
+  onSave: (next: string) => void;
+}) {
+  const [typed, setTyped] = useState(value);
+  const refusals = useContext(Refusals);
+  useEffect(() => {
+    setTyped(value);
+  }, [value, refusals]);
+  return (
+    <textarea
+      id={id}
+      className={S.promptbox}
+      rows={Math.max(5, Math.min(20, value.split('\n').length + 2))}
+      value={typed}
+      disabled={disabled}
+      placeholder={placeholder}
+      onChange={(e) => setTyped(e.target.value)}
+      onBlur={() => {
+        if (typed !== value) onSave(typed);
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Escape') setTyped(value);
+      }}
+    />
+  );
+}
+
 function ListField({
   id,
   value,
@@ -884,6 +928,7 @@ export function Settings({
     verify?: Record<string, unknown>;
     claude?: { model?: string };
     codex?: { model?: string };
+    instructions?: { text?: string };
   };
   const gates = effective.gates ?? {};
   const loop = effective.loop ?? {};
@@ -1509,6 +1554,44 @@ export function Settings({
             </tr>
           </tbody>
         </table>
+      </section>
+
+      {/* **Standing instructions** (#273): *"a way to give vibe instructions it
+          can remember across runs. Kind of like a global agents.md."* Both
+          scopes, because it is a setting like any other - set it once here for
+          every project, or in one project's file for that project, which wins. */}
+      <section className={S.block}>
+        <h3 className={S.h}>standing instructions</h3>
+        <p className={S.note}>
+          Given to every agent on every turn of every run (the planner, the critic, the
+          implementer, the reviewer and the rest, Claude and Codex alike) and to the pilot. Use it
+          for the rules you would otherwise repeat in every brief. A run&apos;s record names it
+          when it changes, so a run can say what its agents were told. Empty sends nothing.
+          {scope === 'project' &&
+            ' Set here, it replaces the instructions for all projects in this repository only.'}
+        </p>
+        <div className={S.row}>
+          <label className={S.label} htmlFor="instructions-text">
+            instructions
+            <Key name="instructions.text" />
+            {source('instructions', 'text', 'none')}
+          </label>
+          <ProseField
+            id="instructions-text"
+            value={(raw['instructions'] as { text?: unknown } | undefined)?.text === undefined
+              ? ''
+              : String((raw['instructions'] as { text?: unknown }).text)}
+            placeholder={
+              scope === 'project' && (effective.instructions?.text ?? '') !== ''
+                ? 'empty: this project takes the instructions for all projects'
+                : 'e.g. Use the gh CLI for GitHub. Never push to main. Work in a worktree.'
+            }
+            disabled={busy}
+            // Empty clears the key, so the level below shows through again
+            // rather than an empty string overriding it.
+            onSave={(next) => save({ instructions: { text: next.trim() === '' ? null : next } })}
+          />
+        </div>
       </section>
 
       {scope === 'global' ? (

@@ -1110,6 +1110,19 @@ they are waiting on. Four things in it are worth carrying:
   not a fact about any run. Saving and adopting are separate controls for exactly that reason,
   and *use the default* **clears the key** rather than copying today's text into it — a cleared
   key follows the product forward when the default is improved.
+- **Standing instructions are the person's text, not a prompt block** (#273). Asked for as *"a
+  way to give vibe instructions it can remember across runs. Kind of like a global agents.md."*
+  `instructions.text` is its own config key, empty by default, settable in the global file or a
+  project's (a project's wins, and a cleared box writes `null` so the level below shows through).
+  It is not a `prompts.*` block because a block is the product's text, with a default and a
+  checked set of turns it reaches. `withStanding` in `prompts.ts` puts it in front of the prompt
+  where it reaches stdin in **both adapters**, so every role and every kind of turn gets it with
+  no builder edited, on every turn rather than a session's first, so a resume or a rotation
+  cannot drop it. The pilot gets it in its system prompt on both roads. It is installed beside
+  the prompt overrides, as the same kind of latch for the same reason, and `configDiff` names it,
+  so a run's record says what its agents were told. What it adds over the vendors' own files is
+  one text for both agents: Claude's seats read `~/.claude/CLAUDE.md`, Codex's read
+  `~/.codex/AGENTS.md`, and the pilot reads neither.
 - **A question is answered where it is shown, and the window writes the same file a text
   editor would.** The halt banner carried the CLI's own instruction — *"Answer the questions
   in NEEDS-INPUT.md, then resume the run"* — correct in a terminal and absurd in a window

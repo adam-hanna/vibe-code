@@ -832,6 +832,8 @@ export interface PilotPaneProps {
   ask?: string | null | undefined;
   /** Called once it has been said, so the same brief cannot be sent twice. */
   onAsked?: (() => void) | undefined;
+  /** The person's standing instructions (#273), from their settings. Null until read. */
+  standing?: string | null | undefined;
   /**
    * The launch this window sent, or null if it sent none (#191).
    *
@@ -872,6 +874,7 @@ export function PilotPane({
   kickoff,
   ask,
   onAsked,
+  standing,
   onOpen,
 }: PilotPaneProps) {
   const [conversation, dispatch] = useReducer(apply, undefined, emptyConversation);
@@ -1358,7 +1361,7 @@ ${frame.text}`, turn, origin.current))) {
             // A new session after a compaction opens with the summary, which is
             // the whole of how the compaction reaches the next conversation.
             prompt: withCarry(id === null ? held.current.carry : null, said ?? trailingResults(messages) ?? ''),
-            system: systemPrompt(run, launched, 'emitted', access, agentOf(provider)),
+            system: systemPrompt(run, launched, 'emitted', access, agentOf(provider), standing ?? null),
             model,
             dir,
             sessionId: id ?? crypto.randomUUID(),
@@ -1397,7 +1400,7 @@ ${frame.text}`, turn, origin.current))) {
         // model is only ever sent the most recent one, so there is no earlier
         // description for this to contradict - see `brief.ts` for why that
         // settles the staleness question rather than trading it away.
-        .send({ provider, model, messages, tools: declare(), system: systemPrompt(run, launched, 'native', access) })
+        .send({ provider, model, messages, tools: declare(), system: systemPrompt(run, launched, 'native', access, null, standing ?? null) })
         .then((turn) => {
           // Rust's turn ids and the host's request ids are two counters, so a
           // stale host turn could share this number and send the stop button
@@ -1419,7 +1422,7 @@ ${frame.text}`, turn, origin.current))) {
           }),
         );
     },
-    [model, provider, run, launched, dir, access],
+    [model, provider, run, launched, dir, access, standing],
   );
 
   const owed = unanswered(conversation);
