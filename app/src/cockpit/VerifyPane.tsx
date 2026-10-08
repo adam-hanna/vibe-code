@@ -300,7 +300,7 @@ export function VerifyPane({
       <Trend passes={passes} />
       {ordered.map((pass, i) => (
         <section key={`${String(pass.round)}-${String(pass.at)}`} className="flex flex-col gap-3">
-          <h3 className={cn(LABEL, 'm-0 flex items-center gap-2 text-body-sm')}>
+          <h3 className={cn(LABEL, 'm-0 flex items-center gap-2 font-bold text-body-sm')}>
             {pass.round === null ? 'a verification pass' : `round ${pass.round + 1}`}
             {i === 0 && <Badge>most recent</Badge>}
           </h3>

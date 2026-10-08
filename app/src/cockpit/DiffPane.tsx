@@ -332,7 +332,7 @@ export function DiffPane({
               // The row is the design system's and stays untouched; the button
               // is this pane's. Wrapping rather than extending `DiffRow`: a
               // primitive that grew an `onComment` would carry a behaviour only
-              // one screen wants into the gallery every screen is checked in.
+              // one screen wants into every screen that draws a diff row.
               <button
                 // eslint-disable-next-line react/no-array-index-key
                 key={j}

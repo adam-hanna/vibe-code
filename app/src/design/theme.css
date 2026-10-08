@@ -1,5 +1,6 @@
 /*
- * Tailwind, fed by `tokens.css`.
+ * Tailwind, fed by `tokens.css` - and, since the sweep (#237), the whole of the
+ * app's stylesheet besides the tokens themselves.
  *
  * Every colour a utility can reach is a REFERENCE to a token, never a value:
  * `bg-panel` compiles to `var(--surface-panel)`, so the one file allowed to
@@ -8,14 +9,25 @@
  * emit the token's own name rather than a theme variable that points at it,
  * which keeps the computed value readable in devtools as the token it is.
  *
- * **Preflight is deliberately not imported yet.** This file lands as groundwork
- * with no visible change, and Tailwind's reset would restyle every button and
- * heading the current stylesheets rely on `base.css` for. It comes in with the
- * new shell, at the point the old stylesheets start to go.
+ * **Preflight is imported, into `base`, and that is what replaced the old
+ * resets.** They lived in `base.css` and had to be moved into `@layer base` as a
+ * stopgap in the rework (#231): unlayered, an element rule beats every layered
+ * one whatever its specificity, so `button { background: none; border: none }`
+ * and `font: inherit; color: inherit` silently erased the ground, border, size
+ * and colour of every `ui/button.tsx` button. In `base`, a utility wins and an
+ * element nobody styled still gets the reset. Preflight is that reset, kept by
+ * somebody else - and its `button { background-color: transparent }` is the rule
+ * `audit:contrast` §9 now looks for, because an unstyled button taking the
+ * platform's near-white ground is the bug that section exists for.
+ *
+ * What is left below is only what is global by nature: the ground and the type
+ * of the page, text selection, focus, the scrollbar, and the one keyframe.
+ * Everything a component draws is a utility in that component.
  */
 
 @layer theme, base, components, utilities;
 @import 'tailwindcss/theme.css' layer(theme);
+@import 'tailwindcss/preflight.css' layer(base);
 @import 'tailwindcss/utilities.css' layer(utilities);
 
 @theme inline {
@@ -59,6 +71,35 @@
 
   --color-live: var(--semantic-live);
   --color-loss: var(--semantic-loss);
+
+  /* The ramps that used to be reachable only from `components.css` (#237):
+     severity for `SeverityChip`, the diff colours for `DiffRow`, quantity for
+     `Bar`. Named exactly for their tokens, so `border-severity-p0-rule` is
+     `var(--severity-p0-rule)` and nothing else. */
+  --color-severity-p0-rule: var(--severity-p0-rule);
+  --color-severity-p0-text: var(--severity-p0-text);
+  --color-severity-p1-rule: var(--severity-p1-rule);
+  --color-severity-p1-text: var(--severity-p1-text);
+  --color-severity-p2-rule: var(--severity-p2-rule);
+  --color-severity-p2-fill: var(--severity-p2-fill);
+  --color-severity-p3-rule: var(--severity-p3-rule);
+  --color-severity-zero-rule: var(--severity-zero-rule);
+
+  --color-diff-added-row: var(--diff-added-row);
+  --color-diff-added-gutter: var(--diff-added-gutter);
+  --color-diff-added-number: var(--diff-added-number);
+  --color-diff-added-glyph: var(--diff-added-glyph);
+  --color-diff-added-code: var(--diff-added-code);
+  --color-diff-removed-row: var(--diff-removed-row);
+  --color-diff-removed-gutter: var(--diff-removed-gutter);
+  --color-diff-removed-number: var(--diff-removed-number);
+  --color-diff-removed-glyph: var(--diff-removed-glyph);
+  --color-diff-removed-code: var(--diff-removed-code);
+
+  --color-quantity-1: var(--quantity-1);
+  --color-quantity-2: var(--quantity-2);
+  --color-quantity-3: var(--quantity-3);
+  --color-quantity-track: var(--quantity-track);
 
   --font-sans: var(--font-sans);
   --font-condensed: var(--font-condensed);
@@ -104,4 +145,192 @@
   --radius-lg: var(--radius-lg);
 
   --shadow-overlay: var(--shadow-overlay);
+}
+
+/* ================================================================ the page
+ * `:root` is dark to the platform as well as to the eye, so a native control the
+ * app does not style (a select, a radio) draws its dark variant.
+ */
+:root {
+  color-scheme: dark;
+}
+
+@layer base {
+  html,
+  body {
+    background: var(--surface-page);
+    color: var(--text-primary);
+    font: var(--type-body);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* A desktop app, not a document: text selection is opt-in, so a drag on a pane
+   * does not paint half the cockpit blue. Restored on anything a user reads or
+   * copies - values, prose, code - with `select-text` on the element. */
+  body {
+    user-select: none;
+  }
+  code,
+  pre {
+    user-select: text;
+  }
+
+  /* focus-visible: 2px accent outline at 2px offset, on everything focusable,
+   * replacing nothing. Never remove the outline without replacing it: it is the
+   * one accessibility affordance that is invisible to whoever is not using it,
+   * and therefore the one that rots silently. */
+  :focus-visible {
+    outline: 2px solid var(--accent-solid);
+    outline-offset: 2px;
+  }
+
+  button {
+    transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease;
+  }
+  button:disabled {
+    cursor: not-allowed;
+  }
+  input,
+  textarea,
+  select {
+    border-radius: var(--radius-sm);
+  }
+  input[type='checkbox'] {
+    accent-color: var(--accent-solid);
+  }
+
+  /*
+   * **Where preflight would have moved something the app was drawn against.**
+   * Every screen was built and checked without it, so each line here puts back
+   * exactly one platform default it removed, on the elements that still lean on
+   * it. `revert` is the user agent's own value, so none of these is a number
+   * somebody chose. A utility still wins over all of them.
+   *
+   * - The selects in Settings carry no classes and draw as the platform's own.
+   * - A radio or checkbox is drawn by the platform, with its margin beside its
+ *   label.
+   * - An icon stays inline and on the baseline: preflight makes every `svg` a
+   *   block, which only matters where one sits in running text, and that is
+   *   exactly where it would break the line.
+   * - A placeholder keeps the platform's grey where no `placeholder:` utility
+   *   names a token.
+   * - A control does not take its parent's letter-spacing: preflight makes
+ *   `button` inherit it, and a reread button inside a tracked uppercase head
+ *   row would be spaced out by a row it does not belong to.
+ * - A tab is eight columns, which is what a diff or a plan with tabs in it
+   *   has always been drawn at.
+   */
+  html {
+    tab-size: 8;
+  }
+  button,
+  input,
+  select,
+  textarea {
+    letter-spacing: revert;
+  }
+  select {
+    padding: revert;
+    border: revert;
+    background-color: revert;
+  }
+  input[type='radio'],
+  input[type='checkbox'] {
+    margin: revert;
+    padding: revert;
+    border: revert;
+    background-color: revert;
+  }
+  svg {
+    display: revert;
+    vertical-align: revert;
+  }
+  ::placeholder {
+    color: revert;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  @layer base {
+    button {
+      transition: none;
+    }
+  }
+}
+
+::selection {
+  background: var(--accent-border);
+  color: var(--text-display);
+}
+
+/* ================================================================ scroll track
+ *
+ * **Global, and that is the whole of the rule.** It was `.v-scroll`, an opt-in
+ * class, and almost nothing opted in - every pane sets `overflow-y: auto` on its
+ * own - so the product scrolled with the platform's light, chunky gutter down the
+ * side of a dark window.
+ *
+ * What is drawn is a 6px gutter with a 6px rounded thumb at `--rule-strong`,
+ * stepping to `--rule-control` on hover, over a transparent track. That is the
+ * 2026 redesign's (#226) values, which were layered over the original 4px-thumb
+ * design and won the cascade; the two stylesheets were merged here (#237) into
+ * the one set that was actually on screen. The 2px transparent border is the
+ * original design's and is kept, though the redesign's `background` clipped to
+ * the border box and so paints under it.
+ *
+ * The track is transparent. A permanently drawn track is a vertical rule down
+ * every pane in the app, which reads as structure - and on the panes that do not
+ * overflow it would be structure that means nothing.
+ */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--rule-control) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--rule-strong);
+  border: calc(var(--dim-scroll-track) / 2) solid transparent;
+  border-radius: 6px;
+}
+
+/* Brightened on hover, still inside the border tier - a scrollbar is never text
+   and must never reach a text colour. */
+::-webkit-scrollbar-thumb:hover {
+  background: var(--rule-control);
+}
+
+::-webkit-scrollbar-button {
+  display: none;
+}
+
+/* Where a vertical and a horizontal gutter meet. Left unset it is painted white
+   by the engine, which is the one square of the default scrollbar that survives
+   styling everything else. */
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* ================================================================ the one animation
+ * `LivenessDot` and `ThinkingWave` both take it through an `animate-[v-pulse_…]`
+ * utility, at `--pulse-duration` and `--wave-duration`. Those are the only two
+ * periods, and `tokens.css` sets both to 0s under reduced motion, so the dots
+ * stand still without either component handling it.
+ */
+@keyframes v-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
 }

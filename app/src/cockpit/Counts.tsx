@@ -22,9 +22,9 @@ import type { Severity } from '../design';
  * severity this build has no weight for renders unweighted rather than being
  * dropped, which is the same rule `boundary()` and `ending()` follow.
  *
- * `onOpen` is optional and its absence is a real state — the Gallery draws this
- * row with nowhere to send anybody, and a button that goes nowhere is worse than
- * a row that does not claim to be one.
+ * `onOpen` is optional and its absence is a real state — a row with nowhere to
+ * send anybody, and a button that goes nowhere is worse than a row that does not
+ * claim to be one.
  *
  * As a button it keeps exactly the same geometry. The click target is the row,
  * and the only thing that changes on hover is the cursor and a hairline — a

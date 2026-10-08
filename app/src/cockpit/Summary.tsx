@@ -69,7 +69,7 @@ export function Summary({ run }: { run: Run }) {
         </span>
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <span className={LABEL}>run complete</span>
-          <h2 id="v-summary-title" className="m-0 text-section text-primary">What this run did</h2>
+          <h2 id="v-summary-title" className="m-0 font-bold text-section text-primary">What this run did</h2>
         </div>
         <Badge>done</Badge>
       </div>

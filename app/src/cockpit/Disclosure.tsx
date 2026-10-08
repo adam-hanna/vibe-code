@@ -63,8 +63,8 @@ export function Section({
    * every time somebody merely opened the tab.
    *
    * Guarded so it fires on the transition rather than on every render, and
-   * `scrollIntoView` is called defensively because the Gallery and any future
-   * non-DOM host have no layout to scroll.
+   * `scrollIntoView` is called defensively because a non-DOM host has no layout
+   * to scroll.
    */
   reveal?: boolean;
 }) {

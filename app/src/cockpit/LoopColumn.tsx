@@ -752,7 +752,7 @@ export function LoopColumn({
   hostPid?: number | null;
   /**
    * Where a count sends the reader, or undefined where there is nowhere to send
-   * them. The Gallery draws this column with no tabs behind it.
+   * them.
    */
   onOpen?: OpenAt | undefined;
   /** Use the glanceable run-status rail in the desktop cockpit. */
@@ -902,7 +902,7 @@ export function LoopColumn({
 /**
  * The cockpit's glanceable version of the loop column.
  *
- * The full column still exists for the Gallery and for round-level inspection,
+ * The full column still exists for round-level inspection,
  * but the live desktop rail has a different job: explain what is happening now,
  * then make the shape of the run easy to scan. Details stay behind one disclosure
  * per stage and the Activity tab remains the home for the raw transcript.
