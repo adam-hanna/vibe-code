@@ -173,15 +173,27 @@ function settledAt(turns: readonly Turn[]): number | null {
  * be matching two different countings. Both clocks here are this window's own
  * arrival clock, set by `reduce`, so comparing them compares like with like.
  *
+ * **A tie is settled by arrival order** (#285). Frames read out of one chunk of
+ * the host's stdout share a millisecond, and a critique's census and the
+ * revision it causes are said 6ms apart — so they tied, and `<=` gave the census
+ * to the revision: on the #138 run, critique round 2's two P1s were drawn inside
+ * plan round 2. `seq` comes from the counter `reduce` draws phase ids from, so a
+ * group and a record never share a place in that order. The clock still decides
+ * everything else, because it is the same order whenever it is not tied.
+ *
  * Returns the index of the last group that had started, or -1 when the thing
  * arrived before any of them — which is a real state on a resumed run and must
  * attach the record to nothing rather than to the first round it can find.
  */
-function during(starts: readonly number[], at: number): number {
+function during(
+  groups: readonly { startedAt: number; phaseId: number }[],
+  at: number,
+  seq: number,
+): number {
   let found = -1;
-  for (let i = 0; i < starts.length; i += 1) {
-    const started = starts[i];
-    if (started !== undefined && started <= at) found = i;
+  for (let i = 0; i < groups.length; i += 1) {
+    const g = groups[i];
+    if (g !== undefined && (g.startedAt < at || (g.startedAt === at && g.phaseId < seq))) found = i;
   }
   return found;
 }
@@ -195,7 +207,10 @@ function announced(run: Run): { cycle: CycleKind; phase: PhaseGroup }[] {
   // `Cycle`s are stored in the order they first appeared, so a run that
   // alternates between two groups has its phases interleaved across them. Sorted
   // rather than concatenated, because the log is read top to bottom as a history.
-  out.sort((a, b) => a.phase.startedAt - b.phase.startedAt);
+  // A tie is broken by the id, which is arrival order (#285): two groups opened
+  // out of one chunk share a millisecond, and the stable sort alone would then
+  // keep cycle order and put plan round 2 above the critique that caused it.
+  out.sort((a, b) => a.phase.startedAt - b.phase.startedAt || a.phase.id - b.phase.id);
   return out;
 }
 
@@ -227,9 +242,8 @@ export function rounds(run: Run): readonly RoundCard[] {
 
   // Attached after the cards exist, so `during` indexes the same order a reader
   // sees.
-  const starts = cards.map((c) => c.startedAt);
   for (const pass of run.verify) {
-    const i = during(starts, pass.at);
+    const i = during(cards, pass.at, pass.seq);
     const card = cards[i];
     // The latest pass wins a round that ran more than one, which is what `5d`
     // shows: the trend across passes is that pane's subject, and a card is the
@@ -237,12 +251,12 @@ export function rounds(run: Run): readonly RoundCard[] {
     if (card !== undefined) cards[i] = { ...card, verify: pass };
   }
   for (const census of run.censuses) {
-    const i = during(starts, census.at);
+    const i = during(cards, census.at, census.seq);
     const card = cards[i];
     if (card !== undefined) cards[i] = { ...card, census };
   }
   for (const commit of run.commits) {
-    const i = during(starts, commit.at);
+    const i = during(cards, commit.at, commit.seq);
     const card = cards[i];
     // The latest wins a round that committed twice, which no path in the loop
     // does today - `maybeCommit` runs once per round boundary. Written the same
@@ -251,7 +265,7 @@ export function rounds(run: Run): readonly RoundCard[] {
     if (card !== undefined) cards[i] = { ...card, commit };
   }
   for (const round of run.questions) {
-    const i = during(starts, round.at);
+    const i = during(cards, round.at, round.seq);
     const card = cards[i];
     // The latest wins a round that somehow opened two question rounds under one
     // plan round. That is not a shape the loop produces - `revisePlan` opens a

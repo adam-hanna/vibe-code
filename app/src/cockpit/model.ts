@@ -258,6 +258,12 @@ export interface VerifyPass {
   round: number | null;
   gates: readonly GateRun[];
   at: number;
+  /**
+   * Where this arrived in the frame order, from the counter phase-group ids are
+   * drawn from (#285). What attaches it to a round: `at` is this window's
+   * arrival clock, and two frames read out of one chunk share a millisecond.
+   */
+  seq: number;
 }
 
 /**
@@ -347,6 +353,12 @@ export interface Census {
   tolerated: readonly string[];
   findings: readonly FindingRow[];
   at: number;
+  /**
+   * Where this arrived in the frame order, from the counter phase-group ids are
+   * drawn from (#285). What attaches it to a round: `at` is this window's
+   * arrival clock, and two frames read out of one chunk share a millisecond.
+   */
+  seq: number;
 }
 
 /** One turn's charge, as the seam that charged it reported (#223, `5e`). */
@@ -472,8 +484,14 @@ export interface Commit {
   since: string | null;
   /** The commit message, which names what the round was. */
   message: string | null;
-  /** When it reached us, so a round can be found by arrival. */
+  /** When it reached us. */
   at: number;
+  /**
+   * Where this arrived in the frame order, from the counter phase-group ids are
+   * drawn from (#285). What attaches it to a round: `at` is this window's
+   * arrival clock, and two frames read out of one chunk share a millisecond.
+   */
+  seq: number;
 }
 
 /** A boundary the loop is holding at, waiting to be told what to do. */
@@ -561,6 +579,12 @@ export interface QuestionRound {
    * comparison is like with like.
    */
   at: number;
+  /**
+   * Where this arrived in the frame order, from the counter phase-group ids are
+   * drawn from (#285). What attaches it to a round: `at` is this window's
+   * arrival clock, and two frames read out of one chunk share a millisecond.
+   */
+  seq: number;
 }
 
 export interface Run {
@@ -1231,6 +1255,7 @@ function openGate(
   round: number | null,
   name: string,
   at: number,
+  seq: () => number,
 ): VerifyPass[] {
   const gate: GateRun = {
     name,
@@ -1246,7 +1271,7 @@ function openGate(
   };
   const last = passes[passes.length - 1];
   const samePass = last !== undefined && last.round === round;
-  if (!samePass) return [...passes, { round, at, gates: [gate] }];
+  if (!samePass) return [...passes, { round, at, seq: seq(), gates: [gate] }];
   return passes.map((p) => (p === last ? { ...p, gates: [...p.gates, gate] } : p));
 }
 
@@ -1610,7 +1635,7 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
           ...next,
           commits: [
             ...next.commits,
-            { sha, since: str(data['since']), message: str(data['message']), at },
+            { sha, since: str(data['since']), message: str(data['message']), at, seq: id() },
           ],
         };
       }
@@ -1650,7 +1675,7 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
         return {
           ...next,
           cycles: mapLastPhase(next.cycles, (p) => ({ ...p, gates: [...p.gates, gate] })),
-          verify: openGate(next.verify, num(data['round']), gate, at),
+          verify: openGate(next.verify, num(data['round']), gate, at, id),
         };
       }
 
@@ -1703,6 +1728,7 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
             {
               round,
               at,
+              seq: id(),
               gates: names.map((name) => ({
                 name,
                 status: 'disabled' as const,
@@ -1791,6 +1817,7 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
               tolerated: strings(data['tolerated']),
               findings: readFindings(data['findings']),
               at,
+              seq: id(),
             },
           ],
         };
@@ -1824,6 +1851,7 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
               cap: num(data['cap']),
               open: readQuestions(data['questions']),
               at,
+              seq: id(),
             },
           ],
         };
