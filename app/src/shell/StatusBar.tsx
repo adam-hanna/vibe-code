@@ -5,7 +5,8 @@ import { Button } from '../ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { boundary, buildStamp, ending, tokens as fmtTokens } from '../cockpit/format';
 import type { Build } from '../host';
-import type { Run } from '../cockpit/model';
+import type { Run, Staleness } from '../cockpit/model';
+import { StalenessNote } from '../cockpit/Staleness';
 import { cn } from '@/lib/utils';
 
 /**
@@ -46,6 +47,7 @@ export function StatusBar({
   pausing,
   stopping,
   controls,
+  staleness,
   onSpend,
   build,
   diagnosticsOpen,
@@ -74,6 +76,12 @@ export function StatusBar({
    * never draws two sets one above the other. `statusBarControls` decides.
    */
   controls: boolean;
+  /**
+   * How quiet the live turn is (`7c`). Its `thinking` and `cannot tell` states
+   * are drawn here rather than as a strip above the columns, which pushed the
+   * whole window down each time the turn went quiet (#267).
+   */
+  staleness: Staleness;
   onSpend: () => void;
   build: Build | null;
   diagnosticsOpen: boolean;
@@ -109,6 +117,10 @@ export function StatusBar({
       )}
 
       {project !== null && <span className="truncate text-tertiary">{project}</span>}
+
+      {/* Before the spacer, so it takes the spacer's room as it comes and goes
+          and nothing to its right moves (#267). */}
+      <StalenessNote state={staleness} />
 
       <span className="flex-1" />
 
