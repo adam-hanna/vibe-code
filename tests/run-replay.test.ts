@@ -251,11 +251,13 @@ test('a judge round reports the counts its own artifact holds', () => {
   });
   const replay = replayRun(state, {
     ...NOTHING,
-    censuses: [{ phase: 'plan', round: 0, counts: { p0: 0, p1: 3, p2: 1, p3: 0 } }],
+    censuses: [{ phase: 'plan', round: 0, counts: { P0: 0, P1: 3, P2: 1, P3: 0 } }],
   });
   const census = replay.steps.find((s) => s.narration.id === 'findings_reported');
   assert.equal(census?.narration.data?.['phase'], 'plan');
-  assert.deepEqual(census?.narration.data?.['counts'], { p0: 0, p1: 3, p2: 1, p3: 0 });
+  // In the live loop's spelling, `P0`-`P3` (#292): the window reads those keys
+  // and drops a census with any other, which is what lowercase did.
+  assert.deepEqual(census?.narration.data?.['counts'], { P0: 0, P1: 3, P2: 1, P3: 0 });
 });
 
 test('the ending is the last escalation or error, by TYPE', () => {
@@ -632,8 +634,9 @@ test('a gate’s verdicts are said again, each attempt still naming its log (#24
     'claude_turn',
     'verify_started',
     'verify_failed',
-    // The fix turn's own round opens its group, as it always has.
-    'phase_started',
+    // The fix stays in the code group that ran the gate, as it does live (#292).
+    // This used to open a group numbered by the VERIFY round, which drew a stray
+    // code card after the round it belonged to.
     'turn_started',
     'claude_turn',
     'verify_started',
@@ -664,4 +667,25 @@ test('a gate’s verdicts land among the turns by time, not after them (#248)', 
   assert.ok(reviewOpens > order.lastIndexOf('verify_passed:core'));
   assert.ok(order.indexOf('verify_started:core') > order.indexOf('phase_started:implementing'));
   for (let i = 1; i < steps.length; i += 1) assert.ok(steps[i - 1]!.at <= steps[i]!.at);
+});
+
+test('a verify-fix after a later review round stays in that round’s code group (#292)', () => {
+  // The #246 replay drew `implementing 3` and then `implementing 1`: the label
+  // names the verify round and was used as the group's. The group is the code
+  // round that ran the gate, which the checkpoint's review round says; the turn
+  // still carries its own verify round, as the live `turn_started` does.
+  const state = stateWith({
+    events: [
+      { at: iso(60_000), type: 'claude_turn', label: 'fix-3', tokens: 1 },
+      { at: iso(70_000), type: 'verify_failed', gate: 'rust', round: 3, runs: 3, failed: 1, attempts: [] },
+      { at: iso(90_000), type: 'claude_turn', label: 'verify-fix-1', tokens: 1 },
+    ],
+  });
+  const steps = replayRun(state, NOTHING).steps;
+  const opened = steps
+    .filter((s) => s.narration.id === 'phase_started')
+    .map((s) => `${String(s.narration.data?.['phase'])}:${String(s.narration.data?.['round'])}`);
+  assert.deepEqual(opened, ['implementing:3']);
+  const fix = steps.find((s) => s.narration.id === 'turn_started' && s.narration.data?.['kind'] === 'verify-fix');
+  assert.equal(fix?.narration.data?.['round'], 1);
 });
