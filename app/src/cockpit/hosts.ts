@@ -393,6 +393,15 @@ export function writeRefusal(
  * can be running a host whose start has not resolved and that has said nothing
  * yet. Filtering by what the window draws once let a quit skip its own
  * confirmation while a run host was going.
+ *
+ * An entry stops being live only once its run is over: its invoke's `result`
+ * or `error` came back (`serve.ts` sends both after `main()` has settled), or
+ * its host exited. Rust may still hold that host for the few seconds it takes
+ * to leave, and an empty list then quits at once - correctly, because nothing
+ * is running in it and `stop()` closes it the way Rust was already closing it.
+ * The same holds for a host Rust closed because its invoke could not be
+ * written: it never received a run. What this list guarantees is that no RUN
+ * is stopped unasked, not that no process is.
  */
 export function quitList(lives: LiveRuns, label: (e: LiveRun) => string): readonly string[] {
   return lives.filter((e) => e.live).map(label);

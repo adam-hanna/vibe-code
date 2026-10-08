@@ -2327,7 +2327,10 @@ list is a pure function in that file with a test beside it, because the app has 
   naming every run, worded as what it is — each stops where it is and can be resumed, only the
   turn in flight is redone — and calls `app_quit` on yes. Quit asks *which hosts will this
   kill*, and any live entry may have one; filtering by the drawing rule once let a quit skip
-  its own confirmation while a run host was going. A second Quit while that is unanswered is
+  its own confirmation while a run host was going. A host Rust still holds after its run
+  returned, or after its invoke could not be written, is on no list and is quit without
+  asking: nothing is running in it, and `stop()` closes it the way Rust already was. The
+  guarantee is that no *run* is stopped unasked. A second Quit while that is unanswered is
   asked natively, since Rust knows handles and not names; a Cancel is an answer, and calls
   `app_quit` with `quit: false` so the next Quit asks through the window again. **`app_quit` is a deliberate new
   door**: it only exits, through the same `stop()` the tray uses, which is narrower than a
