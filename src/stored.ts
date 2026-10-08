@@ -37,6 +37,7 @@ import type {
   RunCheckpointMeta,
   RunEvent,
   RunPhase,
+  RunStart,
   RunState,
   RunStatus,
   RunSummary,
@@ -1363,6 +1364,28 @@ function readTestChanges(raw: unknown, ctx: ReadContext): TestChanges | undefine
 const FULL_SHA = /^[0-9a-f]{40}$/;
 
 /**
+ * Where this run's branch started, or nothing at all (#249).
+ *
+ * Dropped rather than repaired, for `readTestChanges`'s reason: a start is a
+ * measurement of a commit, and a repaired one would be a commit nobody saw. It
+ * is optional and descriptive - nothing acts on it but the summary - so absence
+ * is the honest degrade, and the repair is still logged so the damage shows.
+ */
+function readStart(raw: unknown, ctx: ReadContext): RunStart | undefined {
+  if (raw === undefined) return undefined;
+  if (
+    isRecord(raw) &&
+    isString(raw['sha']) &&
+    FULL_SHA.test(raw['sha']) &&
+    (raw['ref'] === null || (isString(raw['ref']) && raw['ref'] !== ''))
+  ) {
+    return { sha: raw['sha'], ref: raw['ref'] };
+  }
+  ctx.repairs.dropped('start', 'start');
+  return undefined;
+}
+
+/**
  * A checkpoint's metadata, or null - a pure shape check with no repair log.
  *
  * Exported because `listCheckpoints` needs the same answer without a
@@ -1886,6 +1909,8 @@ const READERS = {
   forkedFrom: (raw, ctx) => readForkOrigin(raw, ctx),
   forkPending: (raw, ctx) => readForkPending(raw, ctx),
   branchPending: (raw, ctx) => readBranchPending(raw, ctx),
+  // Absent stays absent: a run from before #249, or one never put on a branch.
+  start: (raw, ctx) => readStart(raw, ctx),
   // The three question-record fields (#65). Optional every one: absent is what
   // a run that suppressed nothing and was answered by nobody looks like, and it
   // is what every state written before they existed presents - so nothing here

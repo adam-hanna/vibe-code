@@ -1891,6 +1891,39 @@ Five things are load-bearing:
   `prepareGit` makes the branch as it always has. They are environment variables rather than
   `{dir}`-style text substitution because a path pasted into a shell line breaks on a space,
   and a quoted variable does not.
+
+  **A run starts from the base it was told, and a worktree is never moved silently** (#249).
+  The #169 run started from the root checkout's stale `fix/223` tip instead of
+  `origin/develop`: its script detached at the commit it wanted, and `prepareGit` checked the
+  branch — made at HEAD — out over it without a word. Four decisions, all the owner's:
+
+  - **A base is a setting.** `git.baseRef` (project-only, default null) is resolved **once**,
+    in the preflight gate, on a fresh run only, before anything is spent. A remote-tracking ref
+    is fetched first. **A fetch that fails or outlives `git.worktreeTimeoutMs` refuses the run
+    — there is no fallback to the local tracking ref**, because a possibly stale base is the
+    defect. The bound is the existing setup budget rather than a new number, and it is needed
+    at all because a `git fetch` hung for over 120s on the owner's machine and a `git` child is
+    never interruptible under `cancel.ts`. `--no-branch` with a base, an unresolvable ref, and
+    a dirty repository with no worktree whose base is not HEAD are each refused by name. **Null
+    is today's behaviour**: the branch at HEAD. A resume never resolves, fetches or moves
+    anything, and a fork's branch comes from its checkpoint.
+  - **Refuse, never move.** When `prepareGit` adopts a pre-made branch it compares the
+    worktree's HEAD with the branch's commit: equal is the default path and the checkout moves
+    nothing; different is an `Escalation` naming both shas. This holds with `baseRef` unset,
+    and it is the one behaviour change when it is: a script should check `$VIBE_BRANCH` out,
+    not choose a commit. The default `git worktree add --detach` now detaches at the branch's
+    commit rather than HEAD, so it passes.
+  - **One creation site per path, and nothing durable in preflight.** With a worktree the ref
+    is made in preflight (the script must be told it); with none, `prepareGit` makes the branch
+    with `checkout -b <branch> <sha>`. The sha travels from the gate to `prepareGit` through a
+    run-id-keyed module latch (`chooseBase`), not a state field and not a second read of the
+    ref — a fetch in between would otherwise start the branch at a commit the dirty check never
+    saw, and a stored base would outlive a run stopped before it took its branch.
+  - **The start is recorded.** `state.start = { sha, ref }` (ref null for HEAD) is written by
+    `prepareGit` in the **same save** as `state.branch`, so neither is on disk without the
+    other; `run_branch` carries `startSha`/`startRef` on that path only, the sentence says
+    `from origin/develop (a7b5f9b)`, and the summary prints a `Start:` line when the field
+    exists. Absent on older runs and never back-filled; a fork drops its parent's.
 - **The script goes through a shell, and that is `verify.command`'s rule rather than a hole in
   `commands.ts`'s.** `verify.ts` states it at the one place a shell is used at all — *"Model-
   authored text is never passed to a shell"* — and this is the same category: a line a **person**

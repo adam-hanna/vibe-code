@@ -86,6 +86,8 @@ Put a `vibe.config.json` in the repository. Flags override it. `vibe.config.exam
 | `loop.maxPlanRounds`, `loop.maxReviewRounds` | How many rounds before vibe stops and asks. |
 | `gates` | Where the loop pauses for you: `auto`, `step` (the app only) or `stop`. |
 | `git.worktree` | Run in a git worktree of its own. |
+| `git.worktreeCommand` | Your own command for making that worktree. It is given `VIBE_WORKTREE`, `VIBE_REPO`, `VIBE_RUN_ID` and `VIBE_BRANCH`, a branch that already exists at `git.baseRef` (or HEAD). Check it out with `git worktree add "$VIBE_WORKTREE" "$VIBE_BRANCH"` rather than choosing a commit: a worktree left on a different commit from its branch is refused. |
+| `git.baseRef` | The commit a new run's branch starts from, such as `origin/develop`. A remote ref is fetched first, and a fetch that fails or runs past `git.worktreeTimeoutMs` refuses the run rather than using a stale copy. Unset means the repository's HEAD. A resume never moves its branch. |
 
 Settings for every project go in `~/.config/vibe/config.json` (`%APPDATA%\vibe\config.json` on Windows).
 

@@ -155,6 +155,9 @@ export const DEFAULTS: Config = {
     // of command, on the same machine, and `npm ci` cold is the case that
     // decides it.
     worktreeTimeoutMs: 15 * 60 * 1000,
+    // The repository's HEAD at run start, which is what every run did before
+    // this key existed (#249): groundwork ships with no behaviour change.
+    baseRef: null,
   },
   context: {
     enabled: true,
@@ -710,6 +713,20 @@ function validate(cfg: Config): void {
   if (!Number.isFinite(cfg.git.worktreeTimeoutMs) || cfg.git.worktreeTimeoutMs <= 0) {
     throw new Error('git.worktreeTimeoutMs must be a positive number');
   }
+  // A ref, or null for HEAD (#249). A leading dash is refused as well as a blank:
+  // the value is handed to `git rev-parse` and `git fetch` as an argument, where
+  // `-x` would be read as an option rather than as the ref somebody meant.
+  if (
+    cfg.git.baseRef !== null &&
+    (typeof cfg.git.baseRef !== 'string' ||
+      cfg.git.baseRef.trim() === '' ||
+      cfg.git.baseRef.startsWith('-'))
+  ) {
+    throw new Error(
+      'git.baseRef must be a ref such as "origin/develop" or a branch name, or null to start ' +
+        'from HEAD',
+    );
+  }
   // Zero is meaningful here, unlike the round caps: it demands a spotless verdict.
   if (!Number.isInteger(cfg.loop.p1Tolerance) || cfg.loop.p1Tolerance < 0) {
     throw new Error('loop.p1Tolerance must be zero or a positive integer');
@@ -945,7 +962,9 @@ export function globalConfigPath(
  */
 export const PROJECT_ONLY: Readonly<Record<string, readonly string[] | 'all'>> = {
   verify: 'all',
-  git: ['worktree', 'worktreeCommand', 'worktreeTimeoutMs'],
+  // `baseRef` too (#249): which commit a run starts from is a fact about one
+  // repository's branches, and `origin/develop` is nonsense in the next one.
+  git: ['worktree', 'worktreeCommand', 'worktreeTimeoutMs', 'baseRef'],
 };
 
 /** Refuse a global file, or a global write, that sets a project-only key. */

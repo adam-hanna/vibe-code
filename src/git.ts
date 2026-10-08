@@ -254,9 +254,117 @@ export function runBranch(
   return state.branch ?? `${cfg.git.branchPrefix}${state.id}`;
 }
 
-export async function createBranch(cwd: string, name: string): Promise<void> {
-  await git(cwd, ['checkout', '-b', name]);
+/**
+ * `git checkout -b <name> [<startPoint>]`.
+ *
+ * The start point is the commit `git.baseRef` resolved to in the preflight gate
+ * (#249). Without one the argv is exactly what it always was, which is the
+ * branch at HEAD.
+ */
+export async function createBranch(cwd: string, name: string, startPoint?: string): Promise<void> {
+  await git(cwd, startPoint === undefined ? ['checkout', '-b', name] : ['checkout', '-b', name, startPoint]);
   detail(`on branch ${name}`);
+}
+
+/**
+ * The commit `git.baseRef` names, fetched first when it is a remote-tracking
+ * ref, or the reason it cannot be had (#249).
+ *
+ * **A fetch that fails refuses; it never falls back to the local copy.** The
+ * #169 run started from a stale tip, and a remote-tracking ref nobody could
+ * refresh is exactly a possibly stale base - the thing this exists to prevent.
+ *
+ * **The fetch is bounded by `git.worktreeTimeoutMs`**, the existing budget for
+ * setting up where a run works, so no new number is introduced. It needs a
+ * bound at all because a `git fetch` on the owner's machine hung for more than
+ * 120s on the day #249 was briefed, and a `git` child is never interruptible
+ * under `cancel.ts`'s rules - so without one a stop pressed during preflight
+ * would wait on the network for as long as the network liked.
+ *
+ * Never throws: every failure is a sentence for the preflight refusal.
+ */
+export async function resolveBase(
+  cwd: string,
+  ref: string,
+  timeoutMs: number,
+): Promise<{ ok: true; sha: string } | { ok: false; reason: string }> {
+  const repo = await repoStatus(cwd);
+  if (!repo.isRepo) {
+    return {
+      ok: false,
+      reason:
+        `git.baseRef is "${ref}", but ${cwd} is not a git repository` +
+        (repo.error === null ? '' : ` (git could not be run: ${repo.error})`) +
+        '. Nothing has been spent.',
+    };
+  }
+  // Whether it is a remote-tracking ref, asked of git rather than guessed from a
+  // slash: `feature/x` is a local branch and `origin/develop` usually is not.
+  const full = await git(cwd, ['rev-parse', '--symbolic-full-name', ref], { allowFail: true });
+  if (full.code === 0 && full.stdout.startsWith('refs/remotes/')) {
+    const listed = await git(cwd, ['remote'], { allowFail: true });
+    // The longest remote whose prefix matches, so a remote named `a/b` is split
+    // as `a/b` + name rather than `a` + `b/name`.
+    const remote =
+      listed.code !== 0
+        ? undefined
+        : listed.stdout
+            .split('\n')
+            .map((r) => r.trim())
+            .filter((r) => r !== '' && full.stdout.startsWith(`refs/remotes/${r}/`))
+            .sort((a, b) => b.length - a.length)[0];
+    // A remote-tracking ref with no remote to fetch it from is a copy nothing
+    // can refresh - a left-over ref, or remotes git would not list. Refused,
+    // never resolved: falling through to the local ref here would be the very
+    // fallback a failed fetch is refused to avoid (#249).
+    if (remote === undefined) {
+      return {
+        ok: false,
+        reason:
+          `git.baseRef "${ref}" is the remote-tracking ref ${full.stdout}, but no configured ` +
+          'remote it could be fetched from was found' +
+          (listed.code !== 0 ? ` (git remote exited ${String(listed.code)}: ${listed.stderr})` : '') +
+          '. vibe does not fall back to the local copy, which may be stale (#249). Nothing has ' +
+          'been spent.',
+      };
+    }
+    const name = full.stdout.slice(`refs/remotes/${remote}/`.length);
+    const shown = `git fetch ${remote} ${name}`;
+    try {
+      const fetched = await run(gitBin(), ['fetch', remote, name], { cwd, timeoutMs });
+      if (fetched.code !== 0) {
+        return {
+          ok: false,
+          reason:
+            `git.baseRef "${ref}" could not be fetched (${shown} exited ` +
+            `${String(fetched.code)}: ${fetched.stderr.trim() || 'it printed nothing'}). ` +
+            'vibe does not fall back to the local copy, which may be stale (#249). ' +
+            'Nothing has been spent.',
+        };
+      }
+    } catch (err: unknown) {
+      return {
+        ok: false,
+        reason:
+          `git.baseRef "${ref}" could not be fetched: ${shown} did not finish within ` +
+          `git.worktreeTimeoutMs (${String(timeoutMs)} ms) - ` +
+          `${err instanceof Error ? err.message : String(err)}. vibe does not fall back to ` +
+          'the local copy, which may be stale (#249). Nothing has been spent.',
+      };
+    }
+  }
+  // `^0` peels a tag to its commit without the brace syntax `resolveCommit`
+  // avoids, and `resolveCommit` accepts only a full id whose type is a commit.
+  const sha = await resolveCommit(cwd, `${ref}^0`);
+  if (sha === null) {
+    return {
+      ok: false,
+      reason:
+        `git.baseRef "${ref}" does not resolve to a commit in ${cwd}. A remote branch has to ` +
+        'have been fetched once before it can be named. Nothing has been spent.',
+    };
+  }
+  return { ok: true, sha };
 }
 
 /** A full object id, never an abbreviation: 40 lowercase hex characters. */

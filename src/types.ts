@@ -358,6 +358,14 @@ export interface ResolvedQuestion {
   score: number;
 }
 
+/** Where a run's branch started (#249). See `RunState.start`. */
+export interface RunStart {
+  /** A full 40-hex commit id. */
+  sha: string;
+  /** The `git.baseRef` it was resolved from, or null for the repository's HEAD. */
+  ref: string | null;
+}
+
 export interface GitConfig {
   useBranch: boolean;
   branchPrefix: string;
@@ -403,8 +411,10 @@ export interface GitConfig {
    * re-split into two words, and it must leave a working tree at
    * `VIBE_WORKTREE` — checked afterwards, because a script that exits 0 and
    * leaves nothing behind would otherwise fail one git command at a time with
-   * nothing naming the cause. Deliberately **not** told a branch: `prepareGit`
-   * names that, and a second answer to it is how the two come to disagree.
+   * nothing naming the cause. It is also told `VIBE_BRANCH`, a branch that
+   * already exists at `baseRef` or HEAD, and should check it out rather than
+   * choose a commit: `prepareGit` refuses a worktree whose HEAD is not where its
+   * branch is, rather than moving it there in silence (#249).
    */
   worktreeCommand: string | null;
   /**
@@ -417,6 +427,22 @@ export interface GitConfig {
    * that was measured for a comparable command beats inventing one.
    */
   worktreeTimeoutMs: number;
+  /**
+   * The commit a **new** run's branch starts from (#249). Null is the
+   * repository's HEAD when the run starts, which is exactly what every run did
+   * before this key existed.
+   *
+   * The #169 run started from a root checkout's stale `fix/223` tip instead of
+   * `origin/develop`, because the base was whatever HEAD happened to be and a
+   * worktree script that chose a better one was silently overridden. A base is
+   * therefore a setting rather than an accident: resolved once, in the preflight
+   * gate, before anything is spent. A remote-tracking ref (`origin/develop`) is
+   * fetched first, bounded by `worktreeTimeoutMs`, and a fetch that fails or
+   * hangs refuses the run - a local copy that may be stale is the defect this
+   * exists to remove, so there is no fallback to it. A resume never resolves,
+   * fetches or moves anything, and a fork's branch comes from its checkpoint.
+   */
+  baseRef: string | null;
 }
 
 export interface ContextConfig {
@@ -1667,6 +1693,18 @@ export interface RunState {
    * commits land wherever HEAD happens to be.
    */
   branchPending?: true;
+  /**
+   * The commit this run's branch was at when the run took it, and the
+   * `git.baseRef` it came from - null when it came from HEAD (#249).
+   *
+   * Written once, by `prepareGit`, in the same save that records `branch`, so
+   * neither exists without the other: a run stopped before it was on its branch
+   * has no start, rather than a start describing a branch it never took. Absent
+   * on every run from before #249 and never back-filled, because a start
+   * guessed afterwards would be a number nobody measured. A fork drops it: the
+   * child's branch starts at the checkpoint commit, not at the parent's start.
+   */
+  start?: RunStart;
   /** One entry per code-review round, driving the convergence assessment. */
   p1Rounds: RoundRecord[];
   /** The same, for verification-fix rounds, which converge independently. */

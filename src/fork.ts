@@ -513,6 +513,10 @@ export async function commitFork(targetDir: string, plan: ForkPlan): Promise<For
     // probe - so the facts go and preflight rewrites them (#89). `=== true` is
     // what makes a plan built by hand, carrying no such field, keep them.
     if (plan.environmentStale === true) delete child.environment;
+    // Where the PARENT's branch started (#249), which is false of the child: its
+    // branch is created at the checkpoint commit above. `git.baseRef` never
+    // applies to a fork, so the child records no start of its own either.
+    delete child.start;
     if (branch === null) delete child.branchPending;
     else child.branchPending = true;
 

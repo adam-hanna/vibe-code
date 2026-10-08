@@ -154,6 +154,7 @@ import type {
   ReproducerOutcome,
   RoundRecord,
   Plan,
+  RunStart,
   RunState,
   RunSummary,
   Severity,
@@ -2184,8 +2185,36 @@ async function noticeStrandedWork(state: RunState, cwd: string): Promise<void> {
 function sayBranch(
   branch: string | null,
   why: string | null,
+  start?: RunStart,
 ): { id: string; data: Record<string, unknown> } {
-  return { id: 'run_branch', data: { branch, why } };
+  // The base only when a fresh run just took its branch (#249). Every other path
+  // passes none, so a resume and the no-branch paths carry neither field rather
+  // than one guessed after the fact.
+  return {
+    id: 'run_branch',
+    data: start === undefined ? { branch, why } : { branch, why, startSha: start.sha, startRef: start.ref },
+  };
+}
+
+/**
+ * The commit the preflight gate resolved `git.baseRef` to, for the run it was
+ * resolved for (#249).
+ *
+ * **A module latch rather than a field**, and it is the only honest place for
+ * it. The base is resolved ONCE, in preflight, before anything is spent - and
+ * the branch of a run with no worktree is made later, by `prepareGit`. Reading
+ * the ref again there would be a second resolution, and a fetch in between would
+ * start the branch at a commit the dirty-tree check never looked at. A state
+ * field would be durable, and preflight deliberately writes nothing durable
+ * about the branch: a run stopped between the two must not come back holding a
+ * base for a branch it never took. Safe for `cancel.ts`'s reason - one run per
+ * process - and keyed by run id so a value from another run is never read.
+ */
+let chosenBase: { runId: string; sha: string } | null = null;
+
+/** Set by the preflight gate; null clears it. `execute` clears it on the way in. */
+export function chooseBase(runId: string, sha: string | null): void {
+  chosenBase = sha === null ? null : { runId, sha };
 }
 
 /**
@@ -2300,6 +2329,27 @@ export async function prepareGit(
     // there. Run ids are unique, so nothing else leaves one of these behind.
     if (await git.branchExists(cwd, branch)) {
       if ((await git.currentBranch(cwd)) !== branch) {
+        // **Never move a worktree silently** (#249). A checkout that moves
+        // nothing is the default path - the tree was detached at the branch's
+        // own commit - and is allowed. One that would move it is the #169
+        // defect: the setup script chose a commit, this checkout replaced it
+        // with HEAD's, and the run started from a base nobody chose. So it is
+        // refused, naming both commits, before anything is spent - whether or
+        // not `git.baseRef` is set.
+        const here = await git.resolveCommit(cwd, 'HEAD');
+        const tip = await git.resolveCommit(cwd, `refs/heads/${branch}`);
+        if (here !== tip) {
+          throw new Escalation(
+            EXIT.ERROR,
+            `Run ${state.id}'s ${state.worktree === true ? 'worktree' : 'checkout'} is at ` +
+              `${here ?? 'no commit'}, but its branch "${branch}" is at ${String(tip)}. vibe will ` +
+              'not move it there silently (#249) - that is how a run starts from a base nobody ' +
+              'chose. Nothing has run and no turn was dispatched.\n' +
+              'The worktree setup command should check the branch out rather than choose a ' +
+              'commit: git worktree add "$VIBE_WORKTREE" "$VIBE_BRANCH". To choose where runs ' +
+              'start, set git.baseRef.',
+          );
+        }
         const result = await git.checkoutBranch(cwd, branch);
         if (!result.ok) {
           throw new Escalation(
@@ -2312,11 +2362,38 @@ export async function prepareGit(
         }
       }
     } else {
-      await git.createBranch(cwd, branch);
+      // At the commit the preflight gate resolved `git.baseRef` to, when it is
+      // set (#249) - the exact sha, handed over rather than read again. With no
+      // worktree the branch is made here and nowhere else, so a run stopped
+      // before this line leaves the repository untouched. A base that is set and
+      // was never resolved is refused rather than guessed: a gate that did not
+      // run is not permission to start from HEAD.
+      let at: string | undefined;
+      if (cfg.git.baseRef !== null) {
+        if (chosenBase === null || chosenBase.runId !== state.id) {
+          throw new Escalation(
+            EXIT.ERROR,
+            `git.baseRef is "${cfg.git.baseRef}", but this run's preflight never resolved it, so ` +
+              `there is no commit to start branch "${branch}" at. Nothing has run.`,
+          );
+        }
+        at = chosenBase.sha;
+      }
+      await git.createBranch(cwd, branch, at);
     }
+    // The branch and where it started, in ONE save (#249), so neither is ever on
+    // disk without the other. The tip is read rather than assumed: nothing has
+    // committed on the branch yet, so it is the commit the run starts from. A
+    // repository with no commits has no tip and records no start.
+    const tip = await git.resolveCommit(cwd, `refs/heads/${branch}`);
     state.branch = branch;
+    if (tip !== null) state.start = { sha: tip, ref: cfg.git.baseRef };
     saveState(state);
-    log.ok(`Isolated on branch ${branch}`, sayBranch(branch, null));
+    const from =
+      state.start === undefined
+        ? ''
+        : ` from ${state.start.ref ?? 'HEAD'} (${state.start.sha.slice(0, 7)})`;
+    log.ok(`Isolated on branch ${branch}${from}`, sayBranch(branch, null, state.start));
     return;
   }
 
