@@ -300,6 +300,17 @@ impl HostProcess {
 
         let secret = keys_secret();
         let mut command = Command::new(&node);
+        // Your terminal's environment, so the agents, the pilot and the
+        // commands it runs have your `GH_TOKEN`, your ssh agent and your
+        // `PATH` (#272). Before the app's own variables below, so neither can be
+        // replaced by an rc file. The values are never logged.
+        match crate::shellenv::login_env() {
+            Ok((shell, vars)) => {
+                crate::applog::app(&format!("host environment: {} variables from {shell} -l -i", vars.len()));
+                command.envs(vars);
+            }
+            Err(why) => crate::applog::app(&format!("host environment: the app's own ({why})")),
+        }
         command
             .arg(&entry)
             .env("VIBE_HOST_KEYS_SECRET", &secret);

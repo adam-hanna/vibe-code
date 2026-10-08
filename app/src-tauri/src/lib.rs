@@ -36,6 +36,7 @@ mod host;
 mod keys;
 mod pilot;
 mod reaper;
+mod shellenv;
 
 use host::{host_send, host_start, host_status, launch, HostProcess};
 use keys::{key_clear, key_set, key_status};
