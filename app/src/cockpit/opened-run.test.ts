@@ -25,7 +25,9 @@ describe('an opened run is drawn by the column that drew it live', () => {
     // right panel to look just as it would have when I click on an old run as if
     // I had run it myself."* So there is one `LoopColumn`, taking one `Run`, and
     // which run it is is decided in one expression.
-    expect(cockpit).toMatch(/const columnRun = past && opened\.run !== null \? opened\.run : run;/);
+    // A draft not yet started takes an empty run first (#294); the rest of the
+    // expression is unchanged.
+    expect(cockpit).toMatch(/const columnRun = draftHasNoRun\(drafting\) \? blank : past && opened\.run !== null \? opened\.run : run;/);
     expect(cockpit).toMatch(/<LoopColumn\s+run=\{columnRun\}/);
     // And there is no second column component to drift from the first.
     expect(cockpit).not.toMatch(/RecordColumn/);

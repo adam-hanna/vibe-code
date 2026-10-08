@@ -181,3 +181,18 @@ export function settled(list: readonly Draft[], dir: string, archived: readonly 
     .filter((d) => dirKey(d.dir) === key && d.runId !== null && archived.includes(d.runId))
     .map((d) => d.id);
 }
+
+/**
+ * Whether a draft on screen leaves the run column with nothing to draw.
+ *
+ * A draft that has not been started has no run behind it, so the column beside
+ * its conversation has nothing true to show. It drew the window's last live run
+ * instead: `viewing` is null on a draft, and the column fell through to `run`,
+ * so starting a new run and talking it through with the pilot left the column
+ * on whichever run had been open before. Once the proposal is pressed the draft
+ * is `launched`, and the live run IS the one it asked for: the starting card,
+ * then the run, as it binds.
+ */
+export function draftHasNoRun(draft: Draft | null): boolean {
+  return draft !== null && !draft.launched;
+}
