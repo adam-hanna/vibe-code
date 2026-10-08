@@ -1278,6 +1278,8 @@ export function Cockpit() {
    * one run while claiming to show another is the confusion this set out to fix.
    */
   const columnRun = past && opened.run !== null ? opened.run : run;
+  /** One reading of the live turn's quiet, for the strip and the status bar (#267). */
+  const quiet = staleness(run, now);
   // The run the pilot's conversation is about, for its log's round cards (#247).
   // The pane still takes the live `run` for its tools.
   const pilotLogRun = chatRun({
@@ -1412,8 +1414,9 @@ export function Cockpit() {
 
       {/* `7c`, above everything and below the titlebar. It is a statement about
           the whole window - everything under it is as old as the strip says -
-          so it cannot sit inside one column. */}
-      <StalenessStrip state={staleness(run, now)} hostPid={wire.hostPid} />
+          so it cannot sit inside one column. Only `not live` is drawn here; the
+          quiet states are in the status bar, whose height is fixed (#267). */}
+      <StalenessStrip state={quiet} hostPid={wire.hostPid} />
 
       {/* `7e`, above the columns for the same reason: an agent with no headroom
           is a statement about the whole run, not about one pane. Quiet, and
@@ -2143,6 +2146,7 @@ export function Cockpit() {
         stopping={stopping}
         // Only while the footer is not showing them for this run (#264).
         controls={statusBarControls(panels.loop, columnRun === run)}
+        staleness={quiet}
         onSpend={() => setTab('spend')}
         build={wire.status?.build ?? null}
         diagnosticsOpen={diagnostics}

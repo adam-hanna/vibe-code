@@ -18,20 +18,26 @@ import type { Staleness } from './model';
  * - **thinking** — one quiet line, **stated as a fact and not as a worry**. A
  *   turn emitting nothing for twelve minutes is a healthy turn; the retired
  *   6-minute indicator is on the canvas with exactly that reason beside it. It
- *   gets the chrome ground and no weight.
+ *   gets no ground and no weight, and it lives **in the status bar**
+ *   (`StalenessNote`), not in a strip of its own (#267): a working agent goes
+ *   quiet and resumes constantly, and a strip above the columns that came and
+ *   went with it pushed the whole window down and back up every time. A
+ *   standing fact belongs in the bar of standing facts, whose height is fixed.
  * - **not-live** — a strip across the window. Everything on screen is however
  *   old it is and vibe cannot confirm the phase is still running. **This one
  *   must not look normal**, which is why it is the only state that gets width
  *   and the alarm ground.
  *
- * `unknown` is drawn too, and it is not a fourth degree of staleness: it is the
+ * - **not-live** stays a strip. It is rare, and interrupting the layout once,
+ *   when vibe stops being able to confirm the run is alive, is the point.
+ *
+ * `unknown` is drawn too, in the status bar beside `thinking`, and it is not a fourth degree of staleness: it is the
  * pane saying it has no threshold to judge against. That happens on a core that
  * does not report its heartbeat cadence, and picking a number here instead would
  * be the invented denominator this repo refuses everywhere.
  */
 
 const STRIP = 'flex items-baseline gap-3 border-b px-5 py-2 text-body-sm';
-const QUIET = 'border-rule-inner bg-chrome text-secondary';
 
 /**
  * Both clocks, side by side (hi-fi 13).
@@ -68,37 +74,9 @@ export function StalenessStrip({
   /** This window's own host process, not the agent's. Null before it connects. */
   hostPid?: number | null;
 }) {
-  if (state.state === 'live') return null;
-
-  if (state.state === 'unknown') {
-    // Only worth saying when it is a limitation rather than an ordinary gap.
-    // "No turn is running" is the cockpit's normal resting state and needs no
-    // announcement; not knowing the cadence is a real thing to report.
-    if (state.why === null || state.lastBeatAt === null) return null;
-    return (
-      <div className={cn(STRIP, QUIET)}>
-        <Badge>cannot tell</Badge>
-        <span>
-          {state.why}. Last beat {clock(state.lastBeatAt)}.
-        </span>
-      </div>
-    );
-  }
-
-  if (state.state === 'thinking') {
-    return (
-      <div className={cn(STRIP, QUIET)}>
-        <Badge>thinking</Badge>
-        <span>
-          {/* Both clocks on one line, because the point is the comparison: the
-              child has been silent this long, and vibe heard from itself this
-              recently. Either number alone is the one that misleads. */}
-          no output for {state.outputMs === null ? 'the whole turn' : elapsed(state.outputMs)}
-          {state.activityMs !== null && <> · activity {elapsed(state.activityMs)} ago</>}
-        </span>
-      </div>
-    );
-  }
+  // `thinking` and `cannot tell` are drawn in the status bar (#267). Only the
+  // alarm takes a strip.
+  if (state.state !== 'not-live') return null;
 
   return (
     <div className={cn(STRIP, 'border-rule-strong bg-alarm text-primary')}>
@@ -117,5 +95,43 @@ export function StalenessStrip({
           conclusion rather than the quiet one. */}
       <Clocks state={state} hostPid={hostPid} />
     </div>
+  );
+}
+
+/**
+ * `thinking` and `cannot tell`, inline, for the status bar (#267).
+ *
+ * The same words the strip used, in the bar's own type: a badge and one line,
+ * truncating rather than wrapping, with the figures tabular so a second ticking
+ * over does not nudge the line. Null in every other state, and the bar draws it
+ * before the spacer that anchors its right half, so its arrival moves nothing.
+ */
+export function StalenessNote({ state }: { state: Staleness }) {
+  if (state.state === 'unknown') {
+    // Only worth saying when it is a limitation rather than an ordinary gap.
+    // "No turn is running" is the cockpit's normal resting state and needs no
+    // announcement; not knowing the cadence is a real thing to report.
+    if (state.why === null || state.lastBeatAt === null) return null;
+    return (
+      <span className="flex min-w-0 items-center gap-1.5 text-secondary">
+        <Badge>cannot tell</Badge>
+        <span className="truncate">
+          {state.why}. Last beat {clock(state.lastBeatAt)}.
+        </span>
+      </span>
+    );
+  }
+  if (state.state !== 'thinking') return null;
+  return (
+    <span className="flex min-w-0 items-center gap-1.5 text-secondary">
+      <Badge>thinking</Badge>
+      <span className="truncate tabular-nums">
+        {/* Both clocks on one line, because the point is the comparison: the
+            child has been silent this long, and vibe heard from itself this
+            recently. Either number alone is the one that misleads. */}
+        no output for {state.outputMs === null ? 'the whole turn' : elapsed(state.outputMs)}
+        {state.activityMs !== null && <> · activity {elapsed(state.activityMs)} ago</>}
+      </span>
+    </span>
   );
 }
