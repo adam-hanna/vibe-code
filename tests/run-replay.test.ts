@@ -644,3 +644,24 @@ test('a gate’s verdicts are said again, each attempt still naming its log (#24
   assert.equal(failed?.narration.data?.['type'], undefined);
   assert.equal(steps.find((s) => s.narration.id === 'verify_started')?.narration.data?.['gate'], 'core');
 });
+
+test('a gate’s verdicts land among the turns by time, not after them (#248)', () => {
+  // Verdicts are read from `events` after the turns, so this is what pins that
+  // the timeline is sorted: a verify pass that preceded a review must be folded
+  // into the code group it ran under, not the review that came after it.
+  const state = stateWith({
+    events: [
+      { at: iso(60_000), type: 'claude_turn', label: 'implement', tokens: 1 },
+      { at: iso(70_000), type: 'verify_failed', gate: 'core', round: 0, runs: 1, failed: 1, attempts: [] },
+      { at: iso(90_000), type: 'claude_turn', label: 'verify-fix-1', tokens: 1 },
+      { at: iso(95_000), type: 'verify_passed', gate: 'core', round: 0, runs: 1, attempts: [] },
+      { at: iso(120_000), type: 'codex_turn', label: 'review-0', tokens: 1 },
+    ],
+  });
+  const steps = replayRun(state, NOTHING).steps;
+  const order = steps.map((s) => `${s.narration.id}:${String(s.narration.data?.['phase'] ?? s.narration.data?.['gate'] ?? '')}`);
+  const reviewOpens = order.indexOf('phase_started:review');
+  assert.ok(reviewOpens > order.lastIndexOf('verify_passed:core'));
+  assert.ok(order.indexOf('verify_started:core') > order.indexOf('phase_started:implementing'));
+  for (let i = 1; i < steps.length; i += 1) assert.ok(steps[i - 1]!.at <= steps[i]!.at);
+});

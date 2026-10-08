@@ -69,12 +69,17 @@ describe('a fix turn reads as live', () => {
       say('verify_started', { gate: 'core', round: 0 }),
       say('verify_passed', { gate: 'core', round: 0, runs: 3, command: 'npm test', attempts: [] }),
     ]);
-    expect(verifyRowText(verifyRow(run)!)).toBe('core passed');
+    expect(verifyRowText(verifyRow(run)!)).toBe('core passed → fixing (round 1)');
+    // Once the next phase opens, the fix turn is closed and the suffix goes.
+    const after = fold([...verifyFix.slice(0, 7), say('verify_started', { gate: 'core', round: 0 }),
+      say('verify_passed', { gate: 'core', round: 0, runs: 3, command: 'npm test', attempts: [] }),
+      say('phase_started', { phase: 'review', round: 0 })]);
+    expect(verifyRowText(verifyRow(after)!)).toBe('core passed');
   });
 
-  test('a re-run in flight after a fix is not still described as being fixed', () => {
+  test('a re-run in flight after a fix is read as answering that fix', () => {
     const run = fold([...verifyFix, say('verify_started', { gate: 'core', round: 0 })]);
-    expect(verifyRowText(verifyRow(run)!)).toBe('running core');
+    expect(verifyRowText(verifyRow(run)!)).toBe('running core → fixing (round 1)');
   });
 
   test.each([

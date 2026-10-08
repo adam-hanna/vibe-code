@@ -1310,8 +1310,19 @@ export function Cockpit() {
    * does: a column showing the live run says so, an attempt card cannot.
    */
   const verifyOf = past && viewing !== null
-    ? { passes: opened.run?.verify ?? [], dir: viewing.dir, runId: viewing.runId }
-    : { passes: run.verify, dir: run.identity?.repo ?? shownDir, runId: run.identity?.runId ?? null };
+    ? {
+        passes: opened.run?.verify ?? [],
+        dir: viewing.dir,
+        runId: viewing.runId,
+        // Said rather than drawn as an empty run: the replay is still being
+        // read, or could not be, and the pane must not claim no gate ran.
+        waiting: opened.run !== null
+          ? null
+          : opened.failure !== null
+            ? `This run could not be read again: ${opened.failure}`
+            : 'Reading this run’s record…',
+      }
+    : { passes: run.verify, dir: run.identity?.repo ?? shownDir, runId: run.identity?.runId ?? null, waiting: null };
   /** One reading of the live turn's quiet, for the strip and the status bar (#267). */
   const quiet = staleness(run, now);
   // The run the pilot's conversation is about, for its log's round cards (#247).
@@ -1717,7 +1728,13 @@ export function Cockpit() {
           {tab === 'verify' && (
             // Keyed by the run, so an attempt log left open on one run is not
             // carried onto the next one opened.
-            <VerifyPane key={verifyOf.runId ?? 'none'} passes={verifyOf.passes} dir={verifyOf.dir} runId={verifyOf.runId} />
+            <VerifyPane
+              key={verifyOf.runId ?? 'none'}
+              passes={verifyOf.passes}
+              dir={verifyOf.dir}
+              runId={verifyOf.runId}
+              waiting={verifyOf.waiting}
+            />
           )}
           {tab === 'spend' && <SpendPane run={run} />}
           {tab === 'questions' && (

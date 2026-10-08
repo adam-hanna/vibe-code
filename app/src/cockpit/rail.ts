@@ -164,14 +164,13 @@ export function verifyRow(run: Run): VerifyRow | null {
   }
   const running = run.running;
   const gates = [...latest.values()];
-  // Only while the failure it answers is the latest word. The loop narrates no
-  // turn ending and `verify_started` does not close one, so after a verify-fix
-  // the re-run gate arrives with that turn still nominally open - and appending
-  // `→ fixing` to `running core` or `core passed` would claim a fix is under way
-  // that has already been handed back to the gate.
-  const answering = gates.some((g) => g.status === 'failed') && !gates.some((g) => g.status === 'running');
+  // Whenever the open turn is a verify-fix, as the brief settles it. The loop
+  // narrates no turn ending and `verify_started` does not close one, so the
+  // re-run of the gate arrives with the fix turn still open: `running core →
+  // fixing (round 1)` is then the pass answering that fix, which is the reading
+  // a person needs. The turn closes when the next phase starts.
   const fixing =
-    running !== null && running.kind === 'verify-fix' && answering
+    running !== null && running.kind === 'verify-fix'
       ? running.round === null
         ? '→ fixing'
         : `→ fixing (round ${running.round})`

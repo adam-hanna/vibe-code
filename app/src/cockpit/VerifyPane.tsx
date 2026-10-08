@@ -258,12 +258,28 @@ export function VerifyPane({
   passes,
   dir,
   runId,
+  waiting = null,
 }: {
   passes: readonly VerifyPass[];
   /** Where the run that wrote these passes lives - the logs are read from it (#248). */
   dir: string;
   runId: string | null;
+  /**
+   * Why there are no passes to draw yet, or null when the empty list is the
+   * run's own answer. An opened run's passes come from its replay, and until
+   * that arrives - or if it fails - an empty list is not *nothing reached the
+   * gate*; saying so would be a claim about the run this pane cannot make.
+   */
+  waiting?: string | null;
 }) {
+  if (passes.length === 0 && waiting !== null) {
+    return (
+      <div className={EMPTY}>
+        <Badge>not read yet</Badge>
+        <p className="m-0 max-w-md">{waiting}</p>
+      </div>
+    );
+  }
   if (passes.length === 0) {
     return (
       <div className={EMPTY}>
