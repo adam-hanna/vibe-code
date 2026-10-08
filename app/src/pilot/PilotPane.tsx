@@ -712,6 +712,19 @@ function ReplyCard({
   );
 }
 
+/**
+ * A brief handed over from the new-run dialog (#223), and which handover it is.
+ *
+ * `id` is the draft the brief was typed for. It is what the pane de-duplicates
+ * on, never the text: the text matched, so a second run started with the same
+ * brief was taken for the first one sent twice and dropped in silence, leaving
+ * that run's chat blank (#270).
+ */
+export interface Handover {
+  id: string;
+  message: string;
+}
+
 export interface PilotPaneProps {
   /** The run as the cockpit holds it. What `read_run` and `read_output` see. */
   run: Run;
@@ -829,7 +842,7 @@ export interface PilotPaneProps {
    *
    * Sent as something the PERSON said — not a `wake` — because they typed it.
    */
-  ask?: string | null | undefined;
+  ask?: Handover | null | undefined;
   /** Called once it has been said, so the same brief cannot be sent twice. */
   onAsked?: (() => void) | undefined;
   /**
@@ -1579,12 +1592,15 @@ ${frame.text}`, turn, origin.current))) {
    * at the one moment somebody is watching for it. The composer already says why
    * send is off.
    */
+  // The handover already said, by its id (#270). By value it swallowed a second
+  // run whose brief happened to match an earlier one.
   const asked = useRef<string | null>(null);
   useEffect(() => {
-    const want = ask ?? null;
-    if (want === null || want === asked.current) return;
+    const handed = ask ?? null;
+    if (handed === null || handed.id === asked.current) return;
     if (!ready || live !== null) return;
-    asked.current = want;
+    asked.current = handed.id;
+    const want = handed.message;
     // A person spoke, so the rope is new - the same reset `submit` does, since
     // this is the same act arriving through another door.
     chain.current = 0;
