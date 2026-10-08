@@ -93,6 +93,9 @@ export interface NowStatus {
  */
 export function nowStatus(run: Run): NowStatus {
   const isEmpty = run.identity === null && run.preflight === null && run.cycles.length === 0;
+  // Before everything: a run whose host has gone is not waiting, running or
+  // between turns, whatever was open when it went (#246).
+  if (run.lost !== null) return { title: 'Run host lost', detail: run.lost, tone: 'waiting' };
   if (run.gate !== null) {
     return { title: 'Needs your decision', detail: `Waiting at ${boundary(run.gate.boundary)}`, tone: 'waiting' };
   }

@@ -68,8 +68,9 @@ describe('an opened run is drawn by the column that drew it live', () => {
 
   test('the live host’s pid is withheld from a run this process is not running', () => {
     // A pid beside a finished run names a process that has nothing to do with
-    // it.
-    expect(cockpit).toMatch(/hostPid=\{past \? null : wire\.hostPid\}/);
+    // it. Since #246 the pid is the live run's own host, not the service host
+    // the window connected to, and it is still withheld from a past run.
+    expect(cockpit).toMatch(/hostPid=\{past \? null : runHostPid\}/);
   });
 
   test('the strip says the one thing an archive cannot say, once', () => {

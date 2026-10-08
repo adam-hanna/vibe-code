@@ -18,6 +18,12 @@
 //! of its own and should not grow a port, an allocation strategy and an auth
 //! story in order to talk to itself; the process boundary already exists.
 //!
+//! **The Node side is a set of processes, one per run** (#246). One long-lived
+//! *service* host answers everything that is not a run - reads, config writes,
+//! the pilot and commands - and every `invoke` gets a *run* host of its own that
+//! serves that one invoke and is closed after its `result`. Every relayed event
+//! carries the handle of the host it came from; see `host.rs`.
+//!
 //! **The webview is given no shell permission at all.** The host is spawned from
 //! here with a path this crate resolved, and `host_send` writes one line to a
 //! process that is already running. There is deliberately no command that takes
@@ -110,7 +116,7 @@ pub fn run() {
                 None => eprintln!("no app log could be opened; this session is console-only"),
             }
 
-            // Before the tray, and before a window can ask. The host process IS
+            // Before the tray, and before a window can ask. The service host IS
             // the app; a webview that fails to load should leave a running host
             // and a stderr line saying so, not a silent nothing.
             //
@@ -130,7 +136,8 @@ pub fn run() {
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "open" => show(app),
-                    // The one path that stops the host deliberately. Closing the
+                    // The one path that stops the hosts deliberately - every
+                    // one of them, the service host and each run's. Closing the
                     // window does not, because a run outliving its window is the
                     // normal case rather than an edge one.
                     "quit" => {

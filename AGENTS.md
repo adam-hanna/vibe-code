@@ -2140,6 +2140,7 @@ app/src/ui/          the shadcn components, over the tokens - button, badge, com
 app/src/cockpit/pane.ts    the artifact panes' shared layout, named once - nine subjects, one shape
 app/src/host.ts      the webview's end of the wire: typed frames, and nothing re-derived
 app/src/cockpit/model.ts   frames in, a run out - the ONLY logic in the app, and it is pure
+app/src/cockpit/hosts.ts   which host a frame came from, and what that means for the live run
 app/src/cockpit/format.ts  durations, counts, and the closed maps: boundaries and exit codes
 app/src/cockpit/           the loop column, the running row, the output pane, the gate footer
 app/src-tauri/       Rust: window, tray, single instance, spawning and relaying
@@ -2153,7 +2154,7 @@ app/src/cockpit/where.ts     where the window was pointed, kept between launches
 app/src/memory.ts            what the window remembers - host files behind a synchronous cache
 app/src/cockpit/models.ts    the four model listings the pickers draw, and nothing else
 app/src-tauri/src/pilot/models.rs  which models a stored key may use, asked of the vendor
-app/src-tauri/src/host.rs    supervising the host process, and the \\?\ path fix
+app/src-tauri/src/host.rs    supervising the hosts - the service host and one per run - and the \\?\ path fix
 app/src-tauri/src/reaper.rs  making a killed app take the host with it
 app/src-tauri/src/keys.rs    the OS keychain, and the read the window cannot reach
 app/src-tauri/src/pilot/     the only network code in the product - two adapters, one vocabulary
@@ -2179,6 +2180,95 @@ judgement about a run stays on the Node side. The relay parses exactly one thing
 line of stdout is JSON at all — and only so a line that is not can be labelled rather than
 passed off as a frame. **The moment Rust decides something about a run there are two
 definitions of a legal run.**
+
+**One host process per run, and the handle that routes it** (#246). The app used to be
+one Node host running one run at a time: `serve.ts` kept one `running` id and refused a
+second `invoke`. The fix is **a second process, never a second run inside one process** —
+`src/cancel.ts` and `src/prompts.ts` hold per-process latches, and `src/lock.ts` is written
+expecting one run per process, so all three stay exactly as they were.
+
+- **A service host and a run host per invoke.** The service host starts at launch, as the
+  single host did, and answers everything that is not a run: the reads, config writes,
+  `delete_run`, `answer_questions`, the pilot and commands. Every `invoke` — a new run, a
+  resume, an `--implement` — spawns a run host that serves that one invoke. `answer`,
+  `pause`, `unpause`, `cancel` and `shutdown` go to the run's own host.
+- **Every host is contained alike.** One builder, `host_command`, for every spawn:
+  `DETACHED_PROCESS`, the reaper's job, `strip_verbatim`, and applog lines that name the
+  host. **A run host has `VIBE_APP_DATA` removed, not merely unset** — it is inherited and a
+  login shell can export it, and a run host that saw it would adopt the service host's
+  command logs, two hosts following and able to stop one dev server.
+- **The envelope is the relay's, and PROTOCOL did not move.** Every `host://frame`, `log`
+  and `exit` carries `host`, the handle. A run id on the core's frames could never route a
+  run's first frames — preflight narrates before any run id exists — and the handle can,
+  because the window chose it (`run-<invoke id>`) before the host was spawned.
+  `run_started` is what maps a handle to a run. Nothing in the window is matched by "the
+  current run": a run frame reaches the reducer because its handle is the live one, and a
+  run host's `result` reaches it only if it carries the invoke's id, since a pause, an
+  unpause and a cancel are answered with `result` frames too.
+- **How a run host is closed, every way.** Rust closes it — the same stdin close a quit
+  uses (#206), then a kill after the grace — on the `result` carrying its invoke's id, which
+  `send` read off the invoke line; that is the one field Rust learns from an inbound line.
+  Only a `result`: every `result` id on a run host comes from the window's one allocator,
+  `nextRequestId`, where an `error`'s id may be a gate id the host allocated, so Rust never
+  correlates errors. An invoke that fails with an `error` is closed by the window sending
+  `shutdown`. A host that cannot be handed its keys or its invoke is closed by Rust before
+  `host_start` returns — the invoke travels *with* the start for exactly that reason, and a
+  run handle with no invoke, or a first line that is not one with an id, is refused before
+  anything is spawned. A host whose stdout ends is closed too, since nobody can hear it any
+  more.
+- **The window answers each gate once**, and that is what makes an `error` carrying the
+  invoke's id unambiguous: `serve.ts` refuses an answer only when its gate is not in `asks`,
+  and a gate leaves `asks` only by being answered or by the clear that runs after the
+  invoke's own outcome frame. The two counters can coincide; no range fences them apart.
+- **A host stays in the set until it has been reaped**, still listed by `host_status` and
+  still killable, and its exit is relayed only after it has been removed. So the status
+  read the window issues on an exit is the authoritative one, and reads carry a generation
+  so an older answer cannot overwrite it. `Status` keeps describing the service host and
+  lists run hosts under `runs`, so it never states a fact about a process it does not name.
+- **`Run.lost`, and `settled()`.** A run host that exits before its invoke returned ends
+  that run with the host-exit sentence: the turn, any gate and an unfinished preflight are
+  closed, because nothing is executing. It is neither `completed` — a host's exit code is
+  not one of a run's eight — nor `reason`, whose footer says the command has not returned
+  yet. `settled(run)` is the one spelling of *the command is over*, because `lost` is a
+  second way to be over and every site that asked only about `completed` would have held a
+  dead run open. The service host exiting is what "the host exited" has always meant.
+- **Two guards moved to the window**, because separate processes share no variable: a
+  second launch while a run is live is refused before the column resets, and a config
+  write while a run is live is refused with `serve.ts`'s own sentence. `serve.ts` keeps
+  both; inside one process they are still true. The pilot is never refused for a run.
+
+**And the core refuses a second run in one checkout.** `sameRepositoryRefusal` in
+`src/worktree.ts` runs in `main()` before the lock — before `allocateRun` on a start, so a
+refusal leaves no run directory, and before `acquireLock` on a resume. It reads every
+other run's lock under this repository's `.vibe/runs` through `livenessOf`, so a run
+started from a terminal counts too:
+
+| verdict | counts? |
+|---|---|
+| `running` | yes, named with its pid |
+| `unknown` | yes, and the refusal names the lock file — a lock vibe cannot read cannot be ruled out |
+| `interrupted`, `not-running` | no |
+| the run being resumed | never, against itself |
+
+It refuses only when either run would work in the repository itself: the live run has no
+worktree (`state.worktree`, read off its record — a record that cannot be read counts as
+none) or the new run would not get one. Both in worktrees is allowed. The sentence names
+the runs and `git.worktree`, with `EXIT.PREFLIGHT`, and it is a refusal, never a queue.
+**It looks twice.** The first look and the claim are two steps, so two starts could both
+pass the first; each looks again once its own lock is on disk, so whichever looks second
+sees the other, and a refusal then releases the lock (and on a start removes the directory
+it made). Two exactly simultaneous starts may both refuse, which is the fail-closed side —
+and it needs no repository-wide lock, a second kind of lock this file would have to
+explain.
+**It fails closed**: a runs directory that exists and cannot be read refuses, and so does
+an entry `lstat` cannot classify; only an absent directory and a measured link are passed
+over. `--force` does not reach it — it overrides the run's own lock, not another run's
+claim on the checkout. **`vibe fork` is not checked**: it creates a directory, a lock and
+a branch ref and stops, touching no working tree, and the fork runs only through a resume,
+which is checked. **A nested `-C` is not caught**: a run given `repo/sub` keeps its archive
+in `repo/sub/.vibe/runs`, by the settled rule that `.vibe/runs` lives where the run was
+given, and finding it from `repo` would need an unbounded walk of descendant archives and
+a second answer to which runs a directory holds.
 
 The webview is given **no shell permission at all**. The host is spawned from Rust with a
 path Rust resolved, and `host_send` writes one line to a process that is already running.

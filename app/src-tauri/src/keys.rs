@@ -131,16 +131,30 @@ pub fn clear(provider: Provider) -> Result<(), String> {
 /// the host is what spawns them. The key is never emitted, never logged, never
 /// returned to the window and never written down anywhere else in this crate.
 pub(crate) fn read(provider: Provider) -> Result<String, String> {
-    match entry(provider)?.get_password() {
-        Ok(key) => Ok(key),
-        Err(keyring::Error::NoEntry) => Err(format!(
-            "no {} key is stored",
-            match provider {
-                Provider::Anthropic => "Anthropic",
-                Provider::Openai => "OpenAI",
-            }
-        )),
-        Err(e) => Err(format!("the keychain refused to read it: {e}")),
+    entry(provider)
+        .map_err(|why| format!("the {} key could not be read: {why}", vendor(provider)))?
+        .get_password()
+        .map_err(|e| read_error(provider, &e))
+}
+
+/// The vendor's name as a person reads it.
+fn vendor(provider: Provider) -> &'static str {
+    match provider {
+        Provider::Anthropic => "Anthropic",
+        Provider::Openai => "OpenAI",
+    }
+}
+
+/// What a failed read says. **Every branch names the provider**: the sentence
+/// reaches the pilot pane, and somebody who configured one of two keys cannot
+/// act on "the keychain refused" without being told which. Only the absent
+/// branch used to - a locked keychain or a secret service that hung up
+/// (`DBus error: Remote peer disconnected`, seen on this repo's Linux VM) said
+/// nothing about which key it was reading.
+fn read_error(provider: Provider, e: &keyring::Error) -> String {
+    match e {
+        keyring::Error::NoEntry => format!("no {} key is stored", vendor(provider)),
+        e => format!("the keychain refused to read the {} key: {e}", vendor(provider)),
     }
 }
 
@@ -182,14 +196,14 @@ pub fn key_set(
     host: tauri::State<'_, crate::host::HostProcess>,
 ) -> Result<(), String> {
     set(provider, &key)?;
-    let _ = host.send_keys();
+    let _ = host.send_keys(None);
     Ok(())
 }
 
 #[tauri::command]
 pub fn key_clear(provider: Provider, host: tauri::State<'_, crate::host::HostProcess>) -> Result<(), String> {
     clear(provider)?;
-    let _ = host.send_keys();
+    let _ = host.send_keys(None);
     Ok(())
 }
 
@@ -255,6 +269,26 @@ mod tests {
                 assert!(why.contains(name), "{why:?} should name {name}");
                 // And it must never quote what it failed to read.
                 assert!(!why.contains("sk-"), "an error must not carry a key");
+            }
+        }
+    }
+
+    #[test]
+    fn every_way_a_read_fails_names_the_provider() {
+        // The branch `a_missing_key_is_refused_by_name` reaches depends on the
+        // machine's keychain - absent on a quiet one, a platform failure when
+        // the secret service hangs up - so each branch is checked here without
+        // it, against the same claim.
+        let platform = || {
+            keyring::Error::PlatformFailure(Box::new(std::io::Error::other(
+                "DBus error: Remote peer disconnected",
+            )))
+        };
+        for provider in Provider::ALL {
+            let name = vendor(provider);
+            for e in [keyring::Error::NoEntry, platform()] {
+                let why = read_error(provider, &e);
+                assert!(why.contains(name), "{why:?} should name {name}");
             }
         }
     }

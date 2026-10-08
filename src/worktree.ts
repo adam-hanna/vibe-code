@@ -1,6 +1,10 @@
 import path from 'node:path';
-import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { gitBin, isRepo } from '@src/git.js';
+import { livenessOf, lockPath, probePid } from '@src/lock.js';
+import type { LivenessVerdict, PidProbe } from '@src/lock.js';
+import { entryVerdict, RUNS_DIR, runEntryLinkage } from '@src/run.js';
+import type { RunEntryLinkage } from '@src/run.js';
 import { run } from '@src/proc.js';
 import { runUserCommand } from '@src/verify.js';
 import type { RunState } from '@src/types.js';
@@ -275,4 +279,134 @@ async function runSetup(
       '(when branch isolation is on) VIBE_BRANCH set, ' +
       'and must leave a git working tree at VIBE_WORKTREE.',
   };
+}
+
+/**
+ * Whether a run on disk was started with a worktree of its own (#246).
+ *
+ * Read straight off `state.json` rather than through `loadRun`, because `loadRun`
+ * writes - it records repairs and ensures the ignore file - and this is asked of
+ * runs that belong to some other process. **Any failure is `false`**: a run
+ * whose record cannot be read cannot be shown to be working anywhere but the
+ * repository itself, and that is the answer that refuses.
+ */
+export function storedWorktree(runDir: string): boolean {
+  try {
+    const raw: unknown = JSON.parse(readFileSync(path.join(runDir, 'state.json'), 'utf8'));
+    return typeof raw === 'object' && raw !== null && (raw as Record<string, unknown>)['worktree'] === true;
+  } catch {
+    return false;
+  }
+}
+
+/** What one entry under `.vibe/runs` contributes to the refusal. */
+export type EntryConflict =
+  /** Not a live run here, or one that cannot collide: nothing to say. */
+  | null
+  /** A live run, or one vibe cannot rule out, and the clause naming it. */
+  | { clause: string; worktree: boolean };
+
+/**
+ * The per-entry half of `sameRepositoryRefusal`, pure so the branches no portable
+ * fixture can reach - an `lstat` that throws - are tested directly, the way
+ * `entryVerdict`'s own test does it.
+ *
+ * - A **link** is skipped and nothing is read through it (#53). vibe never
+ *   makes one, so it is not a run this process could be racing.
+ * - Everything else is asked of its lock, **a plain file included**: `entryVerdict`
+ *   calls it `readable`, and its lock read fails with `ENOTDIR`, which
+ *   `livenessOf` calls `unknown`. vibe never writes a file into `.vibe/runs`, so
+ *   one there is something nobody can account for - and the settled rule is that
+ *   only an absent root and a measured link are passed over.
+ * - An entry `lstat` could not classify **counts, with no worktree**: it cannot
+ *   be ruled out as a live run, which is `lock.ts`'s fail-closed rule.
+ * - Otherwise the lock's verdict decides: `running` and `unknown` count,
+ *   `interrupted` and `not-running` do not. An `unknown` names its lock file,
+ *   because that is the file a person has to go and look at.
+ */
+export function entryConflict(
+  id: string,
+  dir: string,
+  linkage: RunEntryLinkage,
+  verdict: () => LivenessVerdict,
+  worktree: () => boolean,
+): EntryConflict {
+  const kind = entryVerdict(linkage);
+  if (kind === 'linked') return null;
+  if (kind === 'unverified') {
+    return { clause: `${id} (vibe could not classify this entry, so it cannot rule out a live run)`, worktree: false };
+  }
+  const v = verdict();
+  if (v.liveness === 'running') {
+    return { clause: `${id} (running, pid ${v.lock?.pid ?? 'unknown'})`, worktree: worktree() };
+  }
+  if (v.liveness === 'unknown') {
+    return {
+      clause:
+        `${id} (its lock at ${lockPath(dir)} could not be read or was written on another machine, ` +
+        'so vibe cannot rule out a live run)',
+      worktree: worktree(),
+    };
+  }
+  return null;
+}
+
+/**
+ * Why a run may not start or resume here, or null (#246).
+ *
+ * The app runs one host process per run, so two runs can now be going at once -
+ * and two runs working in **one checkout** would edit the same files and move
+ * the same branch under each other. That is the case refused here, and only that
+ * case: a live run with no worktree, or a new run that would not get one. When
+ * both work in worktrees of their own nothing is shared but the archive, which
+ * was always written to by one run per directory.
+ *
+ * It reads every other run's lock under this repository's `.vibe/runs` through
+ * `livenessOf`, so a run started from a terminal is seen as well as one the app
+ * started. **It fails closed**: a runs directory that exists but cannot be read
+ * refuses, and so does an entry that cannot be classified. Only an absent
+ * directory and an entry measured to be a link are passed over.
+ *
+ * Never writes and never throws. It is a refusal, never a queue - a queue would
+ * leave somebody waiting with no way to know they were waiting.
+ *
+ * `probe` is `livenessOf`'s seam, for the reason `PidProbe` gives.
+ */
+export function sameRepositoryRefusal(
+  targetDir: string,
+  opts: { self: string | null; worktree: boolean; probe?: PidProbe },
+): string | null {
+  const root = path.join(targetDir, RUNS_DIR);
+  let entries: string[];
+  try {
+    entries = readdirSync(root);
+  } catch (err: unknown) {
+    const code = (err as { code?: unknown } | null)?.code;
+    if (code === 'ENOENT') return null;
+    return (
+      `vibe could not read ${root} (${typeof code === 'string' ? code : 'unknown error'}), so it cannot ` +
+      'rule out another run working in this repository. Nothing was created.'
+    );
+  }
+  const probe = opts.probe ?? probePid;
+  const clauses: string[] = [];
+  for (const id of entries.sort()) {
+    if (id === opts.self) continue;
+    const dir = path.join(root, id);
+    const found = entryConflict(
+      id,
+      dir,
+      runEntryLinkage(root, id),
+      () => livenessOf(dir, undefined, probe),
+      () => storedWorktree(dir),
+    );
+    if (found === null) continue;
+    if (!found.worktree || !opts.worktree) clauses.push(found.clause);
+  }
+  if (clauses.length === 0) return null;
+  return (
+    `Another run is working in this repository: ${clauses.join('; ')}. Two runs working in one ` +
+    'checkout would edit the same files and branch at once. Wait for it to finish or stop it, or set ' +
+    'git.worktree to true so each run works in a checkout of its own. Nothing was created.'
+  );
 }

@@ -166,6 +166,10 @@ describe('the run in the prompt is the run read_run reports', () => {
       'cycles',
       'ended',
       'gate',
+      // The run's host gone before it returned (#246): beside `completed`,
+      // because a model told only `completed: null` would read a dead run as
+      // live.
+      'lost',
       'protocol',
       'questions',
       'reason',

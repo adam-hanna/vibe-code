@@ -202,6 +202,22 @@ export function Footer({
   // boundaries hold rather than nothing at all.
   const next = gates === null ? null : nextHold(order, gates, run.lastGate);
 
+  // **The process running this run has gone** (#246), before every other
+  // branch: a gate, a pause or a stop all need a host to answer them, and the
+  // run cannot have returned an exit code, so none of what follows is true of it.
+  if (run.lost !== null) {
+    return (
+      <div className={cn(FOOT, 'border-t-2 border-emphasis bg-active')}>
+        <div className="flex items-center gap-2">
+          <Badge variant="alarm">run host</Badge>
+          <span className={DETAIL}>the process running this run has gone.</span>
+        </div>
+        <div className={WHY}>{run.lost}</div>
+        <div className={NOTE}>Nothing is running it now. Open it from the runs list to resume.</div>
+      </div>
+    );
+  }
+
   // A waiting gate outranks everything, including a run that has said it is
   // done. `review_approved` fires while the loop is still going - verification,
   // commits and the summary all follow it - so a footer that let `ended` win
