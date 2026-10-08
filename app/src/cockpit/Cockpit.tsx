@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { Activity, PanelRightClose, PanelRightOpen, Terminal, X } from 'lucide-react';
 import { usePanelRef } from 'react-resizable-panels';
 import type { Layout, LayoutChangedMeta, PanelImperativeHandle } from 'react-resizable-panels';
@@ -48,6 +48,7 @@ import {
   DRAFTS_KEY,
   addDraft,
   bindDraft,
+  draftHasNoRun,
   namesAfterStart,
   markLaunched,
   newDraft,
@@ -1441,7 +1442,10 @@ export function Cockpit() {
    * failed leaves it there with the failure said beside it — a column showing
    * one run while claiming to show another is the confusion this set out to fix.
    */
-  const columnRun = past && opened.run !== null ? opened.run : run;
+  // A draft not yet started has no run, so the column is drawn empty rather than
+  // falling through to the window's last live run.
+  const blank = useMemo(() => emptyRun(), []);
+  const columnRun = draftHasNoRun(drafting) ? blank : past && opened.run !== null ? opened.run : run;
   /**
    * The verification passes the Verify tab draws, and the run whose directory
    * their logs are read from - **one run, never two** (#248). Each attempt opens
