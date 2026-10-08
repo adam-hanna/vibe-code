@@ -158,3 +158,33 @@ test('a gate still asks the same question whether or not a pause opened it', asy
   session.shutdown();
   await session.finished();
 });
+
+test('an unpause frame is a request this version understands (#276)', () => {
+  const read = decode(line({ type: 'unpause', id: 4 }));
+  assert.deepEqual(read.ok ? read.message : null, { type: 'unpause', id: 4 });
+});
+
+test('a pause can be taken back before a boundary reaches it, and says it was (#276)', () => {
+  const { sent, session } = idle();
+  session.receive(line({ type: 'pause', id: 1 }));
+  session.receive(line({ type: 'unpause', id: 2 }));
+  // 0: there was an armed pause, and it is gone.
+  assert.deepEqual(sent.at(-1), { type: 'result', id: 2, exit: 0 });
+  assert.equal(session.host.takePause?.(), false, 'the next boundary finds nothing to hold for');
+});
+
+test('too late is told, not an error: the boundary already took it (#276)', () => {
+  const { sent, session } = idle();
+  session.receive(line({ type: 'pause', id: 1 }));
+  assert.equal(session.host.takePause?.(), true, 'the boundary took it');
+  session.receive(line({ type: 'unpause', id: 2 }));
+  // 1: nothing was armed. The run is holding, and its ask is how that is answered.
+  assert.deepEqual(sent.at(-1), { type: 'result', id: 2, exit: 1 });
+});
+
+test('an unpause with nothing armed changes nothing', () => {
+  const { sent, session } = idle();
+  session.receive(line({ type: 'unpause', id: 7 }));
+  assert.deepEqual(sent, [{ type: 'result', id: 7, exit: 1 }]);
+  assert.equal(session.host.takePause?.(), false);
+});

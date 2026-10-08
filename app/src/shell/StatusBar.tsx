@@ -1,4 +1,4 @@
-import { Ellipsis, Pause, Play, Square } from 'lucide-react';
+import { Ellipsis, Pause, Play, Square, X } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
@@ -43,6 +43,7 @@ export function StatusBar({
   busy,
   onDecide,
   onPause,
+  onUnpause,
   onStop,
   pausing,
   stopping,
@@ -66,6 +67,8 @@ export function StatusBar({
   busy: boolean;
   onDecide: (askId: number, decision: { kind: 'continue' } | { kind: 'stop'; reason: string }) => void;
   onPause: () => void;
+  /** Take back a pause not yet reached (#276). */
+  onUnpause: () => void;
   onStop: () => void;
   pausing: boolean;
   /** A stop was asked for and the core has not answered yet (#253). */
@@ -164,11 +167,12 @@ export function StatusBar({
           <Button
             size="sm"
             variant="quiet"
-            disabled={busy || pausing || stopping}
-            onClick={onPause}
-            title={pausing ? 'The run will wait after the current step.' : 'Let the current step finish, then wait before the next one. Nothing is lost.'}
+            disabled={busy || stopping}
+            // Taken back from here too, while the run has not reached it (#276).
+            onClick={pausing ? onUnpause : onPause}
+            title={pausing ? 'The run will wait after the current step. Press to take that back.' : 'Let the current step finish, then wait before the next one. Nothing is lost.'}
           >
-            <Pause className="size-3" aria-hidden /> {pausing ? 'pausing after this step' : 'pause'}
+            {pausing ? <X className="size-3" aria-hidden /> : <Pause className="size-3" aria-hidden />} {pausing ? 'cancel pause' : 'pause'}
           </Button>
           {/* One name for one action (#253): the footer and the confirmation say `Stop run` too. */}
           <Button

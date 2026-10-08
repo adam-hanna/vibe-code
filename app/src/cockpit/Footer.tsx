@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Info, Pause, Play, SkipForward, Square } from 'lucide-react';
+import { Info, Pause, Play, SkipForward, Square, X } from 'lucide-react';
 import { LivenessDot } from '../design';
 import { Badge } from '@/ui/badge';
 import { Button } from '@/ui/button';
@@ -30,6 +30,8 @@ export interface FooterProps {
   onDecide: (askId: number, decision: { kind: 'continue' } | { kind: 'stop'; reason: string }) => void;
   /** Hold at the next boundary. Costs nothing (#210). */
   onPause: () => void;
+  /** Take back a pause not yet reached (#276). */
+  onUnpause: () => void;
   /** Kill the turn in flight and end the run, resumably (#209). Confirms first. */
   onStop: () => void;
   /**
@@ -175,6 +177,7 @@ export function Footer({
   run,
   onDecide,
   onPause,
+  onUnpause,
   onStop,
   onResume,
   onImplement,
@@ -715,13 +718,15 @@ export function Footer({
             <Button
               variant="secondary"
               size="sm"
-              disabled={busy || pausing}
-              onClick={onPause}
-              title={pausing ? 'The run will wait after the current step.' : 'Let the current step finish, then wait before the next one. Nothing is lost.'}
-              aria-label={pausing ? 'Pausing after this step' : 'Pause after this step'}
+              disabled={busy}
+              // An armed pause can be taken back until the run reaches it (#276):
+              // the same control, saying what pressing it now does.
+              onClick={pausing ? onUnpause : onPause}
+              title={pausing ? 'The run will wait after the current step. Press to take that back.' : 'Let the current step finish, then wait before the next one. Nothing is lost.'}
+              aria-label={pausing ? 'Cancel pause' : 'Pause after this step'}
             >
-              <Pause size={14} aria-hidden="true" />
-              <span>{pausing ? 'Pausing after this step' : 'Pause'}</span>
+              {pausing ? <X size={14} aria-hidden="true" /> : <Pause size={14} aria-hidden="true" />}
+              <span>{pausing ? 'Cancel pause' : 'Pause'}</span>
             </Button>
             <Button
               variant="secondary"

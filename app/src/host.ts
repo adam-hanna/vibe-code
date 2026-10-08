@@ -713,6 +713,15 @@ export function pause(): Promise<void> {
   return send({ type: 'pause', id: nextRequestId() });
 }
 
+/**
+ * Take back an armed pause (#276). Answered with whether there was one, which
+ * the window does not need: a pause the boundary already took is a gate on
+ * screen, and that is how it is answered.
+ */
+export function unpause(): Promise<void> {
+  return send({ type: 'unpause', id: nextRequestId() });
+}
+
 export function cancel(reason: string): Promise<void> {
   return send({ type: 'cancel', id: nextRequestId(), reason });
 }

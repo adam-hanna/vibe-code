@@ -1070,6 +1070,20 @@ export function Cockpit() {
     });
   }, [note]);
 
+  /**
+   * Take back an armed pause (#276). The window stops saying it is pausing at
+   * once; a pause the boundary already took is a gate on screen by now, and the
+   * effect below clears `pausing` for that case too.
+   */
+  const unpause = useCallback(() => {
+    setPausing(false);
+    void host.unpause().catch((err: unknown) => {
+      // Not re-armed: the request may well have landed, and claiming a hold
+      // the host may no longer hold is the worse of the two errors.
+      note('log', String(err));
+    });
+  }, [note]);
+
   const stop = useCallback(
     (reason: string) => {
       setConfirmStop(false);
@@ -1326,6 +1340,7 @@ export function Cockpit() {
     // link went at the owner's word, and a tab for it is how the bar got to twelve.
     goRuns: () => setTab('runs'),
     pause: () => pause(),
+    unpause: () => unpause(),
     stop: () => setConfirmStop(true),
     gateContinue: () => {
       if (run.gate !== null) answer(run.gate.askId, { kind: 'continue' });
@@ -1407,6 +1422,7 @@ export function Cockpit() {
         actions={available({
           live: run.running !== null || run.preflight !== null,
           gate: run.gate !== null,
+          pausing,
           past,
           inShell: !outside,
         })}
@@ -2119,6 +2135,7 @@ export function Cockpit() {
               busy={busy}
               onDecide={answer}
               onPause={pause}
+              onUnpause={unpause}
               onStop={() => setConfirmStop(true)}
               onResume={resume}
               onImplement={implement}
@@ -2150,6 +2167,7 @@ export function Cockpit() {
         busy={busy}
         onDecide={answer}
         onPause={pause}
+        onUnpause={unpause}
         onStop={() => setConfirmStop(true)}
         pausing={pausing}
         stopping={stopping}
