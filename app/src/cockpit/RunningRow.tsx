@@ -3,7 +3,7 @@ import { Badge } from '@/ui/badge';
 import { cn } from '@/lib/utils';
 import { clock, counted, elapsed, tokens, work } from './format';
 import { runningRow } from './model';
-import type { ArchiveTurns, Turn } from './model';
+import type { ArchiveView, Turn } from './model';
 
 /**
  * `6a` — the element on screen longer than anything else in the app.
@@ -75,7 +75,7 @@ export function RunningRow({
   now: number;
   live?: boolean;
   /** The archive's per-kind token distributions, or null while unread. */
-  archive?: ArchiveTurns | null;
+  archive?: ArchiveView;
 }) {
   const row = runningRow(turn, now, archive);
 

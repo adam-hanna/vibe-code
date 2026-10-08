@@ -2192,6 +2192,14 @@ export interface RunningRow {
 export type ArchiveTurns = ArchiveStats['turns'];
 
 /**
+ * The archive as the window holds it for the current repository and run: the
+ * distributions, the host's sentence for why they could not be read, or null
+ * while they have not been read. Three states, because *not read yet* and *the
+ * read failed* are different absences and each is drawn with its own reason.
+ */
+export type ArchiveView = ArchiveTurns | { failure: string } | null;
+
+/**
  * How past turns of this kind went, by tokens (#114, `6a`).
  *
  * **Tokens and never time.** The archive records no turn durations, and the
@@ -2208,10 +2216,13 @@ export type ArchiveTurns = ArchiveStats['turns'];
  */
 export function comparableLine(
   kind: string,
-  archive: ArchiveTurns | null,
+  archive: ArchiveView,
 ): { text: string; measured: boolean } {
   if (archive === null) {
     return { text: 'comparable turns — this archive has not been read yet', measured: false };
+  }
+  if ('failure' in archive) {
+    return { text: `comparable turns — the archive could not be read: ${archive.failure}`, measured: false };
   }
   const seen = archive.byKind[kind];
   if (seen === undefined || seen.turns === 0 || seen.median === null || seen.p90 === null) {
@@ -2238,7 +2249,27 @@ export function statsEpoch(run: Run): string {
   return `${run.identity?.runId ?? ''}:${run.completed === null ? 'open' : 'ended'}`;
 }
 
-export function runningRow(turn: Turn, now: number, archive: ArchiveTurns | null = null): RunningRow {
+/** A scorecard answer, stamped with the repository and epoch it was read for. */
+export interface HeldStats {
+  dir: string;
+  epoch: string;
+  scorecard: ArchiveStats | null;
+  failure: string | null;
+}
+
+/**
+ * What the window may draw from a held answer for the repository and epoch it
+ * is on now (#114): the answer only if it was read for exactly those, else
+ * null - *not read yet*. A scorecard for another repository, or one read before
+ * the run that just ended joined the archive, is never quoted under this turn.
+ */
+export function archiveView(held: HeldStats | null, dir: string, epoch: string): ArchiveView {
+  if (held === null || held.dir !== dir || held.epoch !== epoch) return null;
+  if (held.failure !== null) return { failure: held.failure };
+  return held.scorecard?.turns ?? null;
+}
+
+export function runningRow(turn: Turn, now: number, archive: ArchiveView = null): RunningRow {
   const beat = turn.beat;
   // Both clocks stop when the turn does. A turn drawn after it ended - which is
   // every turn a held gate is showing the result of - has a final elapsed and a

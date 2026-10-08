@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import * as host from '../host';
-import type { ArchiveStats } from '../host';
+import { archiveView } from './model';
+import type { ArchiveView, HeldStats } from './model';
 
 /**
  * The archive's scorecard for the repository on screen (#114).
@@ -11,38 +12,37 @@ import type { ArchiveStats } from '../host';
  * finished. **No timer**: the archive only changes when a run ends, so polling
  * would re-read every state.json to learn nothing.
  *
- * A fetch and a cache, like `useArtifacts`: what the numbers mean is decided in
- * `model.ts`, which is pure and tested.
+ * **An answer is only drawn for the request that asked it.** Each result is
+ * held with the `dir` and `epoch` it was read for, and `archiveView` returns it
+ * only while those are still current - so until the new answer arrives the line
+ * says *not read yet* rather than quoting another repository's archive. Checked
+ * at render rather than cleared in the effect, because an effect runs after the
+ * render that would already have drawn the stale figure. A failed read keeps
+ * the host's sentence, so the line can say why there is no figure.
+ *
+ * A fetch and a cache, like `useArtifacts`: the rule is `archiveView`, which is
+ * pure and tested.
  */
-export function useStats(dir: string, epoch: string): { scorecard: ArchiveStats | null; failure: string | null } {
-  const [scorecard, setScorecard] = useState<ArchiveStats | null>(null);
-  const [failure, setFailure] = useState<string | null>(null);
+export function useStats(dir: string, epoch: string): ArchiveView {
+  const [held, setHeld] = useState<HeldStats | null>(null);
 
   useEffect(() => {
-    if (dir.trim() === '' || !host.inShell()) {
-      setScorecard(null);
-      setFailure(null);
-      return;
-    }
+    if (dir.trim() === '' || !host.inShell()) return;
     let cancelled = false;
     void host
       .stats(dir)
-      .then((got) => {
-        if (cancelled) return;
-        setScorecard(got);
-        setFailure(null);
+      .then((scorecard) => {
+        if (!cancelled) setHeld({ dir, epoch, scorecard, failure: null });
       })
       .catch((err: unknown) => {
-        if (cancelled) return;
-        // Cleared rather than kept: another repository's distributions under
-        // this one's turn would be a comparison with the wrong archive.
-        setScorecard(null);
-        setFailure(err instanceof Error ? err.message : String(err));
+        if (!cancelled) {
+          setHeld({ dir, epoch, scorecard: null, failure: err instanceof Error ? err.message : String(err) });
+        }
       });
     return () => {
       cancelled = true;
     };
   }, [dir, epoch]);
 
-  return { scorecard, failure };
+  return archiveView(held, dir, epoch);
 }

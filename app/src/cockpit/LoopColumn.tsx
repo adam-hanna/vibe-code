@@ -12,7 +12,7 @@ import type { BottomTab, Tab } from './where';
 import { findTurn, nowStatus, RAIL_TITLE, turnGroup, verifyRow, verifyRowText } from './rail';
 import type { RailState, VerifyRow } from './rail';
 import { RunningRow } from './RunningRow';
-import type { ArchiveTurns } from './model';
+import type { ArchiveView } from './model';
 import type { KeyboardEvent } from 'react';
 import { runningRow } from './model';
 import type { Census, CycleKind, PhaseGroup, Preflight, QuestionRound, ResumedFrom, Run, Turn } from './model';
@@ -124,7 +124,7 @@ function Version({
   turn: Turn;
   draw: Draw;
   now: number;
-  archive: ArchiveTurns | null;
+  archive: ArchiveView;
 }) {
   if (draw !== 'done') return <RunningRow turn={turn} now={now} live={draw === 'live'} archive={archive} />;
   return (
@@ -192,7 +192,7 @@ function Round({
   runningId: number | null;
   settledId: number | null;
   now: number;
-  archive: ArchiveTurns | null;
+  archive: ArchiveView;
 }) {
   const turns = phase.turns.filter((t) => !isAnswerer(t));
   const answerers = phase.turns.filter(isAnswerer);
@@ -359,7 +359,7 @@ function Questions({
   runningId: number | null;
   settledId: number | null;
   now: number;
-  archive: ArchiveTurns | null;
+  archive: ArchiveView;
 }) {
   const outstanding = questions.open.filter((q) => q.answer === null && !q.declined).length;
   const go = onOpen === undefined ? null : () => { onOpen('questions', questions.round); };
@@ -747,7 +747,7 @@ export function LoopColumn({
    * The archive's per-kind token distributions (#114), for the comparable-turns
    * line. Null while the scorecard has not been read, which the line says.
    */
-  archive?: ArchiveTurns | null;
+  archive?: ArchiveView;
   /** A fact about this window's process, not about the run. Hi-fi 16 draws it. */
   hostPid?: number | null;
   /**
@@ -1086,7 +1086,7 @@ function RunRail({
   run: Run;
   now: number;
   onOpen?: OpenAt | undefined;
-  archive: ArchiveTurns | null;
+  archive: ArchiveView;
 }) {
   const currentTurn = run.running ?? findTurn(run, run.gate?.turnId ?? null);
   const currentKind = currentTurn === null ? null : turnGroup(run, currentTurn.id);

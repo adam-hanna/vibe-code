@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest';
-import { comparableLine, emptyRun, nextRun, reduce, runningRow, statsEpoch } from './model';
+import { archiveView, comparableLine, emptyRun, nextRun, reduce, runningRow, statsEpoch } from './model';
 import type { ArchiveTurns, Run } from './model';
-import type { Frame } from '../host';
+import type { ArchiveStats, Frame } from '../host';
 
 /**
  * The comparable-turns line, and when the window re-reads the archive (#114).
@@ -78,5 +78,28 @@ describe('when the scorecard is re-read', () => {
     expect(after).not.toBe(before);
 
     expect(statsEpoch(nextRun(ended))).not.toBe(after);
+  });
+});
+
+describe('which answer the window may draw', () => {
+  const card: ArchiveStats = { version: 1, turns: ARCHIVE };
+
+  test('an answer is drawn only for the repository and epoch it was read for', () => {
+    const held = { dir: '/a', epoch: 'r1:open', scorecard: card, failure: null };
+    expect(archiveView(held, '/a', 'r1:open')).toBe(ARCHIVE);
+    // Pointed at another repository: that archive is not this one's.
+    expect(archiveView(held, '/b', 'r1:open')).toBeNull();
+    // The run ended: the held answer is missing it, so it is not quoted.
+    expect(archiveView(held, '/a', 'r1:ended')).toBeNull();
+    expect(archiveView(null, '/a', 'r1:open')).toBeNull();
+  });
+
+  test('a failed read keeps its reason, and the line says it', () => {
+    const view = archiveView({ dir: '/a', epoch: 'e', scorecard: null, failure: 'disk on fire' }, '/a', 'e');
+    expect(view).toEqual({ failure: 'disk on fire' });
+    const line = comparableLine('critique', view);
+    expect(line.measured).toBe(false);
+    expect(line.text).toMatch(/could not be read: disk on fire/);
+    expect(line.text).not.toMatch(/not been read yet/);
   });
 });

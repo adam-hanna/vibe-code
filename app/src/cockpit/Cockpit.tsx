@@ -1254,7 +1254,7 @@ export function Cockpit() {
   const shownDir = viewing?.dir ?? drafting?.dir ?? run.identity?.repo ?? repoDir;
   // The archive's scorecard for the repository on screen (#114), re-read when
   // the LIVE run ends, because that is the run whose record just joined it.
-  const stats = useStats(shownDir, statsEpoch(run));
+  const archive = useStats(shownDir, statsEpoch(run));
   // Which conversation the pilot shows: the one on screen, or the one that
   // proposed a launch still waiting for its run id (see `holdChat`).
   const pilotDir = holdChat?.dir ?? shownDir;
@@ -2155,7 +2155,7 @@ export function Cockpit() {
                 compact
                 hostPid={past ? null : wire.hostPid}
                 onOpen={open}
-                archive={stats.scorecard?.turns ?? null}
+                archive={archive}
               />
               {/* `4g`, and only on the ending that means the loop finished.
                   Every other exit is a halt, and a halt gets the footer's
