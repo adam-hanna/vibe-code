@@ -379,7 +379,8 @@ describe('a resumed run keeps the column it already had', () => {
     // the run."* `reduce` builds a `Run` from the frames THIS process narrates,
     // and a resume narrates only what happens from the resume onwards — so a run
     // three plan rounds deep came back showing one.
-    expect(cockpit).toMatch(/seed = forResume\(foldReplay\(got\.steps\)\)/);
+    // Followed by the instant the open turn is closed at (#302).
+    expect(cockpit).toMatch(/seed = forResume\(foldReplay\(got\.steps\), /);
     // Case 2 (#246): the seed is handed to `launch`, which makes it the new
     // run's own `Run`, rather than dispatched into the one reducer.
     expect(cockpit).toMatch(/launch\(argv, null, seed, task\);/);
@@ -407,7 +408,9 @@ describe('a resumed run keeps the column it already had', () => {
     // no reset can erase it. What the old pin guarded still holds, by
     // construction rather than by order.
     const body = cockpit.slice(cockpit.indexOf('const continueRun = useCallback'));
-    const fold = body.indexOf('seed = forResume(foldReplay(got.steps))');
+    // The fold's call gained the instant the open turn is closed at (#302), so
+    // the anchor is the call's head rather than its whole argument list.
+    const fold = body.indexOf('seed = forResume(foldReplay(got.steps), ');
     const launched = body.indexOf('launch(argv, null, seed, task);');
     expect(fold).toBeGreaterThan(-1);
     expect(launched).toBeGreaterThan(fold);

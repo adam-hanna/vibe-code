@@ -1267,7 +1267,9 @@ export function Cockpit() {
       void host
         .replay(dir, runId)
         .then((got) => {
-          seed = forResume(foldReplay(got.steps));
+          // Stripped of the previous ending: a resume has not stopped, and
+          // seeding one would draw a halt banner over a run that is starting.
+          seed = forResume(foldReplay(got.steps), got.steps[got.steps.length - 1]?.at ?? Date.now());
         })
         .catch(() => {
           // Deliberately silent. The run is about to start either way, and a
@@ -1937,7 +1939,12 @@ export function Cockpit() {
         <ResizablePanel id="main" minSize="20%" className="flex min-h-0 min-w-0 flex-col">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-page" role="main">
           <header className="flex flex-none items-center justify-between gap-4 px-7 pt-6 pb-4">
-            <div><p className="mt-[1em] mb-1 text-label text-tertiary">{viewing !== null ? 'Run archive' : 'Make room for good work'}</p>
+            {/*
+              The line above the title is drawn only when it says something: an
+              opened run is labelled so it is not mistaken for the live one. It
+              used to carry a tagline otherwise, which told nobody anything (#300).
+            */}
+            <div>{viewing !== null && <p className="mt-[1em] mb-1 text-label text-tertiary">Run archive</p>}
               <h2 className="m-0 text-title font-semibold tracking-tight text-display">{tab === 'pilot' ? 'Your pilot' : tab === 'output' ? 'Output' : tab === 'plans' ? 'Plans' : tab === 'critique' ? 'Plan critique' : tab === 'code' ? 'Code changes' : tab === 'review' ? 'Code review' : tab === 'verify' ? 'Verification' : tab === 'questions' ? 'Questions' : tab === 'spend' ? 'Usage' : tab === 'settings' ? 'Settings' : 'Project runs'}</h2>
             </div>
             <Button variant="quiet" size="sm" onClick={() => setTab('spend')} title="Usage for the live run">
