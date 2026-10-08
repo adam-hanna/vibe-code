@@ -1,6 +1,7 @@
 import type { Level, Narration } from '@src/log.js';
 import type { GateContext } from '@src/host.js';
-import type { ArtifactRead, RunArtifact, RunSummary } from '@src/types.js';
+import type { ArtifactRead, Effort, RunArtifact, RunSummary } from '@src/types.js';
+import { EFFORTS } from '@src/types.js';
 import type { PromptBlock } from '@src/prompts.js';
 import type { FsAnswer, PilotAccess } from '@src/pilotaccess.js';
 import type { PastCommand } from '@src/commandlog.js';
@@ -515,6 +516,13 @@ export type Inbound =
       system: string;
       model: string;
       /**
+       * How hard the CLI thinks (#296), or absent for the CLI's own default -
+       * the same `--effort` / `model_reasoning_effort` a run's seat takes, from
+       * the same closed list, so a name neither CLI accepts is refused here
+       * rather than by a child that has already been spawned.
+       */
+      effort?: Effort;
+      /**
        * The repository the turn runs in, and the only one it can read.
        *
        * **Required, and the reason is the whole of `--restricted`.** That flag
@@ -858,6 +866,11 @@ export function decode(line: string): Decoded {
       if (agent !== undefined && agent !== 'claude' && agent !== 'codex') {
         return { ok: false, id, reason: 'pilot named an agent that was not "claude" or "codex"' };
       }
+      // Absent is the CLI's default; present must be one the CLIs take (#296).
+      const effort = parsed['effort'];
+      if (effort !== undefined && !(EFFORTS as readonly unknown[]).includes(effort)) {
+        return { ok: false, id, reason: `pilot effort must be one of ${EFFORTS.join(', ')}` };
+      }
       return {
         ok: true,
         message: {
@@ -870,6 +883,7 @@ export function decode(line: string): Decoded {
           dir: parsed['dir'] as string,
           resume,
           ...(agent === undefined ? {} : { agent }),
+          ...(effort === undefined ? {} : { effort: effort as Effort }),
         },
       };
     }

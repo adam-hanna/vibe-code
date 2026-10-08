@@ -1349,6 +1349,8 @@ export interface PilotTurn {
   dir: string;
   sessionId: string;
   resume: boolean;
+  /** `--effort` / `model_reasoning_effort`, or absent for the CLI's default (#296). */
+  effort?: string;
 }
 
 /**

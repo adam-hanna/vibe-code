@@ -14,6 +14,7 @@ import * as pilot from './pilot';
 import { agentOf, BACKEND_NAME, BACKEND_NOTE, backendFor, needsKey, sourceOf } from './backend';
 import { CLI_DEFAULT, firstOf, loadApiModels, loadCliModels, optionsFor, useModels, whyNot } from '../cockpit/models';
 import type { Backend } from './backend';
+import { DEFAULT_EFFORT, EFFORTS, effortOff, effortToSend, withEffort } from './effort';
 import { systemPrompt } from './brief';
 import { readEmitted, unique, visible } from './emit';
 import { useFollow } from './follow';
@@ -1019,6 +1020,8 @@ export function PilotPane({
   const [picked, setPicked] = useState<string | null>(null);
   const model = picked ?? firstOf(listing) ?? (needsKey(provider) ? '' : CLI_DEFAULT);
   const setModel = setPicked;
+  // Beside the model, and like it kept for the window session only (#296).
+  const [effort, setEffort] = useState<string>(DEFAULT_EFFORT);
   useEffect(() => {
     if (needsKey(provider)) loadApiModels(provider);
     else loadCliModels();
@@ -1381,6 +1384,7 @@ ${frame.text}`, turn, origin.current))) {
             prompt: withCarry(id === null ? held.current.carry : null, said ?? trailingResults(messages) ?? ''),
             system: systemPrompt(run, launched, 'emitted', access, agentOf(provider), standing ?? null),
             model,
+            ...withEffort(effortToSend(provider, effort)),
             dir,
             sessionId: id ?? crypto.randomUUID(),
             resume: id !== null,
@@ -1788,6 +1792,23 @@ ${frame.text}`, turn, origin.current))) {
           {optionsFor(listing, model).map((c) => (
             <option key={c.value} value={c.value}>
               {c.label}
+            </option>
+          ))}
+        </select>
+        {/* How hard it thinks (#296), directly right of the model. Off, with
+            the reason as its tooltip, on a road that takes no effort. */}
+        <select
+          className={cn(FIELD, 'max-w-32')}
+          aria-label="Pilot effort"
+          value={effortOff(provider) === null ? effort : DEFAULT_EFFORT}
+          disabled={effortOff(provider) !== null}
+          title={effortOff(provider) ?? 'How hard the pilot thinks. Default leaves it to the CLI.'}
+          onChange={(e) => setEffort(e.target.value)}
+        >
+          <option value={DEFAULT_EFFORT}>default effort</option>
+          {EFFORTS.map((e) => (
+            <option key={e} value={e}>
+              {e}
             </option>
           ))}
         </select>
