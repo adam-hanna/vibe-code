@@ -1669,6 +1669,29 @@ export function Settings({
                 onSave={(next) => save({ git: { worktreeCommand: next === '' ? null : next } })}
               />
             </div>
+            {/* **A base is a setting** (#249). The #169 run started from whatever
+                HEAD happened to be in the repository - a stale branch tip - because
+                nothing let anybody say where a run should start. */}
+            <div className={S.row}>
+              <label className={S.label} htmlFor="git-base-ref">
+                where a run&apos;s branch starts
+                <Key name="git.baseRef" />
+                {source('git', 'baseRef')}
+              </label>
+              <TextField
+                id="git-base-ref"
+                value={typeof git['baseRef'] === 'string' ? git['baseRef'] : ''}
+                placeholder="origin/develop"
+                disabled={busy}
+                onSave={(next) => save({ git: { baseRef: next === '' ? null : next } })}
+              />
+            </div>
+            <p className={S.note}>
+              Left empty, a new run&apos;s branch starts at the repository&apos;s HEAD when the run
+              starts. A remote ref such as <code>origin/develop</code> is fetched first, and a fetch
+              that fails or runs past the time limit below refuses the run rather than starting from a
+              copy that may be stale. It applies when a run starts, never when one is resumed.
+            </p>
             <p className={S.note}>
               Left empty, vibe runs <code>git worktree add --detach</code> and nothing else — which
               gives you a checkout with no dependencies installed, so on most projects the
@@ -1681,9 +1704,11 @@ export function Settings({
                 <code>$VIBE_WORKTREE</code> — the directory the worktree must be created at
               </li>
               <li>
-                <code>$VIBE_BRANCH</code> — the run&apos;s branch, already created from HEAD, so{' '}
-                <code>git worktree add &quot;$VIBE_WORKTREE&quot; &quot;$VIBE_BRANCH&quot;</code> puts
-                the worktree on it. Not set when branch isolation is off.
+                <code>$VIBE_BRANCH</code> — the run&apos;s branch, which already exists at the base
+                above or at HEAD. Check it out with{' '}
+                <code>git worktree add &quot;$VIBE_WORKTREE&quot; &quot;$VIBE_BRANCH&quot;</code> rather
+                than choosing a commit: a worktree whose HEAD is not where the branch is is refused.
+                Not set when branch isolation is off.
               </li>
               <li>
                 <code>$VIBE_REPO</code> — the repository, and <code>$VIBE_RUN_ID</code> — the run
@@ -1695,7 +1720,7 @@ export function Settings({
             </p>
             <div className={S.row}>
               <label className={S.label} htmlFor="git-worktree-timeout">
-                how long that may take, in minutes
+                how long that may take, in minutes — the base&apos;s fetch too
                 <Key name="git.worktreeTimeoutMs" />
                 {source('git', 'worktreeTimeoutMs')}
               </label>

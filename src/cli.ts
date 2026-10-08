@@ -38,7 +38,7 @@ import { mergeHumanAnswers, reconcileAssumed, reconcileQuestionRecords } from '@
 import { acceptMoves, acceptRaised, parseMoves, parseRaised, raisePhase } from '@src/raise.js';
 import type { RaiseProblem, RequestedMove, RequestedMoves } from '@src/raise.js';
 import { assertUsableRunId } from '@src/stored.js';
-import { Escalation, EXIT, orchestrate, writeEscalation } from '@src/orchestrator.js';
+import { chooseBase, Escalation, EXIT, orchestrate, writeEscalation } from '@src/orchestrator.js';
 import type { ExitCode } from '@src/orchestrator.js';
 import {
   codexConversations,
@@ -1322,6 +1322,11 @@ export function recordHumanAnswers(state: RunState, answers: readonly Answer[]):
  */
 export interface PreflightOptions {
   skipProbe: boolean;
+  /**
+   * Whether this pass is a resume (#249). Optional so every existing gate and
+   * call site is unchanged; a resume never resolves, fetches or moves a base.
+   */
+  resume?: boolean;
 }
 
 /** The preflight gate, injected so its escalation path is testable without spawning. */
@@ -1579,6 +1584,9 @@ export async function execute(
   // cancel that survived into it would kill its first agent turn instantly -
   // reported as the run being stopped by somebody who stopped a different one.
   clearCancel();
+  // A base resolved for a previous run in this process is never this run's
+  // (#249). Preflight sets it again when this run has one.
+  chooseBase(state.id, null);
   // The prompt overrides this run's config asks for (#223), installed in the
   // same breath and for the same reason the latch above is cleared: it is a
   // module latch, one run per process, and one left standing from a previous
@@ -1639,7 +1647,9 @@ export async function execute(
     // Always called, and handed the flag rather than gated on it: since #71 the
     // gate's deterministic half is not skippable, and only it knows which half
     // is which.
-    const gate = await preflightGate(state, cfg, { skipProbe });
+    // `resume` only when it is one (#249): absent already means a fresh run, so a
+    // fresh run's gate is told exactly what it always was.
+    const gate = await preflightGate(state, cfg, resume ? { skipProbe, resume } : { skipProbe });
     // Also here, for a gate that returned without checking: a stop that landed
     // after the last probe must not buy the first turn.
     stopIfCancelled();
@@ -1880,7 +1890,7 @@ export async function runPreflight(
   state: RunState,
   cfg: Config,
   probes: PreflightProbes = REAL_PROBES,
-  options: { skipProbe?: boolean } = {},
+  options: { skipProbe?: boolean; resume?: boolean } = {},
 ): Promise<ExitCode | null> {
   const phases: Phase[] = state.planOnly ? ['plan'] : ['plan', 'implement', 'review'];
 
@@ -1907,6 +1917,58 @@ export async function runPreflight(
   // calls the loop, and `runPhases` opens with `prepareGit`. So the tree exists
   // before the branch is decided in it, which is the whole arrangement - this
   // decides WHERE, `prepareGit` still decides WHICH BRANCH.
+  /** A preflight refusal, in the shape every other one here takes. */
+  const refuse = (reason: string): ExitCode => {
+    log.heading('Preflight');
+    log.fail(reason, { id: 'run_failed', data: { code: EXIT.PREFLIGHT, reason } });
+    state.status = 'error';
+    recordEvent(state, 'preflight-failed', { reasons: [reason] });
+    return EXIT.PREFLIGHT;
+  };
+
+  // **Where a new run's branch starts** (#249). The #169 run started from a
+  // stale tip because the base was whatever HEAD happened to be. `git.baseRef`
+  // is resolved here, once, before anything is spent, and only on a FRESH run: a
+  // resume's branch already exists and keeps its commits, and a fork's comes
+  // from its checkpoint (it arrives through a resume, with `branch` already set).
+  // Nothing durable is written here - the branch and where it started are
+  // recorded together by `prepareGit` - so a run stopped in preflight comes back
+  // exactly as it was.
+  const fresh = options.resume !== true && state.branch === null;
+  let base: string | null = null;
+  const ref = cfg.git.baseRef;
+  if (fresh && ref !== null) {
+    if (!cfg.git.useBranch) {
+      return refuse(
+        `git.baseRef is "${ref}", but branch isolation is off (--no-branch): there is no run ` +
+          'branch to start at that base, and running on whatever is checked out is the silent ' +
+          'failure #249 removed. Unset git.baseRef, or drop --no-branch. Nothing has been spent.',
+      );
+    }
+    const resolved = await git.resolveBase(state.targetDir, ref, cfg.git.worktreeTimeoutMs);
+    // The fetch is not interruptible, so a stop pressed during it ends the run
+    // the moment it returns rather than after the worktree and both probes.
+    stopIfCancelled();
+    if (!resolved.ok) return refuse(resolved.reason);
+    // With no worktree the base is checked out over the repository itself, so
+    // uncommitted changes would be carried across to a different commit in
+    // silence. At HEAD nothing moves, which is today's behaviour, warning
+    // included.
+    if (state.worktree !== true) {
+      const head = await git.markBase(state.targetDir);
+      if (resolved.sha !== head && (await git.isDirty(state.targetDir))) {
+        return refuse(
+          `git.baseRef "${ref}" resolves to ${resolved.sha}, but the repository has uncommitted ` +
+            `changes and HEAD is ${String(head)}: starting the run there would carry them across ` +
+            'to a different commit. Commit or stash them, or turn git.worktree on. Nothing has ' +
+            'been spent.',
+        );
+      }
+    }
+    base = resolved.sha;
+    chooseBase(state.id, base);
+  }
+
   if (state.worktree === true) {
     // The branch, as a ref, before the script runs - so `VIBE_BRANCH` names a
     // branch that exists on a fresh run and on a resume alike, and one line of
@@ -1914,10 +1976,25 @@ export async function runPreflight(
     // both. `prepareGit` adopts it. A repository with no commit has no HEAD to
     // put it at, so the script is told no branch and `prepareGit` makes it as it
     // always has (#223).
+    //
+    // At `git.baseRef`'s commit when it was resolved above (#249), and the
+    // default worktree is then detached at the same commit. A base that cannot
+    // become the branch refuses rather than degrading to HEAD: starting elsewhere
+    // is the defect. With no worktree nothing is created here - `prepareGit`
+    // makes the branch at the same sha, its one creation site on that path, so a
+    // stop in between strands no ref.
     let branch = git.runBranch(cfg, state);
     if (branch !== null && !(await git.branchExists(state.targetDir, branch))) {
-      const head = await git.markBase(state.targetDir);
-      if (head === null || !(await git.createBranchRef(state.targetDir, branch, head)).ok) {
+      const at = base ?? (await git.markBase(state.targetDir));
+      const made = at === null ? null : await git.createBranchRef(state.targetDir, branch, at);
+      if (made === null || !made.ok) {
+        if (base !== null) {
+          return refuse(
+            `Branch "${branch}" could not be created at git.baseRef "${String(ref)}" ` +
+              `(${base}): ${made !== null && !made.ok ? made.error : 'no commit'}. Nothing has ` +
+              'been spent.',
+          );
+        }
         branch = null;
       }
     }
@@ -2417,6 +2494,14 @@ function summary(state: RunState, started: number, recovery?: RecoveryReport): v
     );
   }
   if (state.branch) log.info(`Branch:   ${state.branch}`);
+  // Where that branch started, only when the run recorded it (#249): a run from
+  // before the field, or one never put on a branch, prints nothing rather than a
+  // commit worked out afterwards.
+  if (state.start !== undefined) {
+    log.info(
+      `Start:    ${state.start.sha}${state.start.ref !== null ? ` (${state.start.ref})` : ''}`,
+    );
+  }
   log.info(`Files:    ${state.dir}`);
 }
 

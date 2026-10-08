@@ -32,3 +32,9 @@ test('a setting named by its key in a message can be found by that key here', ()
     expect(settings, key).toContain(`<Key name="${key}" />`);
   }
 });
+
+// *"git.baseRef is \"origin/develop\", but ..."* - the run's own refusals name
+// the base by its key (#249), so the field that sets it carries the key too.
+test('the base a run starts from can be found by the key its refusals name', () => {
+  expect(settings).toContain('<Key name="git.baseRef" />');
+});

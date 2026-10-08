@@ -65,6 +65,12 @@ import type { RunState } from '@src/types.js';
  * passes it as `VIBE_BRANCH`. `prepareGit` then finds the branch already
  * existing and adopts it instead of creating it again. The script never names a
  * branch; it is told one, and only when branch isolation is on.
+ *
+ * **And it never chooses a commit** (#249). The branch is made at `git.baseRef`,
+ * or at HEAD when that is unset, and the default path detaches at that same
+ * commit. A script that put the worktree somewhere else used to be overridden
+ * in silence by `prepareGit`'s checkout - which is how the #169 run started from
+ * a stale tip - and is now refused there instead, naming both commits.
  */
 
 /** Where worktrees live, relative to the repository. */
@@ -156,9 +162,10 @@ export async function createWorktree(args: {
   command: string | null;
   timeoutMs: number;
   /**
-   * The branch the run will be on, already created as a ref, or null when
-   * branch isolation is off. Passed to a custom script as `VIBE_BRANCH`; the
-   * default `git worktree add --detach` leaves it to `prepareGit` to check out.
+   * The branch the run will be on, already created as a ref at `git.baseRef` or
+   * HEAD, or null when branch isolation is off. Passed to a custom script as
+   * `VIBE_BRANCH`; the default `git worktree add --detach` detaches at its commit
+   * and leaves it to `prepareGit` to check out (#249).
    */
   branch: string | null;
 }): Promise<WorktreeResult> {
@@ -184,8 +191,12 @@ export async function createWorktree(args: {
     // check below is the one that answers it.
   } else {
     // `--detach` is what keeps `prepareGit` the only thing that names a branch.
-    // `HEAD` is explicit rather than defaulted: a worktree created from an
-    // unstated commit-ish is one whose starting point depends on git's version.
+    // The commit-ish is explicit rather than defaulted: a worktree created from
+    // an unstated one is one whose starting point depends on git's version. It
+    // is the branch's commit rather than HEAD (#249), because with `git.baseRef`
+    // set the two differ, and a worktree detached at HEAD would then be refused
+    // by `prepareGit` for not being where its branch is. `refs/heads/` so a tag
+    // of the same name cannot answer instead.
     const added = await run(gitBin(), [
       '-C',
       args.targetDir,
@@ -193,7 +204,7 @@ export async function createWorktree(args: {
       'add',
       '--detach',
       dir,
-      'HEAD',
+      args.branch !== null ? `refs/heads/${args.branch}` : 'HEAD',
     ]);
     if (added.code !== 0) {
       return {
@@ -248,8 +259,9 @@ async function runSetup(
     VIBE_REPO: args.targetDir,
     VIBE_RUN_ID: args.id,
     // The branch `prepareGit` will use, computed by the same `runBranch` and
-    // already created as a ref, so the script is told the answer rather than
-    // asked for one. Absent when branch isolation is off: an empty string would
+    // already created as a ref at `git.baseRef` or HEAD, so the script is told
+    // the answer rather than asked for one - and should check it out rather than
+    // choose a commit, which `prepareGit` refuses (#249). Absent when branch isolation is off: an empty string would
     // be a branch name a script could pass to git.
     ...(args.branch !== null ? { VIBE_BRANCH: args.branch } : {}),
   }, args.timeoutMs);
