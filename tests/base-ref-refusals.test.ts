@@ -57,6 +57,17 @@ test('a fetch that fails is refused, never answered from the local copy', async 
   assert.equal(shaOf(clone, 'HEAD'), stale, 'nothing moved');
 });
 
+test('a remote-tracking ref with no remote to fetch it from is refused, not read locally', async () => {
+  // A left-over tracking ref resolves locally and nothing can refresh it -
+  // reading it would be exactly the stale fallback a failed fetch refuses.
+  const { dir, first, second } = twoCommits();
+  sh(dir, 'update-ref', 'refs/remotes/gone/main', first);
+  const said = await refused(createRun(dir, 'no remote', true), gitConfig({ baseRef: 'gone/main' }));
+  assert.match(said, /refs\/remotes\/gone\/main/);
+  assert.match(said, /no configured remote/);
+  assert.equal(shaOf(dir, 'HEAD'), second, 'nothing moved');
+});
+
 test('git.baseRef with branch isolation off is refused', async () => {
   const { dir } = twoCommits();
   const said = await refused(

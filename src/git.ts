@@ -305,36 +305,52 @@ export async function resolveBase(
     const listed = await git(cwd, ['remote'], { allowFail: true });
     // The longest remote whose prefix matches, so a remote named `a/b` is split
     // as `a/b` + name rather than `a` + `b/name`.
-    const remote = listed.stdout
-      .split('\n')
-      .map((r) => r.trim())
-      .filter((r) => r !== '' && full.stdout.startsWith(`refs/remotes/${r}/`))
-      .sort((a, b) => b.length - a.length)[0];
-    if (remote !== undefined) {
-      const name = full.stdout.slice(`refs/remotes/${remote}/`.length);
-      const shown = `git fetch ${remote} ${name}`;
-      try {
-        const fetched = await run(gitBin(), ['fetch', remote, name], { cwd, timeoutMs });
-        if (fetched.code !== 0) {
-          return {
-            ok: false,
-            reason:
-              `git.baseRef "${ref}" could not be fetched (${shown} exited ` +
-              `${String(fetched.code)}: ${fetched.stderr.trim() || 'it printed nothing'}). ` +
-              'vibe does not fall back to the local copy, which may be stale (#249). ' +
-              'Nothing has been spent.',
-          };
-        }
-      } catch (err: unknown) {
+    const remote =
+      listed.code !== 0
+        ? undefined
+        : listed.stdout
+            .split('\n')
+            .map((r) => r.trim())
+            .filter((r) => r !== '' && full.stdout.startsWith(`refs/remotes/${r}/`))
+            .sort((a, b) => b.length - a.length)[0];
+    // A remote-tracking ref with no remote to fetch it from is a copy nothing
+    // can refresh - a left-over ref, or remotes git would not list. Refused,
+    // never resolved: falling through to the local ref here would be the very
+    // fallback a failed fetch is refused to avoid (#249).
+    if (remote === undefined) {
+      return {
+        ok: false,
+        reason:
+          `git.baseRef "${ref}" is the remote-tracking ref ${full.stdout}, but no configured ` +
+          'remote it could be fetched from was found' +
+          (listed.code !== 0 ? ` (git remote exited ${String(listed.code)}: ${listed.stderr})` : '') +
+          '. vibe does not fall back to the local copy, which may be stale (#249). Nothing has ' +
+          'been spent.',
+      };
+    }
+    const name = full.stdout.slice(`refs/remotes/${remote}/`.length);
+    const shown = `git fetch ${remote} ${name}`;
+    try {
+      const fetched = await run(gitBin(), ['fetch', remote, name], { cwd, timeoutMs });
+      if (fetched.code !== 0) {
         return {
           ok: false,
           reason:
-            `git.baseRef "${ref}" could not be fetched: ${shown} did not finish within ` +
-            `git.worktreeTimeoutMs (${String(timeoutMs)} ms) - ` +
-            `${err instanceof Error ? err.message : String(err)}. vibe does not fall back to ` +
-            'the local copy, which may be stale (#249). Nothing has been spent.',
+            `git.baseRef "${ref}" could not be fetched (${shown} exited ` +
+            `${String(fetched.code)}: ${fetched.stderr.trim() || 'it printed nothing'}). ` +
+            'vibe does not fall back to the local copy, which may be stale (#249). ' +
+            'Nothing has been spent.',
         };
       }
+    } catch (err: unknown) {
+      return {
+        ok: false,
+        reason:
+          `git.baseRef "${ref}" could not be fetched: ${shown} did not finish within ` +
+          `git.worktreeTimeoutMs (${String(timeoutMs)} ms) - ` +
+          `${err instanceof Error ? err.message : String(err)}. vibe does not fall back to ` +
+          'the local copy, which may be stale (#249). Nothing has been spent.',
+      };
     }
   }
   // `^0` peels a tag to its commit without the brace syntax `resolveCommit`
