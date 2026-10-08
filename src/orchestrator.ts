@@ -720,7 +720,9 @@ async function runPhases(
           // critic never saw is not an approved criterion.
           state.acceptanceCriteria,
           plan.out_of_scope,
-        ),
+          // An approved plan can predate the answers to its advisory questions
+          // (#277); the implementer is told them, and that they win.
+        ) + P.advisoryAnswers(state.advisoryAnswers, 'implementer'),
         planInPrompt: true,
         cwd,
         label: 'implement',
@@ -1040,6 +1042,22 @@ async function planPhase(
       // narrowing the list to the declines would decide for them which answers
       // were worth revisiting.
       await holdAt(state, cfg, host, 'question-round', pending);
+      // **Every question advisory: no revision** (#277). The planner said none
+      // of them changes what the plan does, so the answers go to the critic with
+      // this plan instead of buying a planner turn first; one that does change
+      // something comes back as a finding, and that revision folds them all in.
+      // Moved out of `pendingAnswers` on this one write, because that field is
+      // the resume's road into a revision and would buy the skipped turn back.
+      if (answers.length > 0 && pending.every((q) => !q.blocking)) {
+        state.advisoryAnswers = [...(state.advisoryAnswers ?? []), ...answers];
+        state.pendingAnswers = null;
+        saveState(state);
+        log.info(
+          `Not revising the plan for ${answers.length} advisory answer(s) - the critic reads them with the plan.`,
+          { id: 'revision_skipped', data: { answers: answers.length, round: state.questionRound } },
+        );
+        continue;
+      }
       // The answerer may have declined every one; only revise if something came
       // back - and when nothing did, the plan and the turn that wrote it are
       // both still the ones already in hand.
@@ -3632,6 +3650,20 @@ function advancesRound(args: ReviseArgs): boolean {
   return args.findings !== undefined;
 }
 
+/**
+ * The answers a revision is given: its own, plus - on a findings revision - the
+ * advisory answers no revision has folded in yet (#277). Returns `args.answers`
+ * itself when there is nothing to add, which is how the caller tells whether
+ * this revision took them.
+ */
+function withAdvisory(
+  args: ReviseArgs,
+  advisory: readonly Answer[] | undefined,
+): readonly Answer[] | undefined {
+  if (args.findings === undefined || advisory === undefined || advisory.length === 0) return args.answers;
+  return [...(args.answers ?? []), ...advisory];
+}
+
 async function revisePlan(
   state: RunState,
   cfg: Config,
@@ -3700,7 +3732,9 @@ async function revisePlan(
       prompt: P.revisePlanPrompt({
         planMd: state.plan?.plan_md,
         findings: args.findings,
-        answers: args.answers,
+        // A findings revision also folds in the advisory answers no revision has
+        // taken yet (#277), which is the turn the skipped one was waiting for.
+        answers: withAdvisory(args, state.advisoryAnswers),
         // The plan of record's boundary, restated: a revision returns the whole
         // plan, and a session rotated concurrently with the critique would
         // otherwise re-derive `out_of_scope` from nothing.
@@ -3736,6 +3770,8 @@ async function revisePlan(
   // them is on disk and a resume revises against them again.
   if (args.findings !== undefined) state.pendingFindings = null;
   if (args.answers !== undefined) state.pendingAnswers = null;
+  // Folded in by this revision whenever it took them, on the same write (#277).
+  if (withAdvisory(args, state.advisoryAnswers) !== args.answers) delete state.advisoryAnswers;
   saveState(state);
   // **`plan-<n>.json` is the plan of record for round n, which is the version
   // the critic will judge** - so a non-advancing revision replaces it rather
@@ -4160,7 +4196,9 @@ async function runCritique(
         // the critic is what decides whether the bar is any good.
         plan.acceptance_criteria,
         planActivity,
-      ),
+        // Answers no revision has folded in yet (#277). Empty on every run that
+        // skipped no revision, so this prompt is byte-identical there.
+      ) + P.advisoryAnswers(state.advisoryAnswers, 'critic'),
       cwd,
       label: `critique-${state.planRound}`,
     },

@@ -51,6 +51,31 @@ repairs against it; findings and suggested fixes do not independently expand it.
 `;
 }
 
+/**
+ * Answers to the planner's advisory questions that no revision has folded in
+ * yet (#277), for the two turns that read the plan without them.
+ *
+ * The critic is asked to treat a plan that contradicts one as a defect, which
+ * is how an answer that does change something buys the ordinary revision. The
+ * implementer is told the answer wins where the plan was silent or assumed
+ * otherwise, because an approved plan can still predate them.
+ */
+export function advisoryAnswers(answers: readonly Answer[] | undefined, audience: 'critic' | 'implementer'): string {
+  if (answers === undefined || answers.length === 0) return '';
+  const lead =
+    audience === 'critic'
+      ? `The planner raised these as advisory questions - ones it said do not change what the plan does - and they were answered after the plan was written. The plan has not been revised for them. Judge the plan with them in mind: where the plan contradicts an answer, or an answer shows a question was not advisory after all, raise it as a finding.`
+      : `The planner raised these as advisory questions, and they were answered after the plan was written. Where the plan is silent on one, or assumed otherwise, follow the answer.`;
+  return `
+
+## Answers to the planner's advisory questions
+
+${lead}
+
+${answers.map(formatAnswer).join('\n\n')}
+`;
+}
+
 /** Human answers are amendments; model recommendations must never appear here. */
 export function userDecisions(answers: readonly Answer[] | undefined): string {
   if (answers === undefined || answers.length === 0) return '';

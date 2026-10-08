@@ -2110,6 +2110,24 @@ export interface RunState {
    */
   pendingAnswers: Answer[] | null;
   /**
+   * Answers to a question round whose questions were all advisory, which no
+   * planner revision has folded in yet (#277).
+   *
+   * An advisory question is one the planner said does not change what the plan
+   * does, so a whole revision turn to fold its answer in is the most expensive
+   * way to deliver it - on the #249 run, 79 seconds and 237k tokens for one
+   * question about the wording of a log line. So the round revises nothing: the
+   * answers move here from `pendingAnswers` on one write, the critic is shown
+   * them with the plan, the next findings revision folds them in and clears
+   * this on the write that persists its plan, and if the plan is approved
+   * without one the implementer is shown them instead.
+   *
+   * Moved rather than left in `pendingAnswers` because that field is the
+   * resume's road back into a revision: left there, a stop would buy exactly
+   * the turn this exists to skip.
+   */
+  advisoryAnswers?: Answer[];
+  /**
    * Findings the run has paid for that no revision or fix round has yet
    * answered.
    *
