@@ -1125,7 +1125,7 @@ export function Cockpit() {
         .then((got) => {
           // Stripped of the previous ending: a resume has not stopped, and
           // seeding one would draw a halt banner over a run that is starting.
-          seed = forResume(foldReplay(got.steps));
+          seed = forResume(foldReplay(got.steps), got.steps[got.steps.length - 1]?.at ?? Date.now());
         })
         .catch(() => {
           // Deliberately silent. The run is about to start either way, and a
