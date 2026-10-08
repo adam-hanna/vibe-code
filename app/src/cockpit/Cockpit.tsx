@@ -915,17 +915,29 @@ export function Cockpit() {
         return;
       }
       try {
-        statusGen.current += 1;
-        const status = await host.status();
-        setWire((w) => ({
-          ...w,
-          connected: status.running,
-          hostPid: status.pid,
-          failure: status.failure,
-          uncontained: status.uncontained,
-          status,
-        }));
-        if (status.ready !== null) dispatch(status.ready);
+        // Generation-stamped like every other status read: an exit or a
+        // diagnostics refresh issued while this was in flight is newer, and an
+        // older answer landing on it would bring back a host that has gone. So a
+        // stale answer is asked again rather than applied; the window still
+        // needs the service host's facts from a read that is current.
+        for (;;) {
+          const gen = (statusGen.current += 1);
+          const status = await host.status();
+          if (cancelled) return;
+          if (gen !== statusGen.current) continue;
+          setWire((w) => ({
+            ...w,
+            connected: status.running,
+            hostPid: status.pid,
+            // A start failure, or the exit sentence the window may already hold:
+            // `failure` on Status is only ever the start's.
+            failure: status.failure ?? w.failure,
+            uncontained: status.uncontained,
+            status,
+          }));
+          if (status.ready !== null) dispatch(status.ready);
+          break;
+        }
       } catch (err) {
         setWire((w) => ({ ...w, failure: err instanceof Error ? err.message : String(err) }));
       }

@@ -2169,8 +2169,10 @@ expecting one run per process, so all three stay exactly as they were.
   `nextRequestId`, where an `error`'s id may be a gate id the host allocated, so Rust never
   correlates errors. An invoke that fails with an `error` is closed by the window sending
   `shutdown`. A host that cannot be handed its keys or its invoke is closed by Rust before
-  `host_start` returns — the invoke travels *with* the start for exactly that reason. A
-  host whose stdout ends is closed too, since nobody can hear it any more.
+  `host_start` returns — the invoke travels *with* the start for exactly that reason, and a
+  run handle with no invoke, or a first line that is not one with an id, is refused before
+  anything is spawned. A host whose stdout ends is closed too, since nobody can hear it any
+  more.
 - **The window answers each gate once**, and that is what makes an `error` carrying the
   invoke's id unambiguous: `serve.ts` refuses an answer only when its gate is not in `asks`,
   and a gate leaves `asks` only by being answered or by the clear that runs after the
@@ -2209,6 +2211,12 @@ It refuses only when either run would work in the repository itself: the live ru
 worktree (`state.worktree`, read off its record — a record that cannot be read counts as
 none) or the new run would not get one. Both in worktrees is allowed. The sentence names
 the runs and `git.worktree`, with `EXIT.PREFLIGHT`, and it is a refusal, never a queue.
+**It looks twice.** The first look and the claim are two steps, so two starts could both
+pass the first; each looks again once its own lock is on disk, so whichever looks second
+sees the other, and a refusal then releases the lock (and on a start removes the directory
+it made). Two exactly simultaneous starts may both refuse, which is the fail-closed side —
+and it needs no repository-wide lock, a second kind of lock this file would have to
+explain.
 **It fails closed**: a runs directory that exists and cannot be read refuses, and so does
 an entry `lstat` cannot classify; only an absent directory and a measured link are passed
 over. `--force` does not reach it — it overrides the run's own lock, not another run's

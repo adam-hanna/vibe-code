@@ -1,5 +1,5 @@
 ﻿import { CLI_DEFAULT } from '@src/modelflag.js';
-import { readFileSync, existsSync, renameSync } from 'node:fs';
+import { readFileSync, existsSync, renameSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import {
   applyOverrides,
@@ -622,6 +622,21 @@ async function cmdRun(
     return EXIT.ERROR;
   }
 
+  // **Again, now that this run's own lock is on disk** (#246). The check above
+  // and the claim are two steps, so two starts in one checkout could both pass
+  // the first and then both claim. Each writes its lock before it looks a second
+  // time, so whichever looks second sees the other: the race is closed without a
+  // repository-wide lock, and the cost is that two exactly simultaneous starts
+  // may both refuse - the fail-closed direction. A refusal here takes back
+  // everything this start made, so it still leaves no run directory behind.
+  const raced = sameRepositoryRefusal(targetDir, { self: allocated.id, worktree: cfg.git.worktree });
+  if (raced !== null) {
+    handle.release();
+    rmSync(allocated.dir, { recursive: true, force: true });
+    log.fail(raced, { id: 'run_failed', data: { code: EXIT.PREFLIGHT, reason: raced } });
+    return EXIT.PREFLIGHT;
+  }
+
   try {
     return await startRun(
       targetDir,
@@ -869,6 +884,15 @@ async function cmdResume(
         'which reports what it had spent but charges none of it.',
     );
     return EXIT.ERROR;
+  }
+  // The same second look a start takes, for the same race (#246): another run
+  // in this checkout that claimed its lock while this resume was taking its own.
+  // Before anything is read or written beyond the lock, which is released.
+  const raced = sameRepositoryRefusal(targetDir, { self: id, worktree: storedWorktree(runDir) });
+  if (raced !== null) {
+    handle.release();
+    log.fail(raced, { id: 'run_failed', data: { code: EXIT.PREFLIGHT, reason: raced } });
+    return EXIT.PREFLIGHT;
   }
   if (handle.forced) {
     log.warn(`--force: took the lock anyway. It was ${describeLiveness(verdict)}`);

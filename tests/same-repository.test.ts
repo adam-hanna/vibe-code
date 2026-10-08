@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { main } from '@src/cli.js';
 import { EXIT } from '@src/orchestrator.js';
-import { lockPath } from '@src/lock.js';
+import { acquireLock, lockPath } from '@src/lock.js';
 import type { LivenessVerdict, PidProbe, RunLock } from '@src/lock.js';
-import { RUNS_DIR } from '@src/run.js';
+import { allocateRun, RUNS_DIR } from '@src/run.js';
 import * as log from '@src/log.js';
 import type { Narration } from '@src/log.js';
 import { entryConflict, sameRepositoryRefusal, storedWorktree } from '@src/worktree.js';
@@ -241,5 +241,46 @@ test('a resume beside a live run is refused before its lock is taken', async () 
     assert.equal(result, EXIT.PREFLIGHT, `force=${String(force)}`);
     assert.equal(existsSync(lockPath(stopped)), false, 'no lock was written');
     assert.ok(said.some((n) => n.id === 'run_failed' && n.data?.['code'] === 6));
+  }
+});
+
+// ---- the race between the check and the claim --------------------------------
+
+test('two starts that both passed the first check are caught by the second', () => {
+  // The interleaving the first check alone cannot see: both looked, found
+  // nothing, and both claimed. Each claim writes its lock before its second
+  // look, so the second look of each sees the other - whichever order they ran
+  // in, at least one refuses, and with both locks down both do.
+  const dir = repo();
+  const a = allocateRun(dir, 'first');
+  const b = allocateRun(dir, 'second');
+  const lockA = acquireLock(a.dir, a.id, false);
+  const lockB = acquireLock(b.dir, b.id, false);
+  assert.ok(lockA.handle !== null && lockB.handle !== null);
+  try {
+    const seenByA = sameRepositoryRefusal(dir, { self: a.id, worktree: false, probe: running });
+    const seenByB = sameRepositoryRefusal(dir, { self: b.id, worktree: false, probe: running });
+    assert.ok(seenByA !== null && seenByA.includes(b.id), String(seenByA));
+    assert.ok(seenByB !== null && seenByB.includes(a.id), String(seenByB));
+  } finally {
+    lockA.handle.release();
+    lockB.handle.release();
+  }
+});
+
+test('the start and the resume each look again after taking their own lock', () => {
+  // Read as source, because the property is an ordering inside two commands
+  // and no fixture can land a sibling's lock between two of their lines.
+  const cli = readFileSync(path.join(process.cwd(), 'src', 'cli.ts'), 'utf8');
+  for (const [name, self] of [['cmdRun', 'allocated.id'], ['cmdResume', 'id']] as const) {
+    const body = cli.slice(cli.indexOf(`async function ${name}(`));
+    const end = body.indexOf('\n}\n');
+    const fn = body.slice(0, end);
+    const lock = fn.indexOf('acquireLock(');
+    const again = fn.indexOf(`sameRepositoryRefusal(targetDir, { self: ${self}`, lock);
+    assert.ok(lock > -1 && again > lock, `${name} looks again after its lock`);
+    const undo = fn.slice(again, fn.indexOf('return EXIT.PREFLIGHT;', again));
+    assert.match(undo, /handle\.release\(\);/);
+    if (name === 'cmdRun') assert.match(undo, /rmSync\(allocated\.dir/);
   }
 });

@@ -21,8 +21,12 @@ describe('status reads', () => {
   test('a read is applied only if it is still the latest issued', () => {
     expect(cockpit).toMatch(/const gen = \(statusGen\.current \+= 1\);/);
     expect(cockpit).toMatch(/if \(gen === statusGen\.current\) setWire/);
-    // The startup read bumps the generation too, so an earlier one cannot land on it.
-    expect(cockpit).toMatch(/statusGen\.current \+= 1;\n\s*const status = await host\.status\(\);/);
+    // The startup read is stamped too, and a stale answer is asked again rather
+    // than applied over a newer one.
+    const startup = cockpit.slice(cockpit.indexOf('for (;;) {'), cockpit.indexOf('break;\n        }'));
+    expect(startup).toMatch(/const gen = \(statusGen\.current \+= 1\);/);
+    expect(startup).toMatch(/if \(gen !== statusGen\.current\) continue;/);
+    expect(startup.indexOf('continue;')).toBeLessThan(startup.indexOf('setWire('));
   });
 
   test('re-read on every exit, when a run host starts and when diagnostics open — and not on a result', () => {

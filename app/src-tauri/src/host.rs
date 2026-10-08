@@ -358,6 +358,25 @@ pub fn valid_run_handle(handle: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
+/// The id of the `invoke` a run host is started for, or why there is none.
+///
+/// The one field this crate reads off an inbound line, and only to know which
+/// `result` ends the host. A line that is not an invoke with an id is refused
+/// rather than started: a run host without one would sit waiting on stdin for a
+/// request nothing is ever going to send.
+fn invoke_id_of(line: Option<&str>) -> Result<serde_json::Value, String> {
+    let line = line.ok_or("a run host is started with its invoke, and none was given")?;
+    let request: serde_json::Value =
+        serde_json::from_str(line).map_err(|_| "a run host's first line is not JSON".to_string())?;
+    if request.get("type").and_then(|t| t.as_str()) != Some("invoke") {
+        return Err("a run host's first line is not an invoke".into());
+    }
+    match request.get("id") {
+        Some(id) if !id.is_null() => Ok(id.clone()),
+        _ => Err("a run host's invoke carries no id".into()),
+    }
+}
+
 /// The one way a host's command is built, so every host is contained alike.
 ///
 /// The login environment first (#272), then the app's own variables so an rc
@@ -463,6 +482,11 @@ impl HostProcess {
         if handle == SERVICE && line.is_some() {
             return Err("the service host is not started with a request".into());
         }
+        // A run host exists to serve one invoke, so it is not started without
+        // one: refused before the spawn, not cleaned up after it.
+        if handle != SERVICE {
+            invoke_id_of(line)?;
+        }
         let (node, entry) = locate(app)?;
         // A neutral, predictable working directory. Every request carries its
         // own `-C`, so nothing depends on this - but a process inheriting
@@ -534,6 +558,9 @@ impl HostProcess {
         secret: String,
         relay: Arc<dyn Relay>,
     ) -> Result<u32, String> {
+        if handle != SERVICE {
+            invoke_id_of(line)?;
+        }
         let pid = self.spawn(handle, command, secret, relay)?;
         if handle == SERVICE {
             // First thing on the wire, so a run started the moment the window
@@ -1283,6 +1310,20 @@ mod tests {
         let seen = collect.wait("the orphan to be killed and reaped", |s| collect_exit(s, "run-2"));
         assert!(seen.iter().any(|s| matches!(s, Seen::Exit(h, _, false) if h == "run-2")));
         assert!(hosts.status().runs.is_empty());
+    }
+
+    #[test]
+    fn a_run_host_is_never_started_without_its_invoke() {
+        let collect = Collect::new();
+        let hosts = hosts(&collect);
+        for line in [None, Some("not json"), Some(r#"{"type":"pause","id":1}"#), Some(r#"{"type":"invoke","argv":[]}"#)] {
+            let started = start(&hosts, &collect, "run-10", line, ECHO);
+            assert!(started.is_err(), "{line:?} started a run host");
+            assert!(hosts.status().runs.is_empty(), "{line:?} left a host in the set");
+        }
+        // Nothing was spawned at all, so nothing ever exits.
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(collect.exits("run-10"), 0);
     }
 
     #[test]
