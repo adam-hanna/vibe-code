@@ -6,7 +6,7 @@ import path from 'node:path';
 import { DEFAULTS } from '@src/config.js';
 import { claudeTurn, RateLimitError } from '@src/claude.js';
 import type { ClaudeTurnOptions } from '@src/claude.js';
-import { codexTurn } from '@src/codex.js';
+import { codexTurnNoMcp as codexTurn } from './helpers/codex-mcp.js';
 import type { CodexTurnOptions } from '@src/codex.js';
 import { rotateSession, withConcurrentCompaction } from '@src/context.js';
 import { attachSpend, chargeFailure, Escalation, EXIT, runTurn, spendOf } from '@src/orchestrator.js';

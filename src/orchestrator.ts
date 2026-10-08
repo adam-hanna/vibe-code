@@ -1,4 +1,5 @@
-﻿import path from 'node:path';
+﻿import os from 'node:os';
+import path from 'node:path';
 import { applyCharge, chargeFailure, enforceCeilings, Escalation, EXIT, fmtTokens } from '@src/charge.js';
 import {
   claudeTurn,
@@ -32,6 +33,7 @@ import {
   effortFor,
   GENERATIVE_ROLES,
   holderLabel,
+  mcpServersFor,
   modelFor,
   modelSource,
   roleEnabled,
@@ -40,6 +42,7 @@ import {
   turnTimeoutMs,
 } from '@src/roles.js';
 import type { Access, Role, RoleSpec, RoleTable } from '@src/roles.js';
+import { claudeMcpDefinitions, resolveClaudeGrants } from '@src/mcp.js';
 import {
   clearSlotFork,
   ensureSlotId,
@@ -3259,6 +3262,26 @@ async function claudeDispatch(
   // One resolution, used for the spawn, the measurement and the rotation
   // decision, so those three cannot disagree about which model this turn is.
   const model = modelFor(req.role, cfg, roles);
+  // The MCP servers this role was granted, as the definitions `--mcp-config`
+  // re-supplies under `--strict-mcp-config` (#138). Resolved once, outside the
+  // retry, because no attempt changes the files it reads. Preflight has already
+  // refused a name that does not resolve; this throws the same sentence for a
+  // run that skipped it or a file that changed since. `repoDir` because a
+  // worktree's cwd is not where the repository's `.mcp.json` lives.
+  const granted = mcpServersFor(req.role, roles);
+  const mcpServers =
+    granted.length === 0
+      ? {}
+      : resolveClaudeGrants(
+          req.role,
+          granted,
+          claudeMcpDefinitions({
+            cwd: req.cwd,
+            repoDir: state.targetDir,
+            home: os.homedir(),
+            configDir: process.env['CLAUDE_CONFIG_DIR'],
+          }),
+        );
 
   // A rotation that could not be overlapped with Codex work happens here, at a
   // turn boundary - never mid-turn. Asked with *this* turn's model rather than
@@ -3334,6 +3357,7 @@ async function claudeDispatch(
           jsonSchema: req.jsonSchema,
           tools: req.tools,
           timeoutMs: req.timeoutMs,
+          mcpServers,
           progress: progressOptions(state, cfg, req.label, model, 'claude'),
         });
       },
@@ -3934,6 +3958,9 @@ async function codexDispatch(
         // separate conversations, and they no longer have to think alike.
         effort: effortFor(req.role, cfg, roles),
         sandbox: codexSandbox(spec.access, cfg),
+        // The servers this role may keep; every other listed one is disabled
+        // by name in the adapter (#138).
+        mcpServers: mcpServersFor(req.role, roles),
         cwd: req.cwd,
         timeoutMs: req.timeoutMs,
         // One or the other, never both: a fork owed outranks a resume, and a

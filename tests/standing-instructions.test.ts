@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { claudeTurn } from '@src/claude.js';
-import { codexTurn } from '@src/codex.js';
+import { codexTurnNoMcp as codexTurn } from './helpers/codex-mcp.js';
 import { configDiff, DEFAULTS, loadConfig } from '@src/config.js';
 import { clearPromptOverrides, installStandingInstructions, STANDING_HEAD, withStanding } from '@src/prompts.js';
 import type { RunFn } from '@src/proc.js';
