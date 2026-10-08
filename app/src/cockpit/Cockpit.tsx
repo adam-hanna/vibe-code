@@ -54,6 +54,7 @@ import {
   readDrafts,
   removeDraft,
 } from './pending';
+import type { Handover } from '../pilot/PilotPane';
 import type { Draft } from './pending';
 import { chatKey } from '../pilot/saved';
 import { loadChats, putChat } from '../pilot/chatstore';
@@ -572,7 +573,9 @@ export function Cockpit() {
    * pane — and cleared by the pane the moment it has said it, so the same brief
    * cannot be sent twice.
    */
-  const [brief, setBrief] = useState<string | null>(null);
+  // With the draft it was typed for, so two runs with the same brief are two
+  // handovers rather than one sent twice (#270).
+  const [brief, setBrief] = useState<Handover | null>(null);
   /**
    * Runs asked for and not started yet, and the one on screen (#223).
    *
@@ -673,7 +676,7 @@ export function Cockpit() {
    * load runs in a child effect, before this one, so by the time `brief` is set
    * the pane is already holding the right conversation.
    */
-  const [queued, setQueued] = useState<string | null>(null);
+  const [queued, setQueued] = useState<Handover | null>(null);
   useEffect(() => {
     if (queued === null || drafting === null) return;
     setBrief(queued);
@@ -1380,7 +1383,7 @@ export function Cockpit() {
             setDraftId(draft.id);
             setViewing(null);
             rememberRepo(draft.dir);
-            setQueued(message);
+            setQueued({ id: draft.id, message });
             setComposing(null);
             open('pilot');
           }}

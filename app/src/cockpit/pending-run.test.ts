@@ -114,7 +114,8 @@ describe('the cockpit wires it', () => {
     expect(handler).toMatch(/slice\(2, 8\),\s*title,\s*\);/);
     expect(handler).toContain('saveDrafts((list) => addDraft(list, draft))');
     expect(handler).toContain('setDraftId(draft.id)');
-    expect(handler).toContain('setQueued(message)');
+    // With the draft's id since #270, so equal briefs are still two handovers.
+    expect(handler).toContain('setQueued({ id: draft.id, message })');
   });
 
   test('the pilot pane is keyed by the draft, and a draft counts as pointed-at', () => {
