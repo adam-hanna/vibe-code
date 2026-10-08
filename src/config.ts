@@ -552,6 +552,7 @@ export function loadConfig(
     refuseProjectPilot(fromFile, 'vibe.config.json');
     refuseProjectCli(fromFile, 'vibe.config.json');
     refuseProjectAuth(fromFile, 'vibe.config.json');
+    refuseProjectRuns(fromFile, 'vibe.config.json');
   }
 
   // The global layer sits under the project's file and over the defaults, so a
@@ -1007,6 +1008,48 @@ export function refuseGlobalProjectKeys(raw: Readonly<Record<string, unknown>>, 
   }
 }
 
+/**
+ * How many runs this machine's app may host at once (#246) - `runs.maxConcurrent`.
+ *
+ * **0 means no limit, and it is the default**, the shape `budget.maxTokens: 0`
+ * has: any other default would be a number nobody measured, and the rate-limit
+ * wait already does its job when two runs share one subscription. The window
+ * counts the run hosts it spawned and refuses a start at the limit - refused,
+ * never queued. Runs started from a terminal are not counted.
+ *
+ * **Global only**, like `auth` and `cli`: it is a fact about one machine, and a
+ * project file is committed. `null` is refused rather than read as 0, because
+ * reading a value nobody meant as *no limit* is the silent revert the cap is
+ * there to prevent.
+ *
+ * Not read by `readGlobalConfig`: no run reads it, so a malformed value here
+ * must not stop every run on the machine. The window reads it off `globalRaw`
+ * and refuses to start while it cannot.
+ */
+export function readMaxConcurrent(globalRaw: Readonly<Record<string, unknown>>): number {
+  const section = globalRaw['runs'];
+  if (section === undefined) return 0;
+  if (!isRecord(section)) throw new Error('runs must be an object');
+  for (const key of Object.keys(section)) {
+    if (key !== 'maxConcurrent') throw new Error(`runs.${key} is not a setting; the one is maxConcurrent`);
+  }
+  const value = section['maxConcurrent'];
+  if (value === undefined) return 0;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    throw new Error('runs.maxConcurrent must be 0 (no limit) or a whole number of runs');
+  }
+  return value;
+}
+
+/** Refuse a project file, or a project write, that names `runs` (see `readMaxConcurrent`). */
+export function refuseProjectRuns(raw: Readonly<Record<string, unknown>>, label: string): void {
+  if (raw['runs'] === undefined) return;
+  throw new Error(
+    `${label} sets runs, and only your settings for all projects can: how many runs this ` +
+      "machine's app may host at once is a fact about one machine, and this file is committed",
+  );
+}
+
 /** The global file's own contents, or `{}` when there is none or the layer is off. */
 export function readGlobalConfig(): Record<string, unknown> {
   const at = globalConfigPath();
@@ -1057,6 +1100,7 @@ export function withProjectFile(stored: Config, targetDir: string): Config {
   refuseProjectPilot(project, 'vibe.config.json');
   refuseProjectCli(project, 'vibe.config.json');
   refuseProjectAuth(project, 'vibe.config.json');
+  refuseProjectRuns(project, 'vibe.config.json');
   // Seeded from `DEFAULTS` first, because `mergeSection` copies only the keys
   // its base already has. A run stored before a key existed has no such key,
   // so without the seed a project file naming it - `verify.testPaths` on a run
@@ -1112,6 +1156,7 @@ export function writeConfigPatch(
     refuseProjectPilot(patch, 'vibe.config.json');
     refuseProjectCli(patch, 'vibe.config.json');
     refuseProjectAuth(patch, 'vibe.config.json');
+    refuseProjectRuns(patch, 'vibe.config.json');
   }
   const raw = scope === 'global' ? readGlobalConfig() : readRawConfig(targetDir);
   const candidate: Record<string, unknown> = { ...raw };
@@ -1140,6 +1185,7 @@ export function writeConfigPatch(
     readPilotAccess(candidate);
     readCliPaths(candidate);
     readRoutes(candidate);
+    readMaxConcurrent(candidate);
     const alone = mergeConfig(DEFAULTS, candidate);
     validateRoles(alone.roles);
     validate(resolveRoleScopedAgents(alone, [candidate]));

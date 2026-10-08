@@ -248,6 +248,10 @@ Two rules the cockpit inherits from the design and must not quietly drop:
   read `5h39m ago` about a turn that took a minute. `clock()` beside `elapsed()` is the pair,
   and `runningRow` carries `lastBeatAt` and `endedAt` **beside** `quietMs` rather than instead
   of it, because a live card wants the relative form and a settled one cannot have it.
+- **The sidebar's live marks are static** (#246). With several runs going the window marks
+  every one it hosts, and a pulsing dot on each row would put several pulses on screen.
+  Only the run on screen's live card pulses; `LivenessDot still` draws the rows, and the gate
+  badge on a run nobody is looking at is a static `alarm` chip.
 - **The pilot's open turn waves, and it is still one animation.** *"Exactly one element on
   screen pulses"* is the rule above, and the corpus lists the pilot chat's live round card
   among the screens allowed to — but between pressing send and the first token that card has
@@ -2140,7 +2144,7 @@ app/src/ui/          the shadcn components, over the tokens - button, badge, com
 app/src/cockpit/pane.ts    the artifact panes' shared layout, named once - nine subjects, one shape
 app/src/host.ts      the webview's end of the wire: typed frames, and nothing re-derived
 app/src/cockpit/model.ts   frames in, a run out - the ONLY logic in the app, and it is pure
-app/src/cockpit/hosts.ts   which host a frame came from, and what that means for the live run
+app/src/cockpit/hosts.ts   the live runs: routing by handle, what is drawn, the cap, the write rule, adoption
 app/src/cockpit/format.ts  durations, counts, and the closed maps: boundaries and exit codes
 app/src/cockpit/           the loop column, the running row, the output pane, the gate footer
 app/src-tauri/       Rust: window, tray, single instance, spawning and relaying
@@ -2202,8 +2206,8 @@ expecting one run per process, so all three stay exactly as they were.
   run's first frames — preflight narrates before any run id exists — and the handle can,
   because the window chose it (`run-<invoke id>`) before the host was spawned.
   `run_started` is what maps a handle to a run. Nothing in the window is matched by "the
-  current run": a run frame reaches the reducer because its handle is the live one, and a
-  run host's `result` reaches it only if it carries the invoke's id, since a pause, an
+  current run": a run frame reaches its run's reducer because its handle is that run's, and
+  a run host's `result` reaches it only if it carries the invoke's id, since a pause, an
   unpause and a cancel are answered with `result` frames too.
 - **How a run host is closed, every way.** Rust closes it — the same stdin close a quit
   uses (#206), then a kill after the grace — on the `result` carrying its invoke's id, which
@@ -2232,10 +2236,109 @@ expecting one run per process, so all three stay exactly as they were.
   yet. `settled(run)` is the one spelling of *the command is over*, because `lost` is a
   second way to be over and every site that asked only about `completed` would have held a
   dead run open. The service host exiting is what "the host exited" has always meant.
-- **Two guards moved to the window**, because separate processes share no variable: a
-  second launch while a run is live is refused before the column resets, and a config
-  write while a run is live is refused with `serve.ts`'s own sentence. `serve.ts` keeps
-  both; inside one process they are still true. The pilot is never refused for a run.
+- **The config-write guard moved to the window**, because separate processes share no
+  variable, and it says `serve.ts`'s own sentence. `serve.ts` keeps both its guards; inside
+  one process they are still true. The pilot is never refused for a run. The window's
+  second guard, *one run at a time*, is gone: see below.
+
+**The window hosts several live runs at once** (#246, part B). Part A gave every run a
+process; this is the window using them. `liveHost` and the one `useReducer` `Run` became
+`lives`, a list of `LiveRun` in `app/src/cockpit/hosts.ts`, each carrying its own `Run`
+folded by the **unchanged** `reduce` — there is no multi-run reducer. Every decision about the
+list is a pure function in that file with a test beside it, because the app has no jsdom.
+
+- **Keyed by handle until `run_started`, and by `(repo, runId)` after it — and both are read
+  off the `Run`.** `runIdOf` and `repoOf` are `identity` first and the argv second (`asked`,
+  `dir`). A copy of the id taken at launch is a copy `run_started` never updates, which is how
+  an earlier draft of this drew a resume under the wrong run.
+- **Routable is not drawable.** An entry routes from the moment `launch` adds it, so a frame
+  that beats the start's promise lands on its run. It is drawn, and marked in the sidebar,
+  only once `started`: a pid has arrived **or any frame has been routed to it**. Rust relays
+  frames before `host_start` resolves, so the pid alone was too late — a run that had already
+  said `run_started` stayed hidden behind whatever was on screen. A start Rust refuses
+  produces neither, so it is never drawn. The first frame also **points** the window at the
+  run (`point`), once, whichever of it and the pid comes first.
+- **`viewing` picks what is drawn.** `onScreen` is the live, started entry `viewing` names by
+  id and `dirKey` repository — so opening a run this window is hosting draws its live `Run`,
+  not a replay — or, with nothing opened, `focus`, the run last started, including after it
+  ends. Null means replay, and `columnRun` is still the one expression. `past` is now
+  *opened and not live here*. Every control — answer, pause, unpause, stop — acts on the run
+  on screen by its handle, and `mayAnswer` also requires that the gate is the one that run
+  holds. A dead host marks only its own run `lost`.
+- **Ended entries are pruned after a start succeeds, never before**, and only once their
+  proposing conversation has been dealt with and they are not the one being drawn. Pruning
+  ahead of a start Rust then refused would have erased the finished run on screen.
+- **One writer each, ref first.** `updateLives` and `updateDrafts` assign the ref and then
+  set state, and nothing else assigns either. The frame handler is registered once and reads
+  the ref, and a second launch in the same tick has to count the first against the cap and
+  see its draft as claimed.
+- **`launch` has four steps and the order is the safety.** Refusals before anything changes —
+  outside the app, the service host not connected (`connectedRef`, written in the exit
+  handler before `setWire`), an argv whose `-C` it cannot read, a draft already starting, the
+  cap. Then the claims, synchronously: the draft is marked and the entry appended. Then the
+  start; a refusal from Rust reverses the claims exactly (`dropRun`, `unmarkLaunched`), says
+  Rust's sentence in a strip, and **never** marks a run lost, because there was never a run.
+  Only then anything visible: viewing, the repository, focus, and clearing the strip.
+- **Rust refuses a run host while no service host is in its set**, a poisoned lock included,
+  and checks it in `spawn` under the lock that admits the child — checked earlier, the service
+  host could exit in between.
+  The window learns the service host has gone from an event, and an event can be late; a run
+  host beside no service host is a run whose window can read nothing about it.
+- **The cap is `runs.maxConcurrent`, the machine's, and the window enforces it.** 0, the
+  default, is no limit — `budget.maxTokens: 0`'s shape, because any other default is a number
+  nobody measured. A project file that sets `runs` is refused by name on every road
+  (`refuseProjectRuns`, beside `refuseProjectAuth`); `readGlobalConfig` does **not** read it,
+  because no run does and a malformed value must not stop every run on the machine. The
+  window reads it off `globalRaw` (`capOf`, sentence for sentence with `readMaxConcurrent`,
+  and `hosts.test.ts` reads `src/config.ts` to keep them so) and has three states: a value it
+  cannot use refuses every start, since reading *no limit* out of a value somebody wrote is
+  the silent revert the cap exists to prevent; a cap not read yet refuses only while runs are
+  live; and a number refuses at that many live entries, started or not, by name, naming the
+  runs. Refused, never queued. Terminal runs are not counted.
+- **A config write is refused per project.** A project write only while one of that
+  project's runs is live, by `dirKey`, a start in flight included; a global write while any
+  run is live, **except a patch touching only `runs.maxConcurrent`**, which no run reads and
+  which is wanted exactly while runs are going. `auth` and `cli` are not exempt: `agentEnv`
+  and `configuredBin` read them for every agent child a run spawns. The refusal names the
+  runs. `host.setConfigGuard` is how the window's `writeRefusal` reaches `host.config`.
+- **An effect says where it acts.** A pilot `run_command` runs in `effect.dir`, the directory
+  its card displayed — what runs is what was displayed — and the Commands pane in the
+  sidebar's project. With several runs on screen in turn, "where the window is pointed" was a
+  second answer that could differ from the card somebody pressed. Kickoff stays on `repoDir`.
+- **The cockpit is the one adopter, and the pane is held until adoption settles.** The pilot
+  pane only restores now. `adoptionPlan` decides, for every unadopted run at once, with
+  `chatMove`'s rule unchanged; the effect writes the chats first and marks afterwards, and not
+  before the store is ready. Several runs proposed from one conversation each get the
+  exchange and none gets the CLI session; the source is cleaned once, when nothing proposed
+  from it is still waiting for an id. `heldChat` keeps the pane on the proposing conversation
+  until that run's mark lands, **however the run reached the screen** — a run clicked in the
+  sidebar the moment it appeared restored an empty chat and saved it over the one about to
+  arrive. Following a run onto its adopted copy keeps a pilot turn still streaming
+  (`sameExchange`), which adoption in the pane always did. **Adoption survives a relaunch no
+  better than before**: the join was in memory on develop too, and a quit between pressing a
+  proposal and adoption leaves the proposal under its draft or bucket key, not lost.
+- **Hosted marks are per project.** A run id is unique only inside one repository's
+  `.vibe/runs`, so `hostedMarks` takes the section's directory: marks keyed by id alone lit,
+  and badged, a row with the same id in another project. A gate held by a run nobody is
+  looking at is a static `alarm` badge on its row, and on its project's row while that section
+  is shut, so a run cannot wait for a person who cannot see it.
+- **Quit lists every live entry, started or not.** The tray's Quit, with run hosts in Rust's
+  set, shows the window and emits `app://quit-requested`; the window draws one `Confirm`
+  naming every run, worded as what it is — each stops where it is and can be resumed, only the
+  turn in flight is redone — and calls `app_quit` on yes. Quit asks *which hosts will this
+  kill*, and any live entry may have one; filtering by the drawing rule once let a quit skip
+  its own confirmation while a run host was going. A host Rust still holds after its run
+  returned, or after its invoke could not be written, is on no list and is quit without
+  asking: nothing is running in it, and `stop()` closes it the way Rust already was. The
+  guarantee is that no *run* is stopped unasked. A second Quit while that is unanswered is
+  asked natively, since Rust knows handles and not names; a Cancel is an answer, and calls
+  `app_quit` with `quit: false` so the next Quit asks through the window again. **`app_quit` is a deliberate new
+  door**: it only exits, through the same `stop()` the tray uses, which is narrower than a
+  process-exit permission that could skip the stop; `keys.test.ts` pins it. `stop()` drains a
+  poisoned set rather than returning early, and closing the window still only hides it.
+- **Implement continues in `identity.repo`**, as resume always did: `identity.dir` is the
+  run's own directory, and `-C` there looks for the run inside itself. A run whose core sent
+  no repo is not offered implement, and the footer says why.
 
 **And the core refuses a second run in one checkout.** `sameRepositoryRefusal` in
 `src/worktree.ts` runs in `main()` before the lock — before `allocateRun` on a start, so a

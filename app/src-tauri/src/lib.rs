@@ -44,13 +44,40 @@ mod pilot;
 mod reaper;
 mod shellenv;
 
-use host::{host_send, host_start, host_status, launch, HostProcess};
+use host::{app_quit, host_send, host_start, host_status, launch, HostProcess};
 use keys::{key_clear, key_set, key_status};
 use pilot::models::pilot_models;
 use pilot::{pilot_cancel, pilot_send, Pilot};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{Manager, WindowEvent};
+use tauri::{Emitter, Manager, WindowEvent};
+use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+
+/// The tray's Quit (#246). See the menu handler.
+fn tray_quit(app: &tauri::AppHandle) {
+    let hosts = app.state::<HostProcess>();
+    if !hosts.has_run_hosts() {
+        hosts.quit(app);
+        return;
+    }
+    if !hosts.request_quit() {
+        show(app);
+        let _ = app.emit("app://quit-requested", ());
+        return;
+    }
+    let me = app.clone();
+    app.dialog()
+        .message("Runs are still going. Quitting stops each one where it is; every one can be resumed, and only the turn each is in is redone.")
+        .title("Quit Vibe?")
+        .buttons(MessageDialogButtons::OkCancelCustom("Quit".into(), "Cancel".into()))
+        .show(move |yes| {
+            let hosts = me.state::<HostProcess>();
+            hosts.clear_quit();
+            if yes {
+                hosts.quit(&me);
+            }
+        });
+}
 
 /// Bring the window back, creating nothing and assuming nothing.
 ///
@@ -100,7 +127,11 @@ pub fn run() {
             pilot_cancel,
             // The one command that answers with data from a vendor, and it is a
             // list of model names - never a key and never a reply (#223).
-            pilot_models
+            pilot_models,
+            // Quit, once the window has confirmed it with runs going (#246). It
+            // only exits, through the same `stop()` the tray uses - narrower
+            // than a process-exit permission, which could skip the stop.
+            app_quit
         ])
         .setup(|app| {
             // Before `launch`, because the first thing worth keeping is why the
@@ -140,10 +171,14 @@ pub fn run() {
                     // one of them, the service host and each run's. Closing the
                     // window does not, because a run outliving its window is the
                     // normal case rather than an edge one.
-                    "quit" => {
-                        app.state::<HostProcess>().stop();
-                        app.exit(0);
-                    }
+                    //
+                    // **With runs going it asks first** (#246). The window is
+                    // shown and told, and draws one confirmation naming every run;
+                    // it calls `app_quit` on yes. A second Quit while that is
+                    // unanswered - the window hung, or hidden again - is asked
+                    // natively, because Rust knows handles and not names, and a
+                    // quit must never be lost to a window that cannot answer.
+                    "quit" => tray_quit(app),
                     _ => {}
                 })
                 .build(app)?;

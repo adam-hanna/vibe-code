@@ -13,6 +13,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -303,6 +304,10 @@ struct Hosts {
     /// How a key is read. `keys::read` in the app; a test reads none, so it never
     /// touches the machine's keychain.
     keys: fn(crate::keys::Provider) -> Option<String>,
+    /// A tray Quit the window has been asked to confirm and has not answered
+    /// (#246). Here rather than on `HostProcess`, which is `Clone`: every clone
+    /// shares one `Hosts`, so every clone sees one flag.
+    quit_pending: AtomicBool,
 }
 
 impl Default for HostProcess {
@@ -322,6 +327,7 @@ impl HostProcess {
                 reaper: Mutex::default(),
                 grace,
                 keys,
+                quit_pending: AtomicBool::new(false),
             }),
         }
     }
@@ -495,7 +501,45 @@ fn start_refusal(handle: &str, line: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
+/// Why a run host is not started for want of a service host (#246).
+///
+/// The window refuses a start while it believes the service host is gone, but
+/// it learns that from an event, and an event can be late. A run host started
+/// beside no service host is a run whose window can read nothing about it - no
+/// archive, no config, no pilot - so Rust refuses too, from the set it holds.
+fn run_start_refusal(handle: &str, has_service: bool) -> Result<(), String> {
+    if handle == SERVICE || has_service {
+        return Ok(());
+    }
+    Err("the app's host is not running, so a run cannot start until it is back".into())
+}
+
 impl HostProcess {
+    /// Whether any run host is in the set. A lock that cannot be read counts as
+    /// yes, so a quit asks rather than assuming there is nothing to lose.
+    pub fn has_run_hosts(&self) -> bool {
+        match self.inner.hosts.lock() {
+            Ok(guard) => guard.keys().any(|h| h != SERVICE),
+            Err(_) => true,
+        }
+    }
+
+    /// Mark a tray Quit as waiting on the window. True if one already was.
+    pub fn request_quit(&self) -> bool {
+        self.inner.quit_pending.swap(true, Ordering::SeqCst)
+    }
+
+    /// The pending quit has been answered, either way.
+    pub fn clear_quit(&self) {
+        self.inner.quit_pending.store(false, Ordering::SeqCst);
+    }
+
+    /// Stop every host and exit: what the tray's Quit always did.
+    pub fn quit(&self, app: &AppHandle) {
+        self.stop();
+        app.exit(0);
+    }
+
     /// Start a host and wire both of its output streams to the webview.
     ///
     /// `SERVICE` is the host started at launch; any other handle is a run host,
@@ -610,6 +654,10 @@ impl HostProcess {
         relay: Arc<dyn Relay>,
     ) -> Result<u32, String> {
         let mut guard = self.inner.hosts.lock().map_err(|_| "host lock poisoned")?;
+        // Under the same lock that admits the child (#246): checked any earlier,
+        // the service host could exit between the check and the insert, and a
+        // run host would start beside nothing. A poisoned lock refused above.
+        run_start_refusal(handle, guard.contains_key(SERVICE))?;
         // Idempotent by refusal, not by restart. Two processes under one handle
         // would be two writers the window cannot tell apart.
         if let Some(running) = guard.get(handle) {
@@ -959,9 +1007,12 @@ impl HostProcess {
     /// lock (#206). The kill is the fallback for a host that will not go, and
     /// reaching it is a fact worth recording rather than a normal quit.
     pub fn stop(&self) {
+        // A poisoned lock still holds the children, and a quit that returned
+        // early on one would leave every host running with nobody supervising
+        // it - the second writer this exists to prevent. So it is drained anyway.
         let mut taken: Vec<(String, Running)> = match self.inner.hosts.lock() {
             Ok(mut guard) => guard.drain().collect(),
-            Err(_) => return,
+            Err(poisoned) => poisoned.into_inner().drain().collect(),
         };
         for (_, running) in taken.iter_mut() {
             drop(running.stdin.take());
@@ -1040,9 +1091,90 @@ pub fn host_status(state: tauri::State<'_, HostProcess>) -> Status {
     state.status()
 }
 
+/// Quit, after the window has confirmed it with runs going (#246).
+///
+/// **A deliberate new door, and the narrowest one that does the job.** It only
+/// exits, and through the same `stop()` the tray's Quit uses - every host's
+/// stdin closed, each run leaving `HOST_EXIT_ABANDONED` and resumable with its
+/// own `ending.json`. Granting the webview a process-exit permission instead
+/// would let it end the app without stopping the hosts first.
+///
+/// `quit: false` is the window's Cancel, and it only answers the pending
+/// request: a cancelled confirmation is an answered one, so the next tray Quit
+/// asks through the window again rather than natively. One command for the one
+/// question, rather than a second door.
+#[tauri::command]
+pub fn app_quit(app: AppHandle, quit: bool) {
+    let hosts = app.state::<HostProcess>();
+    hosts.clear_quit();
+    if quit {
+        hosts.quit(&app);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_run_host_is_refused_without_a_service_host() {
+        assert!(run_start_refusal("run-1", false).is_err());
+        assert!(run_start_refusal("run-1", true).is_ok());
+        // The service host itself is never refused for its own absence.
+        assert!(run_start_refusal(SERVICE, false).is_ok());
+        // And where it is checked: in `spawn`, under the lock that admits the
+        // child, so nothing is spawned at all.
+        let collect = Collect::new();
+        let hosts = hosts(&collect);
+        let relay: Arc<dyn Relay> = collect.clone();
+        let why = hosts
+            .spawn("run-1", node(ECHO, Vec::new(), None), "s".into(), relay)
+            .expect_err("an empty set has no service host");
+        assert!(why.contains("not running"), "{why}");
+        assert!(hosts.status().runs.is_empty());
+    }
+
+    fn poison(hosts: &HostProcess) {
+        let inner = hosts.inner.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = inner.hosts.lock().unwrap();
+            panic!("poisoning the host lock on purpose");
+        })
+        .join();
+        assert!(hosts.inner.hosts.is_poisoned());
+    }
+
+    #[test]
+    fn a_poisoned_host_lock_refuses_a_run_and_counts_as_runs_going() {
+        let hosts = HostProcess::with(Duration::from_millis(10), |_| None);
+        assert!(!hosts.has_run_hosts());
+        poison(&hosts);
+        let relay: Arc<dyn Relay> = Collect::new();
+        assert!(hosts.spawn("run-1", node(ECHO, Vec::new(), None), "s".into(), relay).is_err());
+        assert!(hosts.has_run_hosts(), "a quit must ask when it cannot tell");
+    }
+
+    #[test]
+    fn the_pending_quit_starts_unset_and_every_clone_shares_it() {
+        let hosts = HostProcess::with(Duration::from_millis(10), |_| None);
+        let other = hosts.clone();
+        assert!(!hosts.request_quit(), "nothing was pending");
+        assert!(other.request_quit(), "the clone sees the first request");
+        other.clear_quit();
+        assert!(!hosts.request_quit(), "cleared through the clone");
+    }
+
+    #[test]
+    fn stop_drains_a_poisoned_set() {
+        let collect = Collect::new();
+        let hosts = hosts(&collect);
+        start(&hosts, &collect, SERVICE, None, ECHO).unwrap();
+        start(&hosts, &collect, "run-1", Some(r#"{"type":"invoke","id":1,"argv":[]}"#), ECHO).unwrap();
+        poison(&hosts);
+        hosts.stop();
+        let seen = collect.wait("both hosts to leave", |s| collect_exit(s, SERVICE) && collect_exit(s, "run-1"));
+        assert!(seen.iter().any(|s| matches!(s, Seen::Exit(h, ..) if h == "run-1")));
+    }
 
     #[test]
     fn status_serialises_the_keys_the_window_reads() {
@@ -1248,6 +1380,12 @@ mod tests {
         hosts.launch_host(handle, line, node(script, Vec::new(), None), "test-secret".into(), relay)
     }
 
+    /// A run host is refused beside no service host (#246), so a case about a
+    /// run host starts one first.
+    fn service(hosts: &HostProcess, collect: &Arc<Collect>) {
+        start(hosts, collect, SERVICE, None, ECHO).unwrap();
+    }
+
     fn has_frame(seen: &[Seen], handle: &str, kind: &str, id: i64) -> bool {
         seen.iter().any(|s| matches!(s, Seen::Frame(h, f)
             if h == handle && f["type"] == kind && f["id"] == id))
@@ -1314,6 +1452,7 @@ mod tests {
     fn a_run_host_whose_keys_cannot_be_written_is_closed_before_its_invoke() {
         let collect = Collect::new();
         let hosts = hosts(&collect);
+        service(&hosts, &collect);
         let relay: Arc<dyn Relay> = collect.clone();
         hosts.spawn("run-2", node(DEAF, Vec::new(), None), "test-secret".into(), relay).unwrap();
         collect.wait("the child to close its stdin", |s| s.iter().any(|f| matches!(f, Seen::Frame(h, v) if h == "run-2" && v["type"] == "deaf")));
@@ -1347,6 +1486,7 @@ mod tests {
         // streams does not. It is killed and nothing is added to the set.
         let collect = Collect::new();
         let hosts = hosts(&collect);
+        service(&hosts, &collect);
         let mut command = node(DEAF, Vec::new(), None);
         command.stdin(Stdio::null());
         let relay: Arc<dyn Relay> = collect.clone();
@@ -1366,6 +1506,7 @@ mod tests {
             });
             setInterval(() => {}, 1000);
         "#;
+        service(&hosts, &collect);
         let relay: Arc<dyn Relay> = collect.clone();
         hosts.spawn("run-4", node(script, Vec::new(), None), "s".into(), relay).unwrap();
         collect.wait("its last frame", |s| s.iter().any(|f| matches!(f, Seen::Frame(h, v) if h == "run-4" && v["type"] == "closing")));
@@ -1418,8 +1559,8 @@ mod tests {
         let hosts = hosts(&collect);
         let relay: Arc<dyn Relay> = collect.clone();
         let login = vec![("VIBE_APP_DATA".to_string(), "/leaked".to_string())];
-        hosts.spawn("run-7", node(ECHO, login.clone(), None), "s".into(), relay.clone()).unwrap();
-        hosts.spawn(SERVICE, node(ECHO, login, Some(&data)), "s".into(), relay).unwrap();
+        hosts.spawn(SERVICE, node(ECHO, login.clone(), Some(&data)), "s".into(), relay.clone()).unwrap();
+        hosts.spawn("run-7", node(ECHO, login, None), "s".into(), relay).unwrap();
         hosts.send("run-7", r#"{"type":"env","id":40}"#).unwrap();
         hosts.send(SERVICE, r#"{"type":"env","id":41}"#).unwrap();
         let seen = collect.wait("both environments", |s| has_frame(s, "run-7", "env", 40) && has_frame(s, SERVICE, "env", 41));
@@ -1446,6 +1587,7 @@ mod tests {
         }
         let collect = Collect::new();
         let hosts = hosts(&collect);
+        service(&hosts, &collect);
         start(&hosts, &collect, "run-8", Some(r#"{"type":"invoke","id":8,"argv":[]}"#), ECHO).unwrap();
         let again = start(&hosts, &collect, "run-8", Some(r#"{"type":"invoke","id":9,"argv":[]}"#), ECHO);
         assert!(again.is_err(), "two processes under one handle");

@@ -513,13 +513,17 @@ export function Footer({
             Offered here, beside the ending, rather than as a `RESUMABLE` exit
             code. Exit 0 is not a halt and must not start reading as one; this is
             a separate labelled act on a run that finished exactly as asked. */}
-        {run.plannedOnly !== null && run.identity !== null && (
+        {/* **The repository, not the run's own directory** (#246), for the
+            reason the resume below gives: `identity.dir` is `<repo>/.vibe/runs/<id>`,
+            and `-C` there looks for the run inside itself. */}
+        {run.plannedOnly !== null && run.identity?.repo != null && (
           <div className={ACTIONS}>
             <Button
               variant="primary"
               disabled={busy}
               onClick={() => {
-                if (run.identity !== null) onImplement(run.identity.runId, run.identity.dir);
+                const at = run.identity;
+                if (at?.repo != null) onImplement(at.runId, at.repo);
               }}
             >
               <Play size={14} aria-hidden="true" /> implement this plan
@@ -532,6 +536,13 @@ export function Footer({
                 : 'findings it carried'}{' '}
               and the ones it declined all travel with it, and nothing is re-planned.
             </span>
+          </div>
+        )}
+        {run.plannedOnly !== null && run.identity !== null && run.identity.repo == null && (
+          <div className={NOTE}>
+            This plan can be implemented, but the loop never said which repository it is in — so
+            there is nothing to point it at from here. `vibe resume &lt;id&gt; --implement` does it from
+            a terminal.
           </div>
         )}
         {/* Said whether or not the button is pressed, because it changes what

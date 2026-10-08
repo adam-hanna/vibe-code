@@ -140,20 +140,28 @@ export function removeDraft(list: readonly Draft[], id: string): readonly Draft[
   return list.filter((d) => d.id !== id);
 }
 
-/** Mark that this draft's proposal was pressed. Only one draft is ever waiting. */
+/**
+ * Mark that this draft's proposal was pressed, and nothing else (#246).
+ *
+ * It used to un-mark every other launched draft, because only one run could be
+ * starting at a time. Several can now, each from its own draft, and each claims
+ * only its own - so this touches one draft and `unmarkLaunched` is its exact
+ * inverse, for a start Rust refused or a run that ended before it had an id.
+ */
 export function markLaunched(list: readonly Draft[], id: string): readonly Draft[] {
-  return list.map((d) =>
-    d.id === id ? { ...d, launched: true } : d.launched && d.runId === null ? { ...d, launched: false } : d,
-  );
+  return list.map((d) => (d.id === id ? { ...d, launched: true } : d));
 }
 
-/**
- * The run a launched draft became.
- *
- * Only a draft that was **launched and not yet claimed** can be bound, so a run
- * started some other way — a resume, a terminal — never swallows a draft that
- * happens to be open.
- */
+/** `markLaunched`'s inverse, for a draft whose run never got an id. */
+export function unmarkLaunched(list: readonly Draft[], id: string): readonly Draft[] {
+  return list.map((d) => (d.id === id && d.runId === null ? { ...d, launched: false } : d));
+}
+
+/** Whether this draft's run is already starting, so a second press is refused. */
+export function isLaunched(list: readonly Draft[], id: string): boolean {
+  return list.some((d) => d.id === id && d.launched);
+}
+
 export function bindDraft(list: readonly Draft[], id: string, runId: string): readonly Draft[] {
   return list.map((d) => (d.id === id && d.launched && d.runId === null ? { ...d, runId } : d));
 }

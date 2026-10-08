@@ -12,6 +12,7 @@ import { Section } from './Disclosure';
 import { STEPS } from './appearance';
 import { pickDirectory } from './pick';
 import { projectName } from './projects';
+import { capOf } from './hosts';
 import { DRAFTS_KEY, draftsFor, readDrafts, removeDraft, saveDraft } from './drafts';
 import type { Draft } from './drafts';
 import type { KeyStatus } from '../pilot/keys';
@@ -1154,6 +1155,8 @@ export function Settings({
   const git = effective.git ?? {};
   const verify = effective.verify ?? {};
   const roles = effective.roles ?? {};
+  // Not on `Config` - no run reads it - so it is read off the global file (#246).
+  const cap = capOf(frame.globalRaw);
   // Which rows the FILE claims, as opposed to which are in force, is `source`
   // below — the whole reason `raw` travels beside `effective`.
 
@@ -1427,6 +1430,32 @@ export function Settings({
                     <Key name="pilot.timeoutMs" />
                   </span>
                 </div>
+                {/* How many runs this window may host at once (#246). The
+                    machine's, like the pilot's limits: a project file that sets
+                    it is refused by name. Read here off the global file rather
+                    than off a frame field, so it shows a value it cannot use
+                    rather than a number it guessed. */}
+                <div className={S.row}>
+                  <label className={S.label} htmlFor="runs-max">
+                    runs at once
+                    {source('runs', 'maxConcurrent')}
+                  </label>
+                  <span className={S.inline}>
+                    <NumberField
+                      id="runs-max"
+                      value={'cap' in cap ? cap.cap : undefined}
+                      disabled={busy}
+                      onSave={(n) => write({ runs: { maxConcurrent: n } }, 'global')}
+                    />
+                    <span className={S.unit}>runs</span>
+                    <Key name="runs.maxConcurrent" />
+                  </span>
+                </div>
+                {'problem' in cap && <p className={S.note}>{cap.problem}</p>}
+                <p className={S.note}>
+                  How many runs this window may host at once. 0 means no limit. A start over the limit
+                  is refused, never queued. Runs started from a terminal are not counted.
+                </p>
                 <div className={S.row}>
                   <label className={S.label} htmlFor="pilot-safe">
                     commands that run without a card

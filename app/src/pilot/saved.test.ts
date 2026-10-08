@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import pilotPane from './PilotPane.tsx?raw';
-import { chatKey, readChat, worthSaving, writable } from './saved';
+import hosts from '../cockpit/hosts.ts?raw';
+import { chatKey, cleanupWrites, readChat, sameExchange, worthSaving, writable } from './saved';
 import { emptyConversation } from './transcript';
 import type { Conversation } from './transcript';
 
@@ -117,16 +118,46 @@ describe('a run adopts the conversation that proposed it', () => {
     // opening it showed an empty pane.
     //
     // The condition moved into `chatMove`, which is pure and has the transition
-    // table this file could never assert from source — including the resume case
-    // the widening needs a guard for. What stays here is the half that is still
-    // about this file: that the move is a write-and-clear and not a read.
-    expect(pilotPane).toMatch(/const move = chatMove\(\{/);
-    expect(pilotPane).toMatch(/if \(move === 'adopt'\)/);
-    // Through `putChat` since the store moved to the host's files (#223).
-    expect(pilotPane).toMatch(/putChat\(key, writable\(held\.current\)\)/);
-    // Cleared, and only the bucket: taking a *run's* key away here would delete
-    // a real conversation to tidy up after a move.
-    expect(pilotPane).toMatch(/if \(before === bucket\) putChat\(bucket, null\)/);
+    // table this file could never assert from source - including the resume case
+    // the widening needs a guard for.
+    //
+    // **Case 2 again (#246), and what moved is who adopts.** With several runs
+    // starting, the pane adopting on a key move was one adopter per pane move
+    // racing the next; the cockpit adopts now, once per run, in `adoptionPlan`,
+    // and the pane only restores. The claim this kept - that the move is a
+    // write-and-clear and not a read - is pinned where the write now is.
+    expect(hosts).toMatch(/const move = chatMove\(\{/);
+    expect(hosts).toMatch(/if \(move !== 'adopt' \|\| from === null\)/);
+    expect(pilotPane).not.toMatch(/chatMove\(/);
+    // Cleared, and only the bucket and a draft: taking a *run's* key away would
+    // delete a real conversation to tidy up after a move, so a run's own chat
+    // keeps its messages and gives up only its session.
+    const bucket = chatKey('/repo', null);
+    const run = chatKey('/repo', 'R');
+    const talk: Conversation = {
+      ...emptyConversation(),
+      messages: [{ role: 'user', content: 'hi' }] as never,
+      session: { backend: 'subscription', id: 's' },
+    };
+    expect(cleanupWrites(bucket, bucket, talk)).toEqual([{ key: bucket, value: null }]);
+    const kept = cleanupWrites(run, bucket, talk)[0];
+    expect(kept?.key).toBe(run);
+    expect(readChat(kept?.value ?? null).messages).toHaveLength(1);
+    expect(readChat(kept?.value ?? null).session).toBeNull();
+  });
+
+  test('following a run onto its adopted copy keeps a pilot turn still streaming', () => {
+    // The pane used to adopt by keeping what it held, so a turn in flight
+    // survived the move. Restoring the copy wholesale would drop it; the pane
+    // keeps its live turn when what is stored is the exchange it already holds.
+    const talk: Conversation = { ...emptyConversation(), messages: [{ role: 'user', content: 'hi' }] as never };
+    expect(sameExchange(writable(talk), talk)).toBe(true);
+    expect(sameExchange(writable({ ...talk, session: { backend: 'subscription', id: 's' } }), talk)).toBe(true);
+    expect(sameExchange(writable(emptyConversation()), talk)).toBe(false);
+    expect(sameExchange(null, talk)).toBe(false);
+    expect(sameExchange(writable(talk), emptyConversation())).toBe(false);
+    expect(pilotPane).toMatch(/if \(sameExchange\(stored, held\.current\)\)/);
+    expect(pilotPane).toMatch(/live: held\.current\.live/);
   });
 
   test('the loader keys on the run, never on the conversation', () => {

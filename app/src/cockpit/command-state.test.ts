@@ -2,6 +2,7 @@ import { describe, expect, test } from 'vitest';
 import { emptyRun } from './model';
 import { COMMAND_OUTPUT_KEEP, noCommands, outcome, reduceCommands, running } from './commands';
 import { execute } from '../pilot/tools';
+import { NO_ACCESS } from '../pilot/access';
 import type { Commands } from './commands';
 import type { CommandEnded, CommandOutput, CommandStarted } from '../host';
 
@@ -110,6 +111,18 @@ describe('what the pilot may do about one', () => {
       program: 'npm',
       args: ['install'],
     });
+  });
+
+  test('an allowed other directory is carried on the effect, which is where the cockpit runs it', () => {
+    // #246: the cockpit runs a pilot command in `effect.dir`, not wherever the
+    // window happens to be pointed, so the directory on the card is the one
+    // that is used.
+    const access = { ...NO_ACCESS, dirs: ['C:/other'] };
+    const settlement = execute(
+      call('run_command', { program: 'git', args: ['status'], why: 'look', directory: 'C:/other' }),
+      { ...ctx(noCommands()), access },
+    );
+    expect(settlement.kind === 'proposes' && settlement.effect).toMatchObject({ kind: 'command', dir: 'C:/other' });
   });
 
   test('shell syntax is refused with its reason rather than passed through', () => {

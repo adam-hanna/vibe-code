@@ -1,21 +1,24 @@
 import { describe, expect, test } from 'vitest';
 import cockpit from './Cockpit.tsx?raw';
 import sidebar from './Sidebar.tsx?raw';
-import pane from '../pilot/PilotPane.tsx?raw';
+import hosts from './hosts.ts?raw';
 import {
   addDraft,
   bindDraft,
   draftsIn,
   isDraftId,
   draftTitle,
+  isLaunched,
   markLaunched,
   namesAfterStart,
   newDraft,
   readDrafts,
   removeDraft,
   settled,
+  unmarkLaunched,
 } from './pending';
-import { chatKey, chatMove, isDraftKey } from '../pilot/saved';
+import { chatKey, chatMove, cleanupWrites, isDraftKey } from '../pilot/saved';
+import { emptyConversation } from '../pilot/transcript';
 
 /**
  * A run exists from the moment somebody presses start (#223).
@@ -57,11 +60,19 @@ describe('a draft is this window\'s memory of a run not started yet', () => {
     expect(bindDraft(bound, d.id, 'S')[0]?.runId).toBe('R');
   });
 
-  test('one draft is waiting at a time', () => {
+  test('each draft claims only its own run, and unmarking is the exact inverse', () => {
+    // Case 2 (#246): this pinned *one draft is waiting at a time*, because one
+    // run could be starting at a time. Several can now, each from its own
+    // draft, so marking one no longer un-marks the others.
     const a = newDraft(repo, 'a', 1, 'a');
     const b = newDraft(repo, 'b', 2, 'b');
     const list = markLaunched(markLaunched([a, b], a.id), b.id);
-    expect(list.map((d) => d.launched)).toEqual([false, true]);
+    expect(list.map((d) => d.launched)).toEqual([true, true]);
+    expect(isLaunched(list, a.id)).toBe(true);
+    expect(unmarkLaunched(markLaunched([a, b], a.id), a.id)).toEqual([a, b]);
+    // A draft already bound to its run keeps its claim.
+    const bound = bindDraft(markLaunched([a], a.id), a.id, 'R');
+    expect(unmarkLaunched(bound, a.id)).toEqual(bound);
   });
 
   test('a project draws its drafts until the archive lists the run, then lets go', () => {
@@ -98,10 +109,11 @@ describe('the conversation goes with it', () => {
     expect(isDraftKey(runKey)).toBe(false);
   });
 
-  test('the pane removes the draft\'s copy once the run holds it', () => {
-    const adopt = pane.slice(pane.indexOf("if (move === 'adopt') {"));
-    // Through `putChat` since the store moved to the host's files (#223).
-    expect(adopt).toContain('isDraftKey(before)) putChat(before, null)');
+  test('the draft\'s copy is removed once the run holds it', () => {
+    // Case 2 (#246): moved out of the pane, verbatim, into `cleanupWrites`,
+    // which the cockpit's one adopter runs.
+    expect(cleanupWrites(draftKey, chatKey(repo, null), emptyConversation())).toEqual([{ key: draftKey, value: null }]);
+    expect(hosts).toContain('cleanupWrites(');
   });
 });
 
@@ -112,29 +124,37 @@ describe('the cockpit wires it', () => {
     expect(at).toBeGreaterThan(-1);
     const handler = cockpit.slice(at);
     expect(handler).toMatch(/slice\(2, 8\),\s*title,\s*\);/);
-    expect(handler).toContain('saveDrafts((list) => addDraft(list, draft))');
+    // `updateDrafts` since #246: the one writer, ref first.
+    expect(handler).toContain('updateDrafts((list) => addDraft(list, draft))');
     expect(handler).toContain('setDraftId(draft.id)');
     // With the draft's id since #270, so equal briefs are still two handovers.
     expect(handler).toContain('setQueued({ id: draft.id, message })');
   });
 
-  test('the pilot pane is keyed by the draft, and a draft counts as pointed-at', () => {
+  test('the pilot pane is keyed by the draft', () => {
     // Through `pilotRunId` since #223: outside a launch's hold it is exactly the
-    // draft first and then the run on screen, and `opened` is unchanged there.
+    // draft first and then the run on screen. Case 2 (#246): `opened` is gone,
+    // because the pane only restores - arriving at a draft restores its own
+    // conversation by construction, and adoption is the cockpit's.
     expect(cockpit).toContain('runId={pilotRunId}');
     expect(cockpit).toContain(
       'const pilotRunId = holdChat !== null ? holdChat.runId : (drafting?.id ?? shownRunId);',
     );
-    expect(cockpit).toContain('opened={holdChat === null && (viewing !== null || drafting !== null)}');
+    expect(cockpit).not.toContain('opened={');
   });
 
   test('only the pilot\'s invoke can claim a draft', () => {
     // A resume or an implement also go through `launch`; neither is the run a
     // draft asked for.
     expect(cockpit).toContain("if (effect.kind === 'invoke') launch(effect.argv, draftId);");
-    expect(cockpit).toMatch(/resumeArgv[\s\S]*launch\(argv\);/);
-    const bind = cockpit.slice(cockpit.indexOf('const startedId = '));
-    expect(bind).toContain('if (launchedFrom.current !== drafting.id) return;');
+    // Case 2 (#246): a resume and an implement pass no draft, and a draft is
+    // claimed by the run whose entry names it - not by a ref that only one
+    // launch at a time could hold.
+    expect(cockpit).toMatch(/launch\(argv, null, seed, task\);/);
+    expect(cockpit).toContain('draft: draft === null ? null : { id: draft.id, dir: draft.dir },');
+    const bind = cockpit.slice(cockpit.indexOf('const plan = adoptionPlan('));
+    expect(bind).toContain('const draft = e?.draft ?? null;');
+    expect(bind).toContain('updateDrafts((list) => bindDraft(list, draft.id, id));');
   });
 
   test('the sidebar draws a draft among the project\'s runs, and discarding confirms', () => {
@@ -169,8 +189,8 @@ describe('a run can be named when it is started, and keeps the name (#262)', () 
   });
 
   test('the cockpit writes it when the draft is bound, and the rows draw it', () => {
-    const bind = cockpit.slice(cockpit.indexOf('bindDraft(list, drafting.id, startedId)'));
-    expect(bind).toMatch(/namesAfterStart\(readNames\(memory\.getItem\(NAMES_KEY\)\), drafting, startedId\)/);
+    const bind = cockpit.slice(cockpit.indexOf('bindDraft(list, draft.id, id)'));
+    expect(bind).toMatch(/namesAfterStart\(readNames\(memory\.getItem\(NAMES_KEY\)\), held, id\)/);
     expect(sidebar).toContain('title={draftTitle(d)}');
   });
 });
