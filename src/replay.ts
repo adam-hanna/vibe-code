@@ -98,7 +98,13 @@ export interface RoundCensus {
   /** `plan` for a critique round, `review` for a review round. */
   phase: 'plan' | 'review';
   round: number;
-  counts: { p0: number; p1: number; p2: number; p3: number };
+  /**
+   * Spelled as the live loop spells them in `findings_reported` (#292). This
+   * was `p0`-`p3`, and the window's `readCounts` reads `P0`-`P3` and refuses
+   * anything else, so every replayed census was dropped and an opened run's
+   * round cards drew no counts at all.
+   */
+  counts: { P0: number; P1: number; P2: number; P3: number };
 }
 
 /** How many questions a question round raised, from `answers-<n>.json`. */
@@ -123,6 +129,12 @@ interface Seat {
   phase: 'planning' | 'critique' | 'implementing' | 'review';
   /** The round the label itself names, or null when it names none. */
   round: number | null;
+  /**
+   * The round the turn itself carries, when it is not the group's. Only a
+   * verify-fix has one: its label names the VERIFY round, which is what the live
+   * `turn_started` carries, while its group is the code round that ran the gate.
+   */
+  turnRound?: number;
 }
 
 /**
@@ -178,9 +190,15 @@ export function seatOf(label: string): Seat | null {
   if (fix !== null) {
     return { role: 'implementer', kind: 'review-fix', phase: 'implementing', round: fix };
   }
+  // **No group round of its own** (#292). `verify-fix-N` names the verify
+  // round, a different counting from the review round a code group is keyed by,
+  // so filing it under `implementing` round N opened a second code card -
+  // `implementing 3` then `implementing 1` on the #246 run. Live, a verify-fix
+  // is inside the code group that ran the gate (#280), so `replayRun` keeps it
+  // in the code group already open.
   const verifyFix = numbered('verify-fix');
   if (verifyFix !== null) {
-    return { role: 'implementer', kind: 'verify-fix', phase: 'implementing', round: verifyFix };
+    return { role: 'implementer', kind: 'verify-fix', phase: 'implementing', round: null, turnRound: verifyFix };
   }
   const finalFix = numbered('final-fix');
   if (finalFix !== null) {
@@ -358,8 +376,12 @@ export function replayRun(state: RunState, sources: ReplaySources): Replay {
     const opened = start ?? turn.at;
 
     if (seat !== null) {
-      const round =
+      // A verify-fix belongs to the code group that ran the gate, which is the
+      // one open: the gate runs only after an implement or fix turn (#292).
+      const sameGroup: boolean = seat.kind === 'verify-fix' && openPhase === 'implementing' && openRound !== null;
+      const round: number =
         seat.round ??
+        (sameGroup ? openRound : null) ??
         (seat.phase === 'review' || seat.phase === 'implementing'
           ? (context?.reviewRound ?? 0)
           : (context?.planRound ?? 0));
@@ -409,7 +431,7 @@ export function replayRun(state: RunState, sources: ReplaySources): Replay {
         say('turn_started', `${seat.role} · ${seat.kind}`, {
           role: seat.role,
           kind: seat.kind,
-          round,
+          round: seat.turnRound ?? round,
           // Told, never inferred. A window that guessed which turns had a
           // measured start would guess wrong on the ones that matter.
           unmeasured: start === null,
