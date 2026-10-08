@@ -2198,6 +2198,19 @@ export interface RunSummary {
    */
   costUsd: number | null;
   /**
+   * The run's four round counters, as its state.json stored them (#114) - the
+   * design's rounds fingerprint, `p2 q1 v1 r2`, cheap to scan for runs that
+   * thrashed.
+   *
+   * Filled only for a state.json that parsed to an object, from the same read
+   * `listRuns` already makes for the row; absent on a linked, unverified or
+   * unreadable entry, because nothing under those was read. A counter the run
+   * never recorded - every run older than `questionRound` - or one that is not a
+   * non-negative integer is `null`, never 0. `review` counts FIX rounds, which is
+   * how `vibe stats` names the same counter.
+   */
+  rounds?: { plan: number | null; question: number | null; review: number | null; verify: number | null };
+  /**
    * Whether anything is working on this run, from its lock (#77).
    *
    * Optional so that a caller building a summary by hand does not have to have

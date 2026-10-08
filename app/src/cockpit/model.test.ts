@@ -459,12 +459,18 @@ describe('the running row reports absence as absence', () => {
     // kept here and asserted of the diffstat's own absence below.
     //
     // **It used to assert the issue number was in the sentence, and that is the
-    // part that moved.** An end user cannot act on `#114`; the actionable half
-    // is the statement that no frame carries the figure. The number stays in the
-    // source comment, where the next reader of this module is.
+    // part that moved.** An end user cannot act on `#114`; the number stays in
+    // the source comment, where the next reader of this module is.
+    //
+    // **And the sentence itself moved with #114** (AGENTS.md case 2): the
+    // window reads the archive now, so "no frame carries it" stopped being
+    // true. The part that still holds - absent WITH A REASON until a figure
+    // exists - is asserted of the one state that still lacks one: a scorecard
+    // that has not been read.
     const row = runningRow(started.running!, 0);
-    expect(row.comparable).toMatch(/no frame carries it/);
-    expect(row.comparable).not.toMatch(/#\d/);
+    expect(row.comparable.measured).toBe(false);
+    expect(row.comparable.text).toMatch(/not been read/);
+    expect(row.comparable.text).not.toMatch(/#\d/);
   });
 
   test('a turn with no reading says which turns get one, rather than looking late', () => {

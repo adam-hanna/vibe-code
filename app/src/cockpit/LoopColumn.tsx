@@ -12,6 +12,7 @@ import type { BottomTab, Tab } from './where';
 import { findTurn, nowStatus, RAIL_TITLE, turnGroup, verifyRow, verifyRowText } from './rail';
 import type { RailState, VerifyRow } from './rail';
 import { RunningRow } from './RunningRow';
+import type { ArchiveView } from './model';
 import type { KeyboardEvent } from 'react';
 import { runningRow } from './model';
 import type { Census, CycleKind, PhaseGroup, Preflight, QuestionRound, ResumedFrom, Run, Turn } from './model';
@@ -114,8 +115,18 @@ type Draw = 'live' | 'settled' | 'done';
 const drawOf = (turn: Turn, runningId: number | null, settledId: number | null): Draw =>
   turn.id === runningId ? 'live' : turn.id === settledId ? 'settled' : 'done';
 
-function Version({ turn, draw, now }: { turn: Turn; draw: Draw; now: number }) {
-  if (draw !== 'done') return <RunningRow turn={turn} now={now} live={draw === 'live'} />;
+function Version({
+  turn,
+  draw,
+  now,
+  archive,
+}: {
+  turn: Turn;
+  draw: Draw;
+  now: number;
+  archive: ArchiveView;
+}) {
+  if (draw !== 'done') return <RunningRow turn={turn} now={now} live={draw === 'live'} archive={archive} />;
   return (
     <div className="flex items-center gap-2 py-1 text-body-sm text-secondary">
       <span className="text-primary">
@@ -166,6 +177,7 @@ function Round({
   runningId,
   settledId,
   now,
+  archive,
 }: {
   phase: PhaseGroup;
   /** What the gate made of this phase, or null. Hi-fi 2 puts it on the row. */
@@ -180,6 +192,7 @@ function Round({
   runningId: number | null;
   settledId: number | null;
   now: number;
+  archive: ArchiveView;
 }) {
   const turns = phase.turns.filter((t) => !isAnswerer(t));
   const answerers = phase.turns.filter(isAnswerer);
@@ -244,6 +257,7 @@ function Round({
               turn={turn}
               draw={drawOf(turn, runningId, settledId)}
               now={now}
+              archive={archive}
             />
           ))}
           {/* **An answerer turn is drawn whether or not its round has a
@@ -266,6 +280,7 @@ function Round({
                 turn={turn}
                 draw={drawOf(turn, runningId, settledId)}
                 now={now}
+                archive={archive}
               />
             ))}
           {turns.length === 0 &&
@@ -288,6 +303,7 @@ function Round({
               runningId={runningId}
               settledId={settledId}
               now={now}
+              archive={archive}
             />
           )}
         </>
@@ -334,6 +350,7 @@ function Questions({
   runningId,
   settledId,
   now,
+  archive,
 }: {
   questions: QuestionRound;
   /** The answerer's turns from this phase, which belong here rather than above. */
@@ -342,6 +359,7 @@ function Questions({
   runningId: number | null;
   settledId: number | null;
   now: number;
+  archive: ArchiveView;
 }) {
   const outstanding = questions.open.filter((q) => q.answer === null && !q.declined).length;
   const go = onOpen === undefined ? null : () => { onOpen('questions', questions.round); };
@@ -388,7 +406,7 @@ function Questions({
       />
 
       {turns.map((turn) => (
-        <Version key={turn.id} turn={turn} draw={drawOf(turn, runningId, settledId)} now={now} />
+        <Version key={turn.id} turn={turn} draw={drawOf(turn, runningId, settledId)} now={now} archive={archive} />
       ))}
 
       {/* Hi-fi 14: *"waiting on you is not stalled, and the column says so."* The
@@ -594,11 +612,11 @@ function PreflightRow({ preflight, now }: { preflight: Preflight; now: number })
  *
  * **The ETA is the one that is not built, and its absence is the point.** The
  * design's wording is *"preflight usually clears in under a minute"*, which is a
- * claim about past runs; nothing in this app has read a past run, because that
- * is #114. Shipping the sentence anyway would make it the same kind of invention
- * as `claude 38%` and `step 9/14` - the two the design itself struck. So the row
- * says what it cannot say and names the issue that would supply it, exactly as
- * `6a`'s comparable-turns line already does.
+ * claim about past runs. The window reads the archive now (#114), and the
+ * archive records no preflight durations - nor any turn's - so there is still
+ * nothing to say it from. Shipping the sentence anyway would make it the same
+ * kind of invention as `claude 38%` and `step 9/14` - the two the design itself
+ * struck. So the row says what it cannot say, and why.
  */
 function Starting({
   run,
@@ -646,11 +664,10 @@ function Starting({
       <p className="mt-2 mb-0 border-t border-dashed border-rule-control-dim pt-2 text-body-sm text-tertiary">
         phase, round, elapsed total and spend — the first turn has not reported
       </p>
-      {/* The issue number this line used to carry has gone from the copy and
-          stayed in the source. An end user cannot act on `#114`; the sentence
-          they can act on is the one that says the figure does not exist. */}
+      {/* The archive is read now, and it holds no durations: the true reason
+          the figure does not exist. Issue numbers stay in the source. */}
       <p className="mt-2 mb-0 border-t border-dashed border-rule-control-dim pt-2 text-body-sm text-tertiary">
-        how long this usually takes — no frame carries a past run&apos;s timings
+        how long this usually takes — the archive records no preflight durations
       </p>
     </div>
   );
@@ -722,9 +739,15 @@ export function LoopColumn({
   hostPid = null,
   onOpen,
   compact = false,
+  archive = null,
 }: {
   run: Run;
   now: number;
+  /**
+   * The archive's per-kind token distributions (#114), for the comparable-turns
+   * line. Null while the scorecard has not been read, which the line says.
+   */
+  archive?: ArchiveView;
   /** A fact about this window's process, not about the run. Hi-fi 16 draws it. */
   hostPid?: number | null;
   /**
@@ -735,7 +758,7 @@ export function LoopColumn({
   /** Use the glanceable run-status rail in the desktop cockpit. */
   compact?: boolean;
 }) {
-  if (compact) return <RunRail run={run} now={now} onOpen={onOpen} />;
+  if (compact) return <RunRail run={run} now={now} onOpen={onOpen} archive={archive} />;
 
   /**
    * Which groups and rounds are folded shut.
@@ -829,6 +852,7 @@ export function LoopColumn({
                   runningId={runningId}
                   settledId={settledId}
                   now={now}
+                  archive={archive}
                 />
               ))}
           </div>
@@ -848,6 +872,7 @@ export function LoopColumn({
           runningId={runningId}
           settledId={settledId}
           now={now}
+          archive={archive}
         />
       ))}
 
@@ -1052,7 +1077,17 @@ function RailPreflight({ preflight, now }: { preflight: Preflight; now: number }
   );
 }
 
-function RunRail({ run, now, onOpen }: { run: Run; now: number; onOpen?: OpenAt | undefined }) {
+function RunRail({
+  run,
+  now,
+  onOpen,
+  archive,
+}: {
+  run: Run;
+  now: number;
+  onOpen?: OpenAt | undefined;
+  archive: ArchiveView;
+}) {
   const currentTurn = run.running ?? findTurn(run, run.gate?.turnId ?? null);
   const currentKind = currentTurn === null ? null : turnGroup(run, currentTurn.id);
   const [open, setOpen] = useState<ReadonlySet<CycleKind>>(() => new Set());
@@ -1064,7 +1099,7 @@ function RunRail({ run, now, onOpen }: { run: Run; now: number; onOpen?: OpenAt 
     });
   };
   const censusOf = censusByPhase(run);
-  const activity = currentTurn === null ? null : runningRow(currentTurn, now);
+  const activity = currentTurn === null ? null : runningRow(currentTurn, now, archive);
   const status = nowStatus(run);
   const verify = verifyRow(run);
   const statusState = status.tone;
@@ -1121,6 +1156,11 @@ function RunRail({ run, now, onOpen }: { run: Run; now: number; onOpen?: OpenAt 
             {activity.activities === null
               ? 'No activity count reported yet'
               : `${activity.activities.count} ${activity.activities.unit}`}
+          </div>
+          {/* The same comparable-turns line `RunningRow` draws, from the same
+              `runningRow` output — this card is what the cockpit shows. */}
+          <div className={cn('mt-1 text-body-sm', activity.comparable.measured ? 'text-secondary' : 'text-tertiary')}>
+            {activity.comparable.text}
           </div>
         </div>
       )}

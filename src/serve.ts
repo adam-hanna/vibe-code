@@ -45,6 +45,8 @@ import type { Narration } from '@src/log.js';
 import type { PilotChatOptions, PilotChatResult } from '@src/pilotchat.js';
 import type { Outbound } from '@src/protocol.js';
 import type { RunSummary } from '@src/types.js';
+import { scoreArchive } from '@src/scorecard.js';
+import type { Scorecard } from '@src/scorecard.js';
 
 /**
  * The second entry point over `execute()` (#153).
@@ -214,6 +216,11 @@ export interface SessionDeps {
    * definition rather than a fixture around one.
    */
   archive?: (dir: string) => RunSummary[];
+  /**
+   * What scores the archive. Defaults to `scoreArchive` (#114), which runs over
+   * `listRuns` and so inherits its definition of what an entry is.
+   */
+  stats?: (dir: string) => Scorecard;
   /** What reads the config. Defaults to `loadConfig` (#223). */
   config?: (dir: string) => LoadedConfig;
   /**
@@ -288,6 +295,7 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
   /** Subscription pilot turns in flight, by request id, so `pilot_stop` can reach one. */
   const pilotTurns = new Map<number, AbortController>();
   const archive = deps.archive ?? ((dir: string) => listRuns(dir));
+  const stats = deps.stats ?? scoreArchive;
   const listModelsWith = deps.models ?? listModels;
   let listings: Promise<ModelListings> | null = null;
   const readConfig = deps.config ?? ((dir: string) => loadConfig(dir));
@@ -478,6 +486,23 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
         // `listRuns` promises not to throw and this is the belt on that: a
         // window that asked for the archive and got silence would sit on a
         // spinner for ever, and an `error` frame is answerable.
+        send({
+          type: 'error',
+          id: msg.id,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+      return;
+    }
+
+    if (msg.type === 'stats') {
+      // The archive's rule and its reason (#114): `scoreArchive` reads what
+      // `listRuns` lists and writes nothing - `archive-scorecard.test.ts` pins
+      // that every byte under `.vibe/runs` is left as it was - so it is
+      // answerable while a run is going, outside the one-at-a-time gate.
+      try {
+        send({ type: 'stats', id: msg.id, dir: msg.dir, scorecard: stats(msg.dir) });
+      } catch (err: unknown) {
         send({
           type: 'error',
           id: msg.id,

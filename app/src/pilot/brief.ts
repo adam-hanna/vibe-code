@@ -103,8 +103,9 @@ const WHO = [
   'kill by process name: both take down whatever else happens to be listening,',
   'and one of them has already killed an unrelated process here.',
   '',
-  'You cannot edit vibe.config.json. There is no tool that reads the run archive',
-  'under .vibe/runs (#114), so you have no structured view of past runs.',
+  'You cannot edit vibe.config.json. read_archive returns every past run in this',
+  'repository and what the archive says about the loop; call it before saying',
+  'whether something has been tried before.',
 ].join('\n');
 
 /**
@@ -120,9 +121,10 @@ const WHO = [
  * had been told not to. The right fix is to stop telling it something untrue —
  * a prompt that misdescribes the tools is a prompt the model has to work around.
  *
- * What #114 is actually about survives: there is no *tool* that returns the
- * archive as data, so nothing here can summarise it, and reading a run's files
- * by hand is a different and much narrower thing than having it.
+ * #114 then gave it the other half: `read_archive` returns the archive as data -
+ * every run's listing and the scorecard - on both backends. Reading one run's
+ * files by hand is still how to see what that run decided; the tool is how to
+ * find which run to open.
  */
 /**
  * What the CLI pilot can do with its own tools, and the limits on it (#223).
@@ -175,9 +177,9 @@ export function ownTools(cli: 'claude' | 'codex', access: PilotAccess | null): s
     'app can follow, read and stop only what run_command started.',
     '',
     '.vibe/runs is inside the repository: a past run\'s PLAN.md, NEEDS-INPUT.md and',
-    'FOLLOW-UPS.md are ordinary files. There is no archive tool, so read the specific',
-    'file and say which one you read. Do not edit anything under .vibe/runs - it is',
-    'the record of what the runs did.',
+    'FOLLOW-UPS.md are ordinary files. read_archive tells you which runs exist; to',
+    'see what one decided, read the specific file and say which one you read. Do not',
+    'edit anything under .vibe/runs - it is the record of what the runs did.',
   );
   return lines.join('\n');
 }

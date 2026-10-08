@@ -145,8 +145,10 @@ Two rules the cockpit inherits from the design and must not quietly drop:
   sending a zero. `6a` has failed three times by inventing a denominator to make waiting feel
   measured.
 - **A missing measurement is drawn as absent with its reason**, never as a blank and never as
-  a zero. The two lines of `6a` that have no source name the issue that would supply them
-  (#136, #114), so the row completes when they land instead of being redesigned.
+  a zero. The two lines of `6a` that had no source named the issue that would supply them
+  (#136, #114), so the row completed when they landed instead of being redesigned. The
+  comparable-turns line is now a **token** distribution read from the archive; it is drawn
+  as absent only until the scorecard has been read.
 - **A diagnostic belongs in the chrome only while it is wrong.** `HOST 43804` and
   `PROTOCOL 1` sat permanently in the titlebar and a manual pass reported the obvious: they
   mean nothing to a user (#204). They are not deleted, because each becomes the most important
@@ -189,9 +191,10 @@ Two rules the cockpit inherits from the design and must not quietly drop:
   hatched cycle rows**, and a zero becomes a named absence. **Preflight takes the live card
   while it runs** — accent border and the one pulse — because it is a real turn against a real
   CLI. The one thing the design asks for that is *not* built is its ETA line, *"preflight
-  usually clears in under a minute"*: that is a claim about past runs and nothing here has read
-  one, so shipping it would be the same invention as `claude 38%` and `step 9/14`, both of
-  which the design itself struck. The row says what it cannot say and names #114.
+  usually clears in under a minute"*: that is a claim about past runs, and the archive the
+  window now reads (#114) records no preflight durations, so shipping it would be the same
+  invention as `claude 38%` and `step 9/14`, both of which the design itself struck. The row
+  says what it cannot say, and why.
 - **While a gate is held there is no live card, and the turn before it is still drawn.** An
   `ask` closes the running turn, exactly as `phase_started`, `turn_started`, `gate_stopped`
   and `result` do — a gate holds *between* things, so nothing is executing while one is
@@ -1697,7 +1700,7 @@ event type**, never a name of its own: `applyCharge` narrates under `claude_turn
 `codex_turn`, the same string it just recorded, so a host acting on the fact and an archive
 holding it agree about one fact rather than two spellings of it.
 
-**Eight frames are reads, and a read runs beside a run** (#223). `archive`, `config`, `diff`,
+**Nine frames are reads, and a read runs beside a run** (#223). `archive`, `stats`, `config`, `diff`,
 `artifacts`, `artifact`, `prompts`, `replay` and `fs` answer a question rather than describing something
 that happened,
 which is a shape the wire did not have — every other outbound frame is pushed. They are exempt
@@ -2084,6 +2087,7 @@ src/replay.ts           a finished run, said again - and what an archive cannot 
 app/src/cockpit/useReplay.ts   folding a finished run through the reducer that drew it live
 app/src/cockpit/artifacts.ts what a run wrote: classifying a listing, and reading a report
 app/src/cockpit/useArtifacts.ts asking the host for a listing, and for one file when it opens
+app/src/cockpit/useStats.ts    asking the host for the archive's scorecard, and again when a run ends
 app/src/cockpit/Disclosure.tsx the one section-that-opens, at every level it appears
 app/src/cockpit/SidePanel.tsx  a column that can be put away without being lost
 app/src/cockpit/PlansPane.tsx  every version of the plan, one section per round
@@ -2286,8 +2290,30 @@ enforcement is not in the component — a proposal appends no tool result, so th
 `unanswered()` and the conversation is unsendable until somebody answers. This is decision 1
 of the five #144 asks for, and the wireframe's 45-second auto-answer is deliberately not
 built: if a proposal should ever fire on its own, that is one more column on #140's gate
-matrix. There is **no config tool** (decision 3) and **no archive tool** until #114 lands
-(decision 4), and both absences are pinned by a test rather than left as an omission.
+matrix. There is **no config tool** (decision 3), pinned by a test rather than left as an
+omission. Decision 4's archive tool landed with #114 as `read_archive`, a **read** rather than
+an effect: it returns the run listing and the scorecard for the repository on screen, asked
+fresh on every call.
+
+**What the window and the pilot read from the archive, and why each piece lives where it does**
+(#114). The issue said to fill both placeholders "from the scorecard", and neither could be:
+`scoreArchive` is cross-run aggregates, with nothing per run and nothing about time.
+
+- **The rounds fingerprint is on `RunSummary`.** `rounds` is filled by `summariseStored` from
+  the state.json `listRuns` already parses, so the `archive` frame carries it with no second
+  read and no second route. A counter a run never recorded is `null`, drawn `–`, never 0; an
+  entry nothing was read from has no fingerprint. `q<n>` is shown only when non-zero, because
+  since #223 a question round no longer advances the plan round.
+- **The comparable-turns line is tokens, never time.** A charge event carries no duration and
+  no model, and a gap between charges includes every gate held. So `turns.byKind` in the
+  scorecard is a token distribution keyed by `seatOf(label).kind` — the one inverse of the
+  labels — over successful charges only, median and p90 by nearest rank, and the line always
+  says `across models` and always names n, with **no minimum sample**: a threshold would be an
+  invented number. Labels `seatOf` cannot place are counted as `unplaced`.
+  `SCORECARD_VERSION` stays 1, because an added field changes no existing meaning.
+- **`stats` is its own read frame, kept off `archive`.** The sidebar asks for `archive` every
+  time a section opens, and scoring reads every state.json. `useStats` asks when the window
+  points at a project and again when the live run ends (`statsEpoch`), and never on a timer.
 
 **One setting decides where the loop hands control back, and it means the same thing in
 both front ends.** `src/gates.ts` holds the matrix; `cfg.gates` is a mode per boundary, and

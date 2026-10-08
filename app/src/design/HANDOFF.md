@@ -36,7 +36,7 @@
 >   | --- | --- |
 >   | `1c` phase-filtered output (#133) | built — the filter is on the phase each line was stamped with |
 >   | `1f` live inbox + gate cards (#134) | built — `questions_opened` carries the questions, `questions_answered` the drafts |
->   | `1b` fingerprint (#114) | `1b` is built; **the fingerprint column is not**, and is drawn as a named absence |
+>   | `1b` fingerprint (#114) | built — `p2 q1 v1 r2` from each run's own round counters, on `RunSummary.rounds` |
 >   | `5d` gate verdict (#135) | built — whole-gate verdict, per-attempt cards, flaky told from broken |
 >   | `4c` ungrounded flag (#113) | built — a finding citing nothing is flagged as such |
 >   | `7a`'s `question-round` row, `7d`'s checkpoint line (#139) | built — the row is in the matrix |
@@ -44,8 +44,9 @@
 >   | `7h` MCP surface (#138) | **still unbuilt**, and still v1.5 |
 >
 >   Three things `7i` did not anticipate are also absent, each because no frame carries them
->   and none is a measurement this build is missing: `1b`'s rounds fingerprint, `4g`'s commit
->   count, and `5e`'s provider headroom. Each is drawn as absent **with its reason** rather
+>   and none is a measurement this build is missing: `4g`'s commit
+>   count and `5e`'s provider headroom (`1b`'s rounds fingerprint was the third, and #114
+>   built it). Each is drawn as absent **with its reason** rather
 >   than omitted.
 >
 >   Two of the design's own controls are deliberately **not** built, and neither is an
@@ -652,9 +653,9 @@ Hi-fi covers the whole app, so every frame carries where its data comes from. A 
 
 | Category | Frames |
 | --- | --- |
-| **Real today** | 5a · 6a · 7c · 6b · 3a · 3b · 2d · 4d · 4e · 5c · 6c · 1e · 7a · 7d · 7e — with two named holes carved out of 7a and 7d for the `question-round` checkpoint |
+| **Real today** | 5a · 6a · 7c · 6b · 3a · 3b · 2d · 4d · 4e · 5c · 6c · 1e · 7a · 7d · 7e · 1b fingerprint (#114, since built) — with two named holes carved out of 7a and 7d for the `question-round` checkpoint |
 | **App-side** | 4h brief versions · 4g DONE summary · 1d human findings · 1b cross-project index · 7f worktree scripts |
-| **Unbuilt** | 1c phase-filtered output (#133) · 1f live inbox + gate cards (#134) · 4c ungrounded flag (#113) · 1b fingerprint (#114) · 5d gate verdict (#135) · 7h MCP surface · **7a's `question-round` matrix row and 7d's checkpoint line (#139)** · 4i / 1g / 6g prompts (#137) |
+| **Unbuilt** | 1c phase-filtered output (#133) · 1f live inbox + gate cards (#134) · 4c ungrounded flag (#113) · 5d gate verdict (#135) · 7h MCP surface · **7a's `question-round` matrix row and 7d's checkpoint line (#139)** · 4i / 1g / 6g prompts (#137) |
 
 **App-side means the loop never learns of it.** 4h's promise — "you can tell whether the brief or the planner was wrong" — is only true because the app stores brief versions; there is no brief concept in the loop, only a task string, and its prompt module treats it as one ("a task is a whole brief").
 
