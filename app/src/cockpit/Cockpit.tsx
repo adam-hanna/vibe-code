@@ -489,10 +489,13 @@ export function Cockpit() {
     };
   }, [repoDir, configEpoch]);
   const [tab, setTab] = useState<
-    // Output and Commands are the bottom panel's tabs now (`bottom`, above),
-    // not this pane's: both are terminal-shaped, and a dev server's log beside
-    // a plan is how an editor arranges them.
+    // Commands is the bottom panel's tab (`bottom`, above), not this pane's: a
+    // dev server's log beside a plan is how an editor arranges it.
     | 'pilot'
+    // The run's raw output, right of the pilot again (#284). The bottom panel
+    // is shut by default, so while it lived there a run had no tab showing
+    // each step as it happened.
+    | 'output'
     // The four artifact panes (#223). `plans`, `critique` and `review` are what
     // the dashed `Versions` tab was standing in for, and `code` is what `diff`
     // became once a round's own range was on the wire.
@@ -555,10 +558,10 @@ export function Cockpit() {
   // A pane by name, never a string: `'activity'` was cast into the tab and the
   // window drew a tab that does not exist, with nothing selected (#260).
   const open = useCallback((next: Tab | BottomTab, round?: number | null) => {
-    // A round card's `open verify` and the pilot's `read_command` still name
-    // the two panes by their old tab names; they live in the bottom panel now,
-    // so opening one opens that panel on it rather than a main tab that is gone.
-    if (next === 'output' || next === 'commands') {
+    // The pilot's `read_command` names the commands pane by its old tab name;
+    // it lives in the bottom panel, so opening it opens that panel on it rather
+    // than a main tab that is gone. The output is a main tab again (#284).
+    if (next === 'commands') {
       setBottom(next);
       setPanels((p) => (p.bottom ? p : { ...p, bottom: true }));
       return;
@@ -1592,7 +1595,7 @@ export function Cockpit() {
         <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-page" role="main">
           <header className="flex flex-none items-center justify-between gap-4 px-7 pt-6 pb-4">
             <div><p className="mb-1 text-label text-tertiary">{viewing !== null ? 'Run archive' : 'Make room for good work'}</p>
-              <h2 className="m-0 text-title font-semibold tracking-tight text-display">{tab === 'pilot' ? 'Your pilot' : tab === 'plans' ? 'Plans' : tab === 'critique' ? 'Plan critique' : tab === 'code' ? 'Code changes' : tab === 'review' ? 'Code review' : tab === 'verify' ? 'Verification' : tab === 'questions' ? 'Questions' : tab === 'spend' ? 'Usage' : tab === 'settings' ? 'Settings' : 'Project runs'}</h2>
+              <h2 className="m-0 text-title font-semibold tracking-tight text-display">{tab === 'pilot' ? 'Your pilot' : tab === 'output' ? 'Output' : tab === 'plans' ? 'Plans' : tab === 'critique' ? 'Plan critique' : tab === 'code' ? 'Code changes' : tab === 'review' ? 'Code review' : tab === 'verify' ? 'Verification' : tab === 'questions' ? 'Questions' : tab === 'spend' ? 'Usage' : tab === 'settings' ? 'Settings' : 'Project runs'}</h2>
             </div>
             <Button variant="quiet" size="sm" onClick={() => setTab('spend')} title="Usage for the live run">
               <Activity size={14} aria-hidden="true" />
@@ -1624,7 +1627,17 @@ export function Cockpit() {
             >
               Pilot{proposals > 0 ? ` · ${String(proposals)}` : ''}
             </button>
-            {/* Output and Commands are the bottom panel's tabs, below. */}
+            {/* The run's raw output, right of the pilot (#284): what each step
+                is doing as it happens. It was the bottom panel's for a while,
+                shut by default, which left no tab to click while watching a run.
+                Commands stays in the bottom panel. */}
+            <button
+              className={cn(TAB, tab === 'output' && TAB_ON)}
+              aria-current={tab === 'output' ? 'page' : undefined}
+              onClick={() => open('output')}
+            >
+              Output
+            </button>
             {/* Hi-fi 3, and it is built now (#223). The tooltip on the tab it
                 replaces said *"this window cannot read a run's artifacts"*,
                 which was true until the `artifacts` frame landed - a version
@@ -1788,6 +1801,16 @@ export function Cockpit() {
               counts what the run SAID it wrote, so a re-read happens because a
               file appeared and never on a timer - and `artifact()` says it after
               the bytes are on disk, so the re-read cannot beat the write. */}
+          {tab === 'output' && (
+            <OutputPane
+              lines={run.output}
+              turn={past ? null : run.running}
+              staleness={staleness(run, now)}
+              // A past run's narration is on disk, in its own transcript. The
+              // live run's is on the wire and has never been read from a file.
+              transcript={past && viewing !== null ? viewing : null}
+            />
+          )}
           {tab === 'plans' && (
             <PlansPane
               dir={shownDir}
@@ -1907,28 +1930,16 @@ export function Cockpit() {
         </div>
         </ResizablePanel>
 
-        {/* The bottom panel (the UI rework): the two terminal-shaped panes,
-            docked under the main pane the way an editor docks its terminal, so
-            a dev server's log can be read beside a plan. Toggled with the
-            `toggleBottom` chord, and opened by anything that names one of its
-            two panes through `open()`. */}
+        {/* The bottom panel (the UI rework): the commands pane, docked under
+            the main pane the way an editor docks its terminal, so a dev
+            server's log can be read beside a plan. Toggled with the
+            `toggleBottom` chord, and opened by `open('commands')`. The run's
+            output was its other tab until it went back to the main bar (#284). */}
         {panels.bottom && (
           <>
           <ResizableSeparator orientation="vertical" />
           <ResizablePanel id="bottom" defaultSize={35} minSize="10%" className="flex min-h-0 min-w-0 flex-col">
             <div className="flex h-8 shrink-0 items-stretch gap-1 border-b border-rule-structure bg-chrome px-2" role="tablist" aria-label="Bottom panel">
-              <button
-                type="button"
-                role="tab"
-                aria-selected={bottom === 'output'}
-                className={cn(
-                  'flex cursor-pointer items-center gap-1.5 border-b-2 bg-transparent px-2 text-chip font-bold uppercase tracking-wide outline-none',
-                  bottom === 'output' ? 'border-accent text-emphasis' : 'border-transparent text-tertiary hover:text-secondary',
-                )}
-                onClick={() => setBottom('output')}
-              >
-                <Activity className="size-3.5" aria-hidden /> Output
-              </button>
               {/* The count is what is still RUNNING, not how many have been run
                   (#211). A dev server left up is the fact worth a badge - it is
                   holding a port and it will not stop by itself - and a total that
@@ -1957,16 +1968,6 @@ export function Cockpit() {
                 <X className="size-3.5" aria-hidden />
               </button>
             </div>
-            {bottom === 'output' && (
-              <OutputPane
-                lines={run.output}
-                turn={past ? null : run.running}
-                staleness={staleness(run, now)}
-                // A past run's narration is on disk, in its own transcript. The
-                // live run's is on the wire and has never been read from a file.
-                transcript={past && viewing !== null ? viewing : null}
-              />
-            )}
             {bottom === 'commands' && (
               <CommandsPane
                 commands={commands}

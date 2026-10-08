@@ -148,10 +148,14 @@ describe('the tab bar the rail emptied', () => {
     // under the work rather than beside it in the tabs. The order of what
     // remains is unchanged, and the two are asserted to be in the bottom panel
     // rather than silently gone.
-    expect(at("setTab('pilot')")).toBeLessThan(at("open('plans')"));
-    expect(bar).not.toMatch(/setTab\('output'\)/);
+    //
+    // Case 2 again (#284): `Output` came back to the bar, directly right of
+    // `Pilot`, because the bottom panel is shut by default and a run then had
+    // no tab showing its steps as they happened. `Commands` stays below.
+    expect(at("setTab('pilot')")).toBeLessThan(at("open('output')"));
+    expect(at("open('output')")).toBeLessThan(at("open('plans')"));
     expect(bar).not.toMatch(/setTab\('commands'\)/);
-    expect(cockpit).toMatch(/bottom === 'output' && \(/);
+    expect(cockpit).not.toMatch(/bottom === 'output'/);
     expect(cockpit).toMatch(/bottom === 'commands' && \(/);
     // The ones that postdate the artwork come after the ones it names, and the
     // readout is last because it is right-aligned.

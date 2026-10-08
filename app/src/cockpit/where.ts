@@ -27,15 +27,22 @@
 export const WHERE_KEY = 'vibe.where';
 
 /**
- * The tabs of the main pane. Output and Commands are not among them: they are
- * the bottom panel's, below. A tab missing here comes back as the pilot.
+ * The tabs of the main pane. A tab missing here comes back as the pilot.
+ *
+ * `output` is back among them, right of the pilot (#284). The UI rework moved it
+ * into the bottom panel, which is shut by default, so somebody watching a run had
+ * no tab to click to see each step as it happened: *"What happened to the output
+ * tab? Add it back, directly right of the pilot tab."* Commands stays below.
  */
-export const TABS = ['pilot', 'plans', 'critique', 'review', 'code', 'verify', 'spend', 'questions', 'runs', 'settings'] as const;
+export const TABS = ['pilot', 'output', 'plans', 'critique', 'review', 'code', 'verify', 'spend', 'questions', 'runs', 'settings'] as const;
 
 export type Tab = (typeof TABS)[number];
 
-/** The bottom panel's two tabs: the terminal-shaped panes. */
-export const BOTTOM_TABS = ['output', 'commands'] as const;
+/**
+ * The bottom panel's tabs. One now that the output is a main tab again (#284);
+ * a record that says `output` here reads as `commands`, the only pane left.
+ */
+export const BOTTOM_TABS = ['commands'] as const;
 
 export type BottomTab = (typeof BOTTOM_TABS)[number];
 
@@ -69,7 +76,7 @@ export interface Where {
 export const OPEN_PANELS: Panels = { sidebar: true, loop: true, bottom: false, sizes: {} };
 
 /** Where a fresh window lands, and where an unreadable record lands too. */
-export const NOWHERE: Where = { tab: 'pilot', viewing: null, draftId: null, bottom: 'output', panels: OPEN_PANELS };
+export const NOWHERE: Where = { tab: 'pilot', viewing: null, draftId: null, bottom: 'commands', panels: OPEN_PANELS };
 
 function isTab(v: unknown): v is Tab {
   return typeof v === 'string' && (TABS as readonly string[]).includes(v);
@@ -117,9 +124,10 @@ function panelsOf(v: unknown): Panels {
  * should not cost the run that was open, and a malformed run should not cost
  * the tab.
  *
- * A record from before the bottom panel may say `tab: 'output'` or
- * `'commands'`. Those panes moved, so the record is read as the pilot with the
- * bottom panel open on that pane - the same screen, in the new arrangement.
+ * A record from before the bottom panel may say `tab: 'commands'`. That pane
+ * moved, so the record is read as the pilot with the bottom panel open on it -
+ * the same screen, in the new arrangement. `tab: 'output'` is a main tab again
+ * (#284) and comes back as itself.
  */
 export function readWhere(raw: string | null): Where {
   if (raw === null) return NOWHERE;
