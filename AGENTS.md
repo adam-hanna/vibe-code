@@ -1165,6 +1165,19 @@ they are waiting on. Four things in it are worth carrying:
   would go stale the week either vendor ships a model — *"models are always evolving, we
   probably don't want these hard coded."* A typo is caught by the run summary before anything
   is spent, and by a turn failure naming `roles.<role>.model`.
+- **The verification gates are a list on the settings screen** (#240). The one test-command
+  field was the only control, so a two-package repository joined its suites with `&&` and lost
+  everything named gates were built for (#47): which package broke, a flaky gate rerun on its
+  own, a `required` and a timeout each. `app/src/cockpit/gateform.ts` holds the decisions and
+  is pure. **Every save sends the whole list**, because `writeConfigPatch` merges one level
+  deep and a list is replaced whole. **Converting is one write**: the command becomes the first
+  gate, named `verification` like the gate the core synthesises from it, and the same patch
+  clears `verify.command`, since the core refuses both at once; removing the last gate is the
+  mirror. `tidyVerify` in `src/config.ts` drops the `null` the clearing leaves, so a converted
+  file is byte-for-byte what a person would write. A new row is not sent until it has a name
+  and a command; a saved row always is, so emptying it reaches the core and is refused in its
+  words. `artifacts` stays file-only and survives a save. A command holding `\"` gets a
+  warning showing what the shell would receive, because that is almost always a paste from JSON.
 - **The four caps and the tolerance are a form now, and P0 is stated as having no setting.**
   Every one was reachable only as a `--max-*` flag. `gate()` refuses a round with any P0
   before it looks at the tolerance at all — *P0 findings are never carried forward* — so a run

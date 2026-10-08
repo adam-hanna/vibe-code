@@ -1127,6 +1127,8 @@ export function writeConfigPatch(
     );
   }
 
+  tidyVerify(candidate);
+
   // The same pipeline `loadConfig` runs, in the same order and for the same
   // reasons - `validateRoles` first, because `resolveRoleScopedAgents` reads the
   // table and a bad role checked afterwards surfaces as a toolchain error.
@@ -1153,6 +1155,28 @@ export function writeConfigPatch(
   writeFileSync(tmp, `${JSON.stringify(candidate, null, 2)}\n`, 'utf8');
   renameSync(tmp, configPath);
   return { path: configPath };
+}
+
+/**
+ * Drop the key a gate list replaces, once it says nothing (#240).
+ *
+ * `verify.command` and `verify.gates` are two answers to *what runs*, and the
+ * settings screen moves a project from one to the other in a single patch. The
+ * merge is one level deep, so that patch can only clear the old key by setting
+ * it to `null` - which is its default, and therefore a line saying nothing.
+ * Left in, a file converted on the screen would differ from the one a person
+ * writes by hand, and the issue's bar is that it must not. Only a null beside
+ * the other key is dropped: a lone `"command": null` is what the single field
+ * writes for auto-detect, and removing lines nobody asked about is not a save's
+ * business.
+ */
+function tidyVerify(candidate: Record<string, unknown>): void {
+  const verify = candidate['verify'];
+  if (!isRecord(verify)) return;
+  const tidy: Record<string, unknown> = { ...verify };
+  if (tidy['command'] === null && Array.isArray(tidy['gates'])) delete tidy['command'];
+  if (tidy['gates'] === null && typeof tidy['command'] === 'string') delete tidy['gates'];
+  setOwn(candidate, 'verify', tidy);
 }
 
 export function refuseArtifactPath(entry: unknown): string | null {

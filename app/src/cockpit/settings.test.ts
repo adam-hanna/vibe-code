@@ -187,10 +187,16 @@ describe('the test command is on the settings screen (#223)', () => {
     expect(block).toContain('save({ verify: { timeoutMs: next * 60_000 } })');
   });
 
-  test('a project that lists gates is told where they live, not given a field that cannot save', () => {
-    // `validateConfig` refuses `verify.command` beside `verify.gates`.
-    expect(settings).toContain("const listsGates = Array.isArray(verify['gates']);");
-    expect(block).toMatch(/listsGates \? \(/);
+  test('a project that lists gates edits the list, and is never given a field that cannot save', () => {
+    // `validateConfig` refuses `verify.command` beside `verify.gates`, so the
+    // single field is drawn only while there is no list (#240). Before #240
+    // the list was not editable here at all and the screen said to edit the file.
+    const list = settings.slice(settings.indexOf('function GateList('));
+    const noList = list.slice(list.indexOf('if (rows === null) {'), list.indexOf('return (\n    <div className={S.block}>'));
+    expect(noList).toContain('{commandField}');
+    expect(list.slice(list.indexOf('return (\n    <div className={S.block}>'))).not.toContain('{commandField}');
+    expect(block).toContain("gates={readGates(verify['gates'])}");
+    expect(settings).not.toContain('so they are edited there');
   });
 });
 
