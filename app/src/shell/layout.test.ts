@@ -38,13 +38,16 @@ describe('the regions', () => {
     expect(cockpit).toMatch(/if \(!meta\.isUserInteraction\) return;/);
   });
 
-  test('output and commands are the bottom panel, and a round card can still open them', () => {
+  test('commands is the bottom panel and output a main tab, and both can still be opened by name', () => {
+    // Case 2 (#284): output went back to the main bar, so the bottom panel
+    // holds commands alone. What still holds is that opening either pane by
+    // name lands on it, wherever it now lives.
     expect(cockpit).toMatch(/panels\.bottom && \(/);
-    expect(cockpit).toMatch(/bottom === 'output' && \(/);
     expect(cockpit).toMatch(/bottom === 'commands' && \(/);
-    // `open('output')` from a card lands on the bottom panel rather than on a
-    // main tab this build no longer has.
-    expect(cockpit).toMatch(/if \(next === 'output' \|\| next === 'commands'\)/);
+    expect(cockpit).not.toMatch(/bottom === 'output'/);
+    expect(cockpit).toMatch(/\{tab === 'output' && \(\s*<OutputPane/);
+    // `open('commands')` lands on the bottom panel; `open('output')` is a tab.
+    expect(cockpit).toMatch(/if \(next === 'commands'\)/);
   });
 });
 
