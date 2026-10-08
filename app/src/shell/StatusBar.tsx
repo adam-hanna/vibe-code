@@ -127,7 +127,14 @@ export function StatusBar({
 
       <span className="flex-1" />
 
-      {run.gate !== null ? (
+      {run.lost !== null ? (
+        // The run's own host has gone (#246): no controls, because nothing is
+        // there to take them, and no exit, because none was returned.
+        <span className="flex items-center gap-1.5">
+          <Badge variant="alarm">run host</Badge>
+          <span className="truncate">{run.lost}</span>
+        </span>
+      ) : run.gate !== null ? (
         <span className="flex items-center gap-1.5">
           <Badge variant="accent">holding</Badge>
           <span>at {boundary(run.gate.boundary)}</span>

@@ -724,6 +724,17 @@ export interface Run {
    * means another run may be started.
    */
   completed: { exit: number } | null;
+  /**
+   * The host running this run stopped before the command returned (#246), and
+   * the sentence saying how.
+   *
+   * **Told, never inferred**: set by the relay's exit event for this run's host,
+   * by the invoke's own `error`, or by a host that could not be started. It is
+   * neither `completed`, which is an exit code the command returned and a lost
+   * host has none to give, nor `reason`, whose footer says the command has not
+   * returned yet - which is no longer something anybody is waiting for.
+   */
+  lost: string | null;
   /** The protocol version the host stated, or null before `ready`. */
   protocol: number | null;
   /**
@@ -833,6 +844,7 @@ export function emptyRun(): Run {
     ended: null,
     reason: null,
     completed: null,
+    lost: null,
     protocol: null,
     identity: null,
     branch: null,
@@ -1337,6 +1349,37 @@ function newestPhase(run: Run): PhaseGroup | null {
     }
   }
   return newest;
+}
+
+/**
+ * Whether the command behind this run is over (#246): it returned, or the host
+ * running it has gone. The one spelling of the question, because `lost` is a
+ * second way to be over and every site that asked only about `completed` would
+ * otherwise hold a dead run open - a launch-held pilot conversation never
+ * released, a start control that never comes back.
+ */
+export function settled(run: Run): boolean {
+  return run.completed !== null || run.lost !== null;
+}
+
+/**
+ * The run's host has gone (#246): whatever was open is closed and the run says
+ * why.
+ *
+ * Nothing is executing once its process has gone, so the turn ends, a gate held
+ * at a boundary is gone with the `await` that held it, and a preflight still
+ * probing will never pass. A preflight that **did** pass is history and is
+ * kept. `completed` and `reason` are left alone: a host's exit code is not one
+ * of a run's eight, and inventing one would be the number this model refuses.
+ */
+export function hostLost(run: Run, at: number, why: string): Run {
+  const ended = endRunning(run, at);
+  return {
+    ...ended,
+    gate: null,
+    preflight: ended.preflight !== null && ended.preflight.passed ? ended.preflight : null,
+    lost: why,
+  };
 }
 
 /** Close the running turn, if there is one. */
@@ -2274,7 +2317,7 @@ export function comparableLine(
  * else. No timer: the archive only changes when a run ends.
  */
 export function statsEpoch(run: Run): string {
-  return `${run.identity?.runId ?? ''}:${run.completed === null ? 'open' : 'ended'}`;
+  return `${run.identity?.runId ?? ''}:${settled(run) ? 'ended' : 'open'}`;
 }
 
 /** A scorecard answer, stamped with the repository and epoch it was read for. */

@@ -66,7 +66,7 @@ import { closeCodexRateLimits, describeLimits, readCodexRateLimits } from '@src/
 import { describeGates } from '@src/gates.js';
 import { renderScorecard, scoreArchive } from '@src/scorecard.js';
 import { resolveGates } from '@src/verify.js';
-import { createWorktree, workDirOf } from '@src/worktree.js';
+import { createWorktree, sameRepositoryRefusal, storedWorktree, workDirOf } from '@src/worktree.js';
 import type { AgentPreflight } from '@src/preflight.js';
 import * as git from '@src/git.js';
 import * as log from '@src/log.js';
@@ -597,6 +597,15 @@ async function cmdRun(
     extraContext = readFileSync(file, 'utf8');
   }
 
+  // Before anything is allocated, so a refused start leaves no run directory
+  // behind (#246). Another run working in this checkout - started here or from a
+  // terminal - would edit the same files and branch under this one.
+  const busy = sameRepositoryRefusal(targetDir, { self: null, worktree: cfg.git.worktree });
+  if (busy !== null) {
+    log.fail(busy, { id: 'run_failed', data: { code: EXIT.PREFLIGHT, reason: busy } });
+    return EXIT.PREFLIGHT;
+  }
+
   // Allocate, lock, then initialise - in that order, and it is load-bearing.
   // The directory has to exist before the lock can live in it, and the first
   // state write has to happen inside the lock and carry the config and the
@@ -842,6 +851,16 @@ async function cmdResume(
     loadRun(targetDir, id);
   }
 
+  // Before the lock, so a refused resume writes nothing (#246). The run's own
+  // worktree decision is read off its record rather than through `loadRun`,
+  // which writes; a resume never re-decides it. `--force` does not reach this:
+  // it overrides this run's own lock, not another run's claim on the checkout.
+  const busy = sameRepositoryRefusal(targetDir, { self: id, worktree: storedWorktree(runDir) });
+  if (busy !== null) {
+    log.fail(busy, { id: 'run_failed', data: { code: EXIT.PREFLIGHT, reason: busy } });
+    return EXIT.PREFLIGHT;
+  }
+
   const { ok, verdict, handle } = acquireLock(runDir, id, flags.force === true);
   if (!ok || handle === null) {
     log.fail(`Run ${id} cannot be resumed: ${describeLiveness(verdict)}`);
@@ -1076,6 +1095,12 @@ function resumedFrom(state: RunState): Record<string, unknown> {
  * With no `--at`, or an `--at` naming no checkpoint, this lists the fork points
  * and exits non-zero - **without ever building a path from the positional id**,
  * which `listForkPoints` guarantees by asserting the id first.
+ */
+/**
+ * No same-repository check here (#246), and that is a decision rather than an
+ * omission: a fork creates a run directory, a lock and a branch ref and then
+ * stops. It touches no working tree and starts no loop, and the fork is only
+ * ever run by a later `vibe resume`, which goes through the check.
  */
 async function cmdFork(args: readonly string[]): Promise<ExitCode> {
   const { positional, flags } = parseArgs(args);

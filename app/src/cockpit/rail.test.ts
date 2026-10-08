@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { emptyRun, reduce } from './model';
+import { emptyRun, hostLost, reduce } from './model';
 import type { Run } from './model';
 import { attemptAction, nowStatus, turnGroup, verifyRow, verifyRowText } from './rail';
 import type { Frame } from '../host';
@@ -155,5 +155,14 @@ describe('an attempt opens the log it was told about', () => {
 
   test('a gate that passed every attempt claims no absence', () => {
     expect(attemptAction({ status: 'passed' }, { run: 1, ok: true, exitCode: 0, log: null })).toEqual({ kind: 'none' });
+  });
+});
+
+describe('a run whose host has gone (#246)', () => {
+  test('the now card says so rather than calling it idle', () => {
+    const open = fold([say('phase_started', { phase: 'planning' }), say('turn_started', { role: 'planner', kind: 'plan' })]);
+    const status = nowStatus(hostLost(open, 2_000_000, 'the host exited 1'));
+    expect(status.title).toBe('Run host lost');
+    expect(status.detail).toBe('the host exited 1');
   });
 });

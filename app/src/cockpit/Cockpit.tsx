@@ -74,7 +74,9 @@ import { Workstreams } from './Workstreams';
 import { VerifyPane } from './VerifyPane';
 import { StalenessStrip } from './Staleness';
 import { NEEDS_HUMAN, tokens as fmtTokens } from './format';
-import { emptyRun, foldReplay, forResume, latestQuestions, nextRun, reduce, staleness, statsEpoch } from './model';
+import { emptyRun, foldReplay, forResume, hostLost, latestQuestions, nextRun, reduce, settled, staleness, statsEpoch } from './model';
+import { exitMeans, hostExitWording, invokeOutcome, mayAnswer, routeFrame } from './hosts';
+import type { LiveHost } from './hosts';
 import { useStats } from './useStats';
 import { rounds } from './rounds';
 import { implementArgv, readLaunchArgv, resumeArgv } from './argv';
@@ -163,8 +165,11 @@ export function Cockpit() {
     // `Date.now()` here rather than inside `reduce`: the model takes the arrival
     // time as an argument so it stays pure and testable, and this is the one
     // place a real clock is read.
-    (state: Run, action: Frame | { type: 'reset' } | { type: 'seed'; run: Run }) => {
+    (state: Run, action: Frame | { type: 'reset' } | { type: 'seed'; run: Run } | { type: 'lost'; why: string }) => {
       if (action.type === 'reset') return nextRun(state);
+      // The run's host has gone (#246). Told by the relay or by the invoke's own
+      // error, never inferred from silence.
+      if (action.type === 'lost') return hostLost(state, Date.now(), action.why);
       // **A resume's column, before the loop adds to it** (#223). The run the
       // replay folded IS a `Run`, so this replaces rather than merges - there is
       // nothing to merge with, because `resume` seeds before it sends the
@@ -715,7 +720,7 @@ export function Cockpit() {
   const startedId = run.identity?.runId ?? null;
   // The held key goes once the run has an id to adopt into, once it has ended
   // without one, or as soon as the window is pointed somewhere else on purpose.
-  const launchSettled = startedId !== null || run.completed !== null;
+  const launchSettled = startedId !== null || settled(run);
   useEffect(() => {
     if (launchSettled || viewing !== null || draftId !== null) setHoldChat(null);
   }, [launchSettled, viewing, draftId]);
@@ -752,7 +757,39 @@ export function Cockpit() {
   const [keyStatuses, setKeyStatuses] = useState<readonly KeyStatus[] | null>(null);
   const [keyFailure, setKeyFailure] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
-  const requests = useRef(0);
+  /**
+   * The run host this window started and the invoke it serves (#246). A ref,
+   * because the frame handler is registered once and reads it on every frame;
+   * `null` whenever no run is live. Run frames are routed by this handle and
+   * nothing else - never by "the current run".
+   */
+  const liveHost = useRef<LiveHost | null>(null);
+  /** The pid of the process running the live run, which is not the service host's. */
+  const [runHostPid, setRunHostPid] = useState<number | null>(null);
+  /**
+   * The latest status read issued. Two reads in flight can resolve in either
+   * order, and the older one must not overwrite the newer - after a run host's
+   * exit that would put a host that has gone back in the diagnostics popover.
+   */
+  const statusGen = useRef(0);
+  const refreshStatus = useCallback(() => {
+    if (!host.inShell()) return;
+    const gen = (statusGen.current += 1);
+    void host
+      .status()
+      .then((status) => {
+        if (gen === statusGen.current) setWire((w) => ({ ...w, status }));
+      })
+      // Left as it was. A refresh that failed is not a reason to blank facts the
+      // window already has; the panel says when it has none.
+      .catch(() => undefined);
+  }, []);
+  /** The live run is over, however it ended: nothing is routed to it any more. */
+  const endLive = useCallback(() => {
+    liveHost.current = null;
+    setRunHostPid(null);
+    host.setRunLive(false);
+  }, []);
 
   const refreshKeys = useCallback(() => {
     void keys
@@ -816,20 +853,8 @@ export function Cockpit() {
   // a figure measured at connect would be however long ago that was - stated as
   // though it were now.
   useEffect(() => {
-    if (!diagnostics || !host.inShell()) return;
-    let cancelled = false;
-    void host
-      .status()
-      .then((status) => {
-        if (!cancelled) setWire((w) => ({ ...w, status }));
-      })
-      // Left as it was. A refresh that failed is not a reason to blank four
-      // facts the window already has; the panel says when it has none.
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [diagnostics]);
+    if (diagnostics) refreshStatus();
+  }, [diagnostics, refreshStatus]);
 
   useEffect(() => {
     if (!host.inShell()) return;
@@ -838,21 +863,51 @@ export function Cockpit() {
 
     void (async () => {
       stop = await host.connect({
-        frame: (frame) => dispatch(frame),
-        unknown: (raw) => note('unknown', JSON.stringify(raw).slice(0, 300)),
-        log: (text) => note('log', text),
-        exit: (code) => {
+        frame: (from, frame) => {
+          const live = liveHost.current;
+          const route = routeFrame(live, from);
+          if (route === 'service') {
+            // Everything else the service host says is read by its own
+            // listener - the pilot, the commands, the reads. Only the protocol
+            // it speaks belongs to the window.
+            if (frame.type === 'ready') dispatch(frame);
+            return;
+          }
+          if (route === 'stale') {
+            note('log', `[${from}] a ${frame.type} frame from a host this window is not running a run on`);
+            return;
+          }
+          const outcome = invokeOutcome(live, from, frame);
+          // A run host answers its pause, unpause and cancel with `result`
+          // frames too, and `reduce` reads any `result` as the command
+          // returning - so only the invoke's own reaches it. Before each run
+          // had a handle and an invoke id the window could not tell them apart,
+          // and a pause's answer drew the run as finished.
+          if (frame.type !== 'result' || outcome === 'completed') dispatch(frame);
+          if (outcome === 'completed') endLive();
+          if (outcome === 'failed' && frame.type === 'error') {
+            // No `result` is coming, so Rust will not close this host on one:
+            // it is told there will be no more requests, and leaves.
+            dispatch({ type: 'lost', why: frame.message });
+            void host.shutdown(from).catch(() => undefined);
+            endLive();
+          }
+        },
+        unknown: (from, raw) => note('unknown', `[${from}] ${JSON.stringify(raw).slice(0, 300)}`),
+        log: (from, text) => note('log', from === host.SERVICE_HOST ? text : `[${from}] ${text}`),
+        exit: (from, code) => {
+          const means = exitMeans(liveHost.current, from);
           // Never hidden. The run is resumable and the user is the one who has
           // to be told that is what happened.
-          setWire((w) => ({
-            ...w,
-            connected: false,
-            hostPid: null,
-            failure:
-              code === null
-                ? 'the host was signalled and reported no exit code'
-                : `the host exited ${String(code)}`,
-          }));
+          if (means === 'service') {
+            setWire((w) => ({ ...w, connected: false, hostPid: null, failure: hostExitWording(code) }));
+          } else if (means === 'run-lost') {
+            dispatch({ type: 'lost', why: hostExitWording(code) });
+            endLive();
+          }
+          // After the host has left Rust's set, so this read is the one that
+          // settles what the diagnostics popover lists.
+          refreshStatus();
         },
       });
       if (cancelled) {
@@ -860,6 +915,7 @@ export function Cockpit() {
         return;
       }
       try {
+        statusGen.current += 1;
         const status = await host.status();
         setWire((w) => ({
           ...w,
@@ -879,13 +935,13 @@ export function Cockpit() {
       cancelled = true;
       stop?.();
     };
-  }, [note]);
+  }, [note, endLive, refreshStatus]);
 
   const send = useCallback(
-    async (request: object) => {
+    async (request: object, handle: string = host.SERVICE_HOST) => {
       setBusy(true);
       try {
-        await host.send(request);
+        await host.send(request, handle);
       } catch (err) {
         note('log', String(err));
       } finally {
@@ -908,6 +964,14 @@ export function Cockpit() {
     // `invoke` passes one: a resume or an implement is not the run a draft asked
     // for, and must not be the run that claims it (#223).
     (argv: readonly string[], fromDraft: string | null = null) => {
+      // **One live run, refused here** (#246). This was `serve.ts`'s `running`
+      // variable, and every run has a process of its own now, so nothing there
+      // can see another. Before the reset, so a refused start leaves the column
+      // it found.
+      if (liveHost.current !== null) {
+        note('log', 'a run is still running; one run at a time');
+        return;
+      }
       launchedFrom.current = fromDraft;
       if (fromDraft !== null) saveDrafts((list) => markLaunched(list, fromDraft));
       else setHoldChat(pilotAt.current);
@@ -945,10 +1009,38 @@ export function Cockpit() {
       // argv this build cannot read, and guessing a directory out of one is worse
       // than pointing at nothing.
       if (sent !== null) rememberRepo(sent.dir);
-      requests.current += 1;
-      void send({ type: 'invoke', id: requests.current, argv });
+      // The invoke's id comes from the same allocator as every control the run
+      // host answers with a `result` - pause, unpause, cancel, shutdown - so
+      // Rust, which closes the host on the invoke's own `result`, cannot mistake
+      // one of theirs for it. The handle is named from it, so it is unique too.
+      if (!host.inShell()) {
+        // A browser preview has no host to start; said, as a failed send was.
+        note('log', 'no host: this window is not running inside the app');
+        return;
+      }
+      const id = host.nextRequestId();
+      const handle = `run-${String(id)}`;
+      liveHost.current = { handle, invokeId: id, answered: new Set() };
+      host.setRunLive(true);
+      setRunHostPid(null);
+      setBusy(true);
+      void host
+        .startRunHost(handle, { type: 'invoke', id, argv })
+        .then((pid) => {
+          if (liveHost.current?.handle === handle) setRunHostPid(pid);
+          refreshStatus();
+        })
+        .catch((err: unknown) => {
+          // Rust has already closed any host it spawned and could not hand the
+          // invoke to, so this is only the window's half.
+          if (liveHost.current?.handle !== handle) return;
+          dispatch({ type: 'lost', why: `the run's host could not start: ${err instanceof Error ? err.message : String(err)}` });
+          endLive();
+          refreshStatus();
+        })
+        .finally(() => setBusy(false));
     },
-    [send, rememberRepo, saveDrafts],
+    [note, rememberRepo, saveDrafts, endLive, refreshStatus],
   );
 
   /**
@@ -1051,9 +1143,18 @@ export function Cockpit() {
    */
   const answer = useCallback(
     (askId: number, decision: object) => {
-      void send({ type: 'answer', id: askId, decision });
+      // **At most once per gate** (#246). That is what makes an `error` carrying
+      // the invoke's id unambiguous - see `invokeOutcome` - and a second answer
+      // to one gate was only ever going to be refused.
+      const live = liveHost.current;
+      if (live === null || !mayAnswer(live, askId)) {
+        note('log', `gate ${String(askId)} was already answered, or no run is live`);
+        return;
+      }
+      liveHost.current = { ...live, answered: new Set([...live.answered, askId]) };
+      void send({ type: 'answer', id: askId, decision }, live.handle);
     },
-    [send],
+    [send, note],
   );
 
   /**
@@ -1065,8 +1166,14 @@ export function Cockpit() {
    * process, and both leave the run resumable.
    */
   const pause = useCallback(() => {
+    // A live-run control: with no run host there is nobody to hold.
+    const live = liveHost.current;
+    if (live === null) {
+      note('log', 'no run is live, so there is nothing to pause');
+      return;
+    }
     setPausing(true);
-    void host.pause().catch((err: unknown) => {
+    void host.pause(live.handle).catch((err: unknown) => {
       // Un-armed on failure. A button that stayed disabled after a request that
       // never landed would be a window claiming a hold it has not asked for.
       setPausing(false);
@@ -1080,8 +1187,13 @@ export function Cockpit() {
    * effect below clears `pausing` for that case too.
    */
   const unpause = useCallback(() => {
+    const live = liveHost.current;
+    if (live === null) {
+      note('log', 'no run is live, so there is no pause to take back');
+      return;
+    }
     setPausing(false);
-    void host.unpause().catch((err: unknown) => {
+    void host.unpause(live.handle).catch((err: unknown) => {
       // Not re-armed: the request may well have landed, and claiming a hold
       // the host may no longer hold is the worse of the two errors.
       note('log', String(err));
@@ -1091,13 +1203,18 @@ export function Cockpit() {
   const stop = useCallback(
     (reason: string) => {
       setConfirmStop(false);
+      const live = liveHost.current;
+      if (live === null) {
+        note('log', 'no run is live, so there is nothing to stop');
+        return;
+      }
       // **Said, because the answer can take minutes** (#253). A stop latches at
       // once and kills an agent turn at once, but the verification gate and git
       // are never killed, so a stop pressed during either waits for it to
       // return - and until the core narrated its ending the footer went on
       // saying `Live run` with both controls live, as if nothing was pressed.
       setStopping(true);
-      void host.cancel(reason).catch((err: unknown) => {
+      void host.cancel(live.handle, reason).catch((err: unknown) => {
         setStopping(false);
         note('log', String(err));
       });
@@ -1118,7 +1235,7 @@ export function Cockpit() {
   // command returns; this is the window's. Keyed on the run's id as well, so a
   // new run starts with neither.
   const runKey = run.identity?.runId ?? null;
-  const ended = run.completed !== null || run.reason !== null;
+  const ended = settled(run) || run.reason !== null;
   useEffect(() => {
     if (ended) {
       setPausing(false);
@@ -1470,7 +1587,7 @@ export function Cockpit() {
           the whole window - everything under it is as old as the strip says -
           so it cannot sit inside one column. Only `not live` is drawn here; the
           quiet states are in the status bar, whose height is fixed (#267). */}
-      <StalenessStrip state={quiet} hostPid={wire.hostPid} />
+      <StalenessStrip state={quiet} hostPid={runHostPid} />
 
       {/* `7e`, above the columns for the same reason: an agent with no headroom
           is a statement about the whole run, not about one pane. Quiet, and
@@ -1480,6 +1597,12 @@ export function Cockpit() {
       {wire.failure !== null && (
         <div className="flex flex-none items-center gap-2 bg-alarm px-5 py-2 text-body-sm text-primary">
           <Badge variant="alarm">no host</Badge> {wire.failure}
+        </div>
+      )}
+      {/* The live run's own host, which is not the one above (#246). */}
+      {run.lost !== null && (
+        <div className="flex flex-none items-center gap-2 bg-alarm px-5 py-2 text-body-sm text-primary">
+          <Badge variant="alarm">run host</Badge> {run.lost}
         </div>
       )}
       {/* `Status.uncontained` is no longer drawn here: a permanent banner on
@@ -1920,7 +2043,7 @@ export function Cockpit() {
               // it underneath would point the pilot at a repository the run is
               // not in.
               kickoff={
-                (!launched || run.completed !== null) && repoDir.trim() !== '' ? (
+                (!launched || settled(run)) && repoDir.trim() !== '' ? (
                   <Kickoff dir={repoDir} />
                 ) : undefined
               }
@@ -2023,7 +2146,7 @@ export function Cockpit() {
               >
                 <PanelRightOpen className="size-4" aria-hidden />
               </Button>
-              {!past && launched && run.completed === null && (
+              {!past && launched && !settled(run) && (
                 <span title={run.running === null ? 'the run is waiting' : 'a turn is running'}>
                   <LivenessDot state={run.running === null ? 'waiting' : 'live'} />
                 </span>
@@ -2112,7 +2235,7 @@ export function Cockpit() {
                     Offered again once the command has RETURNED, not once the
                     loop said it was done: `serve.ts` runs one at a time and
                     refuses a second invoke until the first settles. */}
-                {(!launched || run.completed !== null) && !outside && (
+                {(!launched || settled(run)) && !outside && (
                   <>
                     <div className="mx-4 mb-2 rounded-md border border-rule-card bg-card px-4 py-3.5">
                       <span className="text-body-sm font-medium text-primary">waiting for the brief</span>
@@ -2154,7 +2277,7 @@ export function Cockpit() {
                 run={columnRun}
                 now={now}
                 compact
-                hostPid={past ? null : wire.hostPid}
+                hostPid={past ? null : runHostPid}
                 onOpen={open}
                 archive={archive}
               />

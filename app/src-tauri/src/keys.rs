@@ -182,14 +182,14 @@ pub fn key_set(
     host: tauri::State<'_, crate::host::HostProcess>,
 ) -> Result<(), String> {
     set(provider, &key)?;
-    let _ = host.send_keys();
+    let _ = host.send_keys(None);
     Ok(())
 }
 
 #[tauri::command]
 pub fn key_clear(provider: Provider, host: tauri::State<'_, crate::host::HostProcess>) -> Result<(), String> {
     clear(provider)?;
-    let _ = host.send_keys();
+    let _ = host.send_keys(None);
     Ok(())
 }
 

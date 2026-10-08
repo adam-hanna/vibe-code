@@ -266,6 +266,9 @@ export function describeRun(run: Run): Record<string, unknown> {
     ended: run.ended,
     reason: run.reason,
     completed: run.completed,
+    // The run's host gone before it returned (#246), so a model is not told a
+    // dead run is live because `completed` is null.
+    lost: run.lost,
     // Said rather than left out, so a model does not guess at what this build
     // cannot see. The archive left this list when `read_archive` arrived (#114).
     unavailable: ['no file counts or diffstat: the loop reports none — #136'],
