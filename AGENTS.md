@@ -866,6 +866,14 @@ they are waiting on. Four things in it are worth carrying:
   in the same place. `round` is `state.reviewRound`, the field the three fix
   kinds already carry, because the CODE group re-opens on every fix and the round
   is what tells one pass through it from the next.
+- **A fix round is a code round, and it opens one** (#280). The review fix and the final
+  fix announced a turn and no phase, so `reduce` filed each under the most recently opened
+  group — the review it answered — and a run that went review, fix, review drew
+  `review round 0 → review round 1` with the code nowhere: *"it did a review round 0, but then
+  didn't code but just went straight to another round of review"*. The replay already filed
+  `fix-N` under `implementing`, so the live column and the archived run disagreed about one
+  run. `announceFixRound` opens `implementing` with the review round; `verify-fix` does not,
+  because a failed gate's repair belongs in the code group that ran the gate.
 - **A resume is pointed at the repository, and `dir` is not it.** `run_started`
   carries both and they are not interchangeable: `identity.dir` is the run's
   **own** directory — `<repo>/.vibe/runs/<id>` — and `identity.repo` is the
