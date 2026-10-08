@@ -2279,7 +2279,9 @@ list is a pure function in that file with a test beside it, because the app has 
   start; a refusal from Rust reverses the claims exactly (`dropRun`, `unmarkLaunched`), says
   Rust's sentence in a strip, and **never** marks a run lost, because there was never a run.
   Only then anything visible: viewing, the repository, focus, and clearing the strip.
-- **Rust refuses a run host while no service host is in its set**, a poisoned lock included.
+- **Rust refuses a run host while no service host is in its set**, a poisoned lock included,
+  and checks it in `spawn` under the lock that admits the child — checked earlier, the service
+  host could exit in between.
   The window learns the service host has gone from an event, and an event can be late; a run
   host beside no service host is a run whose window can read nothing about it.
 - **The cap is `runs.maxConcurrent`, the machine's, and the window enforces it.** 0, the
@@ -2326,7 +2328,8 @@ list is a pure function in that file with a test beside it, because the app has 
   turn in flight is redone — and calls `app_quit` on yes. Quit asks *which hosts will this
   kill*, and any live entry may have one; filtering by the drawing rule once let a quit skip
   its own confirmation while a run host was going. A second Quit while that is unanswered is
-  asked natively, since Rust knows handles and not names. **`app_quit` is a deliberate new
+  asked natively, since Rust knows handles and not names; a Cancel is an answer, and calls
+  `app_quit` with `quit: false` so the next Quit asks through the window again. **`app_quit` is a deliberate new
   door**: it only exits, through the same `stop()` the tray uses, which is narrower than a
   process-exit permission that could skip the stop; `keys.test.ts` pins it. `stop()` drains a
   poisoned set rather than returning early, and closing the window still only hides it.

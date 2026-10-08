@@ -1708,7 +1708,10 @@ export function Cockpit() {
             facts={going.map((label, i) => ({ label: `run ${String(i + 1)}`, value: label }))}
             confirm="Quit"
             onConfirm={() => void host.appQuit()}
-            onCancel={() => setQuitting(false)}
+            onCancel={() => {
+              setQuitting(false);
+              void host.quitDeclined();
+            }}
           />
         );
       })()}

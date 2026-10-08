@@ -1053,7 +1053,16 @@ export async function onQuitRequested(callback: () => void): Promise<() => void>
  * process-exit permission.
  */
 export function appQuit(): Promise<void> {
-  return invoke('app_quit');
+  return invoke('app_quit', { quit: true });
+}
+
+/**
+ * The window's Cancel on that confirmation (#246), through the same command:
+ * it answers the pending request and exits nothing, so the next tray Quit asks
+ * through the window again rather than through Rust's native fallback.
+ */
+export function quitDeclined(): Promise<void> {
+  return invoke('app_quit', { quit: false });
 }
 
 /**
