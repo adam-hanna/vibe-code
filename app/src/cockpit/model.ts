@@ -2435,9 +2435,17 @@ export function foldReplay(
  * the first turn has not been announced — and a live card left over from the
  * replay would pulse for a turn that ended hours ago.
  *
+ * **And the turn it names is closed, not merely forgotten** (#302). A charge
+ * does not close a turn and neither does `run_escalated`; the `result` does, and
+ * a replay carries that beside its steps rather than among them. Clearing
+ * `running` alone left the turn the run stopped on with no `endedAt`, so its
+ * round card drew `running` for good — beside the round the resume really was
+ * running: *"critique round 15 … RUNNING, plan round 16 … RUNNING"*. `at` is the
+ * replay's last step, the same instant `useReplay` closes it at.
+ *
  * What stays is everything the resume is being given back: the cycles, their
  * turns, the censuses, the spend, the commits and the artifacts.
  */
-export function forResume(run: Run): Run {
-  return { ...run, reason: null, ended: null, completed: null, running: null };
+export function forResume(run: Run, at: number): Run {
+  return { ...endRunning(run, at), reason: null, ended: null, completed: null, running: null };
 }

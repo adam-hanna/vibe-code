@@ -370,7 +370,8 @@ describe('a resumed run keeps the column it already had', () => {
     // the run."* `reduce` builds a `Run` from the frames THIS process narrates,
     // and a resume narrates only what happens from the resume onwards — so a run
     // three plan rounds deep came back showing one.
-    expect(cockpit).toMatch(/seed = forResume\(foldReplay\(got\.steps\)\)/);
+    // Followed by the instant the open turn is closed at (#302).
+    expect(cockpit).toMatch(/seed = forResume\(foldReplay\(got\.steps\), /);
     expect(cockpit).toMatch(/dispatch\(\{ type: 'seed', run: seed \}\)/);
   });
 
