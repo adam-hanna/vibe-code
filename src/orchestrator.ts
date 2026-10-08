@@ -1386,6 +1386,7 @@ async function reviewPhase(
       saveState(state);
       beginReport(state);
 
+      announceFixRound(state);
       log.step(
         `Incorporating ${decision.tolerated.length} carried P1(s), then finishing: ` +
           decision.tolerated.map((f) => f.id).join(', '),
@@ -1487,6 +1488,34 @@ async function reviewPhase(
 }
 
 /**
+ * A fix round is a code round, and it says so before its turn starts (#280).
+ *
+ * The first implement turn opens the code group with `phase_started`; the fix
+ * kinds said only `turn_started`, and `reduce` files a turn under the most
+ * recently opened group - which is the review it answers. So a run that went
+ * review, fix, review drew `review round 0 → review round 1` with the fix as a
+ * row inside the first, and read as a loop that had skipped the code entirely.
+ * The replay already files `fix-N` and `final-fix-N` under `implementing`
+ * (`seatOf`), so the live column and the same run opened from the archive drew
+ * two different shapes.
+ *
+ * `round` is the review round the fix produces, the number its turn and label
+ * already carry, and it is what keeps `reEntered` from folding this into the
+ * first code group: that one carries no round, and a review sits between them
+ * anyway. The base rides along because every `implementing` carries it.
+ *
+ * `verify-fix` deliberately does not announce. A failed gate is inside the code
+ * group that ran it, so its repair belongs in that group too - and there always
+ * is one open, because the gate runs only after an implement or fix turn.
+ */
+function announceFixRound(state: RunState): void {
+  log.heading(`Implementing (fix round ${state.reviewRound})`, {
+    id: 'phase_started',
+    data: { phase: 'implementing', round: state.reviewRound, baseSha: state.baseSha },
+  });
+}
+
+/**
  * One fix round: the turn, its report, and the commit.
  *
  * A function rather than the tail of the review loop because the loop now
@@ -1507,6 +1536,7 @@ async function runFixRound(
   saveState(state);
   beginReport(state);
 
+  announceFixRound(state);
   log.step(`Fixing ${blockingFindings(findings).length} blocking finding(s)`, {
     id: 'turn_started',
     data: {
