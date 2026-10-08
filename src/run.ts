@@ -704,6 +704,9 @@ export function selectRunIds(
  * invented number this codebase refuses everywhere else. One corrupt run must
  * not take out the listing of every healthy one beside it.
  *
+ * A readable row also carries `rounds`, the run's round counters, taken from
+ * the same parse rather than a second read of the file (#114).
+ *
  * Values are returned exactly as they were stored - `summariseStored` passes an
  * unrecognised status through verbatim on purpose. That is safe for a terminal
  * and is not for a prompt, so the bounding happens where the prompt is

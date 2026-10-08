@@ -94,6 +94,27 @@ export function tokens(n: number): string {
   return String(n);
 }
 
+/**
+ * The design's rounds fingerprint: `p2 v1 r2` - plan, verify-fix and fix rounds
+ * a run spent, cheap to scan for runs that thrashed (`1b`, #114).
+ *
+ * `q<n>` goes after `p` **only when the run asked questions**. Since #223 a
+ * question round no longer advances the plan round, so without it a run that
+ * thrashed on questions would read as clean. A null counter - one the run never
+ * recorded - is `–` rather than 0, and a null or zero question count is left
+ * out because it says nothing a reader scanning for thrash needs.
+ */
+export function fingerprint(r: {
+  plan: number | null;
+  question: number | null;
+  review: number | null;
+  verify: number | null;
+}): string {
+  const n = (v: number | null): string => (v === null ? '–' : String(v));
+  const q = r.question !== null && r.question > 0 ? ` q${r.question}` : '';
+  return `p${n(r.plan)}${q} v${n(r.verify)} r${n(r.review)}`;
+}
+
 /** `47 tool uses`, `1 event`. The unit travels with the count because they do not count the same thing. */
 export function counted(n: number, unit: string): string {
   return `${n} ${unit}${n === 1 ? '' : 's'}`;

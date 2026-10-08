@@ -1,4 +1,5 @@
-import type { Frame, Level, Narration } from '../host';
+import type { ArchiveStats, Frame, Level, Narration } from '../host';
+import { tokens as fmtTokens } from './format';
 
 /**
  * The run, assembled from frames and from nothing else (#159).
@@ -2180,11 +2181,64 @@ export interface RunningRow {
   work: Work | null;
   /** Why there is no reading. Null once one has arrived. */
   noWork: string | null;
-  /** Why the comparable-turns line is missing. Always set until a frame carries the archive. */
-  comparable: string;
+  /**
+   * Past turns of the same kind, by tokens (#114). `measured` is false only
+   * while the archive has not been read, which is the one case drawn as absent.
+   */
+  comparable: { text: string; measured: boolean };
 }
 
-export function runningRow(turn: Turn, now: number): RunningRow {
+/** The part of the scorecard the comparable-turns line reads. */
+export type ArchiveTurns = ArchiveStats['turns'];
+
+/**
+ * How past turns of this kind went, by tokens (#114, `6a`).
+ *
+ * **Tokens and never time.** The archive records no turn durations, and the
+ * gap between two charges includes every gate the loop held at - a duration
+ * derived from it would be a proxy wearing another measurement's clothes - so
+ * the wording carries no time unit and no `took`. **Always across models**: a
+ * charge event records no model, and inferring one from a run's config, which a
+ * resume can change, would be a guess. **Always the sample size, and no
+ * minimum**: a threshold under which the line hides would be an invented
+ * number, and `1 past review turn` says exactly how much it is worth.
+ *
+ * The kind is the live `Turn`'s own, which is the vocabulary `seatOf` files the
+ * archive under - never read out of a sentence.
+ */
+export function comparableLine(
+  kind: string,
+  archive: ArchiveTurns | null,
+): { text: string; measured: boolean } {
+  if (archive === null) {
+    return { text: 'comparable turns — this archive has not been read yet', measured: false };
+  }
+  const seen = archive.byKind[kind];
+  if (seen === undefined || seen.turns === 0 || seen.median === null || seen.p90 === null) {
+    return { text: `this archive holds no past ${kind} turns · across models`, measured: true };
+  }
+  const noun = seen.turns === 1 ? 'turn' : 'turns';
+  return {
+    text:
+      `${seen.turns} past ${kind} ${noun} · median ${fmtTokens(seen.median)} tok · ` +
+      `p90 ${fmtTokens(seen.p90)} tok · across models`,
+    measured: true,
+  };
+}
+
+/**
+ * What the window's scorecard is current as of (#114).
+ *
+ * The run that is going and whether it has ended. It moves exactly when a
+ * `result` folds - the moment a finished run joins the archive - and again when
+ * a launch clears `completed`, so `useStats` re-reads on those and on nothing
+ * else. No timer: the archive only changes when a run ends.
+ */
+export function statsEpoch(run: Run): string {
+  return `${run.identity?.runId ?? ''}:${run.completed === null ? 'open' : 'ended'}`;
+}
+
+export function runningRow(turn: Turn, now: number, archive: ArchiveTurns | null = null): RunningRow {
   const beat = turn.beat;
   // Both clocks stop when the turn does. A turn drawn after it ended - which is
   // every turn a held gate is showing the result of - has a final elapsed and a
@@ -2212,12 +2266,8 @@ export function runningRow(turn: Turn, now: number): RunningRow {
       turn.work === null
         ? 'no reading yet — the loop measures the tree during write turns'
         : null,
-    // Narrowed rather than left as it was. `nothing reads the run archive yet`
-    // stopped being true when `scorecard.ts` landed; what is still true is that
-    // no frame carries it here, which is a different sentence and the one a
-    // reader of this row needs.
-    comparable:
-      'no comparable turns — vibe scorecard reads the archive, but no frame carries it here',
+    // Filled from the scorecard the `stats` frame carries (#114), by tokens.
+    comparable: comparableLine(turn.kind, archive),
   };
 }
 

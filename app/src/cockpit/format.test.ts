@@ -1,5 +1,5 @@
 import { expect, test } from 'vitest';
-import { buildStamp, uptime } from './format';
+import { buildStamp, fingerprint, uptime } from './format';
 
 /**
  * The two facts the diagnostics panel formats (#201).
@@ -35,4 +35,14 @@ test('uptime is a duration in the same shape as every other one', () => {
   expect(uptime(11_040)).toBe('3h04m');
   // Never negative. Two clocks disagreeing is not a reason to print `-3s`.
   expect(uptime(-5)).toBe('0s');
+});
+
+test('the rounds fingerprint is the design\'s p v r, with q only when questions were asked', () => {
+  expect(fingerprint({ plan: 2, question: 1, review: 2, verify: 1 })).toBe('p2 q1 v1 r2');
+  // A counter the run never recorded is a dash, never a zero.
+  expect(fingerprint({ plan: null, question: null, review: 2, verify: 1 })).toBe('p– v1 r2');
+  // No questions, or none recorded: nothing to scan for, so left out.
+  expect(fingerprint({ plan: 2, question: 0, review: 2, verify: 1 })).toBe('p2 v1 r2');
+  expect(fingerprint({ plan: 2, question: null, review: 2, verify: 1 })).toBe('p2 v1 r2');
+  expect(fingerprint({ plan: null, question: null, review: null, verify: null })).toBe('p– v– r–');
 });

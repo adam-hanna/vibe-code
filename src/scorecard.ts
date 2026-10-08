@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { EXIT } from '@src/charge.js';
+import { seatOf } from '@src/replay.js';
 import { LINKED_STATUS, listRuns, RUNS_DIR, UNVERIFIED_STATUS } from '@src/run.js';
 import type { RunSummary } from '@src/types.js';
 
@@ -43,7 +44,13 @@ import type { RunSummary } from '@src/types.js';
  * found it.
  */
 
-/** Bumped when a field here changes meaning, so a reader can refuse a shape it does not know. */
+/**
+ * Bumped when a field here changes meaning, so a reader can refuse a shape it does not know.
+ *
+ * Still 1 after `turns.byKind` and `turns.unplaced` arrived (#114): adding a
+ * field changes the meaning of none that were already here, and a reader that
+ * does not know the new ones can ignore them.
+ */
 export const SCORECARD_VERSION = 1;
 
 /**
@@ -93,6 +100,22 @@ export interface TurnCensus {
   costUsd: number | null;
   /** Turns whose `toolItems` was zero, over turns that recorded `toolItems` at all (#66). */
   inert: Measure;
+}
+
+/**
+ * How many tokens one kind of turn spent, as a distribution (#114).
+ *
+ * Tokens and never time: a charge event records no duration, and the gap
+ * between two charges includes every gate the loop held at, so a duration
+ * derived from it would be a proxy wearing another measurement's clothes.
+ * Median and p90 are **nearest-rank**, so each is a token count some real turn
+ * actually spent rather than an interpolation between two; null only when no
+ * turn of the kind carried a count, which cannot happen for a key that exists.
+ */
+export interface KindTokens {
+  turns: number;
+  median: number | null;
+  p90: number | null;
 }
 
 export interface Scorecard {
@@ -152,6 +175,20 @@ export interface Scorecard {
     /** Keyed by the turn's label with its round number replaced by `N`: `critique-N`, `plan`. */
     byLabel: Record<string, TurnCensus>;
     inert: Measure;
+    /**
+     * Token distributions keyed by the turn's kind as `seatOf` reads it back -
+     * `critique`, `review-fix` - so the naming rules exist once, in the inverse
+     * of the orchestrator's labels, and the live window keys by the same kind
+     * a `turn_started` carries (#114).
+     *
+     * **Across models, always.** A charge event records no model; grouping by
+     * one would mean inferring it from a run's stored config, which
+     * `resume_config` can change mid-run. Successful charges only - a
+     * `turn_failed` total is partial - and only those carrying a token count.
+     */
+    byKind: Record<string, KindTokens>;
+    /** Successful charges whose label `seatOf` cannot place: counted, never filed under a guess. */
+    unplaced: number;
   };
   questions: {
     /** Runs that asked the answerer anything, over runs that could be read. */
@@ -272,7 +309,7 @@ export function scoreArchive(targetDir: string): Scorecard {
     finalFix: measure(),
     gates: { recorded: measure(), byName: {}, attempts: {}, repeatedFailure: measure() },
     findings: { downgraded: 0, byFrom: {}, byKinds: {} },
-    turns: { total: 0, byLabel: {}, inert: measure() },
+    turns: { total: 0, byLabel: {}, inert: measure(), byKind: {}, unplaced: 0 },
     questions: {
       asking: measure(),
       answered: 0,
@@ -283,6 +320,9 @@ export function scoreArchive(targetDir: string): Scorecard {
     unmeasurable: UNMEASURABLE,
   };
 
+  // Token counts per turn kind, gathered across every run and reduced to a
+  // distribution once at the end - a median cannot be accumulated run by run.
+  const samples = new Map<string, number[]>();
   for (const row of rows) {
     const skip = skipReason(row);
     if (skip !== null) {
@@ -310,8 +350,9 @@ export function scoreArchive(targetDir: string): Scorecard {
       continue;
     }
     card.archive.read += 1;
-    countRun(card, raw);
+    countRun(card, raw, samples);
   }
+  card.turns.byKind = finishKinds(samples);
   return card;
 }
 
@@ -330,7 +371,7 @@ function skipReason(row: RunSummary): string | null {
   return null;
 }
 
-function countRun(card: Scorecard, raw: Record<string, unknown>): void {
+function countRun(card: Scorecard, raw: Record<string, unknown>, samples: Map<string, number[]>): void {
   const status = raw['status'];
   bump(card.endings.byStatus, typeof status === 'string' ? status : 'unrecorded');
 
@@ -372,6 +413,7 @@ function countRun(card: Scorecard, raw: Record<string, unknown>): void {
       const label = e['label'];
       if (labelFamily(typeof label === 'string' ? label : '').startsWith('review-')) reviewed = true;
       countTurn(card, type, e);
+      sampleTurn(card, samples, e);
     }
   }
   observe(card.endings.resumed, resumed);
@@ -430,6 +472,46 @@ function countTurn(card: Scorecard, type: string, e: Record<string, unknown>): v
   const inert = typeof toolItems === 'number' ? toolItems === 0 : null;
   observe(seen.inert, inert);
   observe(card.turns.inert, inert);
+}
+
+/**
+ * One successful turn's tokens, filed under its kind (#114).
+ *
+ * Only `claude_turn` / `codex_turn` reach here: a `turn_failed` charge records
+ * what a turn spent before it stopped, which is a partial total and would drag
+ * every distribution down. A chunked review (`review-2-part3`) is one charge
+ * per chunk, so each chunk is its own sample - that is what was charged.
+ */
+function sampleTurn(card: Scorecard, samples: Map<string, number[]>, e: Record<string, unknown>): void {
+  const label = e['label'];
+  const seat = typeof label === 'string' ? seatOf(label) : null;
+  if (seat === null) {
+    card.turns.unplaced += 1;
+    return;
+  }
+  const tokens = e['tokens'];
+  if (typeof tokens !== 'number' || !Number.isFinite(tokens) || tokens < 0) return;
+  const list = samples.get(seat.kind) ?? [];
+  list.push(tokens);
+  samples.set(seat.kind, list);
+}
+
+/**
+ * The value at percentile `p` by nearest rank: the smallest sample with at
+ * least `p` of the samples at or below it. Always a value that occurred.
+ */
+function nearestRank(sorted: readonly number[], p: number): number | null {
+  if (sorted.length === 0) return null;
+  return sorted[Math.max(0, Math.ceil(p * sorted.length) - 1)] ?? null;
+}
+
+function finishKinds(samples: Map<string, number[]>): Record<string, KindTokens> {
+  const out: Record<string, KindTokens> = {};
+  for (const kind of [...samples.keys()].sort()) {
+    const sorted = [...(samples.get(kind) ?? [])].sort((a, b) => a - b);
+    out[kind] = { turns: sorted.length, median: nearestRank(sorted, 0.5), p90: nearestRank(sorted, 0.9) };
+  }
+  return out;
 }
 
 function countGates(card: Scorecard, raw: unknown): void {
@@ -520,6 +602,14 @@ export function renderScorecard(card: Scorecard): string[] {
     out.push(`  ${pad(label)} ${String(t.turns).padStart(4)}  ${fmt(t.tokens).padStart(11)} tok  ${cost}`);
   }
   out.push(`  ${pad('ran no tools')} ${rate(card.turns.inert, 'turn', 'turns')}`);
+
+  out.push('', 'Tokens per turn, by kind  (across models; turn events record no model)');
+  for (const [kind, k] of Object.entries(card.turns.byKind)) {
+    const median = k.median === null ? '-' : fmt(k.median);
+    const p90 = k.p90 === null ? '-' : fmt(k.p90);
+    out.push(`  ${pad(kind)} ${String(k.turns).padStart(4)}  median ${median} tok  p90 ${p90} tok`);
+  }
+  if (card.turns.unplaced > 0) out.push(`  ${pad('unplaced labels')} ${card.turns.unplaced}`);
 
   out.push('', 'Verification gates');
   out.push(`  ${pad('runs recording outcomes')} ${rate(card.gates.recorded, 'run', 'runs')}`);

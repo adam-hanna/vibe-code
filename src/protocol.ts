@@ -5,6 +5,7 @@ import type { PromptBlock } from '@src/prompts.js';
 import type { FsAnswer, PilotAccess } from '@src/pilotaccess.js';
 import type { PastCommand } from '@src/commandlog.js';
 import type { ModelListings } from '@src/models.js';
+import type { Scorecard } from '@src/scorecard.js';
 
 /** Where one CLI is, as `config` reports it (#223). */
 export interface CliStatus {
@@ -173,6 +174,18 @@ export type Outbound =
    * one that disagreed would be the one on screen.
    */
   | { type: 'archive'; id: number; dir: string; runs: RunSummary[] }
+  /**
+   * What the archive says about the loop, in reply to a `stats` request (#114).
+   *
+   * Named for `vibe stats`, and `scorecard` is the document `vibe stats --json`
+   * prints, verbatim - one `scoreArchive`, so the terminal and the window cannot
+   * report different numbers.
+   *
+   * **Kept off `archive` on purpose.** The sidebar asks for `archive` every time
+   * a project section opens, and scoring is a full read of every state.json; the
+   * window asks for this when it points at a project and when a run ends.
+   */
+  | { type: 'stats'; id: number; dir: string; scorecard: Scorecard }
   /**
    * The configuration in force, and what the file itself claims (#223, `1h`).
    *
@@ -544,6 +557,12 @@ export type Inbound =
    */
   | { type: 'archive'; id: number; dir: string }
   /**
+   * Score the archive, as `vibe stats` does (#114). A read, beside a run, for
+   * `archive`'s reason: `scoreArchive` runs over `listRuns` and never writes.
+   * `dir` is required for the same reason too.
+   */
+  | { type: 'stats'; id: number; dir: string }
+  /**
    * Read the configuration, or write a patch into it (#223, `1h`).
    *
    * One frame with an optional `patch` rather than two, because they are the
@@ -865,6 +884,15 @@ export function decode(line: string): Decoded {
         return { ok: false, id, reason: 'archive carried no dir' };
       }
       return { ok: true, message: { type: 'archive', id, dir } };
+    }
+    case 'stats': {
+      // `archive`'s rule exactly: an empty `dir` would score the host's own
+      // cwd, which is another repository's archive presented as this one's.
+      const dir = parsed['dir'];
+      if (typeof dir !== 'string' || dir === '') {
+        return { ok: false, id, reason: 'stats carried no dir' };
+      }
+      return { ok: true, message: { type: 'stats', id, dir } };
     }
     case 'artifacts':
     case 'artifact':

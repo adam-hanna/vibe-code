@@ -152,6 +152,39 @@ export interface ArchiveRun {
   forkedFrom?: { runId: string; checkpoint: number };
   linked?: true;
   unverified?: true;
+  /**
+   * The run's round counters off its own state.json (#114), for the rounds
+   * fingerprint. Absent on an entry nothing was read from; a counter the run
+   * never recorded is null, never 0.
+   */
+  rounds?: { plan: number | null; question: number | null; review: number | null; verify: number | null };
+}
+
+/** One kind of turn's token distribution, as `vibe stats` computes it (#114). */
+export interface TurnKindTokens {
+  turns: number;
+  median: number | null;
+  p90: number | null;
+}
+
+/**
+ * The scorecard `vibe stats --json` prints (#114).
+ *
+ * Only the part the window reads is typed; the rest travels through untouched
+ * for the pilot, which is handed the whole document. Nothing here computes a
+ * figure out of it.
+ */
+export type ArchiveStats = {
+  version: number;
+  turns: { byKind: Record<string, TurnKindTokens>; unplaced: number };
+} & Record<string, unknown>;
+
+/** The scorecard, in reply to a `stats` request. */
+export interface StatsFrame {
+  type: 'stats';
+  id: number;
+  dir: string;
+  scorecard: ArchiveStats;
 }
 
 /** The archive, in reply to a request for it. */
@@ -507,6 +540,7 @@ export type Frame =
   | PilotStopped
   | FsFrame
   | Archive
+  | StatsFrame
   | ConfigFrame
   | DiffFrame
   | ArtifactsFrame
@@ -551,6 +585,8 @@ export function isFrame(v: unknown): v is Frame {
     // The archive, which the cockpit's reducer also ignores: it describes runs
     // that are over, and `Run` is about the one in progress (#223).
     type === 'archive' ||
+    // The scorecard, ignored by the reducer for the archive's reason (#114).
+    type === 'stats' ||
     type === 'config' ||
     type === 'diff' ||
     // The two artifact reads (#223), ignored by the cockpit's reducer for the
@@ -831,6 +867,23 @@ export async function archive(dir: string): Promise<readonly ArchiveRun[]> {
     'the host did not answer with the archive',
   );
   return frame.runs;
+}
+
+/**
+ * Score a repository's archive, as `vibe stats` does (#114).
+ *
+ * Its own request rather than part of `archive`, which the sidebar asks for
+ * every time a section opens: scoring reads every state.json.
+ */
+export async function stats(dir: string): Promise<ArchiveStats> {
+  const id = nextRequestId();
+  const frame = await ask<StatsFrame>(
+    { type: 'stats', id, dir },
+    id,
+    'stats',
+    'the host did not answer with the scorecard',
+  );
+  return frame.scorecard;
 }
 
 /**

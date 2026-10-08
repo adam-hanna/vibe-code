@@ -2023,18 +2023,32 @@ export function validateStoredState(
  * this function, and anything that ACTS on "vibe refused to follow this entry"
  * has to read a field only `listRuns`'s own guard can set (#53). Nothing here
  * sets it - the summary is built field by field from `id`, `status`, `task`,
- * `costUsd` and `forkLabel`, so no stored value can reach it.
+ * `costUsd`, `rounds` and `forkLabel`, so no stored value can reach it.
+ *
+ * `rounds` is the per-run fingerprint (#114), read off the same parse rather
+ * than by a second open of the file. Each counter goes through `isCounter` -
+ * the tolerance `counter()` in `scorecard.ts` applies to the same four fields -
+ * so a counter the run never recorded, or one that is not a non-negative
+ * integer, is `null` and never 0: a run that predates `questionRound` did not
+ * ask zero questions, it never said.
  */
 export function summariseStored(raw: unknown, id: string): RunSummary {
   if (!isRecord(raw)) return { id, status: 'unreadable', task: '', costUsd: null };
   const status = raw['status'];
   const task = raw['task'];
   const cost = raw['costUsd'];
+  const round = (v: unknown): number | null => (isCounter(v) ? v : null);
   return {
     id,
     status: isString(status) ? status : 'unknown',
     task: isString(task) ? task : '',
     costUsd: isMoney(cost) ? cost : null,
+    rounds: {
+      plan: round(raw['planRound']),
+      question: round(raw['questionRound']),
+      review: round(raw['reviewRound']),
+      verify: round(raw['verifyRound']),
+    },
     ...forkLabel(raw['forkedFrom']),
   };
 }

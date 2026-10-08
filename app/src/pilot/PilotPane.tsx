@@ -18,7 +18,7 @@ import { systemPrompt } from './brief';
 import { readEmitted, unique, visible } from './emit';
 import { useFollow } from './follow';
 import { autoRun, NO_ACCESS } from './access';
-import { declare, settleCall } from './tools';
+import { archiveContent, declare, settleCall } from './tools';
 import { chatKey, chatMove, isDraftKey, readChat, replyKey, worthSaving, writable } from './saved';
 import { getChat, putChat, useChats } from './chatstore';
 import {
@@ -1154,11 +1154,16 @@ export function PilotPane({
         if (out.kind === 'reads') {
           reading.current.add(call.id);
           const id = call.id;
-          void host
-            .fs(out.op, dir, out.path)
-            .then((frame) =>
-              dispatch({ type: 'settle', id, settlement: { kind: 'ran', content: JSON.stringify(frame) } }),
-            )
+          // The archive is two host reads answered as one (#114): the listing
+          // and the scorecard, both for the repository on screen.
+          const asked: Promise<string> =
+            out.op === 'archive'
+              ? Promise.all([host.archive(dir), host.stats(dir)]).then(([runs, scorecard]) =>
+                  archiveContent(dir, runs, scorecard),
+                )
+              : host.fs(out.op, dir, out.path).then((frame) => JSON.stringify(frame));
+          void asked
+            .then((content) => dispatch({ type: 'settle', id, settlement: { kind: 'ran', content } }))
             .catch((err: unknown) =>
               dispatch({
                 type: 'settle',

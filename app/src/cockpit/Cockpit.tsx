@@ -74,7 +74,8 @@ import { Workstreams } from './Workstreams';
 import { VerifyPane } from './VerifyPane';
 import { StalenessStrip } from './Staleness';
 import { NEEDS_HUMAN, tokens as fmtTokens } from './format';
-import { emptyRun, foldReplay, forResume, latestQuestions, nextRun, reduce, staleness } from './model';
+import { emptyRun, foldReplay, forResume, latestQuestions, nextRun, reduce, staleness, statsEpoch } from './model';
+import { useStats } from './useStats';
 import { rounds } from './rounds';
 import { implementArgv, readLaunchArgv, resumeArgv } from './argv';
 import { SCALE_KEY, SCALE_VAR, readScale, writable } from './appearance';
@@ -1251,6 +1252,9 @@ export function Cockpit() {
    * has not finished.
    */
   const shownDir = viewing?.dir ?? drafting?.dir ?? run.identity?.repo ?? repoDir;
+  // The archive's scorecard for the repository on screen (#114), re-read when
+  // the LIVE run ends, because that is the run whose record just joined it.
+  const stats = useStats(shownDir, statsEpoch(run));
   // Which conversation the pilot shows: the one on screen, or the one that
   // proposed a launch still waiting for its run id (see `holdChat`).
   const pilotDir = holdChat?.dir ?? shownDir;
@@ -2151,6 +2155,7 @@ export function Cockpit() {
                 compact
                 hostPid={past ? null : wire.hostPid}
                 onOpen={open}
+                archive={stats.scorecard?.turns ?? null}
               />
               {/* `4g`, and only on the ending that means the loop finished.
                   Every other exit is a halt, and a halt gets the footer's
