@@ -468,6 +468,13 @@ fn locate(app: &AppHandle) -> Result<(PathBuf, PathBuf), String> {
     Ok((node, entry))
 }
 
+/// Whether a `try_wait` answer shows the child gone. **Only a reported status
+/// does**: an error says the OS would not answer, not that the process left, so
+/// every path that removes or spares a host treats it as still running (#246).
+fn exited(answer: &std::io::Result<Option<std::process::ExitStatus>>) -> bool {
+    matches!(answer, Ok(Some(_)))
+}
+
 /// Why `start` will not spawn this host, checked before anything is spawned.
 ///
 /// One function for both roads into a start - `HostProcess::start` and the
@@ -766,18 +773,13 @@ impl HostProcess {
                 };
                 // Already taken by `stop`, which is the ordinary quit path.
                 let running = guard.get_mut(handle)?;
-                match running.child.try_wait() {
-                    Ok(Some(status)) => {
-                        guard.remove(handle);
-                        return status.code();
-                    }
-                    Ok(None) => {}
-                    // A status the OS will not report is not one to wait on for
-                    // ever; the host is gone from what this process can manage.
-                    Err(_) => {
-                        guard.remove(handle);
-                        return None;
-                    }
+                // Only a status the OS reported is an exit. A `try_wait` that
+                // failed has not shown the child gone, so the entry stays listed
+                // and killable - `close`'s grace kill and `stop` both still find
+                // it - rather than leaving a live host nobody can see.
+                if let Ok(Some(status)) = running.child.try_wait() {
+                    guard.remove(handle);
+                    return status.code();
                 }
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -888,7 +890,9 @@ impl HostProcess {
             // The same process, not merely the same handle: a service host
             // retried within the grace must not be killed for its predecessor.
             if let Some(running) = guard.get_mut(&handle).filter(|r| r.pid == pid) {
-                if matches!(running.child.try_wait(), Ok(None)) {
+                // Anything short of a reported exit is killed, a failed
+                // `try_wait` included: the same rule `stop` applies.
+                if !exited(&running.child.try_wait()) {
                     crate::applog::app(&format!(
                         "host {handle} (pid {pid}) did not leave within {}s of stdin closing; killed",
                         me.inner.grace.as_secs_f32()
@@ -967,7 +971,7 @@ impl HostProcess {
             // Cannot tell is treated as "still there" and killed at the
             // deadline, which is the fail-closed direction: a process left
             // running is a second writer against a run directory.
-            taken.retain_mut(|(_, running)| !matches!(running.child.try_wait(), Ok(Some(_))));
+            taken.retain_mut(|(_, running)| !exited(&running.child.try_wait()));
             if taken.is_empty() || Instant::now() >= deadline {
                 break;
             }
@@ -1446,6 +1450,15 @@ mod tests {
         let again = start(&hosts, &collect, "run-8", Some(r#"{"type":"invoke","id":9,"argv":[]}"#), ECHO);
         assert!(again.is_err(), "two processes under one handle");
         hosts.stop();
+    }
+
+    #[test]
+    fn a_try_wait_that_failed_is_never_taken_for_an_exit() {
+        assert!(!exited(&Err(std::io::Error::other("waitpid failed"))));
+        assert!(!exited(&Ok(None)));
+        let mut child = Command::new("node").args(["-e", ""]).spawn().unwrap();
+        let status = child.wait().unwrap();
+        assert!(exited(&Ok(Some(status))));
     }
 
     #[test]
