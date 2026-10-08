@@ -9,8 +9,8 @@ import type { ActionContext } from './actions';
  * the second through `Record<ActionId, () => void>`, and these pin the rest.
  */
 
-const ALL: ActionContext = { live: true, gate: true, past: true, inShell: true };
-const NONE: ActionContext = { live: false, gate: false, past: false, inShell: false };
+const ALL: ActionContext = { live: true, gate: true, pausing: false, past: true, inShell: true };
+const NONE: ActionContext = { live: false, gate: false, pausing: false, past: false, inShell: false };
 
 describe('the table', () => {
   test('every id appears once, and every shortcut names one action', () => {
@@ -31,6 +31,7 @@ describe('what is offered', () => {
   test('a run control needs a run, a gate control needs a gate, back-to-live needs a past run', () => {
     const none = available(NONE).map((a) => a.id);
     expect(none).not.toContain('pause');
+    expect(none).not.toContain('unpause');
     expect(none).not.toContain('stop');
     expect(none).not.toContain('gateContinue');
     expect(none).not.toContain('gateStop');
@@ -40,8 +41,23 @@ describe('what is offered', () => {
     expect(none).toContain('newRun');
     expect(none).toContain('toggleBottom');
 
-    const all = available(ALL).map((a) => a.id);
-    expect(all).toEqual(ACTIONS.map((a) => a.id));
+    // Every action is reachable in SOME context. Pause and cancel-pause are
+    // alternatives since #276, so no one context offers both, and the claim is
+    // checked over the two that differ only in whether a pause is armed.
+    const reachable = new Set([
+      ...available(ALL).map((a) => a.id),
+      ...available({ ...ALL, pausing: true }).map((a) => a.id),
+    ]);
+    expect([...reachable].sort()).toEqual(ACTIONS.map((a) => a.id).sort());
+  });
+
+  test('an armed pause can be cancelled and not asked for again (#276)', () => {
+    const armed = available({ ...ALL, pausing: true }).map((a) => a.id);
+    expect(armed).toContain('unpause');
+    expect(armed).not.toContain('pause');
+    const idle = available(ALL).map((a) => a.id);
+    expect(idle).toContain('pause');
+    expect(idle).not.toContain('unpause');
   });
 });
 

@@ -951,6 +951,16 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       return;
     }
 
+    if (msg.type === 'unpause') {
+      // Whether there was one to take back is the answer (#276): 0 cleared an
+      // armed hold, 1 found none, because the boundary took it first or no
+      // pause was asked for. Never an error - too late is a run that is holding.
+      const had = pauseRequested;
+      pauseRequested = false;
+      send({ type: 'result', id: msg.id, exit: had ? 0 : 1 });
+      return;
+    }
+
     if (msg.type === 'pause') {
       pauseRequested = true;
       // Accepted, not honoured — and the two are different facts, the same way

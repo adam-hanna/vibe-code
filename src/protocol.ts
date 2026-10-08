@@ -421,6 +421,17 @@ export type Inbound =
    */
   | { type: 'pause'; id: number }
   /**
+   * Take back a pause that has not been reached yet (#276).
+   *
+   * The other half of `pause`, and as cheap: it clears the one armed hold and
+   * nothing else. Answered with **whether there was one** - `exit 0` when it
+   * cleared an armed pause, `exit 1` when nothing was armed, because the
+   * boundary already took it or none was asked for - so a window can tell
+   * *taken back* from *too late*. Too late is not an error: the run is holding,
+   * and the `ask` already on the wire is how that gets answered.
+   */
+  | { type: 'unpause'; id: number }
+  /**
    * Kill the turn in flight and end the run, resumably (#209).
    *
    * **The other half of `pause`, and they must never be confused.** A pause
@@ -757,6 +768,8 @@ export function decode(line: string): Decoded {
       return { ok: true, message: { type: 'shutdown', id } };
     case 'pause':
       return { ok: true, message: { type: 'pause', id } };
+    case 'unpause':
+      return { ok: true, message: { type: 'unpause', id } };
     case 'command': {
       // Every field checked here, for `pilot`'s reason: there is no `parseArgs`
       // below this to catch a missing one, and this frame spawns a process.

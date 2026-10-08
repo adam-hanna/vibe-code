@@ -2300,6 +2300,9 @@ some later boundary nobody was looking at, which is indistinguishable from a sta
 **And it belongs to one run** (#253): `serve.ts` clears it when a run's command returns, so
 a run that stops or finishes before any boundary does not leave the next run to hold for a
 request nobody made of it. A pause asked for before a run starts still holds that run.
+**And it can be taken back** (#276): `unpause` clears the armed hold and answers whether there
+was one, `exit 0` or `1`, so *too late* (the boundary already took it, and the run is holding)
+is told rather than raised. While a pause is armed, the window's control reads **Cancel pause**.
 
 Three things it is not, each for its own reason. Not a **gate mode**: `cfg.gates` is the run's
 standing answer to where control comes back, decided before the run starts, and a mode would

@@ -8,7 +8,7 @@ import type { Run } from './model';
 function footer(run: Run, over: { pausing?: boolean; stopping?: boolean } = {}): string {
   return renderToStaticMarkup(createElement(Footer, {
     run, busy: false, pausing: over.pausing ?? false, stopping: over.stopping ?? false, caps: null, gates: null, order: [],
-    onDecide: () => {}, onPause: () => {}, onStop: () => {},
+    onDecide: () => {}, onPause: () => {}, onUnpause: () => {}, onStop: () => {},
     onResume: () => {}, onImplement: () => {},
   }));
 }
@@ -68,6 +68,10 @@ describe('stopping and pausing say what they do (#253)', () => {
     const idle = footer(live());
     expect(idle).toContain('>Pause<');
     expect(idle).not.toMatch(/at gate|armed/i);
-    expect(footer(live(), { pausing: true })).toContain('Pausing after this step');
+    // Armed, the control takes the pause back (#276), and still speaks of steps.
+    const armed = footer(live(), { pausing: true });
+    expect(armed).toContain('Cancel pause');
+    expect(armed).toContain('wait after the current step');
+    expect(armed).not.toMatch(/at gate|armed/i);
   });
 });
