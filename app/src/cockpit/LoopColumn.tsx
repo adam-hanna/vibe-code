@@ -6,12 +6,14 @@ import { Button } from '@/ui/button';
 import { cn } from '@/lib/utils';
 import { Counts } from './Counts';
 import { Caret } from './Disclosure';
-import { boundary, clock, elapsed } from './format';
+import { clock, elapsed } from './format';
 import { censusByPhase, questionsByPhase, title, unplacedQuestions } from './rounds';
 import type { BottomTab, Tab } from './where';
+import { findTurn, nowStatus, RAIL_TITLE, turnGroup, verifyRow, verifyRowText } from './rail';
+import type { RailState, VerifyRow } from './rail';
 import { RunningRow } from './RunningRow';
 import type { KeyboardEvent } from 'react';
-import { CYCLE_OF, runningRow } from './model';
+import { runningRow } from './model';
 import type { Census, CycleKind, PhaseGroup, Preflight, QuestionRound, ResumedFrom, Run, Turn } from './model';
 
 /**
@@ -882,21 +884,9 @@ export function LoopColumn({
  */
 const RAIL_KINDS: readonly CycleKind[] = ['plan', 'critique', 'code', 'review'];
 
-const RAIL_TITLE: Readonly<Record<CycleKind, string>> = {
-  plan: 'Plan',
-  critique: 'Plan critique',
-  code: 'Code',
-  review: 'Code review',
-};
-
-const TURN_GROUP: Readonly<Record<string, CycleKind>> = {
-  plan: 'plan',
-  critique: 'critique',
-  implement: 'code',
-  review: 'review',
-};
-
-type RailState = 'upcoming' | 'complete' | 'running' | 'waiting';
+// `TURN_GROUP` lived here and is gone (#248): a turn's group is read off the
+// cycle `reduce` placed it in (`turnGroup` in `rail.ts`), because a four-entry
+// kind table drew five of the loop's turn kinds as an idle run.
 
 /**
  * The one place a state becomes a colour. Four states, four tokens: the accent
@@ -920,25 +910,6 @@ const STATE_BAR: Readonly<Record<RailState, string>> = {
 /** A card in the rail: the `now` card, the activity card and the path. */
 const CARD = 'rounded-md border border-rule-card bg-card';
 
-function railKindForTurn(kind: string): CycleKind | null {
-  return TURN_GROUP[kind] ?? CYCLE_OF[kind] ?? null;
-}
-
-function findTurn(run: Run, id: number | null): Turn | null {
-  if (id === null) return null;
-  for (const cycle of run.cycles) {
-    for (const phase of cycle.phases) {
-      const turn = phase.turns.find((candidate) => candidate.id === id);
-      if (turn !== undefined) return turn;
-    }
-  }
-  return null;
-}
-
-function roleName(role: string): string {
-  return role.length === 0 ? 'Agent' : `${role.slice(0, 1).toUpperCase()}${role.slice(1)}`;
-}
-
 function RailStateIcon({ state }: { state: RailState }) {
   if (state === 'running') {
     return <LivenessDot state="live" />;
@@ -960,6 +931,7 @@ function RailStage({
   onToggle,
   censusOf,
   onOpen,
+  verify = null,
 }: {
   kind: CycleKind;
   cycle: Run['cycles'][number] | undefined;
@@ -968,6 +940,8 @@ function RailStage({
   onToggle: () => void;
   censusOf: ReadonlyMap<number, Census>;
   onOpen?: OpenAt | undefined;
+  /** The verification sub-row, drawn under the Code stage only (#248). */
+  verify?: VerifyRow | null;
 }) {
   const count = cycle?.phases.length ?? 0;
   const meta = cycle === undefined
@@ -1009,6 +983,19 @@ function RailStage({
           ? <ChevronRight size={14} className={cn('flex-none text-tertiary transition-transform', open && 'rotate-90')} aria-hidden="true" />
           : <span className="w-3.5 flex-none" aria-hidden="true" />}
       </button>
+
+      {/* Verification, outside the disclosure: a gate that failed and the fix it
+          bought are what the Code stage is doing now, and a row somebody has to
+          open first is a row nobody reads while the run is going. Every figure
+          in it is one the frames carried. */}
+      {verify !== null && (
+        <div className="flex min-w-0 items-baseline gap-2 px-3.5 pb-2.5 pl-10 text-body-sm">
+          <span className="flex-none text-tertiary">Verification</span>
+          <span className="min-w-0 truncate font-mono text-mono-sm text-secondary" title={verifyRowText(verify)}>
+            {verifyRowText(verify)}
+          </span>
+        </div>
+      )}
 
       {open && cycle !== undefined && (
         <div className="divide-y divide-dashed divide-rule-inner bg-active py-px pr-3.5 pb-2.75 pl-10">
@@ -1067,7 +1054,7 @@ function RailPreflight({ preflight, now }: { preflight: Preflight; now: number }
 
 function RunRail({ run, now, onOpen }: { run: Run; now: number; onOpen?: OpenAt | undefined }) {
   const currentTurn = run.running ?? findTurn(run, run.gate?.turnId ?? null);
-  const currentKind = currentTurn === null ? null : railKindForTurn(currentTurn.kind);
+  const currentKind = currentTurn === null ? null : turnGroup(run, currentTurn.id);
   const [open, setOpen] = useState<ReadonlySet<CycleKind>>(() => new Set());
   const toggle = (kind: CycleKind) => {
     setOpen((current) => {
@@ -1078,25 +1065,9 @@ function RunRail({ run, now, onOpen }: { run: Run; now: number; onOpen?: OpenAt 
   };
   const censusOf = censusByPhase(run);
   const activity = currentTurn === null ? null : runningRow(currentTurn, now);
-  const isEmpty = run.identity === null && run.preflight === null && run.cycles.length === 0;
-  const status = run.gate !== null
-    ? { title: 'Needs your decision', detail: `Waiting at ${boundary(run.gate.boundary)}`, tone: 'waiting' }
-    : run.running !== null && currentKind !== null
-      ? { title: RAIL_TITLE[currentKind], detail: `${roleName(run.running.role)} is working`, tone: 'running' }
-      : run.preflight !== null && !run.preflight.passed
-        ? { title: 'Preflight', detail: run.preflight.probing === null ? 'Preparing checks' : `Checking ${run.preflight.probing}`, tone: 'running' }
-        : run.reason !== null
-          ? { title: 'Run ending', detail: run.reason.message, tone: 'waiting' }
-          : run.ended?.how === 'stopped'
-            ? { title: 'Run stopped', detail: run.ended.detail, tone: 'waiting' }
-            : run.completed?.exit === 0 || run.ended?.how === 'approved'
-            ? { title: 'Run complete', detail: 'Review the results in the workspace', tone: 'complete' }
-            : run.completed !== null
-              ? { title: 'Process finished', detail: `Exit ${run.completed.exit}`, tone: 'complete' }
-            : isEmpty
-              ? { title: 'Waiting for a brief', detail: 'Review the brief to begin', tone: 'upcoming' }
-              : { title: 'Ready for the next turn', detail: 'The run is between turns', tone: 'waiting' };
-  const statusState = status.tone as RailState;
+  const status = nowStatus(run);
+  const verify = verifyRow(run);
+  const statusState = status.tone;
   const statusTime = activity === null
     ? run.preflight === null ? null : elapsed(Math.max(0, now - run.preflight.at))
     : elapsed(activity.elapsedMs);
@@ -1177,6 +1148,7 @@ function RunRail({ run, now, onOpen }: { run: Run; now: number; onOpen?: OpenAt 
               onToggle={() => { toggle(kind); }}
               censusOf={censusOf}
               onOpen={onOpen}
+              verify={kind === 'code' ? verify : null}
             />
           );
         })}

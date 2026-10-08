@@ -134,12 +134,14 @@ import {
 } from '@src/ratelimits.js';
 import {
   describeFailure,
+  excerpt,
   failedRuns,
   resolveGates,
   runGateCommand,
   suggestedFix,
   verdictOf,
 } from '@src/verify.js';
+import type { VerifyResult } from '@src/verify.js';
 import type {
   Answer,
   CheckpointCommitNote,
@@ -2672,6 +2674,30 @@ async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Findi
     // non-zero exit, so `runs` was the attempt that failed and the sentence said
     // "attempt 1 of 1" for every failure of a three-run gate.
     const flaky = verdictOf(result) === 'flaky';
+
+    // Every attempt's whole output, as a file of its own (#248). Passing attempts
+    // of a flaky gate included: the difference between the run that passed and
+    // the one that failed is the evidence a race leaves. Keyed by the review
+    // round, the verify round (before the caller increments it), the gate and the
+    // attempt, so neither the other gate nor the next verify-fix pass under the
+    // same review round can overwrite it. Uncapped, because it is a file and the
+    // excerpt below is what is bounded. Gate names pass `GATE_NAME_RE`, so the
+    // name is always an artifact basename.
+    const logs = result.attempts.map((a, i) => {
+      const name = `verify-${state.reviewRound}-${state.verifyRound}-${gate.name}-${a.run}.log`;
+      return { run: a.run, ok: a.ok, name, path: path.resolve(artifact(state, name, result.outputs[i] ?? '')) };
+    });
+    const firstLog = logs.find((l) => l.run === result.failedRun) ?? null;
+    const firstIndex = firstLog === null ? -1 : logs.indexOf(firstLog);
+    // The excerpt the fixer reads and `verify-failure-<n>.txt` holds, naming the
+    // attempt whose output it cuts. Built here rather than in `runGateCommand`
+    // because only this site has written the file the marker points at.
+    const shown: VerifyResult = {
+      ...result,
+      output: excerpt(result.outputs[firstIndex] ?? result.output, firstLog?.path ?? null),
+    };
+    const failedLogs = logs.filter((l) => !l.ok).map((l) => ({ run: l.run, path: l.path }));
+
     const failed: GateOutcome = {
       name: gate.name,
       status: 'failed',
@@ -2709,10 +2735,16 @@ async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Findi
         // argued for: a reader of the archive asking "was this suite ever noisy"
         // has no other way to find out, and three small objects on the gates
         // that failed is not what #133 was protecting `state.events` from.
-        attempts: result.attempts,
+        //
+        // Each carries `log`, the basename of that attempt's full output (#248).
+        // The window opens what it is told and never composes `verify-…log` from
+        // the rounds it already has: that would be the loop's naming convention
+        // copied into a process that cannot be kept in step with it. The OUTPUT
+        // is deliberately not here - it is in the file, which is #133's line.
+        attempts: result.attempts.map((a, i) => ({ ...a, log: logs[i]?.name ?? null })),
       },
     );
-    artifact(state, `verify-failure-${state.reviewRound}.txt`, result.output);
+    artifact(state, `verify-failure-${state.reviewRound}.txt`, shown.output);
 
     // What the failing command PRODUCED, on the failing branch only (#62). Not
     // on the unavailable or unlaunchable paths above: nothing ran there, so
@@ -2770,13 +2802,13 @@ async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Findi
       // and at the file written one line above: the artifact is uniform, and
       // the fixer is pointed at the output it has to read (#48).
       evidence: [{ kind: 'artifact', path: `verify-failure-${state.reviewRound}.txt` }],
-      detail: describeFailure(result),
+      detail: describeFailure(shown, failedLogs),
       // Beside `describeFailure` in `verify.ts` rather than written here (#135).
       // The two sentences have to agree about which kind of failure this is -
       // a detail that says "not deterministic" over a fix that says "make it
       // pass" is worse than either alone - and they cannot disagree if one
       // module owns both.
-      suggested_fix: suggestedFix(result),
+      suggested_fix: suggestedFix(shown),
     };
   }
 
