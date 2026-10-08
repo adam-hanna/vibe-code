@@ -1,3 +1,4 @@
+import { withStanding } from '@src/prompts.js';
 import { modelArgs } from '@src/modelflag.js';
 import { attachSpend } from '@src/charge.js';
 import { attachEnding, describeEnding, resolveBin, run } from '@src/proc.js';
@@ -216,7 +217,8 @@ export async function claudeTurn(
   // had.
   return withHeartbeat(heartbeat, async () => {
     const { code, signal, stdout, stderr } = await exec(claudeBin(), args, {
-      input: prompt,
+      // The person's standing instructions in front, on every turn (#273).
+      input: withStanding(prompt),
       cwd,
       timeoutMs,
       // Billed to the road Settings names for Anthropic (#223).

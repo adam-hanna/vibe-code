@@ -444,6 +444,8 @@ export function Cockpit() {
    * card.
    */
   const [access, setAccess] = useState<host.PilotAccess | null>(null);
+  /** The person's standing instructions (#273), from the same read, for the pilot. */
+  const [standing, setStanding] = useState<string | null>(null);
   /**
    * Bumped by every save in Settings, so a change there reaches this read —
    * including the pilot's safe list, which an open conversation acts on.
@@ -458,9 +460,12 @@ export function Cockpit() {
         const effective = frame.effective as {
           loop?: Partial<Caps>;
           gates?: Record<string, string>;
+          instructions?: { text?: unknown };
         };
         if (cancelled) return;
         setAccess(frame.pilot);
+        const text = effective.instructions?.text;
+        setStanding(typeof text === 'string' ? text : null);
         if (effective.gates !== undefined) setGates(effective.gates);
         setOrder(frame.gateable);
         const loop = effective.loop;
@@ -1823,6 +1828,7 @@ export function Cockpit() {
               onEffect={onEffect}
               ask={brief}
               onAsked={() => setBrief(null)}
+              standing={standing}
               onPending={setProposals}
               limits={limits}
               statuses={keyStatuses}

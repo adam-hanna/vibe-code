@@ -1648,7 +1648,43 @@ export function installPromptOverrides(overrides: Readonly<Record<string, string
 
 export function clearPromptOverrides(): void {
   installed = {};
+  standing = '';
 }
+
+/**
+ * The person's standing instructions for this run (#273), installed beside the
+ * prompt overrides and for the same reason: a module latch, one run per process,
+ * installed unconditionally so an empty text is what clears the previous run's.
+ */
+let standing = '';
+
+export function installStandingInstructions(text: string): void {
+  standing = text;
+}
+
+/**
+ * A turn's prompt with the person's standing instructions in front of it.
+ *
+ * Applied where the prompt reaches stdin in both adapters, so every role and
+ * every kind of turn gets it - plan, critique, answer, implement, review and all
+ * three fixes - with no builder edited and none able to forget it. On every turn
+ * rather than the first of a session, so it survives a resume, a fork and a
+ * session rotation alike; it is a paragraph, and a turn that lost it would be a
+ * turn the person's rules silently stopped applying to.
+ *
+ * Blank is nothing at all: the prompt comes back byte-identical, which is what
+ * keeps a run with no instructions exactly the run it was before.
+ */
+export function withStanding(prompt: string): string {
+  const text = standing.trim();
+  if (text === '') return prompt;
+  return `${STANDING_HEAD}\n\n${text}\n\n---\n\n${prompt}`;
+}
+
+/** Introduces the person's own text, so the model can tell it from vibe's. */
+export const STANDING_HEAD =
+  '## Standing instructions\n\nFrom the person running vibe, for every turn of every run. ' +
+  "Follow them unless the task below explicitly says otherwise; they do not change this turn's job or the format of its answer.";
 
 /**
  * The text a block renders as: the project's, or the product's.

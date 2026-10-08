@@ -170,5 +170,6 @@ test('the pane tells the host which CLI takes a turn, and lets Settings choose t
   expect(pilotPane).toContain('backendFor(vendor, access ?? NO_ACCESS)');
   // Each CLI is told which one it is, because both now have their own tools
   // and the limits on them are enforced differently (#223).
-  expect(pilotPane).toContain("systemPrompt(run, launched, 'emitted', access, agentOf(provider))");
+  // The standing instructions ride last since #273; the CLI is still named.
+  expect(pilotPane).toContain("systemPrompt(run, launched, 'emitted', access, agentOf(provider), ");
 });

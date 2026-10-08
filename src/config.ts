@@ -225,6 +225,8 @@ export const DEFAULTS: Config = {
   // Empty: a project that overrides no prompt is byte-identical to one that
   // predates the key, which is what makes this safe to add to every config.
   prompts: {},
+  // Empty: nobody's instructions until somebody writes some (#273).
+  instructions: { text: '' },
   toolchain: {
     // Deliberately minimal. `git` is needed in every phase because vibe commits
     // per round; node and npm only matter once something is being built or
@@ -331,6 +333,7 @@ export function mergeConfig(base: Config, override: unknown): Config {
     progress: mergeSection(base.progress, override['progress']),
     toolchain: mergeToolchain(base.toolchain, override['toolchain']),
     prompts: mergePrompts(base.prompts, override['prompts']),
+    instructions: mergeInstructions(base.instructions, override['instructions']),
   };
 }
 
@@ -363,6 +366,22 @@ function mergeToolchain(base: ToolchainContract, override: unknown): ToolchainCo
  * the keys come from a user's file, `__proto__` is reachable, and a swallowed
  * entry would skip validation instead of being reported by name.
  */
+/**
+ * The standing instructions, where a `null` text is no text at all (#273).
+ *
+ * The settings screen clears the box by writing `null`, as it clears every
+ * other optional field, and a cleared project box must let the instructions for
+ * all projects show through again rather than override them with nothing. A
+ * string replaces; anything else leaves the layer below in force, and a value
+ * that is neither is still refused by `validate` when it is not a string.
+ */
+function mergeInstructions(base: Config['instructions'], override: unknown): Config['instructions'] {
+  if (!isRecord(override)) return base;
+  const text = override['text'];
+  if (text === null || text === undefined) return base;
+  return { text: text as string };
+}
+
 function mergePrompts(base: PromptOverrides, override: unknown): PromptOverrides {
   if (!isRecord(override)) return base;
   const out: Record<string, string> = { ...base };
@@ -481,6 +500,7 @@ const SECTIONS = [
   'verify',
   'progress',
   'prompts',
+  'instructions',
 ] as const;
 
 /**
@@ -804,6 +824,10 @@ function validate(cfg: Config): void {
   }
   validateToolchain(cfg.toolchain);
   validatePrompts(cfg.prompts);
+  // Any text at all, including none. There is no judging whether an
+  // instruction is a good one, and a length limit would be a number with
+  // nothing behind it - the same answer `validatePrompts` gives (#273).
+  if (typeof cfg.instructions.text !== 'string') throw new Error('instructions.text must be a string');
 }
 
 const PHASES: readonly Phase[] = ['plan', 'implement', 'review'];

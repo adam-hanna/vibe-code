@@ -461,6 +461,26 @@ export function accessNote(access: PilotAccess | null): string {
  * subscription CLI, which is told the table in prose because there is nowhere
  * else to put it.
  */
+/**
+ * The person's standing instructions as the pilot is told them (#273): right
+ * after who it is, because they are the person's rules for everything that
+ * follows. The run agents get the same text from the core's `withStanding`;
+ * the heading is spelled here rather than imported because the app and the
+ * core are two packages, and it says the same thing in the same words.
+ */
+export function standingBlock(standing: string | null): string[] {
+  const text = standing?.trim() ?? '';
+  if (text === '') return [];
+  return [
+    '## Standing instructions',
+    '',
+    'From the person running vibe, for every turn. Follow them unless they ask otherwise in this conversation.',
+    '',
+    text,
+    '',
+  ];
+}
+
 export function systemPrompt(
   run: Run,
   launched: Launched | null,
@@ -472,10 +492,17 @@ export function systemPrompt(
    * has none, so it reads through `list_dir` and `read_file`.
    */
   cli: 'claude' | 'codex' | null = null,
+  /**
+   * The person's standing instructions (#273), the same text every run agent is
+   * given, from `instructions.text` in their settings. Null or blank adds
+   * nothing, so a pilot with none is told exactly what it was before.
+   */
+  standing: string | null = null,
 ): string {
   return [
     WHO,
     '',
+    ...standingBlock(standing),
     // **Before the run block, deliberately.** Everything below this is a
     // description of a run that may not exist yet; this is the job. A doctrine
     // buried under two hundred lines of JSON is one a model reads last.
