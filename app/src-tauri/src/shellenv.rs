@@ -54,6 +54,7 @@ pub fn login_env() -> Result<(String, Vec<(String, String)>), String> {
     let shell = std::env::var("SHELL")
         .ok()
         .filter(|s| !s.trim().is_empty())
+        .or_else(account_shell)
         .unwrap_or_else(|| "/bin/sh".into());
     let script = format!("printf '%s' '{MARK}'; env -0; printf '%s' '{MARK}'");
     let mut child = Command::new(&shell)
@@ -106,6 +107,27 @@ pub fn login_env() -> Result<(String, Vec<(String, String)>), String> {
             return Err(format!("{shell} exited ({status}) without printing its environment"));
         }
         std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// The login shell on the user's own account record, for when `SHELL` is unset.
+///
+/// A terminal always sets `SHELL`, and a desktop session on Linux usually does,
+/// but an app launchd starts on macOS may have none, and falling straight back
+/// to `/bin/sh` would read no `.zshrc` at all - the whole point lost on the
+/// platform that needs this most. `getpwuid` answers from the directory service
+/// on macOS and from `/etc/passwd` or NSS on Linux, which is what `login` reads.
+#[cfg(unix)]
+fn account_shell() -> Option<String> {
+    // SAFETY: `getpwuid` returns a pointer into static storage or null; the
+    // field is read and copied out at once, before any other call could reuse it.
+    unsafe {
+        let entry = libc::getpwuid(libc::getuid());
+        if entry.is_null() || (*entry).pw_shell.is_null() {
+            return None;
+        }
+        let shell = std::ffi::CStr::from_ptr((*entry).pw_shell).to_string_lossy().into_owned();
+        (!shell.trim().is_empty()).then_some(shell)
     }
 }
 
@@ -199,6 +221,15 @@ mod tests {
     fn drops_the_shells_own_variables_and_non_assignments() {
         let out = framed("", &["PWD=/home/me", "SHLVL=2", "_=/usr/bin/env", "OLDPWD=/", "noequals", "=empty", "KEEP=1"], "");
         assert_eq!(parse(&out), Some(vec![("KEEP".to_string(), "1".to_string())]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_account_names_a_shell_when_shell_is_unset() {
+        // Whatever this machine's account says - only that it says something
+        // that exists, since that is what the fallback hands to `Command`.
+        let shell = account_shell().expect("the account record names a login shell");
+        assert!(std::path::Path::new(&shell).exists(), "{shell} does not exist");
     }
 
     #[cfg(unix)]
