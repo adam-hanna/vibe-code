@@ -1,0 +1,82 @@
+# The repository's tests, on every push and pull request into develop and main.
+#
+# The three jobs are the same three gates `vibe` runs on its own changes: the
+# core (`npm run typecheck && npm test`), the app (typecheck, vitest and the
+# design system's contrast audit) and the Rust shell's `cargo test`. CI reports
+# only after a push, so running `npm run typecheck && npm test` locally before
+# every commit is still the rule. A test that fails only here is a finding, not
+# something to retry past.
+name: CI
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+    branches: [develop, main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+      # The test fixtures run `git commit`, and a hosted runner has no identity.
+      - run: |
+          git config --global user.name "vibe CI"
+          git config --global user.email "ci@users.noreply.github.com"
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  app:
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npx vitest run
+      - run: npm run audit:contrast
+
+  rust:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            app/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/linux-deps
+      - run: |
+          git config --global user.name "vibe CI"
+          git config --global user.email "ci@users.noreply.github.com"
+      # stage:sidecar builds the core itself; it needs the root's dependencies.
+      - run: npm ci
+      - run: npm ci
+        working-directory: app
+      - run: npm run stage:sidecar
+        working-directory: app
+      - run: npm run test:rust
+        working-directory: app

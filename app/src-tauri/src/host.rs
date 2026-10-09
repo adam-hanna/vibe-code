@@ -128,7 +128,8 @@ pub fn strip_verbatim(path: &Path) -> PathBuf {
 ///
 /// `commit` and `at` are `Option` because a tree with no git cannot answer, and
 /// an absence is reported as one. `version` always exists - it is the crate's,
-/// which `tauri.conf.json` and `Cargo.toml` agree on.
+/// from `Cargo.toml`. It is not the installer's version: `tauri.conf.json` reads
+/// that from the root `package.json` (#239), and the two are not kept in step.
 #[derive(Clone, Serialize)]
 pub struct Build {
     pub version: String,

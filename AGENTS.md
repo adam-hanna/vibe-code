@@ -67,9 +67,15 @@ node scripts/record-cli-fixtures.mjs --force   # re-record a version that alread
 introduced them, which could not record fixtures from inside a sandboxed turn. There is no
 other way past the check.
 
-There is **no linter and no formatter**. The one workflow, `.github/workflows/pages.yml`,
-deploys the docs site from `main`; there is still **no test CI**. `npm run typecheck && npm test`
-before every commit is the whole gate, and it is on you to run it. Node 20+ (`engines`).
+There is **no linter and no formatter**. There are three workflows. `pages.yml` deploys the
+docs site from `main`. `ci.yml` runs on every push and pull request into `develop` and `main`:
+the core gate (`npm run typecheck && npm test`), the app gate (typecheck, vitest,
+`audit:contrast`) and the Rust tests, all on Ubuntu 22.04 with Node 22. `release.yml` builds the
+desktop bundles on a `v*` tag into a draft GitHub release (#239). What CI does **not** run: a
+linter or formatter, the tests on macOS or Windows, and `npm publish`. **`npm run typecheck &&
+npm test` before every commit is still the rule**, and it is still on you to run it: CI only
+reports after you push. A test that fails only on CI is a finding about the test or the code,
+never something to retry past or skip. Node 20+ (`engines`).
 
 ### The docs site — `docs/`
 
@@ -2225,7 +2231,10 @@ docs/                the docs site - VitePress, its own package.json, never in `
 docs/.vitepress/config.mts  the site's config: BASE (the one place the path is written), sidebar, search
 docs/images/         screenshots, shared by README.md and the site
 docs/plans/          internal design notes, excluded from the site
-.github/workflows/pages.yml  the one workflow: builds docs/ from main and deploys it to Pages
+.github/workflows/pages.yml    builds docs/ from main and deploys it to Pages
+.github/workflows/ci.yml       the core, app and Rust gates on push and PR into develop and main
+.github/workflows/release.yml  the desktop bundles on a v* tag, into one draft release
+.github/actions/linux-deps/    the Linux packages a Tauri build needs, listed once
 ```
 
 **The app and the CLI are two front ends over one core.** The app links `src/` and calls
@@ -3859,10 +3868,16 @@ and its commits survive it.
    re-record the fixtures with `node scripts/record-cli-fixtures.mjs` (#298). Commit both.
 6. Verify from a clean checkout: `npm run typecheck`, `npm test`, `npm pack --dry-run`.
 7. Merge, then tag: `git tag -a v<version> -m "..." && git push origin v<version>`.
-8. `npm publish`. **This needs a real interactive terminal** — the OTP flow hands off to a
+8. **Wait for `release.yml` on the tag, install the draft on at least one machine, then publish
+   the draft release.** The workflow builds the Windows, macOS (Apple Silicon) and Linux bundles
+   into one draft and never publishes it. A tag that is not `package.json`'s version still
+   builds, with a warning, and the bundles carry `package.json`'s version - so a throwaway
+   `v<version>-rc.N` tag is how to try the workflow, and it yields a draft pre-release. A tag
+   whose release is already published is refused rather than uploaded into.
+9. `npm publish`. **This needs a real interactive terminal** — the OTP flow hands off to a
    browser and cannot be driven from a headless shell. A granular automation token in
    `.npmrc` avoids the prompt.
-9. **Merge `main` back into `develop`.** The release PR is squash-merged, so the version bump
+10. **Merge `main` back into `develop`.** The release PR is squash-merged, so the version bump
    and the changelog exist only on `main` until you do. After 1.1.0 this was missed and
    `develop` sat at version 1.0.1 with no `CHANGELOG.md` — which is the branch the next
    release would have been cut from.

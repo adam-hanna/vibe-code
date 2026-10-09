@@ -69,7 +69,9 @@ The app is the same loop with a window around it. You describe what you want to 
 
 The app also pauses at the checkpoints you choose, lets you stop a turn in flight, and answers a run's questions in place. Settings edits `vibe.config.json` for you.
 
-The app isn't packaged for download yet. To build it (Rust and the [Tauri prerequisites](https://tauri.app/start/prerequisites/) are needed):
+Download it from the [releases page](https://github.com/adam-hanna/vibe-code/releases): `.msi` or `.exe` for Windows x64, `.dmg` for Apple Silicon Macs, `.deb` or `.AppImage` for Linux. The builds are **unsigned**. On macOS, if it says the app is damaged or from an unidentified developer, run `xattr -cr /Applications/Vibe.app`. On Windows, SmartScreen warns first: click **More info**, then **Run anyway**. Intel Macs build from source.
+
+To build it yourself (Rust and the [Tauri prerequisites](https://tauri.app/start/prerequisites/) are needed):
 
 ```bash
 cd app && npm install && npm run app:build

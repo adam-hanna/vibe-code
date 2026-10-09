@@ -6,7 +6,20 @@ The desktop app is the same loop with a window around it. It runs the same core 
 
 ## Building it
 
-The app is not packaged for download yet. Packaged builds are tracked in [#239](https://github.com/adam-hanna/vibe-code/issues/239). For now, build it from source. You need Rust and the [Tauri prerequisites](https://tauri.app/start/prerequisites/) for your platform:
+Download the app from the [releases page](https://github.com/adam-hanna/vibe-code/releases):
+
+| Platform | File |
+|---|---|
+| Windows (x64) | `.msi` or the `.exe` installer |
+| macOS (Apple Silicon only) | `.dmg` |
+| Linux | `.deb` or `.AppImage` |
+
+The builds are **unsigned**, so each operating system warns before the first launch:
+
+- **macOS**: if it says the app is damaged or comes from an unidentified developer, move it to Applications and run `xattr -cr /Applications/Vibe.app`. There is no Intel build; Intel Macs build from source.
+- **Windows**: SmartScreen says it protected your PC. Click **More info**, then **Run anyway**.
+
+Or build it from source. You need Rust and the [Tauri prerequisites](https://tauri.app/start/prerequisites/) for your platform:
 
 ```bash
 git clone https://github.com/adam-hanna/vibe-code.git
