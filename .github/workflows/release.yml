@@ -30,8 +30,10 @@
 # installed app checks, at `releases/latest/download/latest.json`. Without the
 # key (a fork) the build skips them rather than failing, and no `latest.json`
 # is written. tauri.conf.json leaves the setting off, so a local
-# `npm run app:build` never needs the key. The matching public key is for the
-# app's updater plugin (#299) and is not needed to produce these files.
+# `npm run app:build` never needs the key. The bundler refuses to produce them
+# without `plugins.updater` in tauri.conf.json - the public key, and the
+# `latest.json` endpoint #299's updater reads - so that block is committed even
+# before the plugin is (the first rc tag failed on all three platforms for it).
 #
 #   TAURI_SIGNING_PRIVATE_KEY, TAURI_SIGNING_PRIVATE_KEY_PASSWORD
 #       Signs the update bundles. Never printed and never written to a file.
