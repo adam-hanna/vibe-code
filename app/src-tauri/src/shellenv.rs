@@ -242,6 +242,16 @@ mod tests {
         std::env::remove_var("VIBE_NO_SHELL_ENV");
         let (shell, vars) = login_env().expect("sh prints its environment");
         assert_eq!(shell, "/bin/sh");
-        assert!(vars.contains(&("VIBE_SHELLENV_PROBE".to_string(), "it came back".to_string())));
+        // Said in full on failure: a first CI run lost the variable while the
+        // framing still parsed, and a bare `contains` could not say what came
+        // back instead.
+        let probe = vars.iter().find(|(name, _)| name == "VIBE_SHELLENV_PROBE");
+        let vibe: Vec<&String> = vars.iter().map(|(name, _)| name).filter(|n| n.contains("VIBE")).collect();
+        assert_eq!(
+            probe.map(|(_, value)| value.as_str()),
+            Some("it came back"),
+            "{shell} returned {} variables; VIBE ones: {vibe:?}",
+            vars.len(),
+        );
     }
 }
