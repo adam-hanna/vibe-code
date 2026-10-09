@@ -67,8 +67,35 @@ node scripts/record-cli-fixtures.mjs --force   # re-record a version that alread
 introduced them, which could not record fixtures from inside a sandboxed turn. There is no
 other way past the check.
 
-There is **no linter and no formatter**, and no CI. `npm run typecheck && npm test` before
-every commit is the whole gate, and it is on you to run it. Node 20+ (`engines`).
+There is **no linter and no formatter**. The one workflow, `.github/workflows/pages.yml`,
+deploys the docs site from `main`; there is still **no test CI**. `npm run typecheck && npm test`
+before every commit is the whole gate, and it is on you to run it. Node 20+ (`engines`).
+
+### The docs site — `docs/`
+
+```bash
+cd docs
+npm install
+npm run docs:build     # vitepress build - fails on a dead link, and that check stays on
+npm run docs:dev       # vitepress dev - the site with live reload
+npm run docs:preview   # serve the built site, under its real base path
+```
+
+**`docs/` has its own `package.json` and lockfile**, the arrangement `app/` has: the root
+package gains no dependency, `docs/` is not in `files`, and the root gate neither builds it nor
+sees it. It is a VitePress site published at `https://adam-hanna.github.io/vibe-code/` by the
+Pages workflow, which builds from `main` so the site describes the latest release. `BASE` in
+`docs/.vitepress/config.mts` is the only place the path is written; a custom domain is a
+`docs/public/CNAME` and that one line. `docs/images/` is shared with `README.md`, and
+`docs/plans/` is internal and excluded from the site (`srcExclude`).
+
+**The reference pages are hand-written, and guarded only for what is missing.**
+`tests/docs-drift.test.ts`, run by `npm test`, fails when a `DEFAULTS` key path, a section,
+a `verify.gates[]` field, an `EXIT` code or a command `src/cli.ts` dispatches is absent from
+`docs/configuration.md`, `docs/exit-codes.md` or `docs/cli.md` (and when the last two name one
+the source lacks). It checks no description, no default value and no flag, so a green run
+means nothing is missing, never that the page is right. A change to any of those in `src/`
+updates the page in the same PR, written against the code rather than an older page.
 
 ### The desktop app — `app/`
 
@@ -2137,6 +2164,7 @@ src/worktree.ts      a checkout of its own: where the work happens, and where it
 src/pilotaccess.ts   what the pilot may do unasked: the safe list, YOLO, its directories, its reads
 src/mcp.ts           which MCP servers a run's children reach: none unless a role names one
 tests/               node:test, one file per concern
+tests/docs-drift.test.ts  the docs' reference pages against DEFAULTS, EXIT and the commands - nothing missing, not accuracy
 
 app/                 the desktop app - Vite + React, its own package.json and gate
 app/src/design/      tokens.css, theme.css (Tailwind over the tokens), and the primitives still drawn
@@ -2192,6 +2220,12 @@ app/src-tauri/src/pilot/     the only network code in the product - two adapters
 app/src-tauri/src/pilot/sse.rs      the wire format both vendors share, and nothing else
 app/src-tauri/src/pilot/event.rs    PilotEvent and Usage - every count an Option, on purpose
 app/scripts/         contrast.mjs, stage-sidecar.mjs, make-icon.mjs - all dependency-free
+
+docs/                the docs site - VitePress, its own package.json, never in `files`
+docs/.vitepress/config.mts  the site's config: BASE (the one place the path is written), sidebar, search
+docs/images/         screenshots, shared by README.md and the site
+docs/plans/          internal design notes, excluded from the site
+.github/workflows/pages.yml  the one workflow: builds docs/ from main and deploys it to Pages
 ```
 
 **The app and the CLI are two front ends over one core.** The app links `src/` and calls

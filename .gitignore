@@ -8,3 +8,7 @@ dist/
 # Per-machine Claude Code state - settings.local.json is the only thing in here.
 # Shared agent config belongs in CLAUDE.md / AGENTS.md, which are tracked.
 .claude/
+# The docs site's own install and build output.
+docs/node_modules/
+docs/.vitepress/dist/
+docs/.vitepress/cache/
