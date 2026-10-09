@@ -60,6 +60,7 @@ import {
 import type { Handover } from '../pilot/PilotPane';
 import type { Draft } from './pending';
 import { chatKey } from '../pilot/saved';
+import { askFor, draftOfPane, mountedPanes, paneOf } from '../pilot/panes';
 import { getChat, loadChats, putChat, useChats } from '../pilot/chatstore';
 import { Confirm } from './Confirm';
 import { useReplay } from './useReplay';
@@ -1479,15 +1480,23 @@ export function Cockpit() {
    * the model asked for, and a person pressed a button. This is the routing, and
    * it routes to the same functions the buttons call.
    */
+  /**
+   * An effect from one pilot pane. `draft` is **that pane's** draft rather than
+   * the one on screen (#305): a pane in the background can still finish a turn
+   * whose proposal fires on the person's settings, and the run it starts is the
+   * run its own draft asked for.
+   */
   const onEffect = useCallback(
-    (effect: Effect) => {
-      if (effect.kind === 'invoke') launch(effect.argv, draftId);
+    (effect: Effect, draft: string | null) => {
+      if (effect.kind === 'invoke') launch(effect.argv, draft);
       else if (effect.kind === 'command') runCommand(effect.dir, effect.program, effect.args);
       else if (effect.kind === 'stop_command') stopCommand(effect.commandId);
       else answer(effect.askId, effect.decision);
     },
-    [draftId, launch, answer, runCommand, stopCommand],
+    [launch, answer, runCommand, stopCommand],
   );
+  const effectRef = useRef(onEffect);
+  effectRef.current = onEffect;
 
   const outside = !host.inShell();
   /**
@@ -1632,6 +1641,50 @@ export function Cockpit() {
     live: run,
     opened: past && viewing !== null ? { runId: viewing.runId, run: opened.run } : null,
   });
+
+  /**
+   * One pilot pane per conversation still doing something (#305) - see
+   * `pilot/panes.ts`. The one on screen takes the props above; one in the
+   * background keeps the props it last had on screen, which are about its own
+   * conversation, since it is no longer the one a person is looking at.
+   */
+  const shownPane = paneOf({ dir: pilotDir, runId: pilotRunId }, drafts);
+  const paneProps = useRef(
+    new Map<string, { dir: string; runId: string | null; run: typeof pilotRun; logRun: typeof pilotLogRun; launched: LiveRun['sent'] }>(),
+  );
+  paneProps.current.set(shownPane, {
+    dir: pilotDir,
+    runId: pilotRunId,
+    run: pilotRun,
+    logRun: pilotLogRun,
+    launched: shownLive?.sent ?? null,
+  });
+  const [knownPanes, setKnownPanes] = useState<readonly string[]>([]);
+  useEffect(() => {
+    setKnownPanes((k) => (k.includes(shownPane) ? k : [...k, shownPane]));
+  }, [shownPane]);
+  const [busyPanes, setBusyPanes] = useState<ReadonlySet<string>>(() => new Set());
+  // Stable per pane, so a pane's effects do not re-run on every cockpit render.
+  const paneHooks = useRef(new Map<string, { busy: (b: boolean) => void; effect: (e: Effect) => void }>());
+  const hooksFor = (pane: string) => {
+    let hooks = paneHooks.current.get(pane);
+    if (hooks === undefined) {
+      hooks = {
+        busy: (b) =>
+          setBusyPanes((now) => {
+            if (now.has(pane) === b) return now;
+            const next = new Set(now);
+            if (b) next.add(pane);
+            else next.delete(pane);
+            return next;
+          }),
+        effect: (e) => effectRef.current(e, draftOfPane(pane, draftsRef.current)),
+      };
+      paneHooks.current.set(pane, hooks);
+    }
+    return hooks;
+  };
+  const panes = mountedPanes(shownPane, knownPanes, busyPanes, drafts);
 
   /**
    * Every action the shell offers, by id (`shell/actions.ts`). The palette, the
@@ -2213,61 +2266,77 @@ export function Cockpit() {
               which is the one thing this tab must not do. The other two panes
               hold nothing, so they stay conditional. */}
           <div className={cn('min-h-0 flex-1 flex-col', tab === 'pilot' ? 'flex' : 'hidden')} hidden={tab !== 'pilot'}>
-            <PilotPane
-              // The run on screen, live or replayed (#246): what the pilot is
-              // told about is the run a person is looking at. The protocol is the
-              // service host's, which a replayed run never heard.
-              run={pilotRun}
-              logRun={pilotLogRun}
-              launched={shownLive?.sent ?? null}
-              // **The run's repository, not the window's** (#223). Every other
-              // pane that reads a run moved onto `shownDir` and this one was
-              // missed, which is the second-answer-to-which-repository defect
-              // AGENTS.md already records, one pane later. It is worse here
-              // than on a reader: `dir` is the pilot's PERMISSION BOUNDARY -
-              // the directory `claude -p --restricted` is spawned in and the
-              // only one it can read - and it is where an accepted
-              // `run_command` runs. So opening a run in another project left
-              // the pilot reading a different repository from the one on
-              // screen, and with no project selected at all it was blocked
-              // outright: *"I just tried sending a chat to an old run's pilot
-              // but I can't"*.
-              dir={pilotDir}
-              // Which conversation to show. It follows the run the panes are
-              // reading, so opening a finished run brings back the chat about
-              // it — and null, before any run, is the conversation that will
-              // propose one.
-              // A draft's conversation is its own, keyed by the draft id until
-              // the run it asked for starts and adopts it (#223).
-              runId={pilotRunId}
-              access={access}
-              // There is no `opened` any more (#246): the pane only restores,
-              // and adoption is the cockpit's - see the adoption effect.
-              commands={commands}
-              onEffect={onEffect}
-              ask={brief}
-              onAsked={() => setBrief(null)}
-              standing={standing}
-              onPending={setProposals}
-              limits={limits}
-              statuses={keyStatuses}
-              // Hi-fi 5's `open verify`. A round card is the round's summary
-              // and the pane beside it holds the detail, so the card links to
-              // it rather than growing a second copy of that screen - and it
-              // names its own round, so the pane opens at the card you clicked
-              // rather than at whichever round happens to be newest (#223).
-              onOpen={open}
-              // The repository, whenever there is no run to watch. Once one is
-              // going the pane is a conversation *about* it, and the field is
-              // settled — the run is already using that directory, and changing
-              // it underneath would point the pilot at a repository the run is
-              // not in.
-              kickoff={
-                (shownLive === null || settled(run)) && repoDir.trim() !== '' ? (
-                  <Kickoff dir={repoDir} />
-                ) : undefined
-              }
-            />
+            {/* One pane per conversation still doing something (#305), the
+                one on screen visible and the rest hidden but mounted, so a turn
+                always lands in the conversation that asked for it. */}
+            {panes.map((pane) => {
+              const at = paneProps.current.get(pane);
+              if (at === undefined) return null;
+              const visible = pane === shownPane;
+              return (
+                <div key={pane} className={visible ? 'contents' : 'hidden'} hidden={!visible}>
+                    <PilotPane
+                      background={!visible}
+                      onBusy={hooksFor(pane).busy}
+                      // The run on screen, live or replayed (#246): what the pilot is
+                      // told about is the run a person is looking at. The protocol is the
+                      // service host's, which a replayed run never heard.
+                      run={at.run}
+                      logRun={at.logRun}
+                      launched={at.launched}
+                      // **The run's repository, not the window's** (#223). Every other
+                      // pane that reads a run moved onto `shownDir` and this one was
+                      // missed, which is the second-answer-to-which-repository defect
+                      // AGENTS.md already records, one pane later. It is worse here
+                      // than on a reader: `dir` is the pilot's PERMISSION BOUNDARY -
+                      // the directory `claude -p --restricted` is spawned in and the
+                      // only one it can read - and it is where an accepted
+                      // `run_command` runs. So opening a run in another project left
+                      // the pilot reading a different repository from the one on
+                      // screen, and with no project selected at all it was blocked
+                      // outright: *"I just tried sending a chat to an old run's pilot
+                      // but I can't"*.
+                      dir={at.dir}
+                      // Which conversation to show. It follows the run the panes are
+                      // reading, so opening a finished run brings back the chat about
+                      // it — and null, before any run, is the conversation that will
+                      // propose one.
+                      // A draft's conversation is its own, keyed by the draft id until
+                      // the run it asked for starts and adopts it (#223).
+                      runId={at.runId}
+                      access={access}
+                      // There is no `opened` any more (#246): the pane only restores,
+                      // and adoption is the cockpit's - see the adoption effect.
+                      commands={commands}
+                      onEffect={hooksFor(pane).effect}
+                      // Only to the draft it was typed for (#305), so a brief can never
+                      // be said into another conversation.
+                      ask={askFor(brief, at)}
+                      onAsked={() => setBrief(null)}
+                      standing={standing}
+                      onPending={visible ? setProposals : undefined}
+                      limits={limits}
+                      statuses={keyStatuses}
+                      // Hi-fi 5's `open verify`. A round card is the round's summary
+                      // and the pane beside it holds the detail, so the card links to
+                      // it rather than growing a second copy of that screen - and it
+                      // names its own round, so the pane opens at the card you clicked
+                      // rather than at whichever round happens to be newest (#223).
+                      onOpen={open}
+                      // The repository, whenever there is no run to watch. Once one is
+                      // going the pane is a conversation *about* it, and the field is
+                      // settled — the run is already using that directory, and changing
+                      // it underneath would point the pilot at a repository the run is
+                      // not in.
+                      kickoff={
+                        visible && (shownLive === null || settled(run)) && repoDir.trim() !== '' ? (
+                          <Kickoff dir={repoDir} />
+                        ) : undefined
+                      }
+                    />
+                </div>
+              );
+            })}
           </div>
           {wire.unknown.length > 0 && (
             <div className="flex-none border-t border-rule-card px-5 py-2 font-mono text-mono-sm text-emphasis">

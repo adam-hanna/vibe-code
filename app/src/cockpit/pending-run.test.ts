@@ -136,7 +136,9 @@ describe('the cockpit wires it', () => {
     // draft first and then the run on screen. Case 2 (#246): `opened` is gone,
     // because the pane only restores - arriving at a draft restores its own
     // conversation by construction, and adoption is the cockpit's.
-    expect(cockpit).toContain('runId={pilotRunId}');
+    // Case 2 (#305): through the snapshot of the pane on screen.
+    expect(cockpit).toContain('runId={at.runId}');
+    expect(cockpit).toContain('runId: pilotRunId,');
     expect(cockpit).toContain(
       'const pilotRunId = holdChat !== null ? holdChat.runId : (drafting?.id ?? shownRunId);',
     );
@@ -146,7 +148,10 @@ describe('the cockpit wires it', () => {
   test('only the pilot\'s invoke can claim a draft', () => {
     // A resume or an implement also go through `launch`; neither is the run a
     // draft asked for.
-    expect(cockpit).toContain("if (effect.kind === 'invoke') launch(effect.argv, draftId);");
+    // Case 2 (#305): the draft is the PANE's, not the one on screen, because a
+    // pane in the background can still fire a proposal.
+    expect(cockpit).toContain("if (effect.kind === 'invoke') launch(effect.argv, draft);");
+    expect(cockpit).toContain('effectRef.current(e, draftOfPane(pane, draftsRef.current))');
     // Case 2 (#246): a resume and an implement pass no draft, and a draft is
     // claimed by the run whose entry names it - not by a ref that only one
     // launch at a time could hold.
