@@ -413,6 +413,11 @@ export interface HostedMarks {
   live: ReadonlySet<string>;
   /** Run ids live here holding a gate, and not on screen. */
   gates: ReadonlySet<string>;
+  /**
+   * Run ids live here with a turn running and no gate held (#307) - the rows
+   * whose dot pulses. A pulse means *a turn is running*, so several can.
+   */
+  working: ReadonlySet<string>;
 }
 
 /**
@@ -426,14 +431,16 @@ export interface HostedMarks {
 export function hostedMarks(lives: LiveRuns, dir: string, shownHandle: string | null): HostedMarks {
   const live = new Set<string>();
   const gates = new Set<string>();
+  const working = new Set<string>();
   const key = dirKey(dir);
   for (const e of lives) {
     const id = runIdOf(e);
     if (!e.live || !started(e) || id === null || dirKey(repoOf(e)) !== key) continue;
     live.add(id);
     if (e.run.gate !== null && e.handle !== shownHandle) gates.add(id);
+    if (e.run.running !== null && e.run.gate === null && !settled(e.run)) working.add(id);
   }
-  return { live, gates };
+  return { live, gates, working };
 }
 
 export function gatesWaiting(marks: HostedMarks): boolean {

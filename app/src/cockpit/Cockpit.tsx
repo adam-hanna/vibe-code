@@ -59,8 +59,9 @@ import {
 } from './pending';
 import type { Handover } from '../pilot/PilotPane';
 import type { Draft } from './pending';
-import { chatKey } from '../pilot/saved';
+import { chatKey, readChat } from '../pilot/saved';
 import { askFor, draftOfPane, mountedPanes, paneOf } from '../pilot/panes';
+import { draftAttention } from './attention';
 import { getChat, loadChats, putChat, useChats } from '../pilot/chatstore';
 import { Confirm } from './Confirm';
 import { useReplay } from './useReplay';
@@ -1925,6 +1926,11 @@ export function Cockpit() {
             }}
             onForgetDraft={forgetDraft}
             onSettled={settleDrafts}
+            // From the saved conversation (#307): the draft on screen draws its
+            // own state, and one whose proposal was pressed is a run starting.
+            draftNeeds={(d) =>
+              d.launched || d.id === draftId ? null : draftAttention(readChat(getChat(chatKey(d.dir, d.id))))
+            }
             // The run ON SCREEN, which is what a highlight means (#223). This
             // was the live run, so opening a past one left the highlight on the
             // run you had just left - or on nothing when none was going. A

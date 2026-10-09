@@ -388,6 +388,24 @@ describe('quit and the sidebar', () => {
     expect(hostedMarks(lives, '/repo/b', 'run-9').gates.size).toBe(0);
     expect(hostedMarks(endRun(lives, 'run-9'), '/repo/b', null).live.size).toBe(0);
   });
+
+  test('a row is working while a turn runs, and not while a gate holds (#307)', () => {
+    const turn: Frame = {
+      type: 'narration',
+      level: 'step',
+      message: 'x',
+      id: 'turn_started',
+      data: { role: 'planner', kind: 'plan' },
+    } as Frame;
+    const idle = [told('2026-a', '/repo/a')];
+    expect(hostedMarks(idle, '/repo/a', null).working.size).toBe(0);
+    const going = fold(idle, 'run-7', turn);
+    expect([...hostedMarks(going, '/repo/a', null).working]).toEqual(['2026-a']);
+    // Working is said on the row on screen too: its pulse and the live card's are one signal.
+    expect([...hostedMarks(going, '/repo/a', 'run-7').working]).toEqual(['2026-a']);
+    // A gate closes the turn; nothing is executing while one is held.
+    expect(hostedMarks(fold(going, 'run-7', ask(1)), '/repo/a', null).working.size).toBe(0);
+  });
 });
 
 describe('who adopts which conversation', () => {
