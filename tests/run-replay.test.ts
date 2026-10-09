@@ -291,7 +291,31 @@ test('a status this build does not recognise reports no exit code', () => {
   // Null rather than a guessed zero: it has not told us the run succeeded, and
   // the footer draws a code it does not know as the number rather than as a
   // phrase invented for it.
-  assert.equal(replayRun(stateWith({ status: 'stalled' as RunState['status'] }), NOTHING).exit, null);
+  assert.equal(replayRun(stateWith({ status: 'mystery' as RunState['status'] }), NOTHING).exit, null);
+});
+
+test('a stalled run reports the code its escalation recorded (#309)', () => {
+  // `stalled` covers a round cap, a budget, a rate limit and an unverified
+  // finish, so the code is read off the escalation rather than mapped. Without
+  // it the replay had a reason and no ending, and the footer said "the run is
+  // stopping" for good with no resume to press.
+  const state = stateWith({
+    status: 'stalled',
+    events: [
+      { at: iso(1_000), type: 'escalation', code: 4, message: 'an earlier budget stop' },
+      { at: iso(2_000), type: 'escalation', code: 3, message: 'the same P1 set came back 3 rounds running' },
+    ],
+  });
+  assert.equal(replayRun(state, NOTHING).exit, 3);
+});
+
+test('a stalled run whose escalation recorded no code reports none', () => {
+  const state = stateWith({
+    status: 'stalled',
+    events: [{ at: iso(1_000), type: 'escalation', message: 'from a core older than the field' }],
+  });
+  assert.equal(replayRun(state, NOTHING).exit, null);
+  assert.equal(replayRun(stateWith({ status: 'stalled' }), NOTHING).exit, null);
 });
 
 test('a finished plan-only run says so, so it can still be offered implementation', () => {
