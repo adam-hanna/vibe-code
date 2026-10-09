@@ -7,15 +7,109 @@ for a change that breaks an existing config or an existing run.
 Each entry links the pull request that made it and, where there is one, the issue it
 closes.
 
-## Unreleased
+## 1.5.0 - 2026-10-08
+
+Forty pull requests since 1.4.0. **Nothing here breaks an existing config:** no key was renamed or removed, no flag was removed, and every new key has a default. Six behaviours a running setup can notice are listed under Upgrading. The first one, that runs no longer reach your MCP servers, is the one most likely to matter.
+
+The theme is running more than one thing at once. The app can now run several runs side by side, each in its own host process, and each draft keeps its own pilot conversation. The sidebar shows which rows are working and which are waiting on you. Underneath, a run's agents get your shell's environment and no longer get your MCP servers, a verification gate runs on the toolchain your `PATH` names, and a failing gate can be read.
 
 ### Added
 
-- **Each role can be granted MCP servers by name.** `roles.<role>.mcpServers` takes a list of server names in the object form of a role setting, and is empty by default. `vibe doctor` prints each role's servers and how each provider enforces them: Claude is *replaced* (`--strict-mcp-config`), and Codex is *disabled by name*, with the caveat that a server Codex does not list cannot be disabled. A grant that does not resolve stops the run before its first turn, naming the role and the server. Refs #138.
+- **Several runs at once in the window.** Each run gets its own host process, and frames are routed by a handle the window assigns. A machine-wide cap limits how many run together, and quitting lists the runs that would be stopped.
+  (#246, [#291](https://github.com/adam-hanna/vibe-code/pull/291), [#304](https://github.com/adam-hanna/vibe-code/pull/304))
+- **The sidebar shows which rows are working and which need you.** A row's dot pulses while a turn runs. A badge marks a held gate, a run stopped on a question, at a limit or by a failure, and a draft whose pilot replied or proposed something.
+  (#307, [#311](https://github.com/adam-hanna/vibe-code/pull/311))
+- **Each role can be granted MCP servers by name.** `roles.<role>.mcpServers` takes a list of server names in the object form of a role setting, and is empty by default. `vibe doctor` prints each role's servers and how each provider enforces them: Claude is *replaced* (`--strict-mcp-config`), and Codex is *disabled by name*, with the caveat that a server Codex does not list cannot be disabled. A grant that does not resolve stops the run before its first turn, naming the role and the server.
+  (#138, [#288](https://github.com/adam-hanna/vibe-code/pull/288))
+- **Standing instructions.** `instructions.text` is one text given to every agent and to the pilot on every run. It is set once in Settings, in the global file or a project's, and `configDiff` names it so a run's record says what its agents were told.
+  (#273, [#275](https://github.com/adam-hanna/vibe-code/pull/275))
+- **`git.baseRef` chooses the commit a fresh run starts from.** A remote-tracking ref is fetched first. A worktree that a setup script left on a different commit is refused before the first turn, rather than silently checked back over.
+  (#249, [#269](https://github.com/adam-hanna/vibe-code/pull/269))
+- **A change to the run's own judge is recorded and judged.** When a review round's diff touches test files or `vibe.config.json`, the reviewer is given the files and must give a verdict on each one, and the verdicts are recorded. It never blocks. `verify.testPaths` replaces the built-in list of test paths.
+  (#112, [#266](https://github.com/adam-hanna/vibe-code/pull/266))
+- **The window and the pilot can read the run archive.** A `stats` read frame, a rounds fingerprint on each run (`p2 v1 r2`) and token comparisons against comparable turns.
+  (#114, [#289](https://github.com/adam-hanna/vibe-code/pull/289))
+- **Verification gates are edited as a list in Settings,** one row per gate with its own name, command, runs, timeout and `required` flag.
+  (#240, [#283](https://github.com/adam-hanna/vibe-code/pull/283))
+- **The pilot's effort is chosen beside its model.**
+  (#296, [#297](https://github.com/adam-hanna/vibe-code/pull/297))
+- **A run can be named when it is started,** and keeps that name once it begins.
+  (#262, [#263](https://github.com/adam-hanna/vibe-code/pull/263))
+- **Copy a message out of the pilot chat,** yours or the pilot's, with one click. The pilot's reply is copied as its Markdown source.
+  (#256, [#257](https://github.com/adam-hanna/vibe-code/pull/257))
+- **A pause can be taken back** before the run reaches it.
+  (#276, [#278](https://github.com/adam-hanna/vibe-code/pull/278))
+- **The run output is a main tab again,** right of Pilot.
+  (#284, [#286](https://github.com/adam-hanna/vibe-code/pull/286))
+
+### Fixed
+
+- **A failing verification gate can be read.** The fix round is drawn as live, each attempt's log can be opened, and the fixer sees the failures rather than a truncated tail.
+  (#248, [#281](https://github.com/adam-hanna/vibe-code/pull/281))
+- **The verification gate runs on the Node your `PATH` names,** not the system's. One gate failed a suite that passed in a terminal, and kept failing on every resume.
+  (#251, [#252](https://github.com/adam-hanna/vibe-code/pull/252))
+- **Agents get your login shell's environment,** so `gh` is logged in and a push uses your ssh agent instead of asking for a passphrase.
+  (#272, [#274](https://github.com/adam-hanna/vibe-code/pull/274))
+- **A stopped run can be resumed from the window.** A run that stopped at a limit replayed with no exit code, so its footer stuck on "ending" and offered no resume.
+  (#309, [#310](https://github.com/adam-hanna/vibe-code/pull/310))
+- **After a resume, the turn the run stopped on no longer stays RUNNING.**
+  (#302, [#303](https://github.com/adam-hanna/vibe-code/pull/303))
+- **Two drafts' pilot conversations no longer cross.** Each conversation has its own pane, so a reply lands where it was asked for.
+  (#305, [#306](https://github.com/adam-hanna/vibe-code/pull/306))
+- **Each pilot chat shows the round cards of the run it is about,** not the live run's.
+  (#247, [#250](https://github.com/adam-hanna/vibe-code/pull/250))
+- **A new run with the same brief as an earlier one no longer gets a blank pilot chat.**
+  (#270, [#271](https://github.com/adam-hanna/vibe-code/pull/271))
+- **A new run's draft draws an empty run column,** not the last run on screen.
+  (#294, [#295](https://github.com/adam-hanna/vibe-code/pull/295))
+- **An answerer's answers are kept when a run stops before the revision that uses them.** There were four ways to lose them, and a resume then critiqued a plan whose questions nothing had resolved.
+  (#169, [#255](https://github.com/adam-hanna/vibe-code/pull/255))
+- **A question round whose questions are all advisory skips the planner revision.** The critic reads the answers with the plan instead.
+  (#277, [#279](https://github.com/adam-hanna/vibe-code/pull/279))
+- **A fix round is drawn as a code round,** so the column reads code, review, code, review.
+  (#280, [#282](https://github.com/adam-hanna/vibe-code/pull/282))
+- **A replayed run keeps its severity counts,** and a verify-fix stays in its code round.
+  (#292, [#293](https://github.com/adam-hanna/vibe-code/pull/293))
+- **A critique's findings are drawn on the critique,** not on the revision it caused, when the two frames arrive together.
+  (#285, [#287](https://github.com/adam-hanna/vibe-code/pull/287))
+- **An opened run shows the spend its record holds,** instead of "no turn reported a charge".
+  (#235, [#243](https://github.com/adam-hanna/vibe-code/pull/243))
+- **The judge is no longer told a P1 threshold the loop does not apply.**
+  (#115, [#244](https://github.com/adam-hanna/vibe-code/pull/244))
+- **Stopping and pausing say plainly what they do.** A stop that is waiting is shown, and a pause ends with its run.
+  (#253, [#254](https://github.com/adam-hanna/vibe-code/pull/254))
+- **One set of run controls is drawn at a time,** not two stacked in the corner.
+  (#264, [#265](https://github.com/adam-hanna/vibe-code/pull/265))
+- **A quiet turn is said in the status bar,** so the window no longer jumps as the strip comes and goes.
+  (#267, [#268](https://github.com/adam-hanna/vibe-code/pull/268))
+- **The new-run dialog's settings are drawn as chips under your brief,** not as your words.
+  (#258, [#259](https://github.com/adam-hanna/vibe-code/pull/259))
+- **"Open full activity" opens the output,** and panes are opened only by name.
+  (#260, [#261](https://github.com/adam-hanna/vibe-code/pull/261))
+- **An opened run's way back sits in the column's title row,** and it stops saying "reading" once it has loaded.
+  (#236, [#245](https://github.com/adam-hanna/vibe-code/pull/245))
+- **The tagline above the main heading is gone.**
+  (#300, [#301](https://github.com/adam-hanna/vibe-code/pull/301))
+
+### Internal
+
+- **The test suite runs inside a temp root it removes,** and fails on anything that escapes it. Each run used to leave about 1,600 directories in `/tmp`.
+  (#234, [#241](https://github.com/adam-hanna/vibe-code/pull/241))
+- **The UI rework is finished:** the old stylesheets and the gallery are deleted, and Tailwind's preflight is imported.
+  (#237, [#290](https://github.com/adam-hanna/vibe-code/pull/290))
+- **The dead `applog::path` is removed,** so an app build no longer warns.
+  (#238, [#242](https://github.com/adam-hanna/vibe-code/pull/242))
 
 ### Upgrading
 
-- **Runs no longer reach any MCP server.** Before this change, every `claude` and `codex` child that a run spawned loaded your own MCP configuration. That gave every role, the read-only critic and reviewer included, every server you had set up for yourself. Now every `claude` child runs with `--strict-mcp-config`. Every `codex` child has each server that `codex mcp list` reports switched off with `-c mcp_servers.<name>.enabled=false`. This covers every turn, resume, fork and preflight probe. To give a role a server back, name it in `roles.<role>.mcpServers`. Claude re-reads it from `~/.claude.json` or the repository's `.mcp.json`. claude.ai connectors (`claude.ai Gmail` and the like) cannot be granted, because their definitions are in no file vibe can read. A `codex mcp list` that fails now refuses the Codex turn rather than running it with your servers open. Refs #138.
+No config change is required. Six behaviours a running setup can notice:
+
+- **Runs no longer reach any MCP server.** Before this change, every `claude` and `codex` child that a run spawned loaded your own MCP configuration. That gave every role, the read-only critic and reviewer included, every server you had set up for yourself. Now every `claude` child runs with `--strict-mcp-config`. Every `codex` child has each server that `codex mcp list` reports switched off with `-c mcp_servers.<name>.enabled=false`. This covers every turn, resume, fork and preflight probe. To give a role a server back, name it in `roles.<role>.mcpServers`. Claude re-reads it from `~/.claude.json` or the repository's `.mcp.json`. claude.ai connectors (`claude.ai Gmail` and the like) cannot be granted, because their definitions are in no file vibe can read. A `codex mcp list` that fails now refuses the Codex turn rather than running it with your servers open.
+- **On Linux and macOS, `claude`, `codex` and `node` resolve from `PATH` first,** before the fallback directories (`~/.local/bin`, `/usr/local/bin`), which is what a terminal runs. `VIBE_CLAUDE_BIN`, `VIBE_CODEX_BIN` and the `cli.*` settings still win over both.
+- **A worktree that a setup script moved is refused.** If `git.worktreeCommand` leaves the worktree on a different commit from the run branch, the run stops before its first turn and names both shas. Check out `$VIBE_BRANCH` in the script, or choose the base with `git.baseRef`.
+- **An all-advisory question round no longer revises the plan.** The answers go to the critic with the plan, and an answer that does change something comes back as a finding.
+- **The terminal prints a heading for each fix round:** `=== Implementing (fix round N) ===`.
+- **The app's host takes your login shell's environment.** It runs `$SHELL -l -i` once at start-up, for at most 10 seconds, and falls back to the app's own environment if that fails.
 
 ## 1.4.0 - 2026-10-07
 
