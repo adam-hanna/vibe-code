@@ -6,13 +6,15 @@ The desktop app is the same loop with a window around it. It runs the same core 
 
 ## Building it
 
-Download the app from the [releases page](https://github.com/adam-hanna/vibe-code/releases):
+Download the latest version:
 
-| Platform | File |
+| Platform | Download |
 |---|---|
-| Windows (x64) | `.msi` or the `.exe` installer |
-| macOS (Apple Silicon only) | `.dmg` |
-| Linux | `.deb` or `.AppImage` |
+| Windows (x64) | [installer (`.exe`)](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-windows-x64-setup.exe) or [`.msi`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-windows-x64.msi) |
+| macOS (Apple Silicon only) | [`.dmg`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-macos-arm64.dmg) |
+| Linux (x86-64) | [`.AppImage`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-linux-x86_64.AppImage) or [`.deb`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-linux-amd64.deb) |
+
+These links always point at the newest published release. Older versions, and pre-releases such as `v1.6.0-rc.1`, are on the [releases page](https://github.com/adam-hanna/vibe-code/releases). A pre-release is never what these links serve.
 
 The builds are **unsigned**, so each operating system warns before the first launch:
 

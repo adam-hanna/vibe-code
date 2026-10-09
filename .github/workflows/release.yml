@@ -15,7 +15,29 @@
 #   an OTP. Nothing here publishes the draft either: a person does, after
 #   installing it.
 #
-# Signing. Every secret is optional, and adding one needs no change to any job.
+# Downloads. Each installer is uploaded twice: under Tauri's versioned name,
+# and under a stable name with no version in it (`=Vibe-…` in each matrix
+# entry's `assets` below, the one place those names are written). The README
+# and docs/app.md link to `releases/latest/download/<stable name>`, which
+# GitHub serves from the newest *published* release - drafts and pre-releases
+# are never "latest" - so no link changes per release.
+# `tests/download-names.test.ts` fails when the pages and this file disagree.
+#
+# Updater artifacts (#299 builds on them). With TAURI_SIGNING_PRIVATE_KEY and
+# TAURI_SIGNING_PRIVATE_KEY_PASSWORD set, the build turns on
+# `bundle.createUpdaterArtifacts`, each platform uploads its update bundle and
+# a `.sig` beside it, and the `updater` job writes `latest.json` - the file an
+# installed app checks, at `releases/latest/download/latest.json`. Without the
+# key (a fork) the build skips them rather than failing, and no `latest.json`
+# is written. tauri.conf.json leaves the setting off, so a local
+# `npm run app:build` never needs the key. The matching public key is for the
+# app's updater plugin (#299) and is not needed to produce these files.
+#
+#   TAURI_SIGNING_PRIVATE_KEY, TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+#       Signs the update bundles. Never printed and never written to a file.
+#       Losing it means installed copies can no longer update themselves.
+#
+# Signing. Every other secret is optional, and adding one needs no change to any job.
 # With none set, Windows builds are unsigned and macOS builds are ad-hoc signed
 # (`bundle.macOS.signingIdentity: "-"` in tauri.conf.json - Apple Silicon will
 # not run unsigned code). A secret is only exported when it is non-empty,
@@ -100,14 +122,26 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # `assets`: `<glob>=<stable name>`. Each glob must match exactly one
+          # file, which is uploaded under its own name and under the stable one.
+          # `updater`: the update bundles and signatures, uploaded only when the
+          # signing key is set.
           - os: windows-latest
-            files: bundle/msi/*.msi bundle/nsis/*.exe
+            assets: >-
+              bundle/msi/*.msi=Vibe-windows-x64.msi
+              bundle/nsis/*-setup.exe=Vibe-windows-x64-setup.exe
+            updater: bundle/msi/*.msi.sig bundle/nsis/*-setup.exe.sig
           # Apple Silicon only. The .app is the bundle the dmg wraps.
           - os: macos-14
-            files: bundle/dmg/*.dmg
+            assets: >-
+              bundle/dmg/*.dmg=Vibe-macos-arm64.dmg
+            updater: bundle/macos/*.app.tar.gz bundle/macos/*.app.tar.gz.sig
           # 22.04 for its older glibc.
           - os: ubuntu-22.04
-            files: bundle/deb/*.deb bundle/appimage/*.AppImage
+            assets: >-
+              bundle/deb/*.deb=Vibe-linux-amd64.deb
+              bundle/appimage/*.AppImage=Vibe-linux-x86_64.AppImage
+            updater: bundle/appimage/*.AppImage.sig
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -186,10 +220,30 @@ jobs:
           Set-Content -Path $path -Value $config
           "TAURI_ARGS=--config $($path -replace '\\', '/')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      # The key is only checked for, never echoed. Without it the bundles still
+      # build and the updater files are skipped.
+      - name: Updater artifacts
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::notice::No TAURI_SIGNING_PRIVATE_KEY secret: building without updater artifacts."
+            exit 0
+          fi
+          conf="$RUNNER_TEMP/tauri.updater.json"
+          printf '%s\n' '{ "bundle": { "createUpdaterArtifacts": true } }' > "$conf"
+          echo "UPDATER=1" >> "$GITHUB_ENV"
+          echo "TAURI_ARGS=${TAURI_ARGS:-} --config ${conf//\\//}" >> "$GITHUB_ENV"
+
       # beforeBuildCommand runs the webview build and stage:sidecar.
       - name: Build the bundles
         shell: bash
         working-directory: app
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run app:build -- ${TAURI_ARGS:-}
 
       - name: Upload to the draft release
@@ -198,13 +252,88 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          FILES: ${{ matrix.files }}
+          ASSETS: ${{ matrix.assets }}
+          UPDATER_FILES: ${{ matrix.updater }}
         run: |
           set -euo pipefail
           shopt -s nullglob
-          files=($FILES)
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "::error::The build produced none of: $FILES"
-            exit 1
+          stable="$RUNNER_TEMP/stable"
+          mkdir -p "$stable"
+          files=()
+          # Split with `read`, which never globs: under nullglob an unquoted
+          # pattern that matches nothing would vanish instead of failing below.
+          read -r -a entries <<< "$ASSETS"
+          read -r -a updater <<< "$UPDATER_FILES"
+          for entry in "${entries[@]}"; do
+            glob="${entry%%=*}"
+            name="${entry#*=}"
+            matched=($glob)
+            if [ ${#matched[@]} -ne 1 ]; then
+              echo "::error::$glob matched ${#matched[@]} files; it must match exactly one to be uploaded as $name."
+              exit 1
+            fi
+            cp "${matched[0]}" "$stable/$name"
+            files+=("${matched[0]}" "$stable/$name")
+          done
+          if [ "${UPDATER:-}" = 1 ]; then
+            for glob in "${updater[@]}"; do
+              matched=($glob)
+              if [ ${#matched[@]} -eq 0 ]; then
+                echo "::error::The signed build produced no $glob."
+                exit 1
+              fi
+              files+=("${matched[@]}")
+            done
           fi
           gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
+
+  # latest.json: what an installed app reads to learn of a new version and fetch
+  # it. Built from the `.sig` files the matrix uploaded, so it only names
+  # bundles that are really on this release, and only runs when every platform
+  # built. Its URLs name the versioned assets of this tag.
+  updater:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Write latest.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"
+          mkdir sigs
+          gh release download "$TAG" --pattern '*.sig' --dir sigs || true
+          shopt -s nullglob
+          sigs=(sigs/*.sig)
+          if [ ${#sigs[@]} -eq 0 ]; then
+            echo "::notice::No update signatures on $TAG (no signing key): not writing latest.json."
+            exit 0
+          fi
+          url="https://github.com/$GH_REPO/releases/download/$TAG"
+          platforms='{}'
+          add() {
+            platforms=$(jq --arg k "$1" --arg u "$url/$2" --rawfile s "sigs/$2.sig" \
+              '. + {($k): {signature: ($s | rtrimstr("\n")), url: $u}}' <<< "$platforms")
+          }
+          for f in "${sigs[@]}"; do
+            asset=$(basename "$f" .sig)
+            case "$asset" in
+              *.AppImage) add linux-x86_64 "$asset" ;;
+              *.app.tar.gz) add darwin-aarch64 "$asset" ;;
+              *.msi) add windows-x86_64-msi "$asset" ;;
+              *-setup.exe) add windows-x86_64-nsis "$asset"; add windows-x86_64 "$asset" ;;
+              *) echo "::warning::$asset.sig matches no updater platform; left out of latest.json." ;;
+            esac
+          done
+          gh release view "$TAG" --json body -q .body > notes.md
+          jq -n --arg v "$(node -p "require('./package.json').version")" \
+            --rawfile n notes.md \
+            --arg d "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --argjson p "$platforms" \
+            '{version: $v, notes: $n, pub_date: $d, platforms: $p}' > latest.json
+          gh release upload "$TAG" latest.json --clobber

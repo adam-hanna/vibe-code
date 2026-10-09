@@ -77,6 +77,17 @@ npm test` before every commit is still the rule**, and it is still on you to run
 reports after you push. A test that fails only on CI is a finding about the test or the code,
 never something to retry past or skip. Node 20+ (`engines`).
 
+**A release carries two names for each installer and the files an installed app updates
+from** (#239). The README and `docs/app.md` link to
+`releases/latest/download/<stable name>` — `Vibe-macos-arm64.dmg` and the rest — so no link
+moves per release; the names are written once, in `release.yml`'s matrix, and
+`download-names.test.ts` fails when a page and the workflow disagree. With the
+`TAURI_SIGNING_PRIVATE_KEY` secrets set, the build also produces the signed update bundles and
+`latest.json`, which #299's updater reads. `tauri.conf.json` leaves `createUpdaterArtifacts`
+off and the workflow switches it on, so a local `npm run app:build` never needs the key. **That
+key cannot be replaced**: a release signed with a new one is refused by every installed copy,
+whose only way forward is a manual reinstall.
+
 ### The docs site — `docs/`
 
 ```bash
