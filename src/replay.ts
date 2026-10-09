@@ -558,21 +558,42 @@ export function replayRun(state: RunState, sources: ReplaySources): Replay {
   // Stable, and by time rather than by the order they were pushed: the commits
   // are appended after the turns and belong among them.
   steps.sort((a, b) => a.at - b.at);
-  return { steps, exit: exitOf(state.status) };
+  return { steps, exit: exitOf(state) };
 }
 
 /**
  * The exit code a run of this status reported.
  *
- * The four the archive can actually hold, and **null for anything else** — a
- * status this build does not recognise has not told us the run succeeded, and a
- * zero would say it had. `EXIT` is not imported because that is the *CLI's*
+ * The statuses the archive can actually hold, and **null for anything else** -
+ * a status this build does not recognise has not told us the run succeeded, and
+ * a zero would say it had. `EXIT` is not imported because that is the *CLI's*
  * table for a run it just finished; this is a reading of a record, and the two
  * agreeing by coincidence is not the same as sharing a definition.
+ *
+ * **`stalled` is every other escalation, so its code is read, not mapped**
+ * (#309). `execute` writes `stalled` for a round cap, a budget, a rate limit
+ * and an unverified finish alike, so no one number is the right answer - and
+ * the escalation event records the one it was. Reporting null here left a
+ * stopped run's replay with a reason and no ending, and the footer drew
+ * *"ending - the run is stopping"* for good, with no resume to press. A stalled
+ * run whose escalation recorded no code still reports null.
  */
-function exitOf(status: string): number | null {
+function exitOf(state: RunState): number | null {
+  const status: string = state.status;
   if (status === 'done' || status === 'planned') return 0;
   if (status === 'needs-input') return 2;
   if (status === 'error') return 1;
+  if (status === 'stalled') return escalationCode(state);
+  return null;
+}
+
+/** The code the last escalation recorded, or null where it recorded none. */
+function escalationCode(state: RunState): number | null {
+  for (let i = state.events.length - 1; i >= 0; i -= 1) {
+    const event = state.events[i];
+    if (event?.type !== 'escalation') continue;
+    const code = event['code'];
+    return typeof code === 'number' && Number.isInteger(code) ? code : null;
+  }
   return null;
 }
