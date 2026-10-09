@@ -366,6 +366,16 @@ export interface RunStart {
   ref: string | null;
 }
 
+/**
+ * The agent CLI versions detected on this machine (#298). See
+ * `RunState.cliVersions`. Null is "not detected" - a `--version` that could
+ * not be run or read - and never an empty string or a guess.
+ */
+export interface CliVersions {
+  claude: string | null;
+  codex: string | null;
+}
+
 export interface GitConfig {
   useBranch: boolean;
   branchPrefix: string;
@@ -1724,6 +1734,15 @@ export interface RunState {
    * child's branch starts at the checkpoint commit, not at the parent's start.
    */
   start?: RunStart;
+  /**
+   * The `claude` and `codex` versions this run last ran under (#298), written
+   * when it starts and again on every resume. A resume that finds a different
+   * version records `cli_versions_changed` naming both, so a run that changed
+   * CLI mid-life says so. Absent on every run from before #298 and never
+   * back-filled, and absent on a run started with `--skip-probe`, which skips
+   * the detection.
+   */
+  cliVersions?: CliVersions;
   /** One entry per code-review round, driving the convergence assessment. */
   p1Rounds: RoundRecord[];
   /** The same, for verification-fix rounds, which converge independently. */

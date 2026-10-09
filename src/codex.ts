@@ -9,7 +9,7 @@ import { configuredBin } from '@src/clipaths.js';
 import { agentEnv } from '@src/auth.js';
 import type { ChildEnding, RunFn } from '@src/proc.js';
 import { detail, warn } from '@src/log.js';
-import { createHeartbeat, parseCodexLine, withHeartbeat } from '@src/progress.js';
+import { createHeartbeat, parseCodexLine, watchCodexItems, withHeartbeat } from '@src/progress.js';
 import type { ProgressOptions } from '@src/progress.js';
 import type { Effort, Sandbox, TokenUsage, TurnActivity } from '@src/types.js';
 
@@ -329,6 +329,11 @@ function supersede(file: string, keepAt: string): void {
   }
 }
 
+// The once-per-run warning for an unrecognised item type lives in
+// `src/progress.ts`, beside the parser that collects it (#298). Re-exported so
+// this adapter's callers have one name for it.
+export { noteCodexItems, resetUnrecognisedCodexItems } from '@src/progress.js';
+
 /**
  * The flags the direct fork vector sends. `--output-schema` is conditional, so
  * it is checked only when a schema is in play.
@@ -633,7 +638,10 @@ export async function codexTurn(
       onBytes: (bytes) => {
         outputBytes = bytes;
       },
-      ...(heartbeat === null ? {} : { onLine: heartbeat.onLine }),
+      // Every line goes through a parser as it arrives, with progress on or off:
+      // an unrecognised item type is warned about when it is seen, so a turn
+      // that is then stopped, times out or throws has still said so (#298).
+      onLine: heartbeat === null ? watchCodexItems : heartbeat.onLine,
     });
     ended.seen = { code, signal };
 

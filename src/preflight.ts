@@ -8,6 +8,8 @@ import * as git from '@src/git.js';
 import { hostExecutableFor } from '@src/hosttools.js';
 import { agentEnv } from '@src/auth.js';
 import { run } from '@src/proc.js';
+import { checkClis } from '@src/cliversions.js';
+import type { CliCheck } from '@src/cliversions.js';
 import { codexEffortOverride, codexMcpDisableArgs, listCodexMcpServers } from '@src/mcp.js';
 import { codexProbeSandbox, enabledRolesFor, providerAccess, rolesFor } from '@src/roles.js';
 import type { Access, RoleTable } from '@src/roles.js';
@@ -63,6 +65,12 @@ export interface PreflightReport {
   ok: boolean;
   blockingReasons: readonly string[];
   warnings: readonly string[];
+  /**
+   * The agent CLIs' versions and declared flags (#298), or null where the
+   * probes in use carry no `clis` check - every test fake, which spawns nothing.
+   * Optional so a report built by hand (a test, a charge case) need not name it.
+   */
+  clis?: CliCheck | null | undefined;
 }
 
 export interface PreflightProbes {
@@ -79,10 +87,28 @@ export interface PreflightProbes {
     contract: ToolchainContract,
     phases: readonly Phase[],
   ) => Promise<AgentPreflight>;
+  /**
+   * The installed CLIs against the tested versions and the flags vibe passes
+   * (#298). Optional, so a fake that names only the two agent probes checks
+   * nothing and spawns nothing.
+   */
+  clis?: () => Promise<CliCheck>;
 }
 
 /** What a real run probes with. Tests substitute fakes for both. */
-export const REAL_PROBES: PreflightProbes = { claude: preflightClaude, codex: preflightCodex };
+export const REAL_PROBES: PreflightProbes = {
+  claude: preflightClaude,
+  codex: preflightCodex,
+  clis: () => checkClis(),
+};
+
+/** What an agent probe reports when the CLI check refused before it ran. */
+const NOT_PROBED: AgentPreflight = {
+  runtime: null,
+  violations: [],
+  prepared: null,
+  probeError: 'not probed: an agent CLI is missing a flag vibe passes',
+};
 
 /**
  * The order the probes run in, which is the order they are announced in.
@@ -120,6 +146,22 @@ export async function preflight(
   // The run's own table, so enforcement follows who actually takes a turn.
   const roles = rolesFor(cfg);
 
+  // The CLIs first, because they are free: a plain `--version` and three
+  // `--help` reads, no model turn. A flag a run passes that the installed CLI
+  // no longer declares refuses here, before a probe spends a token on an
+  // agent that would fail its first real turn (#298).
+  const clis = probes.clis === undefined ? null : await probes.clis();
+  if (clis !== null && clis.blocking.length > 0) {
+    return {
+      claude: NOT_PROBED,
+      codex: NOT_PROBED,
+      ok: false,
+      blockingReasons: clis.blocking,
+      warnings: clis.warnings,
+      clis,
+    };
+  }
+
   // Each agent is probed only against the tools it is responsible for running.
   announce('claude');
   const claude = await probes.claude(
@@ -138,7 +180,14 @@ export async function preflight(
   ];
   const { blockingReasons, warnings } = adjudicate(verdicts, cfg, roles);
 
-  return { claude, codex, ok: blockingReasons.length === 0, blockingReasons, warnings };
+  return {
+    claude,
+    codex,
+    ok: blockingReasons.length === 0,
+    blockingReasons,
+    warnings: [...(clis?.warnings ?? []), ...warnings],
+    clis,
+  };
 }
 
 export interface AgentVerdict {

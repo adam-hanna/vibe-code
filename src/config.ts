@@ -41,6 +41,25 @@ export { EFFORTS };
 
 const SANDBOXES: readonly Sandbox[] = ['read-only', 'workspace-write', 'danger-full-access'];
 
+/**
+ * The agent CLI versions this build was tested against (#298).
+ *
+ * The versions installed when this constant was written, measured with
+ * `claude --version` (printed `2.1.294 (Claude Code)`) and `codex --version`
+ * (printed `codex-cli 0.157.1`). Bumped as a release step, with the fixtures
+ * under `tests/fixtures/cli/` re-recorded beside it.
+ *
+ * **Tested, deliberately not a floor and not a ceiling.** Being older than
+ * this is not evidence of breakage, and a ceiling would refuse every user the
+ * day a vendor ships - so a different version warns and the run continues. A
+ * refusal needs a capability that is actually missing: a flag vibe passes that
+ * the installed CLI's `--help` does not declare (`src/cliversions.ts`).
+ */
+export const TESTED_CLI_VERSIONS: Readonly<Record<AgentProvider, string>> = {
+  claude: '2.1.294',
+  codex: '0.157.1',
+};
+
 export const DEFAULTS: Config = {
   // Claude plans and implements, Codex critiques, answers and reviews - the
   // assignment every run made before this key existed.
