@@ -52,6 +52,21 @@ and the root is removed when the run ends. Three rules travel with it, pinned by
 is never what you tested — but if you invoke `node --test` directly, build first or you are
 testing the last change rather than this one.
 
+**`npm test` fails until the agent CLIs' fixtures are recorded** (#298).
+`cli-fixtures-contract.test.ts` feeds a real turn of each CLI, recorded under
+`tests/fixtures/cli/<cli>-<version>/`, through the real parsers, and a missing fixture for a
+version in `TESTED_CLI_VERSIONS` fails by name. Recording spawns real agents, so it is done by
+hand and never by the suite:
+
+```bash
+node scripts/record-cli-fixtures.mjs           # writes tests/fixtures/cli/claude-<v>/ and codex-<v>/
+node scripts/record-cli-fixtures.mjs --force   # re-record a version that already has one
+```
+
+`VIBE_CLI_FIXTURES=pending` skips those tests, and says so; it exists for the run that
+introduced them, which could not record fixtures from inside a sandboxed turn. There is no
+other way past the check.
+
 There is **no linter and no formatter**, and no CI. `npm run typecheck && npm test` before
 every commit is the whole gate, and it is on you to run it. Node 20+ (`engines`).
 
@@ -2102,6 +2117,7 @@ src/charge.ts        the one seam every token and dollar is charged through
 src/slots.ts         session-slot lifecycle (main = Claude, judge + review = Codex, write = one-shot Codex)
 src/context.ts       context measurement, compaction, session rotation
 src/preflight.ts     toolchain contract enforcement, `vibe doctor`
+src/cliversions.ts   the installed claude/codex against the tested versions, and the flags vibe passes
 src/verify.ts        the verification gates — the list, every run, and broken vs flaky
 src/judge.ts         which changed files are the run's own judge, and the reviewer's verdict on each
 src/reproducer.ts    a reviewer's test: placed, run by the user's own gate, taken back out
@@ -3503,6 +3519,45 @@ than called a leftover or hidden, because #77's probe refuses to guess and the c
 flight; and a superseded round with no `round-N` installed beside it is **never listed as
 removable**, because it may be the only copy of that evidence.
 
+**The agent CLIs are checked against what this build was tested with, and refused only on a
+missing capability** (#298). vibe inherits whatever `claude` and `codex` are installed, and an
+upstream change used to fail late: a turn broke after it was spawned, or a parser quietly read
+nothing. `src/cliversions.ts` holds it, and five decisions travel with it, all the owner's:
+
+- **Tested, not a floor.** `TESTED_CLI_VERSIONS` in `src/config.ts` is what this build was
+  tested against. An older or newer version warns in `preflight` and `vibe doctor`, naming
+  both versions and the command that moves to the tested one, and the run continues. There
+  is no minimum and no ceiling: being older is not evidence of breakage, and a ceiling would
+  refuse every user the day a vendor ships. The command is read off where the binary
+  resolves - `claude install <v>` for the native installer, `npm i -g <pkg>@<v>` for an npm
+  global - and every method is named when the path does not say which.
+- **A refusal needs a missing capability, never a version number.** Preflight reads
+  `claude --help`, `codex exec --help` and `codex exec resume --help` through `parseOptionTokens`,
+  and refuses only when help that **was read** does not declare a flag a run passes. Help that
+  could not be read warns, by `forkHelp`'s rule: it is not evidence that a flag is missing. A
+  flag only the pilot passes warns and refuses nothing, because no run passes it; the pilot's
+  own spawn reports the CLI's error. The lists are `CLI_FLAG_REQUIREMENTS`, and
+  `cli-flags-source.test.ts` reads the adapter sources and fails on a flag literal they do not
+  name, so the list checked is the list sent.
+- **A plain child process, not the toolchain contract.** `<bin> --version` and the help reads
+  run from vibe's own process, once each per process. `ToolRequirement.minVersion` is for
+  tools the agents probe inside their own shells during a model turn, which is a different
+  mechanism. `--skip-probe` skips this too, because it is the escape hatch for a false refusal.
+- **Every run records what it ran under.** `state.cliVersions` is written when a run starts and
+  again on every resume, `run_started` carries it, and a resume under a different version
+  records `cli_versions_changed` naming the old and the new. Null is "not detected", never a
+  guess.
+- **An unknown Codex item type warns once per run and never fails a turn.** `KNOWN_CODEX_ITEMS`
+  in `src/progress.ts` is a vocabulary for a warning, not an allow-list: Codex adds item kinds
+  as it grows. `parseEvents` collects them rather than the heartbeat's parser, because it
+  reads every turn's stdout with progress on or off. Claude's stream has no equivalent.
+
+**The fixtures are recorded by hand, outside a run, and that is the point of them.** The
+contract tests over `tests/fixtures/cli/` are what catch a changed event shape, which `--help`
+cannot show. Recording one spawns real agents, and the suite never calls an agent; and a
+sandboxed vibe turn spawning agents hangs or is blocked. So the run that built this could not
+record them, and set `VIBE_CLI_FIXTURES=pending` on its own gate.
+
 `src/orchestrator.ts` is the biggest file by a wide margin and is where most changes land.
 Read the phase you are touching end to end before editing it; the guards interact.
 
@@ -3764,12 +3819,15 @@ and its commits survive it.
 3. Add the `CHANGELOG.md` section — grouped Added / Fixed / Internal / Upgrading, every entry
    linking its PR and issue.
 4. PR into `main`, with the `closes` keyword repeated per issue (see above).
-5. Verify from a clean checkout: `npm run typecheck`, `npm test`, `npm pack --dry-run`.
-6. Merge, then tag: `git tag -a v<version> -m "..." && git push origin v<version>`.
-7. `npm publish`. **This needs a real interactive terminal** — the OTP flow hands off to a
+5. Re-measure the agent CLIs this release was tested against: `claude --version` and
+   `codex --version`. Bump `TESTED_CLI_VERSIONS` in `src/config.ts` to what they print, and
+   re-record the fixtures with `node scripts/record-cli-fixtures.mjs` (#298). Commit both.
+6. Verify from a clean checkout: `npm run typecheck`, `npm test`, `npm pack --dry-run`.
+7. Merge, then tag: `git tag -a v<version> -m "..." && git push origin v<version>`.
+8. `npm publish`. **This needs a real interactive terminal** — the OTP flow hands off to a
    browser and cannot be driven from a headless shell. A granular automation token in
    `.npmrc` avoids the prompt.
-8. **Merge `main` back into `develop`.** The release PR is squash-merged, so the version bump
+9. **Merge `main` back into `develop`.** The release PR is squash-merged, so the version bump
    and the changelog exist only on `main` until you do. After 1.1.0 this was missed and
    `develop` sat at version 1.0.1 with no `CHANGELOG.md` — which is the branch the next
    release would have been cut from.

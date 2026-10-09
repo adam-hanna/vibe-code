@@ -113,6 +113,7 @@ When a round changes a test file or `vibe.config.json`, the reviewer is shown ea
 ## Notes and limitations
 
 - **Codex cost isn't reported.** Codex runs on a subscription and no output mode returns a price, so vibe reports tokens and never a guessed dollar figure. `budget.maxTokens` covers both agents.
+- **Tested with claude 2.1.294 and codex 0.157.1.** vibe uses whatever versions you have installed. `vibe doctor` and every run's preflight compare them with the tested ones. A different version is a warning that names the command to move to the tested one, and the run continues. vibe refuses to start only when the installed CLI's `--help` no longer declares a flag vibe passes; `--skip-probe` skips that check.
 - **Agreement isn't proof.** A clean run means two different models agreed and your tests passed. Both can still be wrong in the same way.
 - **Long docs are coming.** [#230](https://github.com/adam-hanna/vibe-code/issues/230) tracks a docs site with a full config reference and how the loop works.
 

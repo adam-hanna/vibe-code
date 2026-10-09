@@ -315,6 +315,35 @@ export const parseClaudeLine: LineParser = (snapshot, line) => {
 const NON_TOOL_CODEX_ITEMS = new Set(['agent_message', 'reasoning']);
 
 /**
+ * Every Codex item type this build recognises (#298) - a vocabulary for a
+ * warning, never an allow-list for a decision.
+ *
+ * `NON_TOOL_CODEX_ITEMS`, the two tool kinds observed on this stream and cited
+ * above (`command_execution`, `web_search`), and the kinds `codex exec --json`'s
+ * own documentation lists for the stream (`file_change`, `mcp_tool_call`,
+ * `todo_list`, `error`). `tests/cli-fixtures-contract.test.ts` checks every item
+ * type in a recorded fixture is here.
+ *
+ * A type outside it is warned about once per run, naming the installed and
+ * tested Codex versions (`noteCodexItems` in `src/codex.ts`), and nothing else
+ * changes: the parsers stay tolerant, the tally above still counts it as a tool,
+ * and the turn is never failed - Codex adds item kinds as it grows, and refusing
+ * one would break runs that would have worked.
+ *
+ * Claude's stream gets no equivalent: `parseClaudeLine` already ignores events
+ * it does not read, and there is no recorded Claude vocabulary to hold one to.
+ */
+export const KNOWN_CODEX_ITEMS: ReadonlySet<string> = new Set([
+  ...NON_TOOL_CODEX_ITEMS,
+  'command_execution',
+  'web_search',
+  'file_change',
+  'mcp_tool_call',
+  'todo_list',
+  'error',
+]);
+
+/**
  * Codex's `--json` stream, which is sparser: it names item types but reports no
  * per-request usage, so there is nothing here to drive a context percentage.
  *
