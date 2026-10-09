@@ -121,8 +121,11 @@ describe('an opened run is drawn by the column that drew it live', () => {
     // The pane takes the live run for its tools and a separate run for its
     // log's round cards, decided once by `chatRun` beside `pilotRunId`. Handing
     // the log the live run is what put its cards in every chat.
-    const pane = cockpit.slice(cockpit.indexOf('<PilotPane'), cockpit.indexOf('onEffect={onEffect}'));
-    expect(pane).toContain('logRun={pilotLogRun}');
+    // Case 2 (#305): one pane per conversation, so the props reach the pane
+    // through its snapshot - the one on screen is `pilotLogRun`, unchanged.
+    const pane = cockpit.slice(cockpit.indexOf('<PilotPane'), cockpit.indexOf('onEffect='));
+    expect(pane).toContain('logRun={at.logRun}');
+    expect(cockpit).toContain('logRun: pilotLogRun,');
     expect(cockpit).toMatch(/const pilotLogRun = chatRun\(\{\s*runId: pilotRunId,/);
     expect(pilot).toContain('logOf(logRun, conversation.replies)');
     expect(pilot).not.toContain('logOf(run, conversation.replies)');
@@ -510,11 +513,13 @@ describe('the pilot reads the repository on screen, not the one in the sidebar (
     // another, and with no project selected it refused to send at all -
     // reported as *"I just tried sending a chat to an old run's pilot but I
     // can't"*.
-    const pane = cockpit.slice(cockpit.indexOf('<PilotPane'), cockpit.indexOf('onEffect={onEffect}'));
+    const pane = cockpit.slice(cockpit.indexOf('<PilotPane'), cockpit.indexOf('onEffect='));
     // Through `pilotDir` since #223, which IS `shownDir` except for the seconds
     // a launch waits for its run id, when it holds the directory of the chat
-    // that proposed the run (see `holdChat`).
-    expect(pane).toContain('dir={pilotDir}');
+    // that proposed the run (see `holdChat`). Case 2 (#305): it reaches the
+    // pane on screen through that pane's snapshot.
+    expect(pane).toContain('dir={at.dir}');
+    expect(cockpit).toContain('dir: pilotDir,');
     expect(cockpit).toContain('const pilotDir = holdChat?.dir ?? shownDir;');
     expect(pane).not.toContain('dir={repoDir}');
   });

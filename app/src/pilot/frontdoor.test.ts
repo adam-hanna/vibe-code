@@ -91,7 +91,8 @@ describe('the cockpit carries it across', () => {
 
   test('the pane is given it, and given the way to clear it', () => {
     const pane = cockpit.slice(cockpit.indexOf('<PilotPane'), cockpit.indexOf('onPending='));
-    expect(pane).toContain('ask={brief}');
+    // Case 2 (#305): only the pane of the draft it was typed for is given it.
+    expect(pane).toContain('ask={askFor(brief, at)}');
     expect(cockpit).toContain('onAsked={() => setBrief(null)}');
   });
 });

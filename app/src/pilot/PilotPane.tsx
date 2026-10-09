@@ -746,7 +746,7 @@ export interface PilotPaneProps {
    */
   onEffect: (effect: Effect) => void;
   /** How many proposals are waiting on a person, so a hidden tab can say so. */
-  onPending?: (count: number) => void;
+  onPending?: ((count: number) => void) | undefined;
   /**
    * Which providers have a key, as the window last read it. Null until it has.
    *
@@ -859,6 +859,19 @@ export interface PilotPaneProps {
    * one every time but the last.
    */
   onOpen?: OpenAt;
+  /**
+   * This pane's conversation is not the one on screen (#305).
+   *
+   * The cockpit keeps one pane mounted per conversation that is still doing
+   * something - a draft, or a turn in flight - so a reply lands in the
+   * conversation that asked for it whatever is showing. A pane in the
+   * background finishes its own turns and its own tool chain, and starts
+   * nothing new: the command and gate wakes are about what the person is
+   * looking at, so they belong to the pane on screen.
+   */
+  background?: boolean | undefined;
+  /** Whether a turn is opening or open here, so the cockpit keeps the pane mounted. */
+  onBusy?: ((busy: boolean) => void) | undefined;
 }
 
 export function PilotPane({
@@ -878,6 +891,8 @@ export function PilotPane({
   onAsked,
   standing,
   onOpen,
+  background = false,
+  onBusy,
 }: PilotPaneProps) {
   const [conversation, dispatch] = useReducer(apply, undefined, emptyConversation);
   /** Call ids read back from storage, which never run without a press (#223). */
@@ -1033,6 +1048,12 @@ export function PilotPane({
   /** The composer's field, so a starter can hand it focus without a selector. */
   const entryRef = useRef<HTMLTextAreaElement>(null);
   const [live, setLive] = useState<number | null>(null);
+  /** Turns asked for whose id has not come back yet (#305). */
+  const [opening, setOpening] = useState(0);
+  const turning = live !== null || opening > 0;
+  useEffect(() => {
+    onBusy?.(turning);
+  }, [turning, onBusy]);
   // The pilot's own books (#145). Read from the window's memory at mount, because a
   // per-day ceiling that reset when the app restarted would not be a ceiling.
   const [ledger, setLedger] = useState<Ledger>(readLedger);
@@ -1084,7 +1105,10 @@ export function PilotPane({
           dispatch({ type: 'event', event });
           // Rust guarantees exactly one terminal event per turn and that it is
           // last, so this is safe to act on the first time it is seen.
-          if (pilot.isFinal(event)) setLive(null);
+          // Only for this pane's own turn (#305): every mounted pane hears every
+          // event, and a reply ending in one conversation is not the end of a
+          // turn another is waiting on.
+          if (pilot.isFinal(event)) setLive((at) => (at === event.turn ? null : at));
         },
         () => dispatch({ type: 'unknown' }),
       );
@@ -1170,7 +1194,10 @@ export function PilotPane({
       (reply) => reply.outcome !== null && reply.usage !== null && !counted.current.has(replyKey(reply)),
     );
     if (fresh.length === 0) return;
-    let next = ledger;
+    // Read fresh rather than from this pane's copy (#305): with one pane per
+    // conversation, another pane may have recorded a turn since this one read
+    // the books, and writing a stale copy back would erase that spend.
+    let next = readLedger();
     const at = new Date();
     for (const reply of fresh) {
       counted.current.add(replyKey(reply));
@@ -1317,6 +1344,9 @@ ${frame.text}`, turn, origin.current))) {
        * slowest bit, which is the opposite of what the number is for.
        */
       const openedAt = Date.now();
+      // Busy from the request, not from the id (#305): the spawn is the slow
+      // part, and a pane let go of during it would lose the turn it asked for.
+      setOpening((n) => n + 1);
 
       // The subscription path. It does not go through Rust at all: the host
       // spawns `claude -p` with the closed read-only allow-list `pilotchat.ts`
@@ -1366,7 +1396,8 @@ ${frame.text}`, turn, origin.current))) {
               message: err instanceof Error ? err.message : String(err),
               woke,
             }),
-          );
+          )
+          .finally(() => setOpening((n) => n - 1));
         return;
       }
 
@@ -1400,7 +1431,8 @@ ${frame.text}`, turn, origin.current))) {
             message: err instanceof Error ? err.message : String(err),
             woke,
           }),
-        );
+        )
+        .finally(() => setOpening((n) => n - 1));
     },
     [model, provider, run, launched, dir, access, standing],
   );
@@ -1539,12 +1571,12 @@ ${frame.text}`, turn, origin.current))) {
     // Recorded before the send, not after: a turn refused on its way out must
     // not leave the watcher armed to try the same gate on the next render.
     seenGate.current = gate.askId;
-    if (!ready || live !== null) return;
+    if (background || !ready || live !== null) return;
     const reason = wakeReason(gate);
     chain.current = 0;
     setStalled(false);
     start([...conversation.messages, { role: 'user' as const, content: reason }], reason, reason);
-  }, [run.gate, watching, ready, live, conversation.messages, start]);
+  }, [run.gate, watching, ready, live, conversation.messages, start, background]);
 
   /**
    * Say a brief that was typed in the composer (#223).
@@ -1618,6 +1650,16 @@ ${frame.text}`, turn, origin.current))) {
    */
   const woken = useRef<Map<string, CommandNews>>(new Map());
   useEffect(() => {
+    // In the background nothing is news (#305): what each command has done so
+    // far is recorded as seen, so coming back on screen does not wake this pane
+    // for a command another conversation already answered.
+    if (background) {
+      for (const command of commands.all) {
+        if (command.endedAt !== null) woken.current.set(command.id, 'ended');
+        else if (command.bytes > 0 && !woken.current.has(command.id)) woken.current.set(command.id, 'quiet');
+      }
+      return;
+    }
     if (!ready || live !== null) return;
 
     const say = (command: Command, news: CommandNews): void => {
@@ -1657,7 +1699,7 @@ ${frame.text}`, turn, origin.current))) {
       return () => clearTimeout(timer);
     }
     return;
-  }, [commands, ready, live, conversation.messages, start]);
+  }, [commands, ready, live, conversation.messages, start, background]);
 
   const contextState = contextNow(conversation, provider);
   const contextLine = describeContext(contextState, !needsKey(provider));
