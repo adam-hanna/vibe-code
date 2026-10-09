@@ -47,6 +47,8 @@ import type { Draft } from './pending';
 import type { ArchiveRun } from '../host';
 import { gatesWaiting } from './hosts';
 import type { HostedMarks } from './hosts';
+import { ATTENTION, runAttention } from './attention';
+import type { Attention } from './attention';
 
 /**
  * The navigator: projects, their runs, and the ones you pinned (#223).
@@ -270,13 +272,16 @@ function RenameRow({
 }
 
 /**
- * A gate held by a run nobody is looking at (#246). Without it a run can sit
- * waiting for a person who cannot see it. The alarm variant, static.
+ * A row waiting on a person (#307): a gate held by a run nobody is looking at
+ * (#246), a run that stopped needing you, or a draft whose pilot handed the
+ * conversation back. Without it a run can sit waiting for a person who cannot
+ * see it. The alarm variant, static, and the tooltip says why.
  */
-function GateBadge() {
+function NeedsBadge({ attention }: { attention: Attention }) {
+  const { label, why } = ATTENTION[attention];
   return (
-    <Badge variant="alarm" className="ml-auto flex-none" title="waiting for a decision — open the run to answer it">
-      gate
+    <Badge variant="alarm" className="ml-auto flex-none" title={why}>
+      {label}
     </Badge>
   );
 }
@@ -285,7 +290,8 @@ function RunRow({
   title,
   task,
   live,
-  gate = false,
+  working = false,
+  attention = null,
   current,
   pinned,
   renaming,
@@ -299,11 +305,10 @@ function RunRow({
   /** The run's own brief, so the rename box can tell a name from a task. */
   task: string;
   live: boolean;
-  /**
-   * A gate this window's run is holding while somebody looks at another run
-   * (#246). Static, like the dot: only the run on screen pulses.
-   */
-  gate?: boolean;
+  /** A turn of this run is running here (#307), so its dot pulses. */
+  working?: boolean;
+  /** Why this run is waiting on a person, or null - see `attention.ts` (#307). */
+  attention?: Attention | null;
   current: boolean;
   pinned: boolean;
   /** Whether this row is the one being renamed. At most one is, sidebar-wide. */
@@ -334,12 +339,13 @@ function RunRow({
         title={`${title} — double-click to rename`}
       >
         {/* The archive's verdict, or a run this window is hosting - never one
-            derived here. **Static** (#246): exactly one element on screen
-            pulses, the run on screen's live card, and with several runs going a
-            pulsing dot on every row would break that. */}
-        {live ? <LivenessDot state="live" still /> : <span className="w-4 flex-none text-label text-tertiary">·</span>}
+            derived here. It pulses while one of the run's turns is running and
+            is still otherwise (#307): #246 made every row still so exactly one
+            element pulsed, and a run working looked the same as one idle. A
+            pulse means a turn is running, so several rows can. */}
+        {live ? <LivenessDot state="live" still={!working} /> : <span className="w-4 flex-none text-label text-tertiary">·</span>}
         <span className={cn('truncate', current && 'text-accent-on-tint')}>{title}</span>
-        {gate && <GateBadge />}
+        {attention !== null && <NeedsBadge attention={attention} />}
       </button>
       <PinButton on={pinned} onToggle={onPin} />
       <button className={ACT} onClick={onRename} title="Rename this run">
@@ -366,6 +372,7 @@ function RunRow({
 function DraftRow({
   title,
   launched,
+  attention,
   current,
   onOpen,
   onForget,
@@ -373,6 +380,8 @@ function DraftRow({
   title: string;
   /** Whether its proposal has been pressed and the run is starting. */
   launched: boolean;
+  /** The pilot handed the conversation back, or proposed something (#307). */
+  attention: Attention | null;
   current: boolean;
   onOpen: () => void;
   onForget: () => void;
@@ -384,7 +393,11 @@ function DraftRow({
         <span className={cn('truncate', current && 'text-accent-on-tint')}>{title}</span>
         {/* Said rather than styled: a row with no run behind it has to read as
             one, or the first click on it looks like a run that will not load. */}
-        <span className="ml-auto flex-none text-label lowercase text-tertiary">{launched ? 'starting' : 'drafting'}</span>
+        {attention !== null ? (
+          <NeedsBadge attention={attention} />
+        ) : (
+          <span className="ml-auto flex-none text-label lowercase text-tertiary">{launched ? 'starting' : 'drafting'}</span>
+        )}
       </button>
       <button
         className={ACT}
@@ -412,6 +425,7 @@ function Project({
   onDraft,
   onForgetDraft,
   onSettled,
+  draftNeeds,
   showing,
   marksFor,
   pins,
@@ -456,6 +470,8 @@ function Project({
   onForgetDraft: (draft: Draft) => void;
   /** Drafts whose run this archive now lists, so they can be let go of. */
   onSettled: (ids: readonly string[]) => void;
+  /** Why a draft is waiting on a person, or null (#307). */
+  draftNeeds: (draft: Draft) => Attention | null;
   /** The run on screen, by repository and id, or null. */
   showing: { dir: string; runId: string } | null;
   /** The runs this window hosts in a project (#246). */
@@ -515,6 +531,7 @@ function Project({
   // report this exists to answer.
   const archived = runs.map((r) => r.id);
   const mine = draftsIn(drafts, dir, archived);
+  const shutNeeds = open ? null : (mine.map(draftNeeds).find((a) => a !== null) ?? null);
   const done = settled(drafts, dir, archived).join('\n');
   useEffect(() => {
     if (done !== '') onSettled(done.split('\n'));
@@ -537,9 +554,10 @@ function Project({
             <span className={cn('truncate', current && 'text-emphasis')}>
               {label}
             </span>
-            {/* A shut section hides its rows, and with them a gate somebody
-                is waiting on (#246). */}
-            {!open && gatesWaiting(marks) && <GateBadge />}
+            {/* A shut section hides its rows, and with them a gate or a draft
+                somebody is waiting on (#246, #307). Its archive is not read
+                while shut, so a run that stopped is said only once it opens. */}
+            {!open && (gatesWaiting(marks) ? <NeedsBadge attention="gate" /> : shutNeeds !== null && <NeedsBadge attention={shutNeeds} />)}
           </button>
           {/* Right-justified, beside the project it starts a run in. The composer
               it opens has no repository field at all — the project is the answer,
@@ -590,6 +608,7 @@ function Project({
               key={d.id}
               title={draftTitle(d)}
               launched={d.launched}
+              attention={draftNeeds(d)}
               current={d.id === draftId}
               onOpen={() => onDraft(d)}
               onForget={() => onForgetDraft(d)}
@@ -609,7 +628,8 @@ function Project({
                 title={title}
                 task={r.task}
                 live={r.live}
-                gate={marks.gates.has(r.id)}
+                working={marks.working.has(r.id)}
+                attention={runAttention({ gate: marks.gates.has(r.id), status: r.status, live: r.live, current: r.current })}
                 current={r.current}
                 pinned={isPinned(pins, { dir, runId: r.id, task: r.task })}
                 renaming={renaming !== null && renaming.dir === dir && renaming.runId === r.id}
@@ -661,6 +681,7 @@ export function Sidebar({
   onDraft,
   onForgetDraft,
   onSettled,
+  draftNeeds,
 }: {
   /** The repository the window is pointed at. Always one of the projects. */
   dir: string;
@@ -690,6 +711,8 @@ export function Sidebar({
   /** Discard one, after the confirmation below. */
   onForgetDraft: (draft: Draft) => void;
   onSettled: (ids: readonly string[]) => void;
+  /** Why a draft is waiting on a person, or null (#307). */
+  draftNeeds: (draft: Draft) => Attention | null;
 }) {
   const [projects, setProjects] = useState<readonly string[]>([]);
   const [pins, setPins] = useState<readonly Pin[]>([]);
@@ -976,6 +999,7 @@ export function Sidebar({
         onDraft={onDraft}
         onForgetDraft={(d) => setPending({ kind: 'draft', draft: d })}
         onSettled={onSettled}
+        draftNeeds={draftNeeds}
         showing={current}
         marksFor={marksFor}
         pins={pins}
@@ -1097,7 +1121,14 @@ export function Sidebar({
                 // hosting is known without reading anything (#246), so that is
                 // marked, in the pin's own project.
                 live={marks.live.has(p.runId)}
-                gate={marks.gates.has(p.runId)}
+                working={marks.working.has(p.runId)}
+                // A pin's archive is not read, so only the gate is known here.
+                attention={runAttention({
+                  gate: marks.gates.has(p.runId),
+                  status: null,
+                  live: marks.live.has(p.runId),
+                  current: current !== null && p.runId === current.runId && dirKey(p.dir) === dirKey(current.dir),
+                })}
                 current={current !== null && p.runId === current.runId && dirKey(p.dir) === dirKey(current.dir)}
                 pinned
                 renaming={renaming !== null && renaming.dir === p.dir && renaming.runId === p.runId}

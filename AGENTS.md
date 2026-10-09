@@ -248,10 +248,21 @@ Two rules the cockpit inherits from the design and must not quietly drop:
   read `5h39m ago` about a turn that took a minute. `clock()` beside `elapsed()` is the pair,
   and `runningRow` carries `lastBeatAt` and `endedAt` **beside** `quietMs` rather than instead
   of it, because a live card wants the relative form and a settled one cannot have it.
-- **The sidebar's live marks are static** (#246). With several runs going the window marks
-  every one it hosts, and a pulsing dot on each row would put several pulses on screen.
-  Only the run on screen's live card pulses; `LivenessDot still` draws the rows, and the gate
-  badge on a run nobody is looking at is a static `alarm` chip.
+- **A sidebar row's dot pulses while one of its turns is running** (#307). #246 made every
+  row still, so that exactly one element on screen pulsed. The cost was reported directly:
+  a run working looked the same as one idle, and the sidebar is where several live runs are
+  compared. So the rule is now *a pulse means a turn is running*: `hostedMarks.working` is a
+  run with `running` set and no gate held, and its row pulses, so several rows can. A gate,
+  a held turn and an idle host all draw `LivenessDot still`.
+- **A row waiting on a person says so, and why** (#307). `cockpit/attention.ts` holds the
+  rule: a held gate (`gate`); the archive's `needs-input`, `stalled` and `error`
+  (`needs you`, `stopped`, `failed`), only for a run not running, since a running run's
+  status may predate its resume; and a draft whose saved conversation ends on the pilot's
+  message (`your turn`) or holds an unanswered proposal (`proposal`). A saved conversation
+  never holds a turn in flight, so its shape is enough. The badge is a static `alarm` chip
+  with the reason in its tooltip, never on the row on screen. A shut project shows one for a
+  gate or a draft; its archive is not read while shut, so a stopped run is said only once it
+  opens.
 - **The pilot's open turn waves, and it is still one animation.** *"Exactly one element on
   screen pulses"* is the rule above, and the corpus lists the pilot chat's live round card
   among the screens allowed to — but between pressing send and the first token that card has
