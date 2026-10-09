@@ -146,7 +146,18 @@ pub fn login_env() -> Result<(String, Vec<(String, String)>), String> {
 pub fn parse(out: &[u8]) -> Option<Vec<(String, String)>> {
     let mark = MARK.as_bytes();
     let open = find(out, mark, 0)? + mark.len();
-    let close = find(out, mark, open)?;
+    // The closing marker is the one straight after a NUL, since `env -0` ends
+    // every entry with one - or straight after the opening marker, for an empty
+    // environment. Any other occurrence is inside a value: dash exports `_` as
+    // the previous command's last argument, which is the opening marker itself.
+    let close = if out[open..].starts_with(mark) {
+        open
+    } else {
+        let mut ended = Vec::with_capacity(mark.len() + 1);
+        ended.push(0);
+        ended.extend_from_slice(mark);
+        find(out, &ended, open)? + 1
+    };
     let body = &out[open..close];
     let vars = body
         .split(|b| *b == 0)
@@ -207,6 +218,32 @@ mod tests {
         out.extend_from_slice(b"PATH=/usr/bin\0");
         assert_eq!(parse(&out), None, "half an environment is not one");
         assert_eq!(parse(b"no markers at all"), None);
+    }
+
+    #[test]
+    fn a_marker_inside_a_value_does_not_close_the_list() {
+        // dash exports `_` as the last argument of the previous command, which
+        // is the opening `printf`'s marker - so `env -0` prints `_=<marker>` in
+        // the middle of the list. Closing there cut off every variable after it:
+        // the first CI run, on ubuntu-22.04, got 57 of its variables and no PATH.
+        let marker_value = format!("_={MARK}");
+        let out = framed("", &["HOME=/home/me", &marker_value, "PATH=/usr/bin", "GH_TOKEN=abc"], "");
+        assert_eq!(
+            parse(&out),
+            Some(vec![
+                ("HOME".to_string(), "/home/me".to_string()),
+                ("PATH".to_string(), "/usr/bin".to_string()),
+                ("GH_TOKEN".to_string(), "abc".to_string()),
+            ])
+        );
+        let half = framed("", &["HOME=/home/me", &marker_value], "");
+        let half = &half[..half.len() - MARK.len()];
+        assert_eq!(parse(half), None, "a marker inside a value is not the closing one");
+    }
+
+    #[test]
+    fn an_empty_environment_still_parses() {
+        assert_eq!(parse(&framed("", &[], "")), Some(vec![]));
     }
 
     #[test]
