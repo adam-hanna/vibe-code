@@ -31,6 +31,7 @@ export type ActionId =
   | 'goCommands'
   | 'goRuns'
   | 'pause'
+  | 'unpause'
   | 'stop'
   | 'gateContinue'
   | 'gateStop'
@@ -71,8 +72,9 @@ export const ACTIONS: readonly Action[] = [
   { id: 'backToLive', label: 'Back to the live run', group: 'Go to' },
 
   { id: 'newRun', label: 'New run…', group: 'Run', shortcut: { code: 'KeyN', shift: false } },
-  { id: 'pause', label: 'Pause at the next gate', group: 'Run' },
-  { id: 'stop', label: 'Stop this turn…', group: 'Run' },
+  { id: 'pause', label: 'Pause after this step', group: 'Run' },
+  { id: 'unpause', label: 'Cancel pause', group: 'Run' },
+  { id: 'stop', label: 'Stop run…', group: 'Run' },
   { id: 'gateContinue', label: 'Continue past the gate', group: 'Run' },
   { id: 'gateStop', label: 'Stop at the gate', group: 'Run' },
 
@@ -91,6 +93,8 @@ export interface ActionContext {
   live: boolean;
   /** A gate is holding and can be answered. */
   gate: boolean;
+  /** A pause is armed and not yet reached, so it can be taken back (#276). */
+  pausing: boolean;
   /** The window is pointed at a past run, so there is a live one to go back to. */
   past: boolean;
   /** Inside the desktop shell. A browser preview has no host and no diagnostics worth the name. */
@@ -105,7 +109,12 @@ export interface ActionContext {
 export function available(ctx: ActionContext): readonly Action[] {
   return ACTIONS.filter((a) => {
     switch (a.id) {
+      // One of the two at a time (#276): an armed pause can be cancelled and
+      // cannot be asked for again, since a second pause is the same request.
       case 'pause':
+        return ctx.live && !ctx.pausing;
+      case 'unpause':
+        return ctx.live && ctx.pausing;
       case 'stop':
         return ctx.live;
       case 'gateContinue':

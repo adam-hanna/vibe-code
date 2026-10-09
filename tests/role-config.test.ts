@@ -21,7 +21,7 @@ import {
 import type { AgentTurns, Role, RoleProviders, TurnRequest } from '@src/orchestrator.js';
 import { adjudicate, preflight } from '@src/preflight.js';
 import type { AgentPreflight, PreflightProbes } from '@src/preflight.js';
-import { codexTurn } from '@src/codex.js';
+import { codexTurnNoMcp as codexTurn } from './helpers/codex-mcp.js';
 import { taskContext } from '@src/prompts.js';
 import type { CodexTurnOptions } from '@src/codex.js';
 import { createRun, recordContextMeasurement } from '@src/run.js';
@@ -32,7 +32,7 @@ import type {
   Phase,
   PreparedEnvironment,
 } from '@src/runtime.js';
-import { ANSWERS_SCHEMA, FINDINGS_SCHEMA, PLAN_SCHEMA } from '@src/schemas.js';
+import { ANSWERS_SCHEMA, PLAN_SCHEMA, REVIEW_SCHEMA } from '@src/schemas.js';
 import { parseAnswers, parseFindings } from '@src/validate.js';
 import type { ClaudeTurnOptions } from '@src/claude.js';
 import type { RunFn, RunResult } from '@src/proc.js';
@@ -237,7 +237,9 @@ test('a Claude reviewer returns structured findings its existing caller can read
   assert.equal(report.findings[0]?.id, 'a-thing');
 
   // And it was asked for the schema and the read-only tools the role carries.
-  assert.equal(rec.claudeCalls[0]?.jsonSchema, FINDINGS_SCHEMA);
+  // The reviewer's own schema since #112 - the findings plus the per-file
+  // verdicts on changes to the judge - not the critic's.
+  assert.equal(rec.claudeCalls[0]?.jsonSchema, REVIEW_SCHEMA);
   assert.deepEqual(rec.claudeCalls[0]?.tools, READ_ONLY_TOOLS);
   assert.equal(rec.claudeCalls[0]?.permissionMode, 'plan');
 });

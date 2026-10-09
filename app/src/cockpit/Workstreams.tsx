@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Table } from '../design';
 import { Badge } from '@/ui/badge';
 import { Button } from '@/ui/button';
+import { fingerprint } from './format';
 import { EMPTY, HEAD, PANE } from './pane';
 import * as host from '../host';
 import type { ArchiveRun } from '../host';
@@ -24,14 +25,14 @@ import type { ArchiveRun } from '../host';
  * eventually disagree with `vibe list` about which runs exist, and the one that
  * disagreed would be the one on screen.
  *
- * ## What is drawn as absent
+ * ## The rounds fingerprint
  *
  * The design's **rounds fingerprint** (`p2 v1 r2` — rounds spent in each cycle,
- * cheap to scan for runs that thrashed) is the column it most wants, and
- * `RunSummary` does not carry it. It is derivable from a run's `state.json`, and
- * reading one per row is a different request from this one; #114's archive
- * reader is where it belongs. The column is named and empty rather than dropped,
- * because a table that showed only what it had would read as the whole story.
+ * cheap to scan for runs that thrashed) is the column it most wants. It rides on
+ * `RunSummary.rounds`, which `listRuns` fills from the state.json it already
+ * reads for the row (#114) — so it costs no second request and no second
+ * classifier. An entry nothing was read from has no fingerprint, and the cell
+ * says why rather than going blank.
  *
  * A cost of `null` is drawn as unknown and never as `$0.00`, which would assert
  * that an unreadable run cost nothing.
@@ -121,7 +122,7 @@ function Reopen({
   onResume,
 }: {
   run: ArchiveRun;
-  onResume: (runId: string, force: boolean) => void;
+  onResume: (runId: string, force: boolean, task: string) => void;
 }) {
   const [confirming, setConfirming] = useState(false);
   const lock = forcing(run);
@@ -137,7 +138,7 @@ function Reopen({
 
   if (lock === null) {
     return (
-      <Button variant="secondary" size="sm" onClick={() => onResume(run.id, false)}>
+      <Button variant="secondary" size="sm" onClick={() => onResume(run.id, false, run.task)}>
         reopen
       </Button>
     );
@@ -154,7 +155,7 @@ function Reopen({
   return (
     <span className="flex max-w-md flex-wrap items-baseline gap-2">
       <span className="text-body-sm text-emphasis">{lock.why}</span>
-      <Button variant="secondary" size="sm" onClick={() => onResume(run.id, true)}>
+      <Button variant="secondary" size="sm" onClick={() => onResume(run.id, true, run.task)}>
         take the lock and reopen
       </Button>
       <Button variant="quiet" size="sm" onClick={() => setConfirming(false)}>
@@ -169,7 +170,7 @@ export function Workstreams({
   onResume,
 }: {
   dir: string;
-  onResume: (runId: string, force: boolean) => void;
+  onResume: (runId: string, force: boolean, task: string) => void;
 }) {
   const [runs, setRuns] = useState<readonly ArchiveRun[] | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
@@ -256,12 +257,15 @@ export function Workstreams({
             ) : (
               <span key="cost">~${run.costUsd.toFixed(2)}</span>
             ),
-            // The design's most-wanted column, named and empty. Deriving it
-            // needs a read of each run's state.json, which is #114's request
-            // rather than this one.
-            <span key="fp" className="text-body-sm text-tertiary" title="Needs a read of each run's state">
-              not read
-            </span>,
+            // The design's most-wanted column. Absent with its reason when the
+            // core read nothing for this row — refused, or unreadable.
+            run.rounds === undefined ? (
+              <span key="fp" className="text-body-sm text-tertiary">
+                {run.linked === true || run.unverified === true ? 'not opened' : 'state could not be read'}
+              </span>
+            ) : (
+              <code key="fp">{fingerprint(run.rounds)}</code>
+            ),
             !openable(run) ? (
               <span key="act" className="text-body-sm text-tertiary">
                 —
@@ -274,9 +278,10 @@ export function Workstreams({
       />
 
       <p className="m-0 text-body-sm text-tertiary">
-        The rounds fingerprint — <code>p2 v1 r2</code>, cheap to scan for runs that thrashed — is
-        the column this table most wants and it needs a read of each run&apos;s state.
-        Cost is Claude-side only, as everywhere.
+        The fingerprint counts the rounds each run spent: <code>p</code> plan revisions,{' '}
+        <code>q</code> question rounds (shown only when there were any), <code>v</code> verify fix
+        rounds and <code>r</code> review fix rounds. A <code>–</code> is a counter that run never
+        recorded. Cost is Claude-side only, as everywhere.
       </p>
     </div>
   );

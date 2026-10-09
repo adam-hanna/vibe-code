@@ -1,7 +1,6 @@
-import type { ReactNode } from 'react';
-
 /**
- * Severity, the kicker, and the meta chip.
+ * The severity chip. The state kicker and the meta chip beside it went with the
+ * gallery, which was the last thing drawing them (#237).
  *
  * `Severity` is declared here rather than imported from `@src/types.js`
  * deliberately: this layer binds to no core code, so it can be built while the
@@ -9,6 +8,27 @@ import type { ReactNode } from 'react';
  * union in `src/types.ts`, and the app proper is where the two are joined.
  */
 export type Severity = 'P0' | 'P1' | 'P2' | 'P3';
+
+/**
+ * Weight ascends with severity. No chip carries a fill but P2's tint - a fill
+ * would mean pressable. P0 takes the highest luminance AND a doubled rule,
+ * because on a dark ground the ramp is rebuilt rather than flipped. Zero is
+ * dashed, with its digit at the text floor: nothing to report is an absence,
+ * and absence has a treatment.
+ *
+ * Utilities since #237, each the token the old `.v-sev` rule named - the
+ * spacing tokens are off Tailwind's scale, so they are referenced, not rounded.
+ */
+const CHIP =
+  'inline-flex items-baseline gap-(--space-1) whitespace-nowrap rounded-[4px] px-(--space-2) py-[2px] uppercase tracking-(--track-chip) [font:var(--type-chip)]';
+
+const VARIANT = {
+  P0: 'border-(length:--severity-p0-width) border-solid border-severity-p0-rule text-severity-p0-text',
+  P1: 'border border-severity-p1-rule text-severity-p1-text',
+  P2: 'border border-severity-p2-rule bg-severity-p2-fill text-accent-on-tint',
+  P3: 'border border-severity-p3-rule text-primary',
+  zero: 'border border-dashed border-severity-zero-rule text-tertiary',
+} as const;
 
 export function SeverityChip({
   severity,
@@ -20,57 +40,10 @@ export function SeverityChip({
   count?: number | undefined;
   label?: string | undefined;
 }) {
-  const variant = severity === null ? 'zero' : severity.toLowerCase();
   return (
-    <span className={`v-sev v-sev--${variant}`}>
+    <span className={`${CHIP} ${VARIANT[severity ?? 'zero']}`}>
       <span>{label ?? severity ?? 'none'}</span>
       {count !== undefined && <span>{count}</span>}
     </span>
   );
-}
-
-/**
- * The headline of a banner, and the one place a solid fill does not mean
- * interactive. One per region.
- *
- * `alarm` is the pale emphasis reserved for alarm across the whole product;
- * `accent` is for a state that wants you but is not wrong; `quiet` is outlined
- * and is what a verdict wears.
- */
-export function StateKicker({
-  tone = 'alarm',
-  children,
-}: {
-  tone?: 'alarm' | 'accent' | 'quiet';
-  children: ReactNode;
-}) {
-  return <span className={`v-kicker v-kicker--${tone}`}>{children}</span>;
-}
-
-/**
- * `proposed · #NNN`, `app`, `unknown`, `likely the same`, and the evidence
- * kinds.
- *
- * Dashed by default, because a dashed border says "nothing verified this".
- * `checkable` is the exception: a citation that resolved on disk is drawn as a
- * fact. `proposed` is a promise the UI is making that the code has not kept -
- * any of these surviving into a shipped build is a screen running ahead of its
- * behaviour.
- *
- * `alarm` is hi-fi 15's: a diagnostic value that is **wrong**. It is the one
- * kind that earns a place in the chrome, because the whole argument for moving
- * `HOST 43804` and `PROTOCOL 1` into a panel is that they say nothing until one
- * of them disagrees - and at that moment they are the most important thing on
- * screen. It wears `--text-emphasis`, which the token file reserves for alarm
- * across the whole product, rather than a colour chosen here.
- */
-export function MetaChip({
-  kind = 'default',
-  children,
-}: {
-  kind?: 'default' | 'checkable' | 'proposed' | 'alarm';
-  children: ReactNode;
-}) {
-  const mod = kind === 'default' ? '' : ` v-meta--${kind}`;
-  return <span className={`v-meta${mod}`}>{children}</span>;
 }

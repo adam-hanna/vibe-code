@@ -21,7 +21,12 @@ describe('a launch keeps the chat that proposed it until the run has an id', () 
   });
 
   test('the cockpit holds on a pilot launch, and lets go once the run is known', () => {
-    expect(cockpit).toContain('else setHoldChat(pilotAt.current);');
-    expect(cockpit).toMatch(/if \(launchSettled \|\| viewing !== null \|\| draftId !== null\) setHoldChat\(null\);/);
+    // Case 2 (#246): the hold is no longer a state set on launch and cleared
+    // on an id. Each run remembers the conversation that proposed it, and the
+    // pane is held on it until that run's adoption has settled - `heldChat`,
+    // tested in hosts.test.ts, which also covers a run opened from the sidebar
+    // before it was adopted.
+    expect(cockpit).toContain("held: draft === null && seed === null && argv[0] !== 'resume' ? pilotAt.current : null,");
+    expect(cockpit).toMatch(/const holdChat = heldChat\(lives, shownLive, viewing, drafting\);/);
   });
 });

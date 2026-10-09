@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Info, Pause, Play, SkipForward, Square } from 'lucide-react';
+import { Info, Pause, Play, SkipForward, Square, X } from 'lucide-react';
 import { LivenessDot } from '../design';
 import { Badge } from '@/ui/badge';
 import { Button } from '@/ui/button';
@@ -30,6 +30,8 @@ export interface FooterProps {
   onDecide: (askId: number, decision: { kind: 'continue' } | { kind: 'stop'; reason: string }) => void;
   /** Hold at the next boundary. Costs nothing (#210). */
   onPause: () => void;
+  /** Take back a pause not yet reached (#276). */
+  onUnpause: () => void;
   /** Kill the turn in flight and end the run, resumably (#209). Confirms first. */
   onStop: () => void;
   /**
@@ -64,6 +66,8 @@ export interface FooterProps {
   order: readonly string[];
   /** Whether a pause is armed and waiting for the next boundary. */
   pausing: boolean;
+  /** Whether this window asked for a stop the core has not answered yet (#253). */
+  stopping: boolean;
   busy: boolean;
 }
 
@@ -173,6 +177,7 @@ export function Footer({
   run,
   onDecide,
   onPause,
+  onUnpause,
   onStop,
   onResume,
   onImplement,
@@ -180,6 +185,7 @@ export function Footer({
   gates,
   order,
   pausing,
+  stopping: stopAsked,
   busy,
 }: FooterProps) {
   const [reason, setReason] = useState('');
@@ -195,6 +201,22 @@ export function Footer({
   // which is the state before the config frame arrives - and the row says which
   // boundaries hold rather than nothing at all.
   const next = gates === null ? null : nextHold(order, gates, run.lastGate);
+
+  // **The process running this run has gone** (#246), before every other
+  // branch: a gate, a pause or a stop all need a host to answer them, and the
+  // run cannot have returned an exit code, so none of what follows is true of it.
+  if (run.lost !== null) {
+    return (
+      <div className={cn(FOOT, 'border-t-2 border-emphasis bg-active')}>
+        <div className="flex items-center gap-2">
+          <Badge variant="alarm">run host</Badge>
+          <span className={DETAIL}>the process running this run has gone.</span>
+        </div>
+        <div className={WHY}>{run.lost}</div>
+        <div className={NOTE}>Nothing is running it now. Open it from the runs list to resume.</div>
+      </div>
+    );
+  }
 
   // A waiting gate outranks everything, including a run that has said it is
   // done. `review_approved` fires while the loop is still going - verification,
@@ -491,13 +513,17 @@ export function Footer({
             Offered here, beside the ending, rather than as a `RESUMABLE` exit
             code. Exit 0 is not a halt and must not start reading as one; this is
             a separate labelled act on a run that finished exactly as asked. */}
-        {run.plannedOnly !== null && run.identity !== null && (
+        {/* **The repository, not the run's own directory** (#246), for the
+            reason the resume below gives: `identity.dir` is `<repo>/.vibe/runs/<id>`,
+            and `-C` there looks for the run inside itself. */}
+        {run.plannedOnly !== null && run.identity?.repo != null && (
           <div className={ACTIONS}>
             <Button
               variant="primary"
               disabled={busy}
               onClick={() => {
-                if (run.identity !== null) onImplement(run.identity.runId, run.identity.dir);
+                const at = run.identity;
+                if (at?.repo != null) onImplement(at.runId, at.repo);
               }}
             >
               <Play size={14} aria-hidden="true" /> implement this plan
@@ -510,6 +536,13 @@ export function Footer({
                 : 'findings it carried'}{' '}
               and the ones it declined all travel with it, and nothing is re-planned.
             </span>
+          </div>
+        )}
+        {run.plannedOnly !== null && run.identity !== null && run.identity.repo == null && (
+          <div className={NOTE}>
+            This plan can be implemented, but the loop never said which repository it is in — so
+            there is nothing to point it at from here. `vibe resume &lt;id&gt; --implement` does it from
+            a terminal.
           </div>
         )}
         {/* Said whether or not the button is pressed, because it changes what
@@ -659,6 +692,29 @@ export function Footer({
     );
   }
 
+  // **A stop that is waiting says so** (#253). Between pressing stop and the core
+  // narrating its ending, the footer used to look exactly as it did before the
+  // press. An agent turn is killed at once, so this is usually brief - but the
+  // verification gate and git are never killed, and a stop pressed during the
+  // gate waits minutes for it. No controls: the stop has been asked for, and a
+  // pause on top of it would be a request the loop will never reach.
+  if (stopAsked) {
+    return (
+      <div className={cn(FOOT, 'border-t-2 border-emphasis bg-active')}>
+        <div className="flex items-center gap-2">
+          <Badge variant="alarm">stopping</Badge>
+          <span className={DETAIL}>the run stops when the current step returns.</span>
+        </div>
+        <div className={NOTE}>
+          {run.running !== null
+            ? 'The agent turn is being cancelled now.'
+            : 'Checks and git steps are left to finish rather than cut off, so this can take a few minutes.'}{' '}
+          You can resume the run afterwards.
+        </div>
+      </div>
+    );
+  }
+
   const canControl = run.preflight !== null || run.running !== null;
   const boundaryTitle = gates === null
     ? 'Gate settings have not been read yet.'
@@ -689,21 +745,23 @@ export function Footer({
             <Button
               variant="secondary"
               size="sm"
-              disabled={busy || pausing}
-              onClick={onPause}
-              title={pausing ? 'The loop will hold at the next boundary.' : 'Let the current turn finish, then hold at the next boundary.'}
-              aria-label="Pause at the next gate"
+              disabled={busy}
+              // An armed pause can be taken back until the run reaches it (#276):
+              // the same control, saying what pressing it now does.
+              onClick={pausing ? onUnpause : onPause}
+              title={pausing ? 'The run will wait after the current step. Press to take that back.' : 'Let the current step finish, then wait before the next one. Nothing is lost.'}
+              aria-label={pausing ? 'Cancel pause' : 'Pause after this step'}
             >
-              <Pause size={14} aria-hidden="true" />
-              <span>{pausing ? 'Pause armed' : 'Pause at gate'}</span>
+              {pausing ? <X size={14} aria-hidden="true" /> : <Pause size={14} aria-hidden="true" />}
+              <span>{pausing ? 'Cancel pause' : 'Pause'}</span>
             </Button>
             <Button
               variant="secondary"
               size="sm"
               disabled={busy}
               onClick={onStop}
-              title="Stop the active turn now. The run will be resumable from its last checkpoint."
-              aria-label="Stop this turn now — ends the run"
+              title="Stop the run now. The current turn is cancelled, and you can resume the run later."
+              aria-label="Stop run"
             >
               <Square size={12} className="text-emphasis" aria-hidden="true" />
               <span>Stop run</span>

@@ -305,17 +305,36 @@ console.log('\n8 · every style that can wrap has leading');
 // declaration.
 console.log('\n9 · the element reset leaves no user-agent ground showing');
 {
-  const base = readFileSync(path.join(here, '..', 'src', 'design', 'base.css'), 'utf8');
-  const declarations = base.replace(/\/\*[\s\S]*?\*\//g, '');
-  // A `button { … }` block that neutralises the platform's background. Matched
-  // on the selector rather than anywhere in the file, so a `background` set on
-  // some other rule cannot satisfy it.
-  const rule = /(^|\})\s*button\s*\{([^}]*)\}/m.exec(declarations);
-  const body = rule?.[2] ?? '';
-  if (!/background\s*:/.test(body)) {
-    fail('base.css has no `button` rule clearing the user-agent background');
+  // The reset is Tailwind's preflight since #237, which replaced the `button`
+  // rule `base.css` used to carry. So the check asks the same question in two
+  // halves: does `theme.css` import preflight into the base layer, and does
+  // the preflight it imports have a rule naming `button` that neutralises the
+  // background? The second half reads the installed file, because a preflight
+  // that one day stopped resetting buttons is exactly the regression this is
+  // for, and the version is not ours to pin by memory.
+  const theme = readFileSync(path.join(here, '..', 'src', 'design', 'theme.css'), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '');
+  const imported = /@import\s+['"]tailwindcss\/preflight\.css['"]\s+layer\(base\)/.test(theme);
+  let preflight = '';
+  try {
+    preflight = readFileSync(path.join(here, '..', 'node_modules', 'tailwindcss', 'preflight.css'), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '');
+  } catch {
+    // Absent is a failure, not a skip: an audit that passes because it could not
+    // find its subject is the silent pass §8 already refuses.
+  }
+  // A rule whose selector list includes `button` as a selector of its own, and
+  // whose body sets a background. Matched on the selector rather than anywhere
+  // in the file, so a `background` set on some other rule cannot satisfy it.
+  const resets = [...preflight.matchAll(/([^{}]+)\{([^{}]*)\}/g)].some(
+    (m) => (m[1] ?? '').split(',').some((sel) => sel.trim() === 'button') && /background(-color)?\s*:/.test(m[2] ?? ''),
+  );
+  if (!imported) {
+    fail('theme.css does not import tailwindcss/preflight.css into the base layer');
+  } else if (!resets) {
+    fail('the imported preflight has no `button` rule clearing the user-agent background');
   } else {
-    pass('button chrome is reset, so an unstyled control cannot take the UA ground');
+    pass('button chrome is reset by preflight, so an unstyled control cannot take the UA ground');
   }
   // And the three that had the bug now say what colour they are, rather than
   // inheriting one that was only ever correct against a ground they did not have.

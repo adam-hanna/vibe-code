@@ -22,6 +22,8 @@
  * as *"only what differs from project defaults"* — which means the form has to
  * be able to send a difference, not a whole configuration.
  */
+import { tokens } from './format';
+
 export interface Overrides {
   /** `--max-tokens`. The one ceiling that bounds Codex work. Null leaves it alone. */
   maxTokens?: number | null;
@@ -93,13 +95,66 @@ export function briefFor(task: string, planOnly: boolean, over: Overrides = {}):
   }
   if (typeof over.maxTokens === 'number') lines.push(`- max_tokens: ${over.maxTokens}`);
   if (typeof over.p1Tolerance === 'number') lines.push(`- p1_tolerance: ${over.p1Tolerance}`);
-  return [
-    task.trim(),
-    '',
-    '---',
-    'Settings I chose for this run in the composer. Pass them on start_run when you propose it:',
-    ...lines,
-  ].join('\n');
+  return [task.trim(), '', SETTINGS_RULE, SETTINGS_HEAD, ...lines].join('\n');
+}
+
+/** The two lines that open the block `briefFor` appends. `splitBrief` reads them back. */
+const SETTINGS_RULE = '---';
+const SETTINGS_HEAD = 'Settings I chose for this run in the composer. Pass them on start_run when you propose it:';
+
+/**
+ * Your message, and the composer's settings that ride under it, apart (#258).
+ *
+ * **The block stays on the wire and leaves the screen.** `briefFor` puts the
+ * settings in the message because the pilot needs them on the turn that proposes
+ * the run, which may be several exchanges later, and the conversation is the one
+ * thing that persists across those turns - the system prompt is rebuilt every
+ * turn and knows nothing about a draft. But drawn as prose it read as words the
+ * person wrote: *"Whats the purpose? I think we should just get rid of that."*
+ * So the pane shows the brief and draws the settings as chips.
+ *
+ * **Only the exact block `briefFor` writes is recognised**, and only at the end:
+ * a blank line, the rule, the heading, then nothing but `- ` lines. Both halves
+ * of the format are in this file and `overrides.test.ts` drives one through the
+ * other, so a rewording breaks a test rather than putting the block back on
+ * screen. A message that merely contains a `---` is left whole. A setting line
+ * this build does not recognise is shown as itself rather than dropped, because
+ * the chips are the only place the person can see what the pilot was told.
+ *
+ * At display time, so a conversation saved before this change reads the same.
+ */
+export function splitBrief(text: string): { brief: string; settings: string[] } {
+  const marker = `\n\n${SETTINGS_RULE}\n${SETTINGS_HEAD}\n`;
+  const at = text.lastIndexOf(marker);
+  if (at < 0) return { brief: text, settings: [] };
+  const lines = text.slice(at + marker.length).split('\n');
+  if (lines.length === 0 || !lines.every((l) => l.startsWith('- '))) return { brief: text, settings: [] };
+  return { brief: text.slice(0, at), settings: lines.map((l) => settingChip(l.slice(2))) };
+}
+
+/** One `key: value` line from `briefFor`, as a chip. */
+function settingChip(line: string): string {
+  const colon = line.indexOf(': ');
+  const key = colon < 0 ? line : line.slice(0, colon);
+  const value = colon < 0 ? '' : line.slice(colon + 2);
+  switch (key) {
+    case 'plan_only':
+      if (value.startsWith('true')) return 'plan only';
+      if (value.startsWith('false')) return 'full run';
+      return line;
+    case 'gates':
+      return `gates ${value}`;
+    case 'max_tokens': {
+      const n = Number(value);
+      // 0 turns the ceiling off, which is a choice and is said as one.
+      if (!Number.isFinite(n) || value === '') return line;
+      return n === 0 ? 'no token ceiling' : `max ${tokens(n)} tok`;
+    }
+    case 'p1_tolerance':
+      return `P1 tolerance ${value}`;
+    default:
+      return line;
+  }
 }
 
 /**

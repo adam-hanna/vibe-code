@@ -1,11 +1,12 @@
-import { Ellipsis, Pause, Play, Square } from 'lucide-react';
+import { Ellipsis, Pause, Play, Square, X } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { boundary, buildStamp, ending, tokens as fmtTokens } from '../cockpit/format';
 import type { Build } from '../host';
-import type { Run } from '../cockpit/model';
+import type { Run, Staleness } from '../cockpit/model';
+import { StalenessNote } from '../cockpit/Staleness';
 import { cn } from '@/lib/utils';
 
 /**
@@ -18,9 +19,10 @@ import { cn } from '@/lib/utils';
  *   diagnostic belongs in the chrome only while it is wrong (#204), so the pid
  *   lives in the popover and the bar shows only a **protocol alarm** when the
  *   window and the core disagree - naming the disagreement, never the value.
- * - **The run's state**, in one phrase: holding at a gate (with continue and
- *   stop beside it, so a held run is answerable without finding the column),
- *   a turn in flight, or how it ended. The full gate card, with the questions
+ * - **The run's state**, in one phrase: holding at a gate, a turn in flight,
+ *   or how it ended. Continue, pause and stop sit beside it only while the run
+ *   column's footer is not showing them (#264): the column collapsed, or
+ *   showing a past run you opened. Two sets stacked was the bug. The full gate card, with the questions
  *   and the reason field, stays in the loop column; this is the summary.
  * - **Spend**, absent rather than `0 tok` before anything is charged - a run
  *   that has spent nothing has not spent zero, it has not been measured.
@@ -41,8 +43,12 @@ export function StatusBar({
   busy,
   onDecide,
   onPause,
+  onUnpause,
   onStop,
   pausing,
+  stopping,
+  controls,
+  staleness,
   onSpend,
   build,
   diagnosticsOpen,
@@ -61,8 +67,24 @@ export function StatusBar({
   busy: boolean;
   onDecide: (askId: number, decision: { kind: 'continue' } | { kind: 'stop'; reason: string }) => void;
   onPause: () => void;
+  /** Take back a pause not yet reached (#276). */
+  onUnpause: () => void;
   onStop: () => void;
   pausing: boolean;
+  /** A stop was asked for and the core has not answered yet (#253). */
+  stopping: boolean;
+  /**
+   * Draw continue, pause and stop, or only the state word (#264). False while
+   * the run column's footer is showing them for the same run, so the window
+   * never draws two sets one above the other. `statusBarControls` decides.
+   */
+  controls: boolean;
+  /**
+   * How quiet the live turn is (`7c`). Its `thinking` and `cannot tell` states
+   * are drawn here rather than as a strip above the columns, which pushed the
+   * whole window down each time the turn went quiet (#267).
+   */
+  staleness: Staleness;
   onSpend: () => void;
   build: Build | null;
   diagnosticsOpen: boolean;
@@ -99,12 +121,25 @@ export function StatusBar({
 
       {project !== null && <span className="truncate text-tertiary">{project}</span>}
 
+      {/* Before the spacer, so it takes the spacer's room as it comes and goes
+          and nothing to its right moves (#267). */}
+      <StalenessNote state={staleness} />
+
       <span className="flex-1" />
 
-      {run.gate !== null ? (
+      {run.lost !== null ? (
+        // The run's own host has gone (#246): no controls, because nothing is
+        // there to take them, and no exit, because none was returned.
+        <span className="flex items-center gap-1.5">
+          <Badge variant="alarm">run host</Badge>
+          <span className="truncate">{run.lost}</span>
+        </span>
+      ) : run.gate !== null ? (
         <span className="flex items-center gap-1.5">
           <Badge variant="accent">holding</Badge>
           <span>at {boundary(run.gate.boundary)}</span>
+          {controls && (
+          <>
           <Button
             size="sm"
             variant="primary"
@@ -124,6 +159,8 @@ export function StatusBar({
           >
             <Square className="size-3" aria-hidden /> stop
           </Button>
+          </>
+          )}
         </span>
       ) : run.completed !== null ? (
         <span className="flex items-center gap-1.5">
@@ -131,19 +168,31 @@ export function StatusBar({
         </span>
       ) : live ? (
         <span className="flex items-center gap-1.5">
-          <Badge variant="live">{run.running === null ? 'preflight' : 'live'}</Badge>
+          <Badge variant="live">{run.running === null ? 'preflight' : stopping ? 'stopping' : 'live'}</Badge>
+          {controls && (
+          <>
           <Button
             size="sm"
             variant="quiet"
-            disabled={busy || pausing}
-            onClick={onPause}
-            title={pausing ? 'The loop will hold at the next boundary.' : 'Let the current turn finish, then hold at the next boundary.'}
+            disabled={busy || stopping}
+            // Taken back from here too, while the run has not reached it (#276).
+            onClick={pausing ? onUnpause : onPause}
+            title={pausing ? 'The run will wait after the current step. Press to take that back.' : 'Let the current step finish, then wait before the next one. Nothing is lost.'}
           >
-            <Pause className="size-3" aria-hidden /> {pausing ? 'pause armed' : 'pause'}
+            {pausing ? <X className="size-3" aria-hidden /> : <Pause className="size-3" aria-hidden />} {pausing ? 'cancel pause' : 'pause'}
           </Button>
-          <Button size="sm" variant="quiet" disabled={busy} onClick={onStop} title="Stop the turn now. The run stays resumable.">
-            <Square className="size-3" aria-hidden /> stop
+          {/* One name for one action (#253): the footer and the confirmation say `Stop run` too. */}
+          <Button
+            size="sm"
+            variant="quiet"
+            disabled={busy || stopping}
+            onClick={onStop}
+            title="Stop the run now. The current turn is cancelled, and you can resume the run later."
+          >
+            <Square className="size-3" aria-hidden /> {stopping ? 'stopping…' : 'stop run'}
           </Button>
+          </>
+          )}
         </span>
       ) : null}
 

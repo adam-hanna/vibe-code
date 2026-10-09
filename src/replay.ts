@@ -98,7 +98,13 @@ export interface RoundCensus {
   /** `plan` for a critique round, `review` for a review round. */
   phase: 'plan' | 'review';
   round: number;
-  counts: { p0: number; p1: number; p2: number; p3: number };
+  /**
+   * Spelled as the live loop spells them in `findings_reported` (#292). This
+   * was `p0`-`p3`, and the window's `readCounts` reads `P0`-`P3` and refuses
+   * anything else, so every replayed census was dropped and an opened run's
+   * round cards drew no counts at all.
+   */
+  counts: { P0: number; P1: number; P2: number; P3: number };
 }
 
 /** How many questions a question round raised, from `answers-<n>.json`. */
@@ -123,6 +129,12 @@ interface Seat {
   phase: 'planning' | 'critique' | 'implementing' | 'review';
   /** The round the label itself names, or null when it names none. */
   round: number | null;
+  /**
+   * The round the turn itself carries, when it is not the group's. Only a
+   * verify-fix has one: its label names the VERIFY round, which is what the live
+   * `turn_started` carries, while its group is the code round that ran the gate.
+   */
+  turnRound?: number;
 }
 
 /**
@@ -178,9 +190,15 @@ export function seatOf(label: string): Seat | null {
   if (fix !== null) {
     return { role: 'implementer', kind: 'review-fix', phase: 'implementing', round: fix };
   }
+  // **No group round of its own** (#292). `verify-fix-N` names the verify
+  // round, a different counting from the review round a code group is keyed by,
+  // so filing it under `implementing` round N opened a second code card -
+  // `implementing 3` then `implementing 1` on the #246 run. Live, a verify-fix
+  // is inside the code group that ran the gate (#280), so `replayRun` keeps it
+  // in the code group already open.
   const verifyFix = numbered('verify-fix');
   if (verifyFix !== null) {
-    return { role: 'implementer', kind: 'verify-fix', phase: 'implementing', round: verifyFix };
+    return { role: 'implementer', kind: 'verify-fix', phase: 'implementing', round: null, turnRound: verifyFix };
   }
   const finalFix = numbered('final-fix');
   if (finalFix !== null) {
@@ -332,6 +350,22 @@ export function replayRun(state: RunState, sources: ReplaySources): Replay {
   let questionsSaid = 0;
   const censusSaid = new Set<string>();
 
+  // The run's totals ride on the LAST charge, and only there (#235). A live
+  // charge carries `runTokens`, `runCostUsd` and `codexTokens` because
+  // `applyCharge` narrates the totals it has just updated, and the window reads
+  // the total off the charge rather than adding turns up - so a replay whose
+  // charges carried none drew every opened run as "no turn reported a charge".
+  // The running totals were never stored, only the final ones are, and a
+  // running sum rebuilt from `events` is a second answer that need not end where
+  // `state.json` does. So the earlier charges carry no total, the last carries
+  // the record's own, and the fold finishes on the figure the run holds.
+  const last = turns[turns.length - 1];
+  const totals = {
+    runTokens: state.tokensUsed,
+    runCostUsd: state.costUsd,
+    codexTokens: state.codexTokens ?? null,
+  };
+
   for (const turn of turns) {
     const seat = seatOf(turn.label);
     const context = contextAt(sources.checkpoints, turn.at);
@@ -342,8 +376,12 @@ export function replayRun(state: RunState, sources: ReplaySources): Replay {
     const opened = start ?? turn.at;
 
     if (seat !== null) {
-      const round =
+      // A verify-fix belongs to the code group that ran the gate, which is the
+      // one open: the gate runs only after an implement or fix turn (#292).
+      const sameGroup: boolean = seat.kind === 'verify-fix' && openPhase === 'implementing' && openRound !== null;
+      const round: number =
         seat.round ??
+        (sameGroup ? openRound : null) ??
         (seat.phase === 'review' || seat.phase === 'implementing'
           ? (context?.reviewRound ?? 0)
           : (context?.planRound ?? 0));
@@ -393,7 +431,7 @@ export function replayRun(state: RunState, sources: ReplaySources): Replay {
         say('turn_started', `${seat.role} · ${seat.kind}`, {
           role: seat.role,
           kind: seat.kind,
-          round,
+          round: seat.turnRound ?? round,
           // Told, never inferred. A window that guessed which turns had a
           // measured start would guess wrong on the ones that matter.
           unmeasured: start === null,
@@ -406,7 +444,11 @@ export function replayRun(state: RunState, sources: ReplaySources): Replay {
     // replayed total disagree with the run's own record.
     push(
       turn.at,
-      say(turn.type, `${turn.label} ${turn.failed ? 'stopped' : 'charged'}`, turn.data),
+      say(
+        turn.type,
+        `${turn.label} ${turn.failed ? 'stopped' : 'charged'}`,
+        turn === last ? { ...turn.data, ...totals } : turn.data,
+      ),
     );
 
     // The judge's verdict, read from the round's own artifact rather than from
@@ -428,6 +470,35 @@ export function replayRun(state: RunState, sources: ReplaySources): Replay {
         );
       }
     }
+  }
+
+  // **The verification gate's verdicts, as the run recorded them** (#248). Each
+  // `verify_passed|failed|unavailable` is a durable event, carried here whole -
+  // including every attempt's `log`, which is what lets the Verify tab of an
+  // opened run open that run's own logs rather than drawing the live run's
+  // attempts over another run's directory. `verify_started` is a step and not
+  // durable, so it is said immediately before the verdict it opened: `reduce`
+  // settles only a gate something opened, and the verdict is the evidence that
+  // one was. The gate's duration therefore collapses to nothing, which the pane
+  // already draws for a gate without one.
+  for (const event of state.events) {
+    const id = event.type;
+    if (
+      id !== 'verify_passed' &&
+      id !== 'verify_failed' &&
+      id !== 'verify_unavailable' &&
+      id !== 'verify_disabled'
+    ) {
+      continue;
+    }
+    const at = ms(typeof event['at'] === 'string' ? event['at'] : null);
+    if (at === null) continue;
+    const { at: _at, type: _type, ...data } = event;
+    if (id !== 'verify_disabled') {
+      if (typeof data['gate'] !== 'string') continue;
+      push(at, say('verify_started', `Verifying: ${data['gate']}`, { gate: data['gate'], round: data['round'] ?? null }));
+    }
+    push(at, say(id, id, data));
   }
 
   // `since` is the commit before this one, which for the archive is the
@@ -487,21 +558,42 @@ export function replayRun(state: RunState, sources: ReplaySources): Replay {
   // Stable, and by time rather than by the order they were pushed: the commits
   // are appended after the turns and belong among them.
   steps.sort((a, b) => a.at - b.at);
-  return { steps, exit: exitOf(state.status) };
+  return { steps, exit: exitOf(state) };
 }
 
 /**
  * The exit code a run of this status reported.
  *
- * The four the archive can actually hold, and **null for anything else** — a
- * status this build does not recognise has not told us the run succeeded, and a
- * zero would say it had. `EXIT` is not imported because that is the *CLI's*
+ * The statuses the archive can actually hold, and **null for anything else** -
+ * a status this build does not recognise has not told us the run succeeded, and
+ * a zero would say it had. `EXIT` is not imported because that is the *CLI's*
  * table for a run it just finished; this is a reading of a record, and the two
  * agreeing by coincidence is not the same as sharing a definition.
+ *
+ * **`stalled` is every other escalation, so its code is read, not mapped**
+ * (#309). `execute` writes `stalled` for a round cap, a budget, a rate limit
+ * and an unverified finish alike, so no one number is the right answer - and
+ * the escalation event records the one it was. Reporting null here left a
+ * stopped run's replay with a reason and no ending, and the footer drew
+ * *"ending - the run is stopping"* for good, with no resume to press. A stalled
+ * run whose escalation recorded no code still reports null.
  */
-function exitOf(status: string): number | null {
+function exitOf(state: RunState): number | null {
+  const status: string = state.status;
   if (status === 'done' || status === 'planned') return 0;
   if (status === 'needs-input') return 2;
   if (status === 'error') return 1;
+  if (status === 'stalled') return escalationCode(state);
+  return null;
+}
+
+/** The code the last escalation recorded, or null where it recorded none. */
+function escalationCode(state: RunState): number | null {
+  for (let i = state.events.length - 1; i >= 0; i -= 1) {
+    const event = state.events[i];
+    if (event?.type !== 'escalation') continue;
+    const code = event['code'];
+    return typeof code === 'number' && Number.isInteger(code) ? code : null;
+  }
   return null;
 }

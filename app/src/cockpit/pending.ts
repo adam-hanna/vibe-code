@@ -1,4 +1,5 @@
-import { dirKey } from './projects';
+import { dirKey, preview, renameRun } from './projects';
+import type { RunName } from './projects';
 
 /**
  * A run that has been asked for and not started yet (#223).
@@ -38,6 +39,34 @@ export interface Draft {
   launched: boolean;
   /** The run this became, once it said so. Null until `run_started`. */
   runId: string | null;
+  /**
+   * The title the person gave it in the new-run dialog, or null (#262).
+   *
+   * Null is the ordinary case and means *name it from the brief*, which is what
+   * every draft saved before the field reads as. A title somebody typed is
+   * theirs: the row shows it instead of a preview, and it becomes the run's
+   * rename when the draft becomes a run, so pressing the pilot's proposal does
+   * not swap it for the brief the pilot wrote.
+   */
+  name: string | null;
+}
+
+/** What a draft's row is called: the title somebody gave it, or its brief. */
+export function draftTitle(d: Pick<Draft, 'name' | 'task'>): string {
+  return d.name ?? preview(d.task);
+}
+
+/**
+ * The run names once a draft has become run `runId` (#262).
+ *
+ * A typed title is written as the run's **rename** - the same store the row's
+ * own ✎ writes - and not into the run's task: a rename is a label and never a
+ * write to the run's record, and the task is the brief the run was given. A
+ * draft with no title leaves the names exactly as they were, so the row goes on
+ * being named from the brief as it always was.
+ */
+export function namesAfterStart(names: readonly RunName[], draft: Draft, runId: string): readonly RunName[] {
+  return draft.name === null ? names : renameRun(names, draft.dir, runId, draft.name);
 }
 
 export const DRAFTS_KEY = 'vibe.drafts';
@@ -49,7 +78,14 @@ export const DRAFT_PREFIX = 'draft-';
  * A new draft. The randomness is passed in rather than drawn here, so this file
  * stays pure — the same arrangement `emit.ts` has for its window origin.
  */
-export function newDraft(dir: string, task: string, now: number, salt: string): Draft {
+export function newDraft(
+  dir: string,
+  task: string,
+  now: number,
+  salt: string,
+  /** The title typed in the dialog. Blank is no title: the row is named from the brief. */
+  name: string | null = null,
+): Draft {
   return {
     dir: dir.trim(),
     id: `${DRAFT_PREFIX}${now.toString(36)}-${salt}`,
@@ -57,6 +93,7 @@ export function newDraft(dir: string, task: string, now: number, salt: string): 
     createdAt: now,
     launched: false,
     runId: null,
+    name: name === null || name.trim() === '' ? null : name.trim(),
   };
 }
 
@@ -77,7 +114,7 @@ export function readDrafts(raw: string | null): readonly Draft[] {
   return parsed.flatMap((d: unknown): Draft[] => {
     if (typeof d !== 'object' || d === null) return [];
     const r = d as Record<string, unknown>;
-    const { dir, id, task, createdAt, launched, runId } = r;
+    const { dir, id, task, createdAt, launched, runId, name } = r;
     if (typeof dir !== 'string' || typeof id !== 'string' || !isDraftId(id)) return [];
     if (typeof task !== 'string' || typeof createdAt !== 'number') return [];
     return [
@@ -88,6 +125,8 @@ export function readDrafts(raw: string | null): readonly Draft[] {
         createdAt,
         launched: launched === true,
         runId: typeof runId === 'string' ? runId : null,
+        // Absent on every draft saved before #262, and that is no title.
+        name: typeof name === 'string' && name.trim() !== '' ? name : null,
       },
     ];
   });
@@ -101,20 +140,28 @@ export function removeDraft(list: readonly Draft[], id: string): readonly Draft[
   return list.filter((d) => d.id !== id);
 }
 
-/** Mark that this draft's proposal was pressed. Only one draft is ever waiting. */
+/**
+ * Mark that this draft's proposal was pressed, and nothing else (#246).
+ *
+ * It used to un-mark every other launched draft, because only one run could be
+ * starting at a time. Several can now, each from its own draft, and each claims
+ * only its own - so this touches one draft and `unmarkLaunched` is its exact
+ * inverse, for a start Rust refused or a run that ended before it had an id.
+ */
 export function markLaunched(list: readonly Draft[], id: string): readonly Draft[] {
-  return list.map((d) =>
-    d.id === id ? { ...d, launched: true } : d.launched && d.runId === null ? { ...d, launched: false } : d,
-  );
+  return list.map((d) => (d.id === id ? { ...d, launched: true } : d));
 }
 
-/**
- * The run a launched draft became.
- *
- * Only a draft that was **launched and not yet claimed** can be bound, so a run
- * started some other way — a resume, a terminal — never swallows a draft that
- * happens to be open.
- */
+/** `markLaunched`'s inverse, for a draft whose run never got an id. */
+export function unmarkLaunched(list: readonly Draft[], id: string): readonly Draft[] {
+  return list.map((d) => (d.id === id && d.runId === null ? { ...d, launched: false } : d));
+}
+
+/** Whether this draft's run is already starting, so a second press is refused. */
+export function isLaunched(list: readonly Draft[], id: string): boolean {
+  return list.some((d) => d.id === id && d.launched);
+}
+
 export function bindDraft(list: readonly Draft[], id: string, runId: string): readonly Draft[] {
   return list.map((d) => (d.id === id && d.launched && d.runId === null ? { ...d, runId } : d));
 }
@@ -141,4 +188,19 @@ export function settled(list: readonly Draft[], dir: string, archived: readonly 
   return list
     .filter((d) => dirKey(d.dir) === key && d.runId !== null && archived.includes(d.runId))
     .map((d) => d.id);
+}
+
+/**
+ * Whether a draft on screen leaves the run column with nothing to draw.
+ *
+ * A draft that has not been started has no run behind it, so the column beside
+ * its conversation has nothing true to show. It drew the window's last live run
+ * instead: `viewing` is null on a draft, and the column fell through to `run`,
+ * so starting a new run and talking it through with the pilot left the column
+ * on whichever run had been open before. Once the proposal is pressed the draft
+ * is `launched`, and the live run IS the one it asked for: the starting card,
+ * then the run, as it binds.
+ */
+export function draftHasNoRun(draft: Draft | null): boolean {
+  return draft !== null && !draft.launched;
 }

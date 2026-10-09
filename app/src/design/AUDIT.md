@@ -1,5 +1,16 @@
 # The built app against the hi-fi — a divergence audit
 
+> **2026-10-08 (#237): "the built app" here is the pre-Tailwind build, which no longer
+> exists.** This audit walked the screens drawn by the `v-` classes in `components.css`,
+> `cockpit.css` and `workspace.css`. The UI rework (#231) redrew every one of them in
+> Tailwind over the same `tokens.css` — the rail became an activity bar, `SidePanel` became
+> resizable panels, corner marks and hatched skeletons became borders and badges — and the
+> sweep (#237) deleted the last of those stylesheets and the gallery. The findings and their
+> `### Closed` notes are kept as the record of *why* each screen behaves as it does; the
+> file and component names in them describe that build, not this one. What the rework kept
+> from them is listed in the plan (`docs/plans/2026-10-06-ui-rework-design.md`, "Rules
+> pinned").
+
 **Status: closed. Every finding below has been acted on or answered.** The
 verdicts are unchanged from the day they were written; what has been added under
 each is a `### Closed` note saying what was built, what was deliberately built

@@ -29,11 +29,15 @@ import type {
   QuestionKind,
   ResolvedQuestion,
   ReviewCoverage,
+  FileChangeStatus,
+  JudgeFile,
+  TestChanges,
   RoundClaim,
   RoundRecord,
   RunCheckpointMeta,
   RunEvent,
   RunPhase,
+  RunStart,
   RunState,
   RunStatus,
   RunSummary,
@@ -273,6 +277,13 @@ const SLOT_NAMES = {
   review: 'review',
   write: 'write',
 } satisfies Record<SlotName, SlotName>;
+
+const FILE_CHANGE_STATUSES = {
+  added: 'added',
+  modified: 'modified',
+  deleted: 'deleted',
+  renamed: 'renamed',
+} satisfies Record<FileChangeStatus, FileChangeStatus>;
 
 const FORK_WHYS = {
   'never-started': 'never-started',
@@ -1289,8 +1300,90 @@ function readReviewCoverage(raw: unknown, ctx: ReadContext): ReviewCoverage | un
   return { round: raw['round'], chunks: raw['chunks'], files, truncated };
 }
 
+/**
+ * What the last review round did to the judge, or nothing at all (#112).
+ *
+ * Dropped whole rather than repaired, for `readReviewCoverage`'s reason one
+ * function up and a sharper one: a verdict is the reviewer's word, and a
+ * repaired entry would be a word nobody said. A count that is neither a
+ * non-negative integer nor null is not something the writer produces - null is
+ * how it says "not counted" - so it is damage rather than a value to coerce.
+ * The repair is still logged, so the corruption is visible.
+ */
+function readTestChanges(raw: unknown, ctx: ReadContext): TestChanges | undefined {
+  if (raw === undefined) return undefined;
+  const drop = (): undefined => {
+    ctx.repairs.dropped('testChanges', 'testChanges');
+    return undefined;
+  };
+  if (
+    !isRecord(raw) ||
+    !isPositiveInt(raw['round']) ||
+    !Array.isArray(raw['patterns']) ||
+    !raw['patterns'].every(isString) ||
+    !Array.isArray(raw['files'])
+  ) {
+    return drop();
+  }
+  const count = (v: unknown): v is number | null => v === null || isCounter(v);
+  const files: JudgeFile[] = [];
+  for (const entry of raw['files'] as unknown[]) {
+    if (!isRecord(entry)) return drop();
+    const status = enumOf(entry['status'], FILE_CHANGE_STATUSES);
+    const file = entry['path'];
+    const oldPath = entry['oldPath'];
+    const added = entry['added'];
+    const removed = entry['removed'];
+    const verdict = entry['verdict'];
+    if (
+      status === null ||
+      !isString(file) ||
+      !(oldPath === null || isString(oldPath)) ||
+      !count(added) ||
+      !count(removed)
+    ) {
+      return drop();
+    }
+    let read: JudgeFile['verdict'];
+    if (verdict === 'unjudged') read = 'unjudged';
+    else if (
+      isRecord(verdict) &&
+      typeof verdict['justified'] === 'boolean' &&
+      isString(verdict['reason'])
+    ) {
+      read = { justified: verdict['justified'], reason: verdict['reason'] };
+    } else {
+      return drop();
+    }
+    files.push({ path: file, oldPath, status, added, removed, verdict: read });
+  }
+  return { round: raw['round'], patterns: [...(raw['patterns'] as string[])], files };
+}
+
 /** A full object id, never an abbreviation. The same rule `src/git.ts` applies. */
 const FULL_SHA = /^[0-9a-f]{40}$/;
+
+/**
+ * Where this run's branch started, or nothing at all (#249).
+ *
+ * Dropped rather than repaired, for `readTestChanges`'s reason: a start is a
+ * measurement of a commit, and a repaired one would be a commit nobody saw. It
+ * is optional and descriptive - nothing acts on it but the summary - so absence
+ * is the honest degrade, and the repair is still logged so the damage shows.
+ */
+function readStart(raw: unknown, ctx: ReadContext): RunStart | undefined {
+  if (raw === undefined) return undefined;
+  if (
+    isRecord(raw) &&
+    isString(raw['sha']) &&
+    FULL_SHA.test(raw['sha']) &&
+    (raw['ref'] === null || (isString(raw['ref']) && raw['ref'] !== ''))
+  ) {
+    return { sha: raw['sha'], ref: raw['ref'] };
+  }
+  ctx.repairs.dropped('start', 'start');
+  return undefined;
+}
 
 /**
  * A checkpoint's metadata, or null - a pure shape check with no repair log.
@@ -1796,6 +1889,9 @@ const READERS = {
   // review part has completed, and a damaged record is dropped to absence
   // rather than guessed into one (#49).
   reviewCoverage: (raw, ctx) => readReviewCoverage(raw, ctx),
+  // Absent stays absent: a round that touched no judge file records nothing,
+  // and a damaged record is dropped rather than guessed into one (#112).
+  testChanges: (raw, ctx) => readTestChanges(raw, ctx),
   // Absent stays absent again, and a present value is checked rather than
   // trusted: this one becomes a path under the run directory and its contents
   // are rendered into a prompt, so a stored `../../something` would read a file
@@ -1813,6 +1909,8 @@ const READERS = {
   forkedFrom: (raw, ctx) => readForkOrigin(raw, ctx),
   forkPending: (raw, ctx) => readForkPending(raw, ctx),
   branchPending: (raw, ctx) => readBranchPending(raw, ctx),
+  // Absent stays absent: a run from before #249, or one never put on a branch.
+  start: (raw, ctx) => readStart(raw, ctx),
   // The three question-record fields (#65). Optional every one: absent is what
   // a run that suppressed nothing and was answered by nobody looks like, and it
   // is what every state written before they existed presents - so nothing here
@@ -1829,6 +1927,8 @@ const READERS = {
     raw === undefined ? undefined : repairedArray('resolvedByHuman', raw, ctx, readResolvedQuestion),
   carried: (raw, ctx) =>
     raw === undefined ? undefined : repairedArray('carried', raw, ctx, readFinding),
+  advisoryAnswers: (raw, ctx) =>
+    raw === undefined ? undefined : repairedArray('advisoryAnswers', raw, ctx, readAnswer),
   declined: (raw, ctx) =>
     raw === undefined ? undefined : repairedArray('declined', raw, ctx, readFinding),
   acceptanceCriteria: (raw, ctx) =>
@@ -1923,18 +2023,32 @@ export function validateStoredState(
  * this function, and anything that ACTS on "vibe refused to follow this entry"
  * has to read a field only `listRuns`'s own guard can set (#53). Nothing here
  * sets it - the summary is built field by field from `id`, `status`, `task`,
- * `costUsd` and `forkLabel`, so no stored value can reach it.
+ * `costUsd`, `rounds` and `forkLabel`, so no stored value can reach it.
+ *
+ * `rounds` is the per-run fingerprint (#114), read off the same parse rather
+ * than by a second open of the file. Each counter goes through `isCounter` -
+ * the tolerance `counter()` in `scorecard.ts` applies to the same four fields -
+ * so a counter the run never recorded, or one that is not a non-negative
+ * integer, is `null` and never 0: a run that predates `questionRound` did not
+ * ask zero questions, it never said.
  */
 export function summariseStored(raw: unknown, id: string): RunSummary {
   if (!isRecord(raw)) return { id, status: 'unreadable', task: '', costUsd: null };
   const status = raw['status'];
   const task = raw['task'];
   const cost = raw['costUsd'];
+  const round = (v: unknown): number | null => (isCounter(v) ? v : null);
   return {
     id,
     status: isString(status) ? status : 'unknown',
     task: isString(task) ? task : '',
     costUsd: isMoney(cost) ? cost : null,
+    rounds: {
+      plan: round(raw['planRound']),
+      question: round(raw['questionRound']),
+      review: round(raw['reviewRound']),
+      verify: round(raw['verifyRound']),
+    },
     ...forkLabel(raw['forkedFrom']),
   };
 }

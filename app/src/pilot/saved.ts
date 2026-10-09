@@ -202,3 +202,45 @@ export function chatMove(args: {
   if (args.intoRun && !args.opened && args.holding && !args.stored) return 'adopt';
   return 'restore';
 }
+
+/**
+ * What adoption leaves behind at the conversation that proposed a run (#223),
+ * moved out of the pane when the cockpit became the one adopter (#246).
+ *
+ * - The project's **bucket** is cleared, so the next run in this project starts
+ *   from nothing rather than inheriting the conversation that launched this one.
+ * - A **draft's** key is cleared: the run it asked for holds the conversation
+ *   now, and the draft's copy would only come back as a duplicate.
+ * - A **run's own** chat that proposed this one keeps its record, messages and
+ *   all, but gives up its CLI session: two chats resuming one session would each
+ *   answer from the other's messages. Taking a run's key away would delete a
+ *   real conversation to tidy up after a move.
+ */
+export function cleanupWrites(
+  source: string,
+  bucket: string,
+  conversation: Conversation,
+): readonly { key: string; value: string | null }[] {
+  if (source === bucket) return [{ key: bucket, value: null }];
+  if (isDraftKey(source)) return [{ key: source, value: null }];
+  return [{ key: source, value: writable({ ...conversation, session: null, carry: null }) }];
+}
+
+/**
+ * Whether a stored conversation is the exchange already on screen (#246).
+ *
+ * The pane only restores now; the cockpit adopts. So when the pane follows a run
+ * onto the key its conversation was just copied to, what it reads back is the
+ * conversation it is already holding - and replacing it with that copy would
+ * drop a pilot turn still streaming, which adoption never used to. The pane
+ * keeps its turn in flight when this is true, and takes everything else from
+ * the store, including a session the copy gave up.
+ */
+export function sameExchange(stored: string | null, conversation: Conversation): boolean {
+  if (stored === null || !worthSaving(conversation)) return false;
+  const back = readChat(stored);
+  return (
+    JSON.stringify(back.messages) === JSON.stringify(conversation.messages) &&
+    JSON.stringify(back.replies) === JSON.stringify(conversation.replies)
+  );
+}

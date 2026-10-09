@@ -375,7 +375,10 @@ test('a downgrade is tallied by severity and evidence, and never by its reason',
 test('reading the archive does not write to it', () => {
   // #114 asks for this in as many words, and it is the property that makes
   // running this against a live repo safe.
-  const dir = archive({ a: state({ planRound: 2 }), b: '{ broken' });
+  const dir = archive({
+    a: state({ planRound: 2, events: [turn('claude_turn', { label: 'review-0', tokens: 7 })] }),
+    b: '{ broken',
+  });
   const root = path.join(dir, RUNS_DIR);
   const before = snapshot(root);
   scoreArchive(dir);
@@ -404,4 +407,57 @@ test('a state.json holding something that is not an object is refused upstream',
   assert.deepEqual(card.archive.skipped, [{ id: 'a', reason: 'state.json could not be read' }]);
   assert.equal(readFileSync(path.join(dir, RUNS_DIR, 'a', 'state.json'), 'utf8'), '[1,2,3]');
   assert.deepEqual(card.endings.byStatus, {});
+});
+
+test('tokens per turn kind are a nearest-rank distribution, keyed by seatOf', () => {
+  // The comparable-turns line's source (#114). Keyed by the kind `seatOf` reads
+  // back from a label, so `critique-0` and `critique-4` are one kind, and
+  // nearest-rank so every figure is a count some real turn spent.
+  const crit = [10, 50, 30, 20, 40].map((tokens, i) =>
+    turn('codex_turn', { label: `critique-${i}`, tokens }),
+  );
+  const card = scoreArchive(
+    archive({
+      a: state({ events: [...crit.slice(0, 3), turn('claude_turn', { label: 'plan', tokens: 7 })] }),
+      b: state({ events: crit.slice(3) }),
+    }),
+  );
+  assert.deepEqual(card.turns.byKind['critique'], { turns: 5, median: 30, p90: 50 });
+  assert.deepEqual(card.turns.byKind['plan'], { turns: 1, median: 7, p90: 7 });
+  assert.equal(card.version, SCORECARD_VERSION);
+  assert.equal(SCORECARD_VERSION, 1);
+});
+
+test('failed turns, unplaceable labels and missing token counts stay out of every kind', () => {
+  const card = scoreArchive(
+    archive({
+      a: state({
+        events: [
+          // A partial total, which would drag the distribution down.
+          { at: new Date().toISOString(), type: 'turn_failed', label: 'critique-0', tokens: 999 },
+          // A label this build cannot place: counted, never filed under a guess.
+          turn('codex_turn', { label: 'mystery-3', tokens: 5 }),
+          // Placed, but nothing to sample.
+          turn('codex_turn', { label: 'critique-1', tokens: 'lots' }),
+          turn('codex_turn', { label: 'critique-2', tokens: 12 }),
+          // Both revisions are one kind, as the live turn_started says.
+          turn('claude_turn', { label: 'revise-q2', tokens: 3 }),
+          turn('claude_turn', { label: 'revise-1', tokens: 9 }),
+        ],
+      }),
+    }),
+  );
+  assert.deepEqual(card.turns.byKind, {
+    critique: { turns: 1, median: 12, p90: 12 },
+    revise: { turns: 2, median: 3, p90: 9 },
+  });
+  assert.equal(card.turns.unplaced, 1);
+  assert.match(renderScorecard(card).join('\n'), /across models/);
+});
+
+test('an empty archive has no kinds and nothing unplaced', () => {
+  const card = scoreArchive(mkdtempSync(path.join(tmpdir(), 'vibe-scorecard-nokinds-')));
+  assert.deepEqual(card.turns.byKind, {});
+  assert.equal(card.turns.unplaced, 0);
+  assert.equal(renderScorecard(card).some((l) => l.includes('%')), false);
 });

@@ -60,8 +60,13 @@ describe('the webview can store a key and can never read one', () => {
     const registered = lib
       .slice(lib.indexOf('generate_handler!['), lib.indexOf(']', lib.indexOf('generate_handler![')))
       .match(/\b\w+\b/g)
-      ?.filter((w) => /^(host|key|pilot)_/.test(w));
+      ?.filter((w) => /^(host|key|pilot|app)_/.test(w));
     expect(registered?.sort()).toEqual([
+      // Case 2 (#246): a tenth command, on purpose, and the one door the window
+      // has into ending the app. It only exits, through the same `stop()` the
+      // tray's Quit uses, once the window has confirmed a quit with runs going;
+      // a process-exit permission would be broader and could skip the stop.
+      'app_quit',
       'host_send',
       'host_start',
       'host_status',
@@ -197,19 +202,20 @@ describe('the webview can store a key and can never read one', () => {
     expect(context).not.toMatch(/key|secret|token/i);
   });
 
-  test('the two capabilities #144 refuses are absent, not merely undocumented', () => {
+  test('the capability #144 refuses is absent, and the one it deferred is a read', () => {
     // Config (decision 3, answered no) and the run archive (decision 4, yes but
     // #114 first). An absence is only a decision if something fails when it
     // stops being one.
     //
-    // The table grew by two in #211 - `read_command` and `run_command` - and by
-    // one more in #223, `stop_command`, which is the off switch the runner had
-    // no tool for. The list moves with it, which is the point of spelling it out
-    // rather than counting. **No refusal moved**: there is still no config tool
-    // and no archive tool, and the second assertion is the one that says so.
+    // The table grew by two in #211 - `read_command` and `run_command` - by one
+    // in #223, `stop_command`, and by one in #114, `read_archive`: decision 4's
+    // "yet" arrived, so the archive half of the refusal is lifted on purpose and
+    // the tool is a read, never an effect. The config half did not move, and the
+    // second assertion is the one that says so.
     const declared = [...tools.matchAll(/^ {2}name: '(\w+)',$/gm)].map((m) => m[1] ?? '');
     expect(declared.sort()).toEqual([
       'answer_gate',
+      'read_archive',
       'read_command',
       'read_output',
       'read_run',
@@ -217,7 +223,7 @@ describe('the webview can store a key and can never read one', () => {
       'start_run',
       'stop_command',
     ]);
-    expect(declared.filter((n) => /config|archive|runs/.test(n))).toEqual([]);
+    expect(declared.filter((n) => /config/.test(n))).toEqual([]);
   });
 
   test('the event vocabulary is the same set on both sides of the wire', () => {

@@ -251,11 +251,13 @@ test('a judge round reports the counts its own artifact holds', () => {
   });
   const replay = replayRun(state, {
     ...NOTHING,
-    censuses: [{ phase: 'plan', round: 0, counts: { p0: 0, p1: 3, p2: 1, p3: 0 } }],
+    censuses: [{ phase: 'plan', round: 0, counts: { P0: 0, P1: 3, P2: 1, P3: 0 } }],
   });
   const census = replay.steps.find((s) => s.narration.id === 'findings_reported');
   assert.equal(census?.narration.data?.['phase'], 'plan');
-  assert.deepEqual(census?.narration.data?.['counts'], { p0: 0, p1: 3, p2: 1, p3: 0 });
+  // In the live loop's spelling, `P0`-`P3` (#292): the window reads those keys
+  // and drops a census with any other, which is what lowercase did.
+  assert.deepEqual(census?.narration.data?.['counts'], { P0: 0, P1: 3, P2: 1, P3: 0 });
 });
 
 test('the ending is the last escalation or error, by TYPE', () => {
@@ -289,7 +291,31 @@ test('a status this build does not recognise reports no exit code', () => {
   // Null rather than a guessed zero: it has not told us the run succeeded, and
   // the footer draws a code it does not know as the number rather than as a
   // phrase invented for it.
-  assert.equal(replayRun(stateWith({ status: 'stalled' as RunState['status'] }), NOTHING).exit, null);
+  assert.equal(replayRun(stateWith({ status: 'mystery' as RunState['status'] }), NOTHING).exit, null);
+});
+
+test('a stalled run reports the code its escalation recorded (#309)', () => {
+  // `stalled` covers a round cap, a budget, a rate limit and an unverified
+  // finish, so the code is read off the escalation rather than mapped. Without
+  // it the replay had a reason and no ending, and the footer said "the run is
+  // stopping" for good with no resume to press.
+  const state = stateWith({
+    status: 'stalled',
+    events: [
+      { at: iso(1_000), type: 'escalation', code: 4, message: 'an earlier budget stop' },
+      { at: iso(2_000), type: 'escalation', code: 3, message: 'the same P1 set came back 3 rounds running' },
+    ],
+  });
+  assert.equal(replayRun(state, NOTHING).exit, 3);
+});
+
+test('a stalled run whose escalation recorded no code reports none', () => {
+  const state = stateWith({
+    status: 'stalled',
+    events: [{ at: iso(1_000), type: 'escalation', message: 'from a core older than the field' }],
+  });
+  assert.equal(replayRun(state, NOTHING).exit, null);
+  assert.equal(replayRun(stateWith({ status: 'stalled' }), NOTHING).exit, null);
 });
 
 test('a finished plan-only run says so, so it can still be offered implementation', () => {
@@ -516,4 +542,174 @@ test('a failed turn whose provider this build cannot read is skipped, not misatt
   const replay = replayRun(state, NOTHING);
   assert.equal(replay.steps.find((s) => s.narration.id === 'claude_turn'), undefined);
   assert.equal(replay.steps.find((s) => s.narration.id === 'codex_turn'), undefined);
+});
+
+// ---- what the run spent (#235) -----------------------------------------------
+
+function charges(state: RunState): Record<string, unknown>[] {
+  return replayRun(state, NOTHING)
+    .steps.filter((s) => s.narration.id === 'claude_turn' || s.narration.id === 'codex_turn')
+    .map((s) => s.narration.data ?? {});
+}
+
+test('the last charge carries the run’s own totals, so an opened run has a spend', () => {
+  // The window reads the total off a charge and never adds turns up, and a live
+  // charge carries it because `applyCharge` narrates it. A replay whose charges
+  // carried none drew every opened run as "no turn reported a charge" - including
+  // the README's own screenshots, of a run that spent 2.4M tokens.
+  const state = stateWith({
+    tokensUsed: 2_400_000,
+    costUsd: 3.21,
+    codexTokens: 900_000,
+    events: [
+      { at: iso(10_000), type: 'claude_turn', label: 'plan', tokens: 1_000_000 },
+      { at: iso(20_000), type: 'codex_turn', label: 'critique-0', tokens: 900_000 },
+      { at: iso(30_000), type: 'claude_turn', label: 'implement', tokens: 500_000 },
+    ],
+  });
+  const said = charges(state);
+  assert.equal(said.length, 3);
+  const final = said[2] ?? {};
+  assert.equal(final['runTokens'], 2_400_000);
+  assert.equal(final['runCostUsd'], 3.21);
+  assert.equal(final['codexTokens'], 900_000);
+  // The per-turn figure is still the turn's own.
+  assert.equal(final['tokens'], 500_000);
+});
+
+test('only the last charge carries a total, because the running ones were never stored', () => {
+  // A running sum rebuilt from `events` would be a second answer to a question
+  // `state.json` already answers, and it need not end where the record does. So
+  // the earlier charges say nothing about the total rather than something
+  // derived.
+  const state = stateWith({
+    tokensUsed: 30,
+    events: [
+      { at: iso(10_000), type: 'claude_turn', label: 'plan', tokens: 10 },
+      { at: iso(20_000), type: 'codex_turn', label: 'critique-0', tokens: 20 },
+    ],
+  });
+  const [first] = charges(state);
+  assert.equal(first?.['runTokens'], undefined);
+  assert.equal(first?.['codexTokens'], undefined);
+});
+
+test('the total is the record’s even where the events do not add up to it', () => {
+  // `state.tokensUsed` is the authority: a turn charged before this build
+  // recorded it as an event, or one whose label could not be read, is in the
+  // total and not in the list. The replay reports what the run holds.
+  const state = stateWith({
+    tokensUsed: 5_000,
+    events: [{ at: iso(10_000), type: 'claude_turn', label: 'plan', tokens: 100 }],
+  });
+  assert.equal(charges(state)[0]?.['runTokens'], 5_000);
+});
+
+test('a Codex share the run never recorded is said as absent, not as zero', () => {
+  const state = stateWith({
+    tokensUsed: 100,
+    events: [{ at: iso(10_000), type: 'claude_turn', label: 'plan', tokens: 100 }],
+  });
+  assert.equal(charges(state)[0]?.['codexTokens'], null);
+});
+
+test('a run with no charges carries no total at all', () => {
+  // Nothing to attach it to, and nothing invented to hold it: the window keeps
+  // drawing the absence rather than a zero.
+  const state = stateWith({ tokensUsed: 0 });
+  assert.deepEqual(charges(state), []);
+});
+
+test('a run that stopped on a failed turn carries its totals on that turn', () => {
+  const state = stateWith({
+    status: 'needs-input',
+    tokensUsed: 14_247_742,
+    events: [
+      { at: iso(10_000), type: 'claude_turn', label: 'plan', tokens: 1 },
+      { at: iso(90_000), type: 'turn_failed', label: 'implement', provider: 'claude', tokens: 14_247_741 },
+    ],
+  });
+  assert.equal(charges(state)[1]?.['runTokens'], 14_247_742);
+});
+
+test('a gate’s verdicts are said again, each attempt still naming its log (#248)', () => {
+  // The Verify tab of an opened run draws that run's own passes, so the replay
+  // has to carry them - including every attempt's `log`, or the tab of an
+  // opened run either shows nothing or the live run's attempts read under the
+  // wrong run's directory. `verify_started` is not durable, so it is said
+  // immediately before the verdict it opened, which is what `reduce` needs.
+  const attempts = [
+    { run: 1, ok: false, exitCode: 1, log: 'verify-0-0-core-1.log' },
+    { run: 2, ok: true, exitCode: 0, log: 'verify-0-0-core-2.log' },
+  ];
+  const state = stateWith({
+    events: [
+      { at: iso(60_000), type: 'claude_turn', label: 'implement', tokens: 1 },
+      { at: iso(70_000), type: 'verify_failed', gate: 'core', round: 0, runs: 2, failed: 1, verdict: 'flaky', attempts },
+      { at: iso(90_000), type: 'claude_turn', label: 'verify-fix-1', tokens: 1 },
+      { at: iso(95_000), type: 'verify_passed', gate: 'core', round: 0, runs: 2, attempts: [] },
+    ],
+  });
+  const steps = replayRun(state, NOTHING).steps;
+  assert.deepEqual(ids(steps), [
+    'run_started',
+    'phase_started',
+    'turn_started',
+    'claude_turn',
+    'verify_started',
+    'verify_failed',
+    // The fix stays in the code group that ran the gate, as it does live (#292).
+    // This used to open a group numbered by the VERIFY round, which drew a stray
+    // code card after the round it belonged to.
+    'turn_started',
+    'claude_turn',
+    'verify_started',
+    'verify_passed',
+  ]);
+  const failed = steps.find((s) => s.narration.id === 'verify_failed');
+  assert.deepEqual(failed?.narration.data?.['attempts'], attempts);
+  assert.equal(failed?.narration.data?.['type'], undefined);
+  assert.equal(steps.find((s) => s.narration.id === 'verify_started')?.narration.data?.['gate'], 'core');
+});
+
+test('a gate’s verdicts land among the turns by time, not after them (#248)', () => {
+  // Verdicts are read from `events` after the turns, so this is what pins that
+  // the timeline is sorted: a verify pass that preceded a review must be folded
+  // into the code group it ran under, not the review that came after it.
+  const state = stateWith({
+    events: [
+      { at: iso(60_000), type: 'claude_turn', label: 'implement', tokens: 1 },
+      { at: iso(70_000), type: 'verify_failed', gate: 'core', round: 0, runs: 1, failed: 1, attempts: [] },
+      { at: iso(90_000), type: 'claude_turn', label: 'verify-fix-1', tokens: 1 },
+      { at: iso(95_000), type: 'verify_passed', gate: 'core', round: 0, runs: 1, attempts: [] },
+      { at: iso(120_000), type: 'codex_turn', label: 'review-0', tokens: 1 },
+    ],
+  });
+  const steps = replayRun(state, NOTHING).steps;
+  const order = steps.map((s) => `${s.narration.id}:${String(s.narration.data?.['phase'] ?? s.narration.data?.['gate'] ?? '')}`);
+  const reviewOpens = order.indexOf('phase_started:review');
+  assert.ok(reviewOpens > order.lastIndexOf('verify_passed:core'));
+  assert.ok(order.indexOf('verify_started:core') > order.indexOf('phase_started:implementing'));
+  for (let i = 1; i < steps.length; i += 1) assert.ok(steps[i - 1]!.at <= steps[i]!.at);
+});
+
+test('a verify-fix after a later review round stays in that round’s code group (#292)', () => {
+  // The #246 replay drew `implementing 3` and then `implementing 1`: the label
+  // names the verify round and was used as the group's. The group is the code
+  // round that ran the gate, which the checkpoint's review round says; the turn
+  // still carries its own verify round, as the live `turn_started` does.
+  const state = stateWith({
+    events: [
+      { at: iso(60_000), type: 'claude_turn', label: 'fix-3', tokens: 1 },
+      { at: iso(70_000), type: 'verify_failed', gate: 'rust', round: 3, runs: 3, failed: 1, attempts: [] },
+      { at: iso(90_000), type: 'claude_turn', label: 'verify-fix-1', tokens: 1 },
+    ],
+  });
+  const steps = replayRun(state, NOTHING).steps;
+  const opened = steps
+    .filter((s) => s.narration.id === 'phase_started')
+    .map((s) => `${String(s.narration.data?.['phase'])}:${String(s.narration.data?.['round'])}`);
+  assert.deepEqual(opened, ['implementing:3']);
+  const fix = steps.find((s) => s.narration.id === 'turn_started' && s.narration.data?.['kind'] === 'verify-fix');
+  assert.equal(fix?.narration.data?.['round'], 1);
 });

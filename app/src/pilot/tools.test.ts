@@ -2,7 +2,7 @@ import { describe, expect, test } from 'vitest';
 import { launchArgv } from '../cockpit/argv';
 import { noCommands } from '../cockpit/commands';
 import { emptyRun, OUTPUT_KEEP, reduce } from '../cockpit/model';
-import { declare, execute, ORIGIN, TOOLS } from './tools';
+import { archiveContent, declare, execute, ORIGIN, settleCall, TOOLS } from './tools';
 import type { Run } from '../cockpit/model';
 import type { Settlement, ToolContext } from './tools';
 
@@ -98,9 +98,10 @@ describe('reading is immediate; acting is not', () => {
 
     expect(seen['protocol']).toBe(1);
     expect(seen['running']).toMatchObject({ role: 'planner', kind: 'plan', elapsedMs: 42_000 });
-    // Named rather than left out. A model that cannot see the archive would
-    // otherwise answer "has this been tried before" from nothing at all.
-    expect(JSON.stringify(seen['unavailable'])).toContain('#114');
+    // The archive left `unavailable` when `read_archive` arrived (#114): a list
+    // saying it cannot be read beside a tool that reads it is the half-lifted
+    // rule the model would have to work around.
+    expect(JSON.stringify(seen['unavailable'])).not.toMatch(/archive|\.vibe\/runs/);
   });
 
   test("read_run's elapsed is the loop's own figure, absent until it reports one", () => {
@@ -288,5 +289,28 @@ describe('answer_gate proposes a decision the core will judge', () => {
   test('a decision the loop does not understand is refused here rather than read as a stop', () => {
     const settlement = execute(call('answer_gate', { decision: 'implement anyway' }), ctx(holding));
     expect(settlement.kind).toBe('refused');
+  });
+});
+
+describe('read_archive (#114)', () => {
+  test('it is a host read, never an effect or a proposal', () => {
+    const call = { name: 'read_archive', input: {}, unreadable: null };
+    const context: ToolContext = { run: emptyRun(), commands: noCommands(), dir: '/repo' };
+    expect(settleCall(call, context)).toEqual({ kind: 'reads', op: 'archive' });
+    // With no host to ask, it is refused rather than answered with nothing.
+    expect(execute(call, context)).toEqual({
+      kind: 'refused',
+      content: 'read_archive is answered by the host, and there is none here.',
+    });
+  });
+
+  test('its answer is the listing and the scorecard, verbatim', () => {
+    // The listing answers "has this been tried before"; the scorecard alone
+    // cannot, so both travel and neither is summarised.
+    const runs = [
+      { id: 'r1', status: 'done', task: 't', costUsd: 1, rounds: { plan: 2, question: 1, review: 0, verify: null } },
+    ];
+    const scorecard = { version: 1, turns: { byKind: { plan: { turns: 1, median: 5, p90: 5 } }, unplaced: 0 } };
+    expect(JSON.parse(archiveContent('/repo', runs, scorecard))).toEqual({ dir: '/repo', runs, scorecard });
   });
 });

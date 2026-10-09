@@ -45,6 +45,8 @@ import type { Narration } from '@src/log.js';
 import type { PilotChatOptions, PilotChatResult } from '@src/pilotchat.js';
 import type { Outbound } from '@src/protocol.js';
 import type { RunSummary } from '@src/types.js';
+import { scoreArchive } from '@src/scorecard.js';
+import type { Scorecard } from '@src/scorecard.js';
 
 /**
  * The second entry point over `execute()` (#153).
@@ -214,6 +216,11 @@ export interface SessionDeps {
    * definition rather than a fixture around one.
    */
   archive?: (dir: string) => RunSummary[];
+  /**
+   * What scores the archive. Defaults to `scoreArchive` (#114), which runs over
+   * `listRuns` and so inherits its definition of what an entry is.
+   */
+  stats?: (dir: string) => Scorecard;
   /** What reads the config. Defaults to `loadConfig` (#223). */
   config?: (dir: string) => LoadedConfig;
   /**
@@ -288,6 +295,7 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
   /** Subscription pilot turns in flight, by request id, so `pilot_stop` can reach one. */
   const pilotTurns = new Map<number, AbortController>();
   const archive = deps.archive ?? ((dir: string) => listRuns(dir));
+  const stats = deps.stats ?? scoreArchive;
   const listModelsWith = deps.models ?? listModels;
   let listings: Promise<ModelListings> | null = null;
   const readConfig = deps.config ?? ((dir: string) => loadConfig(dir));
@@ -398,6 +406,13 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
         // nobody is awaiting - and, worse, silently consuming an id the next
         // gate might reuse.
         asks.clear();
+        // A pause belongs to the run it was asked during (#253). `takePause`
+        // clears it at the next boundary, but a run that stops or finishes
+        // before reaching one left it armed - and the NEXT run, minutes or days
+        // later, held at its first boundary for a request nobody made of it.
+        // A pause asked for before any run starts still holds that run: this
+        // clears only when a run returns.
+        pauseRequested = false;
         settleIfDone();
       });
   };
@@ -471,6 +486,23 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
         // `listRuns` promises not to throw and this is the belt on that: a
         // window that asked for the archive and got silence would sit on a
         // spinner for ever, and an `error` frame is answerable.
+        send({
+          type: 'error',
+          id: msg.id,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+      return;
+    }
+
+    if (msg.type === 'stats') {
+      // The archive's rule and its reason (#114): `scoreArchive` reads what
+      // `listRuns` lists and writes nothing - `archive-scorecard.test.ts` pins
+      // that every byte under `.vibe/runs` is left as it was - so it is
+      // answerable while a run is going, outside the one-at-a-time gate.
+      try {
+        send({ type: 'stats', id: msg.id, dir: msg.dir, scorecard: stats(msg.dir) });
+      } catch (err: unknown) {
         send({
           type: 'error',
           id: msg.id,
@@ -870,6 +902,7 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
         prompt: msg.prompt,
         system: msg.system,
         model: msg.model,
+        ...(msg.effort === undefined ? {} : { effort: msg.effort }),
         sessionId: msg.sessionId,
         resume: msg.resume,
         // **The repository the window named, never this process's cwd.** Under
@@ -941,6 +974,16 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       // somebody: zero means the cancel arrived between turns, so the run still
       // ends but no work was discarded.
       send({ type: 'result', id: msg.id, exit: killed });
+      return;
+    }
+
+    if (msg.type === 'unpause') {
+      // Whether there was one to take back is the answer (#276): 0 cleared an
+      // armed hold, 1 found none, because the boundary took it first or no
+      // pause was asked for. Never an error - too late is a run that is holding.
+      const had = pauseRequested;
+      pauseRequested = false;
+      send({ type: 'result', id: msg.id, exit: had ? 0 : 1 });
       return;
     }
 

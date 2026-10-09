@@ -62,8 +62,21 @@ export interface VerifyResult {
    */
   attempts: readonly GateAttempt[];
   exitCode: number | null;
-  /** Combined stdout/stderr of the FIRST failing attempt, tail-trimmed. */
+  /**
+   * Combined stdout/stderr of the FIRST failing attempt, cut by `excerpt` to
+   * its head and its tail (#248).
+   */
   output: string;
+  /**
+   * The whole combined output of every attempt, in order, index-aligned with
+   * `attempts` (#248). Empty when nothing ran.
+   *
+   * **Never put on an event.** `attempts` lands on the durable `verify_failed`
+   * and in `state.events`, and an attempt's output can be megabytes - which is
+   * exactly what #133 protects the run's memory from. The caller writes these to
+   * files and puts the files' names on the event instead.
+   */
+  outputs: readonly string[];
   /**
    * Set when the gate could not run at all, as distinct from failing.
    *
@@ -256,6 +269,7 @@ export async function runGateCommand(
     attempts: [],
     exitCode: null,
     output: '',
+    outputs: [],
     unavailable: null,
     unlaunchable: null,
   };
@@ -273,6 +287,7 @@ export async function runGateCommand(
   const env = verificationEnv(contract);
   const wanted = Math.max(1, gate.runs);
   const attempts: GateAttempt[] = [];
+  const outputs: string[] = [];
   /** The first failure, which is the one every existing caller means. */
   let first: { run: number; exitCode: number | null; output: string } | null = null;
 
@@ -280,6 +295,7 @@ export async function runGateCommand(
     const result = await runUserCommand(command, cwd, env, gate.timeoutMs);
     const ok = result.code === 0;
     attempts.push({ run, ok, exitCode: result.code });
+    outputs.push(result.output);
 
     if (ok) continue;
     if (first === null) first = { run, exitCode: result.code, output: result.output };
@@ -293,13 +309,14 @@ export async function runGateCommand(
         runs: attempts.length,
         attempts,
         exitCode: first.exitCode,
-        output: tail(first.output),
+        output: excerpt(first.output, null),
+        outputs,
         unlaunchable,
       };
     }
   }
 
-  if (first === null) return { ...base, runs: wanted, attempts };
+  if (first === null) return { ...base, runs: wanted, attempts, outputs };
 
   return {
     ...base,
@@ -308,7 +325,8 @@ export async function runGateCommand(
     runs: attempts.length,
     attempts,
     exitCode: first.exitCode,
-    output: tail(first.output),
+    output: excerpt(first.output, null),
+    outputs,
     unlaunchable: null,
   };
 }
@@ -345,21 +363,49 @@ export function failedRuns(result: VerifyResult): number {
 /**
  * PATH for the verification command.
  *
- * Prepends the host directories of contracted tools for the same reason the
+ * Adds the host directories of contracted tools for the same reason the
  * agents need repairing: vibe may itself be running under a shell whose PATH
  * cannot resolve node, and a verification step that fails with ENOENT would
  * be indistinguishable from a genuine test failure.
+ *
+ * **Only for a tool the gate's PATH cannot already find, and appended, never
+ * prepended** (#251). Putting the directories first also decided WHICH tool
+ * ran: with `/usr/bin` at the front, a suite on an nvm Node ran under the
+ * system's, and one test of this repo's own failed under it. So the gate ran
+ * something its author's terminal never runs, failed 3 of 3, and the fixer -
+ * whose shell had the normal PATH - could not reproduce it, round after round.
+ * A repair is for a tool that is missing; a tool that is present is the
+ * person's choice, and the gate runs their toolchain.
  */
-function verificationEnv(contract: ToolchainContract): NodeJS.ProcessEnv {
+export function verificationEnv(
+  contract: ToolchainContract,
+  env: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const separator = process.platform === 'win32' ? ';' : ':';
+  const current = env['PATH'] ?? '';
   const dirs: string[] = [];
   for (const tool of Object.keys(contract)) {
+    if (findsOnPath(tool, current, env)) continue;
     const dir = hostDirectoryFor(tool);
     if (dir !== null && !dirs.includes(dir)) dirs.push(dir);
   }
-  if (dirs.length === 0) return { ...process.env };
+  if (dirs.length === 0) return { ...env };
+  // An empty entry means the working directory on POSIX, so none is introduced.
+  const entries = [...current.split(separator).filter((e) => e !== ''), ...dirs];
+  return { ...env, PATH: entries.join(separator) };
+}
 
-  const separator = process.platform === 'win32' ? ';' : ':';
-  return { ...process.env, PATH: `${dirs.join(separator)}${separator}${process.env['PATH'] ?? ''}` };
+/** Whether a directory on `pathVar` holds `tool`, as a shell's lookup would find it. */
+function findsOnPath(tool: string, pathVar: string, env: NodeJS.ProcessEnv): boolean {
+  const win = process.platform === 'win32';
+  const names = win
+    ? ['', ...(env['PATHEXT'] ?? '.COM;.EXE;.BAT;.CMD').split(';')].map((ext) => tool + ext.toLowerCase())
+    : [tool];
+  for (const dir of pathVar.split(win ? ';' : ':')) {
+    if (dir === '') continue;
+    for (const name of names) if (existsSync(path.join(dir, name))) return true;
+  }
+  return false;
 }
 
 /** `npm test` when the project defines one. Deliberately conservative. */
@@ -456,8 +502,41 @@ export function runUserCommand(
   });
 }
 
-function tail(text: string, max = 8000): string {
-  return text.length <= max ? text : `...\n${text.slice(-max)}`;
+/**
+ * How much of a failing gate's output the fixer is handed inline: the first
+ * 2,000 characters and the last 6,000 (#248).
+ *
+ * **The same 8,000 the old tail kept, split.** This is a truncation in the same
+ * standing as `PREVIEW` in the app, not a measurement, and no new budget is
+ * introduced: the old `tail()` kept the last 8,000 alone, and in the #169 run
+ * that held `# fail 2` and none of the failures. The head is what catches a
+ * compile error or a crash, which a runner prints first and then buries.
+ *
+ * **Head and tail together still cannot show a failure printed mid-stream** -
+ * a TAP runner writes each `not ok` where it happens and only a count at the
+ * end, which is exactly the #169 case. What fixes that case is the full log,
+ * written beside the run and named in the marker, and `describeFailure` tells
+ * the fixer to search it.
+ */
+export const EXCERPT_HEAD = 2000;
+export const EXCERPT_TAIL = 6000;
+
+/**
+ * `text` within `EXCERPT_HEAD + EXCERPT_TAIL`, with the cut stated (#248).
+ *
+ * Output within the budget comes back byte-identical, with no marker. Past it,
+ * the elided middle is replaced by one line saying how much was dropped and -
+ * when the caller has written it - where the whole of it is.
+ */
+export function excerpt(text: string, full: string | null): string {
+  const budget = EXCERPT_HEAD + EXCERPT_TAIL;
+  if (text.length <= budget) return text;
+  const omitted = text.length - budget;
+  const where = full === null ? '' : `; the full output is ${full}`;
+  return (
+    `${text.slice(0, EXCERPT_HEAD)}\n[vibe] … ${omitted} characters omitted${where} …\n` +
+    text.slice(-EXCERPT_TAIL)
+  );
 }
 
 /** "runs 1 and 3 passed, run 2 exited 1" - what actually happened, per attempt. */
@@ -492,7 +571,15 @@ function list(ns: readonly number[]): string {
  * two, and saying "it failed" when that is the whole of the evidence is the
  * honest version.
  */
-export function describeFailure(result: VerifyResult): string {
+export function describeFailure(
+  result: VerifyResult,
+  /**
+   * The full log of every FAILED attempt, by absolute path (#248). The excerpt
+   * above it is bounded and the log is not, so this is where the failures are
+   * when the runner printed them mid-stream.
+   */
+  logs: readonly { run: number; path: string }[] = [],
+): string {
   const command = `\`${result.command ?? 'verification'}\``;
   const gate = `Gate \`${result.name}\``;
   const detail = perRun(result);
@@ -511,7 +598,19 @@ export function describeFailure(result: VerifyResult): string {
           `${gate}: ${command} exited ${result.exitCode ?? 'abnormally'}. It was run once, ` +
           'so there is no second sample and nothing here says whether it is deterministic.';
 
-  return `${headline}\n\n\`\`\`\n${result.output}\n\`\`\``;
+  const fenced = `${headline}\n\n\`\`\`\n${result.output}\n\`\`\``;
+  if (logs.length === 0) return fenced;
+  // Named for every failed attempt, and the instruction travels with them: the
+  // reporter is not parsed (#135), so the fixer is told where to look and what a
+  // runner usually does with failures rather than being handed a list of them.
+  const named = logs.map((l) => `- run ${l.run}: ${l.path}`).join('\n');
+  return (
+    `${fenced}\n\nThe full output of each failed run is on disk:\n${named}\n\n` +
+    'A test runner usually prints each failure where it happens and only a count at the ' +
+    'end, so the excerpt above may not contain the failures. Search the full log (for ' +
+    'example for `not ok`, `✖`, `Error`, `FAIL`) before changing code, rather than ' +
+    're-running the suite by hand to find them.'
+  );
 }
 
 /**

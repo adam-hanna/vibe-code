@@ -8,6 +8,8 @@ import { roundTitle } from '../cockpit/rounds';
 import type { Severity } from '../design';
 import type { RoundCard as Round } from '../cockpit/rounds';
 import type { GateRun } from '../cockpit/model';
+import type { OpenAt } from '../cockpit/LoopColumn';
+import type { Tab } from '../cockpit/where';
 
 /**
  * What a round left behind, in the log (hi-fi 5, #223).
@@ -78,7 +80,7 @@ function gateLine(gate: GateRun): string {
  * up already earned: the largest thing on the surface was inert while something
  * smaller beside it did the navigating.
  */
-const PANE: Readonly<Record<Round['cycle'], string>> = {
+const PANE: Readonly<Record<Round['cycle'], Tab>> = {
   plan: 'plans',
   critique: 'critique',
   code: 'code',
@@ -103,7 +105,7 @@ export function RoundCard({
 }: {
   card: Round;
   /** Undefined where there is nowhere to send the reader. The link is omitted. */
-  onOpen?: ((tab: string, round?: number | null) => void) | undefined;
+  onOpen?: OpenAt | undefined;
 }) {
   const open = card.endedAt === null;
   const counts = card.census?.counts ?? null;

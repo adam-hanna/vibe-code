@@ -196,7 +196,17 @@ export const FINDINGS_SCHEMA = {
     verdict: {
       type: 'string',
       enum: ['APPROVE', 'REVISE'],
-      description: 'APPROVE if and only if there are zero P0 and zero P1 findings.',
+      // This used to read "APPROVE if and only if there are zero P0 and zero P1
+      // findings", which was both an instruction about what the loop does and
+      // false: `gate()` decides from the findings and `loop.p1Tolerance`, carries
+      // up to that many P1s (default 1), and never reads this field (#115). It
+      // states no threshold on purpose - a reviewer told how many P1s are free is
+      // invited to grade toward the line rather than on the merits.
+      description:
+        'Your own judgement of whether this is right. It is recorded, not acted on: what ' +
+        'happens next is decided from your findings and their severities under the ' +
+        "project's settings. APPROVE is a correct and expected outcome when inspection " +
+        'supports it. Grade each finding on its merits, never to reach or avoid a verdict.',
     },
     summary: { type: 'string' },
     findings: {
@@ -372,6 +382,51 @@ export const FINDINGS_SCHEMA = {
                   'command is.',
               },
             },
+          },
+        },
+      },
+    },
+  },
+} as const satisfies object;
+
+/**
+ * The reviewer's schema: the findings, plus one verdict per change to the judge
+ * (#112).
+ *
+ * Its own constant rather than a field on `FINDINGS_SCHEMA`, because that one is
+ * the plan critic's too and the critic has no diff and no judge files to rule
+ * on. Required and an empty array when the prompt lists nothing, because Codex
+ * refuses a closed object whose `required` does not cover every property (#68) -
+ * so "optional" is spelled `[]`, never an absent key.
+ */
+export const REVIEW_SCHEMA = {
+  ...FINDINGS_SCHEMA,
+  required: [...FINDINGS_SCHEMA.required, 'test_verdicts'],
+  properties: {
+    ...FINDINGS_SCHEMA.properties,
+    test_verdicts: {
+      type: 'array',
+      description:
+        'One entry per file listed under "Changes to the judge" in the prompt, and an empty ' +
+        'array when the prompt lists none. A listed file you leave out is recorded as unjudged.',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['file', 'justified', 'reason'],
+        properties: {
+          file: {
+            type: 'string',
+            description: 'The path exactly as it is listed in the prompt.',
+          },
+          justified: {
+            type: 'boolean',
+            description:
+              'True only when the change is justified under the definition in the prompt. ' +
+              'Never true merely because the change makes the gate pass.',
+          },
+          reason: {
+            type: 'string',
+            description: 'Why, citing what in the plan or the code settles it.',
           },
         },
       },

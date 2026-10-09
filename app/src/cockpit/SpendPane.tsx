@@ -53,7 +53,7 @@ function byPhase(charges: readonly Charge[]): { phase: string; tokens: number; t
 
 /** One block of the pane: a heading and what it measured. */
 const BLOCK = 'flex flex-col gap-2';
-const H = cn(LABEL, 'm-0 text-body-sm');
+const H = cn(LABEL, 'm-0 font-bold text-body-sm');
 const NOTE = 'm-0 text-body-sm text-secondary';
 /** A named absence, never a blank and never a zero. */
 const ABSENT = 'm-0 text-body-sm text-tertiary';

@@ -11,7 +11,7 @@
  * ## Why a type scale rather than browser zoom
  *
  * Zoom scales layout as well as type, and viewport units do not scale with it —
- * so `.v-modal`'s `max-height: calc(100vh - …)` would compute in zoomed pixels
+ * so the Modal's `max-h-[calc(100vh-44px)]` would compute in zoomed pixels
  * and a dialog would be taller than the window at any zoom above 1, which is the
  * exact defect that bound was added to fix. A type scale touches type.
  *

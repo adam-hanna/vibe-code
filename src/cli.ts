@@ -1,5 +1,5 @@
 ﻿import { CLI_DEFAULT } from '@src/modelflag.js';
-import { readFileSync, existsSync, renameSync } from 'node:fs';
+import { readFileSync, existsSync, renameSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import {
   applyOverrides,
@@ -30,15 +30,15 @@ import {
 import type { AllocatedRun } from '@src/run.js';
 import { acquireLock, describeLiveness } from '@src/lock.js';
 import { Cancelled, cancelRequested, clearCancel } from '@src/cancel.js';
-import { installPromptOverrides } from '@src/prompts.js';
+import { installPromptOverrides, installStandingInstructions } from '@src/prompts.js';
 import { describeEnding as describeProcessEnding, installEndingStamp } from '@src/ending.js';
 import { commitFork, listForkPoints, planFork } from '@src/fork.js';
 import type { Liveness, LockHandle } from '@src/lock.js';
-import { reconcileAssumed, reconcileQuestionRecords } from '@src/questions.js';
+import { mergeHumanAnswers, reconcileAssumed, reconcileQuestionRecords } from '@src/questions.js';
 import { acceptMoves, acceptRaised, parseMoves, parseRaised, raisePhase } from '@src/raise.js';
 import type { RaiseProblem, RequestedMove, RequestedMoves } from '@src/raise.js';
 import { assertUsableRunId } from '@src/stored.js';
-import { Escalation, EXIT, orchestrate, writeEscalation } from '@src/orchestrator.js';
+import { chooseBase, Escalation, EXIT, orchestrate, writeEscalation } from '@src/orchestrator.js';
 import type { ExitCode } from '@src/orchestrator.js';
 import {
   codexConversations,
@@ -55,6 +55,8 @@ import type { RolePatches } from '@src/roles.js';
 import { setOwn } from '@src/runtime.js';
 import { claudeBin, setSessionArgs } from '@src/claude.js';
 import { codexBin } from '@src/codex.js';
+import { describeMcp, mcpRefusals } from '@src/mcp.js';
+import { run as runChild } from '@src/proc.js';
 // The accounting seam, from the leaf it lives in: orchestrator.js re-exports
 // applyCharge but not fmtTokens, and charge.js imports nothing that imports this.
 import { applyCharge, fmtTokens, takeInFlight } from '@src/charge.js';
@@ -64,7 +66,7 @@ import { closeCodexRateLimits, describeLimits, readCodexRateLimits } from '@src/
 import { describeGates } from '@src/gates.js';
 import { renderScorecard, scoreArchive } from '@src/scorecard.js';
 import { resolveGates } from '@src/verify.js';
-import { createWorktree, workDirOf } from '@src/worktree.js';
+import { createWorktree, sameRepositoryRefusal, storedWorktree, workDirOf } from '@src/worktree.js';
 import type { AgentPreflight } from '@src/preflight.js';
 import * as git from '@src/git.js';
 import * as log from '@src/log.js';
@@ -595,6 +597,15 @@ async function cmdRun(
     extraContext = readFileSync(file, 'utf8');
   }
 
+  // Before anything is allocated, so a refused start leaves no run directory
+  // behind (#246). Another run working in this checkout - started here or from a
+  // terminal - would edit the same files and branch under this one.
+  const busy = sameRepositoryRefusal(targetDir, { self: null, worktree: cfg.git.worktree });
+  if (busy !== null) {
+    log.fail(busy, { id: 'run_failed', data: { code: EXIT.PREFLIGHT, reason: busy } });
+    return EXIT.PREFLIGHT;
+  }
+
   // Allocate, lock, then initialise - in that order, and it is load-bearing.
   // The directory has to exist before the lock can live in it, and the first
   // state write has to happen inside the lock and carry the config and the
@@ -609,6 +620,21 @@ async function cmdRun(
     // must not become a second writer.
     log.fail(`Run ${allocated.id} is already locked: ${describeLiveness(verdict)}`);
     return EXIT.ERROR;
+  }
+
+  // **Again, now that this run's own lock is on disk** (#246). The check above
+  // and the claim are two steps, so two starts in one checkout could both pass
+  // the first and then both claim. Each writes its lock before it looks a second
+  // time, so whichever looks second sees the other: the race is closed without a
+  // repository-wide lock, and the cost is that two exactly simultaneous starts
+  // may both refuse - the fail-closed direction. A refusal here takes back
+  // everything this start made, so it still leaves no run directory behind.
+  const raced = sameRepositoryRefusal(targetDir, { self: allocated.id, worktree: cfg.git.worktree });
+  if (raced !== null) {
+    handle.release();
+    rmSync(allocated.dir, { recursive: true, force: true });
+    log.fail(raced, { id: 'run_failed', data: { code: EXIT.PREFLIGHT, reason: raced } });
+    return EXIT.PREFLIGHT;
   }
 
   try {
@@ -840,6 +866,16 @@ async function cmdResume(
     loadRun(targetDir, id);
   }
 
+  // Before the lock, so a refused resume writes nothing (#246). The run's own
+  // worktree decision is read off its record rather than through `loadRun`,
+  // which writes; a resume never re-decides it. `--force` does not reach this:
+  // it overrides this run's own lock, not another run's claim on the checkout.
+  const busy = sameRepositoryRefusal(targetDir, { self: id, worktree: storedWorktree(runDir) });
+  if (busy !== null) {
+    log.fail(busy, { id: 'run_failed', data: { code: EXIT.PREFLIGHT, reason: busy } });
+    return EXIT.PREFLIGHT;
+  }
+
   const { ok, verdict, handle } = acquireLock(runDir, id, flags.force === true);
   if (!ok || handle === null) {
     log.fail(`Run ${id} cannot be resumed: ${describeLiveness(verdict)}`);
@@ -848,6 +884,15 @@ async function cmdResume(
         'which reports what it had spent but charges none of it.',
     );
     return EXIT.ERROR;
+  }
+  // The same second look a start takes, for the same race (#246): another run
+  // in this checkout that claimed its lock while this resume was taking its own.
+  // Before anything is read or written beyond the lock, which is released.
+  const raced = sameRepositoryRefusal(targetDir, { self: id, worktree: storedWorktree(runDir) });
+  if (raced !== null) {
+    handle.release();
+    log.fail(raced, { id: 'run_failed', data: { code: EXIT.PREFLIGHT, reason: raced } });
+    return EXIT.PREFLIGHT;
   }
   if (handle.forced) {
     log.warn(`--force: took the lock anyway. It was ${describeLiveness(verdict)}`);
@@ -968,10 +1013,17 @@ async function resumeRun(
     }
     applyEdits();
     log.ok(`Picked up ${answers.length} answer(s) from NEEDS-INPUT.md`);
-    state.pendingAnswers = answers;
+    // Merged, never overwritten (#169): the answerer's usable answers are
+    // already durable in `pendingAnswers` when a run stops after its turn, and
+    // a `question-round` stop hands every question back - answered or not. The
+    // person wins where both answered one question; the answerer's answer
+    // stands where the person left it blank.
+    state.pendingAnswers = mergeHumanAnswers(state.pendingAnswers, answers);
     // On the same write that stores them, so there is no window where the run
     // is holding answers it has no durable record of having been given (#65).
-    // `pendingAnswers` is consumed by the loop and cannot be that record.
+    // `pendingAnswers` is consumed by the loop and cannot be that record - and
+    // only the human answers go here, because `humanAnswered` means a person
+    // answered and the merged list includes the answerer's.
     recordHumanAnswers(state, answers);
     saveState(state);
     // Immediately, and before preflight: `ASSUMED.md` is authored at the end of
@@ -1067,6 +1119,12 @@ function resumedFrom(state: RunState): Record<string, unknown> {
  * With no `--at`, or an `--at` naming no checkpoint, this lists the fork points
  * and exits non-zero - **without ever building a path from the positional id**,
  * which `listForkPoints` guarantees by asserting the id first.
+ */
+/**
+ * No same-repository check here (#246), and that is a decision rather than an
+ * omission: a fork creates a run directory, a lock and a branch ref and then
+ * stops. It touches no working tree and starts no loop, and the fork is only
+ * ever run by a later `vibe resume`, which goes through the check.
  */
 async function cmdFork(args: readonly string[]): Promise<ExitCode> {
   const { positional, flags } = parseArgs(args);
@@ -1315,6 +1373,11 @@ export function recordHumanAnswers(state: RunState, answers: readonly Answer[]):
  */
 export interface PreflightOptions {
   skipProbe: boolean;
+  /**
+   * Whether this pass is a resume (#249). Optional so every existing gate and
+   * call site is unchanged; a resume never resolves, fetches or moves a base.
+   */
+  resume?: boolean;
 }
 
 /** The preflight gate, injected so its escalation path is testable without spawning. */
@@ -1572,6 +1635,9 @@ export async function execute(
   // cancel that survived into it would kill its first agent turn instantly -
   // reported as the run being stopped by somebody who stopped a different one.
   clearCancel();
+  // A base resolved for a previous run in this process is never this run's
+  // (#249). Preflight sets it again when this run has one.
+  chooseBase(state.id, null);
   // The prompt overrides this run's config asks for (#223), installed in the
   // same breath and for the same reason the latch above is cleared: it is a
   // module latch, one run per process, and one left standing from a previous
@@ -1579,6 +1645,7 @@ export async function execute(
   // reviewer. Installed unconditionally, so an empty table is what clears it -
   // there is no path that leaves the previous run's overrides in place.
   installPromptOverrides(cfg.prompts);
+  installStandingInstructions(cfg.instructions.text);
   const started = Date.now();
   const recovery = emptyRecovery();
   let reported = false;
@@ -1632,7 +1699,9 @@ export async function execute(
     // Always called, and handed the flag rather than gated on it: since #71 the
     // gate's deterministic half is not skippable, and only it knows which half
     // is which.
-    const gate = await preflightGate(state, cfg, { skipProbe });
+    // `resume` only when it is one (#249): absent already means a fresh run, so a
+    // fresh run's gate is told exactly what it always was.
+    const gate = await preflightGate(state, cfg, resume ? { skipProbe, resume } : { skipProbe });
     // Also here, for a gate that returned without checking: a stop that landed
     // after the last probe must not buy the first turn.
     stopIfCancelled();
@@ -1714,6 +1783,7 @@ export async function execute(
     // limits; this is a statement about what the run did and did not establish.
     reportGates(state);
     reportReviewCoverage(state);
+    reportTestChanges(state);
     reportDeferred(state);
     summary(state, started, recovery);
     return incomplete === null ? EXIT.OK : EXIT.UNVERIFIED;
@@ -1872,7 +1942,7 @@ export async function runPreflight(
   state: RunState,
   cfg: Config,
   probes: PreflightProbes = REAL_PROBES,
-  options: { skipProbe?: boolean } = {},
+  options: { skipProbe?: boolean; resume?: boolean } = {},
 ): Promise<ExitCode | null> {
   const phases: Phase[] = state.planOnly ? ['plan'] : ['plan', 'implement', 'review'];
 
@@ -1899,6 +1969,58 @@ export async function runPreflight(
   // calls the loop, and `runPhases` opens with `prepareGit`. So the tree exists
   // before the branch is decided in it, which is the whole arrangement - this
   // decides WHERE, `prepareGit` still decides WHICH BRANCH.
+  /** A preflight refusal, in the shape every other one here takes. */
+  const refuse = (reason: string): ExitCode => {
+    log.heading('Preflight');
+    log.fail(reason, { id: 'run_failed', data: { code: EXIT.PREFLIGHT, reason } });
+    state.status = 'error';
+    recordEvent(state, 'preflight-failed', { reasons: [reason] });
+    return EXIT.PREFLIGHT;
+  };
+
+  // **Where a new run's branch starts** (#249). The #169 run started from a
+  // stale tip because the base was whatever HEAD happened to be. `git.baseRef`
+  // is resolved here, once, before anything is spent, and only on a FRESH run: a
+  // resume's branch already exists and keeps its commits, and a fork's comes
+  // from its checkpoint (it arrives through a resume, with `branch` already set).
+  // Nothing durable is written here - the branch and where it started are
+  // recorded together by `prepareGit` - so a run stopped in preflight comes back
+  // exactly as it was.
+  const fresh = options.resume !== true && state.branch === null;
+  let base: string | null = null;
+  const ref = cfg.git.baseRef;
+  if (fresh && ref !== null) {
+    if (!cfg.git.useBranch) {
+      return refuse(
+        `git.baseRef is "${ref}", but branch isolation is off (--no-branch): there is no run ` +
+          'branch to start at that base, and running on whatever is checked out is the silent ' +
+          'failure #249 removed. Unset git.baseRef, or drop --no-branch. Nothing has been spent.',
+      );
+    }
+    const resolved = await git.resolveBase(state.targetDir, ref, cfg.git.worktreeTimeoutMs);
+    // The fetch is not interruptible, so a stop pressed during it ends the run
+    // the moment it returns rather than after the worktree and both probes.
+    stopIfCancelled();
+    if (!resolved.ok) return refuse(resolved.reason);
+    // With no worktree the base is checked out over the repository itself, so
+    // uncommitted changes would be carried across to a different commit in
+    // silence. At HEAD nothing moves, which is today's behaviour, warning
+    // included.
+    if (state.worktree !== true) {
+      const head = await git.markBase(state.targetDir);
+      if (resolved.sha !== head && (await git.isDirty(state.targetDir))) {
+        return refuse(
+          `git.baseRef "${ref}" resolves to ${resolved.sha}, but the repository has uncommitted ` +
+            `changes and HEAD is ${String(head)}: starting the run there would carry them across ` +
+            'to a different commit. Commit or stash them, or turn git.worktree on. Nothing has ' +
+            'been spent.',
+        );
+      }
+    }
+    base = resolved.sha;
+    chooseBase(state.id, base);
+  }
+
   if (state.worktree === true) {
     // The branch, as a ref, before the script runs - so `VIBE_BRANCH` names a
     // branch that exists on a fresh run and on a resume alike, and one line of
@@ -1906,10 +2028,25 @@ export async function runPreflight(
     // both. `prepareGit` adopts it. A repository with no commit has no HEAD to
     // put it at, so the script is told no branch and `prepareGit` makes it as it
     // always has (#223).
+    //
+    // At `git.baseRef`'s commit when it was resolved above (#249), and the
+    // default worktree is then detached at the same commit. A base that cannot
+    // become the branch refuses rather than degrading to HEAD: starting elsewhere
+    // is the defect. With no worktree nothing is created here - `prepareGit`
+    // makes the branch at the same sha, its one creation site on that path, so a
+    // stop in between strands no ref.
     let branch = git.runBranch(cfg, state);
     if (branch !== null && !(await git.branchExists(state.targetDir, branch))) {
-      const head = await git.markBase(state.targetDir);
-      if (head === null || !(await git.createBranchRef(state.targetDir, branch, head)).ok) {
+      const at = base ?? (await git.markBase(state.targetDir));
+      const made = at === null ? null : await git.createBranchRef(state.targetDir, branch, at);
+      if (made === null || !made.ok) {
+        if (base !== null) {
+          return refuse(
+            `Branch "${branch}" could not be created at git.baseRef "${String(ref)}" ` +
+              `(${base}): ${made !== null && !made.ok ? made.error : 'no commit'}. Nothing has ` +
+              'been spent.',
+          );
+        }
         branch = null;
       }
     }
@@ -1987,6 +2124,27 @@ export async function runPreflight(
   // already finished - there is nothing to resume" a moment later, which is the
   // explanation a user needs.
   if (ahead.length === 0) return null;
+
+  // Every MCP grant resolves, or the run does not start (#138). Before the
+  // `--skip-probe` return on purpose: that flag skips the agents' environment
+  // probe, not this - a grant that names nothing would otherwise surface as a
+  // failed turn after the run had spent. Free on a run that grants nothing,
+  // which is every run by default: no role is asked about, so nothing spawns.
+  const mcpBlocked = await mcpRefusals(cfg, rolesFor(cfg), {
+    cwd: workDirOf(state),
+    repoDir: state.targetDir,
+    exec: runChild,
+    codexBin,
+  });
+  if (mcpBlocked.length > 0) {
+    log.heading('Preflight');
+    for (const reason of mcpBlocked) {
+      log.fail(reason, { id: 'run_failed', data: { code: EXIT.PREFLIGHT, reason } });
+    }
+    state.status = 'error';
+    recordEvent(state, 'preflight-failed', { reasons: mcpBlocked });
+    return EXIT.PREFLIGHT;
+  }
 
   // After the preconditions, before the heading: a skipped probe printed
   // nothing before #71 and still prints nothing now.
@@ -2209,6 +2367,33 @@ function reportGates(state: RunState): void {
 }
 
 /**
+ * Changes to the run's own judge that the last review did not call justified
+ * (#112).
+ *
+ * One line, and only when there is something to say: a file the reviewer judged
+ * not justified, or one it never judged at all. Silent when every change was
+ * justified or none was touched - a list of fine edits at the end of a run is
+ * noise that teaches people to skip the line that matters. The exit code does
+ * not move for this; the issue's decision is record and surface, never block.
+ */
+function reportTestChanges(state: RunState): void {
+  const record = state.testChanges;
+  if (record === undefined) return;
+  const named = (files: readonly { path: string }[]): string =>
+    files.map((f) => `\`${f.path}\``).join(', ');
+  const unjudged = record.files.filter((f) => f.verdict === 'unjudged');
+  const rejected = record.files.filter((f) => f.verdict !== 'unjudged' && !f.verdict.justified);
+  if (unjudged.length === 0 && rejected.length === 0) return;
+  const parts: string[] = [];
+  if (rejected.length > 0) parts.push(`not justified: ${named(rejected)}`);
+  if (unjudged.length > 0) parts.push(`unjudged: ${named(unjudged)}`);
+  log.warn(
+    `Review round ${record.round} changed the run's own tests or config - ${parts.join('; ')}. ` +
+      'The reasons are in state.json under testChanges and in the round\'s code-review artifact.',
+  );
+}
+
+/**
  * What the last review round was actually shown.
  *
  * Here for the reason `reportGates` is here: a change too large for one turn is
@@ -2382,6 +2567,14 @@ function summary(state: RunState, started: number, recovery?: RecoveryReport): v
     );
   }
   if (state.branch) log.info(`Branch:   ${state.branch}`);
+  // Where that branch started, only when the run recorded it (#249): a run from
+  // before the field, or one never put on a branch, prints nothing rather than a
+  // commit worked out afterwards.
+  if (state.start !== undefined) {
+    log.info(
+      `Start:    ${state.start.sha}${state.start.ref !== null ? ` (${state.start.ref})` : ''}`,
+    );
+  }
   log.info(`Files:    ${state.dir}`);
 }
 
@@ -2589,6 +2782,23 @@ async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
     if (globalAt !== null && existsSync(globalAt)) log.info(`  also your settings for all projects: ${globalAt}`);
     log.info(`  claude ${shownModel(cfg.claude.model, 'claude')}/${cfg.claude.effort} - codex ${shownModel(cfg.codex.model, 'codex')}/${cfg.codex.effort}`);
     reportResolvedRoles(cfg);
+    // Which MCP servers each role reaches and how each provider enforces it
+    // (#138), in the words `src/mcp.ts` keeps for every surface that says it.
+    log.info('  mcp:');
+    const table = rolesFor(cfg);
+    for (const line of describeMcp(table)) log.info(`    ${line}`);
+    const mcpBlocked = await mcpRefusals(cfg, table, {
+      cwd: targetDir,
+      repoDir: targetDir,
+      exec: runChild,
+      codexBin,
+    });
+    for (const reason of mcpBlocked) {
+      log.fail(`mcp: ${reason}`);
+      bad++;
+    }
+    const granting = ROLE_NAMES.some((role) => (table[role].mcpServers ?? []).length > 0);
+    if (granting && mcpBlocked.length === 0) log.ok('mcp: every granted server resolves');
     log.info(
       `  budget $${cfg.budget.maxCostUsd} (Claude) / ` +
         `${cfg.budget.maxTokens > 0 ? `${cfg.budget.maxTokens.toLocaleString()} tokens (both)` : 'no token ceiling'}` +

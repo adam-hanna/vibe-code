@@ -52,10 +52,12 @@ import type { Run } from '../cockpit/model';
  *   values *by name*, and a wrong one is expensive and silent; the pilot can
  *   read a config file with the tools it has in the chat and say what it would
  *   change, which keeps the human where the cost is.
- * - **No archive tool.** Decision 4, answered yes-but-not-yet: `.vibe/runs/` is
- *   the thing that makes a pilot better than a generic assistant, and there is
- *   no mechanism to read it until #114. Named rather than omitted, so it is a
- *   gap with an issue on it instead of a question nobody asked.
+ * - **The archive is a read, not an action.** Decision 4 was answered
+ *   yes-but-not-yet, and #114 is the "yet": `read_archive` returns every run
+ *   `.vibe/runs/` holds for the repository on screen - the listing `vibe list`
+ *   reads, fingerprints included - and the scorecard `vibe stats` prints. The
+ *   listing is what answers *"has this been tried before"*; the scorecard alone
+ *   cannot. It is asked of the host fresh on every call and writes nothing.
  * - **No credential anything.** Decision 5, and it is the only real answer to
  *   "what never goes to a provider": a key. This module imports nothing from
  *   `keys`, cannot reach `keys::read` — which is `pub(crate)` in Rust — and has
@@ -137,11 +139,10 @@ export type Settlement =
  * text, `refused` with the host's own sentence. The boundary is the host's to
  * decide, so nothing here checks the path.
  */
-export interface Read {
-  kind: 'reads';
-  op: 'list' | 'read';
-  path: string;
-}
+export type Read =
+  | { kind: 'reads'; op: 'list' | 'read'; path: string }
+  /** The repository's run archive and its scorecard (#114): two host reads, one answer. */
+  | { kind: 'reads'; op: 'archive' };
 
 /** What running a call produced, including a read still to be made. */
 export type Outcome = Settlement | Read;
@@ -265,13 +266,12 @@ export function describeRun(run: Run): Record<string, unknown> {
     ended: run.ended,
     reason: run.reason,
     completed: run.completed,
-    // Said rather than left out. A model that cannot see the archive will
-    // otherwise answer "has this been tried before" from nothing at all, which
-    // is the failure mode this whole issue is arranged against.
-    unavailable: [
-      'the run archive (.vibe/runs) is not readable from here yet — #114',
-      'no file counts or diffstat: the loop reports none — #136',
-    ],
+    // The run's host gone before it returned (#246), so a model is not told a
+    // dead run is live because `completed` is null.
+    lost: run.lost,
+    // Said rather than left out, so a model does not guess at what this build
+    // cannot see. The archive left this list when `read_archive` arrived (#114).
+    unavailable: ['no file counts or diffstat: the loop reports none — #136'],
   };
 }
 
@@ -816,6 +816,37 @@ const READ_FILE = readTool(
 );
 
 /**
+ * The run archive, as data (#114).
+ *
+ * A read on both backends, answered by the host for the repository on screen:
+ * the run listing - which is what answers *"has this been tried before"* - and
+ * the scorecard `vibe stats` prints, which says how the loop behaves here and
+ * cannot answer that question on its own. Asked fresh on every call, so a run
+ * that ended a minute ago is in it.
+ */
+const READ_ARCHIVE: ToolDef = {
+  name: 'read_archive',
+  description:
+    'Every past run this repository holds under .vibe/runs (id, status, task, cost, and the ' +
+    'rounds each spent: plan, question, review-fix, verify-fix) plus the scorecard `vibe stats` ' +
+    'prints about the loop. Runs at once, no card. Call it before saying whether something has ' +
+    'been tried before.',
+  input_schema: { type: 'object', properties: {}, additionalProperties: false },
+  call: () => ({ kind: 'reads', op: 'archive' }),
+};
+
+/**
+ * What `read_archive` hands the model: the listing and the scorecard, verbatim.
+ *
+ * Typed `unknown` on purpose - this module never imports the wire - and nothing
+ * here summarises either document, so the model reads the measurements rather
+ * than a paraphrase of them.
+ */
+export function archiveContent(dir: string, runs: readonly unknown[], scorecard: unknown): string {
+  return JSON.stringify({ dir, runs, scorecard });
+}
+
+/**
  * The stop control, as a proposal (#223).
  *
  * **Propose-only, exactly like the tool that starts one**, and the symmetry is
@@ -889,6 +920,7 @@ export const TOOLS: readonly ToolDef[] = [
   READ_COMMAND,
   LIST_DIR,
   READ_FILE,
+  READ_ARCHIVE,
   START_RUN,
   ANSWER_GATE,
   RUN_COMMAND,

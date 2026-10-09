@@ -103,8 +103,9 @@ const WHO = [
   'kill by process name: both take down whatever else happens to be listening,',
   'and one of them has already killed an unrelated process here.',
   '',
-  'You cannot edit vibe.config.json. There is no tool that reads the run archive',
-  'under .vibe/runs (#114), so you have no structured view of past runs.',
+  'You cannot edit vibe.config.json. read_archive returns every past run in this',
+  'repository and what the archive says about the loop; call it before saying',
+  'whether something has been tried before.',
 ].join('\n');
 
 /**
@@ -120,9 +121,10 @@ const WHO = [
  * had been told not to. The right fix is to stop telling it something untrue —
  * a prompt that misdescribes the tools is a prompt the model has to work around.
  *
- * What #114 is actually about survives: there is no *tool* that returns the
- * archive as data, so nothing here can summarise it, and reading a run's files
- * by hand is a different and much narrower thing than having it.
+ * #114 then gave it the other half: `read_archive` returns the archive as data -
+ * every run's listing and the scorecard - on both backends. Reading one run's
+ * files by hand is still how to see what that run decided; the tool is how to
+ * find which run to open.
  */
 /**
  * What the CLI pilot can do with its own tools, and the limits on it (#223).
@@ -175,9 +177,9 @@ export function ownTools(cli: 'claude' | 'codex', access: PilotAccess | null): s
     'app can follow, read and stop only what run_command started.',
     '',
     '.vibe/runs is inside the repository: a past run\'s PLAN.md, NEEDS-INPUT.md and',
-    'FOLLOW-UPS.md are ordinary files. There is no archive tool, so read the specific',
-    'file and say which one you read. Do not edit anything under .vibe/runs - it is',
-    'the record of what the runs did.',
+    'FOLLOW-UPS.md are ordinary files. read_archive tells you which runs exist; to',
+    'see what one decided, read the specific file and say which one you read. Do not',
+    'edit anything under .vibe/runs - it is the record of what the runs did.',
   );
   return lines.join('\n');
 }
@@ -461,6 +463,26 @@ export function accessNote(access: PilotAccess | null): string {
  * subscription CLI, which is told the table in prose because there is nowhere
  * else to put it.
  */
+/**
+ * The person's standing instructions as the pilot is told them (#273): right
+ * after who it is, because they are the person's rules for everything that
+ * follows. The run agents get the same text from the core's `withStanding`;
+ * the heading is spelled here rather than imported because the app and the
+ * core are two packages, and it says the same thing in the same words.
+ */
+export function standingBlock(standing: string | null): string[] {
+  const text = standing?.trim() ?? '';
+  if (text === '') return [];
+  return [
+    '## Standing instructions',
+    '',
+    'From the person running vibe, for every turn. Follow them unless they ask otherwise in this conversation.',
+    '',
+    text,
+    '',
+  ];
+}
+
 export function systemPrompt(
   run: Run,
   launched: Launched | null,
@@ -472,10 +494,17 @@ export function systemPrompt(
    * has none, so it reads through `list_dir` and `read_file`.
    */
   cli: 'claude' | 'codex' | null = null,
+  /**
+   * The person's standing instructions (#273), the same text every run agent is
+   * given, from `instructions.text` in their settings. Null or blank adds
+   * nothing, so a pilot with none is told exactly what it was before.
+   */
+  standing: string | null = null,
 ): string {
   return [
     WHO,
     '',
+    ...standingBlock(standing),
     // **Before the run block, deliberately.** Everything below this is a
     // description of a run that may not exist yet; this is the job. A doctrine
     // buried under two hundred lines of JSON is one a model reads last.

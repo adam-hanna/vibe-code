@@ -80,17 +80,22 @@ Put a `vibe.config.json` in the repository. Flags override it. `vibe.config.exam
 | Key | What it does |
 |---|---|
 | `verify.command` | The test command vibe runs after implementing. It is detected from `package.json` if not set. |
+| `verify.testPaths` | Which changed files count as tests when a review checks whether the run edited its own judge. Replaces the built-in list (`**/*.test.*`, `**/tests/**`, `**/test_*.py` and similar). `vibe.config.json` always counts. |
 | `roles` | Which agent, model and effort plans, implements, critiques and reviews. |
 | `budget.maxTokens` | A ceiling for the whole run, across both agents. |
 | `loop.maxPlanRounds`, `loop.maxReviewRounds` | How many rounds before vibe stops and asks. |
 | `gates` | Where the loop pauses for you: `auto`, `step` (the app only) or `stop`. |
 | `git.worktree` | Run in a git worktree of its own. |
+| `git.worktreeCommand` | Your own command for making that worktree. It is given `VIBE_WORKTREE`, `VIBE_REPO`, `VIBE_RUN_ID` and `VIBE_BRANCH`, a branch that already exists at `git.baseRef` (or HEAD). Check it out with `git worktree add "$VIBE_WORKTREE" "$VIBE_BRANCH"` rather than choosing a commit: a worktree left on a different commit from its branch is refused. |
+| `git.baseRef` | The commit a new run's branch starts from, such as `origin/develop`. A remote ref is fetched first, and a fetch that fails or runs past `git.worktreeTimeoutMs` refuses the run rather than using a stale copy. Unset means the repository's HEAD. A resume never moves its branch. |
 
 Settings for every project go in `~/.config/vibe/config.json` (`%APPDATA%\vibe\config.json` on Windows).
 
 ## What a run leaves behind
 
 Everything goes in `.vibe/runs/<run-id>/` in the repository: `PLAN.md`, every plan revision and critique, every code review, `state.json`, and a `transcript.log`. `FOLLOW-UPS.md` is the one to read afterwards: it lists what the critic said belongs in another change.
+
+When a round changes a test file or `vibe.config.json`, the reviewer is shown each one and must say whether the change was justified. Each file's status, the lines added and removed, and the verdict are recorded under `testChanges` in `state.json` and in that round's `code-review-<n>.json`. A file the reviewer left out is recorded as `unjudged`. None of this stops a run, but the end-of-run summary names any file that was not judged justified.
 
 ## Exit codes
 

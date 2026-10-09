@@ -358,6 +358,14 @@ export interface ResolvedQuestion {
   score: number;
 }
 
+/** Where a run's branch started (#249). See `RunState.start`. */
+export interface RunStart {
+  /** A full 40-hex commit id. */
+  sha: string;
+  /** The `git.baseRef` it was resolved from, or null for the repository's HEAD. */
+  ref: string | null;
+}
+
 export interface GitConfig {
   useBranch: boolean;
   branchPrefix: string;
@@ -403,8 +411,10 @@ export interface GitConfig {
    * re-split into two words, and it must leave a working tree at
    * `VIBE_WORKTREE` — checked afterwards, because a script that exits 0 and
    * leaves nothing behind would otherwise fail one git command at a time with
-   * nothing naming the cause. Deliberately **not** told a branch: `prepareGit`
-   * names that, and a second answer to it is how the two come to disagree.
+   * nothing naming the cause. It is also told `VIBE_BRANCH`, a branch that
+   * already exists at `baseRef` or HEAD, and should check it out rather than
+   * choose a commit: `prepareGit` refuses a worktree whose HEAD is not where its
+   * branch is, rather than moving it there in silence (#249).
    */
   worktreeCommand: string | null;
   /**
@@ -417,6 +427,22 @@ export interface GitConfig {
    * that was measured for a comparable command beats inventing one.
    */
   worktreeTimeoutMs: number;
+  /**
+   * The commit a **new** run's branch starts from (#249). Null is the
+   * repository's HEAD when the run starts, which is exactly what every run did
+   * before this key existed.
+   *
+   * The #169 run started from a root checkout's stale `fix/223` tip instead of
+   * `origin/develop`, because the base was whatever HEAD happened to be and a
+   * worktree script that chose a better one was silently overridden. A base is
+   * therefore a setting rather than an accident: resolved once, in the preflight
+   * gate, before anything is spent. A remote-tracking ref (`origin/develop`) is
+   * fetched first, bounded by `worktreeTimeoutMs`, and a fetch that fails or
+   * hangs refuses the run - a local copy that may be stale is the defect this
+   * exists to remove, so there is no fallback to it. A resume never resolves,
+   * fetches or moves anything, and a fork's branch comes from its checkpoint.
+   */
+  baseRef: string | null;
 }
 
 export interface ContextConfig {
@@ -534,6 +560,15 @@ export interface VerifyConfig {
    * matter, even though the implementer writes files there every round.
    */
   reproducers: boolean;
+  /**
+   * The path patterns that make a changed file part of the run's own judge
+   * (#112), replacing - never extending - the built-in convention list in
+   * `src/judge.ts`. `vibe.config.json` at the root is judged whatever this says.
+   *
+   * Optional in the type only so a hand-built `VerifyConfig` need not spell it;
+   * `DEFAULTS.verify` always carries it.
+   */
+  testPaths?: string[] | undefined;
 }
 
 export interface ProgressConfig {
@@ -715,6 +750,25 @@ export interface Config {
    * predates this key.
    */
   prompts: PromptOverrides;
+  /**
+   * Standing instructions from the person running vibe, given to every agent
+   * turn of every run and to the pilot (#273).
+   *
+   * Asked for as *"a way to give vibe instructions it can remember across runs.
+   * Kind of like a global agents.md."* Not a prompt block: a block is the
+   * product's own text with a default and a fixed set of turns it reaches; this
+   * is the person's text, empty unless they write some, and it reaches every
+   * turn. It lives in the **global** file as naturally as in a project's, and
+   * like every setting a project's file wins.
+   *
+   * What it buys over the vendors' own files is that one text reaches both
+   * agents - Claude's seats read `~/.claude/CLAUDE.md` and Codex's
+   * `~/.codex/AGENTS.md`, and the pilot reads neither - and that a run's
+   * record says what its agents were told, because `configDiff` names
+   * `instructions.text` like any other key. Empty by default, so a run with
+   * none is byte-identical to one that predates the key.
+   */
+  instructions: { text: string };
 }
 
 /** Block name to replacement text. Open-ended keys, checked against the real list. */
@@ -1310,6 +1364,56 @@ export interface ReviewCoverage {
   truncated: string[];
 }
 
+/** How git described one file in a diff, with rename detection on (#112). */
+export type FileChangeStatus = 'added' | 'modified' | 'deleted' | 'renamed';
+
+/**
+ * One file in the diff a reviewer was handed: facts git reported, nothing else.
+ *
+ * `added` and `removed` are null where git printed `-` - a binary file - and
+ * never 0, because "no lines changed" and "lines were not counted" are
+ * different facts and only one of them is a number (#112).
+ */
+export interface FileChange {
+  path: string;
+  /** The path before a rename; null for every other status. */
+  oldPath: string | null;
+  status: FileChangeStatus;
+  added: number | null;
+  removed: number | null;
+}
+
+/** The reviewer's word on one change to the judge (#112). */
+export interface JudgeVerdict {
+  justified: boolean;
+  reason: string;
+}
+
+/**
+ * A change to the run's own judge, with what the reviewer said about it.
+ *
+ * `'unjudged'` is the fail-closed answer: the file was listed and no verdict
+ * for it came back from the part that showed it. It is never read as justified.
+ */
+export interface JudgeFile extends FileChange {
+  verdict: JudgeVerdict | 'unjudged';
+}
+
+/**
+ * What the most recent review round's diff did to the judge - test files and
+ * `vibe.config.json` - and what the reviewer said about each (#112).
+ *
+ * `patterns` names what was matched against, `vibe.config.json` included, so
+ * an absence of a file reads as "nothing matched these", never as "no test was
+ * touched".
+ */
+export interface TestChanges {
+  /** 1-based, matching `ReviewCoverage.round`. */
+  round: number;
+  patterns: string[];
+  files: JudgeFile[];
+}
+
 /**
  * One turn's observed-but-uncharged spend. See `RunState.inFlight`.
  *
@@ -1608,6 +1712,18 @@ export interface RunState {
    * commits land wherever HEAD happens to be.
    */
   branchPending?: true;
+  /**
+   * The commit this run's branch was at when the run took it, and the
+   * `git.baseRef` it came from - null when it came from HEAD (#249).
+   *
+   * Written once, by `prepareGit`, in the same save that records `branch`, so
+   * neither exists without the other: a run stopped before it was on its branch
+   * has no start, rather than a start describing a branch it never took. Absent
+   * on every run from before #249 and never back-filled, because a start
+   * guessed afterwards would be a number nobody measured. A fork drops it: the
+   * child's branch starts at the checkpoint commit, not at the parent's start.
+   */
+  start?: RunStart;
   /** One entry per code-review round, driving the convergence assessment. */
   p1Rounds: RoundRecord[];
   /** The same, for verification-fix rounds, which converge independently. */
@@ -1632,6 +1748,15 @@ export interface RunState {
    * (#49).
    */
   reviewCoverage?: ReviewCoverage | undefined;
+  /**
+   * Changes the most recent review round's diff made to the run's own judge,
+   * and the reviewer's verdict on each (#112).
+   *
+   * Written the way `reviewCoverage` is: cleared at the start of the round and
+   * extended only after a part's turn has returned. Absent when the round
+   * touched no judge file, or no part has completed - never an empty record.
+   */
+  testChanges?: TestChanges | undefined;
   /**
    * The **basename** of the most recent write turn's report artifact.
    *
@@ -1715,8 +1840,8 @@ export interface RunState {
    *
    * Neither existing field can do this job. `pendingAnswers` is *consumed* by
    * the loop the moment it revises against them, so it is gone by the time
-   * anything reports; `answeredQuestions` is marked for every question **asked**
-   * whatever came back, so reconciling `ASSUMED.md` against it would empty the
+   * anything reports, and since #169 it holds the answerer's answers too;
+   * `answeredQuestions` is marked for every question **asked** whatever came back, so reconciling `ASSUMED.md` against it would empty the
    * file including the entries that are true.
    *
    * Optional, so a state written before this existed loads with no repair and a
@@ -1974,7 +2099,34 @@ export interface RunState {
    */
   config?: Config;
   plan: Plan | null;
+  /**
+   * Answers no revision has consumed yet.
+   *
+   * Two writers (#169): `resolveQuestions`, on the same write that marks the
+   * questions answered, so a stop between the answerer and the revision keeps
+   * what the turn bought; and a NEEDS-INPUT resume, which merges the person's
+   * answers over those (`mergeHumanAnswers` - the person wins). One consumer:
+   * `revisePlan`, which nulls it on the write that persists the plan.
+   */
   pendingAnswers: Answer[] | null;
+  /**
+   * Answers to a question round whose questions were all advisory, which no
+   * planner revision has folded in yet (#277).
+   *
+   * An advisory question is one the planner said does not change what the plan
+   * does, so a whole revision turn to fold its answer in is the most expensive
+   * way to deliver it - on the #249 run, 79 seconds and 237k tokens for one
+   * question about the wording of a log line. So the round revises nothing: the
+   * answers move here from `pendingAnswers` on one write, the critic is shown
+   * them with the plan, the next findings revision folds them in and clears
+   * this on the write that persists its plan, and if the plan is approved
+   * without one the implementer is shown them instead.
+   *
+   * Moved rather than left in `pendingAnswers` because that field is the
+   * resume's road back into a revision: left there, a stop would buy exactly
+   * the turn this exists to skip.
+   */
+  advisoryAnswers?: Answer[];
   /**
    * Findings the run has paid for that no revision or fix round has yet
    * answered.
@@ -2045,6 +2197,19 @@ export interface RunSummary {
    * cost is reported as absent, an unknown context window stays null.
    */
   costUsd: number | null;
+  /**
+   * The run's four round counters, as its state.json stored them (#114) - the
+   * design's rounds fingerprint, `p2 q1 v1 r2`, cheap to scan for runs that
+   * thrashed.
+   *
+   * Filled only for a state.json that parsed to an object, from the same read
+   * `listRuns` already makes for the row; absent on a linked, unverified or
+   * unreadable entry, because nothing under those was read. A counter the run
+   * never recorded - every run older than `questionRound` - or one that is not a
+   * non-negative integer is `null`, never 0. `review` counts FIX rounds, which is
+   * how `vibe stats` names the same counter.
+   */
+  rounds?: { plan: number | null; question: number | null; review: number | null; verify: number | null };
   /**
    * Whether anything is working on this run, from its lock (#77).
    *

@@ -92,16 +92,48 @@ test('a pause asked for before a run starts is kept, not refused', async () => {
   // Somebody who presses pause a moment before the run begins meant to hold
   // that run. Refusing it would be this seam deciding their timing was wrong,
   // and it costs nothing because the first boundary clears it either way.
-  const { sent, session } = idle();
+  //
+  // Asked DURING the run (#253). This case used to ask after an `invoke` that
+  // had already returned, so it also pinned that a pause outlives its run - the
+  // defect: a run that stopped before any boundary left the next run to hold
+  // for a request nobody made of it. The claim it was written for is unchanged.
+  const sent: Outbound[] = [];
+  let release: (code: number) => void = () => {};
+  let session: Session | null = null;
+  let tookDuringRun: boolean | undefined;
+  session = createSession((m) => void sent.push(m), {
+    invoke: () =>
+      new Promise<number>((resolve) => {
+        tookDuringRun = session?.host.takePause?.();
+        release = resolve;
+      }),
+  });
   session.receive(line({ type: 'pause', id: 1 }));
   session.receive(line({ type: 'invoke', id: 2, argv: ['run', 'x'] }));
   await settle();
 
-  assert.equal(session.host.takePause?.(), true);
+  assert.equal(tookDuringRun, true, 'the run that started after it takes it');
+  release(0);
+  await settle();
   assert.deepEqual(
     sent.map((m) => m.type),
     ['result', 'result'],
   );
+
+  session.receive(line({ type: 'shutdown', id: 3 }));
+  await session.finished();
+});
+
+test('a pause the run never reached does not hold the next run (#253)', async () => {
+  // The run stopped or finished before any boundary, so nothing took the pause.
+  // It belonged to that run, and the next one - possibly days later - must not
+  // hold for it.
+  const { session } = idle();
+  session.receive(line({ type: 'pause', id: 1 }));
+  session.receive(line({ type: 'invoke', id: 2, argv: ['run', 'x'] }));
+  await settle();
+
+  assert.equal(session.host.takePause?.(), false);
 
   session.receive(line({ type: 'shutdown', id: 3 }));
   await session.finished();
@@ -125,4 +157,34 @@ test('a gate still asks the same question whether or not a pause opened it', asy
 
   session.shutdown();
   await session.finished();
+});
+
+test('an unpause frame is a request this version understands (#276)', () => {
+  const read = decode(line({ type: 'unpause', id: 4 }));
+  assert.deepEqual(read.ok ? read.message : null, { type: 'unpause', id: 4 });
+});
+
+test('a pause can be taken back before a boundary reaches it, and says it was (#276)', () => {
+  const { sent, session } = idle();
+  session.receive(line({ type: 'pause', id: 1 }));
+  session.receive(line({ type: 'unpause', id: 2 }));
+  // 0: there was an armed pause, and it is gone.
+  assert.deepEqual(sent.at(-1), { type: 'result', id: 2, exit: 0 });
+  assert.equal(session.host.takePause?.(), false, 'the next boundary finds nothing to hold for');
+});
+
+test('too late is told, not an error: the boundary already took it (#276)', () => {
+  const { sent, session } = idle();
+  session.receive(line({ type: 'pause', id: 1 }));
+  assert.equal(session.host.takePause?.(), true, 'the boundary took it');
+  session.receive(line({ type: 'unpause', id: 2 }));
+  // 1: nothing was armed. The run is holding, and its ask is how that is answered.
+  assert.deepEqual(sent.at(-1), { type: 'result', id: 2, exit: 1 });
+});
+
+test('an unpause with nothing armed changes nothing', () => {
+  const { sent, session } = idle();
+  session.receive(line({ type: 'unpause', id: 7 }));
+  assert.deepEqual(sent, [{ type: 'result', id: 7, exit: 1 }]);
+  assert.equal(session.host.takePause?.(), false);
 });

@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { critiquePrompt, reviewPrompt } from '@src/prompts.js';
 import { CRITERIA, DIFF, FILES, OUT_OF_SCOPE, PLAN_MD } from './helpers/prompt-fixture-args.js';
 import { scopeBlock, spliceScope } from './helpers/scope-block.js';
+import { withApproveCost } from './helpers/approve-cost.js';
 
 /**
  * Reviewed first-round, continuing and fresh-session prompt shapes.
@@ -21,6 +22,10 @@ import { scopeBlock, spliceScope } from './helpers/scope-block.js';
  * with no finding quota, scope-conscious breadth and the shared simplicity rule.
  * The fixtures are deliberately regenerated for that new contract, as recorded
  * in their README and the PR; substantive guards still have separate assertions.
+ *
+ * #115 added one reviewer-only paragraph, `APPROVE_COST`, and the baselines
+ * were not regenerated for it: each comparison splices exactly that paragraph
+ * in (`helpers/approve-cost.ts`), which proves nothing else moved.
  */
 
 function fixture(name: string): string {
@@ -46,11 +51,11 @@ function prompt(round: number, hasMemory: boolean): string {
 }
 
 test('a first-round review matches the reviewed prompt baseline', () => {
-  assert.equal(prompt(1, false), fixture('review-round1.txt'));
+  assert.equal(prompt(1, false), withApproveCost(fixture('review-round1.txt')));
 });
 
 test('a continuing review matches the reviewed prompt baseline', () => {
-  assert.equal(prompt(3, true), fixture('review-round3-memory.txt'));
+  assert.equal(prompt(3, true), withApproveCost(fixture('review-round3-memory.txt')));
 });
 
 test('the replaced scope block still carries every guard it had before', () => {
@@ -109,7 +114,7 @@ test('a fresh review matches its baseline and never claims to carry earlier find
     'before; do not stay silent about something because it might have been addressed. Use ' +
     'whatever `id` you would naturally choose - repeats are reconciled by the tool.';
 
-  const baseline = fixture('review-round3-nomemory.txt');
+  const baseline = withApproveCost(fixture('review-round3-nomemory.txt'));
   const now = prompt(3, false);
   assert.ok(now.includes(after));
   assert.equal(now, baseline);

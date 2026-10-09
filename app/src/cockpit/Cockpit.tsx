@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Activity, PanelRightClose, PanelRightOpen, Terminal, X } from 'lucide-react';
 import { usePanelRef } from 'react-resizable-panels';
 import type { Layout, LayoutChangedMeta, PanelImperativeHandle } from 'react-resizable-panels';
@@ -7,6 +7,7 @@ import { Button } from '@/ui/button';
 import { LivenessDot } from '../design';
 import { ActivityBar } from '../shell/ActivityBar';
 import { Palette } from '../shell/Palette';
+import { statusBarControls } from '../shell/controls';
 import { StatusBar } from '../shell/StatusBar';
 import { ACTIONS, available, chordLabel, shortcutFor } from '../shell/actions';
 import type { ActionId } from '../shell/actions';
@@ -20,9 +21,10 @@ import type { KeyStatus } from '../pilot/keys';
 // `PilotPane`, not `Pilot`: `pilot.ts` beside it is the wire, and two files
 // differing only in case is a compile error on Windows and macOS both.
 import { PilotPane } from '../pilot/PilotPane';
+import { chatRun } from '../pilot/log';
 import { noCommands, reduceCommands, restore, running } from './commands';
 import { NOWHERE, readWhere, WHERE_KEY, writableWhere } from './where';
-import type { BottomTab, Panels, Viewing, Where } from './where';
+import type { BottomTab, Panels, Tab, Viewing, Where } from './where';
 import { CommandsPane } from './CommandsPane';
 import { CodePane } from './CodePane';
 import { Diagnostics } from './Diagnostics';
@@ -37,7 +39,6 @@ import {
   PROJECTS_KEY,
   dirKey,
   moveProject,
-  preview,
   readNames,
   readPins,
   readProjectNames,
@@ -47,14 +48,22 @@ import {
   DRAFTS_KEY,
   addDraft,
   bindDraft,
+  draftHasNoRun,
+  isLaunched,
+  namesAfterStart,
   markLaunched,
+  unmarkLaunched,
   newDraft,
   readDrafts,
   removeDraft,
 } from './pending';
+import type { Handover } from '../pilot/PilotPane';
 import type { Draft } from './pending';
-import { chatKey } from '../pilot/saved';
-import { loadChats, putChat } from '../pilot/chatstore';
+import { chatKey, readChat } from '../pilot/saved';
+import { askFor, draftOfPane, mountedPanes, paneOf } from '../pilot/panes';
+import { draftAttention } from './attention';
+import { getChat, loadChats, putChat, useChats } from '../pilot/chatstore';
+import { Confirm } from './Confirm';
 import { useReplay } from './useReplay';
 
 import { LoopColumn } from './LoopColumn';
@@ -71,17 +80,47 @@ import { Workstreams } from './Workstreams';
 import { VerifyPane } from './VerifyPane';
 import { StalenessStrip } from './Staleness';
 import { NEEDS_HUMAN, tokens as fmtTokens } from './format';
-import { emptyRun, foldReplay, forResume, latestQuestions, nextRun, reduce, staleness } from './model';
+import { emptyRun, foldReplay, forResume, hostLost, latestQuestions, reduce, settled, staleness } from './model';
+import {
+  adoptionPlan,
+  addRun,
+  capOf,
+  capRefusal,
+  dropRun,
+  endRun,
+  exitMeans,
+  heldChat,
+  hostExitWording,
+  hostedMarks,
+  invokeOutcome,
+  launchMeta,
+  livesEpoch,
+  markAdopted,
+  markAnswered,
+  mayAnswer,
+  onScreen,
+  pruneEnded,
+  quitList,
+  repoOf,
+  routeFrame,
+  runIdOf,
+  runLabel,
+  setFlag,
+  setPid,
+  updateRun,
+  writeRefusal,
+} from './hosts';
+import type { CapRead, LiveRun, LiveRuns } from './hosts';
+import { useStats } from './useStats';
 import { rounds } from './rounds';
 import { implementArgv, readLaunchArgv, resumeArgv } from './argv';
 import { SCALE_KEY, SCALE_VAR, readScale, writable } from './appearance';
 import { readLimits, writeLimits } from '../pilot/ledger';
 import type { PilotLimits } from '../pilot/ledger';
-import type { Launched, Raise } from './argv';
+import type { Raise } from './argv';
 import type { Caps } from './Footer';
 import type { Effect } from '../pilot/tools';
 import { memory } from '../memory';
-import type { Frame } from '../host';
 import type { Run } from './model';
 
 /**
@@ -102,14 +141,15 @@ const TAB_ON = 'border-accent text-accent';
  *
  * ## The left rail, and what changed about the argument against it
  *
- * It was absent for two stated reasons and only one of them survived. The first
- * — *"projects and workstreams need the archive reader (#114)"* — stopped being
- * true when the `archive` frame landed. The second was that **`serve.ts` runs
- * one run at a time**, so there is never a second live workstream to switch
- * between, and a rail over the *archive* is `1b` in a sidebar.
+ * It was absent for two stated reasons and neither survived. The first —
+ * *"projects and workstreams need the archive reader (#114)"* — stopped being
+ * true when the `archive` frame landed. The second was that **`serve.ts` ran a
+ * single run per process**, so there was never a second live workstream to
+ * switch between. Since #246 every run has a host process of its own and this window
+ * hosts several at once, each its own `Run`, and the sidebar marks every one.
  *
- * That is still true, and it is why the rail's squares **navigate rather than
- * reopen** (see `Rail.tsx`). What it does not justify is having no rail: the
+ * What still holds is that a row **navigates rather than reopens**: opening a
+ * run is a read, and opening one this window is hosting draws its live `Run`. What it does not justify is having no rail: the
  * design puts `＋`, ⌘K and `⚙` on it in every frame, and with nowhere for them
  * to live they were pushed into the tab bar — which is how that bar came to have
  * twelve tabs against the design's seven. `design/AUDIT.md` §1.1 and §1.2 are
@@ -155,22 +195,44 @@ interface Wire {
 }
 
 export function Cockpit() {
-  const [run, dispatch] = useReducer(
-    // `Date.now()` here rather than inside `reduce`: the model takes the arrival
-    // time as an argument so it stays pure and testable, and this is the one
-    // place a real clock is read.
-    (state: Run, action: Frame | { type: 'reset' } | { type: 'seed'; run: Run }) => {
-      if (action.type === 'reset') return nextRun(state);
-      // **A resume's column, before the loop adds to it** (#223). The run the
-      // replay folded IS a `Run`, so this replaces rather than merges - there is
-      // nothing to merge with, because `resume` seeds before it sends the
-      // invoke and no live frame can have arrived yet.
-      if (action.type === 'seed') return { ...action.run, protocol: state.protocol, seq: state.seq };
-      return reduce(state, action, Date.now());
-    },
-    undefined,
-    emptyRun,
-  );
+  /**
+   * Every run this window has started and not yet let go of (#246).
+   *
+   * **One writer, and it writes the ref first.** The frame handler is
+   * registered once and reads `livesRef` on every frame, and `launch` reads it
+   * to count against the cap - so a second launch in the same tick, or a frame
+   * arriving before React has rendered, must see the entry the first one added.
+   * `updateLives` is the only thing that assigns either.
+   *
+   * Each entry's `Run` is folded by the same `reduce` a single run always was;
+   * there is no multi-run reducer. See `hosts.ts`.
+   */
+  const [lives, setLives] = useState<LiveRuns>([]);
+  const livesRef = useRef<LiveRuns>([]);
+  const updateLives = useCallback((change: (l: LiveRuns) => LiveRuns) => {
+    const next = change(livesRef.current);
+    livesRef.current = next;
+    setLives(next);
+  }, []);
+  /** The run last started: what the window draws when nothing is opened. */
+  const [focus, setFocus] = useState<string | null>(null);
+  /**
+   * The protocol the service host stated. It used to arrive in the one live
+   * `Run` through `reduce`; there are several now, and none of them is the
+   * service host, so it is held here and carried into each new run.
+   */
+  const [protocol, setProtocol] = useState<number | null>(null);
+  const protocolRef = useRef<number | null>(null);
+  /** Why the last start was refused, until a host has started. Dismissable. */
+  const [startRefused, setStartRefused] = useState<string | null>(null);
+  /**
+   * `runs.maxConcurrent` as read off the global file, or null until read. A ref
+   * only: `launch` is the one reader and must see the latest read, and nothing
+   * draws it - Settings reads the file itself.
+   */
+  const capRef = useRef<CapRead | null>(null);
+  /** Tray Quit asked with runs going (#246): the confirmation is up. */
+  const [quitting, setQuitting] = useState(false);
   const [wire, setWire] = useState<Wire>({
     connected: false,
     hostPid: null,
@@ -180,8 +242,15 @@ export function Cockpit() {
     log: [],
     unknown: [],
   });
+  /**
+   * Whether the service host is up, for `launch` (#246). A ref beside `wire`,
+   * written where `wire.connected` is, because `launch` must refuse on the
+   * truth at the moment it is called, not on a render's copy of it.
+   */
+  const connectedRef = useRef(false);
   // The pilot's stored conversations, once the host can answer (#223). In a
   // browser preview there is no host and they come from localStorage instead.
+  const chats = useChats();
   useEffect(() => {
     if (wire.connected || !host.inShell()) void loadChats();
   }, [wire.connected]);
@@ -369,45 +438,23 @@ export function Cockpit() {
       // See above. Nothing here is worth failing a render over.
     }
   }, []);
-  /**
-   * A pause this window has asked for and not yet seen honoured (#210).
-   *
-   * The window's own memory of its own outbound message, like `sentLaunch` — not
-   * a re-derivation. The loop is the one that decides when a pause is taken, and
-   * it says so with `requested` on `gate_waiting`; this only stops the button
-   * being pressed twice while nothing appears to happen.
-   */
-  const [pausing, setPausing] = useState(false);
+  // A pause or a stop this window asked for and has not seen answered (#210,
+  // #253) is on each run's own entry now - `pausing` and `stopping` in
+  // `hosts.ts` - so one run's armed pause cannot disable another's button.
   /** Whether the stop confirmation is up. Hi-fi 18: a stop confirms first. */
   const [confirmStop, setConfirmStop] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [launched, setLaunched] = useState(false);
   /**
-   * The conversation the pilot was showing when a run was launched, held until
-   * that run says who it is (#223).
-   *
-   * Launching points the window at the new run before it has an id, so for the
-   * seconds until `run_started` the pane had no run to key its chat by and fell
-   * back to the project's "before any run" conversation - restoring whatever
-   * stale exchange was stored there, which the new run then **adopted** as its
-   * own. *"The run that starts, the pilot chat, progress etc gets confused with
-   * a previous run. It's like some key isn't unique somewhere."* Holding the key
-   * that proposed the run makes the gap a `stay`, so what the new run adopts is
-   * the conversation that actually proposed it. A draft holds itself already.
+   * Where the pilot pane was pointed, for a launch to remember as the
+   * conversation that proposed it (#223). Assigned during render, read by
+   * `launch`. The hold itself is `heldChat` in `hosts.ts`, derived from the
+   * runs (#246): it lasts until that run's adoption has settled, however the run
+   * reached the screen.
    */
-  const [holdChat, setHoldChat] = useState<{ dir: string; runId: string | null } | null>(null);
   const pilotAt = useRef<{ dir: string; runId: string | null }>({ dir: '', runId: null });
-  /**
-   * The launch this window sent, kept so the pilot can be told about it (#191).
-   *
-   * **Not a re-derivation.** Every other thing on this screen comes from a frame,
-   * and the brief is the one fact no frame carries - the loop narrates phases,
-   * turns and gates, never the text it was given. This is the window remembering
-   * its own outbound message, read back through `readLaunchArgv` so the reader
-   * and the builder cannot drift. An argv it does not recognise leaves this null,
-   * which the prompt says out loud rather than papering over.
-   */
-  const [sentLaunch, setSentLaunch] = useState<Launched | null>(null);
+  // The launch a run was started with, for the pilot (#191), is `sent` on that
+  // run's entry: the window remembering its own outbound message, read back
+  // through `readLaunchArgv` so the reader and the builder cannot drift.
   // There is deliberately no `opening` here any more (#211). It existed to
   // prefill a launch bar with the first thing said to the pilot, and the launch
   // bar is gone: the pilot proposes the run itself, so nothing in this window
@@ -438,13 +485,15 @@ export function Cockpit() {
    * card.
    */
   const [access, setAccess] = useState<host.PilotAccess | null>(null);
+  /** The person's standing instructions (#273), from the same read, for the pilot. */
+  const [standing, setStanding] = useState<string | null>(null);
   /**
    * Bumped by every save in Settings, so a change there reaches this read —
    * including the pilot's safe list, which an open conversation acts on.
    */
   const [configEpoch, setConfigEpoch] = useState(0);
   useEffect(() => {
-    if (repoDir.trim() === '' || !host.inShell()) return;
+    if (repoDir.trim() === '' || !host.inShell() || !wire.connected) return;
     let cancelled = false;
     void host
       .config(repoDir)
@@ -452,9 +501,16 @@ export function Cockpit() {
         const effective = frame.effective as {
           loop?: Partial<Caps>;
           gates?: Record<string, string>;
+          instructions?: { text?: unknown };
         };
         if (cancelled) return;
+        // The cap is the machine's and no run reads it, so it is read off the
+        // global file as written, not off `effective` (#246).
+        const cap = capOf(frame.globalRaw);
+        capRef.current = cap;
         setAccess(frame.pilot);
+        const text = effective.instructions?.text;
+        setStanding(typeof text === 'string' ? text : null);
         if (effective.gates !== undefined) setGates(effective.gates);
         setOrder(frame.gateable);
         const loop = effective.loop;
@@ -476,12 +532,18 @@ export function Cockpit() {
     return () => {
       cancelled = true;
     };
-  }, [repoDir, configEpoch]);
+    // `wire.connected` too: a read made before the service host was up failed
+    // and was never made again, and the cap it carries refuses a second run
+    // while it is unread.
+  }, [repoDir, configEpoch, wire.connected]);
   const [tab, setTab] = useState<
-    // Output and Commands are the bottom panel's tabs now (`bottom`, above),
-    // not this pane's: both are terminal-shaped, and a dev server's log beside
-    // a plan is how an editor arranges them.
+    // Commands is the bottom panel's tab (`bottom`, above), not this pane's: a
+    // dev server's log beside a plan is how an editor arranges it.
     | 'pilot'
+    // The run's raw output, right of the pilot again (#284). The bottom panel
+    // is shut by default, so while it lived there a run had no tab showing
+    // each step as it happened.
+    | 'output'
     // The four artifact panes (#223). `plans`, `critique` and `review` are what
     // the dashed `Versions` tab was standing in for, and `code` is what `diff`
     // became once a round's own range was on the wire.
@@ -541,16 +603,18 @@ export function Cockpit() {
    * naming convention in the one process that cannot be kept in step with it.
    */
   const [openAt, setOpenAt] = useState<number | null>(null);
-  const open = useCallback((next: string, round?: number | null) => {
-    // A round card's `open verify` and the pilot's `read_command` still name
-    // the two panes by their old tab names; they live in the bottom panel now,
-    // so opening one opens that panel on it rather than a main tab that is gone.
-    if (next === 'output' || next === 'commands') {
+  // A pane by name, never a string: `'activity'` was cast into the tab and the
+  // window drew a tab that does not exist, with nothing selected (#260).
+  const open = useCallback((next: Tab | BottomTab, round?: number | null) => {
+    // The pilot's `read_command` names the commands pane by its old tab name;
+    // it lives in the bottom panel, so opening it opens that panel on it rather
+    // than a main tab that is gone. The output is a main tab again (#284).
+    if (next === 'commands') {
       setBottom(next);
       setPanels((p) => (p.bottom ? p : { ...p, bottom: true }));
       return;
     }
-    setTab(next as typeof tab);
+    setTab(next);
     setOpenAt(round ?? null);
   }, []);
   /**
@@ -565,7 +629,9 @@ export function Cockpit() {
    * pane — and cleared by the pane the moment it has said it, so the same brief
    * cannot be sent twice.
    */
-  const [brief, setBrief] = useState<string | null>(null);
+  // With the draft it was typed for, so two runs with the same brief are two
+  // handovers rather than one sent twice (#270).
+  const [brief, setBrief] = useState<Handover | null>(null);
   /**
    * Runs asked for and not started yet, and the one on screen (#223).
    *
@@ -590,16 +656,21 @@ export function Cockpit() {
   const [projectsEpoch, setProjectsEpoch] = useState(0);
   /** The last move, so the new directory's settings can offer the old file. */
   const [moved, setMoved] = useState<{ from: string; to: string } | null>(null);
-  const saveDrafts = useCallback((change: (list: readonly Draft[]) => readonly Draft[]) => {
-    setDrafts((list) => {
-      const next = change(list);
-      try {
-        memory.setItem(DRAFTS_KEY, JSON.stringify(next));
-      } catch {
-        // The drafts still work for this session; they will not be back next time.
-      }
-      return next;
-    });
+  /**
+   * The drafts' one writer, ref first, for `updateLives`' reason (#246): a
+   * launch claims its draft synchronously, before its host is started, so a
+   * second press in the same tick sees the claim and is refused.
+   */
+  const draftsRef = useRef<readonly Draft[]>(drafts);
+  const updateDrafts = useCallback((change: (list: readonly Draft[]) => readonly Draft[]) => {
+    const next = change(draftsRef.current);
+    draftsRef.current = next;
+    setDrafts(next);
+    try {
+      memory.setItem(DRAFTS_KEY, JSON.stringify(next));
+    } catch {
+      // The drafts still work for this session; they will not be back next time.
+    }
   }, []);
   /**
    * Point the project on screen at another directory, from its settings (#223).
@@ -625,13 +696,13 @@ export function Cockpit() {
         return `this window could not save that: ${err instanceof Error ? err.message : String(err)}`;
       }
       const next = to.trim();
-      saveDrafts((list) => list.map((d) => (dirKey(d.dir) === dirKey(repoDir) ? { ...d, dir: next } : d)));
+      updateDrafts((list) => list.map((d) => (dirKey(d.dir) === dirKey(repoDir) ? { ...d, dir: next } : d)));
       setProjectsEpoch((n) => n + 1);
       setMoved({ from: repoDir, to: next });
       rememberRepo(next);
       return null;
     },
-    [repoDir, rememberRepo, saveDrafts],
+    [repoDir, rememberRepo, updateDrafts],
   );
   const [draftId, setDraftId] = useState<string | null>(() => {
     // A draft is only restored while it still exists: it may have become a run
@@ -648,15 +719,6 @@ export function Cockpit() {
     }
   }, [tab, viewing, draftId, bottom, panels]);
   /**
-   * The draft whose proposal was pressed, so only ITS run can claim it.
-   *
-   * A ref rather than a field read off `drafting`, because the thing being
-   * guarded against is a run started some other way — a resume from the footer,
-   * a run continued into implementation — arriving while a draft happens to be
-   * open. Only the pilot's `invoke` sets this, and every other launch clears it.
-   */
-  const launchedFrom = useRef<string | null>(null);
-  /**
    * A brief waiting for its draft's conversation to be on screen.
    *
    * **One commit later, on purpose.** Pointing the pane at a new draft makes it
@@ -666,7 +728,7 @@ export function Cockpit() {
    * load runs in a child effect, before this one, so by the time `brief` is set
    * the pane is already holding the right conversation.
    */
-  const [queued, setQueued] = useState<string | null>(null);
+  const [queued, setQueued] = useState<Handover | null>(null);
   useEffect(() => {
     if (queued === null || drafting === null) return;
     setBrief(queued);
@@ -675,7 +737,7 @@ export function Cockpit() {
   /** Discard a draft and the conversation kept under it. Nothing on disk. */
   const forgetDraft = useCallback(
     (d: Draft) => {
-      saveDrafts((list) => removeDraft(list, d.id));
+      updateDrafts((list) => removeDraft(list, d.id));
       try {
         putChat(chatKey(d.dir, d.id), null);
       } catch {
@@ -683,30 +745,60 @@ export function Cockpit() {
       }
       setDraftId((at) => (at === d.id ? null : at));
     },
-    [saveDrafts],
+    [updateDrafts],
   );
   /** Let go of drafts whose run the archive now draws. Their chat moved already. */
   const settleDrafts = useCallback(
-    (ids: readonly string[]) => saveDrafts((list) => list.filter((d) => !ids.includes(d.id))),
-    [saveDrafts],
+    (ids: readonly string[]) => updateDrafts((list) => list.filter((d) => !ids.includes(d.id))),
+    [updateDrafts],
   );
-  // The run a draft's proposal started has said who it is: bind the draft to it
-  // and let go of the draft, which moves the pilot pane onto the run's key — and
-  // that move is a start rather than a click, so the run adopts the conversation.
-  const startedId = run.identity?.runId ?? null;
-  // The held key goes once the run has an id to adopt into, once it has ended
-  // without one, or as soon as the window is pointed somewhere else on purpose.
-  const launchSettled = startedId !== null || run.completed !== null;
+  /**
+   * Each new run takes the conversation that proposed it, and a draft's run
+   * claims its draft (#223) - decided for every live run at once (#246).
+   *
+   * **The one adopter.** The pilot pane used to adopt when its key moved, and
+   * with two runs starting that was two adopters racing each other; the pane
+   * only restores now, and is held on the proposing conversation (`heldChat`)
+   * until the mark below has landed. `adoptionPlan` is pure and decides; this
+   * writes the chats first and marks afterwards, so the pane cannot follow a run
+   * onto its key before the conversation is there. Not before the stored
+   * conversations have been read, or a run would adopt over one not yet seen.
+   */
   useEffect(() => {
-    if (launchSettled || viewing !== null || draftId !== null) setHoldChat(null);
-  }, [launchSettled, viewing, draftId]);
-  useEffect(() => {
-    if (startedId === null || drafting === null) return;
-    if (launchedFrom.current !== drafting.id) return;
-    launchedFrom.current = null;
-    saveDrafts((list) => bindDraft(list, drafting.id, startedId));
-    setDraftId(null);
-  }, [startedId, drafting, saveDrafts]);
+    if (!chats.ready) return;
+    const plan = adoptionPlan(livesRef.current, getChat);
+    if (plan.marks.length === 0) return;
+    for (const write of plan.writes) {
+      try {
+        putChat(write.key, write.value);
+      } catch {
+        // The conversation is still where it was. What is lost is the move.
+      }
+    }
+    for (const mark of plan.marks) {
+      const e = livesRef.current.find((x) => x.handle === mark.handle);
+      const id = e === undefined ? null : runIdOf(e);
+      const draft = e?.draft ?? null;
+      if (draft !== null && id !== null) {
+        const held = draftsRef.current.find((d) => d.id === draft.id) ?? null;
+        updateDrafts((list) => bindDraft(list, draft.id, id));
+        // A title typed in the dialog becomes the run's name now, so the row
+        // does not swap it for the brief the pilot wrote (#262).
+        if (held !== null && held.name !== null) {
+          try {
+            const names = namesAfterStart(readNames(memory.getItem(NAMES_KEY)), held, id);
+            memory.setItem(NAMES_KEY, JSON.stringify(names));
+            setProjectsEpoch((n) => n + 1);
+          } catch {
+            // Storage off: the row falls back to the task, which is a rename
+            // lost rather than a run lost.
+          }
+        }
+        setDraftId((at) => (at === draft.id ? null : at));
+      }
+      updateLives((l) => markAdopted(l, mark.handle, mark.adopted));
+    }
+  }, [lives, chats.ready, drafts, updateDrafts, updateLives]);
   /** Pilot proposals waiting on a person, so a hidden tab can say so (#144). */
   const [proposals, setProposals] = useState(0);
   /**
@@ -721,7 +813,70 @@ export function Cockpit() {
   const [keyStatuses, setKeyStatuses] = useState<readonly KeyStatus[] | null>(null);
   const [keyFailure, setKeyFailure] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
-  const requests = useRef(0);
+  /**
+   * The latest status read issued. Two reads in flight can resolve in either
+   * order, and the older one must not overwrite the newer - after a run host's
+   * exit that would put a host that has gone back in the diagnostics popover.
+   */
+  const statusGen = useRef(0);
+  const refreshStatus = useCallback(() => {
+    if (!host.inShell()) return;
+    const gen = (statusGen.current += 1);
+    void host
+      .status()
+      .then((status) => {
+        if (gen === statusGen.current) setWire((w) => ({ ...w, status }));
+      })
+      // Left as it was. A refresh that failed is not a reason to blank facts the
+      // window already has; the panel says when it has none.
+      .catch(() => undefined);
+  }, []);
+  /**
+   * A run's invoke is over, however it ended: nothing more is routed to it. A
+   * draft whose run ended before saying who it is goes back to unlaunched, so it
+   * can be proposed again rather than sitting at *starting* for ever.
+   */
+  const endLive = useCallback(
+    (handle: string) => {
+      const e = livesRef.current.find((x) => x.handle === handle);
+      updateLives((l) => endRun(l, handle));
+      const draft = e?.draft ?? null;
+      if (e !== undefined && draft !== null && runIdOf(e) === null) {
+        updateDrafts((list) => unmarkLaunched(list, draft.id));
+      }
+    },
+    [updateLives, updateDrafts],
+  );
+  /**
+   * Point the window at a run it has just started - once, as soon as anything
+   * proves Rust started its host (#246).
+   *
+   * **Visible changes wait for that proof**, so a start Rust refuses leaves the
+   * window exactly where it was. Two things prove it: `host_start` resolving,
+   * and the run's first frame - Rust relays frames before its promise resolves,
+   * so waiting for the pid alone left a run that had already said `run_started`
+   * undrawn behind whatever was on screen before. Whichever comes first points;
+   * the other finds nothing left to do.
+   */
+  const toPoint = useRef(new Set<string>());
+  const point = useCallback(
+    (handle: string) => {
+      if (!toPoint.current.delete(handle)) return;
+      const e = livesRef.current.find((x) => x.handle === handle);
+      // **At the run it is starting** (#223): six panes reading the old run
+      // while the column narrated the new one was reported as four bugs.
+      setViewing(null);
+      setOpenAt(null);
+      // **And at the repository it is starting in**, the same rule one field
+      // along: a project section reads its archive only while it is open, so a
+      // run started elsewhere was never fetched. Taken from the argv that was
+      // sent, through the entry, because that is what was actually sent.
+      if (e !== undefined) rememberRepo(e.dir);
+      setFocus(handle);
+      setStartRefused(null);
+    },
+    [rememberRepo],
+  );
 
   const refreshKeys = useCallback(() => {
     void keys
@@ -785,20 +940,8 @@ export function Cockpit() {
   // a figure measured at connect would be however long ago that was - stated as
   // though it were now.
   useEffect(() => {
-    if (!diagnostics || !host.inShell()) return;
-    let cancelled = false;
-    void host
-      .status()
-      .then((status) => {
-        if (!cancelled) setWire((w) => ({ ...w, status }));
-      })
-      // Left as it was. A refresh that failed is not a reason to blank four
-      // facts the window already has; the panel says when it has none.
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [diagnostics]);
+    if (diagnostics) refreshStatus();
+  }, [diagnostics, refreshStatus]);
 
   useEffect(() => {
     if (!host.inShell()) return;
@@ -807,40 +950,103 @@ export function Cockpit() {
 
     void (async () => {
       stop = await host.connect({
-        frame: (frame) => dispatch(frame),
-        unknown: (raw) => note('unknown', JSON.stringify(raw).slice(0, 300)),
-        log: (text) => note('log', text),
-        exit: (code) => {
+        frame: (from, frame) => {
+          const lives = livesRef.current;
+          const route = routeFrame(lives, from);
+          if (route === 'service') {
+            // Everything else the service host says is read by its own
+            // listener - the pilot, the commands, the reads. Only the protocol
+            // it speaks belongs to the window.
+            if (frame.type === 'ready') {
+              protocolRef.current = frame.protocol;
+              setProtocol(frame.protocol);
+            }
+            return;
+          }
+          if (route === 'stale') {
+            note('log', `[${from}] a ${frame.type} frame from a host this window is not running a run on`);
+            return;
+          }
+          const outcome = invokeOutcome(lives, from, frame);
+          const at = Date.now();
+          // A run host answers its pause, unpause and cancel with `result`
+          // frames too, and `reduce` reads any `result` as the command
+          // returning - so only the invoke's own reaches it. Every frame still
+          // marks the run heard: only a host Rust spawned can write one.
+          const folds = frame.type !== 'result' || outcome === 'completed';
+          updateLives((l) => updateRun(l, from, (r) => (folds ? reduce(r, frame, at) : r)));
+          point(from);
+          if (outcome === 'completed') endLive(from);
+          if (outcome === 'failed' && frame.type === 'error') {
+            // No `result` is coming, so Rust will not close this host on one:
+            // it is told there will be no more requests, and leaves.
+            updateLives((l) => updateRun(l, from, (r) => hostLost(r, at, frame.message)));
+            void host.shutdown(from).catch(() => undefined);
+            endLive(from);
+          }
+        },
+        unknown: (from, raw) => note('unknown', `[${from}] ${JSON.stringify(raw).slice(0, 300)}`),
+        log: (from, text) => note('log', from === host.SERVICE_HOST ? text : `[${from}] ${text}`),
+        exit: (from, code) => {
+          const means = exitMeans(livesRef.current, from);
           // Never hidden. The run is resumable and the user is the one who has
           // to be told that is what happened.
-          setWire((w) => ({
-            ...w,
-            connected: false,
-            hostPid: null,
-            failure:
-              code === null
-                ? 'the host was signalled and reported no exit code'
-                : `the host exited ${String(code)}`,
-          }));
+          if (means === 'service') {
+            // The ref first: `launch` reads it, and a start between this and
+            // the render would otherwise be sent to a host that has gone.
+            connectedRef.current = false;
+            setWire((w) => ({ ...w, connected: false, hostPid: null, failure: hostExitWording(code) }));
+          } else if (means === 'run-lost') {
+            // That run, and no other (#246).
+            const at = Date.now();
+            updateLives((l) => updateRun(l, from, (r) => hostLost(r, at, hostExitWording(code))));
+            endLive(from);
+          }
+          // After the host has left Rust's set, so this read is the one that
+          // settles what the diagnostics popover lists.
+          refreshStatus();
         },
       });
       if (cancelled) {
         stop();
         return;
       }
-      try {
-        const status = await host.status();
+      // Generation-stamped like every other status read: an exit or a
+      // diagnostics refresh issued while this was in flight is newer, and an
+      // older answer landing on it would bring back a host that has gone. So a
+      // stale answer is asked again rather than applied; the window still
+      // needs the service host's facts from a read that is current. That holds
+      // for a stale FAILURE too: its sentence would overwrite whatever the
+      // newer read, or an exit, has put in `failure` since.
+      for (;;) {
+        const gen = (statusGen.current += 1);
+        let status: host.Status;
+        try {
+          status = await host.status();
+        } catch (err) {
+          if (cancelled) return;
+          if (gen !== statusGen.current) continue;
+          setWire((w) => ({ ...w, failure: err instanceof Error ? err.message : String(err) }));
+          break;
+        }
+        if (cancelled) return;
+        if (gen !== statusGen.current) continue;
+        connectedRef.current = status.running;
         setWire((w) => ({
           ...w,
           connected: status.running,
           hostPid: status.pid,
-          failure: status.failure,
+          // A start failure, or the exit sentence the window may already hold:
+          // `failure` on Status is only ever the start's.
+          failure: status.failure ?? w.failure,
           uncontained: status.uncontained,
           status,
         }));
-        if (status.ready !== null) dispatch(status.ready);
-      } catch (err) {
-        setWire((w) => ({ ...w, failure: err instanceof Error ? err.message : String(err) }));
+        if (status.ready !== null) {
+          protocolRef.current = status.ready.protocol;
+          setProtocol(status.ready.protocol);
+        }
+        break;
       }
     })();
 
@@ -848,13 +1054,13 @@ export function Cockpit() {
       cancelled = true;
       stop?.();
     };
-  }, [note]);
+  }, [note, endLive, point, updateLives, refreshStatus]);
 
   const send = useCallback(
-    async (request: object) => {
+    async (request: object, handle: string = host.SERVICE_HOST) => {
       setBusy(true);
       try {
-        await host.send(request);
+        await host.send(request, handle);
       } catch (err) {
         note('log', String(err));
       } finally {
@@ -864,116 +1070,198 @@ export function Cockpit() {
     [note],
   );
 
+  /** A run as the sidebar names it, for every sentence that lists runs (#246). */
+  const labelOf = useCallback((e: LiveRun): string => {
+    let names: ReturnType<typeof readNames> = [];
+    try {
+      names = readNames(memory.getItem(NAMES_KEY));
+    } catch {
+      // Storage off: the brief names it instead of a rename.
+    }
+    return runLabel(e, names);
+  }, []);
+
+  /**
+   * A config write while runs are going is refused per project, and a global
+   * one while any run is live unless it only raises or lowers the cap (#246).
+   * Installed for as long as this window lives; `host.config` asks it before
+   * sending a patch. The decision is `writeRefusal`'s.
+   */
+  useEffect(() => {
+    host.setConfigGuard((patch, scope, dir) => writeRefusal(livesRef.current, patch, scope, dir, labelOf));
+    return () => host.setConfigGuard(null);
+  }, [labelOf]);
+
+  /**
+   * Tray Quit with runs going (#246). Rust has shown the window; this draws the
+   * one confirmation, or quits at once if, by the time it arrives, nothing is
+   * live any more.
+   */
+  useEffect(() => {
+    if (!host.inShell()) return;
+    let stop: (() => void) | null = null;
+    let cancelled = false;
+    void (async () => {
+      stop = await host.onQuitRequested(() => {
+        if (quitList(livesRef.current, labelOf).length === 0) void host.appQuit();
+        else setQuitting(true);
+      });
+      if (cancelled) stop();
+    })();
+    return () => {
+      cancelled = true;
+      stop?.();
+    };
+  }, [labelOf]);
+  // Every run on the list ended while the confirmation was up: there is nothing
+  // left to confirm, so the quit that was asked for goes ahead.
+  useEffect(() => {
+    if (quitting && quitList(lives, labelOf).length === 0) void host.appQuit();
+  }, [quitting, lives, labelOf]);
+
   /**
    * Start a run. **The one place this window does that**, and the pilot's
-   * `start_run` proposal comes through here rather than sending its own frame
-   * (#144) - so the request-id allocation, the column reset and the "one at a
-   * time" rule have exactly one definition each. A pilot capability the UI does
-   * not also have would be a missing control, which is a design bug rather than
-   * a pilot feature.
+   * `start_run` proposal, a resume and an implement all come through here (#144)
+   * - so the request-id allocation, the refusals and the cap have exactly one
+   * definition each. A pilot capability the UI does not also have would be a
+   * missing control, which is a design bug rather than a pilot feature.
+   *
+   * **Several runs may be going (#246)**, each in its own host, so a start is no
+   * longer refused because another run is live. Four steps, in this order, and
+   * the order is what makes each safe:
+   *
+   * 1. **Refusals, before anything changes**: outside the app, the service host
+   *    not connected, an argv whose repository this window cannot read, a draft
+   *    whose run is already starting, and the cap. The core's own refusal of a
+   *    second run in one checkout is not here - it arrives as the run's ending,
+   *    in the core's words.
+   * 2. **Claims, synchronously**: the draft is marked and the run is added, both
+   *    through their ref-first writers, so a frame that beats the start's promise
+   *    routes to its run and a second launch in the same tick counts this one.
+   * 3. **The start.** Rust refuses a run host while no service host is in its
+   *    set; a refusal reverses the claims exactly and says why. It never marks a
+   *    run lost - there was never a run.
+   * 4. **Visible changes**, only once the host is proven: see `point`.
    */
   const launch = useCallback(
-    // `fromDraft` is the draft whose proposal this is, and only the pilot's
-    // `invoke` passes one: a resume or an implement is not the run a draft asked
-    // for, and must not be the run that claims it (#223).
-    (argv: readonly string[], fromDraft: string | null = null) => {
-      launchedFrom.current = fromDraft;
-      if (fromDraft !== null) saveDrafts((list) => markLaunched(list, fromDraft));
-      else setHoldChat(pilotAt.current);
-      // A new run is a new column. Appending to the previous one's cycles would
-      // draw a single loop out of two runs.
-      dispatch({ type: 'reset' });
-      // **Point the window at the run it is starting** (#223). `viewing` is
-      // where the panes are aimed, and starting a run used to leave it aimed
-      // wherever it already was — so a person who had opened a past run from the
-      // sidebar and then started a new one got six panes reading the old run
-      // while the column narrated the new one. That is exactly what was
-      // reported: *"the planner is currently running plan 0, but I see nothing
-      // in the output tab… there is nothing under the plan and critiques tabs!
-      // No questions either, even though it says three raised."* The Questions
-      // **tab** counts the live run and the **pane** was forced to null by
-      // `past`, which is why the badge and the pane disagreed.
-      setViewing(null);
-      setOpenAt(null);
-      setLaunched(true);
+    (
+      argv: readonly string[],
+      // The draft whose proposal this is. Only the pilot's `invoke` passes one:
+      // a resume or an implement is not the run a draft asked for (#223).
+      fromDraft: string | null = null,
+      // A resume's column, before the loop adds to it (#223).
+      seed: Run | null = null,
+      // The brief, for a label before the run says its own.
+      task: string | null = null,
+    ) => {
+      const refuse = (why: string): void => {
+        setStartRefused(why);
+        note('log', why);
+      };
+      if (!host.inShell()) {
+        refuse('no host: this window is not running inside the app');
+        return;
+      }
+      if (!connectedRef.current) {
+        refuse('the host is not running, so no run can start until it is back');
+        return;
+      }
+      const meta = launchMeta(argv);
+      if (meta.dir === null) {
+        refuse('this window cannot read which repository that run is for, so it was not started');
+        return;
+      }
+      if (fromDraft !== null && isLaunched(draftsRef.current, fromDraft)) {
+        refuse("this draft's run is already starting");
+        return;
+      }
+      const capped = capRefusal(livesRef.current, capRef.current, labelOf);
+      if (capped !== null) {
+        refuse(capped);
+        return;
+      }
+      // The invoke's id comes from the same allocator as every control a run
+      // host answers with a `result`, so Rust, which closes the host on the
+      // invoke's own `result`, cannot mistake one of theirs for it. The handle
+      // is named from it, so it is unique too.
+      const id = host.nextRequestId();
+      const handle = `run-${String(id)}`;
+      const draft = fromDraft === null ? null : (draftsRef.current.find((d) => d.id === fromDraft) ?? null);
       const sent = readLaunchArgv(argv);
-      setSentLaunch(sent);
-      // **And at the repository it is starting in**, which is the same rule one
-      // field along (#223). `viewing` was moved above and `repoDir` was not, so a
-      // run started somewhere the window was not pointed left the sidebar showing
-      // a different project — and since a project section only reads its archive
-      // while it is open, that run was not merely in the wrong place in the list,
-      // it was never fetched. The pilot's `start_run` carries the directory it
-      // was given, so this is the case where the two could differ: open a past
-      // run in project B, type a brief, and the run starts in B while the sidebar
-      // is still on A.
-      //
-      // Taken from the argv rather than from a parameter, because the argv is
-      // what was actually sent — a second source would be a second answer to
-      // which repository this run is in. A null parse leaves it alone: that is an
-      // argv this build cannot read, and guessing a directory out of one is worse
-      // than pointing at nothing.
-      if (sent !== null) rememberRepo(sent.dir);
-      requests.current += 1;
-      void send({ type: 'invoke', id: requests.current, argv });
+      if (draft !== null) updateDrafts((list) => markLaunched(list, draft.id));
+      const entry: LiveRun = {
+        handle,
+        invokeId: id,
+        answered: new Set(),
+        live: true,
+        dir: meta.dir,
+        asked: meta.asked,
+        task: task ?? sent?.task ?? null,
+        sent,
+        draft: draft === null ? null : { id: draft.id, dir: draft.dir },
+        // The conversation that proposed it, when that was not a draft's. A
+        // resume has its own conversation already, and a seeded run is one.
+        held: draft === null && seed === null && argv[0] !== 'resume' ? pilotAt.current : null,
+        adopted: null,
+        pid: null,
+        heard: false,
+        pausing: false,
+        stopping: false,
+        run: { ...(seed ?? emptyRun()), protocol: protocolRef.current },
+      };
+      updateLives((l) => addRun(l, entry));
+      toPoint.current.add(handle);
+      setBusy(true);
+      void host
+        .startRunHost(handle, { type: 'invoke', id, argv })
+        .then((pid) => {
+          // Pruned now and not before: pruning ahead of a start Rust then
+          // refused would have erased the finished run on screen.
+          updateLives((l) => pruneEnded(setPid(l, handle, pid), handle));
+          point(handle);
+          refreshStatus();
+        })
+        .catch((err: unknown) => {
+          // Rust has already closed any host it spawned and could not hand the
+          // invoke to, so this is only the window's half: the claims go back
+          // exactly as they were, and the sentence is Rust's.
+          toPoint.current.delete(handle);
+          updateLives((l) => dropRun(l, handle));
+          if (draft !== null) updateDrafts((list) => unmarkLaunched(list, draft.id));
+          setStartRefused(`the run's host could not start: ${err instanceof Error ? err.message : String(err)}`);
+          refreshStatus();
+        })
+        .finally(() => setBusy(false));
     },
-    [send, rememberRepo, saveDrafts],
+    [note, labelOf, updateDrafts, updateLives, point, refreshStatus],
   );
 
   /**
-   * Pick a halted run back up (`4d`).
-   *
-   * Through `launch`, not beside it: the request-id allocation, the column reset
-   * and the one-at-a-time rule keep exactly one definition each, which is the
-   * same reason the pilot's `start_run` proposal comes through there (#144).
-   */
-  /**
-   * Take a finished plan-only run into implementation (#223).
-   *
-   * Through `launch` like every other way a run starts, so the request-id
-   * allocation and the one-at-a-time rule keep one definition each. It is a
-   * RESUME of that run and not a new one - the core refuses it unless the plan
-   * actually cleared critique, and everything the plan phase settled travels
-   * with it.
-   */
-  const implement = useCallback(
-    (runId: string, dir: string) => launch(implementArgv(runId, dir)),
-    [launch],
-  );
-
-  /**
-   * Pick a halted run back up, with the column it already had (#223).
+   * Carry a run on - a resume, or a plan-only run into implementation - with the
+   * column it already had (#223).
    *
    * **A resumed run used to start from an empty column, and that is what was
    * reported:** *"the previous plan, critique, code, etc rounds don't show up on
    * the right bar. I want it to look as I just left it when I stopped the run."*
    * `reduce` builds a `Run` from the frames *this process* narrates, and a
-   * resume narrates only what happens from the resume onwards — so a run three
-   * plan rounds deep came back showing one, and every earlier round, census and
-   * turn was simply gone from the window.
+   * resume narrates only what happens from the resume onwards. So the run is
+   * **seeded** with its own narration, folded before the `invoke` is sent - so
+   * there are no live frames yet to arrive out of order, and the seed can never
+   * land on top of something the loop has already said.
    *
-   * So the column is **seeded** with the run's own narration before the loop
-   * starts adding to it. The ordering is what makes this safe rather than racy:
-   * the replay is fetched and folded *before* the `invoke` is sent, so there are
-   * no live frames yet to arrive out of order, and the seed can never land on
-   * top of something the loop has already said.
+   * The ending is deliberately **not** applied (`forResume`): a run you are
+   * resuming has not stopped, and seeding `completed` would draw a halt banner
+   * over a run that is starting. A replay that fails costs nothing but the
+   * history - losing the seed must never cost somebody the resume.
    *
-   * The ending is deliberately **not** applied. `useReplay` applies it because a
-   * run you opened has ended and must say so; a run you are resuming has not,
-   * and seeding `completed` would draw a halt banner over a run that is starting.
-   *
-   * A replay that fails costs nothing but the history: the resume goes ahead on
-   * an empty column, which is exactly what it did before. Losing the seed must
-   * never cost somebody the resume.
+   * Through `launch`, like every way a run starts. An implement is a RESUME of
+   * that run and not a new one: the core refuses it unless the plan actually
+   * cleared critique, and everything the plan phase settled travels with it.
    */
-  const resume = useCallback(
-    // `force` last and defaulting to false, so every existing caller sends the
-    // ordinary resume: taking a lock somebody may still hold is a decision, and
-    // the one screen that can see the lock's verdict is the one that offers it.
-    (runId: string, dir: string, raise?: Raise, force = false) => {
-      const argv = resumeArgv(runId, dir, raise ?? {}, force);
+  const continueRun = useCallback(
+    (argv: readonly string[], runId: string, dir: string, task: string | null) => {
       if (!host.inShell()) {
-        launch(argv);
+        launch(argv, null, null, task);
         return;
       }
       setBusy(true);
@@ -983,31 +1271,39 @@ export function Cockpit() {
         .then((got) => {
           // Stripped of the previous ending: a resume has not stopped, and
           // seeding one would draw a halt banner over a run that is starting.
-          seed = forResume(foldReplay(got.steps));
+          seed = forResume(foldReplay(got.steps), got.steps[got.steps.length - 1]?.at ?? Date.now());
         })
         .catch(() => {
           // Deliberately silent. The run is about to start either way, and a
           // failure here means the column begins empty - which is what every
-          // resume did until now, not a new failure worth a banner.
+          // resume did until #223, not a new failure worth a banner.
         })
         .finally(() => {
           setBusy(false);
-          // **`launch` first, and the order is the whole of it.** `launch` opens
-          // with `dispatch({ type: 'reset' })`, so a seed dispatched before it
-          // is thrown away by the very next action - which is what happened on
-          // the first cut of this, and it is invisible because an empty column
-          // is exactly what the bug looked like anyway. Both dispatches land in
-          // one batch and the reducer applies them in order: reset, then seed.
-          //
-          // Still before any frame can arrive: `launch` ends at `void send(...)`
-          // and the wire delivers asynchronously, so nothing the loop says can
-          // be overwritten by this.
-          launch(argv);
-          if (seed !== null) dispatch({ type: 'seed', run: seed });
+          launch(argv, null, seed, task);
         });
     },
     [launch],
   );
+  const resume = useCallback(
+    // `force` defaulting to false, so every caller sends the ordinary resume:
+    // taking a lock somebody may still hold is a decision, and the one screen
+    // that can see the lock's verdict is the one that offers it.
+    (runId: string, dir: string, raise?: Raise, force = false, task: string | null = null) =>
+      continueRun(resumeArgv(runId, dir, raise ?? {}, force), runId, dir, task),
+    [continueRun],
+  );
+  const implement = useCallback(
+    (runId: string, dir: string, task: string | null = null) => continueRun(implementArgv(runId, dir), runId, dir, task),
+    [continueRun],
+  );
+
+  /**
+   * The live run on screen, for the controls (#246). Every control acts on the
+   * run a person is looking at, sent to that run's own host - never "the" live
+   * run, because there can be several. Assigned during render, below.
+   */
+  const shownRef = useRef<LiveRun | null>(null);
 
   /**
    * Answer a waiting gate.
@@ -1020,9 +1316,18 @@ export function Cockpit() {
    */
   const answer = useCallback(
     (askId: number, decision: object) => {
-      void send({ type: 'answer', id: askId, decision });
+      // **At most once per gate, and only the gate that run is holding** (#246).
+      // Once-per-gate is what makes an `error` carrying the invoke's id
+      // unambiguous - see `invokeOutcome`.
+      const shown = shownRef.current;
+      if (shown === null || !mayAnswer(livesRef.current, shown.handle, askId)) {
+        note('log', `gate ${String(askId)} was already answered, or is not the gate the run on screen holds`);
+        return;
+      }
+      updateLives((l) => markAnswered(l, shown.handle, askId));
+      void send({ type: 'answer', id: askId, decision }, shown.handle);
     },
-    [send],
+    [send, note, updateLives],
   );
 
   /**
@@ -1034,29 +1339,65 @@ export function Cockpit() {
    * process, and both leave the run resumable.
    */
   const pause = useCallback(() => {
-    setPausing(true);
-    void host.pause().catch((err: unknown) => {
+    // A live-run control: with no run host there is nobody to hold.
+    const shown = shownRef.current;
+    if (shown === null || !shown.live) {
+      note('log', 'no run is live on screen, so there is nothing to pause');
+      return;
+    }
+    updateLives((l) => setFlag(l, shown.handle, 'pausing', true));
+    void host.pause(shown.handle).catch((err: unknown) => {
       // Un-armed on failure. A button that stayed disabled after a request that
       // never landed would be a window claiming a hold it has not asked for.
-      setPausing(false);
+      updateLives((l) => setFlag(l, shown.handle, 'pausing', false));
       note('log', String(err));
     });
-  }, [note]);
+  }, [note, updateLives]);
+
+  /**
+   * Take back an armed pause (#276). The window stops saying it is pausing at
+   * once; a pause the boundary already took is a gate on screen by now, and
+   * `updateRun` clears `pausing` for that case too.
+   */
+  const unpause = useCallback(() => {
+    const shown = shownRef.current;
+    if (shown === null || !shown.live) {
+      note('log', 'no run is live on screen, so there is no pause to take back');
+      return;
+    }
+    updateLives((l) => setFlag(l, shown.handle, 'pausing', false));
+    void host.unpause(shown.handle).catch((err: unknown) => {
+      // Not re-armed: the request may well have landed, and claiming a hold
+      // the host may no longer hold is the worse of the two errors.
+      note('log', String(err));
+    });
+  }, [note, updateLives]);
 
   const stop = useCallback(
     (reason: string) => {
       setConfirmStop(false);
-      void host.cancel(reason).catch((err: unknown) => note('log', String(err)));
+      const shown = shownRef.current;
+      if (shown === null || !shown.live) {
+        note('log', 'no run is live on screen, so there is nothing to stop');
+        return;
+      }
+      // **Said, because the answer can take minutes** (#253). A stop latches at
+      // once and kills an agent turn at once, but the verification gate and git
+      // are never killed, so a stop pressed during either waits for it to
+      // return - and until the core narrated its ending the footer went on
+      // saying `Live run` with both controls live, as if nothing was pressed.
+      updateLives((l) => setFlag(l, shown.handle, 'stopping', true));
+      void host.cancel(shown.handle, reason).catch((err: unknown) => {
+        updateLives((l) => setFlag(l, shown.handle, 'stopping', false));
+        note('log', String(err));
+      });
     },
-    [note],
+    [note, updateLives],
   );
 
-  // The loop honoured the pause, so the window stops saying it is armed. Told,
-  // not guessed: `gate_waiting` carries `requested` precisely so this is not the
-  // window deciding a hold must have been the one it asked for.
-  useEffect(() => {
-    if (run.gate !== null) setPausing(false);
-  }, [run.gate]);
+  // A pause and a stop belong to one run (#253), and since #246 they are held
+  // on that run's entry: `updateRun` clears `pausing` when a gate opens and
+  // both once the run has settled or is giving up, and `endRun` clears both.
 
   /**
    * Commands this window started (#211).
@@ -1100,27 +1441,30 @@ export function Cockpit() {
   }, [wire.connected, note]);
 
   /**
-   * Run one, in the repository this window is pointed at.
+   * Run one, in the directory it names.
    *
    * The **one** sender, exactly as `launch` is: the pilot's accepted proposal
    * and the command bar's own button both arrive here, so a pilot capability the
    * window lacks would be a missing control rather than a special ability
-   * (#144). The directory is not a parameter - a command runs where the window
-   * is pointed, and letting a caller name one would be a second answer to which
-   * repository this is.
+   * (#144). **The directory is the caller's, and each caller states it** (#246):
+   * a pilot proposal runs where its card said - `effect.dir`, which `tools.ts`
+   * resolved and the card displayed, because what runs is what was displayed -
+   * and the Commands pane runs in the project the sidebar is on. With several
+   * runs on screen in turn, "where the window is pointed" was a second answer
+   * that could differ from the card a person pressed.
    */
   const runCommand = useCallback(
-    (program: string, args: readonly string[]) => {
-      if (repoDir.trim() === '') {
+    (dir: string, program: string, args: readonly string[]) => {
+      if (dir.trim() === '') {
         note('log', 'no repository is set, so there is nowhere to run a command');
         return;
       }
       void host
-        .runCommand(repoDir, program, args)
+        .runCommand(dir, program, args)
         .then((frame) => setCommands((prev) => reduceCommands(prev, frame)))
         .catch((err: unknown) => note('log', String(err)));
     },
-    [repoDir, note],
+    [note],
   );
 
   const stopCommand = useCallback(
@@ -1137,17 +1481,37 @@ export function Cockpit() {
    * the model asked for, and a person pressed a button. This is the routing, and
    * it routes to the same functions the buttons call.
    */
+  /**
+   * An effect from one pilot pane. `draft` is **that pane's** draft rather than
+   * the one on screen (#305): a pane in the background can still finish a turn
+   * whose proposal fires on the person's settings, and the run it starts is the
+   * run its own draft asked for.
+   */
   const onEffect = useCallback(
-    (effect: Effect) => {
-      if (effect.kind === 'invoke') launch(effect.argv, draftId);
-      else if (effect.kind === 'command') runCommand(effect.program, effect.args);
+    (effect: Effect, draft: string | null) => {
+      if (effect.kind === 'invoke') launch(effect.argv, draft);
+      else if (effect.kind === 'command') runCommand(effect.dir, effect.program, effect.args);
       else if (effect.kind === 'stop_command') stopCommand(effect.commandId);
       else answer(effect.askId, effect.decision);
     },
-    [draftId, launch, answer, runCommand, stopCommand],
+    [launch, answer, runCommand, stopCommand],
   );
+  const effectRef = useRef(onEffect);
+  effectRef.current = onEffect;
 
   const outside = !host.inShell();
+  /**
+   * The live run on screen, or null (#246): the one `viewing` names if this
+   * window is hosting it, else the run last started. Null means the column
+   * draws a replay, or nothing. `run` is its `Run`, so every expression below
+   * that said "the live run" now says "the live run on screen".
+   */
+  const shownLive = onScreen(lives, viewing, focus);
+  shownRef.current = shownLive;
+  const blank = useMemo(() => emptyRun(), []);
+  const run = shownLive?.run ?? blank;
+  const pausing = shownLive?.pausing ?? false;
+  const stopping = shownLive?.stopping ?? false;
   /**
    * The run every disk-reading pane is about.
    *
@@ -1158,7 +1522,7 @@ export function Cockpit() {
    */
   // A draft on screen has no run yet, so the panes read nothing rather than
   // whichever run the column happens to hold (#223).
-  const shownRunId = viewing?.runId ?? (drafting !== null ? null : (run.identity?.runId ?? null));
+  const shownRunId = viewing?.runId ?? (drafting !== null ? null : shownLive !== null ? runIdOf(shownLive) : null);
   /**
    * The question round the loop is on, through `model.ts` rather than by index.
    *
@@ -1182,9 +1546,18 @@ export function Cockpit() {
    * nothing says *no plans yet*, which is indistinguishable from a planner that
    * has not finished.
    */
-  const shownDir = viewing?.dir ?? drafting?.dir ?? run.identity?.repo ?? repoDir;
+  const shownDir = viewing?.dir ?? drafting?.dir ?? (shownLive !== null ? repoOf(shownLive) : null) ?? repoDir;
+  // The archive's scorecard for the repository on screen (#114), re-read when
+  // any live run starts or ends, because that is a run whose record just joined it.
+  const archive = useStats(shownDir, livesEpoch(lives));
+  /**
+   * The conversation that proposed a run whose adoption has not settled, or
+   * null (#246). While it is set the pane stays on it, however the run reached
+   * the screen - see `heldChat`.
+   */
+  const holdChat = heldChat(lives, shownLive, viewing, drafting);
   // Which conversation the pilot shows: the one on screen, or the one that
-  // proposed a launch still waiting for its run id (see `holdChat`).
+  // proposed a launch still waiting to be adopted (see `holdChat`).
   const pilotDir = holdChat?.dir ?? shownDir;
   const pilotRunId = holdChat !== null ? holdChat.runId : (drafting?.id ?? shownRunId);
   pilotAt.current = { dir: pilotDir, runId: pilotRunId };
@@ -1196,9 +1569,9 @@ export function Cockpit() {
    * run's repository while it asked about the live run's commits, which is a
    * `git diff` against two objects that are not there.
    */
-  const liveRepo = run.identity?.repo ?? repoDir;
-  /** Whether what is on screen is a run this window did not narrate. */
-  const past = viewing !== null && viewing.runId !== run.identity?.runId;
+  const liveRepo = shownLive !== null ? repoOf(shownLive) : shownDir;
+  /** Whether what is on screen is a run this window is not narrating live. */
+  const past = viewing !== null && shownLive === null;
   // The round cards, built once here and handed to the surfaces that draw them.
   // `rounds()` is a re-shaping of what is already on `Run` - it measures nothing
   // and infers nothing - and one call is what keeps the pilot's log, the report
@@ -1231,7 +1604,88 @@ export function Cockpit() {
    * failed leaves it there with the failure said beside it — a column showing
    * one run while claiming to show another is the confusion this set out to fix.
    */
-  const columnRun = past && opened.run !== null ? opened.run : run;
+  // A draft not yet started has no run, so the column is drawn empty rather than
+  // falling through to the window's last live run.
+  const columnRun = draftHasNoRun(drafting) ? blank : past && opened.run !== null ? opened.run : run;
+  /**
+   * The verification passes the Verify tab draws, and the run whose directory
+   * their logs are read from - **one run, never two** (#248). Each attempt opens
+   * the file its own run named, so drawing the live run's attempts while reading
+   * filenames under an opened one would open the wrong run's logs, or nothing.
+   * So an opened run draws its own replayed passes, and draws none until the
+   * replay has arrived rather than borrowing the live run's as the column
+   * does: a column showing the live run says so, an attempt card cannot.
+   */
+  const verifyOf = past && viewing !== null
+    ? {
+        passes: opened.run?.verify ?? [],
+        dir: viewing.dir,
+        runId: viewing.runId,
+        // Said rather than drawn as an empty run: the replay is still being
+        // read, or could not be, and the pane must not claim no gate ran.
+        waiting: opened.run !== null
+          ? null
+          : opened.failure !== null
+            ? `This run could not be read again: ${opened.failure}`
+            : 'Reading this run’s record…',
+      }
+    : { passes: run.verify, dir: liveRepo, runId: run.identity?.runId ?? null, waiting: null };
+  /** One reading of the live turn's quiet, for the strip and the status bar (#267). */
+  const quiet = staleness(run, now);
+  // The run the pilot's conversation is about, for its log's round cards (#247).
+  // The pane still takes the live `run` for its tools.
+  const pilotRun = useMemo(() => ({ ...columnRun, protocol }), [columnRun, protocol]);
+  const pilotLogRun = chatRun({
+    runId: pilotRunId,
+    drafting: drafting !== null,
+    holding: holdChat !== null,
+    live: run,
+    opened: past && viewing !== null ? { runId: viewing.runId, run: opened.run } : null,
+  });
+
+  /**
+   * One pilot pane per conversation still doing something (#305) - see
+   * `pilot/panes.ts`. The one on screen takes the props above; one in the
+   * background keeps the props it last had on screen, which are about its own
+   * conversation, since it is no longer the one a person is looking at.
+   */
+  const shownPane = paneOf({ dir: pilotDir, runId: pilotRunId }, drafts);
+  const paneProps = useRef(
+    new Map<string, { dir: string; runId: string | null; run: typeof pilotRun; logRun: typeof pilotLogRun; launched: LiveRun['sent'] }>(),
+  );
+  paneProps.current.set(shownPane, {
+    dir: pilotDir,
+    runId: pilotRunId,
+    run: pilotRun,
+    logRun: pilotLogRun,
+    launched: shownLive?.sent ?? null,
+  });
+  const [knownPanes, setKnownPanes] = useState<readonly string[]>([]);
+  useEffect(() => {
+    setKnownPanes((k) => (k.includes(shownPane) ? k : [...k, shownPane]));
+  }, [shownPane]);
+  const [busyPanes, setBusyPanes] = useState<ReadonlySet<string>>(() => new Set());
+  // Stable per pane, so a pane's effects do not re-run on every cockpit render.
+  const paneHooks = useRef(new Map<string, { busy: (b: boolean) => void; effect: (e: Effect) => void }>());
+  const hooksFor = (pane: string) => {
+    let hooks = paneHooks.current.get(pane);
+    if (hooks === undefined) {
+      hooks = {
+        busy: (b) =>
+          setBusyPanes((now) => {
+            if (now.has(pane) === b) return now;
+            const next = new Set(now);
+            if (b) next.add(pane);
+            else next.delete(pane);
+            return next;
+          }),
+        effect: (e) => effectRef.current(e, draftOfPane(pane, draftsRef.current)),
+      };
+      paneHooks.current.set(pane, hooks);
+    }
+    return hooks;
+  };
+  const panes = mountedPanes(shownPane, knownPanes, busyPanes, drafts);
 
   /**
    * Every action the shell offers, by id (`shell/actions.ts`). The palette, the
@@ -1261,6 +1715,7 @@ export function Cockpit() {
     // link went at the owner's word, and a tab for it is how the bar got to twelve.
     goRuns: () => setTab('runs'),
     pause: () => pause(),
+    unpause: () => unpause(),
     stop: () => setConfirmStop(true),
     gateContinue: () => {
       if (run.gate !== null) answer(run.gate.askId, { kind: 'continue' });
@@ -1292,6 +1747,31 @@ export function Cockpit() {
         />
       )}
 
+      {/* Tray Quit with runs going (#246). One confirmation listing every run
+          the window hosts, started or not - recomputed on every render, so a
+          run that ends or a start Rust refuses while it is up leaves the list.
+          Worded as what it is: every run is resumable, and only the turn each
+          is in is redone. */}
+      {quitting && (() => {
+        const going = quitList(lives, labelOf);
+        // Nothing left to stop: the effect beside `quitting` quits.
+        if (going.length === 0) return null;
+        return (
+          <Confirm
+            kicker="quit vibe"
+            title={`Quit with ${String(going.length)} run${going.length === 1 ? '' : 's'} going?`}
+            lead="Every run below stops where it is and can be resumed; only the turn each is in is redone."
+            facts={going.map((label, i) => ({ label: `run ${String(i + 1)}`, value: label }))}
+            confirm="Quit"
+            onConfirm={() => void host.appQuit()}
+            onCancel={() => {
+              setQuitting(false);
+              void host.quitDeclined();
+            }}
+          />
+        );
+      })()}
+
       {composing !== null && (
         <NewWorkstream
           dir={composing.dir}
@@ -1311,18 +1791,19 @@ export function Cockpit() {
           // draft is the run as far as the person is concerned; the core has
           // nothing until the proposal is pressed, and the draft is what the
           // sidebar draws in between.
-          onBrief={(message, task) => {
+          onBrief={(message, task, title) => {
             const draft = newDraft(
               composing.dir,
               task,
               Date.now(),
               Math.random().toString(36).slice(2, 8),
+              title,
             );
-            saveDrafts((list) => addDraft(list, draft));
+            updateDrafts((list) => addDraft(list, draft));
             setDraftId(draft.id);
             setViewing(null);
             rememberRepo(draft.dir);
-            setQueued(message);
+            setQueued({ id: draft.id, message });
             setComposing(null);
             open('pilot');
           }}
@@ -1341,6 +1822,7 @@ export function Cockpit() {
         actions={available({
           live: run.running !== null || run.preflight !== null,
           gate: run.gate !== null,
+          pausing,
           past,
           inShell: !outside,
         })}
@@ -1356,8 +1838,9 @@ export function Cockpit() {
 
       {/* `7c`, above everything and below the titlebar. It is a statement about
           the whole window - everything under it is as old as the strip says -
-          so it cannot sit inside one column. */}
-      <StalenessStrip state={staleness(run, now)} hostPid={wire.hostPid} />
+          so it cannot sit inside one column. Only `not live` is drawn here; the
+          quiet states are in the status bar, whose height is fixed (#267). */}
+      <StalenessStrip state={quiet} hostPid={shownLive?.pid ?? null} />
 
       {/* `7e`, above the columns for the same reason: an agent with no headroom
           is a statement about the whole run, not about one pane. Quiet, and
@@ -1367,6 +1850,22 @@ export function Cockpit() {
       {wire.failure !== null && (
         <div className="flex flex-none items-center gap-2 bg-alarm px-5 py-2 text-body-sm text-primary">
           <Badge variant="alarm">no host</Badge> {wire.failure}
+        </div>
+      )}
+      {/* Why the last start was refused - the cap, the service host, Rust's
+          own sentence (#246) - until a host has started, or it is dismissed. */}
+      {startRefused !== null && (
+        <div className="flex flex-none items-center gap-2 bg-alarm px-5 py-2 text-body-sm text-primary">
+          <Badge variant="alarm">not started</Badge> <span className="min-w-0 flex-1">{startRefused}</span>
+          <Button variant="quiet" size="icon-sm" aria-label="Dismiss" title="Dismiss" onClick={() => setStartRefused(null)}>
+            <X className="size-3.5" aria-hidden />
+          </Button>
+        </div>
+      )}
+      {/* The run on screen's own host, which is not the one above (#246). */}
+      {run.lost !== null && (
+        <div className="flex flex-none items-center gap-2 bg-alarm px-5 py-2 text-body-sm text-primary">
+          <Badge variant="alarm">run host</Badge> {run.lost}
         </div>
       )}
       {/* `Status.uncontained` is no longer drawn here: a permanent banner on
@@ -1427,11 +1926,25 @@ export function Cockpit() {
             }}
             onForgetDraft={forgetDraft}
             onSettled={settleDrafts}
+            // From the saved conversation (#307): the draft on screen draws its
+            // own state, and one whose proposal was pressed is a run starting.
+            draftNeeds={(d) =>
+              d.launched || d.id === draftId ? null : draftAttention(readChat(getChat(chatKey(d.dir, d.id))))
+            }
             // The run ON SCREEN, which is what a highlight means (#223). This
             // was the live run, so opening a past one left the highlight on the
             // run you had just left - or on nothing when none was going. A
             // draft on screen is no run at all.
-            currentId={viewing?.runId ?? (draftId !== null ? null : (run.identity?.runId ?? null))}
+            current={
+              viewing !== null
+                ? { dir: viewing.dir, runId: viewing.runId }
+                : draftId !== null || shownLive === null || runIdOf(shownLive) === null
+                  ? null
+                  : { dir: repoOf(shownLive), runId: runIdOf(shownLive) ?? '' }
+            }
+            // Every run this window hosts, marked in its own project's rows,
+            // static; a gate held off screen is badged there (#246).
+            marksFor={(dir) => hostedMarks(lives, dir, shownLive?.handle ?? null)}
             // A run in THIS project, with the repository already answered. It
             // also points the window there, because the run about to start is
             // the one the panes should be reading.
@@ -1485,8 +1998,13 @@ export function Cockpit() {
         <ResizablePanel id="main" minSize="20%" className="flex min-h-0 min-w-0 flex-col">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-page" role="main">
           <header className="flex flex-none items-center justify-between gap-4 px-7 pt-6 pb-4">
-            <div><p className="mb-1 text-label text-tertiary">{viewing !== null ? 'Run archive' : 'Make room for good work'}</p>
-              <h2 className="m-0 text-title font-semibold tracking-tight text-display">{tab === 'pilot' ? 'Your pilot' : tab === 'plans' ? 'Plans' : tab === 'critique' ? 'Plan critique' : tab === 'code' ? 'Code changes' : tab === 'review' ? 'Code review' : tab === 'verify' ? 'Verification' : tab === 'questions' ? 'Questions' : tab === 'spend' ? 'Usage' : tab === 'settings' ? 'Settings' : 'Project runs'}</h2>
+            {/*
+              The line above the title is drawn only when it says something: an
+              opened run is labelled so it is not mistaken for the live one. It
+              used to carry a tagline otherwise, which told nobody anything (#300).
+            */}
+            <div>{viewing !== null && <p className="mt-[1em] mb-1 text-label text-tertiary">Run archive</p>}
+              <h2 className="m-0 text-title font-semibold tracking-tight text-display">{tab === 'pilot' ? 'Your pilot' : tab === 'output' ? 'Output' : tab === 'plans' ? 'Plans' : tab === 'critique' ? 'Plan critique' : tab === 'code' ? 'Code changes' : tab === 'review' ? 'Code review' : tab === 'verify' ? 'Verification' : tab === 'questions' ? 'Questions' : tab === 'spend' ? 'Usage' : tab === 'settings' ? 'Settings' : 'Project runs'}</h2>
             </div>
             <Button variant="quiet" size="sm" onClick={() => setTab('spend')} title="Usage for the live run">
               <Activity size={14} aria-hidden="true" />
@@ -1518,7 +2036,17 @@ export function Cockpit() {
             >
               Pilot{proposals > 0 ? ` · ${String(proposals)}` : ''}
             </button>
-            {/* Output and Commands are the bottom panel's tabs, below. */}
+            {/* The run's raw output, right of the pilot (#284): what each step
+                is doing as it happens. It was the bottom panel's for a while,
+                shut by default, which left no tab to click while watching a run.
+                Commands stays in the bottom panel. */}
+            <button
+              className={cn(TAB, tab === 'output' && TAB_ON)}
+              aria-current={tab === 'output' ? 'page' : undefined}
+              onClick={() => open('output')}
+            >
+              Output
+            </button>
             {/* Hi-fi 3, and it is built now (#223). The tooltip on the tab it
                 replaces said *"this window cannot read a run's artifacts"*,
                 which was true until the `artifacts` frame landed - a version
@@ -1595,7 +2123,7 @@ export function Cockpit() {
               aria-current={tab === 'verify' ? 'page' : undefined}
               onClick={() => setTab('verify')}
             >
-              Verify{run.verify.length > 0 ? ` · ${String(run.verify.length)}` : ''}
+              Verify{verifyOf.passes.length > 0 ? ` · ${String(verifyOf.passes.length)}` : ''}
             </button>
             {/*
               `5e`, in the place hi-fi 1 puts it: right-aligned in this bar,
@@ -1619,7 +2147,17 @@ export function Cockpit() {
               reading box". The loop column's own `reading` head stays, since
               that is where the one fact worth stating (turn durations are
               missing on a replay) is said. */}
-          {tab === 'verify' && <VerifyPane passes={run.verify} />}
+          {tab === 'verify' && (
+            // Keyed by the run, so an attempt log left open on one run is not
+            // carried onto the next one opened.
+            <VerifyPane
+              key={verifyOf.runId ?? 'none'}
+              passes={verifyOf.passes}
+              dir={verifyOf.dir}
+              runId={verifyOf.runId}
+              waiting={verifyOf.waiting}
+            />
+          )}
           {tab === 'spend' && <SpendPane run={run} />}
           {tab === 'questions' && (
             <QuestionsPane
@@ -1633,7 +2171,7 @@ export function Cockpit() {
               // would be refused by the core for having no NEEDS-INPUT.md.
               halted={!past && run.completed?.exit === NEEDS_HUMAN}
               busy={busy}
-              onResume={resume}
+              onResume={(runId, dir) => resume(runId, dir, undefined, false, viewing?.task ?? run.identity?.task ?? null)}
             />
           )}
           {tab === 'settings' && (
@@ -1661,7 +2199,7 @@ export function Cockpit() {
           {tab === 'runs' && (
             <Workstreams
               dir={repoDir}
-              onResume={(runId, force) => resume(runId, repoDir, undefined, force)}
+              onResume={(runId, force, task) => resume(runId, repoDir, undefined, force, task)}
             />
           )}
           {/* The four artifact panes. Every one of them reads the run's own
@@ -1672,6 +2210,16 @@ export function Cockpit() {
               counts what the run SAID it wrote, so a re-read happens because a
               file appeared and never on a timer - and `artifact()` says it after
               the bytes are on disk, so the re-read cannot beat the write. */}
+          {tab === 'output' && (
+            <OutputPane
+              lines={run.output}
+              turn={past ? null : run.running}
+              staleness={staleness(run, now)}
+              // A past run's narration is on disk, in its own transcript. The
+              // live run's is on the wire and has never been read from a file.
+              transcript={past && viewing !== null ? viewing : null}
+            />
+          )}
           {tab === 'plans' && (
             <PlansPane
               dir={shownDir}
@@ -1724,62 +2272,77 @@ export function Cockpit() {
               which is the one thing this tab must not do. The other two panes
               hold nothing, so they stay conditional. */}
           <div className={cn('min-h-0 flex-1 flex-col', tab === 'pilot' ? 'flex' : 'hidden')} hidden={tab !== 'pilot'}>
-            <PilotPane
-              run={run}
-              launched={sentLaunch}
-              // **The run's repository, not the window's** (#223). Every other
-              // pane that reads a run moved onto `shownDir` and this one was
-              // missed, which is the second-answer-to-which-repository defect
-              // AGENTS.md already records, one pane later. It is worse here
-              // than on a reader: `dir` is the pilot's PERMISSION BOUNDARY -
-              // the directory `claude -p --restricted` is spawned in and the
-              // only one it can read - and it is where an accepted
-              // `run_command` runs. So opening a run in another project left
-              // the pilot reading a different repository from the one on
-              // screen, and with no project selected at all it was blocked
-              // outright: *"I just tried sending a chat to an old run's pilot
-              // but I can't"*.
-              dir={pilotDir}
-              // Which conversation to show. It follows the run the panes are
-              // reading, so opening a finished run brings back the chat about
-              // it — and null, before any run, is the conversation that will
-              // propose one.
-              // A draft's conversation is its own, keyed by the draft id until
-              // the run it asked for starts and adopts it (#223).
-              runId={pilotRunId}
-              access={access}
-              // Pointed at rather than started here. `viewing` is set by
-              // clicking a row in the archive, and a click is a read — so the
-              // conversation must not travel with it, which is what adoption
-              // was doing to every run somebody browsed to (#223).
-              // A draft counts as pointed-at too: arriving at one restores ITS
-              // conversation rather than adopting whatever was on screen, which
-              // is what a fresh draft needs. Leaving it for its run is the start.
-              opened={holdChat === null && (viewing !== null || drafting !== null)}
-              commands={commands}
-              onEffect={onEffect}
-              ask={brief}
-              onAsked={() => setBrief(null)}
-              onPending={setProposals}
-              limits={limits}
-              statuses={keyStatuses}
-              // Hi-fi 5's `open verify`. A round card is the round's summary
-              // and the pane beside it holds the detail, so the card links to
-              // it rather than growing a second copy of that screen - and it
-              // names its own round, so the pane opens at the card you clicked
-              // rather than at whichever round happens to be newest (#223).
-              onOpen={open}
-              // The repository, whenever there is no run to watch. Once one is
-              // going the pane is a conversation *about* it, and the field is
-              // settled — the run is already using that directory, and changing
-              // it underneath would point the pilot at a repository the run is
-              // not in.
-              kickoff={
-                (!launched || run.completed !== null) && repoDir.trim() !== '' ? (
-                  <Kickoff dir={repoDir} />
-                ) : undefined
-              }
-            />
+            {/* One pane per conversation still doing something (#305), the
+                one on screen visible and the rest hidden but mounted, so a turn
+                always lands in the conversation that asked for it. */}
+            {panes.map((pane) => {
+              const at = paneProps.current.get(pane);
+              if (at === undefined) return null;
+              const visible = pane === shownPane;
+              return (
+                <div key={pane} className={visible ? 'contents' : 'hidden'} hidden={!visible}>
+                    <PilotPane
+                      background={!visible}
+                      onBusy={hooksFor(pane).busy}
+                      // The run on screen, live or replayed (#246): what the pilot is
+                      // told about is the run a person is looking at. The protocol is the
+                      // service host's, which a replayed run never heard.
+                      run={at.run}
+                      logRun={at.logRun}
+                      launched={at.launched}
+                      // **The run's repository, not the window's** (#223). Every other
+                      // pane that reads a run moved onto `shownDir` and this one was
+                      // missed, which is the second-answer-to-which-repository defect
+                      // AGENTS.md already records, one pane later. It is worse here
+                      // than on a reader: `dir` is the pilot's PERMISSION BOUNDARY -
+                      // the directory `claude -p --restricted` is spawned in and the
+                      // only one it can read - and it is where an accepted
+                      // `run_command` runs. So opening a run in another project left
+                      // the pilot reading a different repository from the one on
+                      // screen, and with no project selected at all it was blocked
+                      // outright: *"I just tried sending a chat to an old run's pilot
+                      // but I can't"*.
+                      dir={at.dir}
+                      // Which conversation to show. It follows the run the panes are
+                      // reading, so opening a finished run brings back the chat about
+                      // it — and null, before any run, is the conversation that will
+                      // propose one.
+                      // A draft's conversation is its own, keyed by the draft id until
+                      // the run it asked for starts and adopts it (#223).
+                      runId={at.runId}
+                      access={access}
+                      // There is no `opened` any more (#246): the pane only restores,
+                      // and adoption is the cockpit's - see the adoption effect.
+                      commands={commands}
+                      onEffect={hooksFor(pane).effect}
+                      // Only to the draft it was typed for (#305), so a brief can never
+                      // be said into another conversation.
+                      ask={askFor(brief, at)}
+                      onAsked={() => setBrief(null)}
+                      standing={standing}
+                      onPending={visible ? setProposals : undefined}
+                      limits={limits}
+                      statuses={keyStatuses}
+                      // Hi-fi 5's `open verify`. A round card is the round's summary
+                      // and the pane beside it holds the detail, so the card links to
+                      // it rather than growing a second copy of that screen - and it
+                      // names its own round, so the pane opens at the card you clicked
+                      // rather than at whichever round happens to be newest (#223).
+                      onOpen={open}
+                      // The repository, whenever there is no run to watch. Once one is
+                      // going the pane is a conversation *about* it, and the field is
+                      // settled — the run is already using that directory, and changing
+                      // it underneath would point the pilot at a repository the run is
+                      // not in.
+                      kickoff={
+                        visible && (shownLive === null || settled(run)) && repoDir.trim() !== '' ? (
+                          <Kickoff dir={repoDir} />
+                        ) : undefined
+                      }
+                    />
+                </div>
+              );
+            })}
           </div>
           {wire.unknown.length > 0 && (
             <div className="flex-none border-t border-rule-card px-5 py-2 font-mono text-mono-sm text-emphasis">
@@ -1789,28 +2352,16 @@ export function Cockpit() {
         </div>
         </ResizablePanel>
 
-        {/* The bottom panel (the UI rework): the two terminal-shaped panes,
-            docked under the main pane the way an editor docks its terminal, so
-            a dev server's log can be read beside a plan. Toggled with the
-            `toggleBottom` chord, and opened by anything that names one of its
-            two panes through `open()`. */}
+        {/* The bottom panel (the UI rework): the commands pane, docked under
+            the main pane the way an editor docks its terminal, so a dev
+            server's log can be read beside a plan. Toggled with the
+            `toggleBottom` chord, and opened by `open('commands')`. The run's
+            output was its other tab until it went back to the main bar (#284). */}
         {panels.bottom && (
           <>
           <ResizableSeparator orientation="vertical" />
           <ResizablePanel id="bottom" defaultSize={35} minSize="10%" className="flex min-h-0 min-w-0 flex-col">
             <div className="flex h-8 shrink-0 items-stretch gap-1 border-b border-rule-structure bg-chrome px-2" role="tablist" aria-label="Bottom panel">
-              <button
-                type="button"
-                role="tab"
-                aria-selected={bottom === 'output'}
-                className={cn(
-                  'flex cursor-pointer items-center gap-1.5 border-b-2 bg-transparent px-2 text-chip font-bold uppercase tracking-wide outline-none',
-                  bottom === 'output' ? 'border-accent text-emphasis' : 'border-transparent text-tertiary hover:text-secondary',
-                )}
-                onClick={() => setBottom('output')}
-              >
-                <Activity className="size-3.5" aria-hidden /> Output
-              </button>
               {/* The count is what is still RUNNING, not how many have been run
                   (#211). A dev server left up is the fact worth a badge - it is
                   holding a port and it will not stop by itself - and a total that
@@ -1839,21 +2390,13 @@ export function Cockpit() {
                 <X className="size-3.5" aria-hidden />
               </button>
             </div>
-            {bottom === 'output' && (
-              <OutputPane
-                lines={run.output}
-                turn={past ? null : run.running}
-                staleness={staleness(run, now)}
-                // A past run's narration is on disk, in its own transcript. The
-                // live run's is on the wire and has never been read from a file.
-                transcript={past && viewing !== null ? viewing : null}
-              />
-            )}
             {bottom === 'commands' && (
               <CommandsPane
                 commands={commands}
                 dir={repoDir}
-                onRun={runCommand}
+                // The Commands pane's own button runs where the sidebar is
+                // pointed; a pilot card runs where it said (#246).
+                onRun={(program, args) => runCommand(repoDir, program, args)}
                 onStop={stopCommand}
               />
             )}
@@ -1900,7 +2443,7 @@ export function Cockpit() {
               >
                 <PanelRightOpen className="size-4" aria-hidden />
               </Button>
-              {!past && launched && run.completed === null && (
+              {!past && shownLive !== null && !settled(run) && (
                 <span title={run.running === null ? 'the run is waiting' : 'a turn is running'}>
                   <LivenessDot state={run.running === null ? 'waiting' : 'live'} />
                 </span>
@@ -1908,17 +2451,29 @@ export function Cockpit() {
             </div>
           ) : (
           <>
-          <div className="flex h-9 flex-none items-center justify-between pr-1.5 pl-4">
+          <div className="flex h-9 flex-none items-center justify-between gap-2 pr-1.5 pl-4">
             <span className="text-chip uppercase tracking-[0.12em] text-tertiary">Run status</span>
-            <Button
-              variant="quiet"
-              size="icon-sm"
-              aria-label="Hide run status"
-              title="Hide run status (Ctrl+Shift+B)"
-              onClick={act.toggleLoop}
-            >
-              <PanelRightClose className="size-4" aria-hidden />
-            </Button>
+            {/* The way back from an opened run lives in the title row (#236).
+                It sat in a box under a `reading` badge that never changed, so a
+                run that had loaded completely still looked as if it was
+                loading; the task the box repeated already titles the run in
+                the sidebar. The way back is the one thing that had to stay. */}
+            <span className="ml-auto flex items-center gap-1">
+              {past && viewing !== null && (
+                <Button variant="quiet" size="sm" onClick={() => setViewing(null)}>
+                  back to the live run
+                </Button>
+              )}
+              <Button
+                variant="quiet"
+                size="icon-sm"
+                aria-label="Hide run status"
+                title="Hide run status (Ctrl+Shift+B)"
+                onClick={act.toggleLoop}
+              >
+                <PanelRightClose className="size-4" aria-hidden />
+              </Button>
+            </span>
           </div>
           <div className="flex min-h-0 flex-1 flex-col">
             {/* **The column follows the run the window is pointed at** (#223),
@@ -1938,33 +2493,30 @@ export function Cockpit() {
                 could still be open, and every turn in an archive is a turn that
                 ended, because `applyCharge` records one when it is charged. */}
             {past && viewing !== null ? (
-              <div className="flex flex-col items-start gap-2 p-4 text-body-sm text-secondary">
-                <Badge>reading</Badge>
-                <span className="text-body text-primary">{preview(viewing.task)}</span>
-                {opened.loading && opened.run === null && <p className="m-0">Reading this run…</p>}
-                {/* The core's own sentence, verbatim. A run whose id will not
-                    join onto a path, a directory vibe refuses to follow (#53)
-                    and a `state.json` the validators reject are three findings
-                    needing three responses, and *"could not read the run"*
-                    answers none of them. */}
-                {opened.failure !== null && (
-                  <p className="m-0 text-tertiary">{opened.failure}</p>
-                )}
-                {/* Said once, here, rather than as a blank on every turn row.
-                    `state.turnStartedAt` describes the turn in flight, so the
-                    only starts an archive keeps are the ones a checkpoint froze
-                    — and a duration invented from the gap between two charges
-                    would include every gate the loop held at. */}
-                {opened.run !== null && (
-                  <p className="m-0 text-tertiary">
-                    Some turns have no duration: a run records a turn when it is charged, and only a
-                    checkpoint keeps the moment one began.
-                  </p>
-                )}
-                <Button variant="quiet" size="sm" onClick={() => setViewing(null)}>
-                  back to the live run
-                </Button>
-              </div>
+                <div className="flex flex-col gap-1 px-4 pb-2 text-body-sm">
+                  {/* Only while it is true: `reading` once the replay has
+                      landed was the defect (#236). */}
+                  {opened.loading && opened.run === null && (
+                    <p className="m-0 text-secondary">Reading this run…</p>
+                  )}
+                  {/* The core's own sentence, verbatim. A run whose id will not
+                      join onto a path, a directory vibe refuses to follow (#53)
+                      and a `state.json` the validators reject are three findings
+                      needing three responses, and *"could not read the run"*
+                      answers none of them. */}
+                  {opened.failure !== null && <p className="m-0 text-tertiary">{opened.failure}</p>}
+                  {/* Said once, here, rather than as a blank on every turn row.
+                      `state.turnStartedAt` describes the turn in flight, so the
+                      only starts an archive keeps are the ones a checkpoint froze
+                      — and a duration invented from the gap between two charges
+                      would include every gate the loop held at. */}
+                  {opened.run !== null && (
+                    <p className="m-0 text-tertiary">
+                      Some turns have no duration: a run records a turn when it is charged, and only a
+                      checkpoint keeps the moment one began.
+                    </p>
+                  )}
+                </div>
             ) : (
               <>
                 {/* While there is no run, this column is four not-started groups
@@ -1980,7 +2532,7 @@ export function Cockpit() {
                     Offered again once the command has RETURNED, not once the
                     loop said it was done: `serve.ts` runs one at a time and
                     refuses a second invoke until the first settles. */}
-                {(!launched || run.completed !== null) && !outside && (
+                {(shownLive === null || settled(run)) && !outside && (
                   <>
                     <div className="mx-4 mb-2 rounded-md border border-rule-card bg-card px-4 py-3.5">
                       <span className="text-body-sm font-medium text-primary">waiting for the brief</span>
@@ -2022,8 +2574,9 @@ export function Cockpit() {
                 run={columnRun}
                 now={now}
                 compact
-                hostPid={past ? null : wire.hostPid}
+                hostPid={past ? null : (shownLive?.pid ?? null)}
                 onOpen={open}
+                archive={archive}
               />
               {/* `4g`, and only on the ending that means the loop finished.
                   Every other exit is a halt, and a halt gets the footer's
@@ -2041,13 +2594,15 @@ export function Cockpit() {
               busy={busy}
               onDecide={answer}
               onPause={pause}
+              onUnpause={unpause}
               onStop={() => setConfirmStop(true)}
-              onResume={resume}
-              onImplement={implement}
+              onResume={(runId, dir, raise) => resume(runId, dir, raise, false, columnRun.identity?.task ?? null)}
+              onImplement={(runId, dir) => implement(runId, dir, columnRun.identity?.task ?? null)}
               caps={caps}
               gates={gates}
               order={order}
               pausing={pausing}
+              stopping={stopping}
             />
           </div>
           </>
@@ -2065,14 +2620,19 @@ export function Cockpit() {
         connected={wire.connected}
         failure={wire.failure}
         project={shownDir.trim() === '' ? null : projectName(shownDir)}
-        protocol={run.protocol}
+        protocol={protocol}
         expected={host.EXPECTED_PROTOCOL}
         run={run}
         busy={busy}
         onDecide={answer}
         onPause={pause}
+        onUnpause={unpause}
         onStop={() => setConfirmStop(true)}
         pausing={pausing}
+        stopping={stopping}
+        // Only while the footer is not showing them for this run (#264).
+        controls={statusBarControls(panels.loop, columnRun === run)}
+        staleness={quiet}
         onSpend={() => setTab('spend')}
         build={wire.status?.build ?? null}
         diagnosticsOpen={diagnostics}

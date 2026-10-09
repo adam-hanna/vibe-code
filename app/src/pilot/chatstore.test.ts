@@ -11,7 +11,9 @@ test('the pane keeps conversations through the store, never in localStorage', ()
 
 test('nothing is restored or saved before the stored conversations are read', () => {
   expect(pane).toMatch(/if \(!chats\.ready\) return;/);
-  expect(pane).toMatch(/\[dir, runId, opened, chats\.ready\]/);
+  // Case 2 (#246): `opened` is gone with the pane's adoption; the loader only
+  // restores, and the cockpit's adopter waits for `chats.ready` as well.
+  expect(pane).toMatch(/\[dir, runId, chats\.ready\]/);
 });
 
 test('a failed save is shown, and a migrated conversation leaves localStorage only once the host has it', () => {

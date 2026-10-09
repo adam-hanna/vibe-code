@@ -1,4 +1,5 @@
-﻿import path from 'node:path';
+﻿import os from 'node:os';
+import path from 'node:path';
 import { applyCharge, chargeFailure, enforceCeilings, Escalation, EXIT, fmtTokens } from '@src/charge.js';
 import {
   claudeTurn,
@@ -32,6 +33,7 @@ import {
   effortFor,
   GENERATIVE_ROLES,
   holderLabel,
+  mcpServersFor,
   modelFor,
   modelSource,
   roleEnabled,
@@ -40,6 +42,7 @@ import {
   turnTimeoutMs,
 } from '@src/roles.js';
 import type { Access, Role, RoleSpec, RoleTable } from '@src/roles.js';
+import { claudeMcpDefinitions, resolveClaudeGrants } from '@src/mcp.js';
 import {
   clearSlotFork,
   ensureSlotId,
@@ -98,11 +101,20 @@ import {
   gate,
   parseAnswers,
   parseFindings,
+  parseTestVerdicts,
   parsePlan,
   readEvidence,
   reproducerOutcomesOf,
   reproductionAt,
 } from '@src/validate.js';
+import {
+  attachVerdicts,
+  judgeChanges,
+  judgePatterns,
+  recordedPatterns,
+  testChangeCounts,
+} from '@src/judge.js';
+import type { RawVerdict } from '@src/judge.js';
 import {
   markOccupancyWarned,
   occupancyWarning,
@@ -125,12 +137,14 @@ import {
 } from '@src/ratelimits.js';
 import {
   describeFailure,
+  excerpt,
   failedRuns,
   resolveGates,
   runGateCommand,
   suggestedFix,
   verdictOf,
 } from '@src/verify.js';
+import type { VerifyResult } from '@src/verify.js';
 import type {
   Answer,
   CheckpointCommitNote,
@@ -138,11 +152,14 @@ import type {
   Config,
   Finding,
   FindingsReport,
+  FileChange,
+  TestChanges,
   GateOutcome,
   OpenQuestion,
   ReproducerOutcome,
   RoundRecord,
   Plan,
+  RunStart,
   RunState,
   RunSummary,
   Severity,
@@ -708,7 +725,9 @@ async function runPhases(
           // critic never saw is not an approved criterion.
           state.acceptanceCriteria,
           plan.out_of_scope,
-        ),
+          // An approved plan can predate the answers to its advisory questions
+          // (#277); the implementer is told them, and that they win.
+        ) + P.advisoryAnswers(state.advisoryAnswers, 'implementer'),
         planInPrompt: true,
         cwd,
         label: 'implement',
@@ -885,7 +904,18 @@ async function planPhase(
     ({ plan, activity: planActivity } = await runPlan(state, cfg, cwd, roles, turns));
   }
 
-  // Answers supplied by a human in NEEDS-INPUT.md, picked up on resume.
+  // Answers a previous process held and no revision consumed, picked up on
+  // resume. Since #169 there are two writers: a human in NEEDS-INPUT.md (merged
+  // over the answerer's, the person winning - `mergeHumanAnswers`), and
+  // `resolveQuestions` itself, which persists the answerer's usable answers on
+  // the write that marks their questions answered. Either way this block is the
+  // one road back in, so a stop between the answerer and the revision costs a
+  // planner turn and never the answers.
+  //
+  // `markAnswered` no longer saves; the keys land on `revisePlan`'s opening
+  // `saveState`, and the answers are consumed on its plan write - not on a
+  // second write after it, which was a window where a stop bought the revision
+  // again.
   //
   // Deliberately does not clear `pendingFindings`: this revises with `answers`
   // *instead of* the findings, so it has not answered them, and treating a
@@ -903,8 +933,6 @@ async function planPhase(
       turns,
       host,
     ));
-    state.pendingAnswers = null;
-    saveState(state);
   }
 
   // Only the first iteration can be a re-entry, and only a re-entry is worth
@@ -1019,6 +1047,22 @@ async function planPhase(
       // narrowing the list to the declines would decide for them which answers
       // were worth revisiting.
       await holdAt(state, cfg, host, 'question-round', pending);
+      // **Every question advisory: no revision** (#277). The planner said none
+      // of them changes what the plan does, so the answers go to the critic with
+      // this plan instead of buying a planner turn first; one that does change
+      // something comes back as a finding, and that revision folds them all in.
+      // Moved out of `pendingAnswers` on this one write, because that field is
+      // the resume's road into a revision and would buy the skipped turn back.
+      if (answers.length > 0 && pending.every((q) => !q.blocking)) {
+        state.advisoryAnswers = [...(state.advisoryAnswers ?? []), ...answers];
+        state.pendingAnswers = null;
+        saveState(state);
+        log.info(
+          `Not revising the plan for ${answers.length} advisory answer(s) - the critic reads them with the plan.`,
+          { id: 'revision_skipped', data: { answers: answers.length, round: state.questionRound } },
+        );
+        continue;
+      }
       // The answerer may have declined every one; only revise if something came
       // back - and when nothing did, the plan and the turn that wrote it are
       // both still the ones already in hand.
@@ -1345,6 +1389,7 @@ async function reviewPhase(
       saveState(state);
       beginReport(state);
 
+      announceFixRound(state);
       log.step(
         `Incorporating ${decision.tolerated.length} carried P1(s), then finishing: ` +
           decision.tolerated.map((f) => f.id).join(', '),
@@ -1446,6 +1491,34 @@ async function reviewPhase(
 }
 
 /**
+ * A fix round is a code round, and it says so before its turn starts (#280).
+ *
+ * The first implement turn opens the code group with `phase_started`; the fix
+ * kinds said only `turn_started`, and `reduce` files a turn under the most
+ * recently opened group - which is the review it answers. So a run that went
+ * review, fix, review drew `review round 0 → review round 1` with the fix as a
+ * row inside the first, and read as a loop that had skipped the code entirely.
+ * The replay already files `fix-N` and `final-fix-N` under `implementing`
+ * (`seatOf`), so the live column and the same run opened from the archive drew
+ * two different shapes.
+ *
+ * `round` is the review round the fix produces, the number its turn and label
+ * already carry, and it is what keeps `reEntered` from folding this into the
+ * first code group: that one carries no round, and a review sits between them
+ * anyway. The base rides along because every `implementing` carries it.
+ *
+ * `verify-fix` deliberately does not announce. A failed gate is inside the code
+ * group that ran it, so its repair belongs in that group too - and there always
+ * is one open, because the gate runs only after an implement or fix turn.
+ */
+function announceFixRound(state: RunState): void {
+  log.heading(`Implementing (fix round ${state.reviewRound})`, {
+    id: 'phase_started',
+    data: { phase: 'implementing', round: state.reviewRound, baseSha: state.baseSha },
+  });
+}
+
+/**
  * One fix round: the turn, its report, and the commit.
  *
  * A function rather than the tail of the review loop because the loop now
@@ -1466,6 +1539,7 @@ async function runFixRound(
   saveState(state);
   beginReport(state);
 
+  announceFixRound(state);
   log.step(`Fixing ${blockingFindings(findings).length} blocking finding(s)`, {
     id: 'turn_started',
     data: {
@@ -1883,7 +1957,7 @@ export function writeFollowUps(state: RunState, plan: Plan): string | null {
       `**Task:** ${state.task}\n\n` +
       `Work this run identified and deliberately did not do, as of the latest round.\n\n` +
       `Each finding below was **non-blocking at the moment it was deferred** - P2 or P3, ` +
-      `below both the reviewer's APPROVE rule and the loop gate, which stops only on a P0 ` +
+      `below the loop gate, which stops only on a P0 ` +
       `or on more P1s than \`loop.p1Tolerance\`. A later round may have re-raised the same ` +
       `id at a blocking severity; the severity shown is the one it carried when it was ` +
       `deferred, so check the \`plan-critique-*.json\` and \`code-review-*.json\` artifacts ` +
@@ -2164,8 +2238,36 @@ async function noticeStrandedWork(state: RunState, cwd: string): Promise<void> {
 function sayBranch(
   branch: string | null,
   why: string | null,
+  start?: RunStart,
 ): { id: string; data: Record<string, unknown> } {
-  return { id: 'run_branch', data: { branch, why } };
+  // The base only when a fresh run just took its branch (#249). Every other path
+  // passes none, so a resume and the no-branch paths carry neither field rather
+  // than one guessed after the fact.
+  return {
+    id: 'run_branch',
+    data: start === undefined ? { branch, why } : { branch, why, startSha: start.sha, startRef: start.ref },
+  };
+}
+
+/**
+ * The commit the preflight gate resolved `git.baseRef` to, for the run it was
+ * resolved for (#249).
+ *
+ * **A module latch rather than a field**, and it is the only honest place for
+ * it. The base is resolved ONCE, in preflight, before anything is spent - and
+ * the branch of a run with no worktree is made later, by `prepareGit`. Reading
+ * the ref again there would be a second resolution, and a fetch in between would
+ * start the branch at a commit the dirty-tree check never looked at. A state
+ * field would be durable, and preflight deliberately writes nothing durable
+ * about the branch: a run stopped between the two must not come back holding a
+ * base for a branch it never took. Safe for `cancel.ts`'s reason - one run per
+ * process - and keyed by run id so a value from another run is never read.
+ */
+let chosenBase: { runId: string; sha: string } | null = null;
+
+/** Set by the preflight gate; null clears it. `execute` clears it on the way in. */
+export function chooseBase(runId: string, sha: string | null): void {
+  chosenBase = sha === null ? null : { runId, sha };
 }
 
 /**
@@ -2280,6 +2382,27 @@ export async function prepareGit(
     // there. Run ids are unique, so nothing else leaves one of these behind.
     if (await git.branchExists(cwd, branch)) {
       if ((await git.currentBranch(cwd)) !== branch) {
+        // **Never move a worktree silently** (#249). A checkout that moves
+        // nothing is the default path - the tree was detached at the branch's
+        // own commit - and is allowed. One that would move it is the #169
+        // defect: the setup script chose a commit, this checkout replaced it
+        // with HEAD's, and the run started from a base nobody chose. So it is
+        // refused, naming both commits, before anything is spent - whether or
+        // not `git.baseRef` is set.
+        const here = await git.resolveCommit(cwd, 'HEAD');
+        const tip = await git.resolveCommit(cwd, `refs/heads/${branch}`);
+        if (here !== tip) {
+          throw new Escalation(
+            EXIT.ERROR,
+            `Run ${state.id}'s ${state.worktree === true ? 'worktree' : 'checkout'} is at ` +
+              `${here ?? 'no commit'}, but its branch "${branch}" is at ${String(tip)}. vibe will ` +
+              'not move it there silently (#249) - that is how a run starts from a base nobody ' +
+              'chose. Nothing has run and no turn was dispatched.\n' +
+              'The worktree setup command should check the branch out rather than choose a ' +
+              'commit: git worktree add "$VIBE_WORKTREE" "$VIBE_BRANCH". To choose where runs ' +
+              'start, set git.baseRef.',
+          );
+        }
         const result = await git.checkoutBranch(cwd, branch);
         if (!result.ok) {
           throw new Escalation(
@@ -2292,11 +2415,38 @@ export async function prepareGit(
         }
       }
     } else {
-      await git.createBranch(cwd, branch);
+      // At the commit the preflight gate resolved `git.baseRef` to, when it is
+      // set (#249) - the exact sha, handed over rather than read again. With no
+      // worktree the branch is made here and nowhere else, so a run stopped
+      // before this line leaves the repository untouched. A base that is set and
+      // was never resolved is refused rather than guessed: a gate that did not
+      // run is not permission to start from HEAD.
+      let at: string | undefined;
+      if (cfg.git.baseRef !== null) {
+        if (chosenBase === null || chosenBase.runId !== state.id) {
+          throw new Escalation(
+            EXIT.ERROR,
+            `git.baseRef is "${cfg.git.baseRef}", but this run's preflight never resolved it, so ` +
+              `there is no commit to start branch "${branch}" at. Nothing has run.`,
+          );
+        }
+        at = chosenBase.sha;
+      }
+      await git.createBranch(cwd, branch, at);
     }
+    // The branch and where it started, in ONE save (#249), so neither is ever on
+    // disk without the other. The tip is read rather than assumed: nothing has
+    // committed on the branch yet, so it is the commit the run starts from. A
+    // repository with no commits has no tip and records no start.
+    const tip = await git.resolveCommit(cwd, `refs/heads/${branch}`);
     state.branch = branch;
+    if (tip !== null) state.start = { sha: tip, ref: cfg.git.baseRef };
     saveState(state);
-    log.ok(`Isolated on branch ${branch}`, sayBranch(branch, null));
+    const from =
+      state.start === undefined
+        ? ''
+        : ` from ${state.start.ref ?? 'HEAD'} (${state.start.sha.slice(0, 7)})`;
+    log.ok(`Isolated on branch ${branch}${from}`, sayBranch(branch, null, state.start));
     return;
   }
 
@@ -2557,6 +2707,30 @@ async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Findi
     // non-zero exit, so `runs` was the attempt that failed and the sentence said
     // "attempt 1 of 1" for every failure of a three-run gate.
     const flaky = verdictOf(result) === 'flaky';
+
+    // Every attempt's whole output, as a file of its own (#248). Passing attempts
+    // of a flaky gate included: the difference between the run that passed and
+    // the one that failed is the evidence a race leaves. Keyed by the review
+    // round, the verify round (before the caller increments it), the gate and the
+    // attempt, so neither the other gate nor the next verify-fix pass under the
+    // same review round can overwrite it. Uncapped, because it is a file and the
+    // excerpt below is what is bounded. Gate names pass `GATE_NAME_RE`, so the
+    // name is always an artifact basename.
+    const logs = result.attempts.map((a, i) => {
+      const name = `verify-${state.reviewRound}-${state.verifyRound}-${gate.name}-${a.run}.log`;
+      return { run: a.run, ok: a.ok, name, path: path.resolve(artifact(state, name, result.outputs[i] ?? '')) };
+    });
+    const firstLog = logs.find((l) => l.run === result.failedRun) ?? null;
+    const firstIndex = firstLog === null ? -1 : logs.indexOf(firstLog);
+    // The excerpt the fixer reads and `verify-failure-<n>.txt` holds, naming the
+    // attempt whose output it cuts. Built here rather than in `runGateCommand`
+    // because only this site has written the file the marker points at.
+    const shown: VerifyResult = {
+      ...result,
+      output: excerpt(result.outputs[firstIndex] ?? result.output, firstLog?.path ?? null),
+    };
+    const failedLogs = logs.filter((l) => !l.ok).map((l) => ({ run: l.run, path: l.path }));
+
     const failed: GateOutcome = {
       name: gate.name,
       status: 'failed',
@@ -2594,10 +2768,16 @@ async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Findi
         // argued for: a reader of the archive asking "was this suite ever noisy"
         // has no other way to find out, and three small objects on the gates
         // that failed is not what #133 was protecting `state.events` from.
-        attempts: result.attempts,
+        //
+        // Each carries `log`, the basename of that attempt's full output (#248).
+        // The window opens what it is told and never composes `verify-…log` from
+        // the rounds it already has: that would be the loop's naming convention
+        // copied into a process that cannot be kept in step with it. The OUTPUT
+        // is deliberately not here - it is in the file, which is #133's line.
+        attempts: result.attempts.map((a, i) => ({ ...a, log: logs[i]?.name ?? null })),
       },
     );
-    artifact(state, `verify-failure-${state.reviewRound}.txt`, result.output);
+    artifact(state, `verify-failure-${state.reviewRound}.txt`, shown.output);
 
     // What the failing command PRODUCED, on the failing branch only (#62). Not
     // on the unavailable or unlaunchable paths above: nothing ran there, so
@@ -2655,13 +2835,13 @@ async function runGate(state: RunState, cfg: Config, cwd: string): Promise<Findi
       // and at the file written one line above: the artifact is uniform, and
       // the fixer is pointed at the output it has to read (#48).
       evidence: [{ kind: 'artifact', path: `verify-failure-${state.reviewRound}.txt` }],
-      detail: describeFailure(result),
+      detail: describeFailure(shown, failedLogs),
       // Beside `describeFailure` in `verify.ts` rather than written here (#135).
       // The two sentences have to agree about which kind of failure this is -
       // a detail that says "not deterministic" over a fix that says "make it
       // pass" is worse than either alone - and they cannot disagree if one
       // module owns both.
-      suggested_fix: suggestedFix(result),
+      suggested_fix: suggestedFix(shown),
     };
   }
 
@@ -3082,6 +3262,26 @@ async function claudeDispatch(
   // One resolution, used for the spawn, the measurement and the rotation
   // decision, so those three cannot disagree about which model this turn is.
   const model = modelFor(req.role, cfg, roles);
+  // The MCP servers this role was granted, as the definitions `--mcp-config`
+  // re-supplies under `--strict-mcp-config` (#138). Resolved once, outside the
+  // retry, because no attempt changes the files it reads. Preflight has already
+  // refused a name that does not resolve; this throws the same sentence for a
+  // run that skipped it or a file that changed since. `repoDir` because a
+  // worktree's cwd is not where the repository's `.mcp.json` lives.
+  const granted = mcpServersFor(req.role, roles);
+  const mcpServers =
+    granted.length === 0
+      ? {}
+      : resolveClaudeGrants(
+          req.role,
+          granted,
+          claudeMcpDefinitions({
+            cwd: req.cwd,
+            repoDir: state.targetDir,
+            home: os.homedir(),
+            configDir: process.env['CLAUDE_CONFIG_DIR'],
+          }),
+        );
 
   // A rotation that could not be overlapped with Codex work happens here, at a
   // turn boundary - never mid-turn. Asked with *this* turn's model rather than
@@ -3157,6 +3357,7 @@ async function claudeDispatch(
           jsonSchema: req.jsonSchema,
           tools: req.tools,
           timeoutMs: req.timeoutMs,
+          mcpServers,
           progress: progressOptions(state, cfg, req.label, model, 'claude'),
         });
       },
@@ -3535,6 +3736,20 @@ function advancesRound(args: ReviseArgs): boolean {
   return args.findings !== undefined;
 }
 
+/**
+ * The answers a revision is given: its own, plus - on a findings revision - the
+ * advisory answers no revision has folded in yet (#277). Returns `args.answers`
+ * itself when there is nothing to add, which is how the caller tells whether
+ * this revision took them.
+ */
+function withAdvisory(
+  args: ReviseArgs,
+  advisory: readonly Answer[] | undefined,
+): readonly Answer[] | undefined {
+  if (args.findings === undefined || advisory === undefined || advisory.length === 0) return args.answers;
+  return [...(args.answers ?? []), ...advisory];
+}
+
 async function revisePlan(
   state: RunState,
   cfg: Config,
@@ -3603,7 +3818,9 @@ async function revisePlan(
       prompt: P.revisePlanPrompt({
         planMd: state.plan?.plan_md,
         findings: args.findings,
-        answers: args.answers,
+        // A findings revision also folds in the advisory answers no revision has
+        // taken yet (#277), which is the turn the skipped one was waiting for.
+        answers: withAdvisory(args, state.advisoryAnswers),
         // The plan of record's boundary, restated: a revision returns the whole
         // plan, and a session rotated concurrently with the critique would
         // otherwise re-derive `out_of_scope` from nothing.
@@ -3632,7 +3849,15 @@ async function revisePlan(
   // `answers` *instead of* the findings, and has therefore consumed nothing.
   // Assigned rather than routed through `clearPendingFindings` precisely so it
   // rides on this `saveState` and not a later one.
+  //
+  // The answers are consumed here for the same reason (#169). They are durable
+  // in `pendingAnswers` from the moment the answerer's turn is recorded, so
+  // clearing them anywhere later leaves a window in which the plan answering
+  // them is on disk and a resume revises against them again.
   if (args.findings !== undefined) state.pendingFindings = null;
+  if (args.answers !== undefined) state.pendingAnswers = null;
+  // Folded in by this revision whenever it took them, on the same write (#277).
+  if (withAdvisory(args, state.advisoryAnswers) !== args.answers) delete state.advisoryAnswers;
   saveState(state);
   // **`plan-<n>.json` is the plan of record for round n, which is the version
   // the critic will judge** - so a non-advancing revision replaces it rather
@@ -3733,6 +3958,9 @@ async function codexDispatch(
         // separate conversations, and they no longer have to think alike.
         effort: effortFor(req.role, cfg, roles),
         sandbox: codexSandbox(spec.access, cfg),
+        // The servers this role may keep; every other listed one is disabled
+        // by name in the adapter (#138).
+        mcpServers: mcpServersFor(req.role, roles),
         cwd: req.cwd,
         timeoutMs: req.timeoutMs,
         // One or the other, never both: a fork owed outranks a resume, and a
@@ -4057,7 +4285,9 @@ async function runCritique(
         // the critic is what decides whether the bar is any good.
         plan.acceptance_criteria,
         planActivity,
-      ),
+        // Answers no revision has folded in yet (#277). Empty on every run that
+        // skipped no revision, so this prompt is byte-identical there.
+      ) + P.advisoryAnswers(state.advisoryAnswers, 'critic'),
       cwd,
       label: `critique-${state.planRound}`,
     },
@@ -4083,7 +4313,7 @@ async function runReview(
   plan: Plan,
   roles: RoleTable,
   turns: AgentTurns,
-): Promise<FindingsReport> {
+): Promise<FindingsReport & { testChanges?: TestChanges }> {
   // Before `log.step`, so the run never claims a reviewer started on a diff it
   // could not read. The decision that a gitless run is refused rather than
   // degraded is NOT made here - it is made by `gitPrecondition` in the preflight
@@ -4118,7 +4348,11 @@ async function runReview(
     id: 'turn_started',
     data: { role: 'reviewer', kind: 'review', round: state.reviewRound },
   });
-  const { chunks, files } = await git.diffChunks(cwd, state.baseSha);
+  const { chunks, files, changes } = await git.diffChunks(cwd, state.baseSha);
+  // From the same read as the diff, so the files the reviewer is asked to judge
+  // are the files it is shown (#112).
+  const patterns = judgePatterns(cfg.verify);
+  const judged = judgeChanges(changes, patterns);
 
   // **An empty diff is refused, not reviewed.** There was a guard for a diff too
   // BIG for one turn and none at all for one with nothing in it, and
@@ -4164,6 +4398,9 @@ async function runReview(
   // would claim the reviewer saw every file the instant before that turn failed,
   // which is the shape of overclaim this field exists to prevent.
   state.reviewCoverage = undefined;
+  // The judge record goes with it, for the same reason: a verdict carried over
+  // from the previous round would be a verdict on a diff nobody showed (#112).
+  state.testChanges = undefined;
   saveState(state);
 
   // Read once, before the loop, and handed to EVERY part. Each part sees a
@@ -4190,7 +4427,16 @@ async function runReview(
   // to would make that a round trip through a value this function owns.
   const seen: string[] = [];
   const cut: string[] = [];
+  // Per part, because a verdict only counts from the part that listed the file.
+  const listedPerPart: FileChange[][] = [];
+  const verdictsPerPart: RawVerdict[][] = [];
   for (const [i, chunk] of chunks.entries()) {
+    // Only this part's judge files. A rename is listed wherever either of its
+    // paths is shown, since `chunk.files` names both sides (`--no-renames`).
+    const listed = judged.filter(
+      (c) =>
+        chunk.files.includes(c.path) || (c.oldPath !== null && chunk.files.includes(c.oldPath)),
+    );
     // Read inside the loop: the slot is marked started by the turn that
     // succeeds, so with a persistent thread part 1 is memoryless and parts 2..n
     // continue the conversation without anything new (#45).
@@ -4242,6 +4488,9 @@ async function runReview(
           // the one before #113. Only gates with a command: a gate the run
           // cannot execute is not a choice the reviewer has.
           reproducerGates(cfg, cwd),
+          // Absent unless this part shows a judge file, which is what keeps every
+          // other round's prompt byte-identical (#112).
+          listed.length > 0 ? listed : undefined,
         ),
         cwd,
         // Unchanged when there is one chunk: this string is Codex's output name
@@ -4252,6 +4501,7 @@ async function runReview(
       turns,
       roles,
     );
+    const structured = readStructured(outcome);
     reports.push(
       // Per chunk turn, deliberately: a chunked round is several reviewer turns,
       // and each one's findings are judged against what that turn did rather
@@ -4261,10 +4511,12 @@ async function runReview(
         cwd,
         'reviewer',
         roles,
-        parseFindings(readStructured(outcome)),
+        parseFindings(structured),
         outcome.activity,
       ),
     );
+    listedPerPart.push(listed);
+    verdictsPerPart.push(parseTestVerdicts(structured));
 
     // After the turn, never before it: this says what the reviewer was actually
     // handed. A round that stops here leaves a record of the parts it got.
@@ -4276,6 +4528,16 @@ async function runReview(
       files: [...seen],
       truncated: [...cut],
     };
+    // After the turn, like the coverage above: a verdict is recorded only once
+    // the turn that gave it has returned. Nothing at all until a part has
+    // listed a judge file - a round that touches none records no field (#112).
+    if (listedPerPart.some((l) => l.length > 0)) {
+      state.testChanges = {
+        round: state.reviewRound + 1,
+        patterns: recordedPatterns(patterns),
+        files: attachVerdicts(listedPerPart, verdictsPerPart),
+      };
+    }
     saveState(state);
     for (const file of chunk.truncated) {
       recordAndSay(
@@ -4286,6 +4548,23 @@ async function runReview(
         { file },
       );
     }
+  }
+
+  const testChanges = state.testChanges;
+  if (testChanges !== undefined) {
+    // Narration with no event, under `recordAndSay`'s rule: the fact is already
+    // durable in `state.testChanges` and in the round's artifact, and a census of
+    // a round is exactly what that rule keeps out of `state.events`. Warn only
+    // when something was not judged justified - a round that only added tests
+    // the reviewer accepted is information, not a caveat (#112).
+    const counts = testChangeCounts(testChanges.files);
+    const say = counts.notJustified + counts.unjudged > 0 ? log.warn : log.info;
+    say(
+      `Review round ${testChanges.round}: ${counts.files} change(s) to the judge - ` +
+        `${counts.justified} justified, ${counts.notJustified} not justified, ` +
+        `${counts.unjudged} unjudged`,
+      { id: 'test_changes_judged', data: { round: testChanges.round, ...counts } },
+    );
   }
 
   const [only] = reports;
@@ -4306,7 +4585,11 @@ async function runReview(
   // here too: that file is the record of what the reviewer produced. Written
   // once, containing what the reviewer said and what vibe observed about it, is
   // exactly what it already does for `downgraded`.
-  return proveFindings(state, cfg, cwd, roles, merged);
+  const proven = await proveFindings(state, cfg, cwd, roles, merged);
+  // Into the round's `code-review-<n>.json`, which the caller writes once from
+  // this. Absent rather than empty when no judge file was touched, so that
+  // artifact is byte-for-byte what it was before (#112).
+  return testChanges === undefined ? proven : { ...proven, testChanges };
 }
 
 /**
@@ -4574,6 +4857,29 @@ async function resolveQuestions(
   const usable = answers.filter((a) => !declined(a));
   const refused = answers.filter(declined);
 
+  // **The marks and the answers they stand for land on one write** (#169).
+  //
+  // Marking stays here, before the revision, and that order is #65's: a stop
+  // after this turn and before the mark would put the same question to the
+  // answerer again. But a mark is a promise that the answer reaches a plan, and
+  // until #169 the answers lived only in this function's return value - so
+  // every way of stopping before `revisePlan` persisted the plan kept the marks
+  // and lost the answers, and the resumed loop critiqued a plan whose questions
+  // `isAnswered` now suppressed and nothing had resolved. Four exits did it: a
+  // kill, the declined-blocking escalation below, and a `stop` gate or a
+  // stopped `step` hold at `question-round`.
+  //
+  // So the usable answers ride on the same `saveState` as the keys, before any
+  // of those exits can be reached, and `planPhase`'s re-entry block - the
+  // resume path NEEDS-INPUT already used - revises against them. The whole
+  // usable list, unpaired answers included, because that is what the revision
+  // would have been given; declined answers never reached a revision and do
+  // not here either. A consequence that is intended: the post-answerer
+  // `question-round` checkpoint (#139) now carries them, so a fork from it
+  // revises against what this turn bought instead of losing it.
+  state.pendingAnswers = usable.length > 0 ? [...usable] : null;
+  saveState(state);
+
   // **The pairing, and it is no longer string equality** (#211). The answerer is
   // asked to echo the question and echoes what it was shown, which
   // `formatQuestion` renders with the kind and the blocking tag after it - so a
@@ -4708,11 +5014,15 @@ async function resolveQuestions(
  * suppressed wording recurring in a later round is caught by the fuzzy scan
  * against the original rather than by the exact path below - which is what the
  * scores in `src/questions.ts` leave room for.
+ *
+ * **It does not save** (#169). A key on disk is a promise that the answer
+ * reaches a plan, so the caller persists the marks on the same write as the
+ * answers they stand for - one `saveState` per batch, never one per key with a
+ * window after the last of them.
  */
 function markAnswered(state: RunState, question: string): void {
   const key = normalize(question);
   if (key && !state.answeredQuestions.includes(key)) state.answeredQuestions.push(key);
-  saveState(state);
 }
 
 function isAnswered(state: RunState, question: string): boolean {

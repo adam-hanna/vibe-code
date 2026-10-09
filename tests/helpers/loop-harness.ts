@@ -8,7 +8,7 @@ import type { CodexTurnOptions } from '@src/codex.js';
 import { DEFAULTS } from '@src/config.js';
 import { Escalation, EXIT, orchestrate, writeEscalation } from '@src/orchestrator.js';
 import type { AgentTurns } from '@src/orchestrator.js';
-import { reconcileQuestionRecords } from '@src/questions.js';
+import { mergeHumanAnswers, reconcileQuestionRecords } from '@src/questions.js';
 import { acceptMoves, acceptRaised, parseMoves, parseRaised, raisePhase } from '@src/raise.js';
 import { createRun, resumePhase, saveState, takePendingFindings } from '@src/run.js';
 import type {
@@ -764,7 +764,8 @@ export function answerNeedsInput(
       'answerNeedsInput parsed no answers - NEEDS-INPUT.md is left in place, as cmdResume leaves it',
     );
   }
-  state.pendingAnswers = answers;
+  // Merged, as `cmdResume` merges: the person wins over the answerer (#169).
+  state.pendingAnswers = mergeHumanAnswers(state.pendingAnswers, answers);
   recordHumanAnswers(state, answers);
   saveState(state);
   reconcileQuestionRecords(state);

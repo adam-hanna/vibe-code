@@ -135,11 +135,13 @@ describe('the run in the prompt is the run read_run reports', () => {
     expect(prompt).toContain('never zero');
   });
 
-  test('it carries what this build cannot see, rather than leaving it to be guessed', () => {
-    // `describeRun`'s `unavailable` list. A model asked "has this been tried
-    // before" with no archive and no statement that there is no archive will
-    // answer from nothing at all.
-    expect(systemPrompt(emptyRun(), null)).toContain('#114');
+  test('it names the archive tool, and never also says there is none', () => {
+    // Decision 4's "yet" arrived with #114. A prompt holding one sentence that
+    // offers `read_archive` and another saying there is no archive tool is a
+    // rule half-lifted, and the model would have to pick which to believe.
+    const prompt = systemPrompt(emptyRun(), null);
+    expect(prompt).toContain('read_archive');
+    expect(prompt).not.toMatch(/no tool that reads the run archive|There is no archive tool/);
   });
 
   test('there is exactly one description of a run and the tool owns it', () => {
@@ -164,6 +166,10 @@ describe('the run in the prompt is the run read_run reports', () => {
       'cycles',
       'ended',
       'gate',
+      // The run's host gone before it returned (#246): beside `completed`,
+      // because a model told only `completed: null` would read a dead run as
+      // live.
+      'lost',
       'protocol',
       'questions',
       'reason',

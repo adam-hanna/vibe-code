@@ -27,6 +27,27 @@ npm run watch       # tsc --watch
 would pass or fail by machine. A case about the global layer points the variable at a file of
 its own and puts it back (`global-config.test.ts`). Running `node --test` directly skips this.
 
+**`npm test` also owns where the suite's temporary files go, and removes them** (#234). The
+suite makes about 1,600 temporary directories a run, 411 of them git repositories, and for a
+long time removed none: on the Linux dev machine's tmpfs that used up a million inodes in about
+thirty runs, and the next run failed 673 tests with `ENOSPC`, which looks like a broken suite
+rather than a full disk. The fix is where a directory comes from, not 225 `mkdtempSync` sites
+each remembering `rmSync`: `scripts/test.mjs` points `TMPDIR`, `TMP` and `TEMP` at one
+`vibe-test-run-*` root, so `os.tmpdir()` answers that root in every test file and every child,
+and the root is removed when the run ends. Three rules travel with it, pinned by
+`test-sandbox.test.ts`:
+
+- **`GIT_TEMPLATE_DIR` is an empty directory**, so a fixture repository holds 9 entries
+  rather than 27. The sample hooks were two-thirds of what a test repository cost, and no test
+  runs one. A run fell from about 30,000 inodes and 174 MB to about 22,800 and 148 MB; most of
+  what is left is the deliberately large states in `fork-kill` and the chat-store cases.
+- **Ctrl-C, SIGTERM and a closed terminal still remove the root**; the script waits for the runner and then cleans up. **A SIGKILL or a crash is swept by the next run**: each root holds the pid that made it,
+  and a root whose pid has gone is removed at the start of the next run.
+- **Anything that appears in the real temp directory fails the run, by name.** That is a test
+  writing to a hard-coded `/tmp` or spawning a child with a hand-built environment, and it would
+  otherwise bring the leak back silently. Put a new fixture under `os.tmpdir()` and it is
+  covered without any cleanup of its own; `VIBE_KEEP_TEST_TMP=1` keeps the root and prints it.
+
 **`npm test` runs the compiled output, not the sources.** `pretest` builds, so a stale `dist/`
 is never what you tested — but if you invoke `node --test` directly, build first or you are
 testing the last change rather than this one.
@@ -90,12 +111,47 @@ which is the failure mode of any allow-list somebody has to remember to extend.
 
 **Its last two sections are a different kind of check and are there for a reason vitest
 cannot cover.** §9 and §10 are both about a rule broken by the **absence** of a declaration —
-a `button` with no background taking the platform's near-white, and a `.v-modal` with no
+a `button` with no background taking the platform's near-white, and a dialog with no
 `max-height` growing past the bottom of the screen — which is invisible to a reader of the
 stylesheet and unreachable from a token pairing. They live here rather than in a vitest case
 because **vitest stubs a CSS import to the empty string, `?raw` included**, so a test cannot
 read a stylesheet at all; this script reads the file. Anything asserting the *content* of CSS
-belongs here.
+belongs here. Each check reads the file its rule lives in, and moves when the rule does:
+§9's reset is Tailwind's preflight since #237, so it checks that `theme.css` imports
+`tailwindcss/preflight.css` into the base layer and that the installed preflight still has a
+`button` rule clearing the background; §10 reads the `Modal`'s utilities off `Surfaces.tsx`;
+§8 reads `--size-*` off `tokens.css`.
+
+**The app draws with Tailwind over the tokens, and there is no other stylesheet** (#231,
+#237). `tokens.css` holds every value and is still the only file allowed a hex;
+`design/theme.css` maps the tokens into Tailwind's theme *by reference*, imports preflight,
+and holds the handful of rules that are global by nature — the page's ground and type, body
+`select-none`, focus, the scrollbar, and the one `v-pulse` keyframe. Everything a component
+draws is a utility in that component. What it reverses is the original design system's one
+rule about itself — *"Class names are `v-` prefixed and flat. No nesting, no CSS-in-JS, no
+runtime"*, sixteen primitives in `components.css` — and the reason is the one
+`design/AUDIT.md` already gave: composition does not survive being transcribed into a
+stylesheet, and 6,589 lines of hand-written CSS had drifted into nine copies of the artifact
+pane's layout. Three things the
+move had to keep, and did:
+
+- **Preflight came in with the sweep, in `base`, so a utility always wins.** The old resets were
+  unlayered, and an unlayered rule beats every layered one whatever its specificity — which
+  is how `button { background: none; border: none }` silently erased every new button's
+  ground (#231). The few platform defaults the screens were drawn against are put back by
+  name in `theme.css` with `revert` (native selects, radios and checkboxes, inline icons,
+  placeholder grey, eight-column tabs), and a heading or paragraph that leaned on the user
+  agent's weight or margin says so in its own utilities.
+- **The off-scale tokens are referenced, not rounded.** `--space-2` is 6px, and the root
+  font size is `--type-body`, so `rem` here is 13px — a `px-1.5` or a `pl-10` is not the
+  number it looks like. The moved primitives write `px-(--space-2)` and
+  `[font:var(--type-mono-sm)]`.
+- **`Modal` stayed this repo's own component rather than becoming a radix `Dialog`**, though
+  the rework's plan named one. Its safety properties are the point of it — Escape on the
+  *window*, no dismiss on a scrim click because every dialog guards something expensive, focus
+  to the scrim once on mount, a viewport bound and a body that is the flex item that scrolls —
+  and a library dialog closes on an outside click. The command palette *is* a radix dialog
+  (`ui/command.tsx`), because it guards nothing.
 
 **The screens the source keeps citing are in `app/src/design/HANDOFF.md`.** Twelve comments
 name a frame — `3a`, `4a`, `4h`, `5c`, `6a`, `7a`, `7c`, `7d`, `hi-fi 5`, `hi-fi 11` — and
@@ -124,8 +180,10 @@ Two rules the cockpit inherits from the design and must not quietly drop:
   sending a zero. `6a` has failed three times by inventing a denominator to make waiting feel
   measured.
 - **A missing measurement is drawn as absent with its reason**, never as a blank and never as
-  a zero. The two lines of `6a` that have no source name the issue that would supply them
-  (#136, #114), so the row completes when they land instead of being redesigned.
+  a zero. The two lines of `6a` that had no source named the issue that would supply them
+  (#136, #114), so the row completed when they landed instead of being redesigned. The
+  comparable-turns line is now a **token** distribution read from the archive; it is drawn
+  as absent only until the scorecard has been read.
 - **A diagnostic belongs in the chrome only while it is wrong.** `HOST 43804` and
   `PROTOCOL 1` sat permanently in the titlebar and a manual pass reported the obvious: they
   mean nothing to a user (#204). They are not deleted, because each becomes the most important
@@ -168,9 +226,10 @@ Two rules the cockpit inherits from the design and must not quietly drop:
   hatched cycle rows**, and a zero becomes a named absence. **Preflight takes the live card
   while it runs** — accent border and the one pulse — because it is a real turn against a real
   CLI. The one thing the design asks for that is *not* built is its ETA line, *"preflight
-  usually clears in under a minute"*: that is a claim about past runs and nothing here has read
-  one, so shipping it would be the same invention as `claude 38%` and `step 9/14`, both of
-  which the design itself struck. The row says what it cannot say and names #114.
+  usually clears in under a minute"*: that is a claim about past runs, and the archive the
+  window now reads (#114) records no preflight durations, so shipping it would be the same
+  invention as `claude 38%` and `step 9/14`, both of which the design itself struck. The row
+  says what it cannot say, and why.
 - **While a gate is held there is no live card, and the turn before it is still drawn.** An
   `ask` closes the running turn, exactly as `phase_started`, `turn_started`, `gate_stopped`
   and `result` do — a gate holds *between* things, so nothing is executing while one is
@@ -189,6 +248,21 @@ Two rules the cockpit inherits from the design and must not quietly drop:
   read `5h39m ago` about a turn that took a minute. `clock()` beside `elapsed()` is the pair,
   and `runningRow` carries `lastBeatAt` and `endedAt` **beside** `quietMs` rather than instead
   of it, because a live card wants the relative form and a settled one cannot have it.
+- **A sidebar row's dot pulses while one of its turns is running** (#307). #246 made every
+  row still, so that exactly one element on screen pulsed. The cost was reported directly:
+  a run working looked the same as one idle, and the sidebar is where several live runs are
+  compared. So the rule is now *a pulse means a turn is running*: `hostedMarks.working` is a
+  run with `running` set and no gate held, and its row pulses, so several rows can. A gate,
+  a held turn and an idle host all draw `LivenessDot still`.
+- **A row waiting on a person says so, and why** (#307). `cockpit/attention.ts` holds the
+  rule: a held gate (`gate`); the archive's `needs-input`, `stalled` and `error`
+  (`needs you`, `stopped`, `failed`), only for a run not running, since a running run's
+  status may predate its resume; and a draft whose saved conversation ends on the pilot's
+  message (`your turn`) or holds an unanswered proposal (`proposal`). A saved conversation
+  never holds a turn in flight, so its shape is enough. The badge is a static `alarm` chip
+  with the reason in its tooltip, never on the row on screen. A shut project shows one for a
+  gate or a draft; its archive is not read while shut, so a stopped run is said only once it
+  opens.
 - **The pilot's open turn waves, and it is still one animation.** *"Exactly one element on
   screen pulses"* is the rule above, and the corpus lists the pilot chat's live round card
   among the screens allowed to — but between pressing send and the first token that card has
@@ -357,8 +431,9 @@ they are waiting on. Four things in it are worth carrying:
   been given one job, once by hi-fi 1 and once by moving the loop column. `Sidebar.tsx` is the
   merge. **What must survive it is `＋ ⌘K ⚙`**: `design/AUDIT.md` §1.1's finding was never
   *"there should be a strip"*, it was that those three had nowhere to live and ended up in the
-  tab bar, so a panel that shut them away would put the finding straight back. They are the
-  shut strip, which is why `SidePanel` takes a `shut` slot at all.
+  tab bar, so a panel that shut them away would put the finding straight back. They were the
+  shut strip, which is why the old `SidePanel` took a `shut` slot at all; since the rework they
+  live on the activity bar (`shell/ActivityBar.tsx`), at every width.
 - **A row OPENS a run. It does not start one.** The first cut resumed on click and the report
   was immediate: *"clicking on a run automatically kicks off the pre-flight. I don't want
   that."* It is the sharper form of the narrowing the rail already made — that one said a
@@ -485,8 +560,8 @@ they are waiting on. Four things in it are worth carrying:
   would have when I click on an old run as if I had run it myself. You just added
   a summary or something and changed it entirely."* A person opening a run wants
   **the run**, not a report about it — and a second drawing of one object is two
-  things to keep in step, which is the mistake `SidePanel` and `Counts` both
-  exist to avoid.
+  things to keep in step, which is the mistake `Counts` exists to avoid (and
+  the old `SidePanel` did, before the rework's resizable panels replaced it).
 
   So the core says the run **again**. `src/replay.ts` reconstructs the narration
   and the window folds it through the **same `reduce`** a live run goes through,
@@ -680,7 +755,7 @@ they are waiting on. Four things in it are worth carrying:
   make the two disagree about that.
 - **Your half of the pilot chat is mirrored, and only your half** (#223). The
   first answer to *"it's too hard to tell which is which"* was a `you` chip and
-  a tinted ground, and `pilot.css` recorded at the time that a mirrored layout
+  a tinted ground, and `pilot.css` (since deleted) recorded at the time that a mirrored layout
   was **deliberately** not wanted: the pilot's replies carry chips, prices and
   proposal cards, so putting the one un-annotated thing in the conversation on
   its own axis would be decoration. That reasoning is right about the *reply* and
@@ -845,6 +920,14 @@ they are waiting on. Four things in it are worth carrying:
   in the same place. `round` is `state.reviewRound`, the field the three fix
   kinds already carry, because the CODE group re-opens on every fix and the round
   is what tells one pass through it from the next.
+- **A fix round is a code round, and it opens one** (#280). The review fix and the final
+  fix announced a turn and no phase, so `reduce` filed each under the most recently opened
+  group — the review it answered — and a run that went review, fix, review drew
+  `review round 0 → review round 1` with the code nowhere: *"it did a review round 0, but then
+  didn't code but just went straight to another round of review"*. The replay already filed
+  `fix-N` under `implementing`, so the live column and the archived run disagreed about one
+  run. `announceFixRound` opens `implementing` with the review round; `verify-fix` does not,
+  because a failed gate's repair belongs in the code group that ran the gate.
 - **A resume is pointed at the repository, and `dir` is not it.** `run_started`
   carries both and they are not interchangeable: `identity.dir` is the run's
   **own** directory — `<repo>/.vibe/runs/<id>` — and `identity.repo` is the
@@ -1089,6 +1172,19 @@ they are waiting on. Four things in it are worth carrying:
   not a fact about any run. Saving and adopting are separate controls for exactly that reason,
   and *use the default* **clears the key** rather than copying today's text into it — a cleared
   key follows the product forward when the default is improved.
+- **Standing instructions are the person's text, not a prompt block** (#273). Asked for as *"a
+  way to give vibe instructions it can remember across runs. Kind of like a global agents.md."*
+  `instructions.text` is its own config key, empty by default, settable in the global file or a
+  project's (a project's wins, and a cleared box writes `null` so the level below shows through).
+  It is not a `prompts.*` block because a block is the product's text, with a default and a
+  checked set of turns it reaches. `withStanding` in `prompts.ts` puts it in front of the prompt
+  where it reaches stdin in **both adapters**, so every role and every kind of turn gets it with
+  no builder edited, on every turn rather than a session's first, so a resume or a rotation
+  cannot drop it. The pilot gets it in its system prompt on both roads. It is installed beside
+  the prompt overrides, as the same kind of latch for the same reason, and `configDiff` names it,
+  so a run's record says what its agents were told. What it adds over the vendors' own files is
+  one text for both agents: Claude's seats read `~/.claude/CLAUDE.md`, Codex's read
+  `~/.codex/AGENTS.md`, and the pilot reads neither.
 - **A question is answered where it is shown, and the window writes the same file a text
   editor would.** The halt banner carried the CLI's own instruction — *"Answer the questions
   in NEEDS-INPUT.md, then resume the run"* — correct in a terminal and absurd in a window
@@ -1123,6 +1219,19 @@ they are waiting on. Four things in it are worth carrying:
   would go stale the week either vendor ships a model — *"models are always evolving, we
   probably don't want these hard coded."* A typo is caught by the run summary before anything
   is spent, and by a turn failure naming `roles.<role>.model`.
+- **The verification gates are a list on the settings screen** (#240). The one test-command
+  field was the only control, so a two-package repository joined its suites with `&&` and lost
+  everything named gates were built for (#47): which package broke, a flaky gate rerun on its
+  own, a `required` and a timeout each. `app/src/cockpit/gateform.ts` holds the decisions and
+  is pure. **Every save sends the whole list**, because `writeConfigPatch` merges one level
+  deep and a list is replaced whole. **Converting is one write**: the command becomes the first
+  gate, named `verification` like the gate the core synthesises from it, and the same patch
+  clears `verify.command`, since the core refuses both at once; removing the last gate is the
+  mirror. `tidyVerify` in `src/config.ts` drops the `null` the clearing leaves, so a converted
+  file is byte-for-byte what a person would write. A new row is not sent until it has a name
+  and a command; a saved row always is, so emptying it reaches the core and is refused in its
+  words. `artifacts` stays file-only and survives a save. A command holding `\"` gets a
+  warning showing what the shell would receive, because that is almost always a paste from JSON.
 - **The four caps and the tolerance are a form now, and P0 is stated as having no setting.**
   Every one was reachable only as a `--max-*` flag. `gate()` refuses a round with any P0
   before it looks at the tolerance at all — *P0 findings are never carried forward* — so a run
@@ -1217,7 +1326,7 @@ they are waiting on. Four things in it are worth carrying:
   together**, so the ramp the spec chose survives being scaled and no two styles can drift.
 
   Browser zoom was the other answer and is worse here: it scales layout as well as type, and
-  viewport units do not scale with it — so `.v-modal`'s `max-height: calc(100vh - …)` would
+  viewport units do not scale with it — so the `Modal`'s `max-h-[calc(100vh-44px)]` would
   compute in zoomed pixels and a dialog would be taller than the window at any zoom above 1,
   which is the exact defect that bound was added to fix.
 
@@ -1270,7 +1379,9 @@ they are waiting on. Four things in it are worth carrying:
   file. It is also the right home on the merits: a modal that bounds itself is a design-system
   invariant, not a fact about whichever screen last broke it. Same shape as §9, and found the
   same way: the rule that broke it was the **absence** of a declaration, invisible to a reader
-  of the stylesheet.
+  of the stylesheet. (`.v-modal` and `.v-modal__body` are utilities on `Modal` in
+  `design/Surfaces.tsx` since the rework (#231), which is the file §10 reads now; the corner
+  marks went with it, the scrolling wrapper and `min-h-0` did not.)
 - **A run's name is its brief, so anywhere it becomes a heading it is previewed.** That is the
   text half of the bound above and the two are not alternatives — a modal that cannot outgrow
   the viewport is what stops the *next* long string breaking it, and a heading that is a
@@ -1500,13 +1611,14 @@ landed on the pilot with no run open.
   was a *tab*, which made the archive something you left the run to look at, and the loop
   column was on the left where the design draws it — the report was that the two were the
   wrong way round: the runs belong beside the rail they are drawn from, and the loop belongs
-  beside the pane whose rounds it names. `SidePanel` is one component for both edges, because
+  beside the pane whose rounds it names. `SidePanel` was one component for both edges, because
   two implementations of *standing context you glance at* drift in the way nobody notices —
   you are never looking at both edges at once. **Collapsed is a state, not an absence**: a
   shut panel keeps its strip, its mark and its name, so the way back is where the panel was.
-  Neither is persisted, and that is deliberate — a collapse is a gesture for the next few
-  minutes, where `localStorage` holds the repository and the spend ceiling because those are
-  decisions.
+  Neither was persisted, deliberately — a collapse was a gesture for the next few minutes.
+  The rework (#231) replaced `SidePanel` with resizable panels and reversed that half:
+  with real drag handles an arrangement is a setting, so `cockpit/where.ts` keeps the sizes
+  and which panels are shut.
 
   **The width is the exception, and it is on the same side of that line** (#223): *"The two
   side bars (left and right) should be width adjustable when open."* An open panel's inner edge
@@ -1527,8 +1639,9 @@ landed on the pilot with no run open.
   anything, because a section inside them is a flex item whose automatic minimum size the spec
   resolves to **zero** when `overflow` is not `visible` — so a section holding a nine-page plan
   shrank to the space left and clipped the rest, the pane never overflowed, and the pane
-  therefore never scrolled. `flex: none` on `.v-sect` is the fix and the `overflow: hidden`
-  stays, because it is what clips the head's hover ground to the border. Worth remembering as a
+  therefore never scrolled. `flex: none` on the section is the fix — `flex-none` on
+  `Disclosure.tsx`'s `<section>` since the rework, which replaced `.v-sect` — and the clip
+  stays (`overflow-clip` there), because it is what clips the head's hover ground to the border. Worth remembering as a
   shape rather than as a rule about one class: **a scrolling column's children must not be
   allowed to shrink**, and one with `overflow` set will shrink to nothing without saying so.
 
@@ -1552,11 +1665,13 @@ releases is wrong for at most one turn.
 
 **The scrollbar is global, and the class it replaced is why.** `.v-scroll` was an opt-in and
 almost nothing opted in — every pane sets `overflow-y: auto` itself — so the product scrolled
-with the platform's own light gutter down the side of a dark window. `--dim-scroll-track` is
-the design's 4px and is the width of the **thumb**; the gutter is twice that, with the
-difference clipped away by `background-clip: padding-box`, so the stated design and a usable
-hit target are not in conflict. The track is transparent: a permanently drawn one is a
-vertical rule down every pane, which reads as structure.
+with the platform's own light gutter down the side of a dark window. The rule is in
+`design/theme.css` now (#237). This paragraph used to describe a 4px thumb in an 8px gutter,
+clipped by `background-clip: padding-box`; that was `base.css`'s rule, and the 2026 redesign
+(#226) laid a 6px gutter and a 6px `--rule-strong` thumb over it in `workspace.css`, which won
+the cascade and reset the clip. The sweep merged the two into the one set that was actually on
+screen rather than restoring the one this file described. The track is transparent: a
+permanently drawn one is a vertical rule down every pane, which reads as structure.
 
 **A fact the run records and never says is a screen that cannot be built** (#223). The loop
 has always known whether the verification gate passed, what a round's four severity counts
@@ -1642,7 +1757,7 @@ event type**, never a name of its own: `applyCharge` narrates under `claude_turn
 `codex_turn`, the same string it just recorded, so a host acting on the fact and an archive
 holding it agree about one fact rather than two spellings of it.
 
-**Eight frames are reads, and a read runs beside a run** (#223). `archive`, `config`, `diff`,
+**Nine frames are reads, and a read runs beside a run** (#223). `archive`, `stats`, `config`, `diff`,
 `artifacts`, `artifact`, `prompts`, `replay` and `fs` answer a question rather than describing something
 that happened,
 which is a shape the wire did not have — every other outbound frame is pushed. They are exempt
@@ -1870,6 +1985,39 @@ Five things are load-bearing:
   `prepareGit` makes the branch as it always has. They are environment variables rather than
   `{dir}`-style text substitution because a path pasted into a shell line breaks on a space,
   and a quoted variable does not.
+
+  **A run starts from the base it was told, and a worktree is never moved silently** (#249).
+  The #169 run started from the root checkout's stale `fix/223` tip instead of
+  `origin/develop`: its script detached at the commit it wanted, and `prepareGit` checked the
+  branch — made at HEAD — out over it without a word. Four decisions, all the owner's:
+
+  - **A base is a setting.** `git.baseRef` (project-only, default null) is resolved **once**,
+    in the preflight gate, on a fresh run only, before anything is spent. A remote-tracking ref
+    is fetched first. **A fetch that fails or outlives `git.worktreeTimeoutMs` refuses the run
+    — there is no fallback to the local tracking ref**, because a possibly stale base is the
+    defect. The bound is the existing setup budget rather than a new number, and it is needed
+    at all because a `git fetch` hung for over 120s on the owner's machine and a `git` child is
+    never interruptible under `cancel.ts`. `--no-branch` with a base, an unresolvable ref, and
+    a dirty repository with no worktree whose base is not HEAD are each refused by name. **Null
+    is today's behaviour**: the branch at HEAD. A resume never resolves, fetches or moves
+    anything, and a fork's branch comes from its checkpoint.
+  - **Refuse, never move.** When `prepareGit` adopts a pre-made branch it compares the
+    worktree's HEAD with the branch's commit: equal is the default path and the checkout moves
+    nothing; different is an `Escalation` naming both shas. This holds with `baseRef` unset,
+    and it is the one behaviour change when it is: a script should check `$VIBE_BRANCH` out,
+    not choose a commit. The default `git worktree add --detach` now detaches at the branch's
+    commit rather than HEAD, so it passes.
+  - **One creation site per path, and nothing durable in preflight.** With a worktree the ref
+    is made in preflight (the script must be told it); with none, `prepareGit` makes the branch
+    with `checkout -b <branch> <sha>`. The sha travels from the gate to `prepareGit` through a
+    run-id-keyed module latch (`chooseBase`), not a state field and not a second read of the
+    ref — a fetch in between would otherwise start the branch at a commit the dirty check never
+    saw, and a stored base would outlive a run stopped before it took its branch.
+  - **The start is recorded.** `state.start = { sha, ref }` (ref null for HEAD) is written by
+    `prepareGit` in the **same save** as `state.branch`, so neither is on disk without the
+    other; `run_branch` carries `startSha`/`startRef` on that path only, the sentence says
+    `from origin/develop (a7b5f9b)`, and the summary prints a `Start:` line when the field
+    exists. Absent on older runs and never back-filled; a fork drops its parent's.
 - **The script goes through a shell, and that is `verify.command`'s rule rather than a hole in
   `commands.ts`'s.** `verify.ts` states it at the one place a shell is used at all — *"Model-
   authored text is never passed to a shell"* — and this is the same category: a line a **person**
@@ -1955,6 +2103,7 @@ src/slots.ts         session-slot lifecycle (main = Claude, judge + review = Cod
 src/context.ts       context measurement, compaction, session rotation
 src/preflight.ts     toolchain contract enforcement, `vibe doctor`
 src/verify.ts        the verification gates — the list, every run, and broken vs flaky
+src/judge.ts         which changed files are the run's own judge, and the reviewer's verdict on each
 src/reproducer.ts    a reviewer's test: placed, run by the user's own gate, taken back out
 src/progress.ts      in-turn heartbeat
 src/work.ts          how far a write turn has got - measured, and labelled a proxy
@@ -1970,13 +2119,15 @@ src/ending.ts        how this process ended - the stamp beside the lock
 src/git.ts           branch and commit operations
 src/worktree.ts      a checkout of its own: where the work happens, and where it does not
 src/pilotaccess.ts   what the pilot may do unasked: the safe list, YOLO, its directories, its reads
+src/mcp.ts           which MCP servers a run's children reach: none unless a role names one
 tests/               node:test, one file per concern
 
 app/                 the desktop app - Vite + React, its own package.json and gate
-app/src/design/      tokens.css, base.css, components.css, and the sixteen primitives
+app/src/design/      tokens.css, theme.css (Tailwind over the tokens), and the primitives still drawn
 app/src/design/HANDOFF.md  the design corpus - every screen a source comment cites, by name
 app/src/design/AUDIT.md    the built app walked against all fourteen hi-fi frames, and closed
 app/src/cockpit/rounds.ts  a round as one card, and which round a thing arrived during
+app/src/cockpit/rail.ts    what the run rail says: a turn's group, the now card, the verify row
 app/src/cockpit/Counts.tsx the four severity counts, and the one place they are a control
 app/src/cockpit/squares.ts what the navigator may draw, and the two letters standing for a run
 app/src/cockpit/Sidebar.tsx  projects, their runs, and the pins - the rail merged into one
@@ -1993,15 +2144,18 @@ src/replay.ts           a finished run, said again - and what an archive cannot 
 app/src/cockpit/useReplay.ts   folding a finished run through the reducer that drew it live
 app/src/cockpit/artifacts.ts what a run wrote: classifying a listing, and reading a report
 app/src/cockpit/useArtifacts.ts asking the host for a listing, and for one file when it opens
+app/src/cockpit/useStats.ts    asking the host for the archive's scorecard, and again when a run ends
 app/src/cockpit/Disclosure.tsx the one section-that-opens, at every level it appears
-app/src/cockpit/SidePanel.tsx  a column that can be put away without being lost
 app/src/cockpit/PlansPane.tsx  every version of the plan, one section per round
 app/src/cockpit/ReportPane.tsx a judge's own report - the critique and the review, one screen
 app/src/cockpit/CodePane.tsx   what each round changed, from the range its commit carries
 app/src/pilot/log.ts       rounds and conversation in one scroll, and who may reorder whom
-app/src/Gallery.tsx  every component in every state - the design system's acceptance test
+app/src/shell/       the editor-shaped frame: activity bar, status bar, palette, and their pure tables
+app/src/ui/          the shadcn components, over the tokens - button, badge, command, popover, tooltip, resizable
+app/src/cockpit/pane.ts    the artifact panes' shared layout, named once - nine subjects, one shape
 app/src/host.ts      the webview's end of the wire: typed frames, and nothing re-derived
 app/src/cockpit/model.ts   frames in, a run out - the ONLY logic in the app, and it is pure
+app/src/cockpit/hosts.ts   the live runs: routing by handle, what is drawn, the cap, the write rule, adoption
 app/src/cockpit/format.ts  durations, counts, and the closed maps: boundaries and exit codes
 app/src/cockpit/           the loop column, the running row, the output pane, the gate footer
 app/src-tauri/       Rust: window, tray, single instance, spawning and relaying
@@ -2015,7 +2169,7 @@ app/src/cockpit/where.ts     where the window was pointed, kept between launches
 app/src/memory.ts            what the window remembers - host files behind a synchronous cache
 app/src/cockpit/models.ts    the four model listings the pickers draw, and nothing else
 app/src-tauri/src/pilot/models.rs  which models a stored key may use, asked of the vendor
-app/src-tauri/src/host.rs    supervising the host process, and the \\?\ path fix
+app/src-tauri/src/host.rs    supervising the hosts - the service host and one per run - and the \\?\ path fix
 app/src-tauri/src/reaper.rs  making a killed app take the host with it
 app/src-tauri/src/keys.rs    the OS keychain, and the read the window cannot reach
 app/src-tauri/src/pilot/     the only network code in the product - two adapters, one vocabulary
@@ -2041,6 +2195,194 @@ judgement about a run stays on the Node side. The relay parses exactly one thing
 line of stdout is JSON at all — and only so a line that is not can be labelled rather than
 passed off as a frame. **The moment Rust decides something about a run there are two
 definitions of a legal run.**
+
+**One host process per run, and the handle that routes it** (#246). The app used to be
+one Node host running one run at a time: `serve.ts` kept one `running` id and refused a
+second `invoke`. The fix is **a second process, never a second run inside one process** —
+`src/cancel.ts` and `src/prompts.ts` hold per-process latches, and `src/lock.ts` is written
+expecting one run per process, so all three stay exactly as they were.
+
+- **A service host and a run host per invoke.** The service host starts at launch, as the
+  single host did, and answers everything that is not a run: the reads, config writes,
+  `delete_run`, `answer_questions`, the pilot and commands. Every `invoke` — a new run, a
+  resume, an `--implement` — spawns a run host that serves that one invoke. `answer`,
+  `pause`, `unpause`, `cancel` and `shutdown` go to the run's own host.
+- **Every host is contained alike.** One builder, `host_command`, for every spawn:
+  `DETACHED_PROCESS`, the reaper's job, `strip_verbatim`, and applog lines that name the
+  host. **A run host has `VIBE_APP_DATA` removed, not merely unset** — it is inherited and a
+  login shell can export it, and a run host that saw it would adopt the service host's
+  command logs, two hosts following and able to stop one dev server.
+- **The envelope is the relay's, and PROTOCOL did not move.** Every `host://frame`, `log`
+  and `exit` carries `host`, the handle. A run id on the core's frames could never route a
+  run's first frames — preflight narrates before any run id exists — and the handle can,
+  because the window chose it (`run-<invoke id>`) before the host was spawned.
+  `run_started` is what maps a handle to a run. Nothing in the window is matched by "the
+  current run": a run frame reaches its run's reducer because its handle is that run's, and
+  a run host's `result` reaches it only if it carries the invoke's id, since a pause, an
+  unpause and a cancel are answered with `result` frames too.
+- **How a run host is closed, every way.** Rust closes it — the same stdin close a quit
+  uses (#206), then a kill after the grace — on the `result` carrying its invoke's id, which
+  `send` read off the invoke line; that is the one field Rust learns from an inbound line.
+  Only a `result`: every `result` id on a run host comes from the window's one allocator,
+  `nextRequestId`, where an `error`'s id may be a gate id the host allocated, so Rust never
+  correlates errors. An invoke that fails with an `error` is closed by the window sending
+  `shutdown`. A host that cannot be handed its keys or its invoke is closed by Rust before
+  `host_start` returns — the invoke travels *with* the start for exactly that reason, and a
+  run handle with no invoke, or a first line that is not one with an id, is refused before
+  anything is spawned. A host whose stdout ends is closed too, since nobody can hear it any
+  more.
+- **The window answers each gate once**, and that is what makes an `error` carrying the
+  invoke's id unambiguous: `serve.ts` refuses an answer only when its gate is not in `asks`,
+  and a gate leaves `asks` only by being answered or by the clear that runs after the
+  invoke's own outcome frame. The two counters can coincide; no range fences them apart.
+- **A host stays in the set until it has been reaped**, still listed by `host_status` and
+  still killable, and its exit is relayed only after it has been removed. So the status
+  read the window issues on an exit is the authoritative one, and reads carry a generation
+  so an older answer cannot overwrite it. `Status` keeps describing the service host and
+  lists run hosts under `runs`, so it never states a fact about a process it does not name.
+- **`Run.lost`, and `settled()`.** A run host that exits before its invoke returned ends
+  that run with the host-exit sentence: the turn, any gate and an unfinished preflight are
+  closed, because nothing is executing. It is neither `completed` — a host's exit code is
+  not one of a run's eight — nor `reason`, whose footer says the command has not returned
+  yet. `settled(run)` is the one spelling of *the command is over*, because `lost` is a
+  second way to be over and every site that asked only about `completed` would have held a
+  dead run open. The service host exiting is what "the host exited" has always meant.
+- **The config-write guard moved to the window**, because separate processes share no
+  variable, and it says `serve.ts`'s own sentence. `serve.ts` keeps both its guards; inside
+  one process they are still true. The pilot is never refused for a run. The window's
+  second guard, *one run at a time*, is gone: see below.
+
+**The window hosts several live runs at once** (#246, part B). Part A gave every run a
+process; this is the window using them. `liveHost` and the one `useReducer` `Run` became
+`lives`, a list of `LiveRun` in `app/src/cockpit/hosts.ts`, each carrying its own `Run`
+folded by the **unchanged** `reduce` — there is no multi-run reducer. Every decision about the
+list is a pure function in that file with a test beside it, because the app has no jsdom.
+
+- **Keyed by handle until `run_started`, and by `(repo, runId)` after it — and both are read
+  off the `Run`.** `runIdOf` and `repoOf` are `identity` first and the argv second (`asked`,
+  `dir`). A copy of the id taken at launch is a copy `run_started` never updates, which is how
+  an earlier draft of this drew a resume under the wrong run.
+- **Routable is not drawable.** An entry routes from the moment `launch` adds it, so a frame
+  that beats the start's promise lands on its run. It is drawn, and marked in the sidebar,
+  only once `started`: a pid has arrived **or any frame has been routed to it**. Rust relays
+  frames before `host_start` resolves, so the pid alone was too late — a run that had already
+  said `run_started` stayed hidden behind whatever was on screen. A start Rust refuses
+  produces neither, so it is never drawn. The first frame also **points** the window at the
+  run (`point`), once, whichever of it and the pid comes first.
+- **`viewing` picks what is drawn.** `onScreen` is the live, started entry `viewing` names by
+  id and `dirKey` repository — so opening a run this window is hosting draws its live `Run`,
+  not a replay — or, with nothing opened, `focus`, the run last started, including after it
+  ends. Null means replay, and `columnRun` is still the one expression. `past` is now
+  *opened and not live here*. Every control — answer, pause, unpause, stop — acts on the run
+  on screen by its handle, and `mayAnswer` also requires that the gate is the one that run
+  holds. A dead host marks only its own run `lost`.
+- **Ended entries are pruned after a start succeeds, never before**, and only once their
+  proposing conversation has been dealt with and they are not the one being drawn. Pruning
+  ahead of a start Rust then refused would have erased the finished run on screen.
+- **One writer each, ref first.** `updateLives` and `updateDrafts` assign the ref and then
+  set state, and nothing else assigns either. The frame handler is registered once and reads
+  the ref, and a second launch in the same tick has to count the first against the cap and
+  see its draft as claimed.
+- **`launch` has four steps and the order is the safety.** Refusals before anything changes —
+  outside the app, the service host not connected (`connectedRef`, written in the exit
+  handler before `setWire`), an argv whose `-C` it cannot read, a draft already starting, the
+  cap. Then the claims, synchronously: the draft is marked and the entry appended. Then the
+  start; a refusal from Rust reverses the claims exactly (`dropRun`, `unmarkLaunched`), says
+  Rust's sentence in a strip, and **never** marks a run lost, because there was never a run.
+  Only then anything visible: viewing, the repository, focus, and clearing the strip.
+- **Rust refuses a run host while no service host is in its set**, a poisoned lock included,
+  and checks it in `spawn` under the lock that admits the child — checked earlier, the service
+  host could exit in between.
+  The window learns the service host has gone from an event, and an event can be late; a run
+  host beside no service host is a run whose window can read nothing about it.
+- **The cap is `runs.maxConcurrent`, the machine's, and the window enforces it.** 0, the
+  default, is no limit — `budget.maxTokens: 0`'s shape, because any other default is a number
+  nobody measured. A project file that sets `runs` is refused by name on every road
+  (`refuseProjectRuns`, beside `refuseProjectAuth`); `readGlobalConfig` does **not** read it,
+  because no run does and a malformed value must not stop every run on the machine. The
+  window reads it off `globalRaw` (`capOf`, sentence for sentence with `readMaxConcurrent`,
+  and `hosts.test.ts` reads `src/config.ts` to keep them so) and has three states: a value it
+  cannot use refuses every start, since reading *no limit* out of a value somebody wrote is
+  the silent revert the cap exists to prevent; a cap not read yet refuses only while runs are
+  live; and a number refuses at that many live entries, started or not, by name, naming the
+  runs. Refused, never queued. Terminal runs are not counted.
+- **A config write is refused per project.** A project write only while one of that
+  project's runs is live, by `dirKey`, a start in flight included; a global write while any
+  run is live, **except a patch touching only `runs.maxConcurrent`**, which no run reads and
+  which is wanted exactly while runs are going. `auth` and `cli` are not exempt: `agentEnv`
+  and `configuredBin` read them for every agent child a run spawns. The refusal names the
+  runs. `host.setConfigGuard` is how the window's `writeRefusal` reaches `host.config`.
+- **An effect says where it acts.** A pilot `run_command` runs in `effect.dir`, the directory
+  its card displayed — what runs is what was displayed — and the Commands pane in the
+  sidebar's project. With several runs on screen in turn, "where the window is pointed" was a
+  second answer that could differ from the card somebody pressed. Kickoff stays on `repoDir`.
+- **The cockpit is the one adopter, and the pane is held until adoption settles.** The pilot
+  pane only restores now. `adoptionPlan` decides, for every unadopted run at once, with
+  `chatMove`'s rule unchanged; the effect writes the chats first and marks afterwards, and not
+  before the store is ready. Several runs proposed from one conversation each get the
+  exchange and none gets the CLI session; the source is cleaned once, when nothing proposed
+  from it is still waiting for an id. `heldChat` keeps the pane on the proposing conversation
+  until that run's mark lands, **however the run reached the screen** — a run clicked in the
+  sidebar the moment it appeared restored an empty chat and saved it over the one about to
+  arrive. Following a run onto its adopted copy keeps a pilot turn still streaming
+  (`sameExchange`), which adoption in the pane always did. **Adoption survives a relaunch no
+  better than before**: the join was in memory on develop too, and a quit between pressing a
+  proposal and adoption leaves the proposal under its draft or bucket key, not lost.
+- **Hosted marks are per project.** A run id is unique only inside one repository's
+  `.vibe/runs`, so `hostedMarks` takes the section's directory: marks keyed by id alone lit,
+  and badged, a row with the same id in another project. A gate held by a run nobody is
+  looking at is a static `alarm` badge on its row, and on its project's row while that section
+  is shut, so a run cannot wait for a person who cannot see it.
+- **Quit lists every live entry, started or not.** The tray's Quit, with run hosts in Rust's
+  set, shows the window and emits `app://quit-requested`; the window draws one `Confirm`
+  naming every run, worded as what it is — each stops where it is and can be resumed, only the
+  turn in flight is redone — and calls `app_quit` on yes. Quit asks *which hosts will this
+  kill*, and any live entry may have one; filtering by the drawing rule once let a quit skip
+  its own confirmation while a run host was going. A host Rust still holds after its run
+  returned, or after its invoke could not be written, is on no list and is quit without
+  asking: nothing is running in it, and `stop()` closes it the way Rust already was. The
+  guarantee is that no *run* is stopped unasked. A second Quit while that is unanswered is
+  asked natively, since Rust knows handles and not names; a Cancel is an answer, and calls
+  `app_quit` with `quit: false` so the next Quit asks through the window again. **`app_quit` is a deliberate new
+  door**: it only exits, through the same `stop()` the tray uses, which is narrower than a
+  process-exit permission that could skip the stop; `keys.test.ts` pins it. `stop()` drains a
+  poisoned set rather than returning early, and closing the window still only hides it.
+- **Implement continues in `identity.repo`**, as resume always did: `identity.dir` is the
+  run's own directory, and `-C` there looks for the run inside itself. A run whose core sent
+  no repo is not offered implement, and the footer says why.
+
+**And the core refuses a second run in one checkout.** `sameRepositoryRefusal` in
+`src/worktree.ts` runs in `main()` before the lock — before `allocateRun` on a start, so a
+refusal leaves no run directory, and before `acquireLock` on a resume. It reads every
+other run's lock under this repository's `.vibe/runs` through `livenessOf`, so a run
+started from a terminal counts too:
+
+| verdict | counts? |
+|---|---|
+| `running` | yes, named with its pid |
+| `unknown` | yes, and the refusal names the lock file — a lock vibe cannot read cannot be ruled out |
+| `interrupted`, `not-running` | no |
+| the run being resumed | never, against itself |
+
+It refuses only when either run would work in the repository itself: the live run has no
+worktree (`state.worktree`, read off its record — a record that cannot be read counts as
+none) or the new run would not get one. Both in worktrees is allowed. The sentence names
+the runs and `git.worktree`, with `EXIT.PREFLIGHT`, and it is a refusal, never a queue.
+**It looks twice.** The first look and the claim are two steps, so two starts could both
+pass the first; each looks again once its own lock is on disk, so whichever looks second
+sees the other, and a refusal then releases the lock (and on a start removes the directory
+it made). Two exactly simultaneous starts may both refuse, which is the fail-closed side —
+and it needs no repository-wide lock, a second kind of lock this file would have to
+explain.
+**It fails closed**: a runs directory that exists and cannot be read refuses, and so does
+an entry `lstat` cannot classify; only an absent directory and a measured link are passed
+over. `--force` does not reach it — it overrides the run's own lock, not another run's
+claim on the checkout. **`vibe fork` is not checked**: it creates a directory, a lock and
+a branch ref and stops, touching no working tree, and the fork runs only through a resume,
+which is checked. **A nested `-C` is not caught**: a run given `repo/sub` keeps its archive
+in `repo/sub/.vibe/runs`, by the settled rule that `.vibe/runs` lives where the run was
+given, and finding it from `repo` would need an unbounded walk of descendant archives and
+a second answer to which runs a directory holds.
 
 The webview is given **no shell permission at all**. The host is spawned from Rust with a
 path Rust resolved, and `host_send` writes one line to a process that is already running.
@@ -2195,8 +2537,30 @@ enforcement is not in the component — a proposal appends no tool result, so th
 `unanswered()` and the conversation is unsendable until somebody answers. This is decision 1
 of the five #144 asks for, and the wireframe's 45-second auto-answer is deliberately not
 built: if a proposal should ever fire on its own, that is one more column on #140's gate
-matrix. There is **no config tool** (decision 3) and **no archive tool** until #114 lands
-(decision 4), and both absences are pinned by a test rather than left as an omission.
+matrix. There is **no config tool** (decision 3), pinned by a test rather than left as an
+omission. Decision 4's archive tool landed with #114 as `read_archive`, a **read** rather than
+an effect: it returns the run listing and the scorecard for the repository on screen, asked
+fresh on every call.
+
+**What the window and the pilot read from the archive, and why each piece lives where it does**
+(#114). The issue said to fill both placeholders "from the scorecard", and neither could be:
+`scoreArchive` is cross-run aggregates, with nothing per run and nothing about time.
+
+- **The rounds fingerprint is on `RunSummary`.** `rounds` is filled by `summariseStored` from
+  the state.json `listRuns` already parses, so the `archive` frame carries it with no second
+  read and no second route. A counter a run never recorded is `null`, drawn `–`, never 0; an
+  entry nothing was read from has no fingerprint. `q<n>` is shown only when non-zero, because
+  since #223 a question round no longer advances the plan round.
+- **The comparable-turns line is tokens, never time.** A charge event carries no duration and
+  no model, and a gap between charges includes every gate held. So `turns.byKind` in the
+  scorecard is a token distribution keyed by `seatOf(label).kind` — the one inverse of the
+  labels — over successful charges only, median and p90 by nearest rank, and the line always
+  says `across models` and always names n, with **no minimum sample**: a threshold would be an
+  invented number. Labels `seatOf` cannot place are counted as `unplaced`.
+  `SCORECARD_VERSION` stays 1, because an added field changes no existing meaning.
+- **`stats` is its own read frame, kept off `archive`.** The sidebar asks for `archive` every
+  time a section opens, and scoring reads every state.json. `useStats` asks when the window
+  points at a project and again when the live run ends (`statsEpoch`), and never on a timer.
 
 **One setting decides where the loop hands control back, and it means the same thing in
 both front ends.** `src/gates.ts` holds the matrix; `cfg.gates` is a mode per boundary, and
@@ -2242,6 +2606,12 @@ real; **the control did not exist**, and the only way to make a run hold was to 
 it at the next boundary, and `holdAt` takes it **before** acting on the mode and **whatever**
 the mode is — a boundary that read it, ran through on `auto` and left it armed would hold at
 some later boundary nobody was looking at, which is indistinguishable from a stall.
+**And it belongs to one run** (#253): `serve.ts` clears it when a run's command returns, so
+a run that stops or finishes before any boundary does not leave the next run to hold for a
+request nobody made of it. A pause asked for before a run starts still holds that run.
+**And it can be taken back** (#276): `unpause` clears the armed hold and answers whether there
+was one, `exit 0` or `1`, so *too late* (the boundary already took it, and the run is holding)
+is told rather than raised. While a pause is armed, the window's control reads **Cancel pause**.
 
 Three things it is not, each for its own reason. Not a **gate mode**: `cfg.gates` is the run's
 standing answer to where control comes back, decided before the run starts, and a mode would
@@ -2958,6 +3328,37 @@ short-circuit and costs exactly what it did. Three things about it:
   excluding a flake hides a defect in the suite; re-running a command that could not start
   buys nothing, since no amount of retrying makes a mistyped path resolve.
 
+**A failing gate can be read: the fixer is shown both ends, and every attempt keeps its
+whole output** (#248). In the #169 run the `core` gate failed 3 of 3 and the fixer was
+handed the last 8,000 characters of the first failing attempt, which held `# fail 2` and
+none of the failures. Three things changed:
+
+- **Every attempt of a gate that did not pass cleanly is a file**,
+  `verify-<reviewRound>-<verifyRound>-<gate>-<n>.log`, passing attempts of a flaky gate
+  included, uncapped. Keyed by the gate and the verify round because `runGate` stops at the
+  first failing gate: two gates fail in *successive* passes under one review round, and so
+  does one gate failing again after a verify-fix. The output stays off the event (#133);
+  each attempt on `verify_failed` carries `log`, the file's name, and the Verify pane opens
+  exactly that and never composes one. A gate that passed every attempt writes nothing.
+- **The fixer gets the first 2,000 and the last 6,000 characters**, the same 8,000 as
+  before, split. A cut is stated in one line naming the full log's absolute path, and
+  `describeFailure` names the log of every failed attempt and tells the fixer to search it.
+  **Head and tail alone cannot show a failure a runner printed mid-stream**, which is the
+  #169 case: TAP writes each `not ok` where it happens and only a count at the end. The
+  named log is what fixes that case; the head catches compile errors and crashes.
+- **A turn's group is read from where `reduce` placed it, not from a kind table.** The run
+  rail mapped `plan`, `critique`, `implement` and `review` to a group and nothing else, so
+  `revise`, `answer`, `verify-fix`, `review-fix` and `final-fix` all drew the NOW card as
+  *Ready for the next turn*, above a `Current activity` card showing the same turn's tool
+  calls. `turnGroup` in `app/src/cockpit/rail.ts` reads the cycle holding the turn, which
+  covers every kind the loop has or will have, and while `run.running` is set the card is
+  never idle: a turn in no group is titled by its role.
+
+The replay says the gate's verdicts again too, `verify_started` immediately before each
+stored verdict, so an opened run's Verify tab draws that run's own attempts and opens that
+run's own logs. Until it arrives the tab draws none, rather than the live run's attempts
+read under another run's directory.
+
 **A blocking finding can be asked to prove it, and the proof is a file rather than a
 command** (#113). Both existing guards are about the *form* of a claim, and `evidence.ts`
 says why in its own words: *"Nothing here can judge a claim; it can only check that the claim
@@ -2997,6 +3398,46 @@ module. Four things carry it:
   to say the finding was *"worked on, and nobody has confirmed they are gone"*. A reproducer
   that failed before the fix and passes after it closes it by evidence, and the sentence
   changes — counted, so a run where one of three closed does not read as though all three did.
+
+**A change that touches the run's own judge is recorded and judged, never silent** (#112).
+PR #110's run rewrote an assertion in `tests/fork.test.ts`. The gate went green and the reviewer
+said nothing; only a human noticed. The tests and `vibe.config.json` are what decide a run
+passed, so a round that edits them is grading its own work. This is option 1 of the issue,
+*record and surface*: nothing blocks, and nothing about the gate or APPROVE moved. What changed
+is that such an edit can no longer pass in silence. `src/judge.ts` decides which files count,
+`diffChunks` measures them and `runReview` asks for and records the verdicts in
+`state.testChanges` and the round's `code-review-<n>.json`. Six decisions travel with it:
+
+- **Facts, not a classifier.** Each file's status, old path and lines added and removed, read
+  through the **same** resolved diff mode as the reviewer's diff (`resolveDiffMode`'s rule),
+  so the list judged is the list read. Nothing counts assertions or test cases in any language,
+  because recognising an assertion is the semantic classifier the issue rules out. There are no
+  thresholds: *N removed lines is suspicious* is an invented number. A binary file's counts
+  are `null`, never 0.
+- **`vibe.config.json` is always in**, matched at the work directory's root, whatever
+  `verify.testPaths` says, including `[]`. The gates live in it, so it is the most direct way to
+  change the judge. The record's `patterns` name it beside the configured ones, so an empty
+  result reads as *nothing matched these*, never as *no test was touched*. `verify.testPaths`
+  **replaces** the default list, because those defaults are a naming convention rather than a
+  measurement.
+- **A rename counts if either side matches.** Otherwise moving a test out of `tests/` is how
+  it would disappear.
+- **"Justified" is defined in the prompt**, as this file's own rule for editing a test. An edit
+  is justified only when the test's claim is no longer the contract: the behaviour genuinely
+  moved, or the test asserted more than the thing it guards. It is never justified because it
+  makes the gate pass. Adding a test is not suspicious. For `vibe.config.json`, the question is
+  whether the plan called for the change.
+- **`unjudged` is the fail-closed answer.** A listed file with no verdict from the part that
+  showed it is recorded as `unjudged`, never as justified, because that is the case the issue
+  exists to catch. A verdict naming an unlisted file attaches to nothing. If two verdicts name
+  one file, the **first wins**: deterministic, and a later contradiction cannot quietly replace
+  what the record already said.
+- **The reviewer has its own schema.** `REVIEW_SCHEMA` is `FINDINGS_SCHEMA` plus a required
+  `test_verdicts` array, which is `[]` when nothing is listed, because Codex requires every
+  property to be listed in `required` (#68). The critic's schema and prompt are untouched.
+  A round that touches no judge file gives the reviewer a byte-identical prompt and writes no
+  field. `test_changes_judged` is narration with no event, because the record is already durable
+  in two places. It is said at `warn` only when a file is unjudged or not justified.
 
 **Nothing under `.vibe/runs/` is read through a link, and there is one predicate for all
 three levels.** `linkageOf` in `src/run.ts` is `lstat(...).isSymbolicLink()`, which is true of

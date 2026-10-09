@@ -1,3 +1,5 @@
+import { withStanding } from '@src/prompts.js';
+import { claudeMcpArgs } from '@src/mcp.js';
 import { modelArgs } from '@src/modelflag.js';
 import { attachSpend } from '@src/charge.js';
 import { attachEnding, describeEnding, resolveBin, run } from '@src/proc.js';
@@ -79,6 +81,13 @@ export interface ClaudeTurnOptions {
   jsonSchema?: object | undefined;
   tools?: readonly string[] | undefined;
   timeoutMs: number;
+  /**
+   * MCP server definitions this turn may reach, already resolved from files
+   * vibe read (#138). Absent means none: every turn carries
+   * `--strict-mcp-config` whatever this says, so the person's own MCP
+   * configuration is never what a run's turn loads. See `src/mcp.ts`.
+   */
+  mcpServers?: Readonly<Record<string, Record<string, unknown>>> | undefined;
   /** Live progress. Omitted disables it entirely, which is what preflight wants. */
   progress?: ProgressOptions | undefined;
 }
@@ -186,6 +195,14 @@ export async function claudeTurn(
   args.push(...modelArgs('--model', model), '--effort', effort);
   if (jsonSchema) args.push('--json-schema', JSON.stringify(jsonSchema));
   args.push(...sessionArgs);
+  // Replace, never merge (#138): the person's MCP servers are not this turn's,
+  // and a granted one comes back only from a definition vibe read itself. Every
+  // turn - fresh, resume, fork and rotation - comes through here, which is what
+  // makes this one line the whole Claude closure. Before `--tools` because
+  // `--mcp-config` is variadic as well; the prompt is on stdin, so nothing
+  // positional follows either.
+  const mcp = claudeMcpArgs(options.mcpServers ?? {});
+  args.push(...mcp.args);
   // Variadic flags must come last: they greedily consume following tokens.
   if (tools && tools.length > 0) args.push('--tools', ...tools);
 
@@ -215,22 +232,31 @@ export async function claudeTurn(
   // a turn whose output failed every check below still persisted as one that
   // had.
   return withHeartbeat(heartbeat, async () => {
-    const { code, signal, stdout, stderr } = await exec(claudeBin(), args, {
-      input: prompt,
-      cwd,
-      timeoutMs,
-      // Billed to the road Settings names for Anthropic (#223).
-      env: agentEnv('claude'),
-      // One of the two children a person may stop mid-flight (#209). Off by
-      // default everywhere else on purpose: `git`, the verification gate and
-      // the app-server client all come through the same `run()`, and none of
-      // them is something "stop the turn" gives permission to kill.
-      interruptible: true,
-      onBytes: (bytes) => {
-        outputBytes = bytes;
-      },
-      ...(heartbeat === null ? {} : { onLine: heartbeat.onLine }),
-    });
+    let child: Awaited<ReturnType<RunFn>>;
+    try {
+      child = await exec(claudeBin(), args, {
+        // The person's standing instructions in front, on every turn (#273).
+        input: withStanding(prompt),
+        cwd,
+        timeoutMs,
+        // Billed to the road Settings names for Anthropic (#223).
+        env: agentEnv('claude'),
+        // One of the two children a person may stop mid-flight (#209). Off by
+        // default everywhere else on purpose: `git`, the verification gate and
+        // the app-server client all come through the same `run()`, and none of
+        // them is something "stop the turn" gives permission to kill.
+        interruptible: true,
+        onBytes: (bytes) => {
+          outputBytes = bytes;
+        },
+        ...(heartbeat === null ? {} : { onLine: heartbeat.onLine }),
+      });
+    } finally {
+      // The child has exited (or never started); a granted server's definition,
+      // with whatever secrets it carries, does not outlive it on disk.
+      mcp.cleanup();
+    }
+    const { code, signal, stdout, stderr } = child;
     ended.seen = { code, signal };
 
     if (!stdout.trim()) {

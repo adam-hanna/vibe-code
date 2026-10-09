@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { fixPrompt, implementPrompt, reviewPrompt } from '@src/prompts.js';
 import { CRITERIA, DIFF, FILES, OUT_OF_SCOPE, PLAN_MD } from './helpers/prompt-fixture-args.js';
 import type { Finding } from '@src/types.js';
+import { withApproveCost } from './helpers/approve-cost.js';
 
 /**
  * What the reviewer is told about the implementer's report, and what the write
@@ -166,10 +167,10 @@ test('the review prompt with no report still matches the reviewed goldens', () =
     reviewPrompt(DIFF, FILES, PLAN_MD, OUT_OF_SCOPE, round, hasMemory, null, undefined, CRITERIA);
 
   const first = frozen(1, false);
-  assert.equal(first, fixture('review-round1.txt'));
+  assert.equal(first, withApproveCost(fixture('review-round1.txt')));
 
   const continuing = frozen(3, true);
-  assert.equal(continuing, fixture('review-round3-memory.txt'));
+  assert.equal(continuing, withApproveCost(fixture('review-round3-memory.txt')));
 });
 
 test('a chunked part carries the report as well as its part framing', () => {

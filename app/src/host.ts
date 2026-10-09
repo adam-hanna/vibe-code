@@ -152,6 +152,39 @@ export interface ArchiveRun {
   forkedFrom?: { runId: string; checkpoint: number };
   linked?: true;
   unverified?: true;
+  /**
+   * The run's round counters off its own state.json (#114), for the rounds
+   * fingerprint. Absent on an entry nothing was read from; a counter the run
+   * never recorded is null, never 0.
+   */
+  rounds?: { plan: number | null; question: number | null; review: number | null; verify: number | null };
+}
+
+/** One kind of turn's token distribution, as `vibe stats` computes it (#114). */
+export interface TurnKindTokens {
+  turns: number;
+  median: number | null;
+  p90: number | null;
+}
+
+/**
+ * The scorecard `vibe stats --json` prints (#114).
+ *
+ * Only the part the window reads is typed; the rest travels through untouched
+ * for the pilot, which is handed the whole document. Nothing here computes a
+ * figure out of it.
+ */
+export type ArchiveStats = {
+  version: number;
+  turns: { byKind: Record<string, TurnKindTokens>; unplaced: number };
+} & Record<string, unknown>;
+
+/** The scorecard, in reply to a `stats` request. */
+export interface StatsFrame {
+  type: 'stats';
+  id: number;
+  dir: string;
+  scorecard: ArchiveStats;
 }
 
 /** The archive, in reply to a request for it. */
@@ -507,6 +540,7 @@ export type Frame =
   | PilotStopped
   | FsFrame
   | Archive
+  | StatsFrame
   | ConfigFrame
   | DiffFrame
   | ArtifactsFrame
@@ -551,6 +585,8 @@ export function isFrame(v: unknown): v is Frame {
     // The archive, which the cockpit's reducer also ignores: it describes runs
     // that are over, and `Run` is about the one in progress (#223).
     type === 'archive' ||
+    // The scorecard, ignored by the reducer for the archive's reason (#114).
+    type === 'stats' ||
     type === 'config' ||
     type === 'diff' ||
     // The two artifact reads (#223), ignored by the cockpit's reducer for the
@@ -592,14 +628,45 @@ export function isFrame(v: unknown): v is Frame {
   );
 }
 
+/**
+ * The handle of the long-lived host that is not a run (#246): reads, config
+ * writes, the pilot and commands. Every other handle names a run host, chosen by
+ * the window when it sends the `invoke` that host exists to serve.
+ */
+export const SERVICE_HOST = 'service';
+
+/**
+ * What the Rust relay wraps every event in (#246): the handle of the host that
+ * wrote it. The envelope is the relay's, not the core's - PROTOCOL does not move,
+ * because preflight narrates before a run id exists and a run id on core frames
+ * could never route a run's first frames. The handle can.
+ */
+export interface Relayed {
+  host: string;
+  frame: unknown;
+}
+export interface Logged {
+  host: string;
+  line: string;
+}
+export interface Ended {
+  host: string;
+  code: number | null;
+}
+
+function isEnvelope(v: unknown): v is { host: string } & Record<string, unknown> {
+  return typeof v === 'object' && v !== null && typeof (v as { host?: unknown }).host === 'string';
+}
+
+/** Every handler is told which host the event came from. */
 export interface Handlers {
-  frame(frame: Frame): void;
+  frame(host: string, frame: Frame): void;
   /** A frame this version does not recognise. Shown, never discarded. */
-  unknown(raw: unknown): void;
+  unknown(host: string, raw: unknown): void;
   /** Host prose: its stderr, and any stdout line the relay could not parse. */
-  log(line: string): void;
-  /** The host ended. `code` is null where it was signalled and has none. */
-  exit(code: number | null): void;
+  log(host: string, line: string): void;
+  /** A host ended. `code` is null where it was signalled and has none. */
+  exit(host: string, code: number | null): void;
 }
 
 /**
@@ -617,6 +684,18 @@ export interface Build {
   at: number | null;
 }
 
+/** One live run host (#246), as `host_status` lists it. */
+export interface RunHost {
+  handle: string;
+  pid: number;
+  uptimeSecs: number;
+  uncontained: string | null;
+}
+
+/**
+ * What `host_status` answers. Every field but `runs` describes the **service**
+ * host, so none of them can be read as a claim about a run's process.
+ */
 export interface Status {
   running: boolean;
   pid: number | null;
@@ -643,6 +722,8 @@ export interface Status {
   uncontained: string | null;
   /** Which build this window is running in. Static, and asked for with the rest. */
   build: Build;
+  /** The run hosts alive now, each listed until it has been reaped (#246). */
+  runs: readonly RunHost[];
 }
 
 /** Whether this page is inside the desktop shell at all. */
@@ -661,13 +742,24 @@ export function inShell(): boolean {
 export async function connect(handlers: Handlers): Promise<() => void> {
   const stops = await Promise.all([
     listen<unknown>('host://frame', (event) => {
-      if (isFrame(event.payload)) handlers.frame(event.payload);
-      else handlers.unknown(event.payload);
+      const got: unknown = event.payload;
+      // Shown rather than dropped: a relay that stopped enveloping is exactly
+      // the disagreement somebody needs to be able to see.
+      if (!isEnvelope(got)) return handlers.unknown('?', got);
+      if (isFrame(got['frame'])) handlers.frame(got.host, got['frame']);
+      else handlers.unknown(got.host, got['frame']);
     }),
-    listen<string>('host://log', (event) => handlers.log(event.payload)),
-    listen<{ code: number | null }>('host://exit', (event) =>
-      handlers.exit(event.payload.code),
-    ),
+    listen<unknown>('host://log', (event) => {
+      const got: unknown = event.payload;
+      if (isEnvelope(got)) handlers.log(got.host, String(got['line']));
+      else handlers.unknown('?', got);
+    }),
+    listen<unknown>('host://exit', (event) => {
+      const got: unknown = event.payload;
+      if (!isEnvelope(got)) return handlers.unknown('?', got);
+      const code: unknown = got['code'];
+      handlers.exit(got.host, typeof code === 'number' ? code : null);
+    }),
   ]);
   return () => {
     for (const stop of stops) stop();
@@ -683,7 +775,18 @@ export async function connect(handlers: Handlers): Promise<() => void> {
  * expects one process per run.
  */
 export function start(): Promise<number> {
-  return invoke<number>('host_start');
+  return invoke<number>('host_start', { handle: null, line: null });
+}
+
+/**
+ * Start a run host for one `invoke` (#246), and resolve with its pid.
+ *
+ * The request travels with the start rather than after it, so Rust can close a
+ * host it spawned but could not hand the request to - two calls would leave that
+ * host behind whenever the second failed.
+ */
+export function startRunHost(handle: string, request: object): Promise<number> {
+  return invoke<number>('host_start', { handle, line: JSON.stringify(request) });
 }
 
 export function status(): Promise<Status> {
@@ -697,8 +800,8 @@ export function status(): Promise<Status> {
  * becomes a line, and so the Rust relay keeps receiving a string it never has to
  * understand.
  */
-export function send(request: object): Promise<void> {
-  return invoke('host_send', { line: JSON.stringify(request) });
+export function send(request: object, handle: string = SERVICE_HOST): Promise<void> {
+  return invoke('host_send', { handle, line: JSON.stringify(request) });
 }
 
 /**
@@ -709,12 +812,46 @@ export function send(request: object): Promise<void> {
  * kills a child that may be forty minutes in and ends the run. The one thing
  * they share is that both are resumable, and neither is a kill of the process.
  */
-export function pause(): Promise<void> {
-  return send({ type: 'pause', id: nextRequestId() });
+export function pause(handle: string): Promise<void> {
+  return send({ type: 'pause', id: nextRequestId() }, handle);
 }
 
-export function cancel(reason: string): Promise<void> {
-  return send({ type: 'cancel', id: nextRequestId(), reason });
+/**
+ * Take back an armed pause (#276). Answered with whether there was one, which
+ * the window does not need: a pause the boundary already took is a gate on
+ * screen, and that is how it is answered.
+ */
+export function unpause(handle: string): Promise<void> {
+  return send({ type: 'unpause', id: nextRequestId() }, handle);
+}
+
+export function cancel(handle: string, reason: string): Promise<void> {
+  return send({ type: 'cancel', id: nextRequestId(), reason }, handle);
+}
+
+/**
+ * Tell a run host no more requests are coming (#246). Used after an invoke that
+ * failed before it could return a `result`: Rust closes a run host on that
+ * `result` and nothing else, so a host whose invoke errored is closed this way.
+ */
+export function shutdown(handle: string): Promise<void> {
+  return send({ type: 'shutdown', id: nextRequestId() }, handle);
+}
+
+/**
+ * Listen for the service host's frames, and nothing else.
+ *
+ * Every request the readers below make goes to the service host, so an answer
+ * on any other handle is not theirs - the id that matched it was allocated for a
+ * different host's request.
+ */
+function listenService(handler: (frame: Frame) => void): Promise<() => void> {
+  return listen<unknown>('host://frame', (event) => {
+    const got: unknown = event.payload;
+    if (!isEnvelope(got) || got.host !== SERVICE_HOST) return;
+    const frame: unknown = got['frame'];
+    if (isFrame(frame)) handler(frame);
+  });
 }
 
 /**
@@ -732,9 +869,7 @@ export function cancel(reason: string): Promise<void> {
 export async function onPilotFrame(
   handler: (frame: PilotDelta | PilotReply | PilotStopped | HostError) => void,
 ): Promise<() => void> {
-  return listen<unknown>('host://frame', (event) => {
-    const frame: unknown = event.payload;
-    if (!isFrame(frame)) return;
+  return listenService((frame) => {
     if (
       frame.type === 'pilot_delta' ||
       frame.type === 'pilot_reply' ||
@@ -791,9 +926,7 @@ async function ask<T extends Frame>(
       stop?.();
       f();
     };
-    void listen<unknown>('host://frame', (event) => {
-      const frame: unknown = event.payload;
-      if (!isFrame(frame)) return;
+    void listenService((frame) => {
       // `Ready` carries no id, so the union has none in common. Narrowed on the
       // wanted type first and read through a record after, rather than widening
       // `Frame` to give every member an id it does not have.
@@ -825,6 +958,23 @@ export async function archive(dir: string): Promise<readonly ArchiveRun[]> {
 }
 
 /**
+ * Score a repository's archive, as `vibe stats` does (#114).
+ *
+ * Its own request rather than part of `archive`, which the sidebar asks for
+ * every time a section opens: scoring reads every state.json.
+ */
+export async function stats(dir: string): Promise<ArchiveStats> {
+  const id = nextRequestId();
+  const frame = await ask<StatsFrame>(
+    { type: 'stats', id, dir },
+    id,
+    'stats',
+    'the host did not answer with the scorecard',
+  );
+  return frame.scorecard;
+}
+
+/**
  * Read the configuration, or write a patch into it (#223, `1h`).
  *
  * **One function for both, because a write answers with what resulted.** A form
@@ -842,6 +992,8 @@ export async function config(
   /** Which file a patch goes to. A read answers with both, so it takes none. */
   scope: 'project' | 'global' = 'project',
 ): Promise<ConfigFrame> {
+  const refused = patch === undefined || configGuard === null ? null : configGuard(patch, scope, dir);
+  if (refused !== null) throw new Error(refused);
   const id = nextRequestId();
   return ask<ConfigFrame>(
     patch === undefined ? { type: 'config', id, dir } : { type: 'config', id, dir, patch, scope },
@@ -849,6 +1001,68 @@ export async function config(
     'config',
     'the host did not answer with the configuration',
   );
+}
+
+/**
+ * The sentence `serve.ts` refuses a config write with while a run is going,
+ * moved here verbatim because the service host no longer sees the run (#246).
+ *
+ * A run reads `vibe.config.json` once, when it starts, so a save mid-run cannot
+ * affect it - but it would leave the settings screen and the running loop
+ * describing different configurations with nothing on screen saying so. Each run
+ * is its own process now, and the service host that writes the file shares no
+ * variable with it; the window is the one place that knows a run is live.
+ */
+export const CONFIG_WRITE_DURING_RUN =
+  'a run is still running, and it read vibe.config.json when it started, so it would ' +
+  'not see the change. Stop it or let it finish, then save — a resume reads the file ' +
+  'again';
+
+/**
+ * Who decides whether a config write is refused while runs are going (#246).
+ *
+ * Installed by `Cockpit`, which holds the live runs, and decided by
+ * `writeRefusal` in `cockpit/hosts.ts`: a project write is refused only while
+ * that project has a live run, and a global one while any run is live unless it
+ * touches only `runs.maxConcurrent`. A read is never asked about. The service
+ * host that writes the file shares no variable with any run, so the window is
+ * the one place that knows.
+ */
+export type ConfigGuard = (
+  patch: Record<string, unknown>,
+  scope: 'project' | 'global',
+  dir: string,
+) => string | null;
+let configGuard: ConfigGuard | null = null;
+export function setConfigGuard(guard: ConfigGuard | null): void {
+  configGuard = guard;
+}
+
+/**
+ * Tray Quit with runs going (#246). Rust shows the window and emits this rather
+ * than exiting, so the window can say which runs a quit would stop and confirm.
+ */
+export async function onQuitRequested(callback: () => void): Promise<() => void> {
+  return listen('app://quit-requested', () => callback());
+}
+
+/**
+ * Quit the app, after the window has confirmed (#246): the one command added for
+ * it. It does what the tray's Quit always did - close every host's stdin, then
+ * exit - and nothing else, which is narrower than handing the webview a
+ * process-exit permission.
+ */
+export function appQuit(): Promise<void> {
+  return invoke('app_quit', { quit: true });
+}
+
+/**
+ * The window's Cancel on that confirmation (#246), through the same command:
+ * it answers the pending request and exits nothing, so the next tray Quit asks
+ * through the window again rather than through Rust's native fallback.
+ */
+export function quitDeclined(): Promise<void> {
+  return invoke('app_quit', { quit: false });
 }
 
 /**
@@ -1148,9 +1362,7 @@ export async function stopCommand(commandId: string): Promise<void> {
 export async function onCommandFrame(
   handler: (frame: CommandOutput | CommandEnded) => void,
 ): Promise<() => void> {
-  return listen<unknown>('host://frame', (event) => {
-    const frame: unknown = event.payload;
-    if (!isFrame(frame)) return;
+  return listenService((frame) => {
     if (frame.type === 'command_output' || frame.type === 'command_ended') handler(frame);
   });
 }
@@ -1173,6 +1385,8 @@ export interface PilotTurn {
   dir: string;
   sessionId: string;
   resume: boolean;
+  /** `--effort` / `model_reasoning_effort`, or absent for the CLI's default (#296). */
+  effort?: string;
 }
 
 /**

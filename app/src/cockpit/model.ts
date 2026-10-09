@@ -1,4 +1,5 @@
-import type { Frame, Level, Narration } from '../host';
+import type { ArchiveStats, Frame, Level, Narration } from '../host';
+import { tokens as fmtTokens } from './format';
 
 /**
  * The run, assembled from frames and from nothing else (#159).
@@ -230,9 +231,26 @@ export interface GateRun {
    * information that separates a broken suite from a noisy one. Empty for a
    * gate that never ran, and for a core that predates the field.
    */
-  attempts: readonly { run: number; ok: boolean; exitCode: number | null }[];
+  attempts: readonly Attempt[];
   startedAt: number;
   endedAt: number | null;
+}
+
+/** One attempt of a gate, as `verify_passed|failed` carried it. */
+export interface Attempt {
+  run: number;
+  ok: boolean;
+  exitCode: number | null;
+  /**
+   * The basename of this attempt's whole output, or null (#248).
+   *
+   * **Told, never composed.** The loop names the file on the event and the pane
+   * opens exactly that; a window building `verify-…log` out of the rounds it
+   * already has would be the loop's naming convention copied into a process that
+   * cannot be kept in step with it. Null for a gate that passed every attempt,
+   * which writes no log, and for every event written before the field existed.
+   */
+  log: string | null;
 }
 
 /** One pass of the verification gate, which is a list of gates in order. */
@@ -241,6 +259,12 @@ export interface VerifyPass {
   round: number | null;
   gates: readonly GateRun[];
   at: number;
+  /**
+   * Where this arrived in the frame order, from the counter phase-group ids are
+   * drawn from (#285). What attaches it to a round: `at` is this window's
+   * arrival clock, and two frames read out of one chunk share a millisecond.
+   */
+  seq: number;
 }
 
 /**
@@ -330,6 +354,12 @@ export interface Census {
   tolerated: readonly string[];
   findings: readonly FindingRow[];
   at: number;
+  /**
+   * Where this arrived in the frame order, from the counter phase-group ids are
+   * drawn from (#285). What attaches it to a round: `at` is this window's
+   * arrival clock, and two frames read out of one chunk share a millisecond.
+   */
+  seq: number;
 }
 
 /** One turn's charge, as the seam that charged it reported (#223, `5e`). */
@@ -455,8 +485,14 @@ export interface Commit {
   since: string | null;
   /** The commit message, which names what the round was. */
   message: string | null;
-  /** When it reached us, so a round can be found by arrival. */
+  /** When it reached us. */
   at: number;
+  /**
+   * Where this arrived in the frame order, from the counter phase-group ids are
+   * drawn from (#285). What attaches it to a round: `at` is this window's
+   * arrival clock, and two frames read out of one chunk share a millisecond.
+   */
+  seq: number;
 }
 
 /** A boundary the loop is holding at, waiting to be told what to do. */
@@ -544,6 +580,12 @@ export interface QuestionRound {
    * comparison is like with like.
    */
   at: number;
+  /**
+   * Where this arrived in the frame order, from the counter phase-group ids are
+   * drawn from (#285). What attaches it to a round: `at` is this window's
+   * arrival clock, and two frames read out of one chunk share a millisecond.
+   */
+  seq: number;
 }
 
 export interface Run {
@@ -682,6 +724,17 @@ export interface Run {
    * means another run may be started.
    */
   completed: { exit: number } | null;
+  /**
+   * The host running this run stopped before the command returned (#246), and
+   * the sentence saying how.
+   *
+   * **Told, never inferred**: set by the relay's exit event for this run's host,
+   * by the invoke's own `error`, or by a host that could not be started. It is
+   * neither `completed`, which is an exit code the command returned and a lost
+   * host has none to give, nor `reason`, whose footer says the command has not
+   * returned yet - which is no longer something anybody is waiting for.
+   */
+  lost: string | null;
   /** The protocol version the host stated, or null before `ready`. */
   protocol: number | null;
   /**
@@ -791,6 +844,7 @@ export function emptyRun(): Run {
     ended: null,
     reason: null,
     completed: null,
+    lost: null,
     protocol: null,
     identity: null,
     branch: null,
@@ -902,16 +956,21 @@ function strings(v: unknown): readonly string[] {
  * carried is the absent-is-not-zero rule broken on a sequence - and here it
  * would be worse than usual, because dropping one attempt from three is how a
  * flaky suite comes to look like a clean one.
+ *
+ * **`log` is optional, and its absence never rejects a row** (#248). Every
+ * attempt recorded before the field existed has none, and an attempt of a gate
+ * that passed cleanly never had one; both read as null, which the pane draws as
+ * a named absence rather than a blank.
  */
-function readAttempts(v: unknown): { run: number; ok: boolean; exitCode: number | null }[] {
+function readAttempts(v: unknown): Attempt[] {
   if (!Array.isArray(v)) return [];
-  const out: { run: number; ok: boolean; exitCode: number | null }[] = [];
+  const out: Attempt[] = [];
   for (const item of v as unknown[]) {
     if (typeof item !== 'object' || item === null) return [];
     const row = item as Record<string, unknown>;
     const run = num(row['run']);
     if (run === null || typeof row['ok'] !== 'boolean') return [];
-    out.push({ run, ok: row['ok'], exitCode: num(row['exitCode']) });
+    out.push({ run, ok: row['ok'], exitCode: num(row['exitCode']), log: str(row['log']) });
   }
   return out;
 }
@@ -1209,6 +1268,7 @@ function openGate(
   round: number | null,
   name: string,
   at: number,
+  seq: () => number,
 ): VerifyPass[] {
   const gate: GateRun = {
     name,
@@ -1224,7 +1284,7 @@ function openGate(
   };
   const last = passes[passes.length - 1];
   const samePass = last !== undefined && last.round === round;
-  if (!samePass) return [...passes, { round, at, gates: [gate] }];
+  if (!samePass) return [...passes, { round, at, seq: seq(), gates: [gate] }];
   return passes.map((p) => (p === last ? { ...p, gates: [...p.gates, gate] } : p));
 }
 
@@ -1289,6 +1349,37 @@ function newestPhase(run: Run): PhaseGroup | null {
     }
   }
   return newest;
+}
+
+/**
+ * Whether the command behind this run is over (#246): it returned, or the host
+ * running it has gone. The one spelling of the question, because `lost` is a
+ * second way to be over and every site that asked only about `completed` would
+ * otherwise hold a dead run open - a launch-held pilot conversation never
+ * released, a start control that never comes back.
+ */
+export function settled(run: Run): boolean {
+  return run.completed !== null || run.lost !== null;
+}
+
+/**
+ * The run's host has gone (#246): whatever was open is closed and the run says
+ * why.
+ *
+ * Nothing is executing once its process has gone, so the turn ends, a gate held
+ * at a boundary is gone with the `await` that held it, and a preflight still
+ * probing will never pass. A preflight that **did** pass is history and is
+ * kept. `completed` and `reason` are left alone: a host's exit code is not one
+ * of a run's eight, and inventing one would be the number this model refuses.
+ */
+export function hostLost(run: Run, at: number, why: string): Run {
+  const ended = endRunning(run, at);
+  return {
+    ...ended,
+    gate: null,
+    preflight: ended.preflight !== null && ended.preflight.passed ? ended.preflight : null,
+    lost: why,
+  };
 }
 
 /** Close the running turn, if there is one. */
@@ -1588,7 +1679,7 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
           ...next,
           commits: [
             ...next.commits,
-            { sha, since: str(data['since']), message: str(data['message']), at },
+            { sha, since: str(data['since']), message: str(data['message']), at, seq: id() },
           ],
         };
       }
@@ -1628,7 +1719,7 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
         return {
           ...next,
           cycles: mapLastPhase(next.cycles, (p) => ({ ...p, gates: [...p.gates, gate] })),
-          verify: openGate(next.verify, num(data['round']), gate, at),
+          verify: openGate(next.verify, num(data['round']), gate, at, id),
         };
       }
 
@@ -1681,6 +1772,7 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
             {
               round,
               at,
+              seq: id(),
               gates: names.map((name) => ({
                 name,
                 status: 'disabled' as const,
@@ -1769,6 +1861,7 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
               tolerated: strings(data['tolerated']),
               findings: readFindings(data['findings']),
               at,
+              seq: id(),
             },
           ],
         };
@@ -1802,6 +1895,7 @@ export function reduce(run: Run, frame: Frame, at: number): Run {
               cap: num(data['cap']),
               open: readQuestions(data['questions']),
               at,
+              seq: id(),
             },
           ],
         };
@@ -2158,11 +2252,95 @@ export interface RunningRow {
   work: Work | null;
   /** Why there is no reading. Null once one has arrived. */
   noWork: string | null;
-  /** Why the comparable-turns line is missing. Always set until a frame carries the archive. */
-  comparable: string;
+  /**
+   * Past turns of the same kind, by tokens (#114). `measured` is false only
+   * while the archive has not been read, which is the one case drawn as absent.
+   */
+  comparable: { text: string; measured: boolean };
 }
 
-export function runningRow(turn: Turn, now: number): RunningRow {
+/** The part of the scorecard the comparable-turns line reads. */
+export type ArchiveTurns = ArchiveStats['turns'];
+
+/**
+ * The archive as the window holds it for the current repository and run: the
+ * distributions, the host's sentence for why they could not be read, or null
+ * while they have not been read. Three states, because *not read yet* and *the
+ * read failed* are different absences and each is drawn with its own reason.
+ */
+export type ArchiveView = ArchiveTurns | { failure: string } | null;
+
+/**
+ * How past turns of this kind went, by tokens (#114, `6a`).
+ *
+ * **Tokens and never time.** The archive records no turn durations, and the
+ * gap between two charges includes every gate the loop held at - a duration
+ * derived from it would be a proxy wearing another measurement's clothes - so
+ * the wording carries no time unit and no `took`. **Always across models**: a
+ * charge event records no model, and inferring one from a run's config, which a
+ * resume can change, would be a guess. **Always the sample size, and no
+ * minimum**: a threshold under which the line hides would be an invented
+ * number, and `1 past review turn` says exactly how much it is worth.
+ *
+ * The kind is the live `Turn`'s own, which is the vocabulary `seatOf` files the
+ * archive under - never read out of a sentence.
+ */
+export function comparableLine(
+  kind: string,
+  archive: ArchiveView,
+): { text: string; measured: boolean } {
+  if (archive === null) {
+    return { text: 'comparable turns — this archive has not been read yet', measured: false };
+  }
+  if ('failure' in archive) {
+    return { text: `comparable turns — the archive could not be read: ${archive.failure}`, measured: false };
+  }
+  const seen = archive.byKind[kind];
+  if (seen === undefined || seen.turns === 0 || seen.median === null || seen.p90 === null) {
+    return { text: `this archive holds no past ${kind} turns · across models`, measured: true };
+  }
+  const noun = seen.turns === 1 ? 'turn' : 'turns';
+  return {
+    text:
+      `${seen.turns} past ${kind} ${noun} · median ${fmtTokens(seen.median)} tok · ` +
+      `p90 ${fmtTokens(seen.p90)} tok · across models`,
+    measured: true,
+  };
+}
+
+/**
+ * What the window's scorecard is current as of (#114).
+ *
+ * The run that is going and whether it has ended. It moves exactly when a
+ * `result` folds - the moment a finished run joins the archive - and again when
+ * a launch clears `completed`, so `useStats` re-reads on those and on nothing
+ * else. No timer: the archive only changes when a run ends.
+ */
+export function statsEpoch(run: Run): string {
+  return `${run.identity?.runId ?? ''}:${settled(run) ? 'ended' : 'open'}`;
+}
+
+/** A scorecard answer, stamped with the repository and epoch it was read for. */
+export interface HeldStats {
+  dir: string;
+  epoch: string;
+  scorecard: ArchiveStats | null;
+  failure: string | null;
+}
+
+/**
+ * What the window may draw from a held answer for the repository and epoch it
+ * is on now (#114): the answer only if it was read for exactly those, else
+ * null - *not read yet*. A scorecard for another repository, or one read before
+ * the run that just ended joined the archive, is never quoted under this turn.
+ */
+export function archiveView(held: HeldStats | null, dir: string, epoch: string): ArchiveView {
+  if (held === null || held.dir !== dir || held.epoch !== epoch) return null;
+  if (held.failure !== null) return { failure: held.failure };
+  return held.scorecard?.turns ?? null;
+}
+
+export function runningRow(turn: Turn, now: number, archive: ArchiveView = null): RunningRow {
   const beat = turn.beat;
   // Both clocks stop when the turn does. A turn drawn after it ended - which is
   // every turn a held gate is showing the result of - has a final elapsed and a
@@ -2190,12 +2368,8 @@ export function runningRow(turn: Turn, now: number): RunningRow {
       turn.work === null
         ? 'no reading yet — the loop measures the tree during write turns'
         : null,
-    // Narrowed rather than left as it was. `nothing reads the run archive yet`
-    // stopped being true when `scorecard.ts` landed; what is still true is that
-    // no frame carries it here, which is a different sentence and the one a
-    // reader of this row needs.
-    comparable:
-      'no comparable turns — vibe scorecard reads the archive, but no frame carries it here',
+    // Filled from the scorecard the `stats` frame carries (#114), by tokens.
+    comparable: comparableLine(turn.kind, archive),
   };
 }
 
@@ -2261,9 +2435,17 @@ export function foldReplay(
  * the first turn has not been announced — and a live card left over from the
  * replay would pulse for a turn that ended hours ago.
  *
+ * **And the turn it names is closed, not merely forgotten** (#302). A charge
+ * does not close a turn and neither does `run_escalated`; the `result` does, and
+ * a replay carries that beside its steps rather than among them. Clearing
+ * `running` alone left the turn the run stopped on with no `endedAt`, so its
+ * round card drew `running` for good — beside the round the resume really was
+ * running: *"critique round 15 … RUNNING, plan round 16 … RUNNING"*. `at` is the
+ * replay's last step, the same instant `useReplay` closes it at.
+ *
  * What stays is everything the resume is being given back: the cycles, their
  * turns, the censuses, the spend, the commits and the artifacts.
  */
-export function forResume(run: Run): Run {
-  return { ...run, reason: null, ended: null, completed: null, running: null };
+export function forResume(run: Run, at: number): Run {
+  return { ...endRunning(run, at), reason: null, ended: null, completed: null, running: null };
 }

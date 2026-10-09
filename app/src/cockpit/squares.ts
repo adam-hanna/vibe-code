@@ -80,7 +80,17 @@ export interface RailRun {
  * could not classify - are left off entirely. A square is an invitation to open
  * something, and those are precisely the entries nothing should open.
  */
-export function rail(runs: readonly ArchiveRun[], currentId: string | null): readonly RailRun[] {
+export function rail(
+  runs: readonly ArchiveRun[],
+  currentId: string | null,
+  /**
+   * The runs this window is hosting in this project (#246). The archive's lock
+   * still marks a run started from a terminal; this marks one the window has
+   * just started, before its archive entry has been read again. Per project,
+   * because a run id is unique only inside one repository.
+   */
+  hostedLive: ReadonlySet<string> = new Set(),
+): readonly RailRun[] {
   return runs
     .filter((r) => r.linked !== true && r.unverified !== true)
     .map((r) => ({
@@ -88,7 +98,7 @@ export function rail(runs: readonly ArchiveRun[], currentId: string | null): rea
       mark: initials(r.task),
       task: r.task,
       status: r.status,
-      live: r.liveness === 'running',
+      live: r.liveness === 'running' || hostedLive.has(r.id),
       current: currentId !== null && r.id === currentId,
     }));
 }

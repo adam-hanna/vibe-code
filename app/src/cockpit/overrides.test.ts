@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'vitest';
-import { briefFor, launchArgv, readLaunchArgv } from './argv';
+import { briefFor, launchArgv, readLaunchArgv, splitBrief } from './argv';
+import pilotPane from '../pilot/PilotPane.tsx?raw';
 
 /**
  * The overrides `4a` can express (#223).
@@ -108,5 +109,51 @@ describe('the composer hands its settings to the pilot in the message (#223)', (
     expect(said).toContain('- gates: implemented=auto, review-round=stop');
     expect(said).toContain('- max_tokens: 0');
     expect(said).toContain('- p1_tolerance: 2');
+  });
+});
+
+describe('the settings ride under the brief and are drawn as chips, not as your words (#258)', () => {
+  // The block stays on the wire because the pilot needs it on the turn that
+  // proposes the run. What changes is that the pane stops drawing it as prose.
+  test('a round trip gives back exactly the brief that was typed', () => {
+    const brief = 'fix the thing\n\nwith a second paragraph';
+    expect(splitBrief(briefFor(`  ${brief}\n`, false))).toEqual({ brief, settings: ['full run'] });
+  });
+
+  test('every setting the composer can state has a chip', () => {
+    const said = briefFor('t', true, {
+      gates: { 'review-round': 'stop', implemented: 'auto' },
+      maxTokens: 40_000_000,
+      p1Tolerance: 2,
+    });
+    expect(splitBrief(said).settings).toEqual([
+      'plan only',
+      'gates implemented=auto, review-round=stop',
+      'max 40.00M tok',
+      'P1 tolerance 2',
+    ]);
+  });
+
+  test('a ceiling of 0 is stated as a choice, because it turns the ceiling off', () => {
+    expect(splitBrief(briefFor('t', false, { maxTokens: 0 })).settings).toContain('no token ceiling');
+  });
+
+  test('a message that only looks like one is left whole', () => {
+    const typed = 'notes\n\n---\nnot the composer';
+    expect(splitBrief(typed)).toEqual({ brief: typed, settings: [] });
+    // The heading with prose after it is not the block either.
+    const prose = briefFor('t', false) + '\nand then I kept typing';
+    expect(splitBrief(prose).settings).toEqual([]);
+  });
+
+  test('a setting this build does not know is shown as itself, never dropped', () => {
+    const said = briefFor('t', false) + '\n- reviewer: pro';
+    expect(splitBrief(said).settings).toEqual(['full run', 'reviewer: pro']);
+  });
+
+  test('the pane draws the brief, and the settings as chips', () => {
+    expect(pilotPane).toMatch(/splitBrief\(reply\.asked\)/);
+    expect(pilotPane).toMatch(/\{yours\.brief\}/);
+    expect(pilotPane).not.toMatch(/\{reply\.asked\}/);
   });
 });

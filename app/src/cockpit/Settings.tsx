@@ -12,12 +12,15 @@ import { Section } from './Disclosure';
 import { STEPS } from './appearance';
 import { pickDirectory } from './pick';
 import { projectName } from './projects';
+import { capOf } from './hosts';
 import { DRAFTS_KEY, draftsFor, readDrafts, removeDraft, saveDraft } from './drafts';
 import type { Draft } from './drafts';
 import type { KeyStatus } from '../pilot/keys';
 import type { ConfigFrame, PromptsFrame } from '../host';
 import { memory } from '../memory';
 import { CLI_DEFAULT, loadCliModels, optionsFor, useModels, whyNot } from './models';
+import { backToCommand, convert, gatesPatch, pastedEscapes, readGates, ready, toRow } from './gateform';
+import type { Gate, GateRow } from './gateform';
 import type { Listing } from './models';
 
 /**
@@ -29,7 +32,7 @@ const S = {
   note: 'm-0 max-w-[78ch] text-body-sm text-tertiary',
   row: 'flex flex-wrap items-center gap-3 text-body-sm text-secondary',
   label: 'text-body-sm text-primary',
-  h: 'm-0 text-label uppercase tracking-label text-tertiary',
+  h: 'm-0 font-bold text-label uppercase tracking-label text-tertiary',
   block: 'flex flex-col gap-2',
   inline: 'ml-2 inline-flex items-center gap-2',
   unit: 'text-body-sm text-tertiary',
@@ -56,6 +59,221 @@ const S = {
   drafts: 'mt-3 flex flex-wrap items-center gap-3 border-t border-rule-inner pt-3',
   draft: 'inline-flex items-center gap-1 rounded-sm border border-rule-inner px-1',
 } as const;
+
+/**
+ * The verification gates as a list, one row per gate (#240).
+ *
+ * The single test command was the only control, so a repository with two
+ * packages joined their suites with `&&` and lost what named gates are for: a
+ * failure that says which package broke, retries of the gate that flaked rather
+ * than of everything, and a `required` and a timeout each. `gateform.ts` holds
+ * the decisions; this draws them.
+ *
+ * Saves on leaving a row, for the round caps' reason: a save per keystroke
+ * rewrites the file each time, and a half-typed command is a real, valid, wrong
+ * setting a run starting in that moment would take. A select saves at once,
+ * because choosing an option is the whole of the edit.
+ */
+function GateList({
+  gates,
+  command,
+  fileHasCommand,
+  busy,
+  onSave,
+  commandField,
+}: {
+  gates: Gate[] | null;
+  command: string | null;
+  fileHasCommand: boolean;
+  busy: boolean;
+  onSave: (patch: Record<string, unknown>) => void;
+  /** The single test command, drawn while there is no list. */
+  commandField: ReactNode;
+}) {
+  const refusals = useContext(Refusals);
+  const savedJson = JSON.stringify(gates);
+  const [rows, setRows] = useState<GateRow[] | null>(() => (gates === null ? null : gates.map(toRow)));
+  // Re-seeded from what is in force whenever that changes or a save is refused,
+  // keeping only the rows nobody has saved yet - so a refusal shows the file as
+  // it is, and a half-filled new row is not thrown away by a save of another.
+  useEffect(() => {
+    setRows((current) => {
+      // With no list in force, a list being started from nothing stays on
+      // screen; one that held a converted command goes back to the field,
+      // because the file still has that command and not the list.
+      if (gates === null) return current?.every((r) => r.saved === null) === true ? current : null;
+      return [...gates.map(toRow), ...(current ?? []).filter((r) => !ready(r))];
+    });
+    // `savedJson` stands in for `gates`, whose identity changes every render.
+  }, [savedJson, refusals]);
+
+  const commit = (next: readonly GateRow[]): void => {
+    const patch = gatesPatch(next, fileHasCommand);
+    if (patch === null) return;
+    // Nothing to write when the list sent is the list in force - leaving a row
+    // without changing it is not an edit. Both sides are in the file's shape,
+    // with the keys in one order, so the comparison is of what would be written.
+    const sent = (patch['verify'] as { gates: unknown }).gates;
+    if (gates !== null && JSON.stringify(sent) === JSON.stringify(gates)) return;
+    onSave(patch);
+  };
+  const edit = (key: string, change: Partial<GateRow>): GateRow[] => {
+    const next = (rows ?? []).map((r) => (r.key === key ? { ...r, ...change } : r));
+    setRows(next);
+    return next;
+  };
+  const remove = (key: string): void => {
+    const all = rows ?? [];
+    const gone = all.find((r) => r.key === key);
+    const next = all.filter((r) => r.key !== key);
+    if (gone === undefined) return;
+    // The last saved gate going is the list going: the core refuses an empty
+    // list, so the file goes back to one test command, holding that gate's.
+    if (gone.saved !== null && !next.some((r) => r.saved !== null)) {
+      setRows(null);
+      onSave(backToCommand(gone));
+      return;
+    }
+    setRows(next.length === 0 && gates === null ? null : next);
+    if (gone.saved !== null) commit(next);
+  };
+  const add = (): void => {
+    if (rows === null) {
+      const first = convert(command);
+      setRows(first);
+      commit(first);
+      return;
+    }
+    setRows([...rows, ...convert(null)]);
+  };
+
+  if (rows === null) {
+    return (
+      <>
+        {commandField}
+        <div className={S.row}>
+          <span className={S.hint}>
+            A repository with more than one suite can name each one, so a failure says which
+            broke and a flaky one is rerun on its own.
+          </span>
+          <Button variant="quiet" size="sm" disabled={busy} onClick={add}>
+            {command === null ? 'add a gate' : 'split into named gates'}
+          </Button>
+        </div>
+      </>
+    );
+  }
+
+  return (
+    <div className={S.block}>
+      <table className={S.matrix}>
+        <thead>
+          <tr>
+            <th>name</th>
+            <th>command</th>
+            <th>required</th>
+            <th>runs</th>
+            <th>minutes</th>
+            <th />
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, i) => {
+            const warn = pastedEscapes(row.command);
+            return (
+              <tr
+                key={row.key}
+                // Leaving the row is the save, wherever in it focus was. A move
+                // between two fields of one row is not leaving it.
+                onBlur={(e) => {
+                  if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+                  commit(rows);
+                }}
+              >
+                <td>
+                  <input
+                    aria-label={`gate ${String(i + 1)} name`}
+                    className={cn(S.text, 'min-w-[12ch]')}
+                    value={row.name}
+                    placeholder="core"
+                    spellCheck={false}
+                    disabled={busy}
+                    onChange={(e) => edit(row.key, { name: e.target.value })}
+                  />
+                </td>
+                <td className="w-full">
+                  <input
+                    aria-label={`gate ${String(i + 1)} command`}
+                    className={S.text}
+                    value={row.command}
+                    placeholder="npm run typecheck && npm test"
+                    spellCheck={false}
+                    disabled={busy}
+                    onChange={(e) => edit(row.key, { command: e.target.value })}
+                  />
+                  {warn !== null && <div className={S.hint}>{warn}</div>}
+                  {row.saved === null && !ready(row) && (
+                    <div className={S.hint}>saved once it has a name and a command</div>
+                  )}
+                </td>
+                <td>
+                  <select
+                    aria-label={`gate ${String(i + 1)} required`}
+                    value={row.required ? 'yes' : 'no'}
+                    disabled={busy}
+                    onChange={(e) => commit(edit(row.key, { required: e.target.value === 'yes' }))}
+                  >
+                    <option value="yes">yes</option>
+                    <option value="no">no</option>
+                  </select>
+                </td>
+                <td>
+                  <input
+                    aria-label={`gate ${String(i + 1)} runs`}
+                    className={S.num}
+                    value={row.runs}
+                    placeholder="all"
+                    inputMode="numeric"
+                    disabled={busy}
+                    onChange={(e) => edit(row.key, { runs: e.target.value })}
+                  />
+                </td>
+                <td>
+                  <input
+                    aria-label={`gate ${String(i + 1)} minutes`}
+                    className={S.num}
+                    value={row.minutes}
+                    placeholder="all"
+                    inputMode="numeric"
+                    disabled={busy}
+                    onChange={(e) => edit(row.key, { minutes: e.target.value })}
+                  />
+                </td>
+                <td>
+                  <Button variant="quiet" size="sm" disabled={busy} onClick={() => remove(row.key)}>
+                    remove
+                  </Button>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      <div className={S.row}>
+        <Button variant="quiet" size="sm" disabled={busy} onClick={add}>
+          add a gate
+        </Button>
+      </div>
+      <p className={S.note}>
+        Gates run in this order, and each one&apos;s failure is reported under its own name. A blank
+        runs or minutes takes the value below, which every gate shares. Required means a gate with
+        no command ends the run unverified rather than passing; a gate that runs and fails always
+        blocks. What a failing gate preserves (<code>artifacts</code>) is set in{' '}
+        <code>vibe.config.json</code>, and a save here keeps it.
+      </p>
+    </div>
+  );
+}
 
 /**
  * Everything that is a setting, in one screen (`1h`, `1i`, #223).
@@ -287,6 +505,50 @@ function TextField({
  * half-typed `git` is a real, valid, much wider entry. Blank lines are dropped,
  * so a trailing newline is not an empty pattern.
  */
+/**
+ * A paragraph of prose, saved on blur (#273). `ListField`'s rule and its
+ * reason: a save per keystroke would rewrite the settings file mid-sentence,
+ * and every run starting in that moment would take the half-written text.
+ * Kept whole - no trimming of lines - because it is instructions, and a blank
+ * line between two of them is part of what was written. Escape puts it back.
+ */
+function ProseField({
+  id,
+  value,
+  placeholder,
+  disabled,
+  onSave,
+}: {
+  id: string;
+  value: string;
+  placeholder: string;
+  disabled: boolean;
+  onSave: (next: string) => void;
+}) {
+  const [typed, setTyped] = useState(value);
+  const refusals = useContext(Refusals);
+  useEffect(() => {
+    setTyped(value);
+  }, [value, refusals]);
+  return (
+    <textarea
+      id={id}
+      className={S.promptbox}
+      rows={Math.max(5, Math.min(20, value.split('\n').length + 2))}
+      value={typed}
+      disabled={disabled}
+      placeholder={placeholder}
+      onChange={(e) => setTyped(e.target.value)}
+      onBlur={() => {
+        if (typed !== value) onSave(typed);
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Escape') setTyped(value);
+      }}
+    />
+  );
+}
+
 function ListField({
   id,
   value,
@@ -884,6 +1146,7 @@ export function Settings({
     verify?: Record<string, unknown>;
     claude?: { model?: string };
     codex?: { model?: string };
+    instructions?: { text?: string };
   };
   const gates = effective.gates ?? {};
   const loop = effective.loop ?? {};
@@ -891,11 +1154,9 @@ export function Settings({
   const budget = effective.budget ?? {};
   const git = effective.git ?? {};
   const verify = effective.verify ?? {};
-  // A project that lists its gates owns the command inside each one, and
-  // `validateConfig` refuses `verify.command` beside a list — so this screen
-  // says where to edit them rather than offering a field that cannot save.
-  const listsGates = Array.isArray(verify['gates']);
   const roles = effective.roles ?? {};
+  // Not on `Config` - no run reads it - so it is read off the global file (#246).
+  const cap = capOf(frame.globalRaw);
   // Which rows the FILE claims, as opposed to which are in force, is `source`
   // below — the whole reason `raw` travels beside `effective`.
 
@@ -1169,6 +1430,32 @@ export function Settings({
                     <Key name="pilot.timeoutMs" />
                   </span>
                 </div>
+                {/* How many runs this window may host at once (#246). The
+                    machine's, like the pilot's limits: a project file that sets
+                    it is refused by name. Read here off the global file rather
+                    than off a frame field, so it shows a value it cannot use
+                    rather than a number it guessed. */}
+                <div className={S.row}>
+                  <label className={S.label} htmlFor="runs-max">
+                    runs at once
+                    {source('runs', 'maxConcurrent')}
+                  </label>
+                  <span className={S.inline}>
+                    <NumberField
+                      id="runs-max"
+                      value={'cap' in cap ? cap.cap : undefined}
+                      disabled={busy}
+                      onSave={(n) => write({ runs: { maxConcurrent: n } }, 'global')}
+                    />
+                    <span className={S.unit}>runs</span>
+                    <Key name="runs.maxConcurrent" />
+                  </span>
+                </div>
+                {'problem' in cap && <p className={S.note}>{cap.problem}</p>}
+                <p className={S.note}>
+                  How many runs this window may host at once. 0 means no limit. A start over the limit
+                  is refused, never queued. Runs started from a terminal are not counted.
+                </p>
                 <div className={S.row}>
                   <label className={S.label} htmlFor="pilot-safe">
                     commands that run without a card
@@ -1511,6 +1798,44 @@ export function Settings({
         </table>
       </section>
 
+      {/* **Standing instructions** (#273): *"a way to give vibe instructions it
+          can remember across runs. Kind of like a global agents.md."* Both
+          scopes, because it is a setting like any other - set it once here for
+          every project, or in one project's file for that project, which wins. */}
+      <section className={S.block}>
+        <h3 className={S.h}>standing instructions</h3>
+        <p className={S.note}>
+          Given to every agent on every turn of every run (the planner, the critic, the
+          implementer, the reviewer and the rest, Claude and Codex alike) and to the pilot. Use it
+          for the rules you would otherwise repeat in every brief. A run&apos;s record names it
+          when it changes, so a run can say what its agents were told. Empty sends nothing.
+          {scope === 'project' &&
+            ' Set here, it replaces the instructions for all projects in this repository only.'}
+        </p>
+        <div className={S.row}>
+          <label className={S.label} htmlFor="instructions-text">
+            instructions
+            <Key name="instructions.text" />
+            {source('instructions', 'text', 'none')}
+          </label>
+          <ProseField
+            id="instructions-text"
+            value={(raw['instructions'] as { text?: unknown } | undefined)?.text === undefined
+              ? ''
+              : String((raw['instructions'] as { text?: unknown }).text)}
+            placeholder={
+              scope === 'project' && (effective.instructions?.text ?? '') !== ''
+                ? 'empty: this project takes the instructions for all projects'
+                : 'e.g. Use the gh CLI for GitHub. Never push to main. Work in a worktree.'
+            }
+            disabled={busy}
+            // Empty clears the key, so the level below shows through again
+            // rather than an empty string overriding it.
+            onSave={(next) => save({ instructions: { text: next.trim() === '' ? null : next } })}
+          />
+        </div>
+      </section>
+
       {scope === 'global' ? (
         <p className={S.note}>
           The test command and the worktree settings are set per project, because how a repository
@@ -1551,29 +1876,34 @@ export function Settings({
                 <option value="off">off — nothing checks the code</option>
               </select>
             </div>
-            {listsGates ? (
-              <p className={S.note}>
-                This project lists its gates under <code>verify.gates</code> in{' '}
-                <code>vibe.config.json</code>, each with its own command, so they are edited there.
-              </p>
-            ) : (
-              <div className={S.row}>
-                <label className={S.label} htmlFor="verify-command">
-                  test command
-                  <Key name="verify.command" />
-                {source('verify', 'command', 'auto-detect')}
-                </label>
-                <TextField
-                  id="verify-command"
-                  value={typeof verify['command'] === 'string' ? verify['command'] : ''}
-                  placeholder="empty — npm test, if package.json has a test script"
-                  disabled={busy}
-                  // Empty is null, which is auto-detect — never an empty command,
-                  // which the core refuses by name.
-                  onSave={(next) => save({ verify: { command: next === '' ? null : next } })}
-                />
-              </div>
-            )}
+            <GateList
+              gates={readGates(verify['gates'])}
+              command={typeof verify['command'] === 'string' ? verify['command'] : null}
+              fileHasCommand={inFile(raw, 'verify', 'command') && typeof (raw['verify'] as Record<string, unknown>)['command'] === 'string'}
+              busy={busy}
+              onSave={save}
+              commandField={
+                <div className={S.row}>
+                  <label className={S.label} htmlFor="verify-command">
+                    test command
+                    <Key name="verify.command" />
+                    {source('verify', 'command', 'auto-detect')}
+                  </label>
+                  <TextField
+                    id="verify-command"
+                    value={typeof verify['command'] === 'string' ? verify['command'] : ''}
+                    placeholder="empty — npm test, if package.json has a test script"
+                    disabled={busy}
+                    // Empty is null, which is auto-detect — never an empty command,
+                    // which the core refuses by name.
+                    onSave={(next) => save({ verify: { command: next === '' ? null : next } })}
+                  />
+                  {typeof verify['command'] === 'string' && pastedEscapes(verify['command']) !== null && (
+                    <span className={S.hint}>{pastedEscapes(verify['command'])}</span>
+                  )}
+                </div>
+              }
+            />
             <div className={S.row}>
               <label className={S.label} htmlFor="verify-runs">
                 times it must pass
@@ -1668,7 +1998,33 @@ export function Settings({
                 disabled={busy}
                 onSave={(next) => save({ git: { worktreeCommand: next === '' ? null : next } })}
               />
+              {typeof git['worktreeCommand'] === 'string' && pastedEscapes(git['worktreeCommand']) !== null && (
+                <span className={S.hint}>{pastedEscapes(git['worktreeCommand'])}</span>
+              )}
             </div>
+            {/* **A base is a setting** (#249). The #169 run started from whatever
+                HEAD happened to be in the repository - a stale branch tip - because
+                nothing let anybody say where a run should start. */}
+            <div className={S.row}>
+              <label className={S.label} htmlFor="git-base-ref">
+                where a run&apos;s branch starts
+                <Key name="git.baseRef" />
+                {source('git', 'baseRef')}
+              </label>
+              <TextField
+                id="git-base-ref"
+                value={typeof git['baseRef'] === 'string' ? git['baseRef'] : ''}
+                placeholder="origin/develop"
+                disabled={busy}
+                onSave={(next) => save({ git: { baseRef: next === '' ? null : next } })}
+              />
+            </div>
+            <p className={S.note}>
+              Left empty, a new run&apos;s branch starts at the repository&apos;s HEAD when the run
+              starts. A remote ref such as <code>origin/develop</code> is fetched first, and a fetch
+              that fails or runs past the time limit below refuses the run rather than starting from a
+              copy that may be stale. It applies when a run starts, never when one is resumed.
+            </p>
             <p className={S.note}>
               Left empty, vibe runs <code>git worktree add --detach</code> and nothing else — which
               gives you a checkout with no dependencies installed, so on most projects the
@@ -1676,14 +2032,16 @@ export function Settings({
               shell in the repository, so it can be a sequence, and these are its placeholders —
               environment variables, so quote them:
             </p>
-            <ul className={S.note}>
+            <ul className={cn(S.note, 'list-disc pl-[40px]')}>
               <li>
                 <code>$VIBE_WORKTREE</code> — the directory the worktree must be created at
               </li>
               <li>
-                <code>$VIBE_BRANCH</code> — the run&apos;s branch, already created from HEAD, so{' '}
-                <code>git worktree add &quot;$VIBE_WORKTREE&quot; &quot;$VIBE_BRANCH&quot;</code> puts
-                the worktree on it. Not set when branch isolation is off.
+                <code>$VIBE_BRANCH</code> — the run&apos;s branch, which already exists at the base
+                above or at HEAD. Check it out with{' '}
+                <code>git worktree add &quot;$VIBE_WORKTREE&quot; &quot;$VIBE_BRANCH&quot;</code> rather
+                than choosing a commit: a worktree whose HEAD is not where the branch is is refused.
+                Not set when branch isolation is off.
               </li>
               <li>
                 <code>$VIBE_REPO</code> — the repository, and <code>$VIBE_RUN_ID</code> — the run
@@ -1695,7 +2053,7 @@ export function Settings({
             </p>
             <div className={S.row}>
               <label className={S.label} htmlFor="git-worktree-timeout">
-                how long that may take, in minutes
+                how long that may take, in minutes — the base&apos;s fetch too
                 <Key name="git.worktreeTimeoutMs" />
                 {source('git', 'worktreeTimeoutMs')}
               </label>

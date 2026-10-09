@@ -360,32 +360,32 @@ test('a timeout beside a model and an effort is accepted, and all three reach th
 
 // ---- 5. The two messages that do not update themselves ---------------------
 
-test('an unknown key inside a role object lists all four keys', () => {
+test('an unknown key inside a role object lists all five keys', () => {
   bothPathsReject(
     'reviewer',
     { provider: 'codex', sandbox: 'danger-full-access' },
     /unknown key "sandbox"/,
-    /provider, model, effort and timeoutMs/,
+    /provider, model, effort, timeoutMs and mcpServers/,
   );
 });
 
 test('the expected-value wording mentions the timeout, on every path that prints it', () => {
   // `expectedRoleValue`, reached by a value that is neither a provider nor an
   // object.
-  bothPathsReject('reviewer', 'gemini', /optionally a model, an effort and a timeout/);
+  bothPathsReject('reviewer', 'gemini', /optionally a model, an effort, a timeout and MCP servers/);
 
   // `tableFor`'s own, for a `roles` that is not an object at all - the shape a
   // stored `state.config` can carry, since `validateStoredState` passes that
   // field through unchecked.
   assert.throws(
     () => tableFor(null as unknown as RoleProviders),
-    /optionally a model, an effort and a timeout/,
+    /optionally a model, an effort, a timeout and MCP servers/,
   );
 
   // And `validateRoles`', which is a separate copy of the same sentence.
   assert.throws(
     () => loadConfig(repoWith({ roles: 'codex' })),
-    /optionally a model, an effort and a timeout/,
+    /optionally a model, an effort, a timeout and MCP servers/,
   );
 });
 

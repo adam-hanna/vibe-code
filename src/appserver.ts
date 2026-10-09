@@ -376,6 +376,16 @@ function killTree(child: ChildProcess): void {
  * Mirrors the shim rule in proc.ts: a `.cmd` needs a shell, a real `.exe` must
  * not get one. The child is unref'd and killed on close so an app-server that
  * stops answering cannot keep the process alive after the run ends.
+ *
+ * **It starts no MCP server, so it carries no `-c mcp_servers.*` (#138).** Every
+ * other Codex child of a run disables each listed server by name; this one does
+ * not need to, by measurement rather than by assumption: on codex-cli 0.157.1
+ * (2026-10-07, `scripts/verify-mcp-closure.mjs`), an app-server under a
+ * CODEX_HOME whose config held a marker server that writes a file on launch
+ * answered `initialize`, `account/rateLimits/read` and `model/list` and did not
+ * launch it - MCP servers belong to a thread, and neither caller (`ratelimits.ts`,
+ * `models.ts`) starts one. If a caller ever starts a thread here, that stops
+ * being true and this needs the closure `codexTurn` has.
  */
 export function spawnCodexAppServer(bin: string, cwd: string): AppServerTransport {
   const child = spawn(bin, ['app-server'], {

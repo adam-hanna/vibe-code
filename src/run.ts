@@ -704,6 +704,9 @@ export function selectRunIds(
  * invented number this codebase refuses everywhere else. One corrupt run must
  * not take out the listing of every healthy one beside it.
  *
+ * A readable row also carries `rounds`, the run's round counters, taken from
+ * the same parse rather than a second read of the file (#114).
+ *
  * Values are returned exactly as they were stored - `summariseStored` passes an
  * unrecognised status through verbatim on purpose. That is safe for a terminal
  * and is not for a prompt, so the bounding happens where the prompt is
@@ -1859,7 +1862,7 @@ function readRoundCensuses(dir: string): RoundCensus[] {
     if (!isRecord(parsed)) continue;
     const findings = parsed['findings'];
     if (!Array.isArray(findings)) continue;
-    const counts = { p0: 0, p1: 0, p2: 0, p3: 0 };
+    const counts = { P0: 0, P1: 0, P2: 0, P3: 0 };
     for (const finding of findings as unknown[]) {
       if (!isRecord(finding)) continue;
       // Counted by the severity the report recorded. A severity moved
@@ -1867,10 +1870,10 @@ function readRoundCensuses(dir: string): RoundCensus[] {
       // is the record of what the judge produced, and rewriting it in the replay
       // would make the column disagree with the artifact the pane shows.
       const severity = finding['severity'];
-      if (severity === 'P0') counts.p0 += 1;
-      else if (severity === 'P1') counts.p1 += 1;
-      else if (severity === 'P2') counts.p2 += 1;
-      else if (severity === 'P3') counts.p3 += 1;
+      if (severity === 'P0') counts.P0 += 1;
+      else if (severity === 'P1') counts.P1 += 1;
+      else if (severity === 'P2') counts.P2 += 1;
+      else if (severity === 'P3') counts.P3 += 1;
     }
     out.push({ phase: critique !== null ? 'plan' : 'review', round, counts });
   }

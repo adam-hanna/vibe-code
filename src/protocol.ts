@@ -1,10 +1,12 @@
 import type { Level, Narration } from '@src/log.js';
 import type { GateContext } from '@src/host.js';
-import type { ArtifactRead, RunArtifact, RunSummary } from '@src/types.js';
+import type { ArtifactRead, Effort, RunArtifact, RunSummary } from '@src/types.js';
+import { EFFORTS } from '@src/types.js';
 import type { PromptBlock } from '@src/prompts.js';
 import type { FsAnswer, PilotAccess } from '@src/pilotaccess.js';
 import type { PastCommand } from '@src/commandlog.js';
 import type { ModelListings } from '@src/models.js';
+import type { Scorecard } from '@src/scorecard.js';
 
 /** Where one CLI is, as `config` reports it (#223). */
 export interface CliStatus {
@@ -173,6 +175,18 @@ export type Outbound =
    * one that disagreed would be the one on screen.
    */
   | { type: 'archive'; id: number; dir: string; runs: RunSummary[] }
+  /**
+   * What the archive says about the loop, in reply to a `stats` request (#114).
+   *
+   * Named for `vibe stats`, and `scorecard` is the document `vibe stats --json`
+   * prints, verbatim - one `scoreArchive`, so the terminal and the window cannot
+   * report different numbers.
+   *
+   * **Kept off `archive` on purpose.** The sidebar asks for `archive` every time
+   * a project section opens, and scoring is a full read of every state.json; the
+   * window asks for this when it points at a project and when a run ends.
+   */
+  | { type: 'stats'; id: number; dir: string; scorecard: Scorecard }
   /**
    * The configuration in force, and what the file itself claims (#223, `1h`).
    *
@@ -421,6 +435,17 @@ export type Inbound =
    */
   | { type: 'pause'; id: number }
   /**
+   * Take back a pause that has not been reached yet (#276).
+   *
+   * The other half of `pause`, and as cheap: it clears the one armed hold and
+   * nothing else. Answered with **whether there was one** - `exit 0` when it
+   * cleared an armed pause, `exit 1` when nothing was armed, because the
+   * boundary already took it or none was asked for - so a window can tell
+   * *taken back* from *too late*. Too late is not an error: the run is holding,
+   * and the `ask` already on the wire is how that gets answered.
+   */
+  | { type: 'unpause'; id: number }
+  /**
    * Kill the turn in flight and end the run, resumably (#209).
    *
    * **The other half of `pause`, and they must never be confused.** A pause
@@ -491,6 +516,13 @@ export type Inbound =
       system: string;
       model: string;
       /**
+       * How hard the CLI thinks (#296), or absent for the CLI's own default -
+       * the same `--effort` / `model_reasoning_effort` a run's seat takes, from
+       * the same closed list, so a name neither CLI accepts is refused here
+       * rather than by a child that has already been spawned.
+       */
+      effort?: Effort;
+      /**
        * The repository the turn runs in, and the only one it can read.
        *
        * **Required, and the reason is the whole of `--restricted`.** That flag
@@ -532,6 +564,12 @@ export type Inbound =
    * tell.
    */
   | { type: 'archive'; id: number; dir: string }
+  /**
+   * Score the archive, as `vibe stats` does (#114). A read, beside a run, for
+   * `archive`'s reason: `scoreArchive` runs over `listRuns` and never writes.
+   * `dir` is required for the same reason too.
+   */
+  | { type: 'stats'; id: number; dir: string }
   /**
    * Read the configuration, or write a patch into it (#223, `1h`).
    *
@@ -757,6 +795,8 @@ export function decode(line: string): Decoded {
       return { ok: true, message: { type: 'shutdown', id } };
     case 'pause':
       return { ok: true, message: { type: 'pause', id } };
+    case 'unpause':
+      return { ok: true, message: { type: 'unpause', id } };
     case 'command': {
       // Every field checked here, for `pilot`'s reason: there is no `parseArgs`
       // below this to catch a missing one, and this frame spawns a process.
@@ -826,6 +866,11 @@ export function decode(line: string): Decoded {
       if (agent !== undefined && agent !== 'claude' && agent !== 'codex') {
         return { ok: false, id, reason: 'pilot named an agent that was not "claude" or "codex"' };
       }
+      // Absent is the CLI's default; present must be one the CLIs take (#296).
+      const effort = parsed['effort'];
+      if (effort !== undefined && !(EFFORTS as readonly unknown[]).includes(effort)) {
+        return { ok: false, id, reason: `pilot effort must be one of ${EFFORTS.join(', ')}` };
+      }
       return {
         ok: true,
         message: {
@@ -838,6 +883,7 @@ export function decode(line: string): Decoded {
           dir: parsed['dir'] as string,
           resume,
           ...(agent === undefined ? {} : { agent }),
+          ...(effort === undefined ? {} : { effort: effort as Effort }),
         },
       };
     }
@@ -852,6 +898,15 @@ export function decode(line: string): Decoded {
         return { ok: false, id, reason: 'archive carried no dir' };
       }
       return { ok: true, message: { type: 'archive', id, dir } };
+    }
+    case 'stats': {
+      // `archive`'s rule exactly: an empty `dir` would score the host's own
+      // cwd, which is another repository's archive presented as this one's.
+      const dir = parsed['dir'];
+      if (typeof dir !== 'string' || dir === '') {
+        return { ok: false, id, reason: 'stats carried no dir' };
+      }
+      return { ok: true, message: { type: 'stats', id, dir } };
     }
     case 'artifacts':
     case 'artifact':

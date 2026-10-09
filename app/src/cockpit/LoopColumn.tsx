@@ -6,11 +6,15 @@ import { Button } from '@/ui/button';
 import { cn } from '@/lib/utils';
 import { Counts } from './Counts';
 import { Caret } from './Disclosure';
-import { boundary, clock, elapsed } from './format';
+import { clock, elapsed } from './format';
 import { censusByPhase, questionsByPhase, title, unplacedQuestions } from './rounds';
+import type { BottomTab, Tab } from './where';
+import { findTurn, nowStatus, RAIL_TITLE, turnGroup, verifyRow, verifyRowText } from './rail';
+import type { RailState, VerifyRow } from './rail';
 import { RunningRow } from './RunningRow';
+import type { ArchiveView } from './model';
 import type { KeyboardEvent } from 'react';
-import { CYCLE_OF, runningRow } from './model';
+import { runningRow } from './model';
 import type { Census, CycleKind, PhaseGroup, Preflight, QuestionRound, ResumedFrom, Run, Turn } from './model';
 
 /**
@@ -22,7 +26,12 @@ import type { Census, CycleKind, PhaseGroup, Preflight, QuestionRound, ResumedFr
  * convention in a third place, in the one process that cannot be kept in step
  * with it.
  */
-export type OpenAt = (tab: string, round?: number | null) => void;
+/**
+ * Open a pane, at a round when it has one. A pane by name, never a string: a
+ * name that is not one used to become the current tab and blank the window
+ * (#260).
+ */
+export type OpenAt = (tab: Tab | BottomTab, round?: number | null) => void;
 
 /**
  * The centre column from `3a`, at the width the design fixes it at.
@@ -106,8 +115,18 @@ type Draw = 'live' | 'settled' | 'done';
 const drawOf = (turn: Turn, runningId: number | null, settledId: number | null): Draw =>
   turn.id === runningId ? 'live' : turn.id === settledId ? 'settled' : 'done';
 
-function Version({ turn, draw, now }: { turn: Turn; draw: Draw; now: number }) {
-  if (draw !== 'done') return <RunningRow turn={turn} now={now} live={draw === 'live'} />;
+function Version({
+  turn,
+  draw,
+  now,
+  archive,
+}: {
+  turn: Turn;
+  draw: Draw;
+  now: number;
+  archive: ArchiveView;
+}) {
+  if (draw !== 'done') return <RunningRow turn={turn} now={now} live={draw === 'live'} archive={archive} />;
   return (
     <div className="flex items-center gap-2 py-1 text-body-sm text-secondary">
       <span className="text-primary">
@@ -158,6 +177,7 @@ function Round({
   runningId,
   settledId,
   now,
+  archive,
 }: {
   phase: PhaseGroup;
   /** What the gate made of this phase, or null. Hi-fi 2 puts it on the row. */
@@ -172,6 +192,7 @@ function Round({
   runningId: number | null;
   settledId: number | null;
   now: number;
+  archive: ArchiveView;
 }) {
   const turns = phase.turns.filter((t) => !isAnswerer(t));
   const answerers = phase.turns.filter(isAnswerer);
@@ -236,6 +257,7 @@ function Round({
               turn={turn}
               draw={drawOf(turn, runningId, settledId)}
               now={now}
+              archive={archive}
             />
           ))}
           {/* **An answerer turn is drawn whether or not its round has a
@@ -258,6 +280,7 @@ function Round({
                 turn={turn}
                 draw={drawOf(turn, runningId, settledId)}
                 now={now}
+                archive={archive}
               />
             ))}
           {turns.length === 0 &&
@@ -280,6 +303,7 @@ function Round({
               runningId={runningId}
               settledId={settledId}
               now={now}
+              archive={archive}
             />
           )}
         </>
@@ -326,6 +350,7 @@ function Questions({
   runningId,
   settledId,
   now,
+  archive,
 }: {
   questions: QuestionRound;
   /** The answerer's turns from this phase, which belong here rather than above. */
@@ -334,6 +359,7 @@ function Questions({
   runningId: number | null;
   settledId: number | null;
   now: number;
+  archive: ArchiveView;
 }) {
   const outstanding = questions.open.filter((q) => q.answer === null && !q.declined).length;
   const go = onOpen === undefined ? null : () => { onOpen('questions', questions.round); };
@@ -380,7 +406,7 @@ function Questions({
       />
 
       {turns.map((turn) => (
-        <Version key={turn.id} turn={turn} draw={drawOf(turn, runningId, settledId)} now={now} />
+        <Version key={turn.id} turn={turn} draw={drawOf(turn, runningId, settledId)} now={now} archive={archive} />
       ))}
 
       {/* Hi-fi 14: *"waiting on you is not stalled, and the column says so."* The
@@ -586,11 +612,11 @@ function PreflightRow({ preflight, now }: { preflight: Preflight; now: number })
  *
  * **The ETA is the one that is not built, and its absence is the point.** The
  * design's wording is *"preflight usually clears in under a minute"*, which is a
- * claim about past runs; nothing in this app has read a past run, because that
- * is #114. Shipping the sentence anyway would make it the same kind of invention
- * as `claude 38%` and `step 9/14` - the two the design itself struck. So the row
- * says what it cannot say and names the issue that would supply it, exactly as
- * `6a`'s comparable-turns line already does.
+ * claim about past runs. The window reads the archive now (#114), and the
+ * archive records no preflight durations - nor any turn's - so there is still
+ * nothing to say it from. Shipping the sentence anyway would make it the same
+ * kind of invention as `claude 38%` and `step 9/14` - the two the design itself
+ * struck. So the row says what it cannot say, and why.
  */
 function Starting({
   run,
@@ -638,11 +664,10 @@ function Starting({
       <p className="mt-2 mb-0 border-t border-dashed border-rule-control-dim pt-2 text-body-sm text-tertiary">
         phase, round, elapsed total and spend — the first turn has not reported
       </p>
-      {/* The issue number this line used to carry has gone from the copy and
-          stayed in the source. An end user cannot act on `#114`; the sentence
-          they can act on is the one that says the figure does not exist. */}
+      {/* The archive is read now, and it holds no durations: the true reason
+          the figure does not exist. Issue numbers stay in the source. */}
       <p className="mt-2 mb-0 border-t border-dashed border-rule-control-dim pt-2 text-body-sm text-tertiary">
-        how long this usually takes — no frame carries a past run&apos;s timings
+        how long this usually takes — the archive records no preflight durations
       </p>
     </div>
   );
@@ -714,20 +739,26 @@ export function LoopColumn({
   hostPid = null,
   onOpen,
   compact = false,
+  archive = null,
 }: {
   run: Run;
   now: number;
+  /**
+   * The archive's per-kind token distributions (#114), for the comparable-turns
+   * line. Null while the scorecard has not been read, which the line says.
+   */
+  archive?: ArchiveView;
   /** A fact about this window's process, not about the run. Hi-fi 16 draws it. */
   hostPid?: number | null;
   /**
    * Where a count sends the reader, or undefined where there is nowhere to send
-   * them. The Gallery draws this column with no tabs behind it.
+   * them.
    */
   onOpen?: OpenAt | undefined;
   /** Use the glanceable run-status rail in the desktop cockpit. */
   compact?: boolean;
 }) {
-  if (compact) return <RunRail run={run} now={now} onOpen={onOpen} />;
+  if (compact) return <RunRail run={run} now={now} onOpen={onOpen} archive={archive} />;
 
   /**
    * Which groups and rounds are folded shut.
@@ -821,6 +852,7 @@ export function LoopColumn({
                   runningId={runningId}
                   settledId={settledId}
                   now={now}
+                  archive={archive}
                 />
               ))}
           </div>
@@ -840,6 +872,7 @@ export function LoopColumn({
           runningId={runningId}
           settledId={settledId}
           now={now}
+          archive={archive}
         />
       ))}
 
@@ -869,28 +902,16 @@ export function LoopColumn({
 /**
  * The cockpit's glanceable version of the loop column.
  *
- * The full column still exists for the Gallery and for round-level inspection,
+ * The full column still exists for round-level inspection,
  * but the live desktop rail has a different job: explain what is happening now,
  * then make the shape of the run easy to scan. Details stay behind one disclosure
  * per stage and the Activity tab remains the home for the raw transcript.
  */
 const RAIL_KINDS: readonly CycleKind[] = ['plan', 'critique', 'code', 'review'];
 
-const RAIL_TITLE: Readonly<Record<CycleKind, string>> = {
-  plan: 'Plan',
-  critique: 'Plan critique',
-  code: 'Code',
-  review: 'Code review',
-};
-
-const TURN_GROUP: Readonly<Record<string, CycleKind>> = {
-  plan: 'plan',
-  critique: 'critique',
-  implement: 'code',
-  review: 'review',
-};
-
-type RailState = 'upcoming' | 'complete' | 'running' | 'waiting';
+// `TURN_GROUP` lived here and is gone (#248): a turn's group is read off the
+// cycle `reduce` placed it in (`turnGroup` in `rail.ts`), because a four-entry
+// kind table drew five of the loop's turn kinds as an idle run.
 
 /**
  * The one place a state becomes a colour. Four states, four tokens: the accent
@@ -914,25 +935,6 @@ const STATE_BAR: Readonly<Record<RailState, string>> = {
 /** A card in the rail: the `now` card, the activity card and the path. */
 const CARD = 'rounded-md border border-rule-card bg-card';
 
-function railKindForTurn(kind: string): CycleKind | null {
-  return TURN_GROUP[kind] ?? CYCLE_OF[kind] ?? null;
-}
-
-function findTurn(run: Run, id: number | null): Turn | null {
-  if (id === null) return null;
-  for (const cycle of run.cycles) {
-    for (const phase of cycle.phases) {
-      const turn = phase.turns.find((candidate) => candidate.id === id);
-      if (turn !== undefined) return turn;
-    }
-  }
-  return null;
-}
-
-function roleName(role: string): string {
-  return role.length === 0 ? 'Agent' : `${role.slice(0, 1).toUpperCase()}${role.slice(1)}`;
-}
-
 function RailStateIcon({ state }: { state: RailState }) {
   if (state === 'running') {
     return <LivenessDot state="live" />;
@@ -954,6 +956,7 @@ function RailStage({
   onToggle,
   censusOf,
   onOpen,
+  verify = null,
 }: {
   kind: CycleKind;
   cycle: Run['cycles'][number] | undefined;
@@ -962,6 +965,8 @@ function RailStage({
   onToggle: () => void;
   censusOf: ReadonlyMap<number, Census>;
   onOpen?: OpenAt | undefined;
+  /** The verification sub-row, drawn under the Code stage only (#248). */
+  verify?: VerifyRow | null;
 }) {
   const count = cycle?.phases.length ?? 0;
   const meta = cycle === undefined
@@ -1003,6 +1008,19 @@ function RailStage({
           ? <ChevronRight size={14} className={cn('flex-none text-tertiary transition-transform', open && 'rotate-90')} aria-hidden="true" />
           : <span className="w-3.5 flex-none" aria-hidden="true" />}
       </button>
+
+      {/* Verification, outside the disclosure: a gate that failed and the fix it
+          bought are what the Code stage is doing now, and a row somebody has to
+          open first is a row nobody reads while the run is going. Every figure
+          in it is one the frames carried. */}
+      {verify !== null && (
+        <div className="flex min-w-0 items-baseline gap-2 px-3.5 pb-2.5 pl-10 text-body-sm">
+          <span className="flex-none text-tertiary">Verification</span>
+          <span className="min-w-0 truncate font-mono text-mono-sm text-secondary" title={verifyRowText(verify)}>
+            {verifyRowText(verify)}
+          </span>
+        </div>
+      )}
 
       {open && cycle !== undefined && (
         <div className="divide-y divide-dashed divide-rule-inner bg-active py-px pr-3.5 pb-2.75 pl-10">
@@ -1059,9 +1077,19 @@ function RailPreflight({ preflight, now }: { preflight: Preflight; now: number }
   );
 }
 
-function RunRail({ run, now, onOpen }: { run: Run; now: number; onOpen?: OpenAt | undefined }) {
+function RunRail({
+  run,
+  now,
+  onOpen,
+  archive,
+}: {
+  run: Run;
+  now: number;
+  onOpen?: OpenAt | undefined;
+  archive: ArchiveView;
+}) {
   const currentTurn = run.running ?? findTurn(run, run.gate?.turnId ?? null);
-  const currentKind = currentTurn === null ? null : railKindForTurn(currentTurn.kind);
+  const currentKind = currentTurn === null ? null : turnGroup(run, currentTurn.id);
   const [open, setOpen] = useState<ReadonlySet<CycleKind>>(() => new Set());
   const toggle = (kind: CycleKind) => {
     setOpen((current) => {
@@ -1071,26 +1099,10 @@ function RunRail({ run, now, onOpen }: { run: Run; now: number; onOpen?: OpenAt 
     });
   };
   const censusOf = censusByPhase(run);
-  const activity = currentTurn === null ? null : runningRow(currentTurn, now);
-  const isEmpty = run.identity === null && run.preflight === null && run.cycles.length === 0;
-  const status = run.gate !== null
-    ? { title: 'Needs your decision', detail: `Waiting at ${boundary(run.gate.boundary)}`, tone: 'waiting' }
-    : run.running !== null && currentKind !== null
-      ? { title: RAIL_TITLE[currentKind], detail: `${roleName(run.running.role)} is working`, tone: 'running' }
-      : run.preflight !== null && !run.preflight.passed
-        ? { title: 'Preflight', detail: run.preflight.probing === null ? 'Preparing checks' : `Checking ${run.preflight.probing}`, tone: 'running' }
-        : run.reason !== null
-          ? { title: 'Run ending', detail: run.reason.message, tone: 'waiting' }
-          : run.ended?.how === 'stopped'
-            ? { title: 'Run stopped', detail: run.ended.detail, tone: 'waiting' }
-            : run.completed?.exit === 0 || run.ended?.how === 'approved'
-            ? { title: 'Run complete', detail: 'Review the results in the workspace', tone: 'complete' }
-            : run.completed !== null
-              ? { title: 'Process finished', detail: `Exit ${run.completed.exit}`, tone: 'complete' }
-            : isEmpty
-              ? { title: 'Waiting for a brief', detail: 'Review the brief to begin', tone: 'upcoming' }
-              : { title: 'Ready for the next turn', detail: 'The run is between turns', tone: 'waiting' };
-  const statusState = status.tone as RailState;
+  const activity = currentTurn === null ? null : runningRow(currentTurn, now, archive);
+  const status = nowStatus(run);
+  const verify = verifyRow(run);
+  const statusState = status.tone;
   const statusTime = activity === null
     ? run.preflight === null ? null : elapsed(Math.max(0, now - run.preflight.at))
     : elapsed(activity.elapsedMs);
@@ -1131,7 +1143,7 @@ function RunRail({ run, now, onOpen }: { run: Run; now: number; onOpen?: OpenAt 
           <div className={cn(LABEL, 'flex items-center justify-between text-secondary')}>
             <span>Current activity</span>
             {onOpen !== undefined && (
-              <Button variant="quiet" size="icon-sm" onClick={() => onOpen('activity')} title="Open full activity" aria-label="Open full activity">
+              <Button variant="quiet" size="icon-sm" onClick={() => onOpen('output')} title="Open full activity" aria-label="Open full activity">
                 <Activity size={14} aria-hidden="true" />
               </Button>
             )}
@@ -1144,6 +1156,11 @@ function RunRail({ run, now, onOpen }: { run: Run; now: number; onOpen?: OpenAt 
             {activity.activities === null
               ? 'No activity count reported yet'
               : `${activity.activities.count} ${activity.activities.unit}`}
+          </div>
+          {/* The same comparable-turns line `RunningRow` draws, from the same
+              `runningRow` output — this card is what the cockpit shows. */}
+          <div className={cn('mt-1 text-body-sm', activity.comparable.measured ? 'text-secondary' : 'text-tertiary')}>
+            {activity.comparable.text}
           </div>
         </div>
       )}
@@ -1171,6 +1188,7 @@ function RunRail({ run, now, onOpen }: { run: Run; now: number; onOpen?: OpenAt 
               onToggle={() => { toggle(kind); }}
               censusOf={censusOf}
               onOpen={onOpen}
+              verify={kind === 'code' ? verify : null}
             />
           );
         })}

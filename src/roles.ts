@@ -1,4 +1,4 @@
-import { ANSWERS_SCHEMA, FINDINGS_SCHEMA, PLAN_SCHEMA } from '@src/schemas.js';
+import { ANSWERS_SCHEMA, FINDINGS_SCHEMA, PLAN_SCHEMA, REVIEW_SCHEMA } from '@src/schemas.js';
 import { SLOTS, slotMeasured, slotRotatable } from '@src/slots.js';
 import type { SlotName } from '@src/slots.js';
 import { setOwn } from '@src/runtime.js';
@@ -73,6 +73,13 @@ export interface RoleSpec {
    * `roles.<role>.timeoutMs`. See `turnTimeoutMs`.
    */
   timeoutMs?: number | undefined;
+  /**
+   * The MCP servers this role may reach, by name, and absent when it named none -
+   * which means none at all (#138). Unlike the three keys above, absence does
+   * not fall back to a provider-level setting: there is none, and every run
+   * child is spawned with its user's MCP configuration closed. See `src/mcp.ts`.
+   */
+  mcpServers?: readonly string[] | undefined;
 }
 
 /**
@@ -99,7 +106,22 @@ export const READ_ONLY_TOOLS: readonly string[] = [
  * `access`, `schema` and the tool list are facts about the work: a reviewer is
  * read-only and returns findings whoever holds it, and an implementer writes.
  * They are deliberately not a config surface - the choices a run makes are which
- * provider sits in each seat and, optionally, what effort that seat runs at.
+ * provider sits in each seat and, optionally, what model, effort and timeout that
+ * seat runs at, and which MCP servers it may reach (#138).
+ *
+ * The built-in toolset is a fact about the work. An MCP server is a fact about
+ * the environment.
+ *
+ * That sentence is why the second is a setting and the first is not, and why
+ * opening one does not open the other. A role's built-in tools are what make it
+ * that role: a reviewer that can write is not a reviewer, and a table that let a
+ * config hand `Edit` to the critic would let one line of JSON turn a judge into
+ * an author with nothing in the run's record saying so. So `READ_ONLY_TOOLS` and
+ * this table stay closed. An MCP server is something this machine happens to
+ * have - GitHub, a mailbox, a docs store - and whether a seat may reach it is a
+ * decision about this repository and this person, not about the job. So it is
+ * named per role in `roles.<role>.mcpServers`, defaults to none, and is
+ * enforced by each provider's own mechanism (see `src/mcp.ts`).
  */
 const JOBS: Readonly<
   Record<Role, { access: Access; schema?: object; tools?: readonly string[] }>
@@ -108,7 +130,7 @@ const JOBS: Readonly<
   implementer: { access: 'write' },
   critic: { access: 'read-only', schema: FINDINGS_SCHEMA, tools: READ_ONLY_TOOLS },
   answerer: { access: 'read-only', schema: ANSWERS_SCHEMA, tools: READ_ONLY_TOOLS },
-  reviewer: { access: 'read-only', schema: FINDINGS_SCHEMA, tools: READ_ONLY_TOOLS },
+  reviewer: { access: 'read-only', schema: REVIEW_SCHEMA, tools: READ_ONLY_TOOLS },
 };
 
 /**
@@ -151,6 +173,15 @@ export interface RoleSetting {
    * override stricter than the value it replaces is a trap.
    */
   timeoutMs?: number | undefined;
+  /**
+   * The MCP servers this seat may reach, by name (#138). Absent and `[]` are the
+   * same statement - no server - because the default is all off for every role,
+   * the implementer included. Checked for being an array of non-empty strings
+   * and nothing more here: whether a name resolves to a server is a question
+   * about this machine's files and its Codex listing, so it is asked before the
+   * first turn (`mcpRefusals`), not at config time.
+   */
+  mcpServers?: readonly string[] | undefined;
 }
 
 /** The config surface for one role: who holds it, optionally with what it overrides. */
@@ -247,7 +278,7 @@ function defaultSlot(role: Role, provider: AgentProvider): SlotName {
 }
 
 /** The keys a role object may carry. Anything else is a mistake worth naming. */
-const ROLE_OBJECT_KEYS: readonly string[] = ['provider', 'model', 'effort', 'timeoutMs'];
+const ROLE_OBJECT_KEYS: readonly string[] = ['provider', 'model', 'effort', 'timeoutMs', 'mcpServers'];
 
 /**
  * `provider, model, effort and timeoutMs` - a list a person would read aloud.
@@ -283,7 +314,7 @@ function expectedRoleValue(role: Role, value: unknown): Error {
   return new Error(
     `roles.${role} is ${JSON.stringify(value) ?? String(value)}; expected ` +
       `${PROVIDERS.map((p) => `"${p}"`).join(' or ')}, or an object naming a provider and ` +
-      `optionally a model, an effort and a timeout`,
+      `optionally a model, an effort, a timeout and MCP servers`,
   );
 }
 
@@ -366,6 +397,21 @@ export function roleSetting(role: Role, value: unknown): RoleSetting {
     );
   }
 
+  // A list of names, each a real name: an empty or blank entry is refused rather
+  // than dropped, for `model`'s reason - silently repairing what a user wrote is
+  // how a grant they believe they made goes missing. Stored verbatim.
+  const mcpServers = value['mcpServers'];
+  if (
+    mcpServers !== undefined &&
+    (!Array.isArray(mcpServers) ||
+      !mcpServers.every((name: unknown) => typeof name === 'string' && name.trim() !== ''))
+  ) {
+    throw new Error(
+      `roles.${role}.mcpServers is ${shown(mcpServers)}; must be an array of MCP server ` +
+        `names, or absent for none`,
+    );
+  }
+
   // Spread rather than assigned, for the reason `tableFor` spreads them: a role
   // that named neither must carry neither key, not two holding undefined.
   return {
@@ -373,6 +419,7 @@ export function roleSetting(role: Role, value: unknown): RoleSetting {
     ...(effort === undefined ? {} : { effort: effort as Effort }),
     ...(model === undefined ? {} : { model }),
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    ...(mcpServers === undefined ? {} : { mcpServers: mcpServers as string[] }),
   };
 }
 
@@ -452,7 +499,7 @@ export function tableFor(providers: RoleProviders): RoleTable {
   if (!isRecord(providers)) {
     throw new Error(
       'roles must be an object mapping role names to "claude" or "codex", or to an object ' +
-        'naming a provider and optionally a model, an effort and a timeout',
+        'naming a provider and optionally a model, an effort, a timeout and MCP servers',
     );
   }
   const table = {} as RoleTable;
@@ -473,6 +520,9 @@ export function tableFor(providers: RoleProviders): RoleTable {
       // And again: an absent key is what says "this role means its provider's
       // timeout", and `exactOptionalPropertyTypes` keeps the two apart.
       ...(setting.timeoutMs === undefined ? {} : { timeoutMs: setting.timeoutMs }),
+      // And once more: an absent key is what says "this role named no MCP
+      // server", which means none (#138).
+      ...(setting.mcpServers === undefined ? {} : { mcpServers: setting.mcpServers }),
     };
   }
   return table;
@@ -517,6 +567,15 @@ export function slotForRole(role: Role, roles: RoleTable = ROLES): SlotName {
     );
   }
   return slot;
+}
+
+/**
+ * The MCP servers this role may reach, by name: what it named, else none (#138).
+ * There is no provider-level fallback, because the default for every role is
+ * no server at all.
+ */
+export function mcpServersFor(role: Role, roles: RoleTable): readonly string[] {
+  return roles[role].mcpServers ?? [];
 }
 
 export function claudePermission(access: Access): PermissionMode {

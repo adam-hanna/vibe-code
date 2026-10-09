@@ -6,6 +6,7 @@ import { authorOf, readEvidence, reproductionAt, severityChangesOf } from '@src/
 import type { RoleTable } from '@src/roles.js';
 import type { EnvironmentFacts } from '@src/runtime.js';
 import type {
+  FileChange,
   AcceptanceCriterion,
   Answer,
   Assumption,
@@ -47,6 +48,31 @@ ${extraContext ? `\n## Original additional context\n${extraContext}\n` : ''}
 The brief above defines the goal and constraints. Compare the plan and proposed
 repairs against it; findings and suggested fixes do not independently expand it.
 
+`;
+}
+
+/**
+ * Answers to the planner's advisory questions that no revision has folded in
+ * yet (#277), for the two turns that read the plan without them.
+ *
+ * The critic is asked to treat a plan that contradicts one as a defect, which
+ * is how an answer that does change something buys the ordinary revision. The
+ * implementer is told the answer wins where the plan was silent or assumed
+ * otherwise, because an approved plan can still predate them.
+ */
+export function advisoryAnswers(answers: readonly Answer[] | undefined, audience: 'critic' | 'implementer'): string {
+  if (answers === undefined || answers.length === 0) return '';
+  const lead =
+    audience === 'critic'
+      ? `The planner raised these as advisory questions - ones it said do not change what the plan does - and they were answered after the plan was written. The plan has not been revised for them. Judge the plan with them in mind: where the plan contradicts an answer, or an answer shows a question was not advisory after all, raise it as a finding.`
+      : `The planner raised these as advisory questions, and they were answered after the plan was written. Where the plan is silent on one, or assumed otherwise, follow the answer.`;
+  return `
+
+## Answers to the planner's advisory questions
+
+${lead}
+
+${answers.map(formatAnswer).join('\n\n')}
 `;
 }
 
@@ -152,6 +178,22 @@ ${verification}${caution}
  * are expensive, so a finding that names the root cause and every affected
  * site is worth far more than three findings discovered one round apart.
  */
+/**
+ * What a false finding costs, said to the reviewer alone (#115).
+ *
+ * `REVIEW_BREADTH` already grants permission - an empty list is a successful
+ * review - and every other rule in these prompts is written as a price rather
+ * than a permission, so this names the price. #44's one P1 was false and bought
+ * a ~1.3M-token fix round that edited working code. The critic is deliberately
+ * not told this: its noise buys a plan revision, its prompt has its own
+ * history, and changing both at once would make the effect unattributable.
+ * Exported so the golden-prompt tests can splice exactly this paragraph in.
+ */
+export const APPROVE_COST =
+  'Approving is an equally correct outcome. A change that is right should be approved with no ' +
+  'findings, and an invented finding is not free: it buys a fix round that edits working code ' +
+  'to satisfy a premise nobody checked.';
+
 const REVIEW_BREADTH = `## Review breadth
 
 Do not stop at the first instance of a defect.
@@ -1100,6 +1142,41 @@ A question or concern raised here is a **review lead** - somewhere to go and loo
 `;
 }
 
+/** One line of the judge block: the facts git reported, and nothing inferred. */
+function judgeLine(change: FileChange): string {
+  const lines =
+    change.added === null || change.removed === null
+      ? 'binary - lines not counted'
+      : `+${change.added} / -${change.removed} lines`;
+  const from = change.oldPath === null ? '' : ` from \`${change.oldPath}\``;
+  return `- \`${change.path}\` - ${change.status}${from}, ${lines}`;
+}
+
+/**
+ * The block asking for a verdict on each change to the judge (#112).
+ *
+ * The definition of "justified" is AGENTS.md's rule for when a test may be
+ * edited, closely paraphrased, because without it `justified: true` means
+ * nothing - a reviewer would mark whatever made the gate pass. It states no
+ * threshold: "N removed lines" is a fact the reviewer reads, never a trigger.
+ */
+function judgeSection(judge: readonly FileChange[] | undefined): string {
+  if (judge === undefined || judge.length === 0) return '';
+  return `
+## Changes to the judge
+
+This change touches files that decide whether the work passes - its tests, or \`vibe.config.json\`, where the verification gates are configured. A change here can make the gate go green without the code getting any better, so each one needs your verdict.
+
+${judge.map(judgeLine).join('\n')}
+
+For each file above, return exactly one entry in \`test_verdicts\` - \`file\` spelled exactly as listed, \`justified\`, and a \`reason\`.
+
+**What justified means.** Editing or removing a test is justified ONLY when the test's claim is no longer the contract: the behaviour it checks genuinely moved, as the plan intended, or the test asserted more than the thing it was guarding. It is NEVER justified merely because it makes the gate pass - a test changed to agree with the code is the defect this check exists to catch. A newly added test is fine to mark justified; adding tests is not suspicious. For \`vibe.config.json\`, the question is whether the change to the gates or the configuration is something the plan called for.
+
+A listed file you leave out is recorded as unjudged, never as justified. This does not block the run and it is not a finding: if a change here is wrong, ALSO raise it as an ordinary finding at its true severity.
+`;
+}
+
 export function reviewPrompt(
   diff: string,
   changedFiles: readonly string[],
@@ -1138,6 +1215,16 @@ export function reviewPrompt(
    * the field being usable and being a guess.
    */
   gates?: readonly string[] | undefined,
+  /**
+   * The files in THIS part's diff that are part of the run's own judge - test
+   * files and `vibe.config.json` - or absent when there are none (#112).
+   *
+   * Trailing and absent-renders-nothing for the reason `chunk` is: a round that
+   * touches no judge file must produce exactly the prompt it produced before
+   * this existed. An empty list renders nothing too, so a caller cannot ask for
+   * verdicts on no files.
+   */
+  judge?: readonly FileChange[] | undefined,
 ): string {
   return `You are reviewing a code change against the plan it was meant to implement.${
     round > 1 ? continuityNote(round, hasMemory, 'change') : ''
@@ -1162,6 +1249,8 @@ The loop may carry a small number of P1s forward and settle them against the tes
 
 Do not wave through a real defect. Reserve P1 for defects you can name a concrete failure case for, and prefer P1 over P0 for anything a test run could settle.
 
+${APPROVE_COST}
+
 Give each finding a stable kebab-case \`id\`.
 
 ## Evidence
@@ -1180,7 +1269,7 @@ There is no per-criterion verdict to report and no field to set. Your findings a
 
 ${block(BLOCK.review, REVIEW_BREADTH)}
 ${block(BLOCK.simple, SIMPLE_SOLUTION)}
-${chunk === undefined ? '' : chunkNote(chunk)}${reportSection(report)}
+${chunk === undefined ? '' : chunkNote(chunk)}${reportSection(report)}${judgeSection(judge)}
 ## Files changed
 
 ${changedFiles.length > 0 ? changedFiles.map((f) => `- ${f}`).join('\n') : '(none detected)'}
@@ -1584,7 +1673,43 @@ export function installPromptOverrides(overrides: Readonly<Record<string, string
 
 export function clearPromptOverrides(): void {
   installed = {};
+  standing = '';
 }
+
+/**
+ * The person's standing instructions for this run (#273), installed beside the
+ * prompt overrides and for the same reason: a module latch, one run per process,
+ * installed unconditionally so an empty text is what clears the previous run's.
+ */
+let standing = '';
+
+export function installStandingInstructions(text: string): void {
+  standing = text;
+}
+
+/**
+ * A turn's prompt with the person's standing instructions in front of it.
+ *
+ * Applied where the prompt reaches stdin in both adapters, so every role and
+ * every kind of turn gets it - plan, critique, answer, implement, review and all
+ * three fixes - with no builder edited and none able to forget it. On every turn
+ * rather than the first of a session, so it survives a resume, a fork and a
+ * session rotation alike; it is a paragraph, and a turn that lost it would be a
+ * turn the person's rules silently stopped applying to.
+ *
+ * Blank is nothing at all: the prompt comes back byte-identical, which is what
+ * keeps a run with no instructions exactly the run it was before.
+ */
+export function withStanding(prompt: string): string {
+  const text = standing.trim();
+  if (text === '') return prompt;
+  return `${STANDING_HEAD}\n\n${text}\n\n---\n\n${prompt}`;
+}
+
+/** Introduces the person's own text, so the model can tell it from vibe's. */
+export const STANDING_HEAD =
+  '## Standing instructions\n\nFrom the person running vibe, for every turn of every run. ' +
+  "Follow them unless the task below explicitly says otherwise; they do not change this turn's job or the format of its answer.";
 
 /**
  * The text a block renders as: the project's, or the product's.

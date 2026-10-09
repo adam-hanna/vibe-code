@@ -14,12 +14,13 @@ import * as pilot from './pilot';
 import { agentOf, BACKEND_NAME, BACKEND_NOTE, backendFor, needsKey, sourceOf } from './backend';
 import { CLI_DEFAULT, firstOf, loadApiModels, loadCliModels, optionsFor, useModels, whyNot } from '../cockpit/models';
 import type { Backend } from './backend';
+import { DEFAULT_EFFORT, EFFORTS, effortOff, effortToSend, withEffort } from './effort';
 import { systemPrompt } from './brief';
 import { readEmitted, unique, visible } from './emit';
 import { useFollow } from './follow';
 import { autoRun, NO_ACCESS } from './access';
-import { declare, settleCall } from './tools';
-import { chatKey, chatMove, isDraftKey, readChat, replyKey, worthSaving, writable } from './saved';
+import { archiveContent, declare, settleCall } from './tools';
+import { chatKey, readChat, replyKey, sameExchange, worthSaving, writable } from './saved';
 import { getChat, putChat, useChats } from './chatstore';
 import {
   costOf,
@@ -69,8 +70,12 @@ import type { Launched } from '../cockpit/argv';
 import { line, outcome } from '../cockpit/commands';
 import { memory } from '../memory';
 import { Markdown } from './Markdown';
+import { splitBrief } from '../cockpit/argv';
+import { CopyText } from './CopyText';
+import { copyOf } from './copy';
 import type { Command, Commands } from '../cockpit/commands';
 import type { Run } from '../cockpit/model';
+import type { OpenAt } from '../cockpit/LoopColumn';
 
 /**
  * The pilot pane: the conversation that drives the session (#143, #144).
@@ -575,6 +580,10 @@ function ReplyCard({
   busy: boolean;
 }) {
   const outcome = reply.outcome;
+  // The composer's settings ride under the brief for the model, and are drawn as
+  // chips rather than as words the person wrote (#258).
+  const yours = reply.asked === null ? null : splitBrief(reply.asked);
+  const copy = copyOf(reply);
   return (
     <div className="flex flex-col gap-2">
       {/* What you said, above the answer to it (#211). The pane drew replies
@@ -600,12 +609,25 @@ function ReplyCard({
           left-aligned: a right-aligned paragraph has a ragged left edge, and
           the left edge is the one the eye returns to on every line. Newlines
           survive, because they are the reason shift+enter exists. */}
-      {reply.asked !== null && (
+      {yours !== null && (
         <div className="flex max-w-[80%] flex-col items-end gap-1.5 self-end rounded-md border border-rule-card bg-active px-3.5 py-2.5">
-          <Badge>you</Badge>
-          <div className="self-stretch select-text whitespace-pre-wrap text-left text-body text-primary [overflow-wrap:anywhere]">
-            {reply.asked}
+          {/* Copy beside the label (#256): what you typed, newlines included. */}
+          <div className="flex items-center gap-1">
+            {copy.asked !== null && <CopyText text={copy.asked} label="Copy your message" />}
+            <Badge>you</Badge>
           </div>
+          <div className="self-stretch select-text whitespace-pre-wrap text-left text-body text-primary [overflow-wrap:anywhere]">
+            {yours.brief}
+          </div>
+          {yours.settings.length > 0 && (
+            <div className="flex flex-wrap justify-end gap-1" title="Set in the new-run dialog, and passed to the pilot with this message">
+              {yours.settings.map((chip) => (
+                <Badge key={chip} variant="quiet">
+                  {chip}
+                </Badge>
+              ))}
+            </div>
+          )}
         </div>
       )}
       <div className="flex flex-col gap-2 self-stretch border-l-2 border-accent-border-dim py-1 pl-4">
@@ -642,6 +664,9 @@ function ReplyCard({
         {outcome?.kind === 'ended' && outcome.stop !== null && <Badge>{outcome.stop}</Badge>}
         {outcome?.kind === 'cancelled' && <Badge>stopped</Badge>}
         {outcome?.kind === 'failed' && <Badge variant="alarm">failed</Badge>}
+        {/* The reply's Markdown source, as drawn below (#256), at the end of
+            the row so it sits in the same place on every reply. */}
+        {copy.said !== null && <CopyText text={copy.said} label="Copy the pilot's reply" className="ml-auto" />}
       </div>
 
       {/* `visible`, not the raw text: a tool call the subscription backend made
@@ -688,9 +713,28 @@ function ReplyCard({
   );
 }
 
+/**
+ * A brief handed over from the new-run dialog (#223), and which handover it is.
+ *
+ * `id` is the draft the brief was typed for. It is what the pane de-duplicates
+ * on, never the text: the text matched, so a second run started with the same
+ * brief was taken for the first one sent twice and dropped in silence, leaving
+ * that run's chat blank (#270).
+ */
+export interface Handover {
+  id: string;
+  message: string;
+}
+
 export interface PilotPaneProps {
   /** The run as the cockpit holds it. What `read_run` and `read_output` see. */
   run: Run;
+  /**
+   * The run the conversation on screen is about, whose rounds its log carries
+   * (#247). Not `run`: that is the live one, and its cards belong in its own
+   * chat only. Null for a draft or a project's pre-run chat. `chatRun` decides.
+   */
+  logRun: Run | null;
   /**
    * Fire an accepted proposal.
    *
@@ -702,7 +746,7 @@ export interface PilotPaneProps {
    */
   onEffect: (effect: Effect) => void;
   /** How many proposals are waiting on a person, so a hidden tab can say so. */
-  onPending?: (count: number) => void;
+  onPending?: ((count: number) => void) | undefined;
   /**
    * Which providers have a key, as the window last read it. Null until it has.
    *
@@ -752,17 +796,6 @@ export interface PilotPaneProps {
    */
   runId: string | null;
   /**
-   * Whether `runId` is a run the window was **pointed at** rather than one it
-   * started (#223).
-   *
-   * Only `Cockpit` can answer it — `viewing` is where the window is pointed and
-   * this pane cannot see it — and `chatMove` needs it to tell *adopting* from
-   * *browsing*. Without it, clicking a past run that had no conversation
-   * carried the conversation on screen into it, so the chat never changed and
-   * the exchange was written into the wrong run's key on the way past.
-   */
-  opened: boolean;
-  /**
    * Commands this window has run, so `read_command` has something to read.
    *
    * A prop rather than this pane's own state, for the reason `statuses` is one:
@@ -799,9 +832,11 @@ export interface PilotPaneProps {
    *
    * Sent as something the PERSON said — not a `wake` — because they typed it.
    */
-  ask?: string | null | undefined;
+  ask?: Handover | null | undefined;
   /** Called once it has been said, so the same brief cannot be sent twice. */
   onAsked?: (() => void) | undefined;
+  /** The person's standing instructions (#273), from their settings. Null until read. */
+  standing?: string | null | undefined;
   /**
    * The launch this window sent, or null if it sent none (#191).
    *
@@ -823,15 +858,28 @@ export interface PilotPaneProps {
    * link that opened the pane at whichever round was newest would be the wrong
    * one every time but the last.
    */
-  onOpen?: (tab: string, round?: number | null) => void;
+  onOpen?: OpenAt;
+  /**
+   * This pane's conversation is not the one on screen (#305).
+   *
+   * The cockpit keeps one pane mounted per conversation that is still doing
+   * something - a draft, or a turn in flight - so a reply lands in the
+   * conversation that asked for it whatever is showing. A pane in the
+   * background finishes its own turns and its own tool chain, and starts
+   * nothing new: the command and gate wakes are about what the person is
+   * looking at, so they belong to the pane on screen.
+   */
+  background?: boolean | undefined;
+  /** Whether a turn is opening or open here, so the cockpit keeps the pane mounted. */
+  onBusy?: ((busy: boolean) => void) | undefined;
 }
 
 export function PilotPane({
   run,
+  logRun,
   launched,
   dir,
   runId,
-  opened,
   commands,
   access,
   onEffect,
@@ -841,7 +889,10 @@ export function PilotPane({
   kickoff,
   ask,
   onAsked,
+  standing,
   onOpen,
+  background = false,
+  onBusy,
 }: PilotPaneProps) {
   const [conversation, dispatch] = useReducer(apply, undefined, emptyConversation);
   /** Call ids read back from storage, which never run without a press (#223). */
@@ -862,7 +913,7 @@ export function PilotPane({
    * The loader must fire on the **key** alone — a conversation in its deps would
    * re-run it on every reply, and a loader that runs mid-conversation is a
    * conversation that gets replaced by itself-from-disk. It still needs to see
-   * the current one for the adoption case below, so it reads it through here.
+   * the current one when it follows a run onto its adopted copy, so it reads it here.
    */
   const held = useRef(conversation);
   held.current = conversation;
@@ -875,54 +926,24 @@ export function PilotPane({
   useEffect(() => {
     if (!chats.ready) return;
     const key = chatKey(dir, runId);
-    const before = chat.current;
-    const stored = getChat(key);
-    const move = chatMove({
-      from: before,
-      to: key,
-      intoRun: runId !== null,
-      // Pointed at, rather than started here. Adoption is for the run this
-      // conversation PROPOSED; opening one from the sidebar is a read, and it
-      // used to carry the chat along with it (#223).
-      opened,
-      stored: stored !== null,
-      holding: worthSaving(held.current),
-    });
-    if (move === 'stay') return;
+    if (chat.current === key) return;
     chat.current = key;
+    const stored = getChat(key);
 
-    // **Adoption.** A run is *proposed* by a conversation, so when one starts,
-    // the exchange that decided what to build is the one already on screen —
-    // wherever it happened to be typed. That last clause is the fix: it used to
-    // adopt only out of the project bucket, so a brief typed while a past run
-    // was open went to *that* run's key and the run it proposed started empty.
+    // **Restore only** (#246). Adoption - a run that has just started taking
+    // the conversation that proposed it - is the cockpit's, decided for every
+    // live run at once in `adoptionPlan`, and this pane is held on the proposing
+    // key until that has happened. Two adopters raced each other as soon as
+    // the window could host two runs.
     //
-    // It never adopts over a conversation the target already has, which is what
-    // keeps a **resume** safe: that run has its own exchange and it is the one
-    // worth keeping.
-    if (move === 'adopt') {
-      try {
-        putChat(key, writable(held.current));
-        // Cleared, so the next run in this project starts from nothing rather
-        // than inheriting the conversation that launched the previous one. Only
-        // the project bucket is cleared: taking a *run's* key away here would
-        // delete a real conversation to tidy up after a move.
-        const bucket = chatKey(dir, null);
-        if (before === bucket) putChat(bucket, null);
-        // And a draft's, which is the same case one step later (#223): the run
-        // the draft asked for has now started and holds the conversation, so the
-        // draft's copy would only come back as a duplicate.
-        else if (before !== null && isDraftKey(before)) putChat(before, null);
-        // A run's own chat that proposed this one keeps its record but gives
-        // up its CLI session (#223): the new run carries it on, and two chats
-        // resuming one session would each answer from the other's messages.
-        else if (before !== null) {
-          putChat(before, writable({ ...held.current, session: null, carry: null }));
-        }
-      } catch {
-        // The conversation is still on screen and still correct. What is lost is
-        // its return next time.
-      }
+    // Following a run onto the key its conversation was just copied to reads
+    // back the exchange already on screen, and replacing it wholesale would drop
+    // a pilot turn still streaming - which adoption never did. So that case
+    // keeps its turn in flight and takes the rest from the store, including a
+    // session the copy gave up.
+    if (sameExchange(stored, held.current)) {
+      const back = readChat(stored);
+      dispatch({ type: 'restore', conversation: { ...back, live: held.current.live, unknown: held.current.unknown } });
       return;
     }
 
@@ -937,7 +958,7 @@ export function PilotPane({
     // reopened. They still settle, and a proposal among them is a card.
     for (const reply of back.replies) for (const call of reply.calls) restored.current.add(call.id);
     dispatch({ type: 'restore', conversation: back });
-  }, [dir, runId, opened, chats.ready]);
+  }, [dir, runId, chats.ready]);
 
   // Save on every settled change. `live` is dropped by `writable`, so a turn in
   // flight is not stored half-streamed and a window killed mid-turn leaves a
@@ -972,6 +993,8 @@ export function PilotPane({
   const [picked, setPicked] = useState<string | null>(null);
   const model = picked ?? firstOf(listing) ?? (needsKey(provider) ? '' : CLI_DEFAULT);
   const setModel = setPicked;
+  // Beside the model, and like it kept for the window session only (#296).
+  const [effort, setEffort] = useState<string>(DEFAULT_EFFORT);
   useEffect(() => {
     if (needsKey(provider)) loadApiModels(provider);
     else loadCliModels();
@@ -1025,6 +1048,12 @@ export function PilotPane({
   /** The composer's field, so a starter can hand it focus without a selector. */
   const entryRef = useRef<HTMLTextAreaElement>(null);
   const [live, setLive] = useState<number | null>(null);
+  /** Turns asked for whose id has not come back yet (#305). */
+  const [opening, setOpening] = useState(0);
+  const turning = live !== null || opening > 0;
+  useEffect(() => {
+    onBusy?.(turning);
+  }, [turning, onBusy]);
   // The pilot's own books (#145). Read from the window's memory at mount, because a
   // per-day ceiling that reset when the app restarted would not be a ceiling.
   const [ledger, setLedger] = useState<Ledger>(readLedger);
@@ -1039,7 +1068,7 @@ export function PilotPane({
    * the reply count - because the question it answers is *where is the reader
    * looking*, and only the reader can move that.
    */
-  const log = useFollow<HTMLDivElement>(conversation.replies.length > 0 || conversation.live !== null || run.cycles.length > 0);
+  const log = useFollow<HTMLDivElement>(conversation.replies.length > 0 || conversation.live !== null || (logRun?.cycles.length ?? 0) > 0);
   /**
    * The clock behind the elapsed on an open turn (#211).
    *
@@ -1076,7 +1105,10 @@ export function PilotPane({
           dispatch({ type: 'event', event });
           // Rust guarantees exactly one terminal event per turn and that it is
           // last, so this is safe to act on the first time it is seen.
-          if (pilot.isFinal(event)) setLive(null);
+          // Only for this pane's own turn (#305): every mounted pane hears every
+          // event, and a reply ending in one conversation is not the end of a
+          // turn another is waiting on.
+          if (pilot.isFinal(event)) setLive((at) => (at === event.turn ? null : at));
         },
         () => dispatch({ type: 'unknown' }),
       );
@@ -1107,11 +1139,16 @@ export function PilotPane({
         if (out.kind === 'reads') {
           reading.current.add(call.id);
           const id = call.id;
-          void host
-            .fs(out.op, dir, out.path)
-            .then((frame) =>
-              dispatch({ type: 'settle', id, settlement: { kind: 'ran', content: JSON.stringify(frame) } }),
-            )
+          // The archive is two host reads answered as one (#114): the listing
+          // and the scorecard, both for the repository on screen.
+          const asked: Promise<string> =
+            out.op === 'archive'
+              ? Promise.all([host.archive(dir), host.stats(dir)]).then(([runs, scorecard]) =>
+                  archiveContent(dir, runs, scorecard),
+                )
+              : host.fs(out.op, dir, out.path).then((frame) => JSON.stringify(frame));
+          void asked
+            .then((content) => dispatch({ type: 'settle', id, settlement: { kind: 'ran', content } }))
             .catch((err: unknown) =>
               dispatch({
                 type: 'settle',
@@ -1157,7 +1194,10 @@ export function PilotPane({
       (reply) => reply.outcome !== null && reply.usage !== null && !counted.current.has(replyKey(reply)),
     );
     if (fresh.length === 0) return;
-    let next = ledger;
+    // Read fresh rather than from this pane's copy (#305): with one pane per
+    // conversation, another pane may have recorded a turn since this one read
+    // the books, and writing a stale copy back would erase that spend.
+    let next = readLedger();
     const at = new Date();
     for (const reply of fresh) {
       counted.current.add(replyKey(reply));
@@ -1304,6 +1344,9 @@ ${frame.text}`, turn, origin.current))) {
        * slowest bit, which is the opposite of what the number is for.
        */
       const openedAt = Date.now();
+      // Busy from the request, not from the id (#305): the spawn is the slow
+      // part, and a pane let go of during it would lose the turn it asked for.
+      setOpening((n) => n + 1);
 
       // The subscription path. It does not go through Rust at all: the host
       // spawns `claude -p` with the closed read-only allow-list `pilotchat.ts`
@@ -1327,8 +1370,9 @@ ${frame.text}`, turn, origin.current))) {
             // A new session after a compaction opens with the summary, which is
             // the whole of how the compaction reaches the next conversation.
             prompt: withCarry(id === null ? held.current.carry : null, said ?? trailingResults(messages) ?? ''),
-            system: systemPrompt(run, launched, 'emitted', access, agentOf(provider)),
+            system: systemPrompt(run, launched, 'emitted', access, agentOf(provider), standing ?? null),
             model,
+            ...withEffort(effortToSend(provider, effort)),
             dir,
             sessionId: id ?? crypto.randomUUID(),
             resume: id !== null,
@@ -1352,7 +1396,8 @@ ${frame.text}`, turn, origin.current))) {
               message: err instanceof Error ? err.message : String(err),
               woke,
             }),
-          );
+          )
+          .finally(() => setOpening((n) => n - 1));
         return;
       }
 
@@ -1366,7 +1411,7 @@ ${frame.text}`, turn, origin.current))) {
         // model is only ever sent the most recent one, so there is no earlier
         // description for this to contradict - see `brief.ts` for why that
         // settles the staleness question rather than trading it away.
-        .send({ provider, model, messages, tools: declare(), system: systemPrompt(run, launched, 'native', access) })
+        .send({ provider, model, messages, tools: declare(), system: systemPrompt(run, launched, 'native', access, null, standing ?? null) })
         .then((turn) => {
           // Rust's turn ids and the host's request ids are two counters, so a
           // stale host turn could share this number and send the stop button
@@ -1386,9 +1431,10 @@ ${frame.text}`, turn, origin.current))) {
             message: err instanceof Error ? err.message : String(err),
             woke,
           }),
-        );
+        )
+        .finally(() => setOpening((n) => n - 1));
     },
-    [model, provider, run, launched, dir, access],
+    [model, provider, run, launched, dir, access, standing],
   );
 
   const owed = unanswered(conversation);
@@ -1525,12 +1571,12 @@ ${frame.text}`, turn, origin.current))) {
     // Recorded before the send, not after: a turn refused on its way out must
     // not leave the watcher armed to try the same gate on the next render.
     seenGate.current = gate.askId;
-    if (!ready || live !== null) return;
+    if (background || !ready || live !== null) return;
     const reason = wakeReason(gate);
     chain.current = 0;
     setStalled(false);
     start([...conversation.messages, { role: 'user' as const, content: reason }], reason, reason);
-  }, [run.gate, watching, ready, live, conversation.messages, start]);
+  }, [run.gate, watching, ready, live, conversation.messages, start, background]);
 
   /**
    * Say a brief that was typed in the composer (#223).
@@ -1548,12 +1594,15 @@ ${frame.text}`, turn, origin.current))) {
    * at the one moment somebody is watching for it. The composer already says why
    * send is off.
    */
+  // The handover already said, by its id (#270). By value it swallowed a second
+  // run whose brief happened to match an earlier one.
   const asked = useRef<string | null>(null);
   useEffect(() => {
-    const want = ask ?? null;
-    if (want === null || want === asked.current) return;
+    const handed = ask ?? null;
+    if (handed === null || handed.id === asked.current) return;
     if (!ready || live !== null) return;
-    asked.current = want;
+    asked.current = handed.id;
+    const want = handed.message;
     // A person spoke, so the rope is new - the same reset `submit` does, since
     // this is the same act arriving through another door.
     chain.current = 0;
@@ -1601,6 +1650,16 @@ ${frame.text}`, turn, origin.current))) {
    */
   const woken = useRef<Map<string, CommandNews>>(new Map());
   useEffect(() => {
+    // In the background nothing is news (#305): what each command has done so
+    // far is recorded as seen, so coming back on screen does not wake this pane
+    // for a command another conversation already answered.
+    if (background) {
+      for (const command of commands.all) {
+        if (command.endedAt !== null) woken.current.set(command.id, 'ended');
+        else if (command.bytes > 0 && !woken.current.has(command.id)) woken.current.set(command.id, 'quiet');
+      }
+      return;
+    }
     if (!ready || live !== null) return;
 
     const say = (command: Command, news: CommandNews): void => {
@@ -1640,7 +1699,7 @@ ${frame.text}`, turn, origin.current))) {
       return () => clearTimeout(timer);
     }
     return;
-  }, [commands, ready, live, conversation.messages, start]);
+  }, [commands, ready, live, conversation.messages, start, background]);
 
   const contextState = contextNow(conversation, provider);
   const contextLine = describeContext(contextState, !needsKey(provider));
@@ -1701,8 +1760,8 @@ ${frame.text}`, turn, origin.current))) {
    * that is a clock ticking, not a run changing.
    */
   const entries = useMemo(
-    () => logOf(run, conversation.replies),
-    [run, conversation.replies],
+    () => logOf(logRun, conversation.replies),
+    [logRun, conversation.replies],
   );
 
   return (
@@ -1733,6 +1792,23 @@ ${frame.text}`, turn, origin.current))) {
           {optionsFor(listing, model).map((c) => (
             <option key={c.value} value={c.value}>
               {c.label}
+            </option>
+          ))}
+        </select>
+        {/* How hard it thinks (#296), directly right of the model. Off, with
+            the reason as its tooltip, on a road that takes no effort. */}
+        <select
+          className={cn(FIELD, 'max-w-32')}
+          aria-label="Pilot effort"
+          value={effortOff(provider) === null ? effort : DEFAULT_EFFORT}
+          disabled={effortOff(provider) !== null}
+          title={effortOff(provider) ?? 'How hard the pilot thinks. Default leaves it to the CLI.'}
+          onChange={(e) => setEffort(e.target.value)}
+        >
+          <option value={DEFAULT_EFFORT}>default effort</option>
+          {EFFORTS.map((e) => (
+            <option key={e} value={e}>
+              {e}
             </option>
           ))}
         </select>
@@ -1839,7 +1915,7 @@ ${frame.text}`, turn, origin.current))) {
         <div className={ALARM}>The pilot has stopped: {verdict.why}</div>
       )}
 
-      {/* `select-text`, because `base.css` turns selection off on `body` — a
+      {/* `select-text`, because `theme.css` turns selection off on `body` — a
           drag across the cockpit chrome should not paint half the app blue, and
           the rule restores it on "anything a user reads or copies". A
           conversation is the most copied thing in the product and was missed:
@@ -1885,7 +1961,7 @@ ${frame.text}`, turn, origin.current))) {
             ) : (
               <div className="m-auto flex max-w-105 flex-col items-center gap-2 text-center text-secondary">
                 <MessageSquare size={28} className="text-accent-muted" aria-hidden="true" />
-                <h2 className="m-0 text-section text-display">A fresh conversation about this run</h2>
+                <h2 className="m-0 font-bold text-section text-display">A fresh conversation about this run</h2>
                 <p className="m-0 text-body">
                   There is no saved chat here. Explore its plans and reports above, or ask the pilot
                   about the work. New messages will be saved with this run.

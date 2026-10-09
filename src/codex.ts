@@ -1,4 +1,6 @@
 ﻿import { writeFileSync, readFileSync, existsSync, renameSync, rmSync } from 'node:fs';
+import { withStanding } from '@src/prompts.js';
+import { codexEffortOverride, codexMcpDisableArgs, listCodexMcpServers } from '@src/mcp.js';
 import { CLI_DEFAULT, modelArgs } from '@src/modelflag.js';
 import path from 'node:path';
 import { attachSpend } from '@src/charge.js';
@@ -70,6 +72,12 @@ export interface CodexTurnOptions {
    * charged; see the dispatch in `src/orchestrator.ts`.
    */
   forkFrom?: string | null | undefined;
+  /**
+   * The MCP servers this turn may reach, by the names `codex mcp list` reports
+   * (#138). Absent means none: every other listed server is disabled by name on
+   * this child, whatever this says. See `src/mcp.ts`.
+   */
+  mcpServers?: readonly string[] | undefined;
   /** Live progress. Omitted disables it entirely, which is what preflight wants. */
   progress?: ProgressOptions | undefined;
 }
@@ -473,9 +481,38 @@ export async function codexTurn(
   // no turn, so it reports no usage and there is nothing to charge - then take
   // the turn itself on the new thread through the ordinary `exec resume` path.
   // Still a fork on the first turn, which is the property that matters.
+  // Every MCP server this machine has configured for Codex, switched off by name
+  // unless this role was granted it (#138). Asked of THIS child's cwd with the
+  // same `-c` it carries, so the listing describes the configuration the child
+  // will load - trusted-project `.codex/config.toml` servers included. Before
+  // anything spawns: a listing that cannot be read refuses the turn here rather
+  // than running it with every server open. Codex 0.157.1 has no replace -
+  // `-c 'mcp_servers={}'` merges, `enabled=false` disables - so this is a
+  // deny-list, and a server Codex does not list cannot be disabled.
+  const mcpArgs = codexMcpDisableArgs(
+    await listCodexMcpServers(exec, codexBin(), cwd, codexEffortOverride(effort)),
+    options.mcpServers ?? [],
+  );
+
   let resumeAfterFork: string | null = null;
   if (forkFrom) {
     const options = await forkOptions(exec, cwd);
+    // Every fork child - the direct vector and the two-call mint alike - must
+    // carry the closure, and a fork with servers to disable may only be sent
+    // `-c` once the help has CONFIRMED it. Help that could not be read is not
+    // evidence a flag is missing, which is why `directForkWorks` takes the
+    // direct vector on it; but it is not evidence `-c` is accepted either, and
+    // with servers listed that is the one fact this turn cannot run without.
+    // So the fork is refused here, after the help probe and before any fork
+    // child, rather than made with servers open or with a flag nobody confirmed.
+    // With nothing to disable, unread help keeps its old meaning.
+    if (mcpArgs.length > 0 && options?.has('-c') !== true) {
+      throw new Error(
+        `this codex's exec fork ${options === null ? 'help could not be read, so it is not known to accept' : 'does not accept'} ` +
+          `-c, so the fork of ${forkFrom} cannot be made with its MCP servers disabled; refusing ` +
+          'rather than fork with them open',
+      );
+    }
     if (!directForkWorks(options, schema !== undefined)) {
       detail(`codex exec fork ${forkFrom} (two-call: this codex does not accept the direct flags)`);
       // The mint call sends NOTHING the probe has not confirmed. `--json` is one
@@ -486,7 +523,7 @@ export async function codexTurn(
       const wantsJson = options?.has('--json') === true;
       const minted = await exec(
         codexBin(),
-        wantsJson ? ['exec', 'fork', forkFrom, '--json'] : ['exec', 'fork', forkFrom],
+        [...(wantsJson ? ['exec', 'fork', forkFrom, '--json'] : ['exec', 'fork', forkFrom]), ...mcpArgs],
         { input: '', cwd, timeoutMs, env: agentEnv('codex') },
       );
       // With `--json` the id arrives as a `thread.started` event; without it,
@@ -514,6 +551,7 @@ export async function codexTurn(
         '--json',
         ...modelArgs('-m', model),
         '-c', `model_reasoning_effort="${effort}"`,
+        ...mcpArgs,
         '--skip-git-repo-check',
         ...schemaArgs,
         '-o', outFile,
@@ -525,6 +563,7 @@ export async function codexTurn(
         '--json',
         ...modelArgs('-m', model),
         '-c', `model_reasoning_effort="${effort}"`,
+        ...mcpArgs,
         '--skip-git-repo-check',
         ...schemaArgs,
         '-o', outFile,
@@ -536,6 +575,7 @@ export async function codexTurn(
         '--json',
         ...modelArgs('-m', model),
         '-c', `model_reasoning_effort="${effort}"`,
+        ...mcpArgs,
         '--skip-git-repo-check',
         ...schemaArgs,
         '-o', outFile,
@@ -546,6 +586,7 @@ export async function codexTurn(
         '--json',
         ...modelArgs('-m', model),
         '-c', `model_reasoning_effort="${effort}"`,
+        ...mcpArgs,
         '-s', sandbox,
         '--skip-git-repo-check',
         '-C', cwd,
@@ -578,7 +619,8 @@ export async function codexTurn(
   // a turn that wrote no usable output still persisted as one that had.
   return withHeartbeat(heartbeat, async () => {
     const { code, signal, stdout, stderr } = await exec(codexBin(), args, {
-      input: prompt,
+      // The person's standing instructions in front, on every turn (#273).
+      input: withStanding(prompt),
       cwd,
       timeoutMs,
       // Billed to the road Settings names for OpenAI (#223).

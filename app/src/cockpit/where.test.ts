@@ -32,12 +32,15 @@ describe('where the window was', () => {
     expect(readWhere(JSON.stringify({ ...AT, tab: 'findings' }))).toEqual({ ...AT, tab: 'pilot' });
     expect(readWhere(JSON.stringify({ ...AT, viewing: { dir: '/repo' } }))).toEqual({ ...AT, viewing: null });
     expect(readWhere(JSON.stringify({ ...AT, draftId: 3 }))).toEqual(AT);
-    expect(readWhere(JSON.stringify({ ...AT, bottom: 'terminal' }))).toEqual({ ...AT, bottom: 'output' });
+    // The fallback is `commands`, the bottom panel's one pane since #284.
+    expect(readWhere(JSON.stringify({ ...AT, bottom: 'terminal' }))).toEqual({ ...AT, bottom: 'commands' });
+    // A record from before #284 whose bottom panel was on the output.
+    expect(readWhere(JSON.stringify({ ...AT, bottom: 'output' }))).toEqual({ ...AT, bottom: 'commands' });
   });
 
   test('a record from before the panels opens every panel at its default', () => {
     const old = { tab: 'critique', viewing: AT.viewing, draftId: null };
-    expect(readWhere(JSON.stringify(old))).toEqual({ ...old, bottom: 'output', panels: OPEN_PANELS });
+    expect(readWhere(JSON.stringify(old))).toEqual({ ...old, bottom: 'commands', panels: OPEN_PANELS });
   });
 
   test('a record that had Output or Commands as the main tab comes back as the bottom panel, open', () => {
@@ -52,6 +55,14 @@ describe('where the window was', () => {
       bottom: 'commands',
       panels: { ...OPEN_PANELS, bottom: true },
     });
+  });
+
+  test('a record whose main tab was Output comes back on the Output tab (#284)', () => {
+    // Output is a main tab again, so a record from before the bottom panel - or
+    // from after #284 - that says so is read as itself, not moved anywhere.
+    const got = readWhere(JSON.stringify({ ...AT, tab: 'output' }));
+    expect(got.tab).toBe('output');
+    expect(got.panels).toEqual(AT.panels);
   });
 
   test('a size that is not a percentage drops its whole group, and the rest survive', () => {

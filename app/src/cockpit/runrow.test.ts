@@ -213,8 +213,11 @@ describe('the window points at the run it is showing', () => {
     //
     // A draft on screen comes before the live run (#223): it has no run yet, and
     // its project is the one the pilot and the panes belong to while it is open.
+    //
+    // Case 2 (#246): the run's repository is read through `repoOf`, which is
+    // `identity.repo` and, before `run_started`, the directory it was sent for.
     expect(cockpit).toMatch(
-      /const shownDir = viewing\?\.dir \?\? drafting\?\.dir \?\? run\.identity\?\.repo \?\? repoDir/,
+      /const shownDir = viewing\?\.dir \?\? drafting\?\.dir \?\? \(shownLive !== null \? repoOf\(shownLive\) : null\) \?\? repoDir/,
     );
   });
 

@@ -45,7 +45,9 @@ describe('the renderer', () => {
 describe('the route', () => {
   test('the pane draws a reply through it, and the person\'s own message stays as typed', () => {
     expect(pane).toMatch(/<Markdown text=\{visible\(reply\.text\)\} \/>/);
-    expect(pane).toMatch(/whitespace-pre-wrap[^"]*"\>\s*\{reply\.asked\}/);
+    // `yours.brief`: what was typed, with the composer's settings split off and
+    // drawn as chips (#258). Still plain and pre-wrapped, never Markdown.
+    expect(pane).toMatch(/whitespace-pre-wrap[^"]*"\>\s*\{yours\.brief\}/);
   });
 
   test('the pilot is told its replies are rendered as Markdown', () => {

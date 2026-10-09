@@ -3,14 +3,16 @@ import { Badge } from '@/ui/badge';
 import { cn } from '@/lib/utils';
 import { clock, counted, elapsed, tokens, work } from './format';
 import { runningRow } from './model';
-import type { Turn } from './model';
+import type { ArchiveView, Turn } from './model';
 
 /**
  * `6a` — the element on screen longer than anything else in the app.
  *
  * The design says *"build this exactly"* and lists six measurements with no
- * derived quantity. Five are on the wire today; the last names the issue that
- * would supply it and is drawn as an absence rather than as a blank.
+ * derived quantity. All six are on the wire now: the last, comparable turns, is
+ * read from the archive's scorecard (#114) - **by tokens, never by time**,
+ * because the archive records no turn durations - and is drawn as an absence
+ * only while that scorecard has not been read.
  *
  * The diffstat joined them in #198, and the way it was missed is worth keeping:
  * it named #136, #136 landed, and nobody connected the two - so the row went on
@@ -63,8 +65,19 @@ const LINE = 'font-mono text-mono-sm text-primary';
  */
 const ABSENT = 'border-l border-dashed border-rule-strong pl-1.5 text-tertiary';
 
-export function RunningRow({ turn, now, live = true }: { turn: Turn; now: number; live?: boolean }) {
-  const row = runningRow(turn, now);
+export function RunningRow({
+  turn,
+  now,
+  live = true,
+  archive = null,
+}: {
+  turn: Turn;
+  now: number;
+  live?: boolean;
+  /** The archive's per-kind token distributions, or null while unread. */
+  archive?: ArchiveView;
+}) {
+  const row = runningRow(turn, now, archive);
 
   return (
     <div
@@ -119,7 +132,7 @@ export function RunningRow({ turn, now, live = true }: { turn: Turn; now: number
               <li className={LINE}>last activity {clock(row.lastBeatAt)}</li>
             )}
 
-        <li className={cn(LINE, ABSENT)}>{row.comparable}</li>
+        <li className={row.comparable.measured ? LINE : cn(LINE, ABSENT)}>{row.comparable.text}</li>
       </ol>
 
       {row.tokens !== null && (

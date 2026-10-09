@@ -32,7 +32,8 @@ describe('the composer hands the brief to the pilot', () => {
       composer.indexOf('onSubmit={(e) => {'),
       composer.indexOf('}}', composer.indexOf('onSubmit={(e) => {')),
     );
-    expect(onSubmit).toContain('onBrief(briefFor(task, planOnly, overrides), task.trim())');
+    // The optional title rides third since #262; the message and task are unchanged.
+    expect(onSubmit).toContain('onBrief(briefFor(task, planOnly, overrides), task.trim(), ');
     expect(onSubmit).not.toContain('onLaunch(');
   });
 
@@ -79,15 +80,19 @@ describe('the cockpit carries it across', () => {
     // is one of the two ways that happens.
     // Through `queued`, one commit later, so the pane is already holding the
     // new draft's conversation when the brief is said into it.
-    const handler = cockpit.slice(cockpit.indexOf('onBrief={(message, task) => {'));
-    expect(handler).toContain('setQueued(message)');
+    const at = cockpit.indexOf('onBrief={(message, task, title) => {');
+    expect(at).toBeGreaterThan(-1);
+    const handler = cockpit.slice(at);
+    // With the draft's id since #270, so equal briefs are still two handovers.
+    expect(handler).toContain('setQueued({ id: draft.id, message })');
     expect(cockpit).toContain('setBrief(queued)');
     expect(handler).toContain("open('pilot')");
   });
 
   test('the pane is given it, and given the way to clear it', () => {
     const pane = cockpit.slice(cockpit.indexOf('<PilotPane'), cockpit.indexOf('onPending='));
-    expect(pane).toContain('ask={brief}');
+    // Case 2 (#305): only the pane of the draft it was typed for is given it.
+    expect(pane).toContain('ask={askFor(brief, at)}');
     expect(cockpit).toContain('onAsked={() => setBrief(null)}');
   });
 });
@@ -106,16 +111,21 @@ describe('the pane says it as something a person said', () => {
     expect(effect).not.toMatch(/wakeReason|'wake'/);
   });
 
-  test('it cannot say the same brief twice', () => {
-    // Keyed on the VALUE rather than on having run, so StrictMode's second pass
-    // finds it already said. A brief sent twice is two planner-sized
-    // conversations and a proposal card for each.
+  test('it cannot say the same handover twice, and says a second run with the same brief (#270)', () => {
+    // Keyed on the HANDOVER rather than on having run, so StrictMode's second
+    // pass finds it already said - a brief sent twice is two planner-sized
+    // conversations and a proposal card for each. This used to be keyed on the
+    // brief's text, which pinned the defect too: a second run started with the
+    // same brief was taken for the first, dropped in silence, and got a blank
+    // chat. The id is the draft the brief was typed for.
     const effect = pilotPane.slice(
       pilotPane.indexOf('const asked = useRef<string | null>(null);'),
       pilotPane.indexOf('onAsked?.();'),
     );
-    expect(effect).toContain('want === asked.current');
-    expect(effect).toContain('asked.current = want');
+    expect(effect).toContain('handed.id === asked.current');
+    expect(effect).toContain('asked.current = handed.id');
+    expect(effect).not.toMatch(/want === asked\.current/);
+    expect(cockpit).toContain('setQueued({ id: draft.id, message })');
   });
 
   test('it defers rather than dropping when the pane cannot send', () => {

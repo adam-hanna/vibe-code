@@ -16,6 +16,7 @@ import type { Role, RoleProviders, RolePatches, RoleTable } from '@src/roles.js'
 import { setOwn } from '@src/runtime.js';
 import type { AgentProvider, ToolchainContract, ToolRequirement, Phase } from '@src/runtime.js';
 import { DEFAULT_GATES, validateGates } from '@src/gates.js';
+import { DEFAULT_TEST_PATHS } from '@src/judge.js';
 import { promptBlockNames } from '@src/prompts.js';
 import { readPilotAccess, refuseProjectPilot } from '@src/pilotaccess.js';
 import { readCliPaths, refuseProjectCli } from '@src/clipaths.js';
@@ -154,6 +155,9 @@ export const DEFAULTS: Config = {
     // of command, on the same machine, and `npm ci` cold is the case that
     // decides it.
     worktreeTimeoutMs: 15 * 60 * 1000,
+    // The repository's HEAD at run start, which is what every run did before
+    // this key existed (#249): groundwork ships with no behaviour change.
+    baseRef: null,
   },
   context: {
     enabled: true,
@@ -189,6 +193,9 @@ export const DEFAULTS: Config = {
     // that is wrong and cites a real line, is invisible to both existing guards
     // by their own admission (#113).
     reproducers: true,
+    // Copied, so a caller mutating its config cannot edit the constant. The list
+    // is a naming convention, not a measurement - see `DEFAULT_TEST_PATHS` (#112).
+    testPaths: [...DEFAULT_TEST_PATHS],
   },
   progress: {
     enabled: true,
@@ -218,6 +225,8 @@ export const DEFAULTS: Config = {
   // Empty: a project that overrides no prompt is byte-identical to one that
   // predates the key, which is what makes this safe to add to every config.
   prompts: {},
+  // Empty: nobody's instructions until somebody writes some (#273).
+  instructions: { text: '' },
   toolchain: {
     // Deliberately minimal. `git` is needed in every phase because vibe commits
     // per round; node and npm only matter once something is being built or
@@ -324,6 +333,7 @@ export function mergeConfig(base: Config, override: unknown): Config {
     progress: mergeSection(base.progress, override['progress']),
     toolchain: mergeToolchain(base.toolchain, override['toolchain']),
     prompts: mergePrompts(base.prompts, override['prompts']),
+    instructions: mergeInstructions(base.instructions, override['instructions']),
   };
 }
 
@@ -356,6 +366,22 @@ function mergeToolchain(base: ToolchainContract, override: unknown): ToolchainCo
  * the keys come from a user's file, `__proto__` is reachable, and a swallowed
  * entry would skip validation instead of being reported by name.
  */
+/**
+ * The standing instructions, where a `null` text is no text at all (#273).
+ *
+ * The settings screen clears the box by writing `null`, as it clears every
+ * other optional field, and a cleared project box must let the instructions for
+ * all projects show through again rather than override them with nothing. A
+ * string replaces; anything else leaves the layer below in force, and a value
+ * that is neither is still refused by `validate` when it is not a string.
+ */
+function mergeInstructions(base: Config['instructions'], override: unknown): Config['instructions'] {
+  if (!isRecord(override)) return base;
+  const text = override['text'];
+  if (text === null || text === undefined) return base;
+  return { text: text as string };
+}
+
 function mergePrompts(base: PromptOverrides, override: unknown): PromptOverrides {
   if (!isRecord(override)) return base;
   const out: Record<string, string> = { ...base };
@@ -474,6 +500,7 @@ const SECTIONS = [
   'verify',
   'progress',
   'prompts',
+  'instructions',
 ] as const;
 
 /**
@@ -525,6 +552,7 @@ export function loadConfig(
     refuseProjectPilot(fromFile, 'vibe.config.json');
     refuseProjectCli(fromFile, 'vibe.config.json');
     refuseProjectAuth(fromFile, 'vibe.config.json');
+    refuseProjectRuns(fromFile, 'vibe.config.json');
   }
 
   // The global layer sits under the project's file and over the defaults, so a
@@ -643,7 +671,7 @@ function validateRoles(raw: unknown): void {
   if (!isRecord(raw)) {
     throw new Error(
       'roles must be an object mapping role names to "claude" or "codex", or to an object ' +
-        'naming a provider and optionally a model, an effort and a timeout',
+        'naming a provider and optionally a model, an effort, a timeout and MCP servers',
     );
   }
   for (const key of Object.keys(raw)) {
@@ -705,6 +733,20 @@ function validate(cfg: Config): void {
   }
   if (!Number.isFinite(cfg.git.worktreeTimeoutMs) || cfg.git.worktreeTimeoutMs <= 0) {
     throw new Error('git.worktreeTimeoutMs must be a positive number');
+  }
+  // A ref, or null for HEAD (#249). A leading dash is refused as well as a blank:
+  // the value is handed to `git rev-parse` and `git fetch` as an argument, where
+  // `-x` would be read as an option rather than as the ref somebody meant.
+  if (
+    cfg.git.baseRef !== null &&
+    (typeof cfg.git.baseRef !== 'string' ||
+      cfg.git.baseRef.trim() === '' ||
+      cfg.git.baseRef.startsWith('-'))
+  ) {
+    throw new Error(
+      'git.baseRef must be a ref such as "origin/develop" or a branch name, or null to start ' +
+        'from HEAD',
+    );
   }
   // Zero is meaningful here, unlike the round caps: it demands a spotless verdict.
   if (!Number.isInteger(cfg.loop.p1Tolerance) || cfg.loop.p1Tolerance < 0) {
@@ -783,6 +825,10 @@ function validate(cfg: Config): void {
   }
   validateToolchain(cfg.toolchain);
   validatePrompts(cfg.prompts);
+  // Any text at all, including none. There is no judging whether an
+  // instruction is a good one, and a length limit would be a number with
+  // nothing behind it - the same answer `validatePrompts` gives (#273).
+  if (typeof cfg.instructions.text !== 'string') throw new Error('instructions.text must be a string');
 }
 
 const PHASES: readonly Phase[] = ['plan', 'implement', 'review'];
@@ -941,7 +987,9 @@ export function globalConfigPath(
  */
 export const PROJECT_ONLY: Readonly<Record<string, readonly string[] | 'all'>> = {
   verify: 'all',
-  git: ['worktree', 'worktreeCommand', 'worktreeTimeoutMs'],
+  // `baseRef` too (#249): which commit a run starts from is a fact about one
+  // repository's branches, and `origin/develop` is nonsense in the next one.
+  git: ['worktree', 'worktreeCommand', 'worktreeTimeoutMs', 'baseRef'],
 };
 
 /** Refuse a global file, or a global write, that sets a project-only key. */
@@ -958,6 +1006,48 @@ export function refuseGlobalProjectKeys(raw: Readonly<Record<string, unknown>>, 
       );
     }
   }
+}
+
+/**
+ * How many runs this machine's app may host at once (#246) - `runs.maxConcurrent`.
+ *
+ * **0 means no limit, and it is the default**, the shape `budget.maxTokens: 0`
+ * has: any other default would be a number nobody measured, and the rate-limit
+ * wait already does its job when two runs share one subscription. The window
+ * counts the run hosts it spawned and refuses a start at the limit - refused,
+ * never queued. Runs started from a terminal are not counted.
+ *
+ * **Global only**, like `auth` and `cli`: it is a fact about one machine, and a
+ * project file is committed. `null` is refused rather than read as 0, because
+ * reading a value nobody meant as *no limit* is the silent revert the cap is
+ * there to prevent.
+ *
+ * Not read by `readGlobalConfig`: no run reads it, so a malformed value here
+ * must not stop every run on the machine. The window reads it off `globalRaw`
+ * and refuses to start while it cannot.
+ */
+export function readMaxConcurrent(globalRaw: Readonly<Record<string, unknown>>): number {
+  const section = globalRaw['runs'];
+  if (section === undefined) return 0;
+  if (!isRecord(section)) throw new Error('runs must be an object');
+  for (const key of Object.keys(section)) {
+    if (key !== 'maxConcurrent') throw new Error(`runs.${key} is not a setting; the one is maxConcurrent`);
+  }
+  const value = section['maxConcurrent'];
+  if (value === undefined) return 0;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    throw new Error('runs.maxConcurrent must be 0 (no limit) or a whole number of runs');
+  }
+  return value;
+}
+
+/** Refuse a project file, or a project write, that names `runs` (see `readMaxConcurrent`). */
+export function refuseProjectRuns(raw: Readonly<Record<string, unknown>>, label: string): void {
+  if (raw['runs'] === undefined) return;
+  throw new Error(
+    `${label} sets runs, and only your settings for all projects can: how many runs this ` +
+      "machine's app may host at once is a fact about one machine, and this file is committed",
+  );
 }
 
 /** The global file's own contents, or `{}` when there is none or the layer is off. */
@@ -1010,7 +1100,15 @@ export function withProjectFile(stored: Config, targetDir: string): Config {
   refuseProjectPilot(project, 'vibe.config.json');
   refuseProjectCli(project, 'vibe.config.json');
   refuseProjectAuth(project, 'vibe.config.json');
-  return mergeConfig(mergeConfig(stored, readGlobalConfig()), project);
+  refuseProjectRuns(project, 'vibe.config.json');
+  // Seeded from `DEFAULTS` first, because `mergeSection` copies only the keys
+  // its base already has. A run stored before a key existed has no such key,
+  // so without the seed a project file naming it - `verify.testPaths` on a run
+  // older than #112 - would be dropped here and the default restored by
+  // `applyOverrides` afterwards: a written-down setting silently not applied.
+  // `applyOverrides` already layers the run's memory over `DEFAULTS`, so this
+  // moves that seed earlier and changes nothing a stored key says.
+  return mergeConfig(mergeConfig(mergeConfig(DEFAULTS, stored), readGlobalConfig()), project);
 }
 
 /**
@@ -1058,6 +1156,7 @@ export function writeConfigPatch(
     refuseProjectPilot(patch, 'vibe.config.json');
     refuseProjectCli(patch, 'vibe.config.json');
     refuseProjectAuth(patch, 'vibe.config.json');
+    refuseProjectRuns(patch, 'vibe.config.json');
   }
   const raw = scope === 'global' ? readGlobalConfig() : readRawConfig(targetDir);
   const candidate: Record<string, unknown> = { ...raw };
@@ -1073,6 +1172,8 @@ export function writeConfigPatch(
     );
   }
 
+  tidyVerify(candidate);
+
   // The same pipeline `loadConfig` runs, in the same order and for the same
   // reasons - `validateRoles` first, because `resolveRoleScopedAgents` reads the
   // table and a bad role checked afterwards surfaces as a toolchain error.
@@ -1084,6 +1185,7 @@ export function writeConfigPatch(
     readPilotAccess(candidate);
     readCliPaths(candidate);
     readRoutes(candidate);
+    readMaxConcurrent(candidate);
     const alone = mergeConfig(DEFAULTS, candidate);
     validateRoles(alone.roles);
     validate(resolveRoleScopedAgents(alone, [candidate]));
@@ -1099,6 +1201,28 @@ export function writeConfigPatch(
   writeFileSync(tmp, `${JSON.stringify(candidate, null, 2)}\n`, 'utf8');
   renameSync(tmp, configPath);
   return { path: configPath };
+}
+
+/**
+ * Drop the key a gate list replaces, once it says nothing (#240).
+ *
+ * `verify.command` and `verify.gates` are two answers to *what runs*, and the
+ * settings screen moves a project from one to the other in a single patch. The
+ * merge is one level deep, so that patch can only clear the old key by setting
+ * it to `null` - which is its default, and therefore a line saying nothing.
+ * Left in, a file converted on the screen would differ from the one a person
+ * writes by hand, and the issue's bar is that it must not. Only a null beside
+ * the other key is dropped: a lone `"command": null` is what the single field
+ * writes for auto-detect, and removing lines nobody asked about is not a save's
+ * business.
+ */
+function tidyVerify(candidate: Record<string, unknown>): void {
+  const verify = candidate['verify'];
+  if (!isRecord(verify)) return;
+  const tidy: Record<string, unknown> = { ...verify };
+  if (tidy['command'] === null && Array.isArray(tidy['gates'])) delete tidy['command'];
+  if (tidy['gates'] === null && typeof tidy['command'] === 'string') delete tidy['gates'];
+  setOwn(candidate, 'verify', tidy);
 }
 
 export function refuseArtifactPath(entry: unknown): string | null {
@@ -1216,6 +1340,24 @@ function validateVerify(verify: VerifyConfig): void {
   const reproducers: unknown = verify.reproducers;
   if (reproducers !== undefined && typeof reproducers !== 'boolean') {
     throw new Error('verify.reproducers must be true or false');
+  }
+
+  // Above the `gates === null` return for the same reason again: a property of
+  // the whole section. `[]` is legal and means no test patterns at all -
+  // `vibe.config.json` is still judged, because that one is not configurable
+  // (#112). An empty pattern is refused rather than ignored: it matches only a
+  // path that is the empty string, so it would look like a setting and do
+  // nothing.
+  const testPaths: unknown = verify.testPaths;
+  if (testPaths !== undefined) {
+    if (!Array.isArray(testPaths)) {
+      throw new Error('verify.testPaths must be a list of path patterns, such as "tests/**"');
+    }
+    testPaths.forEach((p: unknown, i) => {
+      if (typeof p !== 'string' || p.trim() === '') {
+        throw new Error(`verify.testPaths[${i}] must be a non-empty path pattern string`);
+      }
+    });
   }
 
   const gates: unknown = verify.gates;

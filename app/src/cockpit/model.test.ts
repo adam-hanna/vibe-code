@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { emptyRun, nextRun, reduce, runningRow, OUTPUT_KEEP } from './model';
+import { emptyRun, hostLost, nextRun, reduce, runningRow, settled, statsEpoch, OUTPUT_KEEP } from './model';
 import type { Run } from './model';
 import type { Frame } from '../host';
 
@@ -459,12 +459,18 @@ describe('the running row reports absence as absence', () => {
     // kept here and asserted of the diffstat's own absence below.
     //
     // **It used to assert the issue number was in the sentence, and that is the
-    // part that moved.** An end user cannot act on `#114`; the actionable half
-    // is the statement that no frame carries the figure. The number stays in the
-    // source comment, where the next reader of this module is.
+    // part that moved.** An end user cannot act on `#114`; the number stays in
+    // the source comment, where the next reader of this module is.
+    //
+    // **And the sentence itself moved with #114** (AGENTS.md case 2): the
+    // window reads the archive now, so "no frame carries it" stopped being
+    // true. The part that still holds - absent WITH A REASON until a figure
+    // exists - is asserted of the one state that still lacks one: a scorecard
+    // that has not been read.
     const row = runningRow(started.running!, 0);
-    expect(row.comparable).toMatch(/no frame carries it/);
-    expect(row.comparable).not.toMatch(/#\d/);
+    expect(row.comparable.measured).toBe(false);
+    expect(row.comparable.text).toMatch(/not been read/);
+    expect(row.comparable.text).not.toMatch(/#\d/);
   });
 
   test('a turn with no reading says which turns get one, rather than looking late', () => {
@@ -867,5 +873,44 @@ describe('an artifact the run wrote is what makes a pane live (#223)', () => {
   test('a frame with no name is dropped, and an old core simply has none', () => {
     expect(fold([say('artifact_written', {})]).artifacts).toEqual([]);
     expect(fold(CLEAN).artifacts).toEqual([]);
+  });
+});
+
+describe('a run whose host has gone (#246)', () => {
+  test('a running turn is closed and the run says why', () => {
+    const run = fold([say('phase_started', { phase: 'planning' }), say('turn_started', { role: 'planner', kind: 'plan' })]);
+    expect(run.running).not.toBeNull();
+    const lost = hostLost(run, 2_000_000, 'the host exited 1');
+    expect(lost.running).toBeNull();
+    expect(lost.lost).toBe('the host exited 1');
+    expect(lost.completed).toBeNull();
+    expect(lost.reason).toBeNull();
+    expect(settled(lost)).toBe(true);
+  });
+
+  test('a gate held by the dead host is gone with it', () => {
+    const gate: Frame = {
+      type: 'ask',
+      id: 1,
+      context: { boundary: 'plan-approved', planRound: 0, reviewRound: 0, verifyRound: 0 },
+    } as Frame;
+    const lost = hostLost(fold([gate]), 2_000_000, 'gone');
+    expect(lost.gate).toBeNull();
+  });
+
+  test('an unfinished preflight is cleared; a passed one is history', () => {
+    const probing = fold([say('preflight_started', { agents: ['claude', 'codex'] })]);
+    expect(hostLost(probing, 2_000_000, 'gone').preflight).toBeNull();
+    const passed = fold([say('preflight_started', { agents: ['claude'] }), say('preflight_passed', null)]);
+    expect(hostLost(passed, 2_000_000, 'gone').preflight?.passed).toBe(true);
+  });
+
+  test('a new run forgets it, and the scorecard epoch reads it as ended', () => {
+    const lost = hostLost(emptyRun(), 1, 'gone');
+    expect(statsEpoch(lost)).toBe(':ended');
+    expect(statsEpoch(emptyRun())).toBe(':open');
+    expect(nextRun(lost).lost).toBeNull();
+    expect(settled(emptyRun())).toBe(false);
+    expect(settled(reduce(emptyRun(), { type: 'result', id: 1, exit: 0 }, 1))).toBe(true);
   });
 });

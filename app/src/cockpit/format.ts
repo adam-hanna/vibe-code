@@ -94,6 +94,27 @@ export function tokens(n: number): string {
   return String(n);
 }
 
+/**
+ * The design's rounds fingerprint: `p2 v1 r2` - plan, verify-fix and fix rounds
+ * a run spent, cheap to scan for runs that thrashed (`1b`, #114).
+ *
+ * `q<n>` goes after `p` **only when the run asked questions**. Since #223 a
+ * question round no longer advances the plan round, so without it a run that
+ * thrashed on questions would read as clean. A null counter - one the run never
+ * recorded - is `–` rather than 0, and a null or zero question count is left
+ * out because it says nothing a reader scanning for thrash needs.
+ */
+export function fingerprint(r: {
+  plan: number | null;
+  question: number | null;
+  review: number | null;
+  verify: number | null;
+}): string {
+  const n = (v: number | null): string => (v === null ? '–' : String(v));
+  const q = r.question !== null && r.question > 0 ? ` q${r.question}` : '';
+  return `p${n(r.plan)}${q} v${n(r.verify)} r${n(r.review)}`;
+}
+
 /** `47 tool uses`, `1 event`. The unit travels with the count because they do not count the same thing. */
 export function counted(n: number, unit: string): string {
   return `${n} ${unit}${n === 1 ? '' : 's'}`;
@@ -422,4 +443,32 @@ export function recorded(iso: string | null): string {
     hour: '2-digit',
     minute: '2-digit',
   });
+}
+
+/**
+ * What a turn of each kind is doing, said to a person (#253).
+ *
+ * The stop confirmation's title was `Stop implementer · verify-fix now`, which
+ * is the frame's two fields joined by a dot. These are the loop's own turn
+ * kinds - every `kind:` its `turn_started` narrations carry - and the map is
+ * closed in the way `ending` is: a kind this build does not know is said as
+ * itself rather than as a phrase invented for it.
+ */
+const TURN_PHRASE: Readonly<Record<string, string>> = {
+  plan: 'writing the plan',
+  revise: 'revising the plan',
+  critique: 'critiquing the plan',
+  answer: "answering the planner's questions",
+  implement: 'implementing the plan',
+  'verify-fix': 'fixing the failing checks',
+  review: 'reviewing the code',
+  'review-fix': 'fixing what the review found',
+  'final-fix': 'fixing the last review findings',
+};
+
+export function turnSentence(turn: { role: string; kind: string }): string {
+  const phrase = TURN_PHRASE[turn.kind];
+  return phrase === undefined
+    ? `The ${turn.role} is running ${/^[aeiou]/i.test(turn.kind) ? 'an' : 'a'} ${turn.kind} turn.`
+    : `The ${turn.role} is ${phrase}.`;
 }

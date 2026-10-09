@@ -6,6 +6,8 @@ import settings from './Settings.tsx?raw';
 import footer from './Footer.tsx?raw';
 import column from './LoopColumn.tsx?raw';
 import pilot from '../pilot/PilotPane.tsx?raw';
+import saved from '../pilot/saved.ts?raw';
+import hosts from './hosts.ts?raw';
 import { chatKey, chatMove } from '../pilot/saved';
 import { recorded } from './format';
 
@@ -25,7 +27,9 @@ describe('an opened run is drawn by the column that drew it live', () => {
     // right panel to look just as it would have when I click on an old run as if
     // I had run it myself."* So there is one `LoopColumn`, taking one `Run`, and
     // which run it is is decided in one expression.
-    expect(cockpit).toMatch(/const columnRun = past && opened\.run !== null \? opened\.run : run;/);
+    // A draft not yet started takes an empty run first (#294); the rest of the
+    // expression is unchanged.
+    expect(cockpit).toMatch(/const columnRun = draftHasNoRun\(drafting\) \? blank : past && opened\.run !== null \? opened\.run : run;/);
     expect(cockpit).toMatch(/<LoopColumn\s+run=\{columnRun\}/);
     // And there is no second column component to drift from the first.
     expect(cockpit).not.toMatch(/RecordColumn/);
@@ -68,8 +72,10 @@ describe('an opened run is drawn by the column that drew it live', () => {
 
   test('the live host’s pid is withheld from a run this process is not running', () => {
     // A pid beside a finished run names a process that has nothing to do with
-    // it.
-    expect(cockpit).toMatch(/hostPid=\{past \? null : wire\.hostPid\}/);
+    // it. Since #246 the pid is the live run's own host, not the service host
+    // the window connected to, and it is still withheld from a past run. Case 2
+    // (#246): the pid is the entry's for the run on screen.
+    expect(cockpit).toMatch(/hostPid=\{past \? null : \(shownLive\?\.pid \?\? null\)\}/);
   });
 
   test('the strip says the one thing an archive cannot say, once', () => {
@@ -85,6 +91,44 @@ describe('an opened run is drawn by the column that drew it live', () => {
     // follow (#53) and a `state.json` the validators reject are three findings
     // needing three responses, and *"could not read the run"* answers none.
     expect(cockpit).toMatch(/\{opened\.failure\}/);
+  });
+
+  test('an opened run that has loaded does not say it is still reading (#236)', () => {
+    // A static `reading` badge sat over every opened run for as long as it was
+    // open, so a run that had loaded completely still looked as if it was
+    // loading. The only `reading` left is the line drawn while the replay is in
+    // flight.
+    expect(cockpit).not.toContain('<Badge>reading</Badge>');
+    expect(cockpit).toMatch(
+      /\{opened\.loading && opened\.run === null && \(\s*<p[^>]*>Reading this run…<\/p>/,
+    );
+  });
+
+  test('the way back from an opened run is in the column’s title row', () => {
+    // It is the only way back when a live run exists, so it has to survive the
+    // box it used to sit in — and it sits between the column's name and the
+    // control that hides the column, not under the column's contents.
+    const head = cockpit.slice(
+      cockpit.indexOf('>Run status</span>'),
+      cockpit.indexOf('aria-label="Hide run status"'),
+    );
+    expect(head).toContain('back to the live run');
+    expect(head).toContain('past && viewing !== null');
+    expect(cockpit.match(/back to the live run/g)?.length).toBe(1);
+  });
+
+  test('the pilot\'s log is told which run its conversation is about (#247)', () => {
+    // The pane takes the live run for its tools and a separate run for its
+    // log's round cards, decided once by `chatRun` beside `pilotRunId`. Handing
+    // the log the live run is what put its cards in every chat.
+    // Case 2 (#305): one pane per conversation, so the props reach the pane
+    // through its snapshot - the one on screen is `pilotLogRun`, unchanged.
+    const pane = cockpit.slice(cockpit.indexOf('<PilotPane'), cockpit.indexOf('onEffect='));
+    expect(pane).toContain('logRun={at.logRun}');
+    expect(cockpit).toContain('logRun: pilotLogRun,');
+    expect(cockpit).toMatch(/const pilotLogRun = chatRun\(\{\s*runId: pilotRunId,/);
+    expect(pilot).toContain('logOf(logRun, conversation.replies)');
+    expect(pilot).not.toContain('logOf(run, conversation.replies)');
   });
 
   test('a failed replay leaves the live run drawn rather than an empty column', () => {
@@ -208,14 +252,20 @@ describe('a conversation belongs to the run it is about', () => {
   test('only the project bucket is cleared after an adoption', () => {
     // Taking a *run's* key away would delete a real conversation to tidy up
     // after a move.
-    // Through `putChat` since the store moved to the host's files (#223).
-    expect(pilot).toMatch(/if \(before === bucket\) putChat\(bucket, null\)/);
+    // Through `putChat` since the store moved to the host's files (#223), and
+    // decided in `cleanupWrites` since the cockpit became the one adopter (#246,
+    // case 2: the rule moved, verbatim, out of the pane).
+    expect(saved).toMatch(/if \(source === bucket\) return \[\{ key: bucket, value: null \}\];/);
+    expect(hosts).toMatch(/cleanupWrites\(source, chatKey\(ref\.dir, null\), readChat\(from\)\)/);
   });
 
   test('the decision is pure, so it is this file that checks it', () => {
     // The app has no jsdom, so a rule living inside an effect is a rule nothing
     // tests — which is how the narrow adoption survived being written down.
-    expect(pilot).toMatch(/const move = chatMove\(\{/);
+    // Case 2 (#246): the call moved from the pane to `adoptionPlan`, which is
+    // pure too, and the pane no longer adopts at all.
+    expect(hosts).toMatch(/const move = chatMove\(\{/);
+    expect(pilot).not.toMatch(/chatMove\(/);
   });
 
   test('a run with no stored conversation says so, rather than "nothing yet"', () => {
@@ -332,8 +382,12 @@ describe('a resumed run keeps the column it already had', () => {
     // the run."* `reduce` builds a `Run` from the frames THIS process narrates,
     // and a resume narrates only what happens from the resume onwards — so a run
     // three plan rounds deep came back showing one.
-    expect(cockpit).toMatch(/seed = forResume\(foldReplay\(got\.steps\)\)/);
-    expect(cockpit).toMatch(/dispatch\(\{ type: 'seed', run: seed \}\)/);
+    // Followed by the instant the open turn is closed at (#302).
+    expect(cockpit).toMatch(/seed = forResume\(foldReplay\(got\.steps\), /);
+    // Case 2 (#246): the seed is handed to `launch`, which makes it the new
+    // run's own `Run`, rather than dispatched into the one reducer.
+    expect(cockpit).toMatch(/launch\(argv, null, seed, task\);/);
+    expect(cockpit).toMatch(/run: \{ \.\.\.\(seed \?\? emptyRun\(\)\), protocol: protocolRef\.current \}/);
   });
 
   test('the seed carries no ending, because a resume has not ended', () => {
@@ -348,29 +402,29 @@ describe('a resumed run keeps the column it already had', () => {
     }
   });
 
-  test('the seed lands AFTER launch, because launch resets the column', () => {
-    // **I had this backwards on the first cut, and it was invisible.** `launch`
-    // opens with `dispatch({ type: 'reset' })`, so a seed dispatched *before* it
-    // was thrown away by the very next action — and the symptom of a discarded
-    // seed is an empty column, which is exactly what the bug looked like anyway.
-    //
-    // Both dispatches land in one batch and the reducer applies them in order:
-    // reset, then seed. And it is still before any frame can arrive, because
-    // `launch` ends at `void send(...)` and the wire delivers asynchronously —
-    // so the seed can neither be erased by the reset nor overwrite something the
-    // loop has already said.
-    const body = cockpit.slice(cockpit.indexOf('const resume = useCallback'));
-    const launched = body.indexOf('launch(argv);');
-    const seeded = body.indexOf("dispatch({ type: 'seed'");
-    expect(launched).toBeGreaterThan(-1);
-    expect(seeded).toBeGreaterThan(launched);
+  test('the seed is the new run’s column from the start, so nothing can reset it', () => {
+    // **Case 2 (#246).** This pinned that the seed was dispatched AFTER
+    // `launch`, because `launch` opened with a reset of the one reducer and a
+    // seed sent first was thrown away. There is no shared reducer to reset now:
+    // each run is its own entry, created by `launch` with the seed as its `Run`,
+    // before the invoke is sent - so no live frame can arrive ahead of it and
+    // no reset can erase it. What the old pin guarded still holds, by
+    // construction rather than by order.
+    const body = cockpit.slice(cockpit.indexOf('const continueRun = useCallback'));
+    // The fold's call gained the instant the open turn is closed at (#302), so
+    // the anchor is the call's head rather than its whole argument list.
+    const fold = body.indexOf('seed = forResume(foldReplay(got.steps), ');
+    const launched = body.indexOf('launch(argv, null, seed, task);');
+    expect(fold).toBeGreaterThan(-1);
+    expect(launched).toBeGreaterThan(fold);
+    expect(cockpit).not.toMatch(/type: 'reset'/);
   });
 
   test('a resume does NOT seed the ending, because the run has not ended', () => {
     // `useReplay` applies the `result` because a run you opened has ended and
     // must say so. Seeding `completed` here would draw a halt banner over a run
     // that is starting.
-    const body = cockpit.slice(cockpit.indexOf('const resume = useCallback'));
+    const body = cockpit.slice(cockpit.indexOf('const continueRun = useCallback'));
     const upToLaunch = body.slice(0, body.indexOf('[launch],'));
     expect(upToLaunch).not.toMatch(/type: 'result'/);
   });
@@ -378,9 +432,9 @@ describe('a resumed run keeps the column it already had', () => {
   test('a replay that fails still resumes the run', () => {
     // Losing the history must never cost somebody the resume — an empty column
     // is what every resume had until now, not a new failure worth a banner.
-    const body = cockpit.slice(cockpit.indexOf('const resume = useCallback'));
+    const body = cockpit.slice(cockpit.indexOf('const continueRun = useCallback'));
     expect(body).toMatch(/\.catch\(\(\) => \{/);
-    expect(body).toMatch(/\.finally\(\(\) => \{[\s\S]*?launch\(argv\);/);
+    expect(body).toMatch(/\.finally\(\(\) => \{[\s\S]*?launch\(argv, null, seed, task\);/);
   });
 
   test('one fold serves the opened run and the resumed one', () => {
@@ -412,13 +466,14 @@ describe('a resume points at the repository, not at the run', () => {
     expect(footer).toMatch(/RESUMABLE\.has\(exit\) && run\.identity\?\.repo != null/);
   });
 
-  test('the seed is dispatched AFTER launch, because launch resets', () => {
-    // `launch` opens with `dispatch({ type: 'reset' })`, so a seed dispatched
-    // before it is thrown away by the very next action — and invisibly, because
-    // an empty column is exactly what the bug looked like anyway.
-    const body = cockpit.slice(cockpit.indexOf('const resume = useCallback'));
-    const launched = body.indexOf('launch(argv);\n          if (seed !== null)');
-    expect(launched).toBeGreaterThan(-1);
+  test('implement continues in the repository too, and is seeded like a resume', () => {
+    // The same mistake one button along (#246): implement passed `identity.dir`
+    // as `-C`. Both carry-ons go through one `continueRun`, so the seed is the
+    // same fold and the argv names the repository.
+    expect(footer).toMatch(/onImplement\(at\.runId, at\.repo\)/);
+    expect(footer).not.toMatch(/onImplement\(run\.identity\.runId, run\.identity\.dir\)/);
+    expect(footer).toMatch(/run\.plannedOnly !== null && run\.identity !== null && run\.identity\.repo == null/);
+    expect(cockpit).toMatch(/continueRun\(implementArgv\(runId, dir\), runId, dir, task\)/);
   });
 });
 
@@ -458,11 +513,13 @@ describe('the pilot reads the repository on screen, not the one in the sidebar (
     // another, and with no project selected it refused to send at all -
     // reported as *"I just tried sending a chat to an old run's pilot but I
     // can't"*.
-    const pane = cockpit.slice(cockpit.indexOf('<PilotPane'), cockpit.indexOf('onEffect={onEffect}'));
+    const pane = cockpit.slice(cockpit.indexOf('<PilotPane'), cockpit.indexOf('onEffect='));
     // Through `pilotDir` since #223, which IS `shownDir` except for the seconds
     // a launch waits for its run id, when it holds the directory of the chat
-    // that proposed the run (see `holdChat`).
-    expect(pane).toContain('dir={pilotDir}');
+    // that proposed the run (see `holdChat`). Case 2 (#305): it reaches the
+    // pane on screen through that pane's snapshot.
+    expect(pane).toContain('dir={at.dir}');
+    expect(cockpit).toContain('dir: pilotDir,');
     expect(cockpit).toContain('const pilotDir = holdChat?.dir ?? shownDir;');
     expect(pane).not.toContain('dir={repoDir}');
   });
