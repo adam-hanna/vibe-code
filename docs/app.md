@@ -6,7 +6,22 @@ The desktop app is the same loop with a window around it. It runs the same core 
 
 ## Building it
 
-The app is not packaged for download yet. Packaged builds are tracked in [#239](https://github.com/adam-hanna/vibe-code/issues/239). For now, build it from source. You need Rust and the [Tauri prerequisites](https://tauri.app/start/prerequisites/) for your platform:
+Download the latest version:
+
+| Platform | Download |
+|---|---|
+| Windows (x64) | [installer (`.exe`)](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-windows-x64-setup.exe) or [`.msi`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-windows-x64.msi) |
+| macOS (Apple Silicon only) | [`.dmg`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-macos-arm64.dmg) |
+| Linux (x86-64) | [`.AppImage`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-linux-x86_64.AppImage) or [`.deb`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-linux-amd64.deb) |
+
+These links always point at the newest published release. Older versions, and pre-releases such as `v1.6.0-rc.1`, are on the [releases page](https://github.com/adam-hanna/vibe-code/releases). A pre-release is never what these links serve.
+
+The builds are **unsigned**, so each operating system warns before the first launch:
+
+- **macOS**: if it says the app is damaged or comes from an unidentified developer, move it to Applications and run `xattr -cr /Applications/Vibe.app`. There is no Intel build; Intel Macs build from source.
+- **Windows**: SmartScreen says it protected your PC. Click **More info**, then **Run anyway**.
+
+Or build it from source. You need Rust and the [Tauri prerequisites](https://tauri.app/start/prerequisites/) for your platform:
 
 ```bash
 git clone https://github.com/adam-hanna/vibe-code.git

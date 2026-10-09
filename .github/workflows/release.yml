@@ -1,0 +1,339 @@
+# Builds the desktop app on every `v*` tag and attaches the bundles to one draft
+# GitHub release (#239).
+#
+# - The `release` job creates the draft once, before the matrix runs, so no two
+#   platforms race to create it. A re-run reuses a draft; a tag whose release is
+#   already published is refused rather than uploaded into.
+# - A tag containing `-` (v1.5.1-rc.1) is marked as a pre-release.
+# - The notes are that version's CHANGELOG.md section, or one fallback line.
+# - A tag push runs this file as it is at the tagged commit.
+# - A tag that is not package.json's version is a warning, not a failure: the
+#   MSI step refuses a non-numeric pre-release version, so an rc tag builds from
+#   a tree still at the last release, and the bundles carry package.json's
+#   version.
+# - Nothing here publishes the CLI to npm. That stays manual, because it needs
+#   an OTP. Nothing here publishes the draft either: a person does, after
+#   installing it.
+#
+# Downloads. Each installer is uploaded twice: under Tauri's versioned name,
+# and under a stable name with no version in it (`=Vibe-…` in each matrix
+# entry's `assets` below, the one place those names are written). The README
+# and docs/app.md link to `releases/latest/download/<stable name>`, which
+# GitHub serves from the newest *published* release - drafts and pre-releases
+# are never "latest" - so no link changes per release.
+# `tests/download-names.test.ts` fails when the pages and this file disagree.
+#
+# Updater artifacts (#299 builds on them). With TAURI_SIGNING_PRIVATE_KEY and
+# TAURI_SIGNING_PRIVATE_KEY_PASSWORD set, the build turns on
+# `bundle.createUpdaterArtifacts`, each platform uploads its update bundle and
+# a `.sig` beside it, and the `updater` job writes `latest.json` - the file an
+# installed app checks, at `releases/latest/download/latest.json`. Without the
+# key (a fork) the build skips them rather than failing, and no `latest.json`
+# is written. tauri.conf.json leaves the setting off, so a local
+# `npm run app:build` never needs the key. The matching public key is for the
+# app's updater plugin (#299) and is not needed to produce these files.
+#
+#   TAURI_SIGNING_PRIVATE_KEY, TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+#       Signs the update bundles. Never printed and never written to a file.
+#       Losing it means installed copies can no longer update themselves.
+#
+# Signing. Every other secret is optional, and adding one needs no change to any job.
+# With none set, Windows builds are unsigned and macOS builds are ad-hoc signed
+# (`bundle.macOS.signingIdentity: "-"` in tauri.conf.json - Apple Silicon will
+# not run unsigned code). A secret is only exported when it is non-empty,
+# because Actions expands an absent secret to "" and an empty
+# APPLE_SIGNING_IDENTITY would replace the config's "-" with nothing.
+#
+#   APPLE_CERTIFICATE (base64 .p12), APPLE_CERTIFICATE_PASSWORD,
+#   APPLE_SIGNING_IDENTITY
+#       Developer ID signing on macOS. Tauri imports the certificate into a
+#       temporary keychain.
+#   APPLE_ID, APPLE_PASSWORD (app-specific), APPLE_TEAM_ID
+#       Notarisation through an Apple ID. Needs the certificate.
+#   APPLE_API_ISSUER, APPLE_API_KEY (key id), APPLE_API_KEY_P8_BASE64
+#       Notarisation through App Store Connect. The .p8 is written to
+#       $RUNNER_TEMP and APPLE_API_KEY_PATH points at it. Needs the certificate.
+#   WINDOWS_CERTIFICATE (base64 .pfx), WINDOWS_CERTIFICATE_PASSWORD,
+#   WINDOWS_TIMESTAMP_URL (optional, default http://timestamp.digicert.com)
+#       Authenticode signing on Windows. The certificate is imported into the
+#       runner's store and its thumbprint is handed to `tauri build --config`,
+#       so tauri.conf.json is never edited.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Create the draft release
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"
+          VERSION="${TAG#v}"
+          PKG=$(node -p "require('./package.json').version")
+          if [ "$VERSION" != "$PKG" ]; then
+            echo "::warning::Tag $TAG is not package.json's version $PKG; the bundles carry $PKG."
+          fi
+
+          : > body.md
+          if [ -f CHANGELOG.md ]; then
+            awk -v h="## $VERSION " 'index($0, h) == 1 { f = 1; next } f && /^## / { exit } f' CHANGELOG.md > body.md
+          fi
+          if ! grep -q '[^[:space:]]' body.md; then
+            echo "Desktop app builds for $TAG." > body.md
+          fi
+
+          PRE=()
+          case "$TAG" in *-*) PRE=(--prerelease) ;; esac
+
+          draft=$(gh release view "$TAG" --json isDraft -q .isDraft 2>/dev/null || true)
+          case "$draft" in
+            true)
+              echo "Draft release $TAG already exists; reusing it." ;;
+            false)
+              echo "::error::Release $TAG is already published; refusing to upload builds into it."
+              exit 1 ;;
+            *)
+              gh release create "$TAG" --draft --verify-tag --title "$TAG" --notes-file body.md "${PRE[@]}" ;;
+          esac
+
+  build:
+    needs: release
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # `assets`: `<glob>=<stable name>`. Each glob must match exactly one
+          # file, which is uploaded under its own name and under the stable one.
+          # `updater`: the update bundles and signatures, uploaded only when the
+          # signing key is set.
+          - os: windows-latest
+            assets: >-
+              bundle/msi/*.msi=Vibe-windows-x64.msi
+              bundle/nsis/*-setup.exe=Vibe-windows-x64-setup.exe
+            updater: bundle/msi/*.msi.sig bundle/nsis/*-setup.exe.sig
+          # Apple Silicon only. The .app is the bundle the dmg wraps.
+          - os: macos-14
+            assets: >-
+              bundle/dmg/*.dmg=Vibe-macos-arm64.dmg
+            updater: bundle/macos/*.app.tar.gz bundle/macos/*.app.tar.gz.sig
+          # 22.04 for its older glibc.
+          - os: ubuntu-22.04
+            assets: >-
+              bundle/deb/*.deb=Vibe-linux-amd64.deb
+              bundle/appimage/*.AppImage=Vibe-linux-x86_64.AppImage
+            updater: bundle/appimage/*.AppImage.sig
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      # This is the runtime the bundle ships: stage-sidecar copies
+      # `process.execPath` into the app as its Node.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            app/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - if: runner.os == 'Linux'
+        uses: ./.github/actions/linux-deps
+      - run: npm ci && npm run build
+      - run: npm ci
+        working-directory: app
+
+      - name: macOS signing environment
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+        run: |
+          set -euo pipefail
+          for n in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
+                   APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID APPLE_API_ISSUER APPLE_API_KEY; do
+            v="${!n}"
+            if [ -n "$v" ]; then
+              printf '%s=%s\n' "$n" "$(printf '%s' "$v" | tr -d '\r\n')" >> "$GITHUB_ENV"
+            fi
+          done
+          if [ -n "$APPLE_API_KEY_P8_BASE64" ]; then
+            printf '%s' "$APPLE_API_KEY_P8_BASE64" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
+            echo "APPLE_API_KEY_PATH=$RUNNER_TEMP/AuthKey.p8" >> "$GITHUB_ENV"
+          fi
+
+      - name: Windows signing certificate
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrEmpty($env:WINDOWS_CERTIFICATE)) {
+            Write-Output 'No WINDOWS_CERTIFICATE secret: building unsigned.'
+            exit 0
+          }
+          $b64 = Join-Path $env:RUNNER_TEMP 'certificate.b64'
+          $pfx = Join-Path $env:RUNNER_TEMP 'certificate.pfx'
+          Set-Content -Path $b64 -Value $env:WINDOWS_CERTIFICATE -NoNewline
+          certutil -decode $b64 $pfx | Out-Null
+          Remove-Item $b64
+          $password = ConvertTo-SecureString -String "$env:WINDOWS_CERTIFICATE_PASSWORD" -Force -AsPlainText
+          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          Remove-Item $pfx
+          $timestamp = $env:WINDOWS_TIMESTAMP_URL
+          if ([string]::IsNullOrEmpty($timestamp)) { $timestamp = 'http://timestamp.digicert.com' }
+          $config = @{ bundle = @{ windows = @{
+            certificateThumbprint = $cert.Thumbprint
+            digestAlgorithm = 'sha256'
+            timestampUrl = $timestamp
+          } } } | ConvertTo-Json -Depth 5
+          $path = Join-Path $env:RUNNER_TEMP 'tauri.sign.json'
+          Set-Content -Path $path -Value $config
+          "TAURI_ARGS=--config $($path -replace '\\', '/')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # The key is only checked for, never echoed. Without it the bundles still
+      # build and the updater files are skipped.
+      - name: Updater artifacts
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::notice::No TAURI_SIGNING_PRIVATE_KEY secret: building without updater artifacts."
+            exit 0
+          fi
+          conf="$RUNNER_TEMP/tauri.updater.json"
+          printf '%s\n' '{ "bundle": { "createUpdaterArtifacts": true } }' > "$conf"
+          echo "UPDATER=1" >> "$GITHUB_ENV"
+          echo "TAURI_ARGS=${TAURI_ARGS:-} --config ${conf//\\//}" >> "$GITHUB_ENV"
+
+      # beforeBuildCommand runs the webview build and stage:sidecar.
+      - name: Build the bundles
+        shell: bash
+        working-directory: app
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run app:build -- ${TAURI_ARGS:-}
+
+      - name: Upload to the draft release
+        shell: bash
+        working-directory: app/src-tauri/target/release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ASSETS: ${{ matrix.assets }}
+          UPDATER_FILES: ${{ matrix.updater }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          stable="$RUNNER_TEMP/stable"
+          mkdir -p "$stable"
+          files=()
+          # Split with `read`, which never globs: under nullglob an unquoted
+          # pattern that matches nothing would vanish instead of failing below.
+          read -r -a entries <<< "$ASSETS"
+          read -r -a updater <<< "$UPDATER_FILES"
+          for entry in "${entries[@]}"; do
+            glob="${entry%%=*}"
+            name="${entry#*=}"
+            matched=($glob)
+            if [ ${#matched[@]} -ne 1 ]; then
+              echo "::error::$glob matched ${#matched[@]} files; it must match exactly one to be uploaded as $name."
+              exit 1
+            fi
+            cp "${matched[0]}" "$stable/$name"
+            files+=("${matched[0]}" "$stable/$name")
+          done
+          if [ "${UPDATER:-}" = 1 ]; then
+            for glob in "${updater[@]}"; do
+              matched=($glob)
+              if [ ${#matched[@]} -eq 0 ]; then
+                echo "::error::The signed build produced no $glob."
+                exit 1
+              fi
+              files+=("${matched[@]}")
+            done
+          fi
+          gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
+
+  # latest.json: what an installed app reads to learn of a new version and fetch
+  # it. Built from the `.sig` files the matrix uploaded, so it only names
+  # bundles that are really on this release, and only runs when every platform
+  # built. Its URLs name the versioned assets of this tag.
+  updater:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Write latest.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"
+          mkdir sigs
+          gh release download "$TAG" --pattern '*.sig' --dir sigs || true
+          shopt -s nullglob
+          sigs=(sigs/*.sig)
+          if [ ${#sigs[@]} -eq 0 ]; then
+            echo "::notice::No update signatures on $TAG (no signing key): not writing latest.json."
+            exit 0
+          fi
+          url="https://github.com/$GH_REPO/releases/download/$TAG"
+          platforms='{}'
+          add() {
+            platforms=$(jq --arg k "$1" --arg u "$url/$2" --rawfile s "sigs/$2.sig" \
+              '. + {($k): {signature: ($s | rtrimstr("\n")), url: $u}}' <<< "$platforms")
+          }
+          for f in "${sigs[@]}"; do
+            asset=$(basename "$f" .sig)
+            case "$asset" in
+              *.AppImage) add linux-x86_64 "$asset" ;;
+              *.app.tar.gz) add darwin-aarch64 "$asset" ;;
+              *.msi) add windows-x86_64-msi "$asset" ;;
+              *-setup.exe) add windows-x86_64-nsis "$asset"; add windows-x86_64 "$asset" ;;
+              *) echo "::warning::$asset.sig matches no updater platform; left out of latest.json." ;;
+            esac
+          done
+          gh release view "$TAG" --json body -q .body > notes.md
+          jq -n --arg v "$(node -p "require('./package.json').version")" \
+            --rawfile n notes.md \
+            --arg d "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --argjson p "$platforms" \
+            '{version: $v, notes: $n, pub_date: $d, platforms: $p}' > latest.json
+          gh release upload "$TAG" latest.json --clobber

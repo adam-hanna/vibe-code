@@ -69,7 +69,9 @@ The app is the same loop with a window around it. You describe what you want to 
 
 The app also pauses at the checkpoints you choose, lets you stop a turn in flight, and answers a run's questions in place. Settings edits `vibe.config.json` for you.
 
-The app isn't packaged for download yet. To build it (Rust and the [Tauri prerequisites](https://tauri.app/start/prerequisites/) are needed):
+Download the latest version: Windows x64 [installer](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-windows-x64-setup.exe) or [`.msi`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-windows-x64.msi), Apple Silicon [`.dmg`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-macos-arm64.dmg), Linux [`.AppImage`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-linux-x86_64.AppImage) or [`.deb`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-linux-amd64.deb). Older versions are on the [releases page](https://github.com/adam-hanna/vibe-code/releases). The builds are **unsigned**. On macOS, if it says the app is damaged or from an unidentified developer, run `xattr -cr /Applications/Vibe.app`. On Windows, SmartScreen warns first: click **More info**, then **Run anyway**. Intel Macs build from source.
+
+To build it yourself (Rust and the [Tauri prerequisites](https://tauri.app/start/prerequisites/) are needed):
 
 ```bash
 cd app && npm install && npm run app:build

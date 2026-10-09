@@ -27,6 +27,13 @@ import { createRun } from '@src/run.js';
 import type { ClaudeTurnResult, Config, TokenUsage } from '@src/types.js';
 import { isMcpList } from './helpers/codex-mcp.js';
 
+// Only so `resolveBin` succeeds on a machine where neither CLI is installed -
+// a hosted CI runner is one (#239). Nothing here spawns either: the cases
+// inject what they run. Without it they passed only where `claude` and
+// `codex` happened to be on PATH.
+process.env['VIBE_CLAUDE_BIN'] = process.execPath;
+process.env['VIBE_CODEX_BIN'] = process.execPath;
+
 /**
  * A run's children reach no MCP server unless a role names one (#138).
  *
