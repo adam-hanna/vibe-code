@@ -30,7 +30,8 @@ The brakes are independent, and any one of them can stop a run:
 
 | Brake | What it does |
 |---|---|
-| **Round caps** | `loop.maxPlanRounds` and `loop.maxReviewRounds` (5 each), `loop.maxVerifyRounds` (3) and `loop.maxQuestionRounds` (3). Verification fixes have their own counter, so a stubborn test suite cannot use up the reviewer's rounds. Exit 3. |
+| **Round caps** | `loop.maxPlanRounds` and `loop.maxReviewRounds` (5 each) and `loop.maxVerifyRounds` (3). Verification fixes have their own counter, so a stubborn test suite cannot use up the reviewer's rounds. Exit 3. |
+| **Question rounds** | `loop.maxQuestionRounds` (3) bounds how many times the planner may answer its own questions. A question round does not use up a plan round. A planner still asking after the cap stops the run for you to answer them directly: exit 2, not 3, because what is missing is a decision rather than agreement. |
 | **Oscillation** | The set of blocking finding ids is fingerprinted every round. The same set `loop.oscillationThreshold` rounds running (3) means nothing new is being produced. Exit 3. |
 | **Convergence trend** | Late in the round budget, over the last `loop.convergenceWindow` rounds, a blocking count that is not falling stops the run. A flat count whose findings keep changing is work being done, and is allowed one more window. Exit 3. |
 | **Persistent finding** | A single finding that keeps coming back while the rest change is **reported, not stopped on**. Persistence is not evidence that it cannot be fixed. |
