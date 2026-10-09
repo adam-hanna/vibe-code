@@ -116,7 +116,7 @@ test('codex: every recorded fixture parses to a thread, tokens and the structure
     assert.ok(events.threadId !== null, `${dir}: parseEvents found no thread id`);
     assert.ok(events.tokens.total > 0, `${dir}: parseEvents read no tokens`);
     // The vocabulary the unknown-item warning holds Codex to (#298).
-    assert.deepEqual(events.unrecognised, [], `${dir}: item types missing from KNOWN_CODEX_ITEMS`);
+    assert.deepEqual(snapshot.unrecognised, [], `${dir}: item types missing from KNOWN_CODEX_ITEMS`);
     for (const line of lines) {
       const event = JSON.parse(line) as { type?: unknown; item?: { type?: unknown } };
       if (typeof event.type === 'string' && event.type.startsWith('item.') && typeof event.item?.type === 'string') {

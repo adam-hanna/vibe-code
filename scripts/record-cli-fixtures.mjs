@@ -53,9 +53,12 @@ function versionOf(cli, bin) {
   return { version: m[1], versionOutput: text.trim() };
 }
 
+// Thrown rather than exiting on the spot: `process.exit` would skip the
+// `finally` that removes each turn's scratch directory.
+class RecordError extends Error {}
+
 function fail(cli, why) {
-  console.error(`record-cli-fixtures: ${cli}: ${why}`);
-  process.exit(1);
+  throw new RecordError(`record-cli-fixtures: ${cli}: ${why}`);
 }
 
 function target(cli, version) {
@@ -134,5 +137,11 @@ function recordCodex() {
   }
 }
 
-recordClaude();
-recordCodex();
+try {
+  recordClaude();
+  recordCodex();
+} catch (err) {
+  if (!(err instanceof RecordError)) throw err;
+  console.error(err.message);
+  process.exitCode = 1;
+}

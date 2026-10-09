@@ -55,7 +55,8 @@ import {
 import type { RolePatches } from '@src/roles.js';
 import { setOwn } from '@src/runtime.js';
 import { claudeBin, setSessionArgs } from '@src/claude.js';
-import { codexBin, resetUnrecognisedCodexItems } from '@src/codex.js';
+import { codexBin } from '@src/codex.js';
+import { resetUnrecognisedCodexItems } from '@src/progress.js';
 import { detectCliVersions } from '@src/cliversions.js';
 import { describeMcp, mcpRefusals } from '@src/mcp.js';
 import { run as runChild } from '@src/proc.js';
@@ -688,6 +689,9 @@ async function startRun(
 
   log.attachTranscript(path.join(state.dir, 'transcript.log'));
   const cliVersions = await detectedCliVersions(flags);
+  // Saved before `run_started` says them, so the archive never announces versions
+  // it does not hold - a resume compares against what is stored (#298).
+  if (cliVersions !== null) noteCliVersions(state, cliVersions);
   log.heading(`Run ${state.id}`, {
     // `repo` and `task` are the other two thirds of hi-fi 1's identity header
     // (#223), and both were already certain here. `dir` is the *run's*
@@ -716,7 +720,6 @@ async function startRun(
       cliVersions,
     },
   });
-  if (cliVersions !== null) noteCliVersions(state, cliVersions);
   log.info(`Repo:    ${targetDir}`);
   log.info(`Claude:  ${shownModel(cfg.claude.model, 'claude')} / ${cfg.claude.effort}`);
   // The thread count is read off the table rather than stated: since #45 the
@@ -991,6 +994,8 @@ async function resumeRun(
       applyEdits();
       renameSync(answersFile, path.join(state.dir, `stalled-${state.planRound}.md`));
       const cliVersions = await detectedCliVersions(flags);
+      // Saved before `run_started` says them (#298); see the start path.
+      if (cliVersions !== null) noteCliVersions(state, cliVersions);
       log.heading(`Resuming ${state.id}`, {
         id: 'run_started',
         data: {
@@ -1004,7 +1009,6 @@ async function resumeRun(
           cliVersions,
         },
       });
-      if (cliVersions !== null) noteCliVersions(state, cliVersions);
       return execute(state, cfg, true, flags.skipProbe === true, REAL_GATE, loop, handle);
     }
 
@@ -1051,6 +1055,8 @@ async function resumeRun(
   // the same question either way, and `resumed` is the field that answers the
   // one thing that differs (#207).
   const cliVersions = await detectedCliVersions(flags);
+  // Saved before `run_started` says them (#298); see the start path.
+  if (cliVersions !== null) noteCliVersions(state, cliVersions);
   log.heading(`Resuming ${state.id}`, {
     id: 'run_started',
     data: {
@@ -1064,7 +1070,6 @@ async function resumeRun(
       cliVersions,
     },
   });
-  if (cliVersions !== null) noteCliVersions(state, cliVersions);
   return execute(state, cfg, true, flags.skipProbe === true, REAL_GATE, loop, handle);
 }
 

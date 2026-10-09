@@ -9,8 +9,7 @@ import { configuredBin } from '@src/clipaths.js';
 import { agentEnv } from '@src/auth.js';
 import type { ChildEnding, RunFn } from '@src/proc.js';
 import { detail, warn } from '@src/log.js';
-import { TESTED_CLI_VERSIONS } from '@src/config.js';
-import { createHeartbeat, KNOWN_CODEX_ITEMS, parseCodexLine, withHeartbeat } from '@src/progress.js';
+import { createHeartbeat, parseCodexLine, watchCodexItems, withHeartbeat } from '@src/progress.js';
 import type { ProgressOptions } from '@src/progress.js';
 import type { Effort, Sandbox, TokenUsage, TurnActivity } from '@src/types.js';
 
@@ -125,12 +124,6 @@ interface CodexEvents {
    * would fail turns that completed.
    */
   failed: boolean;
-  /**
-   * Completed item types outside `KNOWN_CODEX_ITEMS`, each once, in the order
-   * seen (#298). Collected here rather than by the heartbeat's parser because
-   * this read runs on every turn, with progress on or off.
-   */
-  unrecognised: string[];
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -173,7 +166,7 @@ function extractTokens(usage: Record<string, unknown>): TokenUsage {
  * and losing a token count is not worth losing the work for.
  */
 export function parseEvents(stdout: string): CodexEvents {
-  const out: CodexEvents = { threadId: null, tokens: ZERO_TOKENS, failure: null, failed: false, unrecognised: [] };
+  const out: CodexEvents = { threadId: null, tokens: ZERO_TOKENS, failure: null, failed: false };
 
   for (const line of stdout.split(/\r?\n/)) {
     const trimmed = line.trim();
@@ -196,11 +189,6 @@ export function parseEvents(stdout: string): CodexEvents {
       const message = isRecord(err) ? err['message'] : event['message'];
       if (typeof message === 'string') out.failure = message;
       if (event['type'] === 'turn.failed') out.failed = true;
-    } else if (event['type'] === 'item.completed' && isRecord(event['item'])) {
-      const itemType = event['item']['type'];
-      if (typeof itemType === 'string' && itemType !== '' && !KNOWN_CODEX_ITEMS.has(itemType)) {
-        if (!out.unrecognised.includes(itemType)) out.unrecognised.push(itemType);
-      }
     }
   }
   return out;
@@ -341,45 +329,10 @@ function supersede(file: string, keepAt: string): void {
   }
 }
 
-/**
- * Unrecognised Codex item types already warned about in this run, and the
- * Codex version the run is under (#298).
- *
- * A module latch, `cancel.ts`'s trade and its reason: one run per process.
- * `execute` resets it on the way in, so a type warned about in one run is
- * warned about again in the next.
- */
-const warnedItems = new Set<string>();
-let codexInstalled: string | null = null;
-
-export function resetUnrecognisedCodexItems(installed: string | null): void {
-  warnedItems.clear();
-  codexInstalled = installed;
-}
-
-/**
- * Warn once per run for each item type this build does not recognise (#298).
- * Narration with no event, and never a failure: the turn carries on exactly as
- * it would have. `parseEvents` collects and this says, so the parser keeps no
- * side effect.
- */
-export function noteCodexItems(types: readonly string[]): void {
-  for (const type of types) {
-    if (warnedItems.has(type)) continue;
-    warnedItems.add(type);
-    const installed = codexInstalled;
-    const tested = TESTED_CLI_VERSIONS.codex;
-    try {
-      warn(
-        `codex emitted an item type this build does not recognise: "${type}" (codex ` +
-          `${installed ?? 'version unknown'} installed, tested with ${tested}). The turn continues.`,
-        { id: 'codex_item_unrecognised', data: { type, installed, tested } },
-      );
-    } catch {
-      // Narration must never end a turn.
-    }
-  }
-}
+// The once-per-run warning for an unrecognised item type lives in
+// `src/progress.ts`, beside the parser that collects it (#298). Re-exported so
+// this adapter's callers have one name for it.
+export { noteCodexItems, resetUnrecognisedCodexItems } from '@src/progress.js';
 
 /**
  * The flags the direct fork vector sends. `--output-schema` is conditional, so
@@ -685,12 +638,14 @@ export async function codexTurn(
       onBytes: (bytes) => {
         outputBytes = bytes;
       },
-      ...(heartbeat === null ? {} : { onLine: heartbeat.onLine }),
+      // Every line goes through a parser as it arrives, with progress on or off:
+      // an unrecognised item type is warned about when it is seen, so a turn
+      // that is then stopped, times out or throws has still said so (#298).
+      onLine: heartbeat === null ? watchCodexItems : heartbeat.onLine,
     });
     ended.seen = { code, signal };
 
     const events = parseEvents(stdout);
-    noteCodexItems(events.unrecognised);
     // `resumeAfterFork` is in the chain because the two-call path takes its turn
     // through `exec resume`, whose stream names the thread it resumed - but if
     // that turn emitted no `thread.started` at all, the id the first call minted

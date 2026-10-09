@@ -3549,8 +3549,9 @@ nothing. `src/cliversions.ts` holds it, and five decisions travel with it, all t
   guess.
 - **An unknown Codex item type warns once per run and never fails a turn.** `KNOWN_CODEX_ITEMS`
   in `src/progress.ts` is a vocabulary for a warning, not an allow-list: Codex adds item kinds
-  as it grows. `parseEvents` collects them rather than the heartbeat's parser, because it
-  reads every turn's stdout with progress on or off. Claude's stream has no equivalent.
+  as it grows. `parseCodexLine` collects them and the line handler says them as each line
+  arrives - the heartbeat's `onLine`, or `watchCodexItems` when progress is off - so a turn
+  stopped or timed out a moment later has still said so. Claude's stream has no equivalent.
 
 **The fixtures are recorded by hand, outside a run, and that is the point of them.** The
 contract tests over `tests/fixtures/cli/` are what catch a changed event shape, which `--help`
