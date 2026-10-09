@@ -4,6 +4,8 @@
 
 Claude plans and Codex critiques, until the plan has no blocking findings. Then Claude implements, vibe runs your tests, and Codex reviews the diff, until that is clean too. vibe stops only when it actually needs you.
 
+**Documentation:** https://adam-hanna.github.io/vibe-code/
+
 ![The vibe desktop app: projects and runs on the left, the pilot chat in the middle, the run's status on the right](docs/images/app-pilot.png)
 
 ```
@@ -75,7 +77,7 @@ cd app && npm install && npm run app:build
 
 ## Configuration
 
-Put a `vibe.config.json` in the repository. Flags override it. `vibe.config.example.json` is a worked example. The keys most worth knowing:
+Put a `vibe.config.json` in the repository. Flags override it. `vibe.config.example.json` is a worked example, and the [configuration reference](https://adam-hanna.github.io/vibe-code/configuration.html) lists every key. The keys most worth knowing:
 
 | Key | What it does |
 |---|---|
@@ -114,7 +116,7 @@ When a round changes a test file or `vibe.config.json`, the reviewer is shown ea
 
 - **Codex cost isn't reported.** Codex runs on a subscription and no output mode returns a price, so vibe reports tokens and never a guessed dollar figure. `budget.maxTokens` covers both agents.
 - **Agreement isn't proof.** A clean run means two different models agreed and your tests passed. Both can still be wrong in the same way.
-- **Long docs are coming.** [#230](https://github.com/adam-hanna/vibe-code/issues/230) tracks a docs site with a full config reference and how the loop works.
+- **The full documentation is at [adam-hanna.github.io/vibe-code](https://adam-hanna.github.io/vibe-code/)**: every config key, every command, and how the loop works.
 
 ## Contributing
 
