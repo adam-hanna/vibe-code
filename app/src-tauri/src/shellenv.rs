@@ -246,11 +246,11 @@ mod tests {
         // framing still parsed, and a bare `contains` could not say what came
         // back instead.
         let probe = vars.iter().find(|(name, _)| name == "VIBE_SHELLENV_PROBE");
-        let vibe: Vec<&String> = vars.iter().map(|(name, _)| name).filter(|n| n.contains("VIBE")).collect();
+        let names: Vec<&String> = vars.iter().map(|(name, _)| name).collect();
         assert_eq!(
             probe.map(|(_, value)| value.as_str()),
             Some("it came back"),
-            "{shell} returned {} variables; VIBE ones: {vibe:?}",
+            "{shell} returned {} variables, by name: {names:?}",
             vars.len(),
         );
     }
