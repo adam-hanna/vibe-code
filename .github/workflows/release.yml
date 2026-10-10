@@ -39,6 +39,21 @@
 #       Signs the update bundles. Never printed and never written to a file.
 #       Losing it means installed copies can no longer update themselves.
 #
+# Provenance (#317). The `build` job attests every file it uploads - each
+# versioned installer, its stable-name copy, and with the signing key the update
+# bundles and `.sig` files - with actions/attest-build-provenance, before the
+# upload and from the same list the upload reads. It attests there because that
+# is where the files were made: a later job attesting files downloaded back from
+# the release would vouch for whatever the release held, not for what was built.
+# The `updater` job then writes SHA256SUMS over every other asset on the release,
+# in its own step after latest.json, so it does not depend on the signing key and
+# a fork still gets checksums; it attests SHA256SUMS, and latest.json when there
+# is one. An attestation is stored against a digest, not against the release, so
+# a file verifies the same whether the draft is published or not. The repository
+# is public, so no secret is needed: the two jobs need `id-token: write` and
+# `attestations: write`. `tests/release-verification.test.ts` fails when these
+# steps, or the pages' "Verifying a download" instructions, go missing.
+#
 # Signing. Every other secret is optional, and adding one needs no change to any job.
 # With none set, Windows builds are unsigned and macOS builds are ad-hoc signed
 # (`bundle.macOS.signingIdentity: "-"` in tauri.conf.json - Apple Silicon will
@@ -120,6 +135,8 @@ jobs:
     needs: release
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
@@ -248,12 +265,14 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run app:build -- ${TAURI_ARGS:-}
 
-      - name: Upload to the draft release
+      # The one list of what this platform puts on the release. The attest step
+      # and the upload step below both read it, so nothing is attested that is
+      # not uploaded, or uploaded that is not attested.
+      - name: Collect the release files
+        id: assets
         shell: bash
         working-directory: app/src-tauri/target/release
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
           ASSETS: ${{ matrix.assets }}
           UPDATER_FILES: ${{ matrix.updater }}
         run: |
@@ -287,17 +306,56 @@ jobs:
               files+=("${matched[@]}")
             done
           fi
+          # One path a line, from the workspace root, with forward slashes: the
+          # attest action resolves paths from the workspace, not from this
+          # step's directory, and $RUNNER_TEMP is D:\a\_temp on Windows.
+          {
+            echo 'paths<<VIBE_EOF'
+            for f in "${files[@]}"; do
+              case "$f" in
+                /*|[A-Za-z]:*) p="$f" ;;
+                *) p="app/src-tauri/target/release/$f" ;;
+              esac
+              echo "${p//\\//}"
+            done
+            echo 'VIBE_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      # Before the upload, where the files were made. A stable-name copy has the
+      # same digest as its versioned file; both are listed so both names verify.
+      - name: Attest the release files
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: ${{ steps.assets.outputs.paths }}
+
+      - name: Upload to the draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PATHS: ${{ steps.assets.outputs.paths }}
+        run: |
+          set -euo pipefail
+          mapfile -t files <<< "$PATHS"
           gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
 
   # latest.json: what an installed app reads to learn of a new version and fetch
   # it. Built from the `.sig` files the matrix uploaded, so it only names
   # bundles that are really on this release, and only runs when every platform
   # built. Its URLs name the versioned assets of this tag.
+  #
+  # SHA256SUMS: written here too, after every platform has uploaded, so it never
+  # lists a partial set. It is a step of its own after latest.json because that
+  # step stops early when there is no signing key, and a fork should still get
+  # checksums. The job keeps the name `updater` from its first file;
+  # tests/download-names.test.ts cites it by that name.
   updater:
     needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
@@ -339,3 +397,36 @@ jobs:
             --argjson p "$platforms" \
             '{version: $v, notes: $n, pub_date: $d, platforms: $p}' > latest.json
           gh release upload "$TAG" latest.json --clobber
+
+      # Every asset on the release except SHA256SUMS itself, read back from the
+      # release so the sums are of what people download. latest.json is
+      # attested from that same downloaded copy.
+      - name: Write SHA256SUMS
+        id: sums
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"
+          rm -rf assets && mkdir assets
+          gh release download "$TAG" --dir assets
+          rm -f assets/SHA256SUMS
+          ( cd assets && LC_ALL=C ls -1 | LC_ALL=C sort | xargs -d '\n' sha256sum -- ) > SHA256SUMS
+          test -s SHA256SUMS
+          {
+            echo 'paths<<VIBE_EOF'
+            echo SHA256SUMS
+            if [ -f assets/latest.json ]; then echo assets/latest.json; fi
+            echo 'VIBE_EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Attest SHA256SUMS and latest.json
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: ${{ steps.sums.outputs.paths }}
+
+      - name: Upload SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"
+          gh release upload "$TAG" SHA256SUMS --clobber

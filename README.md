@@ -71,6 +71,8 @@ The app also pauses at the checkpoints you choose, lets you stop a turn in fligh
 
 Download the latest version: Windows x64 [installer](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-windows-x64-setup.exe) or [`.msi`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-windows-x64.msi), Apple Silicon [`.dmg`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-macos-arm64.dmg), Linux [`.AppImage`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-linux-x86_64.AppImage) or [`.deb`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-linux-amd64.deb). Older versions are on the [releases page](https://github.com/adam-hanna/vibe-code/releases). The builds are **unsigned**. On macOS, if it says the app is damaged or from an unidentified developer, run `xattr -cr /Applications/Vibe.app`. On Windows, SmartScreen warns first: click **More info**, then **Run anyway**. Intel Macs build from source.
 
+To check that a download came from this repository, run `gh attestation verify Vibe-macos-arm64.dmg --repo adam-hanna/vibe-code`. Without `gh`, compare it with the release's `SHA256SUMS` (`sha256sum -c SHA256SUMS --ignore-missing`), which only shows the file matches the release page. More in [Verifying a download](https://adam-hanna.github.io/vibe-code/app.html#verifying-a-download).
+
 To build it yourself (Rust and the [Tauri prerequisites](https://tauri.app/start/prerequisites/) are needed):
 
 ```bash

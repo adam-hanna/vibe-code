@@ -2182,6 +2182,7 @@ src/pilotaccess.ts   what the pilot may do unasked: the safe list, YOLO, its dir
 src/mcp.ts           which MCP servers a run's children reach: none unless a role names one
 tests/               node:test, one file per concern
 tests/docs-drift.test.ts  the docs' reference pages against DEFAULTS, EXIT and the commands - nothing missing, not accuracy
+tests/release-verification.test.ts  the release's attestations and SHA256SUMS, and the pages that say how to check them
 
 app/                 the desktop app - Vite + React, its own package.json and gate
 app/src/design/      tokens.css, theme.css (Tailwind over the tokens), and the primitives still drawn
@@ -3879,16 +3880,21 @@ and its commits survive it.
    re-record the fixtures with `node scripts/record-cli-fixtures.mjs` (#298). Commit both.
 6. Verify from a clean checkout: `npm run typecheck`, `npm test`, `npm pack --dry-run`.
 7. Merge, then tag: `git tag -a v<version> -m "..." && git push origin v<version>`.
-8. **Wait for `release.yml` on the tag, install the draft on at least one machine, then publish
+8. **When `release.yml` has finished on the tag, verify the draft before publishing it:**
+   `gh release download v<version> --pattern 'Vibe-macos-arm64.dmg' --pattern SHA256SUMS`, then
+   `gh attestation verify Vibe-macos-arm64.dmg --repo adam-hanna/vibe-code` and
+   `sha256sum -c SHA256SUMS --ignore-missing`. An attestation is stored against a file's digest,
+   not against the release, so it verifies while the release is still a draft.
+9. **Wait for `release.yml` on the tag, install the draft on at least one machine, then publish
    the draft release.** The workflow builds the Windows, macOS (Apple Silicon) and Linux bundles
    into one draft and never publishes it. A tag that is not `package.json`'s version still
    builds, with a warning, and the bundles carry `package.json`'s version - so a throwaway
    `v<version>-rc.N` tag is how to try the workflow, and it yields a draft pre-release. A tag
    whose release is already published is refused rather than uploaded into.
-9. `npm publish`. **This needs a real interactive terminal** — the OTP flow hands off to a
+10. `npm publish`. **This needs a real interactive terminal** — the OTP flow hands off to a
    browser and cannot be driven from a headless shell. A granular automation token in
    `.npmrc` avoids the prompt.
-10. **Merge `main` back into `develop`.** The release PR is squash-merged, so the version bump
+11. **Merge `main` back into `develop`.** The release PR is squash-merged, so the version bump
    and the changelog exist only on `main` until you do. After 1.1.0 this was missed and
    `develop` sat at version 1.0.1 with no `CHANGELOG.md` — which is the branch the next
    release would have been cut from.
