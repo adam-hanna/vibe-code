@@ -111,6 +111,20 @@ Settings has two doors. The ⚙ at the foot of the left bar edits your **setting
 
 Settings also shows the standing prompt blocks every turn receives, and lets you override them per project. See [`prompts`](./configuration#prompts).
 
+## Updates
+
+The app checks for a newer version of itself once at launch and then every six hours. The check is one plain HTTPS request for a public file on GitHub (`latest.json` on the newest published release). It sends nothing that identifies you or your machine. To turn it off, open the ⚙ at the foot of the left bar, and under **Check for updates** untick the box. With it off, the app makes no request at all.
+
+When a newer version exists, an arrow appears above the ⚙. Click it to see the version and the start of its release notes. **Skip this version** hides the arrow until a newer version comes out. Closing the popover just closes it.
+
+**Update & restart** downloads the new version, checks its signature, installs it and restarts the app. If runs are going, it asks first. Restarting stops each run where it is, every run can be resumed, and only the turn each one was in is redone.
+
+- **Windows:** the installer (`setup.exe`) updates without a prompt. An install from the `.msi` updates from the `.msi` and Windows shows a UAC prompt.
+- **Linux `.deb`:** the app does not update itself. The popover shows **Download**, which opens the releases page, and you install the new `.deb` yourself. The AppImage updates itself in place.
+- **macOS:** updates in place. This path has not yet been tested end to end.
+
+Pre-releases are never offered, and neither is a version that is not newer than the one you are running. A failed check never shows on screen; it is written to the app's log, `vibe-desktop.log`.
+
 ## On Linux
 
 Under some GPUs WebKitGTK paints a blank window. The app sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` for itself on Linux unless you have set it, which avoids this.

@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type { PilotAccess } from './pilot/access';
+import type { Outcome, UpdateInfo, UpdateProgress } from './shell/update';
 
 /**
  * The webview's end of the wire.
@@ -1063,6 +1064,38 @@ export function appQuit(): Promise<void> {
  */
 export function quitDeclined(): Promise<void> {
   return invoke('app_quit', { quit: false });
+}
+
+/**
+ * Ask whether a newer version of the app exists (#299). Rust makes the request;
+ * the window has no network access. `null` is no update **and** a check that
+ * could not be made - the reason is in `vibe-desktop.log`, never on screen.
+ */
+export function updateCheck(): Promise<UpdateInfo | null> {
+  return invoke<UpdateInfo | null>('update_check');
+}
+
+/**
+ * Install the update the last check found, and restart (#299). Answers
+ * `confirm` without touching anything while runs are going - Rust decides that,
+ * by the same conservative reading the tray's Quit uses - and the window calls
+ * again with `confirmed` once a person has said yes.
+ */
+export function updateInstall(confirmed: boolean): Promise<Outcome> {
+  return invoke<Outcome>('update_install', { page: false, confirmed });
+}
+
+/**
+ * Open the release page in the system's browser (#299): the `.deb`'s Download
+ * and the notes link. The URL is a constant in Rust; the window never names one.
+ */
+export function openReleasePage(): Promise<Outcome> {
+  return invoke<Outcome>('update_install', { page: true, confirmed: false });
+}
+
+/** Download and install progress, as Rust measures it (#299). */
+export async function onUpdateProgress(callback: (p: UpdateProgress) => void): Promise<() => void> {
+  return listen<UpdateProgress>('app://update-progress', (event) => callback(event.payload));
 }
 
 /**
