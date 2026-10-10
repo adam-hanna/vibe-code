@@ -3275,7 +3275,11 @@ purpose. `src-tauri/src/update.rs` holds all of it, behind two commands:
   as runs going - and the window draws the quit confirmation's shape and words, listing its
   runs or saying that runs are still going, and calls again only on a press. This is stricter
   than Quit, which skips a host whose run already returned; asking once too often is the safe
-  side.
+  side. **And no run can start once an install is under way.** The question is asked
+  by `freeze_runs`, which in the same step under the host lock makes `spawn` refuse every new
+  run host until the restart (or until the update gives up, which thaws it). Asked once at
+  the press, a run started during a ten-minute download would have been stopped by the
+  install with nobody asked about it.
 - **Every host stops before the installer runs, on every platform, by the one `stop()`.** The
   plugin's `on_before_exit` hook only exists on Windows - where it matters most, since a running
   host holds `node.exe` and NSIS/MSI overwrite it - so the hook is wired for that case and
@@ -3284,8 +3288,10 @@ purpose. `src-tauri/src/update.rs` holds all of it, behind two commands:
   writes `ending.json` (#206), so it is resumable. An install that fails after the stop
   relaunches the service host so the runs can be resumed.
 - **One install at a time, and a failure can be retried.** `Slot` holds the update the last
-  check found and an `installing` flag behind a drop guard. A second press is refused, a check
-  that returns during an install cannot replace what is being installed, and the install works
+  check found and an `installing` flag, both under **one** lock, with a drop guard - a flag
+  read outside the lock let a check overwrite the update an install had just begun. A second press is refused, a check
+  that returns during an install cannot replace what is being installed and reports that one
+  instead, and the install works
   on a clone so a failed attempt leaves the update for the next press. Progress is the running
   sum of the plugin's chunk lengths (`Tally`), because the plugin reports each chunk, not a
   total.

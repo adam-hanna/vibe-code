@@ -42,7 +42,6 @@
 //!   is where single-instance releases its lock and `lib.rs` runs `stop()`. A new
 //!   process started earlier would find the old one and raise its window instead.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -161,72 +160,89 @@ pub fn log_override() {
 /// update here and pressing again retries it. While an install runs, a check
 /// cannot replace it - the window must not be describing one version while
 /// another is being written over the app.
+///
+/// **One lock for both halves.** The value and the flag were a `Mutex` and an
+/// `AtomicBool`, and `offer` read the flag before taking the lock: a check could
+/// see "not installing", an install could begin and clone the old update, and
+/// the check would then overwrite it - so a retry installed a version nobody
+/// had been shown. Every read and write of either now happens under one lock.
 pub struct Slot<T: Clone> {
-    value: Mutex<Option<T>>,
-    installing: AtomicBool,
+    state: Mutex<SlotState<T>>,
+}
+
+struct SlotState<T> {
+    value: Option<T>,
+    installing: bool,
 }
 
 impl<T: Clone> Default for Slot<T> {
     fn default() -> Self {
         Self {
-            value: Mutex::new(None),
-            installing: AtomicBool::new(false),
+            state: Mutex::new(SlotState {
+                value: None,
+                installing: false,
+            }),
         }
     }
+}
+
+/// What a check should report: the update it found, or the one already being
+/// installed, which it must not replace.
+pub enum Offered<T> {
+    Stored(T),
+    Installing(Option<T>),
 }
 
 /// Held for the whole of one install; dropping it releases the slot, on every
 /// path that returns.
-pub struct InstallGuard<'a> {
-    installing: &'a AtomicBool,
+pub struct InstallGuard<'a, T: Clone> {
+    slot: &'a Slot<T>,
 }
 
-impl Drop for InstallGuard<'_> {
+impl<T: Clone> Drop for InstallGuard<'_, T> {
     fn drop(&mut self) {
-        self.installing.store(false, Ordering::SeqCst);
+        if let Ok(mut state) = self.slot.state.lock() {
+            state.installing = false;
+        }
     }
 }
 
 impl<T: Clone> Slot<T> {
-    /// Store what a check found. Refused while an install runs.
-    pub fn offer(&self, value: T) -> bool {
-        if self.installing() {
-            return false;
-        }
-        match self.value.lock() {
-            Ok(mut slot) => {
-                *slot = Some(value);
-                true
+    /// Store what a check found - unless an install is running, in which case
+    /// the update being installed is what the caller is handed back.
+    pub fn offer(&self, value: T) -> Offered<T> {
+        match self.state.lock() {
+            Ok(mut state) if !state.installing => {
+                state.value = Some(value.clone());
+                Offered::Stored(value)
             }
-            Err(_) => false,
+            Ok(state) => Offered::Installing(state.value.clone()),
+            // Cannot tell: report nothing rather than a version that may not be
+            // the one stored.
+            Err(_) => Offered::Installing(None),
         }
     }
 
+    #[cfg(test)]
     pub fn current(&self) -> Option<T> {
-        self.value.lock().ok().and_then(|slot| slot.clone())
+        self.state.lock().ok().and_then(|state| state.value.clone())
     }
 
-    pub fn installing(&self) -> bool {
-        self.installing.load(Ordering::SeqCst)
+    /// The update being installed, or `None` when no install is running.
+    pub fn installing(&self) -> Option<Option<T>> {
+        let state = self.state.lock().ok()?;
+        state.installing.then(|| state.value.clone())
     }
 
     /// Start an install: one at a time, and only of something a check found.
-    pub fn begin(&self) -> Result<(T, InstallGuard<'_>), &'static str> {
-        if self
-            .installing
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
-        {
+    pub fn begin(&self) -> Result<(T, InstallGuard<'_, T>), &'static str> {
+        let mut state = self.state.lock().map_err(|_| "the update state could not be read")?;
+        if state.installing {
             return Err("an update is already being installed");
         }
-        let guard = InstallGuard {
-            installing: &self.installing,
-        };
-        match self.current() {
-            Some(value) => Ok((value, guard)),
-            // The guard drops here and releases the flag.
-            None => Err("no update has been found yet"),
-        }
+        let value = state.value.clone().ok_or("no update has been found yet")?;
+        state.installing = true;
+        Ok((value, InstallGuard { slot: self }))
     }
 }
 
@@ -326,8 +342,8 @@ fn updater(app: &AppHandle) -> Result<Updater, String> {
 pub async fn update_check(app: AppHandle, pending: State<'_, Pending>) -> Result<Option<UpdateInfo>, ()> {
     // An install is under way: describe what is being installed, and do not
     // ask the network for something that could replace it.
-    if pending.installing() {
-        return Ok(pending.current().as_ref().map(info));
+    if let Some(installing) = pending.installing() {
+        return Ok(installing.as_ref().map(info));
     }
     let found = match updater(&app) {
         Ok(updater) => updater.check().await.map_err(|e| e.to_string()),
@@ -338,9 +354,13 @@ pub async fn update_check(app: AppHandle, pending: State<'_, Pending>) -> Result
             // The plugin builds an `Update` with no timeout of its own, so the
             // download would otherwise be unbounded.
             update.timeout = Some(TIMEOUT);
-            let shown = info(&update);
-            pending.offer(update);
-            Ok(Some(shown))
+            // Report what is stored, never merely what was found: an install
+            // that began while this check was in flight keeps its update, and
+            // the window goes on describing that one.
+            Ok(match pending.offer(update) {
+                Offered::Stored(update) => Some(info(&update)),
+                Offered::Installing(installing) => installing.as_ref().map(info),
+            })
         }
         Ok(None) => Ok(None),
         Err(reason) => {
@@ -365,13 +385,18 @@ pub async fn update_install(
     if page {
         return open_release_page().map(|()| Outcome::Opened);
     }
-    if needs_confirm(confirmed, app.state::<HostProcess>().has_run_hosts()) {
+    install_refusal(this_action())?;
+    // From here until the restart no run may start: one started during a
+    // ten-minute download would otherwise be stopped by the install without
+    // anybody being asked about it. Freezing and asking whether runs exist are
+    // one step under the host lock, so the answer cannot go stale before the
+    // freeze lands. Every return below thaws; a restart never returns.
+    let hosts = app.state::<HostProcess>();
+    let frozen = Frozen(hosts.inner().clone());
+    if needs_confirm(confirmed, hosts.freeze_runs()) {
         return Ok(Outcome::Confirm);
     }
     let (update, _guard) = pending.begin().map_err(str::to_string)?;
-    if this_action() == Action::Download {
-        return Err("this install updates by download, from the release page".into());
-    }
 
     let mut tally = Tally::default();
     let bytes = update
@@ -396,13 +421,34 @@ pub async fn update_install(
 
     if let Err(e) = update.install(bytes) {
         applog::app(&format!("update install failed: {e}"));
-        // The runs were stopped resumably; bring the service host back so the
-        // window can read them and resume one.
+        // The runs were stopped resumably; let them start again and bring the
+        // service host back so the window can read them and resume one.
+        drop(frozen);
         let _ = host::launch(&app);
         return Err(e.to_string());
     }
     applog::app(&format!("update {} installed; restarting", update.version));
     app.restart();
+}
+
+/// Run starts refused for as long as this lives; dropped on every path that
+/// does not restart.
+struct Frozen(HostProcess);
+
+impl Drop for Frozen {
+    fn drop(&mut self) {
+        self.0.thaw_runs();
+    }
+}
+
+/// The refusal `update_install` gives an install that updates by download -
+/// a `.deb`, or a build this cannot identify - before anything is downloaded
+/// or stopped. Its own function so the guard is tested, not only the table.
+pub fn install_refusal(action: Action) -> Result<(), String> {
+    match action {
+        Action::Install => Ok(()),
+        Action::Download => Err("this install updates by download, from the release page".into()),
+    }
 }
 
 /// The release page in the system's browser. No URL and no program from the
@@ -488,28 +534,77 @@ mod tests {
     }
 
     #[test]
+    fn an_install_that_updates_by_download_is_refused_before_anything_happens() {
+        assert!(install_refusal(Action::Install).is_ok());
+        let why = install_refusal(Action::Download).expect_err("a .deb never self-updates");
+        assert!(why.contains("by download"), "{why}");
+        // And a deb gets that action whatever else the environment says.
+        assert!(install_refusal(action_for("linux", Some(BundleType::Deb), true)).is_err());
+    }
+
+    fn stored(o: Offered<String>) -> Option<String> {
+        match o {
+            Offered::Stored(v) => Some(v),
+            Offered::Installing(_) => None,
+        }
+    }
+
+    #[test]
     fn an_empty_slot_cannot_begin_and_does_not_stay_locked() {
         let slot = Slot::<String>::default();
         assert_eq!(slot.begin().err(), Some("no update has been found yet"));
-        assert!(!slot.installing());
+        assert!(slot.installing().is_none());
     }
 
     #[test]
     fn one_install_at_a_time() {
         let slot = Slot::default();
-        assert!(slot.offer("1.6.0".to_string()));
+        assert_eq!(stored(slot.offer("1.6.0".to_string())).as_deref(), Some("1.6.0"));
         let (value, _guard) = slot.begin().expect("begins");
         assert_eq!(value, "1.6.0");
         assert_eq!(slot.begin().err(), Some("an update is already being installed"));
     }
 
     #[test]
-    fn a_check_during_an_install_does_not_replace_the_update() {
+    fn a_check_during_an_install_does_not_replace_the_update_and_reports_it() {
         let slot = Slot::default();
         slot.offer("1.6.0".to_string());
         let _held = slot.begin().expect("begins");
-        assert!(!slot.offer("1.7.0".to_string()));
+        match slot.offer("1.7.0".to_string()) {
+            Offered::Installing(v) => assert_eq!(v.as_deref(), Some("1.6.0")),
+            Offered::Stored(_) => panic!("a check replaced the update being installed"),
+        }
         assert_eq!(slot.current().as_deref(), Some("1.6.0"));
+        assert_eq!(slot.installing(), Some(Some("1.6.0".to_string())));
+    }
+
+    #[test]
+    fn checks_and_installs_racing_never_install_what_was_not_stored() {
+        // The interleaving the old two-part state allowed: a check reading
+        // "not installing" just before an install began. Now every outcome is
+        // either the check landing first (and being what is installed) or the
+        // check being told about the install.
+        use std::sync::Arc;
+        for _ in 0..200 {
+            let slot = Arc::new(Slot::default());
+            slot.offer("1.6.0".to_string());
+            let checker = {
+                let slot = slot.clone();
+                std::thread::spawn(move || stored(slot.offer("1.7.0".to_string())).is_some())
+            };
+            let begun = slot.begin().map(|(v, _g)| v);
+            let check_stored = checker.join().unwrap();
+            let installed = begun.expect("nothing else installs");
+            if !check_stored {
+                assert_eq!(installed, "1.6.0");
+            }
+            // Whatever was installed is what the slot holds or held before a
+            // later check: never a value no `offer` returned as stored.
+            assert!(installed == "1.6.0" || installed == "1.7.0");
+            if installed == "1.7.0" {
+                assert!(check_stored, "installed a version the check never stored");
+            }
+        }
     }
 
     #[test]
@@ -520,7 +615,7 @@ mod tests {
             let _attempt = slot.begin().expect("begins");
             // ...the download or the install fails, and the function returns.
         }
-        assert!(!slot.installing());
+        assert!(slot.installing().is_none());
         let (value, _guard) = slot.begin().expect("a retry begins");
         assert_eq!(value, "1.6.0");
     }

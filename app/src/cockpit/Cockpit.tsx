@@ -321,6 +321,14 @@ export function Cockpit() {
       clearInterval(timer);
     };
   }, [checkUpdates]);
+  // A failure belongs to the version it happened to. When a later check finds a
+  // different one, its popover starts clean - not with the old plugin message
+  // and a "Try again" for something that was never tried. The same version
+  // keeps its failure, so a retry still shows what went wrong last time.
+  const updateVersion = update?.version ?? null;
+  useEffect(() => {
+    setUpdateState((s) => (s.kind === 'failed' ? { kind: 'idle' } : s));
+  }, [updateVersion]);
   useEffect(() => {
     if (!host.inShell()) return;
     let stop: (() => void) | null = null;

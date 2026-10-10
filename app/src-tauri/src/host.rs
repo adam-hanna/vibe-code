@@ -309,6 +309,11 @@ struct Hosts {
     /// (#246). Here rather than on `HostProcess`, which is `Clone`: every clone
     /// shares one `Hosts`, so every clone sees one flag.
     quit_pending: AtomicBool,
+    /// An update is being installed and no run host may start (#299). Read and
+    /// written under the `hosts` lock, the same lock that admits a child, so a
+    /// freeze and a start cannot interleave: a run either exists when the update
+    /// asks (and is confirmed and stopped) or is refused.
+    runs_frozen: AtomicBool,
 }
 
 impl Default for HostProcess {
@@ -329,6 +334,7 @@ impl HostProcess {
                 grace,
                 keys,
                 quit_pending: AtomicBool::new(false),
+                runs_frozen: AtomicBool::new(false),
             }),
         }
     }
@@ -525,6 +531,30 @@ impl HostProcess {
         }
     }
 
+    /// Refuse every new run host from now on, and say whether any already
+    /// exists (#299). One step under the lock that admits a child, so no run can
+    /// start between the answer and the freeze - the update either confirms and
+    /// stops a run that is there, or the run is refused. A lock that cannot be
+    /// read counts as runs going, as it does for `has_run_hosts`; the flag is
+    /// still set, and the poisoned spawn refuses anyway.
+    pub fn freeze_runs(&self) -> bool {
+        match self.inner.hosts.lock() {
+            Ok(guard) => {
+                self.inner.runs_frozen.store(true, Ordering::SeqCst);
+                guard.keys().any(|h| h != SERVICE)
+            }
+            Err(_) => {
+                self.inner.runs_frozen.store(true, Ordering::SeqCst);
+                true
+            }
+        }
+    }
+
+    /// Let runs start again: the update was not installed.
+    pub fn thaw_runs(&self) {
+        self.inner.runs_frozen.store(false, Ordering::SeqCst);
+    }
+
     /// Mark a tray Quit as waiting on the window. True if one already was.
     pub fn request_quit(&self) -> bool {
         self.inner.quit_pending.swap(true, Ordering::SeqCst)
@@ -659,6 +689,9 @@ impl HostProcess {
         // the service host could exit between the check and the insert, and a
         // run host would start beside nothing. A poisoned lock refused above.
         run_start_refusal(handle, guard.contains_key(SERVICE))?;
+        if handle != SERVICE && self.inner.runs_frozen.load(Ordering::SeqCst) {
+            return Err("the app is installing an update, so a run cannot start until it has restarted".into());
+        }
         // Idempotent by refusal, not by restart. Two processes under one handle
         // would be two writers the window cannot tell apart.
         if let Some(running) = guard.get(handle) {
@@ -1175,6 +1208,27 @@ mod tests {
         hosts.stop();
         let seen = collect.wait("both hosts to leave", |s| collect_exit(s, SERVICE) && collect_exit(s, "run-1"));
         assert!(seen.iter().any(|s| matches!(s, Seen::Exit(h, ..) if h == "run-1")));
+    }
+
+    #[test]
+    fn a_frozen_set_refuses_new_runs_and_answers_for_the_ones_there() {
+        // #299: a run started during an update's download would otherwise be
+        // stopped by the install without anybody being asked about it.
+        let collect = Collect::new();
+        let hosts = hosts(&collect);
+        start(&hosts, &collect, SERVICE, None, ECHO).unwrap();
+        assert!(!hosts.freeze_runs(), "no run host is going yet");
+        let relay: Arc<dyn Relay> = collect.clone();
+        let why = hosts
+            .spawn("run-1", node(ECHO, Vec::new(), None), "s".into(), relay.clone())
+            .expect_err("frozen: a run may not start");
+        assert!(why.contains("installing an update"), "{why}");
+        assert!(!hosts.has_run_hosts());
+        hosts.thaw_runs();
+        start(&hosts, &collect, "run-1", Some(r#"{"type":"invoke","id":1,"argv":[]}"#), ECHO).unwrap();
+        assert!(hosts.freeze_runs(), "a run that exists is reported, so the update asks");
+        hosts.thaw_runs();
+        hosts.stop();
     }
 
     #[test]
