@@ -7,6 +7,51 @@ for a change that breaks an existing config or an existing run.
 Each entry links the pull request that made it and, where there is one, the issue it
 closes.
 
+## 1.6.0 - 2026-10-09
+
+Nine pull requests since 1.5.0. **Nothing here breaks an existing config:** no key was renamed or removed, no flag was removed, and no config key was added. Three behaviours a running setup can notice are listed under Upgrading.
+
+The theme is shipping. The desktop app is now built by CI on every release tag, for Windows, macOS (Apple Silicon) and Linux. Each installer is downloadable under a name that never changes, carries a build attestation, and is listed in a checksums file. The app tells you when a newer version is out and can update itself. The long-form docs are a site on GitHub Pages, and vibe now checks the `claude` and `codex` CLIs against the versions it was tested with.
+
+### Added
+
+- **The desktop app is a download.** On every `v*` tag, `release.yml` builds the `.msi` and NSIS `.exe` on Windows, the `.dmg` on macOS (Apple Silicon) and the `.deb` and `.AppImage` on Linux into one draft release. Each installer is uploaded under its versioned name and a stable name (`Vibe-macos-arm64.dmg`, `Vibe-windows-x64-setup.exe`, `Vibe-windows-x64.msi`, `Vibe-linux-x86_64.AppImage`, `Vibe-linux-amd64.deb`), so `releases/latest/download/<name>` always serves the newest. Bundles carry the CLI's version. Windows builds are unsigned and macOS builds are ad-hoc signed until certificates are added as secrets.
+  (#239, [#316](https://github.com/adam-hanna/vibe-code/pull/316), [#318](https://github.com/adam-hanna/vibe-code/pull/318))
+- **The app tells you when a new version is out, and updates and restarts itself.** A ⬆ tool appears above ⚙ when an update exists, with the version, notes, **Update & restart** and **Skip this version**. It checks at launch and every 6 hours. Updates are signed and checked against a public key built into the app. A `.deb` install is offered **Download** instead, and runs going are confirmed and stopped resumably before an install. Settings has a toggle to turn the check off.
+  (#299, [#327](https://github.com/adam-hanna/vibe-code/pull/327))
+- **Every release can be verified.** Each file gets a build provenance attestation (`gh attestation verify <file> --repo adam-hanna/vibe-code`), and a `SHA256SUMS` file lists every asset. `docs/app.md` says how to check a download on each platform, and prints the updater's public key.
+  (#317, [#326](https://github.com/adam-hanna/vibe-code/pull/326))
+- **vibe checks the agent CLIs against the versions it was tested with.** `TESTED_CLI_VERSIONS` records claude `2.1.294` and codex `0.157.1`. Preflight and `vibe doctor` warn, and name the command to move, when an installed CLI differs. A run is refused only when a CLI's own `--help` shows a flag vibe passes is missing. Each run records the versions it ran under, and a resume under different versions records the change.
+  (#298, [#314](https://github.com/adam-hanna/vibe-code/pull/314))
+- **A docs site.** The long-form docs are a VitePress site at https://adam-hanna.github.io/vibe-code/, deployed from `main`. It covers getting started, the CLI and configuration references, the app, the loop, artifacts, exit codes and design notes.
+  (#230, [#308](https://github.com/adam-hanna/vibe-code/pull/308), [#315](https://github.com/adam-hanna/vibe-code/pull/315))
+
+### Fixed
+
+- **While a new run is being drafted, Code, Verify and Spend say there is no run,** instead of showing the previous run.
+  (#319, [#321](https://github.com/adam-hanna/vibe-code/pull/321))
+- **The pilot chat's copy buttons are at the foot of each message,** so a long message no longer has to be scrolled back up to copy it.
+  (#320, [#322](https://github.com/adam-hanna/vibe-code/pull/322))
+- **The app reads your whole login environment when your shell is `dash`.** `dash` exports `_` as the opening marker, which cut the environment off mid-list, leaving no `PATH`. It hit anyone whose login shell is `/bin/sh` on Debian or Ubuntu, or whose `SHELL` is unset.
+  (#239, [#316](https://github.com/adam-hanna/vibe-code/pull/316))
+
+### Internal
+
+- **CI.** `ci.yml` runs the core gate, the app gate and the Rust tests on every push and PR into `develop` and `main`. Five test files that passed only where `claude` and `codex` were installed now pin both to `process.execPath`.
+  (#239, [#316](https://github.com/adam-hanna/vibe-code/pull/316))
+- **Contract tests over recorded CLI output.** `scripts/record-cli-fixtures.mjs` records one real turn of each CLI, and `cli-fixtures-contract.test.ts` runs the recordings through the real parsers.
+  (#298, [#314](https://github.com/adam-hanna/vibe-code/pull/314))
+- **Tests pin the docs to the source:** every config key, exit code and command must appear in the reference pages, download links must match the names the workflow uploads, and the published public key must match the app's.
+  (#230, [#308](https://github.com/adam-hanna/vibe-code/pull/308), [#316](https://github.com/adam-hanna/vibe-code/pull/316), [#326](https://github.com/adam-hanna/vibe-code/pull/326))
+
+### Upgrading
+
+No config change is required. Three behaviours a running setup can notice:
+
+- **Preflight and `vibe doctor` may warn about your CLI versions.** A `claude` or `codex` other than the tested version warns and still runs. A run now stops before its first turn if the CLI's help no longer lists a flag vibe passes.
+- **The desktop app makes a network request of its own.** It fetches `releases/latest/download/latest.json` from GitHub at launch and every 6 hours, a plain HTTPS GET with no identifiers. Turn it off with **Check for updates** in Settings. The CLI still makes no network call of its own.
+- **This is the first release whose app can update itself,** so an app built from an earlier version has no updater and must be replaced by hand once.
+
 ## 1.5.0 - 2026-10-08
 
 Forty pull requests since 1.4.0. **Nothing here breaks an existing config:** no key was renamed or removed, no flag was removed, and every new key has a default. Six behaviours a running setup can notice are listed under Upgrading. The first one, that runs no longer reach your MCP servers, is the one most likely to matter.
