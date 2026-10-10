@@ -131,24 +131,44 @@ mod tests {
     use super::*;
     use std::fs::read_to_string;
 
-    fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("vibe-applog-{name}-{}", std::process::id()));
+    /// A directory of its own, removed when the test ends however it ends.
+    ///
+    /// Under the crate's own `target/`, never the system temp directory. These
+    /// were `$TMPDIR/vibe-applog-<name>-<pid>` and were never removed, so every
+    /// `cargo test` left three new directories there - and the core suite fails
+    /// by name on anything that appears in the real temp directory while it
+    /// runs (#234), so a Rust run beside it made the core gate fail on a tree
+    /// nothing was wrong with. `target/` is gitignored and is this crate's.
+    struct Scratch(PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn scratch(name: &str) -> Scratch {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("test-scratch")
+            .join(format!("applog-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        dir
+        Scratch(dir)
     }
 
     #[test]
     fn opening_creates_the_directory_and_the_file() {
-        let dir = scratch("create");
-        let sink = Sink::open_at(&dir).expect("the log should open under a fresh directory");
+        let scratch = scratch("create");
+        let dir = &scratch.0;
+        let sink = Sink::open_at(dir).expect("the log should open under a fresh directory");
         assert_eq!(sink.path, dir.join(LOG_NAME));
         assert!(sink.path.exists());
     }
 
     #[test]
     fn every_line_is_tagged_stamped_and_on_disk_immediately() {
-        let dir = scratch("write");
-        let sink = Sink::open_at(&dir).expect("open");
+        let scratch = scratch("write");
+        let sink = Sink::open_at(&scratch.0).expect("open");
         sink.write("app ", "host failed to start: no node runtime");
         // Read back before anything is dropped: the claim is that a line is on
         // disk the moment it is written, which is what makes the last lines
@@ -161,9 +181,10 @@ mod tests {
 
     #[test]
     fn a_second_open_appends_rather_than_truncating() {
-        let dir = scratch("append");
-        Sink::open_at(&dir).expect("first").write("app ", "first launch");
-        Sink::open_at(&dir).expect("second").write("app ", "second launch");
+        let scratch = scratch("append");
+        let dir = &scratch.0;
+        Sink::open_at(dir).expect("first").write("app ", "first launch");
+        Sink::open_at(dir).expect("second").write("app ", "second launch");
 
         let text = read_to_string(dir.join(LOG_NAME)).expect("read");
         assert!(text.contains("first launch"), "the earlier session survived");
