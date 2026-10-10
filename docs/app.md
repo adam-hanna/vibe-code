@@ -31,6 +31,31 @@ cd app && npm install && npm run app:build
 
 `npm run app:build` produces an installer and an executable under `app/src-tauri/target/release/`. The app needs the same `claude` and `codex` CLIs as the command line, installed and logged in.
 
+## Verifying a download
+
+Every file on a release has a build provenance attestation, made by this repository's release workflow when it built the file. With the [GitHub CLI](https://cli.github.com/):
+
+```bash
+gh attestation verify Vibe-macos-arm64.dmg --repo adam-hanna/vibe-code
+```
+
+This is what ties a file to this repository's workflow and to the commit it was built from; the output names both.
+
+Every release also has a `SHA256SUMS` file listing the checksum of each other file on it. Without `gh`, download it into the same folder as the installer and check against it:
+
+- **Linux**: `sha256sum -c SHA256SUMS --ignore-missing`
+- **macOS**: `shasum -a 256 Vibe-macos-arm64.dmg`, then compare the hash with that file's line in `SHA256SUMS`.
+- **Windows** (PowerShell): `Get-FileHash Vibe-windows-x64-setup.exe`, then compare the hash with that file's line in `SHA256SUMS`. PowerShell prints it in capitals; the letters are the same.
+
+On its own, a checksum only shows that the file matches what the release page lists. The attestation is what ties it to this repository.
+
+The installed app checks its own updates against this public key before installing them. It is not a way to check a download; use the two checks above for that.
+
+```text
+untrusted comment: minisign public key: 172C0CA4F4F2862E
+RWQuhvL0pAwsF/uy5/v58+NPKkXROME+9UFiSw/z0DvfoC9/AW5BzmFp
+```
+
 ## The window
 
 The left sidebar lists your **projects** (each is a repository) and, under each, its **runs**. Clicking a run opens it. That is only a read: it never starts or resumes anything, and it costs nothing. A finished run is drawn exactly as it looked while it ran. Pin a run to keep it at the top, or rename it. Renaming changes only the label shown here, never the run's record.
