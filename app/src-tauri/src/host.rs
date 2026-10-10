@@ -1232,6 +1232,33 @@ mod tests {
     }
 
     #[test]
+    fn a_second_install_press_never_thaws_the_first_ones_freeze() {
+        // #299: a press that loses the install slot used to freeze and then
+        // thaw on its way out, lifting the freeze a download in flight relied
+        // on - so a run could start and be stopped by that install unasked.
+        let collect = Collect::new();
+        let hosts = hosts(&collect);
+        start(&hosts, &collect, SERVICE, None, ECHO).unwrap();
+        let pending = crate::update::Slot::<String>::default();
+        let _ = pending.offer("1.6.0".into());
+        let first = crate::update::claim(&pending, &hosts).expect("the first press installs");
+        assert!(!first.run_hosts);
+        assert!(crate::update::claim(&pending, &hosts).is_err(), "the second is refused");
+        let relay: Arc<dyn Relay> = collect.clone();
+        let why = hosts
+            .spawn("run-1", node(ECHO, Vec::new(), None), "s".into(), relay.clone())
+            .expect_err("still frozen: the refused press did not thaw it");
+        assert!(why.contains("installing an update"), "{why}");
+        // The first attempt failing lifts the freeze and frees the slot.
+        drop(first);
+        start(&hosts, &collect, "run-1", Some(r#"{"type":"invoke","id":1,"argv":[]}"#), ECHO).unwrap();
+        let retry = crate::update::claim(&pending, &hosts).expect("a retry may begin");
+        assert!(retry.run_hosts, "and it is asked about the run now going");
+        drop(retry);
+        hosts.stop();
+    }
+
+    #[test]
     fn an_update_stops_every_host_first() {
         // #299: the stop `update_install` awaits before the installer runs, and
         // the Windows hook calls, is this one. It must leave nothing running -

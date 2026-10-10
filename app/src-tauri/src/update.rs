@@ -372,9 +372,10 @@ pub async fn update_check(app: AppHandle, pending: State<'_, Pending>) -> Result
 
 /// Open the release page, or install the update the last check found.
 ///
-/// `page` opens the page and touches nothing else. Otherwise, in order: ask if
-/// runs are going, take the one install slot, refuse an install that updates by
-/// download, download, stop every host (awaited), install, restart.
+/// `page` opens the page and touches nothing else. Otherwise, in order: refuse
+/// an install that updates by download, take the one install slot, freeze run
+/// starts and ask if runs are going, download, stop every host (awaited),
+/// install, restart.
 #[tauri::command]
 pub async fn update_install(
     app: AppHandle,
@@ -386,19 +387,16 @@ pub async fn update_install(
         return open_release_page().map(|()| Outcome::Opened);
     }
     install_refusal(this_action())?;
-    // From here until the restart no run may start: one started during a
-    // ten-minute download would otherwise be stopped by the install without
-    // anybody being asked about it. Freezing and asking whether runs exist are
-    // one step under the host lock, so the answer cannot go stale before the
-    // freeze lands. Every return below thaws; a restart never returns.
     let hosts = app.state::<HostProcess>();
-    let frozen = Frozen(hosts.inner().clone());
-    if needs_confirm(confirmed, hosts.freeze_runs()) {
+    // Held to the end; every return drops it, which thaws run starts and then
+    // releases the slot. A restart never returns.
+    let held = claim(&pending, hosts.inner()).map_err(str::to_string)?;
+    if needs_confirm(confirmed, held.run_hosts) {
         return Ok(Outcome::Confirm);
     }
-    let (update, _guard) = pending.begin().map_err(str::to_string)?;
 
     let mut tally = Tally::default();
+    let update = &held.update;
     let bytes = update
         .download(
             |chunk, total| {
@@ -423,7 +421,7 @@ pub async fn update_install(
         applog::app(&format!("update install failed: {e}"));
         // The runs were stopped resumably; let them start again and bring the
         // service host back so the window can read them and resume one.
-        drop(frozen);
+        drop(held);
         let _ = host::launch(&app);
         return Err(e.to_string());
     }
@@ -434,6 +432,33 @@ pub async fn update_install(
 /// Run starts refused for as long as this lives; dropped on every path that
 /// does not restart.
 struct Frozen(HostProcess);
+
+/// One install attempt's hold on the slot and on run starts. Fields drop in
+/// declaration order, so the freeze is lifted before the slot is released and
+/// the next attempt can never have its freeze lifted by this one.
+pub struct Claim<'a, T: Clone> {
+    pub update: T,
+    _frozen: Frozen,
+    pub run_hosts: bool,
+    _guard: InstallGuard<'a, T>,
+}
+
+/// Take the install slot, and only then freeze run starts and ask whether runs
+/// exist. The order is the guarantee: a second press is refused by `begin`
+/// before it has touched the freeze, so it cannot thaw the freeze an install in
+/// flight depends on and let a run start that the install would then stop
+/// unasked. Freezing and asking are one step under the host lock (see
+/// `freeze_runs`), so the answer cannot go stale before the freeze lands.
+pub fn claim<'a, T: Clone>(pending: &'a Slot<T>, hosts: &HostProcess) -> Result<Claim<'a, T>, &'static str> {
+    let (update, guard) = pending.begin()?;
+    let run_hosts = hosts.freeze_runs();
+    Ok(Claim {
+        update,
+        _frozen: Frozen(hosts.clone()),
+        run_hosts,
+        _guard: guard,
+    })
+}
 
 impl Drop for Frozen {
     fn drop(&mut self) {

@@ -3279,7 +3279,9 @@ purpose. `src-tauri/src/update.rs` holds all of it, behind two commands:
   by `freeze_runs`, which in the same step under the host lock makes `spawn` refuse every new
   run host until the restart (or until the update gives up, which thaws it). Asked once at
   the press, a run started during a ten-minute download would have been stopped by the
-  install with nobody asked about it.
+  install with nobody asked about it. `claim` takes the install slot **before** it freezes,
+  so a second press is refused before touching the freeze: when each press froze first, the
+  losing one thawed on its way out and lifted the freeze the first install's download relied on.
 - **Every host stops before the installer runs, on every platform, by the one `stop()`.** The
   plugin's `on_before_exit` hook only exists on Windows - where it matters most, since a running
   host holds `node.exe` and NSIS/MSI overwrite it - so the hook is wired for that case and
