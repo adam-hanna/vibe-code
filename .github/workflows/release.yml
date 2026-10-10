@@ -336,7 +336,13 @@ jobs:
           PATHS: ${{ steps.assets.outputs.paths }}
         run: |
           set -euo pipefail
-          mapfile -t files <<< "$PATHS"
+          # A `read` loop, not `mapfile`: macOS runs this under its own
+          # /bin/bash, which is 3.2 and has no `mapfile` (v1.6.0's mac build
+          # died here with exit 127, after it had built and attested).
+          files=()
+          while IFS= read -r f; do
+            if [ -n "$f" ]; then files+=("$f"); fi
+          done <<< "$PATHS"
           gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
 
   # latest.json: what an installed app reads to learn of a new version and fetch
