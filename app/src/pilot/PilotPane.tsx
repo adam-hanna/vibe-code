@@ -611,11 +611,7 @@ function ReplyCard({
           survive, because they are the reason shift+enter exists. */}
       {yours !== null && (
         <div className="flex max-w-[80%] flex-col items-end gap-1.5 self-end rounded-md border border-rule-card bg-active px-3.5 py-2.5">
-          {/* Copy beside the label (#256): what you typed, newlines included. */}
-          <div className="flex items-center gap-1">
-            {copy.asked !== null && <CopyText text={copy.asked} label="Copy your message" />}
-            <Badge>you</Badge>
-          </div>
+          <Badge>you</Badge>
           <div className="self-stretch select-text whitespace-pre-wrap text-left text-body text-primary [overflow-wrap:anywhere]">
             {yours.brief}
           </div>
@@ -628,6 +624,11 @@ function ReplyCard({
               ))}
             </div>
           )}
+          {/* Copy at the foot (#320): what you typed, newlines included (#256).
+              At the top, a long message had to be scrolled back up to copy, and
+              the end is where you are once you have read it. Right-aligned,
+              with the block's own edge. */}
+          {copy.asked !== null && <CopyText text={copy.asked} label="Copy your message" />}
         </div>
       )}
       <div className="flex flex-col gap-2 self-stretch border-l-2 border-accent-border-dim py-1 pl-4">
@@ -664,9 +665,6 @@ function ReplyCard({
         {outcome?.kind === 'ended' && outcome.stop !== null && <Badge>{outcome.stop}</Badge>}
         {outcome?.kind === 'cancelled' && <Badge>stopped</Badge>}
         {outcome?.kind === 'failed' && <Badge variant="alarm">failed</Badge>}
-        {/* The reply's Markdown source, as drawn below (#256), at the end of
-            the row so it sits in the same place on every reply. */}
-        {copy.said !== null && <CopyText text={copy.said} label="Copy the pilot's reply" className="ml-auto" />}
       </div>
 
       {/* `visible`, not the raw text: a tool call the subscription backend made
@@ -677,6 +675,11 @@ function ReplyCard({
           the prompt now says it is rendered: as preformatted text a table
           arrived as rows of pipes. */}
       {visible(reply.text) !== '' && <Markdown text={visible(reply.text)} />}
+      {/* The reply's Markdown source, as drawn above (#256), under the text it
+          copies (#320) - at the end of the chip row a long reply had to be
+          scrolled back to its start. Left-aligned, with the reply's own edge,
+          and above the cards and the usage line, which are not what it copies. */}
+      {copy.said !== null && <CopyText text={copy.said} label="Copy the pilot's reply" className="self-start" />}
       {outcome?.kind === 'failed' && <div className={WHY}>{outcome.message}</div>}
       {reply.compacts === true && outcome?.kind === 'ended' && reply.text !== '' && reply.calls.length === 0 && (
         <div className={NOTE}>
