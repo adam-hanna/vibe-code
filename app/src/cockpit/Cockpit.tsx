@@ -29,6 +29,7 @@ import { CommandsPane } from './CommandsPane';
 import { CodePane } from './CodePane';
 import { Diagnostics } from './Diagnostics';
 import { Footer } from './Footer';
+import { NoRun } from './NoRun';
 import { PlansPane } from './PlansPane';
 import { ReportPane } from './ReportPane';
 import { Kickoff } from './Kickoff';
@@ -1604,9 +1605,20 @@ export function Cockpit() {
    * failed leaves it there with the failure said beside it — a column showing
    * one run while claiming to show another is the confusion this set out to fix.
    */
+  /**
+   * Whether what is on screen is a draft with no run behind it yet.
+   *
+   * **One expression for every surface that would otherwise fall through to
+   * the window's last live run** (#319). A draft sets `viewing` to null, so
+   * anything choosing between "the opened run" and `run` picked the live one -
+   * which, while a new run is being talked through, is a run the draft has
+   * nothing to do with. The column learned it in #294 and the round cards in
+   * #247; Code, Verify and Spend were the three that had not.
+   */
+  const noRun = draftHasNoRun(drafting);
   // A draft not yet started has no run, so the column is drawn empty rather than
   // falling through to the window's last live run.
-  const columnRun = draftHasNoRun(drafting) ? blank : past && opened.run !== null ? opened.run : run;
+  const columnRun = noRun ? blank : past && opened.run !== null ? opened.run : run;
   /**
    * The verification passes the Verify tab draws, and the run whose directory
    * their logs are read from - **one run, never two** (#248). Each attempt opens
@@ -2147,7 +2159,13 @@ export function Cockpit() {
               reading box". The loop column's own `reading` head stays, since
               that is where the one fact worth stating (turn durations are
               missing on a replay) is said. */}
-          {tab === 'verify' && (
+          {tab === 'verify' && noRun && (
+            <NoRun>
+              Verification runs inside a run, after an implementation or a fix turn. Start this one
+              and its passes land here.
+            </NoRun>
+          )}
+          {tab === 'verify' && !noRun && (
             // Keyed by the run, so an attempt log left open on one run is not
             // carried onto the next one opened.
             <VerifyPane
@@ -2158,7 +2176,15 @@ export function Cockpit() {
               waiting={verifyOf.waiting}
             />
           )}
-          {tab === 'spend' && <SpendPane run={run} />}
+          {tab === 'spend' &&
+            (noRun ? (
+              <NoRun>
+                Spend is what a run's agents have charged, and this run has not started. The pilot's
+                own spend is kept separately, beside the conversation.
+              </NoRun>
+            ) : (
+              <SpendPane run={run} />
+            ))}
           {tab === 'questions' && (
             <QuestionsPane
               questions={past ? null : openQuestions}
@@ -2257,7 +2283,12 @@ export function Cockpit() {
               the pane says that, rather than drawing the live run's shas
               against the opened run's repository. */}
           {tab === 'code' &&
-            (!past ? (
+            (noRun ? (
+              <NoRun>
+                The Code tab shows what a run's rounds changed, read from its commits. Start this run
+                and its first round lands here once it commits.
+              </NoRun>
+            ) : !past ? (
               <CodePane run={run} dir={liveRepo} openAt={openAt} />
             ) : opened.run !== null ? (
               <CodePane run={opened.run} dir={shownDir} openAt={openAt} />
