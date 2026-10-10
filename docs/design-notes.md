@@ -36,7 +36,7 @@ None of that makes a clean run correct. It makes it harder to be wrong without a
 
 ## No network code of its own
 
-vibe has no server, no daemon and no HTTP client. Every external call is a child process: `claude`, `codex` and `git`. It installs neither agent CLI, and it uses whatever you are logged into. The published package has no runtime dependencies. The only network code anywhere is in the desktop app, for the pilot's API-key mode.
+vibe has no server, no daemon and no HTTP client. Every external call is a child process: `claude`, `codex` and `git`. It installs neither agent CLI, and it uses whatever you are logged into. The published package has no runtime dependencies. The only network code anywhere is in the desktop app: the pilot's API-key mode, and the check for a newer version of the app, which fetches one public file from GitHub and can be switched off.
 
 ## Prompts go over stdin
 

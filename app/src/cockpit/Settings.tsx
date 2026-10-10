@@ -959,6 +959,8 @@ export function Settings({
   dir,
   scale,
   onScale,
+  checkUpdates,
+  onCheckUpdates,
   statuses,
   keyFailure,
   onKeysChanged,
@@ -981,6 +983,13 @@ export function Settings({
   /** How big the product is drawn. Window state — see `appearance.ts`. */
   scale: number;
   onScale: (next: number) => void;
+  /**
+   * Whether the app checks for a newer version of itself (#299). Window state,
+   * owned by `Cockpit` like the scale: the check runs there, and this screen
+   * unmounts the moment you look at anything else.
+   */
+  checkUpdates: boolean;
+  onCheckUpdates: (on: boolean) => void;
   /**
    * Which providers hold a pilot key, read by the window and passed in (#188).
    *
@@ -1294,6 +1303,28 @@ export function Settings({
               Every size moves together, so the proportions the design chose survive being scaled.
               Nothing else about the look is configurable: there is one palette, and it is the one the
               contrast gate is measured against.
+            </p>
+          </section>
+
+          {/* Whether this app asks for a newer version of itself (#299): the one
+              network request the app makes on its own, so it is said in full
+              beside the switch that turns it off. */}
+          <section className={S.block}>
+            <h3 className={S.h}>check for updates</h3>
+            <label className="flex cursor-pointer items-baseline gap-2 text-body-sm text-secondary">
+              <input
+                type="checkbox"
+                checked={checkUpdates}
+                onChange={(e) => onCheckUpdates(e.target.checked)}
+              />
+              <span>Check for a new version of the app</span>
+            </label>
+            <p className={S.note}>
+              At launch and every six hours, the app makes one plain HTTPS request for a public file
+              on GitHub that names the latest release. Nothing identifying you or this machine is
+              sent. When a newer version exists, an arrow appears above Settings at the foot of the
+              left bar. Off means no request at all. Like the text size, this is this window&apos;s
+              setting, on this machine.
             </p>
           </section>
 

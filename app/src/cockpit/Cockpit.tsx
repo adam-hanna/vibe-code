@@ -6,6 +6,10 @@ import { Badge } from '@/ui/badge';
 import { Button } from '@/ui/button';
 import { LivenessDot } from '../design';
 import { ActivityBar } from '../shell/ActivityBar';
+import { UpdatePopover } from '../shell/UpdatePopover';
+import type { UpdateState } from '../shell/UpdatePopover';
+import { CHECK_EVERY_MS, CHECK_KEY, SKIP_KEY, checkEnabled, shown } from '../shell/update';
+import type { UpdateInfo } from '../shell/update';
 import { Palette } from '../shell/Palette';
 import { statusBarControls } from '../shell/controls';
 import { StatusBar } from '../shell/StatusBar';
@@ -283,6 +287,91 @@ export function Cockpit() {
     }
   }, []);
 
+
+  /**
+   * A newer version of the app (#299). Rust checks, compares and decides what
+   * this install can do; the window holds what it was told, which version the
+   * person skipped, and whether to ask at all - both of those this window's
+   * memory, never a project's.
+   */
+  const [update, setUpdate] = useState<UpdateInfo | null>(null);
+  const [skipped, setSkipped] = useState<string | null>(() => memory.getItem(SKIP_KEY));
+  const [checkUpdates, setCheckUpdates] = useState(() => checkEnabled(memory.getItem(CHECK_KEY)));
+  const [updateState, setUpdateState] = useState<UpdateState>({ kind: 'idle' });
+  /** Rust answered `confirm`: runs are going and the person is being asked. */
+  const [updating, setUpdating] = useState(false);
+  // Once at launch and every six hours after, silently - and with the setting
+  // off, not at all. A check that fails is a line in the app's log and `null`
+  // here, which draws exactly what "no update" draws.
+  useEffect(() => {
+    if (!host.inShell() || !checkUpdates) return;
+    let live = true;
+    const check = () => {
+      void host.updateCheck().then(
+        (found) => {
+          if (live) setUpdate(found);
+        },
+        () => {},
+      );
+    };
+    check();
+    const timer = setInterval(check, CHECK_EVERY_MS);
+    return () => {
+      live = false;
+      clearInterval(timer);
+    };
+  }, [checkUpdates]);
+  useEffect(() => {
+    if (!host.inShell()) return;
+    let stop: (() => void) | null = null;
+    let cancelled = false;
+    void (async () => {
+      stop = await host.onUpdateProgress((progress) => setUpdateState({ kind: 'working', progress }));
+      if (cancelled) stop();
+    })();
+    return () => {
+      cancelled = true;
+      stop?.();
+    };
+  }, []);
+  /**
+   * Update & restart. Rust is what decides whether to ask - `has_run_hosts()`,
+   * which says yes when it cannot read its own set - so the first call is never
+   * confirmed and the window asks only when told to. A success never returns:
+   * the process is replaced.
+   */
+  const installUpdate = useCallback((confirmed: boolean) => {
+    setUpdateState({ kind: 'working', progress: null });
+    host.updateInstall(confirmed).then(
+      (outcome) => {
+        if (outcome === 'confirm') {
+          setUpdateState({ kind: 'idle' });
+          setUpdating(true);
+        }
+      },
+      (e: unknown) => setUpdateState({ kind: 'failed', message: String(e) }),
+    );
+  }, []);
+  const openReleasePage = useCallback(() => {
+    host.openReleasePage().catch((e: unknown) => setUpdateState({ kind: 'failed', message: String(e) }));
+  }, []);
+  const skipUpdate = useCallback((version: string) => {
+    setSkipped(version);
+    try {
+      memory.setItem(SKIP_KEY, version);
+    } catch {
+      // Skipped for this session; see `rescale`.
+    }
+  }, []);
+  const toggleUpdateChecks = useCallback((on: boolean) => {
+    setCheckUpdates(on);
+    if (!on) setUpdate(null);
+    try {
+      memory.setItem(CHECK_KEY, on ? 'on' : 'off');
+    } catch {
+      // Applies for this session; see `rescale`.
+    }
+  }, []);
 
   /**
    * The pilot's own daily ceiling (#223).
@@ -1772,6 +1861,33 @@ export function Cockpit() {
         );
       })()}
 
+      {/* Update & restart with runs going (#299). The quit confirmation's
+          shape and words, because it is the same act: every host is stopped the
+          way Quit stops them, and every run can be resumed. Rust asked for it,
+          so it is drawn even when this window lists no run - a host it cannot
+          read counts as one - and only a press goes on. */}
+      {updating && (() => {
+        const going = quitList(lives, labelOf);
+        return (
+          <Confirm
+            kicker="update vibe"
+            title="Restart with runs going?"
+            lead="Restarting stops every run where it is; each can be resumed, and only the turn each is in is redone."
+            facts={
+              going.length > 0
+                ? going.map((label, i) => ({ label: `run ${String(i + 1)}`, value: label }))
+                : [{ label: 'runs', value: 'runs are still going' }]
+            }
+            confirm="Update & restart"
+            onConfirm={() => {
+              setUpdating(false);
+              installUpdate(true);
+            }}
+            onCancel={() => setUpdating(false)}
+          />
+        );
+      })()}
+
       {composing !== null && (
         <NewWorkstream
           dir={composing.dir}
@@ -1884,6 +2000,17 @@ export function Cockpit() {
           onPalette={act.palette}
           onSettings={act.settings}
           paletteChord={paletteChord}
+          update={
+            shown(update, skipped) ? (
+              <UpdatePopover
+                info={update}
+                state={updateState}
+                onInstall={() => installUpdate(false)}
+                onPage={openReleasePage}
+                onSkip={() => skipUpdate(update.version)}
+              />
+            ) : undefined
+          }
         />
         {/* The three columns, each a resizable region. Sizes are saved on a
             drag and come back next launch (`where.ts`); a shut region is not
@@ -2185,6 +2312,8 @@ export function Cockpit() {
               dir={repoDir}
               scale={scale}
               onScale={rescale}
+              checkUpdates={checkUpdates}
+              onCheckUpdates={toggleUpdateChecks}
               statuses={keyStatuses}
               keyFailure={keyFailure}
               onKeysChanged={refreshKeys}

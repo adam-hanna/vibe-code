@@ -14,9 +14,12 @@
 //! so every line of judgement about a run stays on the Node side and this crate
 //! is transport plus OS.
 //!
-//! **Transport is stdio, not a localhost socket.** The repo has no network code
-//! of its own and should not grow a port, an allocation strategy and an auth
-//! story in order to talk to itself; the process boundary already exists.
+//! **Transport is stdio, not a localhost socket.** The core has no network code
+//! and this crate should not grow a port, an allocation strategy and an auth
+//! story in order to talk to itself; the process boundary already exists. The
+//! network code this crate does have is two clients, both outbound and both
+//! here rather than in the core: the pilot's vendor adapters (`pilot/`) and the
+//! updater (`update.rs`), which fetches one public file.
 //!
 //! **The Node side is a set of processes, one per run** (#246). One long-lived
 //! *service* host answers everything that is not a run - reads, config writes,
@@ -43,6 +46,7 @@ mod keys;
 mod pilot;
 mod reaper;
 mod shellenv;
+mod update;
 
 use host::{app_quit, host_send, host_start, host_status, launch, HostProcess};
 use keys::{key_clear, key_set, key_status};
@@ -52,6 +56,7 @@ use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager, WindowEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+use update::{update_check, update_install};
 
 /// The tray's Quit (#246). See the menu handler.
 fn tray_quit(app: &tauri::AppHandle) {
@@ -105,8 +110,14 @@ pub fn run() {
         // not on the `generate_handler!` list below, so the guard that pins that
         // list pins this line too - a third plugin has to be added on purpose.
         .plugin(tauri_plugin_dialog::init())
+        // The updater (#299). Registered so the two commands below can drive it
+        // from Rust; the window is granted no updater permission, so it cannot
+        // call the plugin's own commands, has no network access, and never names
+        // a URL. `update.rs` says what it fetches and when.
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(HostProcess::default())
         .manage(Pilot::default())
+        .manage(update::Pending::default())
         // Every command the window may call, and the list is worth reading as a
         // whole: three that talk to a process this crate already started, three
         // that manage a credential the window can store and check but **never
@@ -131,7 +142,12 @@ pub fn run() {
             // Quit, once the window has confirmed it with runs going (#246). It
             // only exits, through the same `stop()` the tray uses - narrower
             // than a process-exit permission, which could skip the stop.
-            app_quit
+            app_quit,
+            // Ask whether a newer version exists, and install it or open the
+            // release page (#299). Neither takes a URL or a program: the
+            // endpoint is config or `VIBE_UPDATE_ENDPOINT`, the page a constant.
+            update_check,
+            update_install
         ])
         .setup(|app| {
             // Before `launch`, because the first thing worth keeping is why the
@@ -146,6 +162,9 @@ pub fn run() {
                 // exactly as it did before there was a log to fail to open.
                 None => eprintln!("no app log could be opened; this session is console-only"),
             }
+            // Whenever the update endpoint is overridden, so a stray value is
+            // never silently pointing every check somewhere else (#299).
+            update::log_override();
 
             // Before the tray, and before a window can ask. The service host IS
             // the app; a webview that fails to load should leave a running host

@@ -26,6 +26,16 @@ tauri-plugin-single-instance = "2"
 # in `capabilities/default.json` - `save`, `message`, `ask` and `confirm` come
 # with `dialog:default` and none of them has a caller.
 tauri-plugin-dialog = "2"
+# The updater (#299): the app's second network client, beside the pilot. It
+# fetches one public file - `latest.json` from the GitHub release - and, when a
+# person presses Update & restart, the bundle it names, verified against the
+# minisign key in `tauri.conf.json` before anything is installed. It is driven
+# from Rust behind `update_check` and `update_install`; the window is granted no
+# updater permission and has no network access of its own. Pinned to a minor
+# because the plugin warns that its reqwest client moves with minors, and to
+# 2.12 because 2.13 requires tauri 2.12, which would move the whole tauri stack
+# (and the `@tauri-apps/api` it must match) for no reason of this change.
+tauri-plugin-updater = "~2.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

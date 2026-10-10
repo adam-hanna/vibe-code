@@ -1178,6 +1178,30 @@ mod tests {
     }
 
     #[test]
+    fn an_update_stops_every_host_first() {
+        // #299: the stop `update_install` awaits before the installer runs, and
+        // the Windows hook calls, is this one. It must leave nothing running -
+        // a host holding `node.exe` is what an installer would collide with -
+        // and every run it stops leaves the way a quit does, resumably (#206).
+        let collect = Collect::new();
+        let hosts = hosts(&collect);
+        start(&hosts, &collect, SERVICE, None, ECHO).unwrap();
+        start(&hosts, &collect, "run-1", Some(r#"{"type":"invoke","id":1,"argv":[]}"#), ECHO).unwrap();
+        assert!(hosts.has_run_hosts());
+        // So an unconfirmed install would have asked rather than stopped it.
+        assert!(crate::update::needs_confirm(false, hosts.has_run_hosts()));
+        crate::update::before_install(&hosts);
+        assert!(!hosts.has_run_hosts());
+        let status = hosts.status();
+        assert!(!status.running);
+        assert!(status.runs.is_empty());
+        collect.wait("both hosts to leave", |s| collect_exit(s, SERVICE) && collect_exit(s, "run-1"));
+        // And a second stop - the hook, or `RunEvent::Exit` - finds nothing.
+        crate::update::before_install(&hosts);
+        assert!(!hosts.has_run_hosts());
+    }
+
+    #[test]
     fn status_serialises_the_keys_the_window_reads() {
         // The one failure mode that is silent in both directions. serde's
         // default is the Rust spelling, so `uptime_secs` would arrive at a

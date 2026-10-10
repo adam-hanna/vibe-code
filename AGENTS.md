@@ -7,8 +7,10 @@ people *using* `vibe`; this file is for people *changing* it.
 
 A TypeScript CLI that automates the plan → critique → implement → review loop between the
 Claude Code CLI and the Codex CLI. It installs neither; it shells out to both and inherits
-whatever you are already logged into. There is no server, no daemon and no network code of
-its own — every external call is a child process.
+whatever you are already logged into. There is no server, no daemon and no network code in
+the core — every external call `src/` makes is a child process. The desktop app has two
+network clients of its own, both in Rust under `app/`: the pilot's vendor adapters and the
+updater (#299).
 
 ## Commands
 
@@ -233,10 +235,11 @@ invisible, which is why it has the tests and the components do not.
 
 Two rules the cockpit inherits from the design and must not quietly drop:
 
-- **If you cannot name the denominator, it is not a bar.** The one bar in the app is Claude's
+- **If you cannot name the denominator, it is not a bar.** The one bar in the cockpit is Claude's
   context, because `promptTokens / contextWindow` is a real number over a known one — and it
   is drawn only when the heartbeat carried the window, since it omits the field rather than
-  sending a zero. `6a` has failed three times by inventing a denominator to make waiting feel
+  sending a zero. (The update popover draws a download bar by the same rule: only when the
+  response sent a `Content-Length` to divide by, and a byte count otherwise.) `6a` has failed three times by inventing a denominator to make waiting feel
   measured.
 - **A missing measurement is drawn as absent with its reason**, never as a blank and never as
   a zero. The two lines of `6a` that had no source named the issue that would supply them
@@ -2212,6 +2215,8 @@ app/src/cockpit/ReportPane.tsx a judge's own report - the critique and the revie
 app/src/cockpit/CodePane.tsx   what each round changed, from the range its commit carries
 app/src/pilot/log.ts       rounds and conversation in one scroll, and who may reorder whom
 app/src/shell/       the editor-shaped frame: activity bar, status bar, palette, and their pure tables
+app/src/shell/update.ts      what the window decides about an update: the skip, the setting, the bar
+app/src/shell/UpdatePopover.tsx  the ⬆ tool above ⚙, and what it opens
 app/src/ui/          the shadcn components, over the tokens - button, badge, command, popover, tooltip, resizable
 app/src/cockpit/pane.ts    the artifact panes' shared layout, named once - nine subjects, one shape
 app/src/host.ts      the webview's end of the wire: typed frames, and nothing re-derived
@@ -2233,7 +2238,8 @@ app/src-tauri/src/pilot/models.rs  which models a stored key may use, asked of t
 app/src-tauri/src/host.rs    supervising the hosts - the service host and one per run - and the \\?\ path fix
 app/src-tauri/src/reaper.rs  making a killed app take the host with it
 app/src-tauri/src/keys.rs    the OS keychain, and the read the window cannot reach
-app/src-tauri/src/pilot/     the only network code in the product - two adapters, one vocabulary
+app/src-tauri/src/pilot/     one of the app's two network clients - two adapters, one vocabulary
+app/src-tauri/src/update.rs  the other: checking for a newer app, and installing it when asked
 app/src-tauri/src/pilot/sse.rs      the wire format both vendors share, and nothing else
 app/src-tauri/src/pilot/event.rs    PilotEvent and Usage - every count an Option, on purpose
 app/scripts/         contrast.mjs, stage-sidecar.mjs, make-icon.mjs - all dependency-free
@@ -3161,8 +3167,10 @@ drives turn by turn, and the standing rule was written about exactly it: *"'run
 this program' must never be in reach of it"* (#144). A shell is not what "read the
 repo" means.
 
-**All the network code lives in `app/` and none of it in `src/`.** The core keeps *"every
-external call is a child process"* exactly, and the published package gains no HTTP
+**All the network code lives in `app/` and none of it in `src/`.** There are two clients, both
+in Rust: the pilot's vendor adapters below, and the updater (`src-tauri/src/update.rs`, #299),
+which fetches one public file and, when a person asks, the bundle it names. The core keeps
+*"every external call is a child process"* exactly, and the published package gains no HTTP
 dependency and no credential handling. If this ever moves into `src/` "because the CLI might
 want it too", that sentence stops being true of everything shipped — and it is a sentence
 people choose this tool for. `keys.test.ts` checks both halves: `dependencies` is `{}` *and*
@@ -3234,6 +3242,73 @@ API key provided: sk-proj-…`, quoting it back in full — found by the live re
 which asserts no failure carries the key it was given. Redaction is at the single seam every
 pilot event leaves through, not in an adapter, because Anthropic not echoing today is not a
 promise either vendor is making.
+
+**The app tells you when a newer version of itself exists, and installs it when asked**
+(#299). It is the first network request the app makes on its own, so the shape is narrow on
+purpose. `src-tauri/src/update.rs` holds all of it, behind two commands:
+
+- **`update_check` and `update_install`, and nothing in the window.** `tauri-plugin-updater` is
+  registered so Rust can drive it; there is no `@tauri-apps/plugin-updater` package and no
+  updater permission in `capabilities/default.json`, so the page still has no network access
+  and the CSP did not move. `keys.test.ts` pins both commands and the plugin. The check is a
+  plain HTTPS GET of `latest.json` on the newest published release, with no identifiers, at
+  launch and every six hours (a choice, not a measurement); a Settings switch in *this
+  window's* section turns it off, and off means no request at all. Pre-releases are never
+  offered, because `releases/latest` never serves one, and the plugin's own semver comparison
+  decides what is newer.
+- **A check never fails on screen.** No manifest (a 404 - which the newest release answers
+  until one ships with the updater), no network, a manifest that will not parse: each is one
+  line in `vibe-desktop.log` and `null` to the window, which draws exactly what "no update"
+  draws. Both requests are bounded at ten minutes: the plugin builds each `Update` with no
+  timeout, so `update_check` sets one before storing it.
+- **A `.deb` never self-updates.** The plugin *can* install a `.deb`, but it looks up
+  `linux-x86_64-deb` and falls back to `linux-x86_64`, which in our manifest is the AppImage,
+  and would `dpkg -i` those bytes. `action_for` reads the bundle type Tauri patches into the
+  binary (`tauri::utils::platform::bundle_type()`) plus `APPIMAGE` on Linux, and fails closed:
+  a deb, an rpm, an unidentified Linux build without `APPIMAGE` and an unpatched Windows build
+  all get **Download**, which opens the release page in the system browser - a URL that is a
+  constant in Rust, spawned with `xdg-open`, `open` or `explorer.exe`, because the app had no
+  link opener and the window must never name a URL. `update_install` asks again rather than
+  trusting what the window drew.
+- **Rust decides whether to ask, by `has_run_hosts()`.** With runs going, `update_install`
+  answers `confirm` before downloading or stopping anything - a host set it cannot read counts
+  as runs going - and the window draws the quit confirmation's shape and words, listing its
+  runs or saying that runs are still going, and calls again only on a press. This is stricter
+  than Quit, which skips a host whose run already returned; asking once too often is the safe
+  side.
+- **Every host stops before the installer runs, on every platform, by the one `stop()`.** The
+  plugin's `on_before_exit` hook only exists on Windows - where it matters most, since a running
+  host holds `node.exe` and NSIS/MSI overwrite it - so the hook is wired for that case and
+  `update_install` also awaits the same `before_install` after the download and before
+  `install()`, everywhere. A run stopped this way leaves through `HOST_EXIT_ABANDONED` and
+  writes `ending.json` (#206), so it is resumable. An install that fails after the stop
+  relaunches the service host so the runs can be resumed.
+- **One install at a time, and a failure can be retried.** `Slot` holds the update the last
+  check found and an `installing` flag behind a drop guard. A second press is refused, a check
+  that returns during an install cannot replace what is being installed, and the install works
+  on a clone so a failed attempt leaves the update for the next press. Progress is the running
+  sum of the plugin's chunk lengths (`Tally`), because the plugin reports each chunk, not a
+  total.
+- **The old process exits before the new one starts.** `restart()` is called from the command's
+  async thread, so Tauri requests an exit and spawns the new process only after
+  `RunEvent::Exit` - which is where single-instance releases its lock and `lib.rs` runs
+  `stop()`. Called from the main thread it would restart without those events, and the new
+  process could find the old one and raise its window instead.
+- **Windows installs are `passive`.** NSIS is per-user and needs no elevation; MSI updates from
+  `windows-x86_64-msi` and shows a UAC prompt. The macOS path replaces one ad-hoc-signed `.app`
+  with another and is unproven.
+- **The skip is this window's.** *Skip this version* writes `vibe.update.skipped` in the
+  window's memory; a newer version is a different string and shows the ⬆ tool again. There is
+  no remind-me-later: closing the popover is that.
+
+**`VIBE_UPDATE_ENDPOINT` is how to test the updater.** It replaces the endpoint at runtime
+through the plugin builder, never by editing `tauri.conf.json`, and must be an `https` URL (a
+release build of the plugin refuses anything else); a value that is not one is ignored and the
+built-in endpoint is used. Either way the app logs it at start-up, naming the URL, so a stray
+value cannot go unnoticed. The signature is still verified against the built-in key, so it can
+only point at bundles the owner signed. A real update needs a published release newer than
+the installed build: build an older version, point the variable at a release's `latest.json`
+(an `-rc` draft's, or a hand-made copy), and press Update & restart.
 
 **The host dies when the app does, and the kernel is what enforces it.** `stop()` handles the
 graceful endings by closing stdin; a Windows Job Object with

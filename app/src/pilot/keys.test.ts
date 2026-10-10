@@ -60,7 +60,7 @@ describe('the webview can store a key and can never read one', () => {
     const registered = lib
       .slice(lib.indexOf('generate_handler!['), lib.indexOf(']', lib.indexOf('generate_handler![')))
       .match(/\b\w+\b/g)
-      ?.filter((w) => /^(host|key|pilot|app)_/.test(w));
+      ?.filter((w) => /^(host|key|pilot|app|update)_/.test(w));
     expect(registered?.sort()).toEqual([
       // Case 2 (#246): a tenth command, on purpose, and the one door the window
       // has into ending the app. It only exits, through the same `stop()` the
@@ -79,18 +79,29 @@ describe('the webview can store a key and can never read one', () => {
       // what replaced a model list compiled into this window.
       'pilot_models',
       'pilot_send',
+      // Case 2 (#299): two commands, on purpose - the updater, driven from
+      // Rust so the window gets no network access and no updater permission.
+      // Neither takes a URL or a program: the endpoint is config or
+      // `VIBE_UPDATE_ENDPOINT`, and the release page is a constant in Rust.
+      'update_check',
+      'update_install',
     ]);
   });
 
-  test('a plugin is a capability surface too, and there are two', () => {
+  test('a plugin is a capability surface too, and there are three', () => {
     // #189 added the first plugin whose commands the window actually calls, and
     // a plugin command does not appear in `generate_handler!` - so the list
     // above stopped being the complete answer to "what can the page invoke" on
     // the commit that added it. This is the half that keeps the question
-    // answerable: a third plugin fails here, which is the moment to ask what it
+    // answerable: another plugin fails here, which is the moment to ask what it
     // put within reach.
     const plugins = [...lib.matchAll(/\.plugin\(tauri_plugin_(\w+)::/g)].map((m) => m[1]);
-    expect(plugins.sort()).toEqual(['dialog', 'single_instance']);
+    //
+    // Case 2 (#299): the third, on purpose. The updater plugin is registered so
+    // `update_check` and `update_install` can drive it from Rust; the window is
+    // granted none of its permissions, which the capability test below still
+    // pins, so its own commands are out of the page's reach.
+    expect(plugins.sort()).toEqual(['dialog', 'single_instance', 'updater']);
   });
 
   test('the dialog plugin is granted one permission by name, not its default set', () => {
