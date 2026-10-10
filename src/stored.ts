@@ -38,6 +38,7 @@ import type {
   RunEvent,
   RunPhase,
   RunStart,
+  CliVersions,
   RunState,
   RunStatus,
   RunSummary,
@@ -1386,6 +1387,23 @@ function readStart(raw: unknown, ctx: ReadContext): RunStart | undefined {
 }
 
 /**
+ * The CLI versions a run last ran under, or nothing at all (#298).
+ *
+ * `readStart`'s shape and reason: descriptive, acted on by nothing but the
+ * change event on the next resume, so a malformed value is dropped - with the
+ * repair logged - rather than repaired into a version nobody detected.
+ */
+function readCliVersions(raw: unknown, ctx: ReadContext): CliVersions | undefined {
+  if (raw === undefined) return undefined;
+  const ok = (v: unknown): v is string | null => v === null || (isString(v) && v !== '');
+  if (isRecord(raw) && ok(raw['claude']) && ok(raw['codex'])) {
+    return { claude: raw['claude'], codex: raw['codex'] };
+  }
+  ctx.repairs.dropped('cliVersions', 'cliVersions');
+  return undefined;
+}
+
+/**
  * A checkpoint's metadata, or null - a pure shape check with no repair log.
  *
  * Exported because `listCheckpoints` needs the same answer without a
@@ -1911,6 +1929,8 @@ const READERS = {
   branchPending: (raw, ctx) => readBranchPending(raw, ctx),
   // Absent stays absent: a run from before #249, or one never put on a branch.
   start: (raw, ctx) => readStart(raw, ctx),
+  // Absent stays absent: a run from before #298, or one started --skip-probe.
+  cliVersions: (raw, ctx) => readCliVersions(raw, ctx),
   // The three question-record fields (#65). Optional every one: absent is what
   // a run that suppressed nothing and was answered by nobody looks like, and it
   // is what every state written before they existed presents - so nothing here

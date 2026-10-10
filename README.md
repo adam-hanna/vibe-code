@@ -4,6 +4,8 @@
 
 Claude plans and Codex critiques, until the plan has no blocking findings. Then Claude implements, vibe runs your tests, and Codex reviews the diff, until that is clean too. vibe stops only when it actually needs you.
 
+**Documentation:** https://adam-hanna.github.io/vibe-code/
+
 ![The vibe desktop app: projects and runs on the left, the pilot chat in the middle, the run's status on the right](docs/images/app-pilot.png)
 
 ```
@@ -67,7 +69,13 @@ The app is the same loop with a window around it. You describe what you want to 
 
 The app also pauses at the checkpoints you choose, lets you stop a turn in flight, and answers a run's questions in place. Settings edits `vibe.config.json` for you.
 
-The app isn't packaged for download yet. To build it (Rust and the [Tauri prerequisites](https://tauri.app/start/prerequisites/) are needed):
+The app tells you when a newer version exists. The check is one plain HTTPS request for a public file on GitHub, sends no identifiers, and can be turned off in Settings. **Update & restart** installs the new version in place on Windows (the `.msi` shows a UAC prompt), macOS and the AppImage. A `.deb` install updates by download from the releases page. Pre-releases are never offered. See [Updates](https://adam-hanna.github.io/vibe-code/app.html#updates).
+
+Download the latest version: Windows x64 [installer](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-windows-x64-setup.exe) or [`.msi`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-windows-x64.msi), Apple Silicon [`.dmg`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-macos-arm64.dmg), Linux [`.AppImage`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-linux-x86_64.AppImage) or [`.deb`](https://github.com/adam-hanna/vibe-code/releases/latest/download/Vibe-linux-amd64.deb). Older versions are on the [releases page](https://github.com/adam-hanna/vibe-code/releases). The builds are **unsigned**. On macOS, if it says the app is damaged or from an unidentified developer, run `xattr -cr /Applications/Vibe.app`. On Windows, SmartScreen warns first: click **More info**, then **Run anyway**. Intel Macs build from source.
+
+To check that a download came from this repository, run `gh attestation verify Vibe-macos-arm64.dmg --repo adam-hanna/vibe-code`. Without `gh`, compare it with the release's `SHA256SUMS` (`sha256sum -c SHA256SUMS --ignore-missing`), which only shows the file matches the release page. More in [Verifying a download](https://adam-hanna.github.io/vibe-code/app.html#verifying-a-download).
+
+To build it yourself (Rust and the [Tauri prerequisites](https://tauri.app/start/prerequisites/) are needed):
 
 ```bash
 cd app && npm install && npm run app:build
@@ -75,7 +83,7 @@ cd app && npm install && npm run app:build
 
 ## Configuration
 
-Put a `vibe.config.json` in the repository. Flags override it. `vibe.config.example.json` is a worked example. The keys most worth knowing:
+Put a `vibe.config.json` in the repository. Flags override it. `vibe.config.example.json` is a worked example, and the [configuration reference](https://adam-hanna.github.io/vibe-code/configuration.html) lists every key. The keys most worth knowing:
 
 | Key | What it does |
 |---|---|
@@ -113,8 +121,9 @@ When a round changes a test file or `vibe.config.json`, the reviewer is shown ea
 ## Notes and limitations
 
 - **Codex cost isn't reported.** Codex runs on a subscription and no output mode returns a price, so vibe reports tokens and never a guessed dollar figure. `budget.maxTokens` covers both agents.
+- **Tested with claude 2.1.294 and codex 0.157.1.** vibe uses whatever versions you have installed. `vibe doctor` and every run's preflight compare them with the tested ones. A different version is a warning that names the command to move to the tested one, and the run continues. vibe refuses to start only when the installed CLI's `--help` no longer declares a flag vibe passes; `--skip-probe` skips that check.
 - **Agreement isn't proof.** A clean run means two different models agreed and your tests passed. Both can still be wrong in the same way.
-- **Long docs are coming.** [#230](https://github.com/adam-hanna/vibe-code/issues/230) tracks a docs site with a full config reference and how the loop works.
+- **The full documentation is at [adam-hanna.github.io/vibe-code](https://adam-hanna.github.io/vibe-code/)**: every config key, every command, and how the loop works.
 
 ## Contributing
 

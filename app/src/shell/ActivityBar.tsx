@@ -1,4 +1,6 @@
 import { PanelLeft, Plus, Search, Settings } from 'lucide-react';
+import { forwardRef } from 'react';
+import type { ButtonHTMLAttributes, ReactNode } from 'react';
 import { VibeMark } from '../design/Icon';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../ui/tooltip';
 import { cn } from '@/lib/utils';
@@ -22,6 +24,7 @@ export function ActivityBar({
   onPalette,
   onSettings,
   paletteChord,
+  update,
 }: {
   sidebarOpen: boolean;
   onSidebar: () => void;
@@ -30,6 +33,12 @@ export function ActivityBar({
   onSettings: () => void;
   /** `⌘K` or `Ctrl+K`, for the tooltip. */
   paletteChord: string;
+  /**
+   * The ⬆ tool and its popover, directly above ⚙ (#299) - passed only while a
+   * newer, unskipped version exists, so the foot reads `＋ ⌘K ⬆ ⚙` then and
+   * `＋ ⌘K ⚙` the rest of the time.
+   */
+  update?: ReactNode;
 }) {
   return (
     <nav
@@ -49,6 +58,7 @@ export function ActivityBar({
         <Search className="size-5" aria-hidden />
       </Tool>
       <div className="flex-1" />
+      {update}
       <Tool label="Settings for all projects" onClick={onSettings}>
         <Settings className="size-5" aria-hidden />
       </Tool>
@@ -56,29 +66,34 @@ export function ActivityBar({
   );
 }
 
-function Tool({
-  label,
-  on = false,
-  onClick,
-  children,
-}: {
-  label: string;
-  on?: boolean;
-  onClick: () => void;
-  children: React.ReactNode;
-}) {
+/**
+ * One icon in the strip. Exported, and forwarding its ref and any other button
+ * props, so a popover's trigger can be a `Tool` (#299): Radix's `asChild` hands
+ * the trigger its click handler, ref and `aria-*`, and they have to land on the
+ * button itself. `onClick` is therefore optional - a trigger supplies none.
+ */
+export const Tool = forwardRef<
+  HTMLButtonElement,
+  Omit<ButtonHTMLAttributes<HTMLButtonElement>, 'children'> & {
+    label: string;
+    on?: boolean;
+    children: ReactNode;
+  }
+>(function Tool({ label, on = false, className, children, ...rest }, ref) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <button
+          ref={ref}
           type="button"
-          onClick={onClick}
           aria-label={label}
           aria-pressed={on}
+          {...rest}
           className={cn(
             'relative flex size-10 cursor-pointer items-center justify-center rounded-sm border border-transparent bg-transparent text-tertiary outline-none transition-colors hover:text-emphasis focus-visible:ring-1 focus-visible:ring-accent-border',
             // The active mark is a 2px bar on the outer edge, VS Code's own cue.
             on && 'text-emphasis before:absolute before:inset-y-2 before:-left-2 before:w-0.5 before:rounded-r before:bg-accent',
+            className,
           )}
         >
           {children}
@@ -87,4 +102,4 @@ function Tool({
       <TooltipContent side="right">{label}</TooltipContent>
     </Tooltip>
   );
-}
+});

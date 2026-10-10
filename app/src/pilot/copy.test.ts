@@ -51,6 +51,13 @@ describe('the controls are drawn, and say what happened', () => {
     expect(pane).toMatch(/copyOf\(reply\)/);
     expect(pane).toMatch(/<CopyText text=\{copy\.asked\}/);
     expect(pane).toMatch(/<CopyText text=\{copy\.said\}/);
+    // At the foot of each half, not the top (#320): a long message or reply had
+    // to be scrolled back up to its start to be copied. Yours comes after your
+    // text and its settings chips; the reply's comes right after its text and
+    // is no longer in the chip row.
+    expect(pane).toMatch(/\{yours\.brief\}[\s\S]*?yours\.settings\.length[\s\S]*?<CopyText text=\{copy\.asked\}/);
+    expect(pane).toMatch(/<Markdown text=\{visible\(reply\.text\)\} \/>\}\s*\{\/\*[\s\S]*?\*\/\}\s*\{copy\.said !== null && <CopyText/);
+    expect(pane).not.toMatch(/<CopyText[^>]*className="ml-auto"/);
   });
 
   test('a refused or missing clipboard is a visible failure, never silence', () => {

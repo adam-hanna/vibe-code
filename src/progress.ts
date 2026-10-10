@@ -2,7 +2,8 @@ import { requestCancel } from '@src/cancel.js';
 // No `fmtTokens` import: this module already has one, and it is the one the
 // heartbeat line renders with - so the ceiling's sentence and the beat that
 // preceded it spell the same number the same way.
-import { detail } from '@src/log.js';
+import { detail, warn } from '@src/log.js';
+import { TESTED_CLI_VERSIONS } from '@src/config.js';
 import type { Meta } from '@src/log.js';
 import { markActivity, measuredWindow } from '@src/run.js';
 import type { AgentProvider } from '@src/runtime.js';
@@ -110,6 +111,12 @@ export interface ProgressSnapshot {
    * not worth reading.
    */
   said: string[];
+  /**
+   * Completed Codex item types outside `KNOWN_CODEX_ITEMS`, since the last line
+   * was drained (#298). A buffer for `said`'s reason: the parser collects and
+   * `onLine` says, through the once-per-run latch `noteCodexItems`.
+   */
+  unrecognised: string[];
 }
 
 export function emptySnapshot(): ProgressSnapshot {
@@ -123,6 +130,7 @@ export function emptySnapshot(): ProgressSnapshot {
     countedMessages: new Set(),
     itemisedMessages: new Set(),
     said: [],
+    unrecognised: [],
   };
 }
 
@@ -315,6 +323,90 @@ export const parseClaudeLine: LineParser = (snapshot, line) => {
 const NON_TOOL_CODEX_ITEMS = new Set(['agent_message', 'reasoning']);
 
 /**
+ * Every Codex item type this build recognises (#298) - a vocabulary for a
+ * warning, never an allow-list for a decision.
+ *
+ * `NON_TOOL_CODEX_ITEMS`, the two tool kinds observed on this stream and cited
+ * above (`command_execution`, `web_search`), and the kinds `codex exec --json`'s
+ * own documentation lists for the stream (`file_change`, `mcp_tool_call`,
+ * `todo_list`, `error`). `tests/cli-fixtures-contract.test.ts` checks every item
+ * type in a recorded fixture is here.
+ *
+ * A type outside it is warned about once per run, naming the installed and
+ * tested Codex versions (`noteCodexItems` in `src/codex.ts`), and nothing else
+ * changes: the parsers stay tolerant, the tally above still counts it as a tool,
+ * and the turn is never failed - Codex adds item kinds as it grows, and refusing
+ * one would break runs that would have worked.
+ *
+ * Claude's stream gets no equivalent: `parseClaudeLine` already ignores events
+ * it does not read, and there is no recorded Claude vocabulary to hold one to.
+ */
+export const KNOWN_CODEX_ITEMS: ReadonlySet<string> = new Set([
+  ...NON_TOOL_CODEX_ITEMS,
+  'command_execution',
+  'web_search',
+  'file_change',
+  'mcp_tool_call',
+  'todo_list',
+  'error',
+]);
+
+/**
+ * Unrecognised Codex item types already warned about in this run, and the
+ * Codex version the run is under (#298).
+ *
+ * A module latch, `cancel.ts`'s trade and its reason: one run per process.
+ * `execute` resets it on the way in, so a type warned about in one run is
+ * warned about again in the next.
+ */
+const warnedItems = new Set<string>();
+let codexInstalled: string | null = null;
+
+export function resetUnrecognisedCodexItems(installed: string | null): void {
+  warnedItems.clear();
+  codexInstalled = installed;
+}
+
+/**
+ * Warn once per run for each item type this build does not recognise (#298).
+ * Narration with no event, and never a failure: the turn carries on exactly as
+ * it would have. `parseCodexLine` collects and this says, so the parser keeps
+ * no side effect.
+ */
+export function noteCodexItems(types: readonly string[]): void {
+  for (const type of types) {
+    if (warnedItems.has(type)) continue;
+    warnedItems.add(type);
+    const installed = codexInstalled;
+    const tested = TESTED_CLI_VERSIONS.codex;
+    try {
+      warn(
+        `codex emitted an item type this build does not recognise: "${type}" (codex ` +
+          `${installed ?? 'version unknown'} installed, tested with ${tested}). The turn continues.`,
+        { id: 'codex_item_unrecognised', data: { type, installed, tested } },
+      );
+    } catch {
+      // Narration must never end a turn.
+    }
+  }
+}
+
+/**
+ * The line handler a Codex turn gets when it has no heartbeat - progress off
+ * (#298). The same parser on a throwaway snapshot, so the warning does not
+ * depend on whether anybody asked to watch the turn.
+ */
+export function watchCodexItems(line: string): void {
+  const snapshot = emptySnapshot();
+  try {
+    parseCodexLine(snapshot, line);
+  } catch {
+    return;
+  }
+  noteCodexItems(snapshot.unrecognised);
+}
+
+/**
  * Codex's `--json` stream, which is sparser: it names item types but reports no
  * per-request usage, so there is nothing here to drive a context percentage.
  *
@@ -336,6 +428,7 @@ export const parseCodexLine: LineParser = (snapshot, line) => {
     // has no reason to double it the way the liveness counter must (#66).
     if (type === 'item.completed' && typeof itemType === 'string' && itemType !== '') {
       tally(snapshot, itemType, !NON_TOOL_CODEX_ITEMS.has(itemType));
+      if (!KNOWN_CODEX_ITEMS.has(itemType)) snapshot.unrecognised.push(itemType);
       // Codex's half of #223. `agent_message` is the model talking - it is in
       // `NON_TOOL_CODEX_ITEMS` for exactly that reason - and `item.completed` is
       // where the whole text has arrived. Reading it on `item.started` would
@@ -974,6 +1067,11 @@ export function createHeartbeat(
           // Same rule as the parse above: narration must never end a turn.
         }
       }
+    }
+    // An unrecognised Codex item type, said as soon as it is seen and once per
+    // run (#298), so a turn stopped a moment later has still reported it.
+    if (snapshot.unrecognised.length > 0) {
+      noteCodexItems(snapshot.unrecognised.splice(0, snapshot.unrecognised.length));
     }
     // The first line that puts a figure on this turn is written immediately,
     // once. Everything after it rides the ordinary throttle: writing per usage

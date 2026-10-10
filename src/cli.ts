@@ -13,6 +13,7 @@ import {
 import {
   allocateRun,
   assertUnlinkedRun,
+  recordAndSay,
   continueIntoImplementation,
   createRun,
   listRuns,
@@ -55,6 +56,8 @@ import type { RolePatches } from '@src/roles.js';
 import { setOwn } from '@src/runtime.js';
 import { claudeBin, setSessionArgs } from '@src/claude.js';
 import { codexBin } from '@src/codex.js';
+import { resetUnrecognisedCodexItems } from '@src/progress.js';
+import { detectCliVersions } from '@src/cliversions.js';
 import { describeMcp, mcpRefusals } from '@src/mcp.js';
 import { run as runChild } from '@src/proc.js';
 // The accounting seam, from the leaf it lives in: orchestrator.js re-exports
@@ -73,6 +76,7 @@ import * as log from '@src/log.js';
 import type { EnvironmentFacts, Phase } from '@src/runtime.js';
 import type {
   Answer,
+  CliVersions,
   Config,
   ConfigOverrides,
   Effort,
@@ -684,6 +688,10 @@ async function startRun(
   });
 
   log.attachTranscript(path.join(state.dir, 'transcript.log'));
+  const cliVersions = await detectedCliVersions(flags);
+  // Saved before `run_started` says them, so the archive never announces versions
+  // it does not hold - a resume compares against what is stored (#298).
+  if (cliVersions !== null) noteCliVersions(state, cliVersions);
   log.heading(`Run ${state.id}`, {
     // `repo` and `task` are the other two thirds of hi-fi 1's identity header
     // (#223), and both were already certain here. `dir` is the *run's*
@@ -708,6 +716,8 @@ async function startRun(
       workDir: workDirOf(state),
       task,
       resumed: false,
+      // The agent CLIs this run starts under (#298), null when not detected.
+      cliVersions,
     },
   });
   log.info(`Repo:    ${targetDir}`);
@@ -983,6 +993,9 @@ async function resumeRun(
       log.info('Previous stop reported findings, not questions - continuing with raised limits.');
       applyEdits();
       renameSync(answersFile, path.join(state.dir, `stalled-${state.planRound}.md`));
+      const cliVersions = await detectedCliVersions(flags);
+      // Saved before `run_started` says them (#298); see the start path.
+      if (cliVersions !== null) noteCliVersions(state, cliVersions);
       log.heading(`Resuming ${state.id}`, {
         id: 'run_started',
         data: {
@@ -993,6 +1006,7 @@ async function resumeRun(
           task: state.task,
           resumed: true,
           from: resumedFrom(state),
+          cliVersions,
         },
       });
       return execute(state, cfg, true, flags.skipProbe === true, REAL_GATE, loop, handle);
@@ -1040,6 +1054,9 @@ async function resumeRun(
   // `run_resumed` of their own. A host asking "which run am I looking at" has
   // the same question either way, and `resumed` is the field that answers the
   // one thing that differs (#207).
+  const cliVersions = await detectedCliVersions(flags);
+  // Saved before `run_started` says them (#298); see the start path.
+  if (cliVersions !== null) noteCliVersions(state, cliVersions);
   log.heading(`Resuming ${state.id}`, {
     id: 'run_started',
     data: {
@@ -1050,9 +1067,48 @@ async function resumeRun(
       task: state.task,
       resumed: true,
       from: resumedFrom(state),
+      cliVersions,
     },
   });
   return execute(state, cfg, true, flags.skipProbe === true, REAL_GATE, loop, handle);
+}
+
+/**
+ * The installed agent CLI versions, for `run_started` and the run's record
+ * (#298), or null under `--skip-probe`, which skips the detection with the rest
+ * of the environment check. Read once per process: the preflight gate's flag
+ * check reuses the same answer.
+ */
+async function detectedCliVersions(flags: ParsedArgs['flags']): Promise<CliVersions | null> {
+  return flags.skipProbe === true ? null : detectCliVersions();
+}
+
+/**
+ * Write the detected CLI versions onto the run, and say so where they moved
+ * (#298).
+ *
+ * A resume under a different `claude` or `codex` than the run last ran under
+ * records `cli_versions_changed` naming both - durable, because "this run
+ * changed CLI mid-life" is a question a later reader of the archive has and
+ * the narration alone cannot answer. Only where both sides are known: a version
+ * that was not detected is not evidence that anything changed. The event id is
+ * the event type, `recordAndSay`'s rule.
+ */
+export function noteCliVersions(state: RunState, detected: CliVersions): void {
+  const stored = state.cliVersions;
+  for (const cli of ['claude', 'codex'] as const) {
+    const from = stored?.[cli] ?? null;
+    const to = detected[cli];
+    if (from !== null && to !== null && from !== to) {
+      recordAndSay(state, 'warn', 'cli_versions_changed', `${cli} changed since this run last ran: ${from} -> ${to}`, {
+        cli,
+        from,
+        to,
+      });
+    }
+  }
+  state.cliVersions = { claude: detected.claude, codex: detected.codex };
+  saveState(state);
 }
 
 /**
@@ -1646,6 +1702,9 @@ export async function execute(
   // there is no path that leaves the previous run's overrides in place.
   installPromptOverrides(cfg.prompts);
   installStandingInstructions(cfg.instructions.text);
+  // Unrecognised Codex item types are warned about once per run (#298); a
+  // previous run's set must not silence this one's.
+  resetUnrecognisedCodexItems(state.cliVersions?.codex ?? null);
   const started = Date.now();
   const recovery = emptyRecovery();
   let reported = false;
@@ -2188,6 +2247,8 @@ export async function runPreflight(
         : '';
     log.info(`${label}: ${result.runtime.shell} / ${result.runtime.pathStyle} paths${repaired}`);
   }
+  // The CLIs as tested (#298): a detail line each, never a warning.
+  for (const line of report.clis?.confirmations ?? []) log.detail(line);
   for (const warning of report.warnings) log.warn(warning);
 
   if (report.ok) {
@@ -2919,6 +2980,8 @@ async function cmdDoctor(args: readonly string[]): Promise<ExitCode> {
       ['plan', 'implement', 'review'],
       path.join(targetDir, '.vibe'),
     );
+    // The installed CLIs against the tested versions, and their flags (#298).
+    for (const line of report.clis?.confirmations ?? []) log.ok(line);
     reportAgent('claude', report.claude);
     reportAgent('codex', report.codex);
 

@@ -25,6 +25,19 @@ test('a started draft is drawn as the run it asked for, and no draft draws whate
 
 test('the column, the footer and the summary all take the empty run while a draft has none', () => {
   // One expression decides the run those three draw, so they cannot disagree.
-  expect(cockpit).toMatch(/const columnRun = draftHasNoRun\(drafting\) \? blank : /);
+  expect(cockpit).toMatch(/const noRun = draftHasNoRun\(drafting\);/);
+  expect(cockpit).toMatch(/const columnRun = noRun \? blank : /);
   expect(cockpit).toContain('run={columnRun}');
+});
+
+test('Code, Verify and Spend say there is no run while a draft has none (#319)', () => {
+  // They chose between the opened run and `run`, and a draft opens nothing, so
+  // all three drew the window's last live run beside an empty column.
+  expect(cockpit).toMatch(/tab === 'code' &&\s*\(noRun \? \(\s*<NoRun>/);
+  expect(cockpit).toMatch(/tab === 'verify' && noRun && \(\s*<NoRun>/);
+  expect(cockpit).toMatch(/tab === 'verify' && !noRun && \(/);
+  expect(cockpit).toMatch(/tab === 'spend' &&\s*\(noRun \? \(\s*<NoRun>/);
+  // And nothing else reads the draft guard on its own, so the surfaces cannot
+  // come to disagree about whether a draft has a run.
+  expect(cockpit.match(/draftHasNoRun\(/g)).toHaveLength(1);
 });

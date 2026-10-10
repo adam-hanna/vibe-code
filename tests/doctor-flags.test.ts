@@ -6,6 +6,13 @@ import path from 'node:path';
 import { configFromFlags, flagOverrideNames, main, parseArgs } from '@src/cli.js';
 import { EXIT } from '@src/orchestrator.js';
 
+// Only so `resolveBin` succeeds on a machine where neither CLI is installed -
+// a hosted CI runner is one (#239). Nothing here spawns either: the cases
+// inject what they run. Without it they passed only where `claude` and
+// `codex` happened to be on PATH.
+process.env['VIBE_CLAUDE_BIN'] = process.execPath;
+process.env['VIBE_CODEX_BIN'] = process.execPath;
+
 /**
  * `vibe doctor` reports the config the same flags would RUN under (#106).
  *

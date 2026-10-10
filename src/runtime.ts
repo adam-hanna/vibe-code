@@ -204,22 +204,43 @@ export function validateContract(
 /** Numeric-prefix comparison. Tolerates `v24.18.0`, `24.18.0`, `1.9`. */
 export function satisfiesMinVersion(actual: string | null, min: string): boolean {
   if (actual === null) return false;
-  const a = parseVersion(actual);
-  const b = parseVersion(min);
-  if (a === null || b === null) return false;
-
-  for (let i = 0; i < Math.max(a.length, b.length); i += 1) {
-    const left = a[i] ?? 0;
-    const right = b[i] ?? 0;
-    if (left !== right) return left > right;
-  }
-  return true;
+  const order = compareVersions(actual, min);
+  return order !== null && order >= 0;
 }
 
-function parseVersion(raw: string): number[] | null {
+/**
+ * The version number in a line of `--version` output, or null.
+ *
+ * `2.1.294 (Claude Code)` is `2.1.294` and `codex-cli 0.157.1` is `0.157.1`
+ * (#298). The one regex for a version in this repo: the toolchain contract and
+ * the agent CLI check both read through it, so they cannot disagree about what
+ * a version is.
+ */
+export function versionOf(raw: string): string | null {
   const m = /(\d+(?:\.\d+)*)/.exec(raw);
-  if (!m?.[1]) return null;
-  return m[1].split('.').map((part) => Number(part));
+  return m?.[1] ?? null;
+}
+
+export function parseVersion(raw: string): number[] | null {
+  const version = versionOf(raw);
+  return version === null ? null : version.split('.').map((part) => Number(part));
+}
+
+/**
+ * Three-way comparison, a missing component counting as 0 (`1.9` equals
+ * `1.9.0`). Null when either side holds no version, which is "not known" and
+ * never a guess at an order.
+ */
+export function compareVersions(a: string, b: string): -1 | 0 | 1 | null {
+  const left = parseVersion(a);
+  const right = parseVersion(b);
+  if (left === null || right === null) return null;
+  for (let i = 0; i < Math.max(left.length, right.length); i += 1) {
+    const l = left[i] ?? 0;
+    const r = right[i] ?? 0;
+    if (l !== r) return l > r ? 1 : -1;
+  }
+  return 0;
 }
 
 /**

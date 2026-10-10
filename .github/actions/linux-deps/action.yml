@@ -1,0 +1,28 @@
+# The Linux packages a Tauri build of the app needs, listed once.
+#
+# Used by ci.yml (the Rust tests) and release.yml (the Linux bundles), so the
+# two cannot drift apart. Check the repository out before using this.
+name: Linux build dependencies
+description: Install the apt packages the Tauri app needs to compile on Ubuntu.
+
+runs:
+  using: composite
+  steps:
+    # libwebkit2gtk-4.1-dev, build-essential, curl, wget, file, libxdo-dev,
+    # libssl-dev and librsvg2-dev are Tauri v2's Linux prerequisites.
+    # libayatana-appindicator3-dev is for the `tray-icon` feature.
+    # libdbus-1-dev is for keyring's `sync-secret-service` on Linux.
+    - shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          libwebkit2gtk-4.1-dev \
+          build-essential \
+          curl \
+          wget \
+          file \
+          libxdo-dev \
+          libssl-dev \
+          libayatana-appindicator3-dev \
+          librsvg2-dev \
+          libdbus-1-dev

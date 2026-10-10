@@ -13,6 +13,13 @@ import type { RunFn, RunOptions } from '@src/proc.js';
 import type { Outbound } from '@src/protocol.js';
 import type { PilotChatOptions, PilotChatResult } from '@src/pilotchat.js';
 
+// Only so `resolveBin` succeeds on a machine where neither CLI is installed -
+// a hosted CI runner is one (#239). Nothing here spawns either: the cases
+// inject what they run. Without it they passed only where `claude` and
+// `codex` happened to be on PATH.
+process.env['VIBE_CLAUDE_BIN'] = process.execPath;
+process.env['VIBE_CODEX_BIN'] = process.execPath;
+
 /**
  * The OpenAI subscription pilot, and telling vibe where the CLIs are (#223).
  *

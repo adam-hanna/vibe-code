@@ -7,8 +7,10 @@ people *using* `vibe`; this file is for people *changing* it.
 
 A TypeScript CLI that automates the plan → critique → implement → review loop between the
 Claude Code CLI and the Codex CLI. It installs neither; it shells out to both and inherits
-whatever you are already logged into. There is no server, no daemon and no network code of
-its own — every external call is a child process.
+whatever you are already logged into. There is no server, no daemon and no network code in
+the core — every external call `src/` makes is a child process. The desktop app has two
+network clients of its own, both in Rust under `app/`: the pilot's vendor adapters and the
+updater (#299).
 
 ## Commands
 
@@ -52,8 +54,67 @@ and the root is removed when the run ends. Three rules travel with it, pinned by
 is never what you tested — but if you invoke `node --test` directly, build first or you are
 testing the last change rather than this one.
 
-There is **no linter and no formatter**, and no CI. `npm run typecheck && npm test` before
-every commit is the whole gate, and it is on you to run it. Node 20+ (`engines`).
+**`npm test` fails until the agent CLIs' fixtures are recorded** (#298).
+`cli-fixtures-contract.test.ts` feeds a real turn of each CLI, recorded under
+`tests/fixtures/cli/<cli>-<version>/`, through the real parsers, and a missing fixture for a
+version in `TESTED_CLI_VERSIONS` fails by name. Recording spawns real agents, so it is done by
+hand and never by the suite:
+
+```bash
+node scripts/record-cli-fixtures.mjs           # writes tests/fixtures/cli/claude-<v>/ and codex-<v>/
+node scripts/record-cli-fixtures.mjs --force   # re-record a version that already has one
+```
+
+`VIBE_CLI_FIXTURES=pending` skips those tests, and says so; it exists for the run that
+introduced them, which could not record fixtures from inside a sandboxed turn. There is no
+other way past the check.
+
+There is **no linter and no formatter**. There are three workflows. `pages.yml` deploys the
+docs site from `main`. `ci.yml` runs on every push and pull request into `develop` and `main`:
+the core gate (`npm run typecheck && npm test`), the app gate (typecheck, vitest,
+`audit:contrast`) and the Rust tests, all on Ubuntu 22.04 with Node 22. `release.yml` builds the
+desktop bundles on a `v*` tag into a draft GitHub release (#239). What CI does **not** run: a
+linter or formatter, the tests on macOS or Windows, and `npm publish`. **`npm run typecheck &&
+npm test` before every commit is still the rule**, and it is still on you to run it: CI only
+reports after you push. A test that fails only on CI is a finding about the test or the code,
+never something to retry past or skip. Node 20+ (`engines`).
+
+**A release carries two names for each installer and the files an installed app updates
+from** (#239). The README and `docs/app.md` link to
+`releases/latest/download/<stable name>` — `Vibe-macos-arm64.dmg` and the rest — so no link
+moves per release; the names are written once, in `release.yml`'s matrix, and
+`download-names.test.ts` fails when a page and the workflow disagree. With the
+`TAURI_SIGNING_PRIVATE_KEY` secrets set, the build also produces the signed update bundles and
+`latest.json`, which #299's updater reads. `tauri.conf.json` leaves `createUpdaterArtifacts`
+off and the workflow switches it on, so a local `npm run app:build` never needs the key. **That
+key cannot be replaced**: a release signed with a new one is refused by every installed copy,
+whose only way forward is a manual reinstall.
+
+### The docs site — `docs/`
+
+```bash
+cd docs
+npm install
+npm run docs:build     # vitepress build - fails on a dead link, and that check stays on
+npm run docs:dev       # vitepress dev - the site with live reload
+npm run docs:preview   # serve the built site, under its real base path
+```
+
+**`docs/` has its own `package.json` and lockfile**, the arrangement `app/` has: the root
+package gains no dependency, `docs/` is not in `files`, and the root gate neither builds it nor
+sees it. It is a VitePress site published at `https://adam-hanna.github.io/vibe-code/` by the
+Pages workflow, which builds from `main` so the site describes the latest release. `BASE` in
+`docs/.vitepress/config.mts` is the only place the path is written; a custom domain is a
+`docs/public/CNAME` and that one line. `docs/images/` is shared with `README.md`, and
+`docs/plans/` is internal and excluded from the site (`srcExclude`).
+
+**The reference pages are hand-written, and guarded only for what is missing.**
+`tests/docs-drift.test.ts`, run by `npm test`, fails when a `DEFAULTS` key path, a section,
+a `verify.gates[]` field, an `EXIT` code or a command `src/cli.ts` dispatches is absent from
+`docs/configuration.md`, `docs/exit-codes.md` or `docs/cli.md` (and when the last two name one
+the source lacks). It checks no description, no default value and no flag, so a green run
+means nothing is missing, never that the page is right. A change to any of those in `src/`
+updates the page in the same PR, written against the code rather than an older page.
 
 ### The desktop app — `app/`
 
@@ -174,10 +235,11 @@ invisible, which is why it has the tests and the components do not.
 
 Two rules the cockpit inherits from the design and must not quietly drop:
 
-- **If you cannot name the denominator, it is not a bar.** The one bar in the app is Claude's
+- **If you cannot name the denominator, it is not a bar.** The one bar in the cockpit is Claude's
   context, because `promptTokens / contextWindow` is a real number over a known one — and it
   is drawn only when the heartbeat carried the window, since it omits the field rather than
-  sending a zero. `6a` has failed three times by inventing a denominator to make waiting feel
+  sending a zero. (The update popover draws a download bar by the same rule: only when the
+  response sent a `Content-Length` to divide by, and a byte count otherwise.) `6a` has failed three times by inventing a denominator to make waiting feel
   measured.
 - **A missing measurement is drawn as absent with its reason**, never as a blank and never as
   a zero. The two lines of `6a` that had no source named the issue that would supply them
@@ -2102,6 +2164,7 @@ src/charge.ts        the one seam every token and dollar is charged through
 src/slots.ts         session-slot lifecycle (main = Claude, judge + review = Codex, write = one-shot Codex)
 src/context.ts       context measurement, compaction, session rotation
 src/preflight.ts     toolchain contract enforcement, `vibe doctor`
+src/cliversions.ts   the installed claude/codex against the tested versions, and the flags vibe passes
 src/verify.ts        the verification gates — the list, every run, and broken vs flaky
 src/judge.ts         which changed files are the run's own judge, and the reviewer's verdict on each
 src/reproducer.ts    a reviewer's test: placed, run by the user's own gate, taken back out
@@ -2121,6 +2184,8 @@ src/worktree.ts      a checkout of its own: where the work happens, and where it
 src/pilotaccess.ts   what the pilot may do unasked: the safe list, YOLO, its directories, its reads
 src/mcp.ts           which MCP servers a run's children reach: none unless a role names one
 tests/               node:test, one file per concern
+tests/docs-drift.test.ts  the docs' reference pages against DEFAULTS, EXIT and the commands - nothing missing, not accuracy
+tests/release-verification.test.ts  the release's attestations and SHA256SUMS, and the pages that say how to check them
 
 app/                 the desktop app - Vite + React, its own package.json and gate
 app/src/design/      tokens.css, theme.css (Tailwind over the tokens), and the primitives still drawn
@@ -2151,6 +2216,8 @@ app/src/cockpit/ReportPane.tsx a judge's own report - the critique and the revie
 app/src/cockpit/CodePane.tsx   what each round changed, from the range its commit carries
 app/src/pilot/log.ts       rounds and conversation in one scroll, and who may reorder whom
 app/src/shell/       the editor-shaped frame: activity bar, status bar, palette, and their pure tables
+app/src/shell/update.ts      what the window decides about an update: the skip, the setting, the bar
+app/src/shell/UpdatePopover.tsx  the ⬆ tool above ⚙, and what it opens
 app/src/ui/          the shadcn components, over the tokens - button, badge, command, popover, tooltip, resizable
 app/src/cockpit/pane.ts    the artifact panes' shared layout, named once - nine subjects, one shape
 app/src/host.ts      the webview's end of the wire: typed frames, and nothing re-derived
@@ -2172,10 +2239,20 @@ app/src-tauri/src/pilot/models.rs  which models a stored key may use, asked of t
 app/src-tauri/src/host.rs    supervising the hosts - the service host and one per run - and the \\?\ path fix
 app/src-tauri/src/reaper.rs  making a killed app take the host with it
 app/src-tauri/src/keys.rs    the OS keychain, and the read the window cannot reach
-app/src-tauri/src/pilot/     the only network code in the product - two adapters, one vocabulary
+app/src-tauri/src/pilot/     one of the app's two network clients - two adapters, one vocabulary
+app/src-tauri/src/update.rs  the other: checking for a newer app, and installing it when asked
 app/src-tauri/src/pilot/sse.rs      the wire format both vendors share, and nothing else
 app/src-tauri/src/pilot/event.rs    PilotEvent and Usage - every count an Option, on purpose
 app/scripts/         contrast.mjs, stage-sidecar.mjs, make-icon.mjs - all dependency-free
+
+docs/                the docs site - VitePress, its own package.json, never in `files`
+docs/.vitepress/config.mts  the site's config: BASE (the one place the path is written), sidebar, search
+docs/images/         screenshots, shared by README.md and the site
+docs/plans/          internal design notes, excluded from the site
+.github/workflows/pages.yml    builds docs/ from main and deploys it to Pages
+.github/workflows/ci.yml       the core, app and Rust gates on push and PR into develop and main
+.github/workflows/release.yml  the desktop bundles on a v* tag, into one draft release
+.github/actions/linux-deps/    the Linux packages a Tauri build needs, listed once
 ```
 
 **The app and the CLI are two front ends over one core.** The app links `src/` and calls
@@ -3091,8 +3168,10 @@ drives turn by turn, and the standing rule was written about exactly it: *"'run
 this program' must never be in reach of it"* (#144). A shell is not what "read the
 repo" means.
 
-**All the network code lives in `app/` and none of it in `src/`.** The core keeps *"every
-external call is a child process"* exactly, and the published package gains no HTTP
+**All the network code lives in `app/` and none of it in `src/`.** There are two clients, both
+in Rust: the pilot's vendor adapters below, and the updater (`src-tauri/src/update.rs`, #299),
+which fetches one public file and, when a person asks, the bundle it names. The core keeps
+*"every external call is a child process"* exactly, and the published package gains no HTTP
 dependency and no credential handling. If this ever moves into `src/` "because the CLI might
 want it too", that sentence stops being true of everything shipped — and it is a sentence
 people choose this tool for. `keys.test.ts` checks both halves: `dependencies` is `{}` *and*
@@ -3164,6 +3243,81 @@ API key provided: sk-proj-…`, quoting it back in full — found by the live re
 which asserts no failure carries the key it was given. Redaction is at the single seam every
 pilot event leaves through, not in an adapter, because Anthropic not echoing today is not a
 promise either vendor is making.
+
+**The app tells you when a newer version of itself exists, and installs it when asked**
+(#299). It is the first network request the app makes on its own, so the shape is narrow on
+purpose. `src-tauri/src/update.rs` holds all of it, behind two commands:
+
+- **`update_check` and `update_install`, and nothing in the window.** `tauri-plugin-updater` is
+  registered so Rust can drive it; there is no `@tauri-apps/plugin-updater` package and no
+  updater permission in `capabilities/default.json`, so the page still has no network access
+  and the CSP did not move. `keys.test.ts` pins both commands and the plugin. The check is a
+  plain HTTPS GET of `latest.json` on the newest published release, with no identifiers, at
+  launch and every six hours (a choice, not a measurement); a Settings switch in *this
+  window's* section turns it off, and off means no request at all. Pre-releases are never
+  offered, because `releases/latest` never serves one, and the plugin's own semver comparison
+  decides what is newer.
+- **A check never fails on screen.** No manifest (a 404 - which the newest release answers
+  until one ships with the updater), no network, a manifest that will not parse: each is one
+  line in `vibe-desktop.log` and `null` to the window, which draws exactly what "no update"
+  draws. Both requests are bounded at ten minutes: the plugin builds each `Update` with no
+  timeout, so `update_check` sets one before storing it.
+- **A `.deb` never self-updates.** The plugin *can* install a `.deb`, but it looks up
+  `linux-x86_64-deb` and falls back to `linux-x86_64`, which in our manifest is the AppImage,
+  and would `dpkg -i` those bytes. `action_for` reads the bundle type Tauri patches into the
+  binary (`tauri::utils::platform::bundle_type()`) plus `APPIMAGE` on Linux, and fails closed:
+  a deb, an rpm, an unidentified Linux build without `APPIMAGE` and an unpatched Windows build
+  all get **Download**, which opens the release page in the system browser - a URL that is a
+  constant in Rust, spawned with `xdg-open`, `open` or `explorer.exe`, because the app had no
+  link opener and the window must never name a URL. `update_install` asks again rather than
+  trusting what the window drew.
+- **Rust decides whether to ask, by `has_run_hosts()`.** With runs going, `update_install`
+  answers `confirm` before downloading or stopping anything - a host set it cannot read counts
+  as runs going - and the window draws the quit confirmation's shape and words, listing its
+  runs or saying that runs are still going, and calls again only on a press. This is stricter
+  than Quit, which skips a host whose run already returned; asking once too often is the safe
+  side. **And no run can start once an install is under way.** The question is asked
+  by `freeze_runs`, which in the same step under the host lock makes `spawn` refuse every new
+  run host until the restart (or until the update gives up, which thaws it). Asked once at
+  the press, a run started during a ten-minute download would have been stopped by the
+  install with nobody asked about it. `claim` takes the install slot **before** it freezes,
+  so a second press is refused before touching the freeze: when each press froze first, the
+  losing one thawed on its way out and lifted the freeze the first install's download relied on.
+- **Every host stops before the installer runs, on every platform, by the one `stop()`.** The
+  plugin's `on_before_exit` hook only exists on Windows - where it matters most, since a running
+  host holds `node.exe` and NSIS/MSI overwrite it - so the hook is wired for that case and
+  `update_install` also awaits the same `before_install` after the download and before
+  `install()`, everywhere. A run stopped this way leaves through `HOST_EXIT_ABANDONED` and
+  writes `ending.json` (#206), so it is resumable. An install that fails after the stop
+  relaunches the service host so the runs can be resumed.
+- **One install at a time, and a failure can be retried.** `Slot` holds the update the last
+  check found and an `installing` flag, both under **one** lock, with a drop guard - a flag
+  read outside the lock let a check overwrite the update an install had just begun. A second press is refused, a check
+  that returns during an install cannot replace what is being installed and reports that one
+  instead, and the install works
+  on a clone so a failed attempt leaves the update for the next press. Progress is the running
+  sum of the plugin's chunk lengths (`Tally`), because the plugin reports each chunk, not a
+  total.
+- **The old process exits before the new one starts.** `restart()` is called from the command's
+  async thread, so Tauri requests an exit and spawns the new process only after
+  `RunEvent::Exit` - which is where single-instance releases its lock and `lib.rs` runs
+  `stop()`. Called from the main thread it would restart without those events, and the new
+  process could find the old one and raise its window instead.
+- **Windows installs are `passive`.** NSIS is per-user and needs no elevation; MSI updates from
+  `windows-x86_64-msi` and shows a UAC prompt. The macOS path replaces one ad-hoc-signed `.app`
+  with another and is unproven.
+- **The skip is this window's.** *Skip this version* writes `vibe.update.skipped` in the
+  window's memory; a newer version is a different string and shows the ⬆ tool again. There is
+  no remind-me-later: closing the popover is that.
+
+**`VIBE_UPDATE_ENDPOINT` is how to test the updater.** It replaces the endpoint at runtime
+through the plugin builder, never by editing `tauri.conf.json`, and must be an `https` URL (a
+release build of the plugin refuses anything else); a value that is not one is ignored and the
+built-in endpoint is used. Either way the app logs it at start-up, naming the URL, so a stray
+value cannot go unnoticed. The signature is still verified against the built-in key, so it can
+only point at bundles the owner signed. A real update needs a published release newer than
+the installed build: build an older version, point the variable at a release's `latest.json`
+(an `-rc` draft's, or a hand-made copy), and press Update & restart.
 
 **The host dies when the app does, and the kernel is what enforces it.** `stop()` handles the
 graceful endings by closing stdin; a Windows Job Object with
@@ -3503,6 +3657,46 @@ than called a leftover or hidden, because #77's probe refuses to guess and the c
 flight; and a superseded round with no `round-N` installed beside it is **never listed as
 removable**, because it may be the only copy of that evidence.
 
+**The agent CLIs are checked against what this build was tested with, and refused only on a
+missing capability** (#298). vibe inherits whatever `claude` and `codex` are installed, and an
+upstream change used to fail late: a turn broke after it was spawned, or a parser quietly read
+nothing. `src/cliversions.ts` holds it, and five decisions travel with it, all the owner's:
+
+- **Tested, not a floor.** `TESTED_CLI_VERSIONS` in `src/config.ts` is what this build was
+  tested against. An older or newer version warns in `preflight` and `vibe doctor`, naming
+  both versions and the command that moves to the tested one, and the run continues. There
+  is no minimum and no ceiling: being older is not evidence of breakage, and a ceiling would
+  refuse every user the day a vendor ships. The command is read off where the binary
+  resolves - `claude install <v>` for the native installer, `npm i -g <pkg>@<v>` for an npm
+  global - and every method is named when the path does not say which.
+- **A refusal needs a missing capability, never a version number.** Preflight reads
+  `claude --help`, `codex exec --help` and `codex exec resume --help` through `parseOptionTokens`,
+  and refuses only when help that **was read** does not declare a flag a run passes. Help that
+  could not be read warns, by `forkHelp`'s rule: it is not evidence that a flag is missing. A
+  flag only the pilot passes warns and refuses nothing, because no run passes it; the pilot's
+  own spawn reports the CLI's error. The lists are `CLI_FLAG_REQUIREMENTS`, and
+  `cli-flags-source.test.ts` reads the adapter sources and fails on a flag literal they do not
+  name, so the list checked is the list sent.
+- **A plain child process, not the toolchain contract.** `<bin> --version` and the help reads
+  run from vibe's own process, once each per process. `ToolRequirement.minVersion` is for
+  tools the agents probe inside their own shells during a model turn, which is a different
+  mechanism. `--skip-probe` skips this too, because it is the escape hatch for a false refusal.
+- **Every run records what it ran under.** `state.cliVersions` is written when a run starts and
+  again on every resume, `run_started` carries it, and a resume under a different version
+  records `cli_versions_changed` naming the old and the new. Null is "not detected", never a
+  guess.
+- **An unknown Codex item type warns once per run and never fails a turn.** `KNOWN_CODEX_ITEMS`
+  in `src/progress.ts` is a vocabulary for a warning, not an allow-list: Codex adds item kinds
+  as it grows. `parseCodexLine` collects them and the line handler says them as each line
+  arrives - the heartbeat's `onLine`, or `watchCodexItems` when progress is off - so a turn
+  stopped or timed out a moment later has still said so. Claude's stream has no equivalent.
+
+**The fixtures are recorded by hand, outside a run, and that is the point of them.** The
+contract tests over `tests/fixtures/cli/` are what catch a changed event shape, which `--help`
+cannot show. Recording one spawns real agents, and the suite never calls an agent; and a
+sandboxed vibe turn spawning agents hangs or is blocked. So the run that built this could not
+record them, and set `VIBE_CLI_FIXTURES=pending` on its own gate.
+
 `src/orchestrator.ts` is the biggest file by a wide margin and is where most changes land.
 Read the phase you are touching end to end before editing it; the guards interact.
 
@@ -3764,12 +3958,26 @@ and its commits survive it.
 3. Add the `CHANGELOG.md` section — grouped Added / Fixed / Internal / Upgrading, every entry
    linking its PR and issue.
 4. PR into `main`, with the `closes` keyword repeated per issue (see above).
-5. Verify from a clean checkout: `npm run typecheck`, `npm test`, `npm pack --dry-run`.
-6. Merge, then tag: `git tag -a v<version> -m "..." && git push origin v<version>`.
-7. `npm publish`. **This needs a real interactive terminal** — the OTP flow hands off to a
+5. Re-measure the agent CLIs this release was tested against: `claude --version` and
+   `codex --version`. Bump `TESTED_CLI_VERSIONS` in `src/config.ts` to what they print, and
+   re-record the fixtures with `node scripts/record-cli-fixtures.mjs` (#298). Commit both.
+6. Verify from a clean checkout: `npm run typecheck`, `npm test`, `npm pack --dry-run`.
+7. Merge, then tag: `git tag -a v<version> -m "..." && git push origin v<version>`.
+8. **When `release.yml` has finished on the tag, verify the draft before publishing it:**
+   `gh release download v<version> --pattern 'Vibe-macos-arm64.dmg' --pattern SHA256SUMS`, then
+   `gh attestation verify Vibe-macos-arm64.dmg --repo adam-hanna/vibe-code` and
+   `sha256sum -c SHA256SUMS --ignore-missing`. An attestation is stored against a file's digest,
+   not against the release, so it verifies while the release is still a draft.
+9. **Wait for `release.yml` on the tag, install the draft on at least one machine, then publish
+   the draft release.** The workflow builds the Windows, macOS (Apple Silicon) and Linux bundles
+   into one draft and never publishes it. A tag that is not `package.json`'s version still
+   builds, with a warning, and the bundles carry `package.json`'s version - so a throwaway
+   `v<version>-rc.N` tag is how to try the workflow, and it yields a draft pre-release. A tag
+   whose release is already published is refused rather than uploaded into.
+10. `npm publish`. **This needs a real interactive terminal** — the OTP flow hands off to a
    browser and cannot be driven from a headless shell. A granular automation token in
    `.npmrc` avoids the prompt.
-8. **Merge `main` back into `develop`.** The release PR is squash-merged, so the version bump
+11. **Merge `main` back into `develop`.** The release PR is squash-merged, so the version bump
    and the changelog exist only on `main` until you do. After 1.1.0 this was missed and
    `develop` sat at version 1.0.1 with no `CHANGELOG.md` — which is the branch the next
    release would have been cut from.
