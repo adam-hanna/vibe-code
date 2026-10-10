@@ -40,5 +40,11 @@
     "macOS": {
       "signingIdentity": "-"
     }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE3MkMwQ0E0RjRGMjg2MkUKUldRdWh2TDBwQXdzRi91eTUvdjU4K05QS2tYUk9NRSs5VUZpU3cvejBEdmZvQzkvQVc1QnptRnAK",
+      "endpoints": ["https://github.com/adam-hanna/vibe-code/releases/latest/download/latest.json"]
+    }
   }
 }

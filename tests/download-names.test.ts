@@ -68,3 +68,16 @@ test('an installed app is told of updates at a name the workflow writes', () => 
   assert.match(workflow, /gh release upload "\$TAG" latest\.json/);
   assert.match(workflow, /createUpdaterArtifacts": true/);
 });
+
+test('the app config names that same endpoint and a public key', () => {
+  // Without `plugins.updater` the bundler refuses to make updater artifacts at
+  // all: `v1.5.1-rc.1` failed on every platform with "plugins > updater doesn't
+  // exist". The endpoint is the stable name, so it never changes per release.
+  const conf = JSON.parse(read('app', 'src-tauri', 'tauri.conf.json')) as {
+    plugins?: { updater?: { pubkey?: unknown; endpoints?: unknown } };
+  };
+  const updater = conf.plugins?.updater;
+  assert.deepEqual(updater?.endpoints, [`${LATEST}latest.json`]);
+  assert.equal(typeof updater?.pubkey, 'string');
+  assert.notEqual(updater?.pubkey, '');
+});
