@@ -298,6 +298,38 @@ jobs:
             exit 1
           }
 
+      # linuxdeploy bundles the build machine's libwayland, and on a distro
+      # with a newer Mesa WebKit cannot create an EGL display against it: the
+      # window opens white and stays white (#331, found in v1.6.0). This
+      # repacks the AppImage without it and re-signs the update bundle, so it
+      # runs before anything is collected, attested or uploaded.
+      - name: Take the host graphics libraries out of the AppImage
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: node app/scripts/prune-appimage.mjs app/src-tauri/target/release/bundle/appimage/*.AppImage
+
+      # Launches it on Ubuntu 22.04 and 24.04, Debian 12, Fedora, Arch and
+      # openSUSE Tumbleweed, under Xvfb, and fails on an abort, an exit or a
+      # blank screen. Before the upload, so a build that draws nothing never
+      # reaches the release.
+      - name: Check the AppImage draws on other distributions
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          SMOKE_OUT: ${{ runner.temp }}/smoke
+        run: app/scripts/smoke-appimage.sh app/src-tauri/target/release/bundle/appimage/*.AppImage
+
+      - name: Keep the smoke test's screenshots
+        if: runner.os == 'Linux' && always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: appimage-smoke
+          path: ${{ runner.temp }}/smoke
+          if-no-files-found: ignore
+
       # The one list of what this platform puts on the release. The attest step
       # and the upload step below both read it, so nothing is attested that is
       # not uploaded, or uploaded that is not attested.
