@@ -57,7 +57,14 @@
 # Signing. Every other secret is optional, and adding one needs no change to any job.
 # With none set, Windows builds are unsigned and macOS builds are ad-hoc signed
 # (`bundle.macOS.signingIdentity: "-"` in tauri.conf.json - Apple Silicon will
-# not run unsigned code). A secret is only exported when it is non-empty,
+# not run unsigned code). Either way the bundler signs with the hardened runtime,
+# and under it the sidecar `node` dies with SIGTRAP on its first line of
+# JavaScript unless it holds `com.apple.security.cs.allow-jit`: V8 cannot map
+# executable memory. v1.6.0 shipped without it and the app never connected.
+# `bundle.macOS.entitlements` grants it, and the bundler applies it to every
+# binary it signs, the sidecar included. The step after the build starts the
+# host from the built bundle, so a bundle whose node cannot run fails here.
+# A secret is only exported when it is non-empty,
 # because Actions expands an absent secret to "" and an empty
 # APPLE_SIGNING_IDENTITY would replace the config's "-" with nothing.
 #
@@ -264,6 +271,29 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run app:build -- ${TAURI_ARGS:-}
+
+      # `node --version` runs no JavaScript and passed on the v1.6.0 bundle whose
+      # node could not run any, so this starts the real host from the signed
+      # .app and waits for its `ready` frame. An empty line makes it answer and
+      # stdin's close makes it leave.
+      - name: Start the host from the macOS bundle
+        if: runner.os == 'macOS'
+        shell: bash
+        working-directory: app/src-tauri/target/release/bundle/macos
+        run: |
+          set -euo pipefail
+          apps=(*.app)
+          contents="${apps[0]}/Contents"
+          codesign -d --entitlements - "$contents/MacOS/node"
+          out=$(echo '' | "$contents/MacOS/node" "$contents/Resources/host/dist/src/hostmain.js" 2>&1) || {
+            echo "::error::The bundled node exited with $? before the host said ready: $out"
+            exit 1
+          }
+          echo "$out"
+          grep -q '"type":"ready"' <<< "$out" || {
+            echo "::error::The host in the bundle never said ready."
+            exit 1
+          }
 
       # The one list of what this platform puts on the release. The attest step
       # and the upload step below both read it, so nothing is attested that is
