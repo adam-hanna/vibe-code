@@ -38,7 +38,8 @@
     "externalBin": ["binaries/node"],
     "resources": ["host/**/*"],
     "macOS": {
-      "signingIdentity": "-"
+      "signingIdentity": "-",
+      "entitlements": "./Entitlements.plist"
     }
   },
   "plugins": {

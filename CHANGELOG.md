@@ -7,6 +7,27 @@ for a change that breaks an existing config or an existing run.
 Each entry links the pull request that made it and, where there is one, the issue it
 closes.
 
+## 1.6.1 - 2026-10-11
+
+Two pull requests since 1.6.0, both fixes to the desktop builds. **Nothing here breaks an existing config.** 1.6.0 was published only as a pre-release, because its Linux AppImage and its macOS app did not work, so this is the first release of everything listed under 1.6.0 below.
+
+### Fixed
+
+- **The Linux AppImage draws its window on current distributions.** It bundled the build machine's (Ubuntu 22.04's) `libwayland-client`, `-cursor` and `-egl`. On Fedora, Arch and openSUSE Tumbleweed, WebKit could not create an EGL display against them with the system's newer Mesa, aborted, and left a white window over a running process. The release now repacks the AppImage without them and re-signs the update bundle. `libwayland-server` stays bundled.
+  (#331, [#332](https://github.com/adam-hanna/vibe-code/pull/332))
+- **The macOS app connects.** The bundled `node` is signed with the hardened runtime, and without `com.apple.security.cs.allow-jit` it died on its first line of JavaScript, so the window sat on `connecting` with "no host service is running". `bundle.macOS.entitlements` now grants that one entitlement.
+  ([#333](https://github.com/adam-hanna/vibe-code/pull/333))
+
+### Internal
+
+- **The release checks its own builds before uploading them.** On Linux, `app/scripts/smoke-appimage.sh` launches the AppImage under Xvfb on Ubuntu 22.04 and 24.04, Debian 12, Fedora, Arch and openSUSE Tumbleweed, and fails on an abort, an early exit or a blank screen. On macOS, the release starts the host from the signed `.app` and fails unless it says `ready`, because `node --version` passed on the broken 1.6.0 bundle.
+  (#331, [#332](https://github.com/adam-hanna/vibe-code/pull/332), [#333](https://github.com/adam-hanna/vibe-code/pull/333))
+
+### Upgrading
+
+- **If you installed the 1.6.0 pre-release, install 1.6.1 over it.** The broken 1.6.0 Linux and macOS apps may not be able to draw or reach the update control. A 1.6.0 macOS install that you want to keep can be repaired by hand: `codesign --force --deep -s - -o runtime --entitlements app/src-tauri/Entitlements.plist /Applications/Vibe.app`.
+- **The AppImage now uses the system's `libwayland-client`, `-cursor` and `-egl`.** Every distribution that runs GTK 3 apps has them.
+
 ## 1.6.0 - 2026-10-09
 
 Nine pull requests since 1.5.0. **Nothing here breaks an existing config:** no key was renamed or removed, no flag was removed, and no config key was added. Three behaviours a running setup can notice are listed under Upgrading.

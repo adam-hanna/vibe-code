@@ -158,6 +158,33 @@ properly:
   logged, by either side. `main.rs` sets that variable on Linux before `run()`, and only when
   it is unset, so somebody who needs the renderer on can still say so. It cost half a day as
   a suspected front-end bug, which is why it is here beside the other two.
+- **On macOS, a window stuck on `connecting` can be the bundled `node` refusing to run
+  JavaScript.** Tauri signs every binary in the `.app` with the hardened runtime, the
+  sidecar `node` included, and under it V8 cannot map executable memory without
+  `com.apple.security.cs.allow-jit`. The process then dies with SIGTRAP (exit 133) on its
+  first line of JavaScript and prints nothing. v1.6.0 shipped that way: `vibe-desktop.log`
+  showed the service host start and end *"without an exit code"* 20ms later, and the
+  window said *"no host service is running"*. **`node --version` still works**, because it
+  runs no JavaScript, so it proves nothing. `app/src-tauri/Entitlements.plist` grants
+  `allow-jit` and nothing else, through `bundle.macOS.entitlements`. `release.yml` starts
+  the real host from the built `.app` and fails unless it says `ready`. To check a bundle
+  by hand: `echo '' | Vibe.app/Contents/MacOS/node
+  Vibe.app/Contents/Resources/host/dist/src/hostmain.js` must print a `ready` frame, and
+  `codesign -d --entitlements - Vibe.app/Contents/MacOS/node` must list `allow-jit`.
+
+  **A white window from the released AppImage is a second cause with the same symptom**
+  (#331). The variable above was set and did not help. WebKit aborted at start-up with
+  `Could not create surfaceless EGL display: EGL_BAD_ALLOC. Aborting...`, and the window
+  stayed white over a process that was still running. linuxdeploy had bundled the CI
+  runner's Ubuntu 22.04 `libwayland-client`, `-cursor` and `-egl`, and the host's Mesa
+  could not create a display against them. Builds made on this machine never showed it,
+  because they bundle this machine's libraries. `libwayland-server` stays bundled: it is
+  not part of the clash, and some hosts with GTK 3 do not have it. `app/scripts/prune-appimage.mjs` repacks the AppImage without them
+  and re-signs it, and `app/scripts/smoke-appimage.sh` launches the result on six
+  distributions under Xvfb before the release uploads it. The abort reproduces under Xvfb,
+  so the check catches it. The script runs locally with podman or docker:
+  `app/scripts/smoke-appimage.sh path/to/Vibe.AppImage`. When a Linux window is blank,
+  look for an `EGL_BAD_*` line on stderr before suspecting the page.
 
 `npm run app:build` needs Rust on PATH (`~/.cargo/bin`) and runs `stage:sidecar` itself. The
 staged tree is ~92 MB of Node plus ~1.5 MB of compiled core, and both are gitignored — they
@@ -2243,7 +2270,8 @@ app/src-tauri/src/pilot/     one of the app's two network clients - two adapters
 app/src-tauri/src/update.rs  the other: checking for a newer app, and installing it when asked
 app/src-tauri/src/pilot/sse.rs      the wire format both vendors share, and nothing else
 app/src-tauri/src/pilot/event.rs    PilotEvent and Usage - every count an Option, on purpose
-app/scripts/         contrast.mjs, stage-sidecar.mjs, make-icon.mjs - all dependency-free
+app/scripts/         contrast.mjs, stage-sidecar.mjs, make-icon.mjs, prune-appimage.mjs - all dependency-free
+app/scripts/smoke-appimage.sh  launching the AppImage on six distributions, and failing on a blank screen
 
 docs/                the docs site - VitePress, its own package.json, never in `files`
 docs/.vitepress/config.mts  the site's config: BASE (the one place the path is written), sidebar, search
