@@ -278,6 +278,9 @@ jobs:
       # stdin's close makes it leave.
       - name: Start the host from the macOS bundle
         if: runner.os == 'macOS'
+        # A host that hangs instead of dying would otherwise hold the job until
+        # GitHub's six-hour limit. It says ready in well under a second.
+        timeout-minutes: 3
         shell: bash
         working-directory: app/src-tauri/target/release/bundle/macos
         run: |
