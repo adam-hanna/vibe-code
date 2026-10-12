@@ -168,7 +168,7 @@ arrives until the app is opened again. The phone's settings say so in those word
 beside the switch, so nobody relies on it overnight.
 
 Push notifications, which reach a locked phone at any time, need a sender holding the
-APNs and FCM keys and are a follow-up issue outside 1.7.0.
+APNs and FCM keys and are a follow-up outside 1.7.0 (#350).
 
 ## Screens
 
@@ -212,10 +212,10 @@ numbers on screen.
 
 Each of these has its own follow-up issue outside the milestone:
 
-- **Push notifications** to a locked phone.
-- **App Store and Play Store listings.**
+- **Push notifications** to a locked phone (#350).
+- **App Store and Play Store listings** (#351).
 - **Code signing for the desktop on macOS and Windows**, so the app installs without
-  security warnings and without `xattr -cr`.
+  security warnings and without `xattr -cr` (#352).
 
 Also out, with no issue yet:
 
