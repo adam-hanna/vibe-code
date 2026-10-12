@@ -3835,8 +3835,10 @@ throwaway script against `dist/`, with the results in the PR body.
 
 ## Branches, commits and pull requests
 
-**`main` is the default branch and only ever receives release merges. `develop` is where
-work integrates.** Branch off `develop`, PR back into `develop`.
+**`develop` is the default branch and where work integrates. `main` only ever receives
+release merges.** Branch off `develop`, PR back into `develop`. `develop` became the default
+on 2026-10-12, after 1.6.1; until then it was `main`, which is why every PR before that says
+`Refs #N` and the release PRs did the closing.
 
 ```
 feat/<issue>-<slug>     new capability          feat/22-deferred-only-rounds
@@ -3854,13 +3856,15 @@ cherry-picked onto #36. If the work genuinely depends on unmerged work, wait, or
 
 ### Closing issues automatically
 
-**GitHub only auto-closes on a merge into the *default* branch, which here is `main`.** A PR
-into `develop` with `Closes #12` in its body closes nothing, ever. So:
+**GitHub only auto-closes on a merge into the *default* branch, which here is `develop`.**
+A PR into `main` with `Closes #12` in its body closes nothing, ever. So:
 
-- **Per-issue PRs (into `develop`) use `Refs #12`.** It cross-links without making a promise
-  the merge cannot keep.
-- **The release PR (into `main`) does the closing**, and lists every issue the release
-  contains.
+- **Per-issue PRs (into `develop`) use `Closes #12`.** The issue closes when the fix merges,
+  which is before it ships; the issue's **milestone** is what says which release it went out
+  in, so set one. Use `Refs #12` for a PR that only touches an issue without finishing it.
+- **The release PR (into `main`) closes nothing.** It still lists every issue the release
+  contains, with `Refs`, so the release has one place naming them; check that each one is
+  already closed, and close any a per-issue PR left open.
 
 **Repeat the keyword before every number.** GitHub parses `Closes #1, #2, #3` as closing
 `#1` and nothing else — the release of 1.1.0 named sixteen issues and closed zero, and all
@@ -3985,7 +3989,8 @@ and its commits survive it.
    existing run.
 3. Add the `CHANGELOG.md` section — grouped Added / Fixed / Internal / Upgrading, every entry
    linking its PR and issue.
-4. PR into `main`, with the `closes` keyword repeated per issue (see above).
+4. PR into `main`, listing every issue the release contains with `Refs #N` (see above). The
+   merge closes nothing, so check the milestone has no open issues left.
 5. Re-measure the agent CLIs this release was tested against: `claude --version` and
    `codex --version`. Bump `TESTED_CLI_VERSIONS` in `src/config.ts` to what they print, and
    re-record the fixtures with `node scripts/record-cli-fixtures.mjs` (#298). Commit both.
