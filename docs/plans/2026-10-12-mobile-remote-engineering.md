@@ -362,4 +362,4 @@ Two things the spec says cannot be built as written:
 | #346 | the phone's pairing, reconnecting, failure sentences, app lock, local notifications, and the device measurements |
 | #347 | the phone's screens |
 | #348 | mobile builds in CI and release |
-| new | the `changed` frame in `serve.ts`, and `origin` read on run starts and settings saves (core, so it lands first, with no behaviour change) |
+| #354 | the `changed` frame in `serve.ts`, and `origin` read on run starts and settings saves (core, so it lands first, with no behaviour change) |
