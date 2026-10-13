@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "The vibe desktop app: window, tray, and the process that does the work"
 authors = ["Adam Hanna"]
 edition = "2021"
-rust-version = "1.77.2"
+# Raised from 1.77.2 for iroh-base 1.3 (the device key, #341), which declares
+# 1.91. CI and the release workflow build on stable, so neither moves.
+rust-version = "1.91"
 
 [lib]
 # Tauri's mobile targets need a cdylib and the desktop binary needs a lib to call
@@ -50,6 +52,25 @@ keyring = { version = "3", features = [
   "sync-secret-service",
 ] }
 ureq = { version = "3.2.1", default-features = false, features = ["rustls", "json"] }
+
+# The device key and the endpoint id a phone dials (#341). The same crate
+# `iroh` 1.3 uses for its `SecretKey` and `PublicKey`, so the endpoint #342
+# adds takes this key with no conversion. `key` is the feature carrying the
+# ed25519 types; the default is only the relay URL type. Its cost is
+# ed25519-dalek 3, curve25519-dalek 5 and rand 0.10 in the build.
+iroh-base = { version = "1.3", default-features = false, features = ["key"] }
+# The pairing matching code: six digits from a SHA-256 both ends compute
+# (#341). Already in the tree via Tauri, so this adds nothing to the build.
+sha2 = "0.10"
+# The constant-time compare of a pairing secret (#341). Already in the tree.
+subtle = "2"
+# The pairing QR code as a matrix of modules, which the window draws itself
+# (#341). Default features off: no image or svg renderer, because the window
+# draws it in token colours and no hex may live outside `tokens.css`.
+qrcode = { version = "0.14", default-features = false }
+# The OS CSPRNG for the pairing secret and the nonce (#341). Already in the
+# tree. A failure refuses the pairing; there is no fallback generator.
+getrandom = "0.3"
 
 # One timestamp, in the shape `transcript.log` already uses, so the app's log and
 # a run's transcript can be read against each other (#186). Already in the tree

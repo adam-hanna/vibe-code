@@ -2291,6 +2291,7 @@ app/src-tauri/src/pilot/models.rs  which models a stored key may use, asked of t
 app/src-tauri/src/host.rs    supervising the hosts - the service host and one per run - and the \\?\ path fix
 app/src-tauri/src/reaper.rs  making a killed app take the host with it
 app/src-tauri/src/keys.rs    the OS keychain, and the read the window cannot reach
+app/src-tauri/src/remote/  the device key, pairing and the paired phones - no network yet; wire.rs is what the phone shares
 app/src-tauri/src/pilot/     one of the app's two network clients - two adapters, one vocabulary
 app/src-tauri/src/update.rs  the other: checking for a newer app, and installing it when asked
 app/src-tauri/src/pilot/sse.rs      the wire format both vendors share, and nothing else
@@ -2862,6 +2863,15 @@ key never crosses the IPC boundary. The CSP agrees from the other side, since `c
 'self' ipc: http://ipc.localhost` means the page could not reach a vendor even holding one.
 Not `vibe.config.json`: that is a project file meant to be committed, and `validateConfig`
 reports bad values *by name*, which is the one thing that must never happen to a secret.
+
+**The device key is a third keychain entry, and no command reaches it** (#341). One ed25519
+secret per install, under the same service as the vendor keys and the account
+`remote-identity`; its public half is the endpoint id a phone dials. No command reads it,
+deletes it or names it - `remote_status` reports the public id only - and its reader,
+`remote::identity::read`, is `pub(crate)` like `keys::read`. `key_set`, `key_clear` and
+`key_status` refuse it, because `Provider` is still the two vendors. **A keychain that cannot
+be read refuses pairing rather than making a new key**: a new key is a new endpoint id, and
+would silently orphan every paired phone. `keys.test.ts` pins all of it.
 
 **A pilot turn can also be a child process, and that is not a hole in the rule
 below — it is the rule** (#193). `src/pilotchat.ts` spawns the same `claude` the

@@ -78,6 +78,7 @@ import { Sidebar } from './Sidebar';
 import { QuestionsPane } from './QuestionsPane';
 import { RateLimitStrip } from './RateLimit';
 import { Settings } from './Settings';
+import { PairPrompt } from '../remote/PairPrompt';
 import { SpendPane } from './SpendPane';
 import { StopConfirm } from './StopConfirm';
 import { Summary } from './Summary';
@@ -298,6 +299,12 @@ export function Cockpit() {
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   const [skipped, setSkipped] = useState<string | null>(() => memory.getItem(SKIP_KEY));
   const [checkUpdates, setCheckUpdates] = useState(() => checkEnabled(memory.getItem(CHECK_KEY)));
+  /**
+   * A phone that was allowed and could not be saved (#341). The prompt that
+   * learns it is mounted here and closes on the same answer, so the sentence is
+   * kept here and read in Settings, where the paired list is.
+   */
+  const [remoteProblem, setRemoteProblem] = useState<string | null>(null);
   const [updateState, setUpdateState] = useState<UpdateState>({ kind: 'idle' });
   /** Rust answered `confirm`: runs are going and the person is being asked. */
   const [updating, setUpdating] = useState(false);
@@ -1861,6 +1868,8 @@ export function Cockpit() {
           run that ends or a start Rust refuses while it is up leaves the list.
           Worded as what it is: every run is resumable, and only the turn each
           is in is redone. */}
+      {/* *Allow this phone?* (#341), on whatever screen is open. */}
+      <PairPrompt onFailed={setRemoteProblem} />
       {quitting && (() => {
         const going = quitList(lives, labelOf);
         // Nothing left to stop: the effect beside `quitting` quits.
@@ -2354,6 +2363,8 @@ export function Cockpit() {
               limits={limits}
               onLimits={relimit}
               onSaved={() => setConfigEpoch((n) => n + 1)}
+              remoteProblem={remoteProblem}
+              onRemoteProblemSeen={() => setRemoteProblem(null)}
             />
           )}
           {/* `1b`, opened from the palette (`goRuns`). The columns the sidebar

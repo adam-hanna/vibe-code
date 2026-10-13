@@ -39,7 +39,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Matches the bundle identifier, so an entry is attributable to this app in a
 /// credential manager somebody is scrolling through.
-const SERVICE: &str = "dev.vibecode.desktop";
+pub(crate) const SERVICE: &str = "dev.vibecode.desktop";
 
 /// The two providers the pilot speaks to.
 ///
@@ -333,6 +333,16 @@ mod tests {
         if let Some(previous) = existing {
             set(provider, &previous).expect("restores");
         }
+    }
+
+    #[test]
+    fn the_device_key_is_not_a_provider() {
+        // #341: the device key is a third entry under `SERVICE`, and the
+        // window's `key_*` commands must never reach it - not to store over
+        // it, not to clear it, not to ask after it. Serde refusing the name is
+        // what keeps it out of all three.
+        assert!(serde_json::from_str::<Provider>("\"remote-identity\"").is_err());
+        assert!(Provider::ALL.iter().all(|p| p.account() != crate::remote::identity::ACCOUNT));
     }
 
     #[test]

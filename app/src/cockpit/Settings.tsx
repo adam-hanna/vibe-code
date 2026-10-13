@@ -22,6 +22,7 @@ import { CLI_DEFAULT, loadCliModels, optionsFor, useModels, whyNot } from './mod
 import { backToCommand, convert, gatesPatch, pastedEscapes, readGates, ready, toRow } from './gateform';
 import type { Gate, GateRow } from './gateform';
 import type { Listing } from './models';
+import { RemoteAccess } from '../remote/RemoteAccess';
 
 /**
  * The settings screen's recurring styles, named once (the UI rework). Every
@@ -967,6 +968,8 @@ export function Settings({
   limits,
   onLimits,
   onSaved,
+  remoteProblem = null,
+  onRemoteProblemSeen,
 }: {
   /**
    * Which file this screen edits (#223), decided by the door it was opened
@@ -1013,6 +1016,13 @@ export function Settings({
   onLimits: (next: PilotLimits) => void;
   /** Told after every save that took, so the window's own reads can follow. */
   onSaved?: (() => void) | undefined;
+  /**
+   * A pairing that was allowed and could not be saved, in Rust's words (#341).
+   * Owned by `Cockpit`, because the prompt that learns it is mounted there and
+   * closes on the same answer; this screen is where the reason is read.
+   */
+  remoteProblem?: string | null;
+  onRemoteProblemSeen?: (() => void) | undefined;
 }) {
   const [frame, setFrame] = useState<ConfigFrame | null>(null);
   // Asked of the CLIs once per window, and again on request (#223).
@@ -1327,6 +1337,10 @@ export function Settings({
               setting, on this machine.
             </p>
           </section>
+
+          {/* Remote access (#341): drawn only while previewed, until the real
+              switch lands. `RemoteAccess` decides that itself, error included. */}
+          <RemoteAccess problem={remoteProblem} onProblemSeen={() => onRemoteProblemSeen?.()} />
 
           {/* ---- how each vendor is reached (#223) ---------------------------- */}
           <section className={S.block}>
