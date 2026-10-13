@@ -203,9 +203,13 @@ pub(crate) fn attempt(
 }
 
 /// The window's yes or no. Every path says how the prompt ended.
+///
+/// The store is needed only to add a phone, so it arrives unresolved: a
+/// missing data directory makes a yes end as `declined` with its reason, and
+/// leaves a no, an expiry and an empty answer saying what they are.
 pub(crate) fn answer(
     pairing: &mut Pairing,
-    store: &Store,
+    store: Result<&Store, String>,
     emit: &dyn Emit,
     yes: bool,
     now: u64,
@@ -213,7 +217,7 @@ pub(crate) fn answer(
     match pairing.answer(yes, now) {
         Answer::Paired { id, name } => {
             let phone = Phone { id: id.to_string(), name, paired_at: now, last_seen: None };
-            match store.add(phone) {
+            match store.and_then(|s| s.add(phone)) {
                 Ok(()) => {
                     emit.pair_ended(Outcome::Paired);
                     Ok(Outcome::Paired)
@@ -332,17 +336,8 @@ pub fn remote_pair_begin(app: AppHandle, remote: State<'_, Remote>) -> Result<Pa
 
 #[tauri::command]
 pub fn remote_pair_answer(yes: bool, app: AppHandle, remote: State<'_, Remote>) -> Result<Outcome, String> {
-    let emit = TauriEmit(&app);
-    let store = match store_of(&app) {
-        Ok(store) => store,
-        // No list to add to, so nothing can be paired; the prompt still ends.
-        Err(why) => {
-            locked(&remote).answer(false, now());
-            emit.pair_ended(Outcome::Declined);
-            return Err(why);
-        }
-    };
-    answer(&mut locked(&remote), &store, &emit, yes, now())
+    let store = store_of(&app);
+    answer(&mut locked(&remote), store.as_ref().map_err(Clone::clone), &TauriEmit(&app), yes, now())
 }
 
 #[tauri::command]
@@ -424,7 +419,7 @@ mod tests {
             attempt(&mut self.pairing, &self.vault, &self.store, &self.emit, &SECRET, phone_key(), "Pixel", NONCE, now)
         }
         fn answer(&mut self, yes: bool, now: u64) -> Result<Outcome, String> {
-            answer(&mut self.pairing, &self.store, &self.emit, yes, now)
+            answer(&mut self.pairing, Ok(&self.store), &self.emit, yes, now)
         }
         fn sent(&self) -> Vec<Sent> {
             std::mem::take(&mut *self.emit.0.borrow_mut())
@@ -515,6 +510,36 @@ mod tests {
         assert!(why.contains(&path.display().to_string()), "{why}");
         assert_eq!(w.sent(), vec![Sent::Ended(Outcome::Declined)]);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "garbage");
+    }
+
+    #[test]
+    fn with_no_data_directory_only_a_yes_needs_the_store() {
+        // The store is the paired list's home; nothing but adding a phone needs
+        // it, so an expiry still says expired and a no still says declined.
+        let gone = || Err("no data directory".to_string());
+
+        let mut w = world("nostore-expired");
+        let begun = w.begin(0);
+        w.attempt(1_000).unwrap();
+        w.sent();
+        let got = answer(&mut w.pairing, gone(), &w.emit, true, begun.expires_at);
+        assert_eq!(got, Ok(Outcome::Expired));
+        assert_eq!(w.sent(), vec![Sent::Ended(Outcome::Expired)]);
+
+        let mut w = world("nostore-no");
+        w.begin(0);
+        w.attempt(1_000).unwrap();
+        w.sent();
+        assert_eq!(answer(&mut w.pairing, gone(), &w.emit, false, 2_000), Ok(Outcome::Declined));
+        assert_eq!(w.sent(), vec![Sent::Ended(Outcome::Declined)]);
+
+        let mut w = world("nostore-yes");
+        w.begin(0);
+        w.attempt(1_000).unwrap();
+        w.sent();
+        assert_eq!(answer(&mut w.pairing, gone(), &w.emit, true, 2_000), Err("no data directory".into()));
+        assert_eq!(w.sent(), vec![Sent::Ended(Outcome::Declined)]);
+        assert_eq!(answer(&mut w.pairing, gone(), &w.emit, true, 2_000), Ok(Outcome::Declined), "the prompt is gone");
     }
 
     #[test]
