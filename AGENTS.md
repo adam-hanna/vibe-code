@@ -2156,6 +2156,31 @@ worktree is inside it, so `--restricted` already allowed the read — what was m
 reason to look. The prompt says it **only when the two differ**, since a sentence about working in
 the repository would be noise on every run that has no worktree, which is all of them by default.
 
+**A phone is another window, over iroh, and it is being built in 1.7.0** (#338–#349). The
+design is `docs/plans/2026-10-12-mobile-remote-engineering.md`, the product decisions are
+its sibling `-product.md`, and the measurements are on #339. Until the code lands, these
+are the rules the code is held to:
+
+- **The phone's webview is `app/src`, and its `invoke` and `listen` go over the
+  connection** to the same Tauri command functions the desktop window calls. The cockpit
+  never knows which side it is on, so there is one cockpit, not two. Only the modules a
+  phone cannot run are swapped, under `VITE_TARGET=mobile`.
+- **Full parity, and the list is still closed.** A phone may call every command the
+  window may, and the allowed list in `app/remote/` is pinned against `generate_handler!`,
+  so a new command is a decision about remote access made on purpose.
+- **Addressed by key, never by IP.** The published record is relay-only (iroh's default
+  `AddrFilter::relay_only`, checked against the live record), so no desktop's IP address
+  is ever published.
+- **Every client has its own range of request ids**, handed out per connection, because
+  every client sees every answer. Gate ids stay shared, and the first answer wins.
+- **A phone's frames are stamped by the desktop**: the bridge overwrites `origin` with
+  the paired phone's name, so a phone cannot claim to be the desktop. It is the one field
+  the bridge writes.
+- **Remote access off means nothing at all**: no endpoint, no relay connection, no
+  published record, no listening socket. Its settings are a Rust-owned file, not vibe's
+  config, because Rust reads them before any window exists and no project file may reach
+  them.
+
 ## Repo map
 
 ```
