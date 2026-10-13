@@ -1230,6 +1230,16 @@ they are waiting on. Four things in it are worth carrying:
   `CREATE_NO_WINDOW` is the wrong flag there is why `windowsHide` is the right one here. Worth
   remembering as a shape: **a detached parent means every console child must hide its own
   window, because there is no console to inherit.**
+- **An interactive shell started in the background stops its whole process group** (#357).
+  The login-shell probe (`shellenv.rs`, #272) runs `$SHELL -l -i`, and bash with `-i`, in the
+  background of a terminal, sends `SIGTTIN` to its own group and waits for `fg`. An app
+  started from a terminal shares that group with every host and run, so the first probe
+  froze all of it: every process in state `T`, no CPU, nothing logged, and the probe's own
+  timeout stopped with it. zsh does not do this, which is why it ran for an hour on a zsh
+  account and froze when a test started `/bin/sh`. The probe now runs under `setsid()`, with
+  no terminal at all. The shape to keep: **a child that may act interactive gets a session
+  of its own**; when an app freezes with no CPU, check `ps -o stat` for `T` before suspecting
+  a deadlock.
 - **Prompts became configuration, and the reasoning that is being reversed is recorded.** The
   settings screen said they were *"deliberately not configuration: they are the product's
   behaviour, and a per-project override would mean two runs of the same version could not be
