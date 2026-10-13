@@ -23,6 +23,7 @@
 pub mod pairing;
 pub mod qr;
 pub mod wire;
+pub mod endpoint;
 pub(crate) mod identity;
 pub(crate) mod store;
 
