@@ -148,6 +148,7 @@ constant in `app/remote/`, and a test fails when a command is added to the deskt
 | `pilot://event` | yes |
 | `app://update-progress` | yes |
 | `app://quit-requested` | **no**. It is the desktop tray asking the desktop window |
+| `remote://pair-request` | yes, because `remote_pair_answer` is allowed. Never to the phone being paired, which is not on the list yet |
 
 ### New desktop commands
 
@@ -158,13 +159,15 @@ All in `app/src-tauri/src/remote/`, and all on the allowed list:
   connected clients.
 - `remote_set`: the switch, start at login, keep awake, and the relay URL.
 - `remote_pair_begin`: makes a pairing code and returns the QR payload.
-- `remote_pair_answer`: the desktop window's yes or no to *Allow this phone?*.
+- `remote_pair_answer`: the desktop window's yes or no to *Allow this phone?*. The
+  prompt arrives as a `remote://pair-request` event carrying the phone's name and
+  the six-digit matching code, both computed in Rust.
 - `remote_revoke`: removes a phone and closes its connections at once.
 
 Settings live in a Rust-owned file in the app's data directory (`remote.json`), not
 in vibe's config. Rust must read them **before any window exists**, because start
 at login opens to the tray, and a project's `vibe.config.json` must not be able to
-reach them. This is the [second spec correction](#corrections-to-the-product-spec).
+reach them. This is the [third spec correction](#corrections-to-the-product-spec).
 
 ### Desktop-only pieces
 
@@ -186,12 +189,35 @@ reach them. This is the [second spec correction](#corrections-to-the-product-spe
 3. The desktop compares the secret in constant time. **Any answer, right or wrong,
    burns the code**, so a photographed code can be tried once and an attacker
    racing the owner makes the owner's attempt fail visibly.
-4. The desktop window shows *Allow `<phoneName>`?*. On yes, Rust adds the phone's
-   endpoint id to the paired list (`remote-paired.json` in the app's data
-   directory) and answers the phone with `{ desktopName }`. On no, or after the
-   code expires, it answers *declined* and closes.
-5. The phone stores the desktop's id, relay hint and name, and opens
+4. On a right secret the desktop makes a fresh 16-byte nonce and sends it to the
+   phone. Both sides then compute the **matching code**: six digits from
+   `SHA-256("vibe-pair-code/1" ‖ desktop id ‖ phone id ‖ nonce)`, read as a
+   big-endian integer mod 10⁶. Each side uses the phone id the QUIC handshake
+   authenticated, never one a message claimed.
+5. The phone shows the code and *Check that the desktop shows the same number*. The
+   desktop window shows *Allow `<phoneName>`?* with the same six digits and the
+   sentence *Press allow only if your phone shows this number*. On yes, Rust adds
+   the phone's endpoint id to the paired list (`remote-paired.json` in the app's
+   data directory) and answers the phone with `{ desktopName }`. On no, or after
+   the code expires, it answers *declined* and closes.
+6. The phone stores the desktop's id, relay hint and name, and opens
    `vibe/remote/1`.
+
+**Why the matching code, and why the nonce.** The name in *Allow `<phoneName>`?* is
+whatever the dialing phone chose. Somebody who photographs the QR code and dials
+first can call their device by the owner's phone's name, and the owner, expecting
+exactly that prompt, presses yes. Burning the code does not help: the attacker is
+the one who used it. The six digits tie the yes to the device in the owner's hand,
+because they are computed from the key that actually connected. An attacker's key
+gives different digits, and the owner's own phone shows none at all, since its
+attempt found the code burnt.
+
+The nonce is what keeps six digits enough. Without it, the code would be a
+function of two public keys, and an attacker who knew the owner's phone id could
+generate keypairs offline until one matched, about a million tries, which takes
+seconds. The nonce is made after the attacker's connection exists, so their key is
+fixed before the digits can be known, and one attempt has a one-in-a-million
+chance. The QR code never contains the digits.
 
 **Revoking from the desktop** removes the id and closes its connections with
 `NOT_PAIRED`. **Unpairing from the phone** sends an `Unpair` message first when the
@@ -299,7 +325,7 @@ already does for gates.
 | A relay, n0's or anyone's | see that two endpoint ids are talking, when, and roughly how much | read or change anything: QUIC is end-to-end encrypted and authenticated to both keys |
 | The DNS and discovery server | see which endpoint ids are looked up; publish a false relay URL for an id | impersonate a desktop: the connection is authenticated to the id, so a false record only fails to connect |
 | Anybody who looks up a desktop's record | learn its relay URL | learn its IP address: the record is relay-only |
-| Somebody who photographs a QR code | try it once, within five minutes, after which the desktop must still press yes | pair without the desktop's yes |
+| Somebody who photographs a QR code | try it once, within five minutes; the desktop then shows digits their device cannot make the owner's phone show | pair by naming their device after the owner's phone: the matching code differs, and the owner's phone shows none |
 | Somebody who replays a pairing secret | nothing: one attempt burns it | |
 | A stolen, unlocked phone with the app lock off | everything a paired phone can, until the desktop revokes it | read an API key: none is ever sent to a phone |
 | A stolen phone with the app lock on | nothing without the owner's biometrics or PIN | |
@@ -316,7 +342,9 @@ In CI, with no network:
 
 - **Two endpoints in one process** on the `Minimal` preset, dialed by direct
   address, with discovery off. Pairing, refusal of an unpaired id before a stream
-  is read, a burnt code, an expired code, revocation closing a live connection,
+  is read, a burnt code, an expired code, the matching code computed alike on both
+  ends from the authenticated ids (and differently for a third key given the same
+  secret), revocation closing a live connection,
   `VERSION_MISMATCH`, and a round trip of calls, returns and events.
 - **The allowed list** against `generate_handler!`: a new desktop command without a
   remote decision fails by name, the way `keys.test.ts` pins the window's commands.
@@ -335,7 +363,7 @@ and local discovery between two physical devices. That is #346's done-when.
 
 ## Corrections to the product spec
 
-Two things the spec says cannot be built as written:
+Three things the spec says cannot be built, or are not safe, as written:
 
 1. **"`<desktop>` no longer recognises this phone. It was reset or reinstalled."**
    A desktop whose keychain was reset has a new endpoint id, and nothing answers on
@@ -345,7 +373,12 @@ Two things the spec says cannot be built as written:
    *removed this phone* sentence. The spec's sentence for a reset desktop goes, and
    the *can't reach* sentence gains *or it was reset* once a desktop has been
    unreachable for a long time.
-2. **Remote access is not in vibe's config.** The spec says a project's
+2. **"The confirmation on the desktop is what stops a photographed QR code from
+   being enough by itself."** Not by itself: an attacker who dials first can name
+   their device after the owner's phone, and a yes to a name is a yes to them. The
+   desktop's prompt and the phone's pairing screen both show a six-digit matching
+   code, and the yes means *these match*. Pairing gains one look at two screens.
+3. **Remote access is not in vibe's config.** The spec says a project's
    `vibe.config.json` cannot turn it on. That stays true, more strongly: the
    settings are in a Rust-owned file, because Rust reads them before any window
    or host exists.
@@ -354,7 +387,7 @@ Two things the spec says cannot be built as written:
 
 | Issue | Builds |
 |---|---|
-| #341 | identity in the keychain, `remote_pair_begin`/`answer`, `remote_revoke`, `remote-paired.json` |
+| #341 | identity in the keychain, `remote_pair_begin`/`answer`, the matching code, `remote_revoke`, `remote-paired.json` |
 | #342 | the endpoint (n0 preset + mDNS + the relay setting), the two ALPNs, refusal before read, `remote_status` |
 | #343 | the control stream, calls and events, the allowed list and its test, id ranges, attribution, the live-run buffer |
 | #344 | `remote_set`, `remote.json`, autostart, keep awake, the connected-phone chip |
