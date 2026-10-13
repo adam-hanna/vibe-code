@@ -13,6 +13,7 @@ import { STEPS } from './appearance';
 import { pickDirectory } from './pick';
 import { projectName } from './projects';
 import { capOf } from './hosts';
+import { showsConfig } from '../changed';
 import { DRAFTS_KEY, draftsFor, readDrafts, removeDraft, saveDraft } from './drafts';
 import type { Draft } from './drafts';
 import type { KeyStatus } from '../pilot/keys';
@@ -1067,6 +1068,27 @@ export function Settings({
   }, [dir]);
 
   useEffect(load, [load]);
+
+  // Another client saved the file this screen shows (#354): ask for it again,
+  // so the next save here starts from what is on disk. A field already drawn
+  // keeps what it took; only the frame is refreshed.
+  useEffect(() => {
+    if (!host.inShell()) return;
+    let off: (() => void) | null = null;
+    let live = true;
+    void host
+      .onChanged((c) => {
+        if (c.what === 'config' && showsConfig(c.key, scope, dir)) load();
+      })
+      .then((stop) => {
+        if (live) off = stop;
+        else stop();
+      });
+    return () => {
+      live = false;
+      off?.();
+    };
+  }, [load, scope, dir]);
 
   const write = useCallback(
     (patch: Record<string, unknown>, to: 'project' | 'global') => {

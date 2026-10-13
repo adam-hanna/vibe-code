@@ -2,6 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type { PilotAccess } from './pilot/access';
 import type { Outcome, UpdateInfo, UpdateProgress } from './shell/update';
+import { isOwn } from './changed';
 
 /**
  * The webview's end of the wire.
@@ -17,7 +18,7 @@ import type { Outcome, UpdateInfo, UpdateProgress } from './shell/update';
  */
 
 /** Kept in step with `PROTOCOL_VERSION` in `src/protocol.ts`. */
-export const EXPECTED_PROTOCOL = 1;
+export const EXPECTED_PROTOCOL = 2;
 
 export type Level = 'heading' | 'step' | 'info' | 'detail' | 'ok' | 'warn' | 'error';
 
@@ -392,6 +393,18 @@ export interface MemorySavedFrame {
 }
 
 /**
+ * A write landed, said to every client (#354). No value: a cache re-reads.
+ * `id` is the write's own request id, so the writer can ignore its own.
+ */
+export interface ChangedFrame {
+  type: 'changed';
+  what: 'memory' | 'chat' | 'config';
+  key: string;
+  id: number;
+  origin?: string;
+}
+
+/**
  * A command an earlier launch ran, read back from its log (#223,
  * `src/commandlog.ts`). `lost` is a host that went away while it was running.
  */
@@ -555,7 +568,8 @@ export type Frame =
   | PastCommandsFrame
   | ModelsFrame
   | ReplayFrame
-  | QuestionsAnswered;
+  | QuestionsAnswered
+  | ChangedFrame;
 
 /**
  * Whether a value is a frame this version recognises.
@@ -612,6 +626,9 @@ export function isFrame(v: unknown): v is Frame {
     // the cockpit mounts and the reducer has no use for.
     type === 'memory' ||
     type === 'memory_saved' ||
+    // Another client's write (#354), read by the caches and the settings
+    // screen through `onChanged`; the reducer has no use for it.
+    type === 'changed' ||
     // A past run's narration, ignored by THIS reducer for a sharper version of
     // the same reason: it describes a run this process is NOT narrating, and
     // folding it into the live run is exactly the confusion it exists to end.
@@ -1444,4 +1461,21 @@ export async function pilotTurn(turn: PilotTurn): Promise<number> {
 let nextId = 0;
 export function nextRequestId(): number {
   return (nextId += 1);
+}
+
+/** Whether this window sent the request with this id (#354). */
+export function allocatedHere(id: number): boolean {
+  return isOwn(id, nextId);
+}
+
+/**
+ * Another client's writes, as the service host announces them (#354).
+ *
+ * A `changed` carrying an id this window allocated is its own write coming
+ * back, and is not passed on: this window's cache already holds what it wrote.
+ */
+export function onChanged(handler: (frame: ChangedFrame) => void): Promise<() => void> {
+  return listenService((frame) => {
+    if (frame.type === 'changed' && !allocatedHere(frame.id)) handler(frame);
+  });
 }

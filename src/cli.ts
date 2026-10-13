@@ -255,6 +255,15 @@ export async function main(
    * never start one.
    */
   loop: RunLoop = orchestrate,
+  /**
+   * Who asked for this run, when a host was told (#354): a paired phone's
+   * label, stamped by the desktop. Recorded once in the run's events and
+   * nowhere else. A parameter and never a flag - argv is the CLI's contract,
+   * and `--origin` would make a phone's label something the CLI accepts.
+   * Trailing and optional, so the CLI and every caller of `main(argv)` pass
+   * nothing and record nothing.
+   */
+  origin: string | null = null,
 ): Promise<ExitCode> {
   const cmd = argv[0];
   if (cmd === undefined || cmd === '-h' || cmd === '--help') {
@@ -265,11 +274,11 @@ export async function main(
   try {
     switch (cmd) {
       case 'run':
-        return await cmdRun(argv.slice(1), false, loop);
+        return await cmdRun(argv.slice(1), false, loop, origin);
       case 'plan':
-        return await cmdRun(argv.slice(1), true, loop);
+        return await cmdRun(argv.slice(1), true, loop, origin);
       case 'resume':
-        return await cmdResume(argv.slice(1), loop);
+        return await cmdResume(argv.slice(1), loop, origin);
       case 'fork':
         return await cmdFork(argv.slice(1));
       case 'list':
@@ -571,6 +580,7 @@ async function cmdRun(
   args: readonly string[],
   planOnly: boolean,
   loop: RunLoop = orchestrate,
+  origin: string | null = null,
 ): Promise<ExitCode> {
   const { positional, flags } = parseArgs(args);
   if (flags.help) {
@@ -652,6 +662,7 @@ async function cmdRun(
       flags,
       handle,
       loop,
+      origin,
     );
   } finally {
     // Every path out, including the ones that never reach `execute`: the throws
@@ -676,6 +687,7 @@ async function startRun(
   flags: ParsedArgs['flags'],
   handle: LockHandle,
   loop: RunLoop = orchestrate,
+  origin: string | null = null,
 ): Promise<ExitCode> {
   // The decision is taken here and the directory is made by the preflight gate.
   // Recorded in the FIRST state write, so a resume cannot come back believing it
@@ -768,7 +780,7 @@ async function startRun(
     );
   }
 
-  return execute(state, cfg, false, flags.skipProbe === true, REAL_GATE, loop, handle);
+  return execute(state, cfg, false, flags.skipProbe === true, REAL_GATE, loop, handle, origin);
 }
 
 /**
@@ -834,6 +846,7 @@ export function resumeConfig(targetDir: string, state: RunState, flags: ParsedAr
 async function cmdResume(
   args: readonly string[],
   loop: RunLoop = orchestrate,
+  origin: string | null = null,
 ): Promise<ExitCode> {
   const { positional, flags } = parseArgs(args);
   if (flags.help) {
@@ -918,7 +931,7 @@ async function cmdResume(
   }
 
   try {
-    return await resumeRun(targetDir, id, flags, handle, loop);
+    return await resumeRun(targetDir, id, flags, handle, loop, origin);
   } finally {
     // Covers the no-answers early return and every throw between here and the
     // end of `execute`, which is why acquisition and this sit in one function.
@@ -933,6 +946,7 @@ async function resumeRun(
   flags: ParsedArgs['flags'],
   handle: LockHandle,
   loop: RunLoop = orchestrate,
+  origin: string | null = null,
 ): Promise<ExitCode> {
   const state = loadRun(targetDir, id);
   const stored = state.config;
@@ -1009,7 +1023,7 @@ async function resumeRun(
           cliVersions,
         },
       });
-      return execute(state, cfg, true, flags.skipProbe === true, REAL_GATE, loop, handle);
+      return execute(state, cfg, true, flags.skipProbe === true, REAL_GATE, loop, handle, origin);
     }
 
     const answers = parseHumanAnswers(raw);
@@ -1070,7 +1084,7 @@ async function resumeRun(
       cliVersions,
     },
   });
-  return execute(state, cfg, true, flags.skipProbe === true, REAL_GATE, loop, handle);
+  return execute(state, cfg, true, flags.skipProbe === true, REAL_GATE, loop, handle, origin);
 }
 
 /**
@@ -1667,6 +1681,22 @@ function reportRecovery(report: RecoveryReport): void {
   }
 }
 
+/**
+ * Record who asked for this invoke, when somebody said (#354).
+ *
+ * The attribution carve-out `gate_released` already takes from
+ * `recordAndSay`'s durability rule, applied to a run start: a row when the
+ * invoke carried a readable origin, and nothing at all when it did not. So a run
+ * started from the desktop window or the CLI - neither of which sends one -
+ * leaves a `state.json` byte-identical to one written before this existed.
+ * Once per invoke, so a fresh start, a resume and an `--implement` each record
+ * their own. The event type is the narration id.
+ */
+export function recordRunOrigin(state: RunState, origin: string | null): void {
+  if (origin === null) return;
+  recordAndSay(state, 'info', 'run_origin', `Asked for by ${origin}`, { origin });
+}
+
 export async function execute(
   state: RunState,
   cfg: Config,
@@ -1685,6 +1715,8 @@ export async function execute(
    * charge what it found or only report it.
    */
   lock?: LockHandle,
+  /** Who asked for this invoke, or null (#354). See `recordRunOrigin`. */
+  origin: string | null = null,
 ): Promise<ExitCode> {
   // A latch from a previous run in this process, cleared before this one starts
   // (#209). The host allows a second `invoke` once the first has settled, and a
@@ -1742,6 +1774,9 @@ export async function execute(
   }
 
   try {
+    // First, so a run refused at preflight still says who asked for it, and
+    // inside the try, so a save that throws lands in the one handler (#354).
+    recordRunOrigin(state, origin);
     // After the lock and before preflight: this is spend that has already
     // happened, and the ceilings have to see it before the run buys anything
     // more. A forced lock reports instead of charging - see `releaseForced`.
