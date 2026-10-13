@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react';
 import * as host from '../host';
+import { reread } from '../changed';
 
 /**
  * Where the pilot's conversations are kept (#223): files the host writes, held
@@ -25,6 +26,10 @@ const DEBOUNCE_MS = 400;
 const cache = new Map<string, string>();
 const pending = new Map<string, ReturnType<typeof setTimeout>>();
 const written = new Map<string, string | null>();
+/** Saves sent and not yet confirmed, by key: still about to land (#354). */
+const inflight = new Map<string, number>();
+/** Keys another client wrote while the store was still loading (#354). */
+const dirty = new Set<string>();
 let state: { ready: boolean; failure: string | null } = { ready: false, failure: null };
 let loading: Promise<void> | null = null;
 const listeners = new Set<() => void>();
@@ -93,6 +98,19 @@ export function loadChats(): Promise<void> {
         stuck.push(key);
       }
     }
+    // Another client may have written since the read above (#354): each such
+    // key is read again until none are left, and the store goes ready in the
+    // same turn. A migration racing one of them is two writes to one key and
+    // the last wins; what this guarantees is that the cache says which.
+    while (dirty.size > 0) {
+      const keys = [...dirty];
+      dirty.clear();
+      try {
+        await refresh(keys);
+      } catch {
+        break;
+      }
+    }
     set({
       ready: true,
       failure:
@@ -129,7 +147,13 @@ export function putChat(key: string, value: string | null): void {
             if (value === null) localStorage.removeItem(key);
             else localStorage.setItem(key, value);
           });
+      inflight.set(key, (inflight.get(key) ?? 0) + 1);
       write
+        .finally(() => {
+          const left = (inflight.get(key) ?? 1) - 1;
+          if (left > 0) inflight.set(key, left);
+          else inflight.delete(key);
+        })
         .then(() => {
           written.set(key, value);
           if (state.failure !== null) set({ failure: null });
@@ -139,6 +163,48 @@ export function putChat(key: string, value: string | null): void {
         );
     }, DEBOUNCE_MS),
   );
+}
+
+/**
+ * Read the host again and replace the named conversations in the cache (#354),
+ * except one with a save of this window's own still to land - decided when the
+ * read answers. `written` follows what the host was seen to hold, so a later
+ * save of the value this window last wrote is not skipped as already there.
+ */
+async function refresh(keys: readonly string[]): Promise<void> {
+  const entries = await host.chats();
+  for (const key of keys) {
+    const next = reread(key, entries, pending.has(key) || inflight.has(key));
+    if (next.kind === 'set') {
+      cache.set(key, next.value);
+      written.set(key, next.value);
+    } else if (next.kind === 'remove') {
+      cache.delete(key);
+      written.set(key, null);
+    }
+  }
+}
+
+/**
+ * Another client saved this conversation (#354).
+ *
+ * The first thing it does is forget what this window last saved for the key,
+ * because that is no longer known to be what the host holds: a save of the same
+ * value, pending now or made later, must reach the host rather than be skipped
+ * as a repeat - whether or not the re-read below succeeds.
+ */
+export async function chatChanged(key: string): Promise<void> {
+  if (!hosted() || !key.startsWith(PREFIX)) return;
+  written.delete(key);
+  if (!state.ready) {
+    dirty.add(key);
+    return;
+  }
+  try {
+    await refresh([key]);
+  } catch {
+    // The cache stays as it was; the next announcement reads again.
+  }
 }
 
 function subscribe(listener: () => void): () => void {

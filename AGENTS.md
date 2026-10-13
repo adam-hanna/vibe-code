@@ -1897,6 +1897,20 @@ Five things about them are load-bearing:
   travels whole so a pane can say *this was never written* rather than *this could not be
   read*.
 
+**Every write is announced, because a second client's stale cache would overwrite it**
+(#354). `memory_save`, `chat_save` and a `config` patch each make the service host send
+`changed` - what, key, the write's own id, and its `origin` when it had one - once the file is
+on disk and after the write's reply. A read, a refusal and a failed write send nothing, and
+`delete_run`, `answer_questions` and command output are not announced, since the panes re-read
+those when opened. The frame carries no value: `memory.ts` and the chat store re-read with the
+reads they already use (`app/src/changed.ts` holds the decisions), the writer ignores an id it
+allocated, a key with a write of its own debounced or in flight keeps its local value, and a
+store reconciles what was announced while it was loading. **Two writes to one key race and the
+last one wins**, a start-up migration included; what is guaranteed is that the cache agrees
+with the disk, which is what stops a stale save. A config write's origin travels on `changed`
+and is never written - `vibe.config.json` is committed - while an invoke's is recorded once as
+`run_origin`, by `gate_released`'s carve-out, so a run with none is byte-identical.
+
 **The window predicts no filename, and `artifacts` is why that was possible** (#223). Four
 tabs — Plans, Plan critique, Code review and Code — draw a run's own artifacts, and the
 dangerous shape they could have taken is composing `plan-${round}.json` from a round number

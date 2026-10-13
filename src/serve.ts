@@ -192,8 +192,11 @@ export interface SessionDeps {
    * The one seam a test needs, and the only one: everything else here is
    * framing, and framing that had to spawn `claude` to be tested would not be
    * tested.
+   *
+   * `origin` is the invoke's readable origin, or null (#354): beside the argv
+   * rather than in it, because the argv is the CLI's contract.
    */
-  invoke?: (argv: readonly string[], loop: RunLoop) => Promise<number>;
+  invoke?: (argv: readonly string[], loop: RunLoop, origin: string | null) => Promise<number>;
   /**
    * What runs one pilot chat turn. Defaults to `pilotChat` (#193).
    *
@@ -289,7 +292,7 @@ export interface SessionDeps {
 export const INBOUND_MAX_BYTES = 64 * 1024 * 1024;
 
 export function createSession(send: Send, deps: SessionDeps = {}): Session {
-  const invoke = deps.invoke ?? ((argv, loop) => main(argv, loop));
+  const invoke = deps.invoke ?? ((argv, loop, origin) => main(argv, loop, origin));
   const chat = deps.pilot ?? pilotChat;
   const chatCodex = deps.pilotCodex ?? pilotCodex;
   /** Subscription pilot turns in flight, by request id, so `pilot_stop` can reach one. */
@@ -382,9 +385,9 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
   // the same loop, called with a host attached.
   const loop: RunLoop = (state, cfg, resume) => orchestrate(state, cfg, resume, undefined, host);
 
-  const runInvoke = (id: number, argv: readonly string[]): void => {
+  const runInvoke = (id: number, argv: readonly string[], origin: string | null): void => {
     running = id;
-    void invoke(argv, loop)
+    void invoke(argv, loop, origin)
       .then((exit) => {
         send({ type: 'result', id, exit });
       })
@@ -631,6 +634,9 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
         } else {
           saveChat(dir, msg.key, msg.value);
           send({ type: 'chat_saved', id: msg.id, key: msg.key });
+          // Every client, after the file and after the reply (#354): another
+          // window's cache re-reads this key rather than saving over it.
+          send({ type: 'changed', what: 'chat', key: msg.key, id: msg.id });
         }
       } catch (err: unknown) {
         send({ type: 'error', id: msg.id, message: err instanceof Error ? err.message : String(err) });
@@ -653,6 +659,7 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
         } else {
           saveEntry(dir, msg.key, msg.value);
           send({ type: 'memory_saved', id: msg.id, key: msg.key });
+          send({ type: 'changed', what: 'memory', key: msg.key, id: msg.id });
         }
       } catch (err: unknown) {
         send({ type: 'error', id: msg.id, message: err instanceof Error ? err.message : String(err) });
@@ -780,9 +787,24 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
         });
         return;
       }
+      // What other clients are told once the file is written (#354), and only
+      // then: `wrote` is set the moment `writeConfig` returns, which is after
+      // its rename. A refusal never gets that far, so it announces nothing.
+      const changed: Outbound | null =
+        msg.patch === undefined
+          ? null
+          : {
+              type: 'changed',
+              what: 'config',
+              key: msg.scope === 'global' ? 'global' : msg.dir,
+              id: msg.id,
+              ...(msg.origin === undefined ? {} : { origin: msg.origin }),
+            };
+      let wrote = false;
       try {
         const path =
           msg.patch === undefined ? null : writeConfig(msg.dir, msg.patch, msg.scope ?? 'project').path;
+        wrote = msg.patch !== undefined;
         // The config that RESULTED, whether this was a read or a write, so a
         // form never has to assume its own save took effect.
         const loaded = readConfig(msg.dir);
@@ -807,6 +829,7 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
           pilot: resolvedAccess(access()),
           clis: { claude: cliStatus('claude'), codex: cliStatus('codex') },
         });
+        if (changed !== null) send(changed);
       } catch (err: unknown) {
         // `validate`'s own message, naming the field - which is what lets a
         // settings form say WHICH value it refused rather than that something
@@ -816,6 +839,9 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
           id: msg.id,
           message: err instanceof Error ? err.message : String(err),
         });
+        // Unless it was: a write that landed and then could not be read back
+        // has still changed the file, so other clients still have to know.
+        if (wrote && changed !== null) send(changed);
       }
       return;
     }
@@ -1032,7 +1058,7 @@ export function createSession(send: Send, deps: SessionDeps = {}): Session {
       });
       return;
     }
-    runInvoke(msg.id, msg.argv);
+    runInvoke(msg.id, msg.argv, msg.origin ?? null);
   };
 
   const write = createLineReader(

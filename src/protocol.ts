@@ -1,5 +1,6 @@
 import type { Level, Narration } from '@src/log.js';
 import type { GateContext } from '@src/host.js';
+import { readOrigin } from '@src/host.js';
 import type { ArtifactRead, Effort, RunArtifact, RunSummary } from '@src/types.js';
 import { EFFORTS } from '@src/types.js';
 import type { PromptBlock } from '@src/prompts.js';
@@ -55,8 +56,12 @@ export interface CliStatus {
  *
  * Adding a new `type` is not a bump: an unrecognised frame is ignored by a
  * reader and refused by this one, and both of those are already the contract.
+ *
+ * 2 (#354) only added `changed`, which that rule says is not a bump - and it
+ * was bumped anyway, because a window now ACTS on `changed` to keep its caches
+ * right, and a host that never sends one should show as the mismatch it is.
  */
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 /** What the loop's process says. */
 export type Outbound =
@@ -360,6 +365,23 @@ export type Outbound =
   /** One of those was written or removed, answering `memory_save`. */
   | { type: 'memory_saved'; id: number; key: string }
   /**
+   * A write landed, said to every client (#354).
+   *
+   * Sent after the write is on disk and after the write's own reply, never
+   * before: a signal that can arrive before the thing it signals is not a
+   * signal. Only `memory_save`, `chat_save` and a `config` patch emit it; a
+   * read, a refusal and a failed write emit nothing.
+   *
+   * **It carries no value.** A client holding a cache re-reads with the read it
+   * already uses, so there is one road to a value and not two. `key` is the key
+   * written, or for config `'global'` or the project directory exactly as the
+   * write named it. `id` is the write's own request id, which is how the client
+   * that sent it knows to ignore it. `origin` is the write's readable origin,
+   * when it had one, and lives nowhere else: a config file is committed and
+   * must not gain a field for who saved it.
+   */
+  | { type: 'changed'; what: 'memory' | 'chat' | 'config'; key: string; id: number; origin?: string }
+  /**
    * The commands a previous host left on disk, answering `commands_past`
    * (#223, `src/commandlog.ts`). Oldest first; none of them is running.
    */
@@ -406,7 +428,17 @@ export type Inbound =
    * bump: the GUI's job is a form to an argv, which is a pure function it can
    * test on its own side.
    */
-  | { type: 'invoke'; id: number; argv: readonly string[] }
+  | {
+      type: 'invoke';
+      id: number;
+      argv: readonly string[];
+      /**
+       * Who asked for this run, when a client says (#354). Read by
+       * `readOrigin`, dropped when unreadable, and deliberately NOT a flag:
+       * argv is the CLI's contract, and a phone's label is not part of it.
+       */
+      origin?: string;
+    }
   /** The decision for the `ask` carrying this `id`. Shape checked by `readDecision`. */
   | { type: 'answer'; id: number; decision: unknown }
   /**
@@ -595,6 +627,11 @@ export type Inbound =
        * which always answers with both.
        */
       scope?: 'project' | 'global';
+      /**
+       * Who saved this patch (#354). Carried on the `changed` frame only and
+       * never written anywhere: `vibe.config.json` is committed.
+       */
+      origin?: string;
     }
   /**
    * Read the diff a run has produced (#223, `1d`).
@@ -787,7 +824,13 @@ export function decode(line: string): Decoded {
       if (!argv.every((a): a is string => typeof a === 'string')) {
         return { ok: false, id, reason: 'invoke argv held something that was not a string' };
       }
-      return { ok: true, message: { type: 'invoke', id, argv } };
+      // A label on the request, never a reason to refuse it (#354): the same
+      // `readOrigin` a gate answer goes through, with the same rules.
+      const origin = readOrigin(parsed);
+      return {
+        ok: true,
+        message: origin === null ? { type: 'invoke', id, argv } : { type: 'invoke', id, argv, origin },
+      };
     }
     case 'answer':
       return { ok: true, message: { type: 'answer', id, decision: parsed['decision'] } };
@@ -1069,11 +1112,14 @@ export function decode(line: string): Decoded {
       // that fell back to the project would write the wrong file and say it had
       // worked.
       const scope = parsed['scope'];
-      if (scope === undefined) return { ok: true, message: { type: 'config', id, dir, patch } };
+      // Only on a write: a read changes nothing, so it has nobody to attribute.
+      const origin = readOrigin(parsed);
+      const labelled = origin === null ? {} : { origin };
+      if (scope === undefined) return { ok: true, message: { type: 'config', id, dir, patch, ...labelled } };
       if (scope !== 'project' && scope !== 'global') {
         return { ok: false, id, reason: 'config carried a scope that was not "project" or "global"' };
       }
-      return { ok: true, message: { type: 'config', id, dir, patch, scope } };
+      return { ok: true, message: { type: 'config', id, dir, patch, scope, ...labelled } };
     }
     case 'cancel': {
       // Optional, and refused rather than coerced when present but unusable.

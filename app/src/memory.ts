@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react';
 import * as host from './host';
+import { reread } from './changed';
 
 /**
  * What the window remembers between launches (#223): files the host writes,
@@ -46,6 +47,14 @@ type Mode = 'loading' | 'hosted' | 'local';
 
 const cache = new Map<string, string>();
 const pending = new Map<string, { timer: ReturnType<typeof setTimeout>; value: string | null }>();
+/**
+ * Writes sent and not yet confirmed, by key (#354). `pending` lets go of a key
+ * the moment it is sent, and until the host confirms it that write is still
+ * about to land - so a re-read must treat it exactly like a debounced one.
+ */
+const inflight = new Map<string, number>();
+/** Keys another client wrote while this window was still loading (#354). */
+const dirty = new Set<string>();
 let mode: Mode = 'loading';
 let failure: string | null = null;
 let loading: Promise<void> | null = null;
@@ -113,6 +122,7 @@ export function loadMemory(): Promise<void> {
     }
     if (entries === null) {
       mode = 'local';
+      dirty.clear();
       setFailure(`this window's settings could not be read from the app's files, so changes this session stay in this window only: ${last}`);
       return;
     }
@@ -134,6 +144,21 @@ export function loadMemory(): Promise<void> {
       } catch {
         cache.set(key, value);
         stuck.push(key);
+      }
+    }
+    // Another client may have written since the snapshot above (#354). Each
+    // such key is read again until none are left, and only then does the
+    // window go live, in the same turn, so no announcement falls in between.
+    // A migration racing one of them is two writes to one key, and the last
+    // wins; what this guarantees is that the cache says which one did.
+    while (dirty.size > 0) {
+      const keys = [...dirty];
+      dirty.clear();
+      try {
+        await refresh(keys);
+      } catch {
+        // Kept as the snapshot left it, the rule for any failed re-read.
+        break;
       }
     }
     mode = 'hosted';
@@ -158,14 +183,53 @@ function flushOne(key: string): void {
   if (held === undefined) return;
   clearTimeout(held.timer);
   pending.delete(key);
+  inflight.set(key, (inflight.get(key) ?? 0) + 1);
   host
     .saveMemory(key, held.value)
+    .finally(() => {
+      const left = (inflight.get(key) ?? 1) - 1;
+      if (left > 0) inflight.set(key, left);
+      else inflight.delete(key);
+    })
     .then(() => {
       if (failure !== null && pending.size === 0 && mode === 'hosted') setFailure(null);
     })
     .catch((err: unknown) =>
       setFailure(`a setting is not being saved: ${err instanceof Error ? err.message : String(err)}`),
     );
+}
+
+/**
+ * Read the host again and replace the named keys in the cache (#354), except a
+ * key with a write of this window's own still to land. Decided when the read
+ * answers, since a local write may have started while it was out.
+ */
+async function refresh(keys: readonly string[]): Promise<void> {
+  const entries = await host.memory();
+  for (const key of keys) {
+    const next = reread(key, entries, pending.has(key) || inflight.has(key));
+    if (next.kind === 'set') cache.set(key, next.value);
+    else if (next.kind === 'remove') cache.delete(key);
+  }
+}
+
+/**
+ * Another client wrote this key (#354). While loading it is remembered and read
+ * again before the window goes live; once hosted it is read again now. A read
+ * that fails keeps what the cache holds.
+ */
+export async function memoryChanged(key: string): Promise<void> {
+  if (!isMemoryKey(key)) return;
+  if (mode === 'loading') {
+    dirty.add(key);
+    return;
+  }
+  if (mode !== 'hosted') return;
+  try {
+    await refresh([key]);
+  } catch {
+    // The cache stays as it was; the next announcement reads again.
+  }
 }
 
 /** Send every write still waiting out its debounce. Called as the page goes away. */
