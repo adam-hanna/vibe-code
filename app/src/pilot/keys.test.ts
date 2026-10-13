@@ -18,6 +18,9 @@ import pilotPane from './PilotPane.tsx?raw';
 import credentials from './Credentials.tsx?raw';
 import cockpit from '../cockpit/Cockpit.tsx?raw';
 import tools from './tools.ts?raw';
+import remoteMod from '../../src-tauri/src/remote/mod.rs?raw';
+import remoteIdentity from '../../src-tauri/src/remote/identity.rs?raw';
+import remoteWindow from '../remote/remote.ts?raw';
 import { PROVIDER_NAME, PROVIDERS, usable } from './keys';
 import type { KeyStatus } from './keys';
 
@@ -60,7 +63,7 @@ describe('the webview can store a key and can never read one', () => {
     const registered = lib
       .slice(lib.indexOf('generate_handler!['), lib.indexOf(']', lib.indexOf('generate_handler![')))
       .match(/\b\w+\b/g)
-      ?.filter((w) => /^(host|key|pilot|app|update)_/.test(w));
+      ?.filter((w) => /^(host|key|pilot|app|update|remote)_/.test(w));
     expect(registered?.sort()).toEqual([
       // Case 2 (#246): a tenth command, on purpose, and the one door the window
       // has into ending the app. It only exits, through the same `stop()` the
@@ -79,6 +82,14 @@ describe('the webview can store a key and can never read one', () => {
       // what replaced a model list compiled into this window.
       'pilot_models',
       'pilot_send',
+      // Case 2 (#341): four commands, on purpose - the paired-phones list,
+      // a pairing code to show, the answer to *Allow this phone?* and revoking
+      // one. None reads, returns or deletes the device key, which the tests
+      // below pin, and none makes a pairing attempt: that is the endpoint's.
+      'remote_pair_answer',
+      'remote_pair_begin',
+      'remote_revoke',
+      'remote_status',
       // Case 2 (#299): two commands, on purpose - the updater, driven from
       // Rust so the window gets no network access and no updater permission.
       // Neither takes a URL or a program: the endpoint is config or
@@ -268,6 +279,54 @@ describe('the webview can store a key and can never read one', () => {
   test('the status shape has no field a key could live in', () => {
     const keys = Object.keys(status()).sort();
     expect(keys).toEqual(['present', 'provider', 'unreadable']);
+  });
+});
+
+/** The production part of a Rust file: everything before its first test module. */
+const production = (source: string): string => {
+  const at = source.indexOf('#[cfg(test)]');
+  return at === -1 ? source : source.slice(0, at);
+};
+
+describe('the device key is a third keychain entry no command reaches (#341)', () => {
+  test('the remote commands are exactly four, and none returns the identity', () => {
+    // The same guard as the one over `keys.rs`, for the module that holds the
+    // device key. A `remote_identity` or a status that grew a `secretKey` would
+    // be the window reading the one secret that makes a phone trust a desktop.
+    const commands = [...remoteMod.matchAll(/#\[tauri::command\]\s*pub fn (\w+)\(([\s\S]*?)\{/g)];
+    expect(commands.map((m) => m[1]).sort()).toEqual([
+      'remote_pair_answer',
+      'remote_pair_begin',
+      'remote_revoke',
+      'remote_status',
+    ]);
+    for (const [, name, signature] of commands) {
+      expect(signature, name).not.toMatch(/SecretKey|identity::read|to_bytes/);
+    }
+  });
+
+  test('the identity has a crate-only reader and no way to delete it', () => {
+    const body = production(remoteIdentity);
+    expect(body).toContain('pub(crate) fn read(');
+    expect(body).not.toMatch(/\bpub fn\b/);
+    expect(body).not.toContain('delete_credential');
+  });
+
+  test('the key_* commands still accept only the two vendors', () => {
+    // Read before the test module, which names `remote-identity` on purpose to
+    // check serde refuses it - that refusal is the Rust half of this guard.
+    expect(production(rust)).not.toContain('remote-identity');
+    expect([...PROVIDERS]).toEqual(['anthropic', 'openai']);
+  });
+
+  test('the window\'s status shape has no field a secret could live in', () => {
+    const shape = remoteWindow.slice(
+      remoteWindow.indexOf('export interface RemoteStatus {'),
+      remoteWindow.indexOf('}', remoteWindow.indexOf('export interface RemoteStatus {')),
+    );
+    const fields = [...shape.matchAll(/^ {2}(\w+):/gm)].map((m) => m[1]);
+    expect(fields.sort()).toEqual(['endpointId', 'identityUnreadable', 'phones', 'phonesUnreadable', 'preview']);
+    expect(fields.filter((f) => /secret|key/i.test(f ?? ''))).toEqual([]);
   });
 });
 

@@ -45,11 +45,13 @@ mod host;
 mod keys;
 mod pilot;
 mod reaper;
+mod remote;
 mod shellenv;
 mod update;
 
 use host::{app_quit, host_send, host_start, host_status, launch, HostProcess};
 use keys::{key_clear, key_set, key_status};
+use remote::{remote_pair_answer, remote_pair_begin, remote_revoke, remote_status, Remote};
 use pilot::models::pilot_models;
 use pilot::{pilot_cancel, pilot_send, Pilot};
 use tauri::menu::{Menu, MenuItem};
@@ -118,6 +120,7 @@ pub fn run() {
         .manage(HostProcess::default())
         .manage(Pilot::default())
         .manage(update::Pending::default())
+        .manage(Remote::default())
         // Every command the window may call, and the list is worth reading as a
         // whole: three that talk to a process this crate already started, three
         // that manage a credential the window can store and check but **never
@@ -147,7 +150,16 @@ pub fn run() {
             // release page (#299). Neither takes a URL or a program: the
             // endpoint is config or `VIBE_UPDATE_ENDPOINT`, the page a constant.
             update_check,
-            update_install
+            update_install,
+            // Remote access (#341): the paired-phones list, a pairing code to
+            // show, the answer to *Allow this phone?*, and revoking one. None
+            // of them reads, returns or deletes the device key - status names
+            // only its public id - and there is deliberately no command that
+            // makes a pairing attempt: that is the endpoint's, once it exists.
+            remote_status,
+            remote_pair_begin,
+            remote_pair_answer,
+            remote_revoke
         ])
         .setup(|app| {
             // Before `launch`, because the first thing worth keeping is why the
