@@ -131,11 +131,11 @@ impl EndpointHooks for PairedOnly {
 /// finished with it, and iroh closes a connection when its last strong handle
 /// goes.
 #[derive(Clone, Debug, Default)]
-pub struct Connections {
+pub struct Live {
     live: Arc<Mutex<HashMap<EndpointId, Vec<WeakConnectionHandle>>>>,
 }
 
-impl Connections {
+impl Live {
     fn add(&self, conn: &Connection) {
         let mut live = self.live.lock().unwrap_or_else(|p| p.into_inner());
         let handles = live.entry(conn.remote_id()).or_default();
@@ -179,6 +179,20 @@ impl Connections {
     }
 }
 
+/// The revoke and the status speak the paired list's spelling of an id, a string.
+/// One that does not parse names no endpoint, so nothing is connected under it
+/// and nothing is closed.
+impl super::Connections for Live {
+    fn close(&self, id: &str) {
+        if let Ok(id) = id.parse::<EndpointId>() {
+            Live::close(self, &id);
+        }
+    }
+    fn connected(&self, id: &str) -> bool {
+        id.parse::<EndpointId>().is_ok_and(|id| Live::connected(self, &id))
+    }
+}
+
 /// The router's handler for `vibe/remote/1`: register, check once more, hand on.
 ///
 /// The hook already refused unpaired ids. The second check is for a revoke that
@@ -188,7 +202,7 @@ impl Connections {
 #[derive(Debug)]
 struct Remote<B> {
     gate: Arc<dyn Gate>,
-    connections: Connections,
+    connections: Live,
     bridge: B,
 }
 
@@ -225,7 +239,7 @@ fn path_of(conn: &Connection) -> PathKind {
 }
 
 /// One home relay, as the endpoint sees it.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RelayInfo {
     pub url: String,
@@ -236,7 +250,7 @@ pub struct RelayInfo {
 }
 
 /// One live phone connection.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkInfo {
     pub id: String,
@@ -258,7 +272,7 @@ pub struct Status {
 /// it cleanly.
 pub struct RemoteEndpoint {
     router: Router,
-    connections: Connections,
+    connections: Live,
 }
 
 impl fmt::Debug for RemoteEndpoint {
@@ -304,7 +318,7 @@ impl RemoteEndpoint {
             .await
             .map_err(|e| format!("the remote-access endpoint could not start: {e}"))?;
 
-        let connections = Connections::default();
+        let connections = Live::default();
         let remote = Remote {
             gate,
             connections: connections.clone(),
@@ -325,7 +339,7 @@ impl RemoteEndpoint {
     }
 
     /// The live connections, for a revoke.
-    pub fn connections(&self) -> &Connections {
+    pub fn connections(&self) -> &Live {
         &self.connections
     }
 
@@ -364,8 +378,17 @@ impl RemoteEndpoint {
     }
 
     /// Close every connection and the endpoint, which also stops publishing.
+    /// Nothing calls it yet but the tests: the switch that turns remote access
+    /// off is #344's, and until then an app that exits takes the socket with it.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn stop(self) {
         let _ = self.router.shutdown().await;
+    }
+
+    /// Resolves once a home relay is connected.
+    #[cfg(test)]
+    pub(crate) async fn online(&self) {
+        self.router.endpoint().online().await;
     }
 
     #[cfg(test)]
@@ -380,7 +403,7 @@ fn mdns_lookup() -> impl AddressLookupBuilder {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use iroh::endpoint::{ApplicationClose, ConnectionError};
     use iroh::EndpointAddr;
@@ -392,19 +415,19 @@ mod tests {
     /// often it is asked, which is how a test tells the hook's refusal (asked once)
     /// from the router's second check (asked twice).
     #[derive(Debug, Default)]
-    struct List {
+    pub(crate) struct List {
         ids: Mutex<HashSet<EndpointId>>,
         asked: AtomicUsize,
     }
 
     impl List {
-        fn with(ids: &[EndpointId]) -> Arc<Self> {
+        pub(crate) fn with(ids: &[EndpointId]) -> Arc<Self> {
             Arc::new(Self {
                 ids: Mutex::new(ids.iter().copied().collect()),
                 asked: AtomicUsize::new(0),
             })
         }
-        fn remove(&self, id: &EndpointId) {
+        pub(crate) fn remove(&self, id: &EndpointId) {
             self.ids.lock().unwrap().remove(id);
         }
         fn asked(&self) -> usize {
@@ -422,10 +445,10 @@ mod tests {
     /// A handler that counts what reached it and then holds the connection open
     /// until the other side or a revoke closes it.
     #[derive(Clone, Debug, Default)]
-    struct Count(Arc<AtomicUsize>);
+    pub(crate) struct Count(Arc<AtomicUsize>);
 
     impl Count {
-        fn seen(&self) -> usize {
+        pub(crate) fn seen(&self) -> usize {
             self.0.load(Ordering::SeqCst)
         }
     }
@@ -438,7 +461,7 @@ mod tests {
         }
     }
 
-    fn key() -> SecretKey {
+    pub(crate) fn key() -> SecretKey {
         SecretKey::generate()
     }
 
@@ -452,7 +475,7 @@ mod tests {
             .expect("a loopback endpoint starts")
     }
 
-    async fn phone(key: SecretKey) -> Endpoint {
+    pub(crate) async fn phone(key: SecretKey) -> Endpoint {
         Endpoint::builder(presets::Minimal)
             .relay_mode(RelayMode::Disabled)
             .clear_address_lookup()
@@ -466,7 +489,7 @@ mod tests {
 
     /// The desktop's address, by its bound loopback socket: no lookup exists in
     /// these tests, which is the point of them.
-    fn addr_of(desktop: &RemoteEndpoint) -> EndpointAddr {
+    pub(crate) fn addr_of(desktop: &RemoteEndpoint) -> EndpointAddr {
         let ep = desktop.endpoint();
         let socket = ep
             .bound_sockets()
@@ -478,7 +501,7 @@ mod tests {
 
     /// How a connection ended, as the phone sees it. A refusal can land during
     /// `connect` or just after it, and both are the same refusal.
-    async fn closing_code(phone: &Endpoint, to: EndpointAddr, alpn: &[u8]) -> Option<u64> {
+    pub(crate) async fn closing_code(phone: &Endpoint, to: EndpointAddr, alpn: &[u8]) -> Option<u64> {
         let ended = match phone.connect(to, alpn).await {
             Ok(conn) => tokio::time::timeout(Duration::from_secs(10), conn.closed())
                 .await
@@ -494,7 +517,7 @@ mod tests {
         }
     }
 
-    async fn settle() {
+    pub(crate) async fn settle() {
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 

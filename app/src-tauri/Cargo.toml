@@ -90,9 +90,11 @@ iroh = { version = "1.3", default-features = false, features = ["tls-ring", "fas
 # A phone on the same network finds the desktop with no internet at all: 0.175s
 # with no relay on #339.
 iroh-mdns-address-lookup = "0.6"
-# iroh's runtime, already in the tree through Tauri. `time` for the accept loop's
-# timeouts; nothing else is asked of it here.
-tokio = { version = "1", features = ["time"] }
+# iroh's runtime, already in the tree through Tauri with all three features on,
+# so naming them adds nothing to the build: `time` for the pairing handler's
+# waits, `sync` for the oneshot that carries the person's answer to it, and
+# `macros` for its `select!`.
+tokio = { version = "1", features = ["macros", "sync", "time"] }
 
 [dev-dependencies]
 # Two endpoints in one process, over loopback, for `remote/endpoint.rs`'s tests.

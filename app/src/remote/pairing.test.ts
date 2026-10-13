@@ -17,6 +17,7 @@ const status = (over: Partial<RemoteStatus> = {}): RemoteStatus => ({
   phones: [],
   phonesUnreadable: null,
   preview: true,
+  endpoint: { state: 'off' },
   ...over,
 });
 

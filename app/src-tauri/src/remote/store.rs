@@ -40,6 +40,7 @@ struct File {
     phones: Vec<Phone>,
 }
 
+#[derive(Clone, Debug)]
 pub(crate) struct Store {
     path: PathBuf,
 }

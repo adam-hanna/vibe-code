@@ -325,7 +325,7 @@ describe('the device key is a third keychain entry no command reaches (#341)', (
       remoteWindow.indexOf('}', remoteWindow.indexOf('export interface RemoteStatus {')),
     );
     const fields = [...shape.matchAll(/^ {2}(\w+):/gm)].map((m) => m[1]);
-    expect(fields.sort()).toEqual(['endpointId', 'identityUnreadable', 'phones', 'phonesUnreadable', 'preview']);
+    expect(fields.sort()).toEqual(['endpoint', 'endpointId', 'identityUnreadable', 'phones', 'phonesUnreadable', 'preview']);
     expect(fields.filter((f) => /secret|key/i.test(f ?? ''))).toEqual([]);
   });
 });
