@@ -74,6 +74,10 @@ function desktop(command: string, args: Json): unknown {
   }
 }
 
+/** The recorded desktop, as `mock.rs`'s `phone_desktops` lists it (#346). */
+const DESKTOP_ID = 'browser-mock-desktop';
+const ID_RANGE = 2 ** 40;
+
 mockIPC(
   (cmd, payload) => {
     const args = (payload ?? {}) as Json;
@@ -84,6 +88,38 @@ mockIPC(
         return { endpointId: 'browser-mock-phone' };
       case 'phone_open_release_page':
         return null;
+      // The phone's own side (#346), as `mock.rs` answers it: unlocked, one
+      // current desktop that opens at once as generation 1.
+      case 'phone_settings':
+        return { lock: true, notify: true, name: 'Phone', deviceLock: 'unknown', locked: false, problem: null };
+      case 'phone_desktops':
+        return {
+          desktops: [
+            {
+              id: DESKTOP_ID,
+              relay: null,
+              desktopName: 'Recorded desktop',
+              name: null,
+              pairedAt: 0,
+              lastSeen: null,
+              reach: { state: 'open' },
+            },
+          ],
+          problem: null,
+          current: DESKTOP_ID,
+          link: { id: DESKTOP_ID, phase: 'up', reason: null, path: 'direct', connectMs: null },
+        };
+      case 'phone_open':
+        return args['id'] === null ? { generation: null } : { generation: 1 };
+      case 'phone_session':
+        return { generation: 1, idBase: ID_RANGE };
+      case 'phone_release':
+      case 'phone_probe':
+      case 'phone_network_change':
+      case 'phone_notify':
+        return null;
+      case 'phone_confirm':
+        return true;
       default:
         throw new Error(`the browser mock has no ${cmd}`);
     }

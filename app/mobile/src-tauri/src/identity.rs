@@ -59,6 +59,14 @@ fn platform_store() -> Result<Arc<keyring_core::CredentialStore>, String> {
         .map_err(|e| format!("the in-memory key store could not be made: {e}"))
 }
 
+/// The device key, read or made, for the phone's endpoint (#346). Held by the
+/// link and never handed to a command: `phone_identity` answers with the
+/// public half only.
+pub fn load() -> Result<iroh_base::SecretKey, String> {
+    install_store()?;
+    vibe_remote::identity::read_or_create(&Store)
+}
+
 /// The modifiers an entry is made with. Only iOS takes any.
 fn entry() -> Result<Entry, String> {
     #[cfg(target_os = "ios")]

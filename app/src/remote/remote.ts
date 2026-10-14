@@ -1,3 +1,4 @@
+import { confirmed } from '../confirm';
 import { invoke, listen } from '../transport';
 
 /**
@@ -164,12 +165,16 @@ export function pairBegin(): Promise<PairBegin> {
   return invoke<PairBegin>('remote_pair_begin');
 }
 
-export function pairAnswer(yes: boolean): Promise<Outcome> {
+/** A yes is asked on the device first (#346); a no never is. */
+export async function pairAnswer(yes: boolean): Promise<Outcome> {
+  if (yes) await confirmed('Pair a phone');
   return invoke<Outcome>('remote_pair_answer', { yes });
 }
 
-export function revoke(id: string): Promise<void> {
-  return invoke('remote_revoke', { id });
+/** Asked on the device first (#346). */
+export async function revoke(id: string): Promise<void> {
+  await confirmed('Unpair a phone');
+  await invoke('remote_revoke', { id });
 }
 
 /**

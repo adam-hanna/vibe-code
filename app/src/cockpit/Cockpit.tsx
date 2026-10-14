@@ -109,15 +109,19 @@ import {
   onScreen,
   pruneEnded,
   quitList,
+  rejoin,
   repoOf,
   routeFrame,
   runIdOf,
   runLabel,
   setFlag,
   setPid,
+  settleRejoin,
+  ENDED_WHILE_AWAY,
   updateRun,
   writeRefusal,
 } from './hosts';
+import { exitNotice, offerNotice, runNotice } from './notices';
 import type { CapRead, LiveRun, LiveRuns } from './hosts';
 import { useStats } from './useStats';
 import { rounds } from './rounds';
@@ -950,6 +954,13 @@ export function Cockpit() {
    * draft whose run ended before saying who it is goes back to unlaunched, so it
    * can be proposed again rather than sitting at *starting* for ever.
    */
+  /** The newest reconnect generation (#346); a settle for any older one is dropped. */
+  const rejoinGen = useRef(0);
+  /** How a notification names a run (#346): as the sidebar does. */
+  const noticeLabel = (handle: string): string => {
+    const e = livesRef.current.find((x) => x.handle === handle);
+    return e === undefined ? 'A run' : labelOf(e);
+  };
   const endLive = useCallback(
     (handle: string) => {
       const e = livesRef.current.find((x) => x.handle === handle);
@@ -1083,6 +1094,9 @@ export function Cockpit() {
             return;
           }
           const outcome = invokeOutcome(lives, from, frame);
+          // A phone's notification (#346), read off the frame's type and id
+          // exactly as the fold below reads it; once per key.
+          offerNotice(runNotice(from, frame, outcome, noticeLabel(from)));
           const at = Date.now();
           // A run host answers its pause, unpause and cancel with `result`
           // frames too, and `reduce` reads any `result` as the command
@@ -1113,6 +1127,7 @@ export function Cockpit() {
             setWire((w) => ({ ...w, connected: false, hostPid: null, failure: hostExitWording(code) }));
           } else if (means === 'run-lost') {
             // That run, and no other (#246).
+            offerNotice(exitNotice(from, code, noticeLabel(from)));
             const at = Date.now();
             updateLives((l) => updateRun(l, from, (r) => hostLost(r, at, hostExitWording(code))));
             endLive(from);
@@ -1120,6 +1135,25 @@ export function Cockpit() {
           // After the host has left Rust's set, so this read is the one that
           // settles what the diagnostics popover lists.
           refreshStatus();
+        },
+        // A phone reconnected (#346): the desktop is about to replay every live
+        // run's frames, so each starts again from its base rather than folding
+        // them twice. Settled once that generation's replay is released.
+        rejoined: (generation) => {
+          rejoinGen.current = generation;
+          updateLives((l) => rejoin(l));
+        },
+        settle: (generation) => {
+          void host
+            .status()
+            .then((status) => {
+              if (rejoinGen.current !== generation) return;
+              const alive = new Set(status.runs.map((r) => r.handle));
+              const settledNow = settleRejoin(livesRef.current, alive, Date.now(), ENDED_WHILE_AWAY);
+              updateLives(() => settledNow.lives);
+              for (const handle of settledNow.lost) endLive(handle);
+            })
+            .catch((err: unknown) => note('log', `could not settle after a reconnect: ${String(err)}`));
         },
       });
       if (cancelled) {
@@ -1323,6 +1357,8 @@ export function Cockpit() {
         pausing: false,
         stopping: false,
         run: { ...(seed ?? emptyRun()), protocol: protocolRef.current },
+        // What a phone's reconnect refolds the replay onto (#346).
+        base: seed ?? emptyRun(),
       };
       updateLives((l) => addRun(l, entry));
       toPoint.current.add(handle);

@@ -14,6 +14,9 @@
 //!   A request it has no answer for is answered with an `error` frame naming
 //!   it, so the cockpit says what is missing rather than waiting.
 //! - Every other command is refused by name. A run is never started.
+//! - The `phone_*` side (#346): one paired desktop, the current one, which
+//!   opens at once as generation 1 with the request range above the window's.
+//!   Pairing and unpairing are refused: there is no desktop to pair with.
 
 use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Emitter};
@@ -110,6 +113,56 @@ impl Desktop for Recorded {
             }
         })
     }
+
+    fn desktops(&self) -> Value {
+        let id = desktop_id();
+        json!({
+            "desktops": [{
+                "id": id,
+                "relay": null,
+                "desktopName": "Recorded desktop",
+                "name": null,
+                "pairedAt": 0,
+                "lastSeen": null,
+                "reach": { "state": "open" },
+            }],
+            "problem": null,
+            "current": id,
+            "link": { "id": id, "phase": "up", "reason": null, "path": "direct", "connectMs": null },
+        })
+    }
+
+    fn open(&self, id: Option<String>) -> Answer<'_> {
+        Box::pin(async move {
+            if id.is_none() {
+                return Ok(json!({ "generation": null }));
+            }
+            self.app
+                .emit("phone://connected", json!({ "generation": GENERATION }))
+                .map_err(|e| format!("the mock desktop could not emit: {e}"))?;
+            Ok(json!({ "generation": GENERATION }))
+        })
+    }
+
+    fn session(&self) -> Result<Value, String> {
+        Ok(json!({ "generation": GENERATION, "idBase": vibe_remote::control::ID_RANGE }))
+    }
+
+    fn pair(&self, _payload: String, _phone_name: String, _attempt: u64) -> Answer<'_> {
+        Box::pin(async { Err("the mock desktop cannot be paired with".to_string()) })
+    }
+
+    fn unpair(&self, _id: String) -> Answer<'_> {
+        Box::pin(async { Err("the mock desktop cannot be unpaired".to_string()) })
+    }
+}
+
+/// The recorded session is one connection.
+const GENERATION: u64 = 1;
+
+/// A fixed endpoint id for the recorded desktop, so the list has a real-looking one.
+fn desktop_id() -> String {
+    iroh_base::SecretKey::from_bytes(&[7; 32]).public().to_string()
 }
 
 #[cfg(test)]
@@ -150,6 +203,13 @@ mod tests {
         assert_eq!(got["type"], "error");
         assert_eq!(got["id"], 5);
         assert_eq!(got["message"], "the mock desktop has no recorded answer to a diff request");
+    }
+
+    #[test]
+    fn the_recorded_desktop_is_the_one_current_desktop() {
+        let d = desktop_id();
+        assert_eq!(d.len(), 64);
+        assert_ne!(d, iroh_base::SecretKey::from_bytes(&[8; 32]).public().to_string());
     }
 
     #[test]

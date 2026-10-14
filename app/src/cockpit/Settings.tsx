@@ -25,6 +25,7 @@ import type { Gate, GateRow } from './gateform';
 import type { Listing } from './models';
 import { RemoteAccess } from '../remote/RemoteAccess';
 import { SURFACE } from '../surface';
+import { confirmed } from '../confirm';
 
 /**
  * The settings screen's recurring styles, named once (the UI rework). Every
@@ -1601,7 +1602,10 @@ export function Settings({
                 confirm="turn YOLO on"
                 onConfirm={() => {
                   setAskYolo(false);
-                  write({ pilot: { yolo: true } }, 'global');
+                  // Asked on the device too (#346); a refusal leaves it off.
+                  void confirmed('Turn YOLO on')
+                    .then(() => write({ pilot: { yolo: true } }, 'global'))
+                    .catch(() => undefined);
                 }}
                 onCancel={() => setAskYolo(false)}
               />

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Merged into the generated Info.plist by `tauri ios` (#346). -->
+<plist version="1.0">
+<dict>
+  <key>NSCameraUsageDescription</key>
+  <string>Vibe uses the camera to scan the pairing code your desktop shows.</string>
+  <key>NSFaceIDUsageDescription</key>
+  <string>Vibe asks for Face ID before it opens, and before acts that cannot be undone.</string>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Vibe finds your desktop on the same network, so it connects even without the internet.</string>
+  <key>NSBonjourServices</key>
+  <array>
+    <!-- iroh's mDNS service, `irohv1` in iroh-mdns-address-lookup. -->
+    <string>_irohv1._udp</string>
+  </array>
+</dict>
+</plist>

@@ -2288,8 +2288,9 @@ that runs a turn. Four things carry it:
   against an allowed list: the desktop's is the one that decides. `local` reaches the
   phone's own commands (`phone_identity`, `phone_open_release_page`).
 - **The swaps are a list, `app/mobile-swaps.ts`**: the transport, the folder chooser
-  (`pick.mobile.tsx` browses the desktop over the `fs` frame, inside the pilot's roots)
-  and `surface.ts` (no keyboard chords, no palette). `mobile.test.ts` fails on a
+  (`pick.mobile.tsx` browses the desktop over the `fs` frame, inside the pilot's roots),
+  `surface.ts` (no keyboard chords, no palette), and `boot.tsx` (the paired desktops and
+  the lock in front of the cockpit, #346). `mobile.test.ts` fails on a
   `*.mobile.ts` the list does not name, and on a swap missing an export of what it
   replaces.
 - **The phone's key follows the desktop's rules**, which moved into
@@ -2318,6 +2319,80 @@ by `tauri <platform> init` on each machine and in CI, because iOS's needs macOS 
 `.github/workflows/mobile.yml` launches both mock builds - an Android emulator and an iOS
 simulator - and fails unless the cockpit read the recorded run. It runs on a pull request into
 `main`, or by hand with `gh workflow run mobile.yml --ref <branch>`, never on `develop`.
+
+**The phone pairs, connects and reconnects through `vibe_remote::client`** (#346). It is in the
+shared crate, so the desktop crate's tests run the **real** pairing handler and bridge against
+the **real** client in one process: they are child modules of `handshake.rs`'s and `bridge.rs`'s
+private `mod tests` (`mod tests { mod client }`), because a sibling file cannot reach those
+helpers, and `vibe-remote` has no tokio runtime of its own to test with. A phone finds a test
+desktop by id through iroh's in-memory lookup (`phone_finding`), the stand-in for n0 and mDNS.
+The phone's `Desktop` is `app/mobile/src-tauri/src/link.rs`, a thin wrapper over it. Ten things
+travel with it:
+
+- **`REMOTE_OFF` (3) is the one desktop change.** Both roads to *off* close every bridged phone
+  with it before the endpoint stops: the window's at once, a phone's own `remote_set` only after
+  its `Return` has arrived (`Written` names the asker, which is closed first, by id). A relay
+  change closes with no code, since the endpoint comes straight back under the same id.
+- **Every ending has a sentence, and there is no "dropped".** The three codes read as themselves;
+  anything else - code 0, an unknown code, a dial nobody answered - goes through `classify`, which
+  reads what the phone can see at that moment. `online` is the OS's word, sent by the webview from
+  `navigator.onLine`, **never** `Endpoint::addr`, which is what the phone advertises.
+  `RelaysUnreachable` needs a path that was not direct, the desktop's relay known and one of the
+  phone's own, and that relay (or every relay) failed; everything else is `Unreachable`. A desktop
+  on a relay of its own may be off or its relay may be down, and nothing the phone can observe
+  separates the two, so *can't reach* is the honest sentence for both.
+- **One dial for every caller**: the stored relay hint under `Timeouts::hint`, then the id alone
+  through lookup under a budget of its own. Connect and probe use `dial`, unpair `unpair_dial`,
+  and **pairing none**: the desktop bounds an attempt by its code's own life, and a second, shorter
+  clock on the phone would end one the desktop still meant to finish. The timeouts are injected,
+  so no test needs tokio's `test-util`. Every interval is a named choice in `client.rs`, and none
+  is a measurement; the device checks on #346 are what will say whether they were right.
+- **Pairing is two steps so the code can be shown between them.** `pair` reads the phone's list
+  first (an unreadable one dials nothing and burns no code), sends the secret and returns a
+  `Challenged` once the desktop's *Allow?* is up; `phone://pair-code` carries the six digits with
+  the screen's own `attempt` number. Then `read_result` and `commit`, split so **an answer the phone
+  has already read beats Back** (`pair_flow`'s biased select): the desktop stores a phone before it
+  sends `Paired`, so dropping a `Paired` in hand would leave the desktop paired and the phone not.
+  The window that remains - the answer in flight as Back hangs up - needs the desktop to wait for
+  an acknowledgement, which is a desktop change #346 did not make; the cancel sentence says how to
+  recover. A yes the phone cannot save is `PairedNotSaved`, and says so even after Back.
+- **The replay barrier.** The desktop replays every live run's frames to a phone on every new
+  connection. Each connection has a generation; its events wait in an `EventGate` from the
+  `Welcome` until the webview says it is ready for that generation (`phone_release`), and
+  `phone://connected` carries the generation and nothing else. The webview pauses its requests
+  (`pauseRequests`: they reject, never throw), starts each live run again from its `base`
+  (`rejoin` in `hosts.ts`; a resume's base is its seeded history), counts ids from the new range
+  through a **monotonic** resync (`phone/link.ts`), releases, and settles once `host_status` says
+  which hosts are alive (`settleRejoin`). Nothing marks the end of a replay - that would be a
+  second desktop change - and a refolded turn's times are its arrival times, as for any phone
+  joining mid-run.
+- **The reconnect loop** checks the desktop is still paired and still the one open before every
+  dial, re-reads its entry each time, and waits `retry_after`'s backoff cut short by a poke. **Every
+  network signal pokes**, whether or not `online` moved (a Wi-Fi to cellular handover is online
+  both sides), and calls `endpoint.network_change()`; so does every return to the foreground. A
+  close the desktop explained (`NOT_PAIRED`, `VERSION_MISMATCH`, `REMOTE_OFF`) waits for a poke only.
+- **The phone's list is a file its Rust owns** (`vibe_remote::paired`), written by temporary file
+  and rename, every read-modify-write under one lock, and never overwritten when it cannot be read.
+  `seen` and `set_relay` never bring back a desktop an unpair removed while a probe was out.
+- **The app opens locked** when its lock is on and the device has, or may have, a screen lock, and
+  when `phone.json` cannot be read; the Rust guard refuses every desktop command until
+  `phone_unlock`. Only the plugin's explicit `passcodeNotSet` is *no lock*: biometrics being
+  unavailable is not, because a PIN is still a lock. The mock build opens unlocked, since no CI
+  emulator can answer a prompt. `confirmOnDevice` is the transport seam's fourth function: the
+  cockpit asks before storing a key, turning YOLO on, deleting a run and pairing or unpairing, and
+  the phone's Rust never reads a frame to decide.
+- **Plugins are driven from Rust** - biometric, notification - **except the barcode scanner**,
+  which has no Rust API. `capabilities/scan.json` grants its four permissions on phones only, and
+  `Pair.tsx` is the one module that imports it; `mobile.test.ts` pins both.
+- **Notifications are offered off frames the cockpit already folds** (`cockpit/notices.ts`), by
+  type and id after `invokeOutcome`, once per key, and fired by the phone's Rust only while the app
+  is hidden with notifications on - and only while it is alive. An ask held and released during a
+  disconnect is announced once on reconnect; a run whose host ended during one is drawn lost and
+  is not announced.
+
+The measurements the device checks read are in the phone's log: `vibe-mobile: connected to <id>
+in <ms> ms`, `vibe-mobile: path to <id> is now direct|relayed after <ms> ms`, and `vibe-mobile:
+connection to <id> closed: <raw>`. `phone_desktops` carries the path and the connect time too.
 
 ## Repo map
 
@@ -2441,6 +2516,13 @@ app/remote/          what the phone and the desktop share: the pairing wire, the
 app/mobile/          the phone app: its Tauri crate, the mock desktop and its recorder, the launch checks
 app/src/transport.ts where the window's commands go - Tauri on the desktop, the paired desktop on a phone
 app/mobile-swaps.ts  the modules the phone build replaces, and nothing else
+app/remote/src/client.rs  the phone's side of both ALPNs: the dial, pairing, the control stream, why it ended
+app/remote/src/paired.rs  the phone's paired desktops: one file, one lock, never overwritten unread
+app/mobile/src-tauri/src/link.rs     the iroh Desktop: the reconnect loop, the replay barrier, probes
+app/mobile/src-tauri/src/pairing.rs  pairing's race with Back, and the code shown between its two steps
+app/mobile/src-tauri/src/device.rs   the app lock: whether there is a screen lock, and asking for it
+app/src/phone/       the phone's own screens - Desktops, Pair, the lock - and the reconnect resync
+app/src/cockpit/notices.ts  which folded frames a phone announces, once each
 app/src-tauri/src/pilot/sse.rs      the wire format both vendors share, and nothing else
 app/src-tauri/src/pilot/event.rs    PilotEvent and Usage - every count an Option, on purpose
 app/scripts/         contrast.mjs, stage-sidecar.mjs, make-icon.mjs, prune-appimage.mjs - all dependency-free

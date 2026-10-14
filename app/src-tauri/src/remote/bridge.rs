@@ -78,11 +78,22 @@ pub(crate) trait Commands: Send + Sync + 'static {
 /// **Holding it ends the control stream** once the answer is written, because
 /// nothing more will be sent on a connection about to close. Every other call
 /// drops it, and the writer then carries on as before.
-pub(crate) struct Written(pub(crate) tokio::sync::oneshot::Receiver<()>);
+///
+/// It names **who asked** (#346): the endpoint id the handshake authenticated
+/// for the connection the call came in on, so the stop can close that phone by
+/// id with `REMOTE_OFF` once its answer has arrived.
+pub(crate) struct Written {
+    pub(crate) reached: tokio::sync::oneshot::Receiver<()>,
+    pub(crate) asker: EndpointId,
+}
 
 impl Written {
+    pub(crate) fn new(reached: tokio::sync::oneshot::Receiver<()>, asker: EndpointId) -> Self {
+        Written { reached, asker }
+    }
+
     pub(crate) async fn wait(self) {
-        let _ = self.0.await;
+        let _ = self.reached.await;
     }
 }
 
@@ -233,7 +244,7 @@ async fn serve(inner: &Inner, conn: Connection) {
                     let name = hello.phone_name.clone();
                     let (reached, written) = tokio::sync::oneshot::channel();
                     tasks.spawn(async move {
-                        let outcome = answer(&*commands, &call.command, call.args, &name, Written(written)).await;
+                        let outcome = answer(&*commands, &call.command, call.args, &name, Written::new(written, who)).await;
                         let _ = tx.send(Outgoing::Return(Return { call: call.call, outcome }, Some(reached)));
                     });
                 }
@@ -543,7 +554,7 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::Notify;
     use vibe_remote::control::{REFUSED_COMMANDS, REMOTE_PROTOCOL};
-    use vibe_remote::{NOT_PAIRED, REMOTE_ALPN};
+    use vibe_remote::{NOT_PAIRED, REMOTE_ALPN, REMOTE_OFF};
 
     /// Records every call that reaches it and echoes it back. `pilot_models`
     /// waits for `release`, which is how a test holds a call in flight.
@@ -578,7 +589,7 @@ mod tests {
                         tokio::spawn(async move {
                             written.wait().await;
                             order.lock().unwrap().push("written");
-                            live.close(&id);
+                            live.close_with(&id, REMOTE_OFF, b"remote access is off");
                         });
                     }
                 }
@@ -600,6 +611,7 @@ mod tests {
         fake: Arc<Fake>,
         store: Store,
         phone_key: SecretKey,
+        desktop_key: SecretKey,
         _dir: Scratch,
     }
 
@@ -622,8 +634,9 @@ mod tests {
             "1.7.0".into(),
             Some("desk".into()),
         );
+        let desktop_key = key();
         let desktop = RemoteEndpoint::start_with(
-            Config { key: key(), reach: Reach::Loopback },
+            Config { key: desktop_key.clone(), reach: Reach::Loopback },
             // The real paired list, so a revoke and an Unpair are seen by the
             // next dial exactly as in the app.
             Arc::new(PairedList(Ok(store.clone()))),
@@ -633,7 +646,7 @@ mod tests {
         )
         .await
         .expect("a loopback endpoint starts");
-        World { desktop, live, hub, fake, store, phone_key, _dir: dir }
+        World { desktop, live, hub, fake, store, phone_key, desktop_key, _dir: dir }
     }
 
     struct TestPhone {
@@ -942,9 +955,10 @@ mod tests {
         let answer = phone.next().await;
         assert_eq!(answer["type"], "return", "{answer}");
         assert_eq!(answer["call"], 4);
-        // Only now does the desktop close it - once the answer was acknowledged.
+        // Only now does the desktop close it - once the answer was acknowledged -
+        // and with REMOTE_OFF, so the phone says why (#346).
         let (code, _) = phone.closed_with().await;
-        assert_eq!(code, NOT_PAIRED as u64);
+        assert_eq!(code, REMOTE_OFF as u64);
         assert_eq!(*w.fake.order.lock().unwrap(), ["written"]);
         w.desktop.stop().await;
     }
@@ -982,6 +996,313 @@ mod tests {
         let event = first.next().await;
         assert_eq!(event["name"], "remote://connections", "and again when it goes");
         w.desktop.stop().await;
+    }
+
+    /// The phone's real client (`vibe_remote::client`) against this real
+    /// bridge, in one process (#346).
+    mod client {
+        use super::*;
+        use crate::remote::endpoint::tests::{phone_finding, settle};
+        use iroh::address_lookup::memory::MemoryLookup;
+        use vibe_remote::client::{self as phone_client, Client, Net, NetReader, Reason, Session, Timeouts, Unpaired};
+        use vibe_remote::paired::{DesktopEntry, PairedList as PhoneList};
+
+        fn online() -> NetReader {
+            Arc::new(|| Net { online: true, relays: vec![], phone_relays: vec![] })
+        }
+
+        fn quick() -> Timeouts {
+            Timeouts {
+                hint: Duration::from_millis(500),
+                dial: Duration::from_secs(5),
+                unpair_dial: Duration::from_secs(2),
+                unpair_wait: Duration::from_secs(1),
+            }
+        }
+
+        fn hello_at(version: &str) -> Hello {
+            Hello { remote_protocol: REMOTE_PROTOCOL, app_version: version.into(), phone_name: PHONE_NAME.into() }
+        }
+
+        struct PhoneSide {
+            client: Client,
+            list: PhoneList,
+            lookup: MemoryLookup,
+            entry: DesktopEntry,
+            _dir: Scratch,
+        }
+
+        async fn phone_of(w: &World, key: SecretKey, tag: &str, timeouts: Timeouts, net: NetReader) -> PhoneSide {
+            let (ep, lookup) = phone_finding(key).await;
+            lookup.add_endpoint_info(addr_of(&w.desktop));
+            let dir = Scratch::new(tag);
+            let list = PhoneList::in_dir(&dir.0);
+            let entry = DesktopEntry {
+                id: w.desktop.id().to_string(),
+                relay: None,
+                desktop_name: Some("desk".into()),
+                name: None,
+                paired_at: 0,
+                last_seen: None,
+            };
+            list.add(entry.clone()).unwrap();
+            list.set_current(Some(&entry.id)).unwrap();
+            PhoneSide { client: Client::new(ep, net, timeouts), list, lookup, entry, _dir: dir }
+        }
+
+        async fn connected(w: &World, tag: &str) -> (PhoneSide, Session) {
+            let p = phone_of(w, w.phone_key.clone(), tag, quick(), online()).await;
+            let session = phone_client::connect(&p.client, &p.entry, hello_at("1.7.0")).await.expect("welcomed");
+            (p, session)
+        }
+
+        async fn ended(session: &Session) -> Reason {
+            within(session.closed()).await.reason
+        }
+
+        #[tokio::test]
+        async fn hello_welcome_a_call_returns_and_an_event_arrives() {
+            let w = world("cl-bridge-roundtrip").await;
+            let (_p, session) = connected(&w, "cl-bridge-roundtrip-phone").await;
+            let welcome = session.welcome();
+            assert!(welcome.id_base > 0 && welcome.id_base % ID_RANGE == 0, "{}", welcome.id_base);
+            assert_eq!(welcome.app_version, "1.7.0", "the desktop's own version is welcomed");
+            let answer = session.call("host_status", json!({ "n": 1 })).await.expect("answered");
+            assert_eq!(answer, json!({ "command": "host_status", "args": { "n": 1 } }));
+
+            let mut events = session.events().expect("events");
+            w.hub.event("pilot://event", Arc::from(r#"{"turn":4}"#), |_| {});
+            let event = within(events.recv()).await.expect("an event");
+            assert_eq!(event.name, "pilot://event");
+            assert_eq!(event.payload.get(), r#"{"turn":4}"#);
+            w.desktop.stop().await;
+        }
+
+        #[tokio::test]
+        async fn two_clients_never_take_each_other_s_answers() {
+            let w = world("cl-bridge-two").await;
+            let second = key();
+            w.store
+                .add(Phone { id: second.public().to_string(), name: "Tablet".into(), paired_at: 0, last_seen: None })
+                .unwrap();
+            let (_a, first) = connected(&w, "cl-bridge-two-a").await;
+            let b = phone_of(&w, second, "cl-bridge-two-b", quick(), online()).await;
+            let other = phone_client::connect(&b.client, &b.entry, hello_at("1.7.0")).await.expect("welcomed");
+            assert_ne!(first.welcome().id_base, other.welcome().id_base);
+
+            // Both count their calls from 1, so the ids collide on the wire;
+            // each answer still reaches only its own connection.
+            let calls = (0..5).map(|n| {
+                let (a, b) = (&first, &other);
+                async move {
+                    let (x, y) = tokio::join!(
+                        a.call("host_status", json!({ "from": "a", "n": n })),
+                        b.call("host_status", json!({ "from": "b", "n": n }))
+                    );
+                    (x.unwrap(), y.unwrap())
+                }
+            });
+            for (n, (x, y)) in futures_join_all(calls).await.into_iter().enumerate() {
+                assert_eq!(x["args"], json!({ "from": "a", "n": n }));
+                assert_eq!(y["args"], json!({ "from": "b", "n": n }));
+            }
+            w.desktop.stop().await;
+        }
+
+        async fn futures_join_all<F: Future>(futs: impl Iterator<Item = F>) -> Vec<F::Output> {
+            let mut out = Vec::new();
+            for f in futs {
+                out.push(f.await);
+            }
+            out
+        }
+
+        #[tokio::test]
+        async fn a_mismatch_names_both_versions() {
+            let w = world("cl-bridge-mismatch").await;
+            let p = phone_of(&w, w.phone_key.clone(), "cl-bridge-mismatch-phone", quick(), online()).await;
+            let mut hello = hello_at("9.9.9");
+            hello.remote_protocol += 98;
+            let got = phone_client::connect(&p.client, &p.entry, hello).await;
+            assert_eq!(
+                got.err(),
+                Some(Reason::VersionMismatch { desktop_app_version: Some("1.7.0".into()), phone_app_version: "9.9.9".into() })
+            );
+            w.desktop.stop().await;
+        }
+
+        #[tokio::test]
+        async fn a_revoke_reads_as_not_paired() {
+            let w = world("cl-bridge-revoke").await;
+            let (_p, session) = connected(&w, "cl-bridge-revoke-phone").await;
+            super::super::super::revoke(&w.store, &w.live, &w.phone_key.public().to_string()).unwrap();
+            assert_eq!(ended(&session).await, Reason::NotPaired);
+            w.desktop.stop().await;
+        }
+
+        #[tokio::test]
+        async fn remote_access_off_reads_as_remote_off() {
+            let w = world("cl-bridge-off").await;
+            let (_p, session) = connected(&w, "cl-bridge-off-phone").await;
+            w.live.close_all(REMOTE_OFF, b"remote access is off");
+            assert_eq!(ended(&session).await, Reason::RemoteOff);
+            w.desktop.stop().await;
+        }
+
+        #[tokio::test]
+        async fn a_stopped_desktop_or_a_code_zero_close_reads_as_unreachable() {
+            let w = world("cl-bridge-stopped").await;
+            let (_p, session) = connected(&w, "cl-bridge-stopped-phone").await;
+            w.live.close_with(&w.phone_key.public(), 0, b"bye");
+            assert_eq!(ended(&session).await, Reason::Unreachable, "code 0");
+
+            let (_q, session) = connected(&w, "cl-bridge-stopped-phone-2").await;
+            let gone = phone_of(&w, w.phone_key.clone(), "cl-bridge-stopped-phone-3", Timeouts { dial: Duration::from_millis(500), ..quick() }, online()).await;
+            w.desktop.stop().await;
+            assert_eq!(ended(&session).await, Reason::Unreachable, "the endpoint stopped");
+
+            // And dialling a stopped desktop is unreachable too.
+            assert_eq!(phone_client::connect(&gone.client, &gone.entry, hello_at("1.7.0")).await.err(), Some(Reason::Unreachable));
+        }
+
+        /// A direct path that ends is never blamed on the relays, however they
+        /// are doing.
+        #[tokio::test]
+        async fn a_direct_session_ending_with_every_relay_failed_is_unreachable() {
+            let w = world("cl-bridge-direct").await;
+            let failing: NetReader = Arc::new(|| {
+                let url: iroh::RelayUrl = "https://use1-1.relay.n0.iroh.link./".parse().unwrap();
+                Net {
+                    online: true,
+                    relays: vec![vibe_remote::client::RelaySeen { url: url.clone(), state: vibe_remote::client::RelayLink::Failed }],
+                    phone_relays: vec![url],
+                }
+            });
+            let p = phone_of(&w, w.phone_key.clone(), "cl-bridge-direct-phone", quick(), failing).await;
+            let session = phone_client::connect(&p.client, &p.entry, hello_at("1.7.0")).await.expect("welcomed");
+            assert_eq!(session.path(), vibe_remote::client::PathKind::Direct);
+            w.live.close_with(&w.phone_key.public(), 0, b"bye");
+            assert_eq!(ended(&session).await, Reason::Unreachable);
+            w.desktop.stop().await;
+        }
+
+        /// A desktop that accepts and never answers the Hello.
+        #[tokio::test]
+        async fn a_stalled_peer_is_unreachable_within_a_second() {
+            let w = world("cl-bridge-stall").await;
+            let stalled = RemoteEndpoint::start(
+                Config { key: key(), reach: Reach::Loopback },
+                Arc::new(PairedList(Ok(w.store.clone()))),
+                Count::default(),
+                Count::default(),
+            )
+            .await
+            .expect("a stalled desktop starts");
+            let (ep, lookup) = phone_finding(w.phone_key.clone()).await;
+            lookup.add_endpoint_info(addr_of(&stalled));
+            let client = Client::new(ep, online(), Timeouts { dial: Duration::from_millis(200), ..quick() });
+            let entry = DesktopEntry { id: stalled.id().to_string(), relay: None, desktop_name: None, name: None, paired_at: 0, last_seen: None };
+            let started = std::time::Instant::now();
+            let got = phone_client::connect(&client, &entry, hello_at("1.7.0")).await;
+            assert_eq!(got.err(), Some(Reason::Unreachable));
+            assert!(started.elapsed() < Duration::from_secs(1), "took {:?}", started.elapsed());
+            stalled.stop().await;
+            w.desktop.stop().await;
+        }
+
+        #[tokio::test]
+        async fn unpairing_a_reachable_desktop_tells_it_and_both_forget() {
+            let w = world("cl-bridge-unpair").await;
+            let (p, session) = connected(&w, "cl-bridge-unpair-phone").await;
+            let got = phone_client::unpair(&p.client, &p.list, &p.entry, Some(&session), hello_at("1.7.0")).await;
+            assert_eq!(got, Ok(Unpaired::Sent));
+            assert!(p.list.read().unwrap().desktops.is_empty());
+            let id = w.phone_key.public().to_string();
+            assert!(w.store.load().unwrap().iter().all(|p| p.id != id), "the desktop forgot the phone");
+            w.desktop.stop().await;
+        }
+
+        #[tokio::test]
+        async fn unpairing_without_a_session_dials_and_tells_it() {
+            let w = world("cl-bridge-unpair-dial").await;
+            let mut p = phone_of(&w, w.phone_key.clone(), "cl-bridge-unpair-dial-phone", quick(), online()).await;
+            // A stale hint: reached only by the lookup.
+            p.entry.relay = Some("https://stale.relay.example./".into());
+            let got = phone_client::unpair(&p.client, &p.list, &p.entry, None, hello_at("1.7.0")).await;
+            assert_eq!(got, Ok(Unpaired::Sent));
+            let id = w.phone_key.public().to_string();
+            until("the desktop forgets the phone", || w.store.load().unwrap().iter().all(|p| p.id != id)).await;
+            assert!(p.list.read().unwrap().desktops.is_empty());
+            w.desktop.stop().await;
+        }
+
+        #[tokio::test]
+        async fn unpairing_a_stopped_desktop_only_forgets_it_here() {
+            let w = world("cl-bridge-unpair-stopped").await;
+            let p = phone_of(&w, w.phone_key.clone(), "cl-bridge-unpair-stopped-phone", quick(), online()).await;
+            w.desktop.stop().await;
+            let got = phone_client::unpair(&p.client, &p.list, &p.entry, None, hello_at("1.7.0")).await;
+            assert_eq!(got, Ok(Unpaired::Unreachable));
+            let file = p.list.read().unwrap();
+            assert!(file.desktops.is_empty());
+            assert_eq!(file.current, None, "current is cleared with it");
+        }
+
+        #[tokio::test]
+        async fn a_rename_is_the_phone_s_own_and_sends_nothing() {
+            let w = world("cl-bridge-rename").await;
+            let (p, _session) = connected(&w, "cl-bridge-rename-phone").await;
+            p.list.rename(&p.entry.id, Some("Studio")).unwrap();
+            settle().await;
+            assert!(w.fake.seen().is_empty(), "no call reached the desktop");
+            assert_eq!(w.store.load().unwrap().len(), 1, "the desktop's list is as it was");
+            assert_eq!(p.list.get(&p.entry.id).unwrap().unwrap().name.as_deref(), Some("Studio"));
+            w.desktop.stop().await;
+        }
+
+        #[tokio::test]
+        async fn a_stale_hint_reconnects_by_lookup_and_the_hint_is_replaced() {
+            let w = world("cl-bridge-stale").await;
+            let mut p = phone_of(&w, w.phone_key.clone(), "cl-bridge-stale-phone", quick(), online()).await;
+            p.entry.relay = Some("https://stale.relay.example./".into());
+            p.list.add(p.entry.clone()).unwrap();
+            let session = phone_client::connect(&p.client, &p.entry, hello_at("1.7.0")).await.expect("reached by id");
+            // What the phone's link does on a Welcome: keep the relay it saw.
+            p.list.set_relay(&p.entry.id, session.relay()).unwrap();
+            assert_eq!(p.list.get(&p.entry.id).unwrap().unwrap().relay, None, "a loopback desktop has no relay");
+            drop(session);
+            w.desktop.stop().await;
+        }
+
+        #[tokio::test]
+        async fn a_desktop_restarted_on_a_new_address_is_reached() {
+            let w = world("cl-bridge-restart").await;
+            let p = phone_of(&w, w.phone_key.clone(), "cl-bridge-restart-phone", quick(), online()).await;
+            let session = phone_client::connect(&p.client, &p.entry, hello_at("1.7.0")).await.expect("welcomed");
+            w.desktop.stop().await;
+            assert_eq!(ended(&session).await, Reason::Unreachable);
+
+            let bridge = Bridge::new(
+                w.fake.clone(),
+                w.hub.clone(),
+                Arc::new(StoreUnpair(Ok(w.store.clone()), w.live.clone())),
+                "1.7.0".into(),
+                Some("desk".into()),
+            );
+            let again = RemoteEndpoint::start_with(
+                Config { key: w.desktop_key.clone(), reach: Reach::Loopback },
+                Arc::new(PairedList(Ok(w.store.clone()))),
+                w.live.clone(),
+                Count::default(),
+                bridge,
+            )
+            .await
+            .expect("the desktop comes back");
+            p.lookup.add_endpoint_info(addr_of(&again));
+            let back = phone_client::connect(&p.client, &p.entry, hello_at("1.7.0")).await.expect("reached again, same key");
+            assert_eq!(back.call("host_status", json!({})).await.unwrap()["command"], "host_status");
+            again.stop().await;
+        }
     }
 
     fn registered_in(lib: &str) -> Vec<String> {

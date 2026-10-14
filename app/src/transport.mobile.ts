@@ -17,6 +17,10 @@ import type { InvokeArgs } from '@tauri-apps/api/core';
  *
  * `local` reaches the phone's own commands - the ones about the device in
  * somebody's hand rather than about the desktop.
+ *
+ * `confirmOnDevice` is Face ID, Touch ID or the device's fingerprint or PIN
+ * (#346), asked by the phone's Rust with the reason shown. The phone's Rust
+ * does not look inside a frame to decide when to ask: the cockpit asks.
  */
 export function invoke<T>(command: string, args?: InvokeArgs): Promise<T> {
   return tauri<T>('remote_call', { command, args: args ?? {} });
@@ -24,3 +28,7 @@ export function invoke<T>(command: string, args?: InvokeArgs): Promise<T> {
 
 export { listen } from '@tauri-apps/api/event';
 export { tauri as local };
+
+export function confirmOnDevice(reason: string): Promise<boolean> {
+  return tauri<boolean>('phone_confirm', { reason });
+}
