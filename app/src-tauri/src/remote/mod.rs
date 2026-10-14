@@ -1,7 +1,8 @@
-//! Remote access: the desktop's half of identity and pairing (#341).
+//! Remote access: the desktop's half of identity, pairing and the endpoint
+//! (#341, #342).
 //!
 //! A phone controls this app over iroh, a QUIC link addressed by an ed25519
-//! public key. This module holds what that needs before any network exists:
+//! public key. This module holds:
 //!
 //! - **the device key** (`identity.rs`), one per install, in the OS keychain
 //!   beside the two vendor keys. Its public half is the endpoint id. **No
@@ -14,30 +15,46 @@
 //! - **the paired list** (`store.rs`), a file Rust owns.
 //! - **the wire** (`wire.rs`), everything the phone also needs, kept free of
 //!   Tauri so the shared crate (#345) takes it as a plain file move.
+//! - **the endpoint** (`endpoint.rs`), what a phone dials, and **the pairing
+//!   handler** (`handshake.rs`), which carries `attempt` and `answer` over it.
 //!
-//! **No network and no timer.** The endpoint that calls `attempt` is #342, so
-//! until then `remote://pair-request` has no production sender. An unanswered
-//! prompt is closed by the window when its clock reaches `expiresAt`, which it
-//! already holds; Rust says `expired` only when an answer arrives too late.
+//! **The endpoint runs only under `VIBE_REMOTE_PREVIEW=1`**, the stand-in for
+//! the switch #344 builds, and only once a device key exists. With the flag
+//! unset nothing binds, nothing reaches a relay and nothing is published. The
+//! paired-only `vibe/remote/1` has no bridge until #343, so a paired phone's
+//! connection is held open and does nothing, which is what lets the
+//! diagnostics say how it is travelling.
+//!
+//! **No timer here.** An unanswered prompt is closed by the window when its
+//! clock reaches `expiresAt`, which it already holds; Rust says `expired` only
+//! when an answer arrives too late. The phone's side of the wait is bounded by
+//! the code's own life in `handshake.rs`.
 
 pub mod pairing;
 pub mod qr;
 pub mod wire;
+pub mod endpoint;
+pub mod handshake;
 pub(crate) mod identity;
 pub(crate) mod store;
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use iroh::endpoint::Connection;
+use iroh::protocol::{AcceptError, ProtocolHandler};
+use iroh::EndpointId;
 use iroh_base::PublicKey;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+use endpoint::{Config, Gate, LinkInfo, Reach, RelayInfo, RemoteEndpoint};
+use handshake::{Desk, PairHandler, Shared};
 use identity::{Keychain, Vault};
 use pairing::{Answer, Pairing};
 use qr::QrMatrix;
 use store::{Phone, Store};
-use wire::PairPayload;
+use wire::{PairPayload, PairResult};
 
 /// Live connections from paired phones. Empty until the endpoint exists (#342),
 /// which drops a revoked phone's connection with `NOT_PAIRED`.
@@ -85,9 +102,9 @@ pub(crate) trait Emit {
     fn pair_ended(&self, outcome: Outcome);
 }
 
-struct TauriEmit<'a>(&'a AppHandle);
+struct TauriEmit(AppHandle);
 
-impl Emit for TauriEmit<'_> {
+impl Emit for TauriEmit {
     fn pair_request(&self, request: &PairRequest) {
         let _ = self.0.emit("remote://pair-request", request);
     }
@@ -96,10 +113,57 @@ impl Emit for TauriEmit<'_> {
     }
 }
 
-/// The pairing state the commands share.
+/// What the commands and the endpoint share: the pairing state, the phone
+/// waiting on a prompt, and the endpoint when it runs.
 #[derive(Default)]
 pub struct Remote {
-    pairing: Mutex<Pairing>,
+    shared: Arc<Shared>,
+    endpoint: Mutex<Running>,
+}
+
+/// Where the endpoint is. `Off` is the default and the whole of it while
+/// remote access is off: nothing has been bound or asked of the network.
+#[derive(Default)]
+enum Running {
+    #[default]
+    Off,
+    /// On, but no device key yet: the first pairing code makes one, and the
+    /// endpoint starts then.
+    NoKey,
+    Starting,
+    Up(RemoteEndpoint),
+    Failed(String),
+}
+
+/// The endpoint as the diagnostics draw it. Read off iroh when asked; nothing
+/// is remembered between asks.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "camelCase")]
+pub enum EndpointReport {
+    /// Remote access is off: no socket, no relay, no record.
+    Off,
+    /// On, waiting for a device key.
+    NoKey,
+    Starting,
+    /// Bound. `relays` is the home relay and whether it is connected; `links`
+    /// is each paired phone connected now and whether its path is direct.
+    Up { relays: Vec<RelayInfo>, links: Vec<LinkInfo> },
+    Failed { reason: String },
+}
+
+impl Running {
+    fn report(&self) -> EndpointReport {
+        match self {
+            Running::Off => EndpointReport::Off,
+            Running::NoKey => EndpointReport::NoKey,
+            Running::Starting => EndpointReport::Starting,
+            Running::Up(ep) => {
+                let s = ep.status();
+                EndpointReport::Up { relays: s.relays, links: s.links }
+            }
+            Running::Failed(reason) => EndpointReport::Failed { reason: reason.clone() },
+        }
+    }
 }
 
 /// What `remote_pair_begin` answers: the payload, when it stops working, and
@@ -140,6 +204,8 @@ pub struct RemoteStatus {
     pub phones_unreadable: Option<String>,
     /// Whether the window draws the section at all. See `preview()`.
     pub preview: bool,
+    /// The endpoint a phone dials (#342). `off` whenever `preview` is false.
+    pub endpoint: EndpointReport,
 }
 
 /// `n` bytes from the OS CSPRNG, or the reason there are none. No fallback.
@@ -156,6 +222,7 @@ pub(crate) fn begin(
     vault: &dyn Vault,
     emit: &dyn Emit,
     hostname: Option<String>,
+    relay: Option<String>,
     secret: [u8; 32],
     now: u64,
 ) -> Result<PairBegin, String> {
@@ -166,7 +233,7 @@ pub(crate) fn begin(
     if begun.replaced_prompt {
         emit.pair_ended(Outcome::Declined);
     }
-    let payload = PairPayload { id: key.public(), relay: None, secret, name: hostname }.to_uri();
+    let payload = PairPayload { id: key.public(), relay, secret, name: hostname }.to_uri();
     let qr = qr::matrix(&payload)?;
     Ok(PairBegin { payload, expires_at: begun.expires_at, qr })
 }
@@ -174,9 +241,9 @@ pub(crate) fn begin(
 /// A phone presents a secret. `phone_id` is the id the QUIC handshake
 /// authenticated.
 ///
-/// **No production caller yet**: the `vibe/pair/1` handler that calls this is
-/// #342, and there is deliberately no command that reaches it.
-#[allow(dead_code, clippy::too_many_arguments)]
+/// Called by the `vibe/pair/1` handler (`handshake.rs`) and by nothing else:
+/// there is deliberately no command that reaches it.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn attempt(
     pairing: &mut Pairing,
     vault: &dyn Vault,
@@ -277,7 +344,7 @@ pub(crate) fn status(
         ),
         Err(why) => (Vec::new(), Some(why)),
     };
-    RemoteStatus { endpoint_id, identity_unreadable, phones, phones_unreadable, preview }
+    RemoteStatus { endpoint_id, identity_unreadable, phones, phones_unreadable, preview, endpoint: EndpointReport::Off }
 }
 
 /// Whether the section is drawn. **The only reader of `VIBE_REMOTE_PREVIEW`**,
@@ -319,30 +386,171 @@ fn hostname() -> Option<String> {
     }
 }
 
-fn locked(remote: &Remote) -> std::sync::MutexGuard<'_, Pairing> {
-    remote.pairing.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+/// `begin`, ending any phone's wait on the prompt the new code replaces.
+pub(crate) fn begin_code(
+    shared: &Shared,
+    vault: &dyn Vault,
+    emit: &dyn Emit,
+    hostname: Option<String>,
+    relay: Option<String>,
+    secret: [u8; 32],
+    now: u64,
+) -> Result<PairBegin, String> {
+    let mut pairing = shared.pairing();
+    shared.tell(PairResult::Declined);
+    begin(&mut pairing, vault, emit, hostname, relay, secret, now)
+}
+
+/// `answer`, and the phone waiting on the prompt told how it ended.
+pub(crate) fn answer_prompt(
+    shared: &Shared,
+    store: Result<&Store, String>,
+    emit: &dyn Emit,
+    desktop_name: Option<String>,
+    yes: bool,
+    now: u64,
+) -> Result<Outcome, String> {
+    let mut pairing = shared.pairing();
+    let answered = answer(&mut pairing, store, emit, yes, now);
+    shared.tell(match &answered {
+        Ok(Outcome::Paired) => PairResult::Paired { desktop_name },
+        Ok(Outcome::Declined | Outcome::Expired) => PairResult::Declined,
+        // The sentence names a path on this desktop; the phone is told only
+        // that the desktop could not keep the pairing.
+        Err(_) => PairResult::Refused { reason: "the desktop could not save the pairing".into() },
+    });
+    answered
+}
+
+impl Remote {
+    fn running(&self) -> std::sync::MutexGuard<'_, Running> {
+        self.endpoint.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// Who may open `vibe/remote/1`: the paired list, read when asked, so a revoke
+/// is seen by the next dial. **A list that cannot be read admits nobody**, and
+/// neither does a missing data directory.
+#[derive(Debug)]
+struct PairedList(Result<Store, String>);
+
+impl Gate for PairedList {
+    fn is_paired(&self, id: &EndpointId) -> bool {
+        let id = id.to_string();
+        matches!(&self.0, Ok(store) if store.load().is_ok_and(|phones| phones.iter().any(|p| p.id == id)))
+    }
+}
+
+/// `vibe/remote/1` until the bridge exists (#343): hold a paired phone's
+/// connection open, so it is counted and its path can be read, and do nothing
+/// with it.
+#[derive(Debug)]
+struct Unbridged;
+
+impl ProtocolHandler for Unbridged {
+    async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
+        conn.closed().await;
+        Ok(())
+    }
+}
+
+/// Start the endpoint, if remote access is on and there is a key to start it
+/// with. Called at launch and after the first pairing code makes the key; a
+/// second call while it is starting or up does nothing.
+pub(crate) fn start(app: &AppHandle) {
+    if !preview() {
+        return;
+    }
+    let remote = app.state::<Remote>();
+    let key = match identity::read(&Keychain) {
+        Ok(Some(key)) => key,
+        Ok(None) => {
+            *remote.running() = Running::NoKey;
+            return;
+        }
+        Err(why) => {
+            *remote.running() = Running::Failed(why);
+            return;
+        }
+    };
+    {
+        let mut running = remote.running();
+        if matches!(*running, Running::Starting | Running::Up(_)) {
+            return;
+        }
+        *running = Running::Starting;
+    }
+    let app = app.clone();
+    let shared = remote.shared.clone();
+    tauri::async_runtime::spawn(async move {
+        let store = store_of(&app);
+        let desk = Desk {
+            shared,
+            vault: Box::new(Keychain),
+            store: store.clone(),
+            emit: Box::new(TauriEmit(app.clone())),
+            now,
+            nonce: random::<16>,
+        };
+        // n0's DNS and relays, plus mDNS, as #340 decided. The setting naming
+        // a relay of the user's own is #344's, so there is none to read yet.
+        let config = Config { key, reach: Reach::Internet { relay: None, mdns: true } };
+        let started =
+            RemoteEndpoint::start(config, Arc::new(PairedList(store)), PairHandler(Arc::new(desk)), Unbridged).await;
+        let next = match started {
+            Ok(ep) => {
+                crate::applog::app(&format!("remote access: endpoint {} is up", ep.id()));
+                Running::Up(ep)
+            }
+            Err(why) => {
+                crate::applog::app(&format!("remote access: {why}"));
+                Running::Failed(why)
+            }
+        };
+        *app.state::<Remote>().running() = next;
+    });
 }
 
 #[tauri::command]
-pub fn remote_status(app: AppHandle) -> RemoteStatus {
-    status(&Keychain, store_of(&app), &NoConnections, preview())
+pub fn remote_status(app: AppHandle, remote: State<'_, Remote>) -> RemoteStatus {
+    let running = remote.running();
+    let report = if preview() { running.report() } else { EndpointReport::Off };
+    match &*running {
+        Running::Up(ep) => RemoteStatus { endpoint: report, ..status(&Keychain, store_of(&app), ep.connections(), preview()) },
+        _ => RemoteStatus { endpoint: report, ..status(&Keychain, store_of(&app), &NoConnections, preview()) },
+    }
 }
 
 #[tauri::command]
 pub fn remote_pair_begin(app: AppHandle, remote: State<'_, Remote>) -> Result<PairBegin, String> {
     let secret = random::<32>()?;
-    begin(&mut locked(&remote), &Keychain, &TauriEmit(&app), hostname(), secret, now())
+    // The home relay, as an address hint, when the endpoint is up and has one.
+    let relay = match &*remote.running() {
+        Running::Up(ep) => ep.relay_hint().map(|url| url.to_string()),
+        _ => None,
+    };
+    let begun = begin_code(&remote.shared, &Keychain, &TauriEmit(app.clone()), hostname(), relay, secret, now());
+    // The first code makes the device key, and an endpoint waiting for one
+    // can start now.
+    if begun.is_ok() {
+        start(&app);
+    }
+    begun
 }
 
 #[tauri::command]
 pub fn remote_pair_answer(yes: bool, app: AppHandle, remote: State<'_, Remote>) -> Result<Outcome, String> {
     let store = store_of(&app);
-    answer(&mut locked(&remote), store.as_ref().map_err(Clone::clone), &TauriEmit(&app), yes, now())
+    answer_prompt(&remote.shared, store.as_ref().map_err(Clone::clone), &TauriEmit(app.clone()), hostname(), yes, now())
 }
 
 #[tauri::command]
-pub fn remote_revoke(id: String, app: AppHandle) -> Result<(), String> {
-    revoke(&store_of(&app)?, &NoConnections, &id)
+pub fn remote_revoke(id: String, app: AppHandle, remote: State<'_, Remote>) -> Result<(), String> {
+    let store = store_of(&app)?;
+    match &*remote.running() {
+        Running::Up(ep) => revoke(&store, ep.connections(), &id),
+        _ => revoke(&store, &NoConnections, &id),
+    }
 }
 
 #[cfg(test)]
@@ -413,7 +621,7 @@ mod tests {
 
     impl World {
         fn begin(&mut self, now: u64) -> PairBegin {
-            begin(&mut self.pairing, &self.vault, &self.emit, Some("desk".into()), SECRET, now).expect("begins")
+            begin(&mut self.pairing, &self.vault, &self.emit, Some("desk".into()), None, SECRET, now).expect("begins")
         }
         fn attempt(&mut self, now: u64) -> Result<[u8; 16], String> {
             attempt(&mut self.pairing, &self.vault, &self.store, &self.emit, &SECRET, phone_key(), "Pixel", NONCE, now)
@@ -556,7 +764,7 @@ mod tests {
     fn begin_on_an_unreadable_keychain_refuses_and_makes_no_key() {
         let mut w = world("locked");
         w.vault.unreadable = Some("the keychain is locked".into());
-        let got = begin(&mut w.pairing, &w.vault, &w.emit, None, SECRET, 0);
+        let got = begin(&mut w.pairing, &w.vault, &w.emit, None, None, SECRET, 0);
         assert!(got.unwrap_err().contains("the keychain is locked"));
         assert_eq!(w.vault.writes.get(), 0);
     }
@@ -609,7 +817,7 @@ mod tests {
         w.store.add(phone(1)).unwrap();
         let s = status(&w.vault, Ok(Store::in_dir(&w._dir.0)), &NoConnections, true);
         let json = serde_json::to_value(&s).unwrap();
-        assert_eq!(keys_of(&json), ["endpointId", "identityUnreadable", "phones", "phonesUnreadable", "preview"]);
+        assert_eq!(keys_of(&json), ["endpoint", "endpointId", "identityUnreadable", "phones", "phonesUnreadable", "preview"]);
         assert_eq!(keys_of(&json["phones"][0]), ["connected", "id", "lastSeen", "name", "pairedAt"]);
 
         let text = json.to_string();
@@ -646,6 +854,48 @@ mod tests {
         assert!(s.phones_unreadable.is_some());
         assert!(s.phones.is_empty());
         assert!(s.preview);
+    }
+
+    #[test]
+    fn the_paired_list_admits_only_its_phones_and_fails_closed() {
+        let w = world("gate");
+        let listed = phone(1);
+        w.store.add(listed.clone()).unwrap();
+        let id: EndpointId = listed.id.parse().unwrap();
+        let other: EndpointId = phone(2).id.parse().unwrap();
+
+        let gate = PairedList(Ok(Store::in_dir(&w._dir.0)));
+        assert!(gate.is_paired(&id));
+        assert!(!gate.is_paired(&other));
+
+        // A list that cannot be read admits nobody, the listed phone included.
+        std::fs::write(w._dir.0.join(store::FILE), "garbage").unwrap();
+        assert!(!gate.is_paired(&id));
+        assert!(!PairedList(Err("no data directory".into())).is_paired(&id));
+    }
+
+    #[test]
+    fn the_endpoint_report_has_the_window_s_shape() {
+        use endpoint::PathKind;
+        assert_eq!(serde_json::to_value(EndpointReport::Off).unwrap(), serde_json::json!({ "state": "off" }));
+        assert_eq!(serde_json::to_value(EndpointReport::NoKey).unwrap(), serde_json::json!({ "state": "noKey" }));
+        assert_eq!(serde_json::to_value(EndpointReport::Starting).unwrap(), serde_json::json!({ "state": "starting" }));
+        assert_eq!(
+            serde_json::to_value(EndpointReport::Failed { reason: "r".into() }).unwrap(),
+            serde_json::json!({ "state": "failed", "reason": "r" })
+        );
+        let up = EndpointReport::Up {
+            relays: vec![RelayInfo { url: "https://relay.example".into(), connected: true, error: None }],
+            links: vec![LinkInfo { id: "p".into(), path: PathKind::Direct }],
+        };
+        assert_eq!(
+            serde_json::to_value(up).unwrap(),
+            serde_json::json!({
+                "state": "up",
+                "relays": [{ "url": "https://relay.example", "connected": true, "error": null }],
+                "links": [{ "id": "p", "path": "direct" }],
+            })
+        );
     }
 
     #[test]

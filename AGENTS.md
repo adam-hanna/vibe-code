@@ -2315,9 +2315,9 @@ app/src-tauri/src/pilot/models.rs  which models a stored key may use, asked of t
 app/src-tauri/src/host.rs    supervising the hosts - the service host and one per run - and the \\?\ path fix
 app/src-tauri/src/reaper.rs  making a killed app take the host with it
 app/src-tauri/src/keys.rs    the OS keychain, and the read the window cannot reach
-app/src-tauri/src/remote/  the device key, pairing and the paired phones - no network yet; wire.rs is what the phone shares
 app/src-tauri/src/pilot/     one of the app's two network clients - two adapters, one vocabulary
 app/src-tauri/src/update.rs  the other: checking for a newer app, and installing it when asked
+app/src-tauri/src/remote/    a phone dialling this desktop: the device key, pairing, the paired list, the iroh endpoint and its two ALPNs - wire.rs is what the phone shares
 app/src-tauri/src/pilot/sse.rs      the wire format both vendors share, and nothing else
 app/src-tauri/src/pilot/event.rs    PilotEvent and Usage - every count an Option, on purpose
 app/scripts/         contrast.mjs, stage-sidecar.mjs, make-icon.mjs, prune-appimage.mjs - all dependency-free
@@ -3257,7 +3257,11 @@ repo" means.
 
 **All the network code lives in `app/` and none of it in `src/`.** There are two clients, both
 in Rust: the pilot's vendor adapters below, and the updater (`src-tauri/src/update.rs`, #299),
-which fetches one public file and, when a person asks, the bundle it names. The core keeps
+which fetches one public file and, when a person asks, the bundle it names. A third piece is
+coming, and it is the first **inbound** one: the iroh endpoint a phone dials
+(`src-tauri/src/remote/endpoint.rs`, #342). It starts only under `VIBE_REMOTE_PREVIEW=1`,
+the stand-in for #344's switch, and only once a device key exists; with the flag unset nothing
+binds and nothing is published. Its rules are in the phone section above. The core keeps
 *"every external call is a child process"* exactly, and the published package gains no HTTP
 dependency and no credential handling. If this ever moves into `src/` "because the CLI might
 want it too", that sentence stops being true of everything shipped — and it is a sentence

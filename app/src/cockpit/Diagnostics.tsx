@@ -1,7 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Check, Copy, X } from 'lucide-react';
 import { buildStamp, uptime } from './format';
+import { inShell } from '../host';
 import type { Build, Status } from '../host';
+import { endpointNote, status as remoteStatus } from '../remote/remote';
+import type { RemoteStatus } from '../remote/remote';
 
 /**
  * Hi-fi 15 — the four facts, out of the chrome (#201, #204, #207).
@@ -81,6 +84,28 @@ export interface DiagnosticsProps {
   identity: { runId: string; dir: string } | null;
 }
 
+/**
+ * The endpoint a phone dials, asked for when the popover opens. Remote access
+ * off draws nothing, so this line is new only to somebody who turned it on.
+ */
+function RemoteFact() {
+  const [remote, setRemote] = useState<RemoteStatus | null>(null);
+  useEffect(() => {
+    if (!inShell()) return;
+    let live = true;
+    remoteStatus().then(
+      (s) => live && setRemote(s),
+      () => live && setRemote(null),
+    );
+    return () => {
+      live = false;
+    };
+  }, []);
+  const note = remote === null ? null : endpointNote(remote.endpoint);
+  if (remote === null || note === null) return null;
+  return <Fact label="remote" value={remote.endpoint.state === 'up' ? remote.endpointId : null} note={note} />;
+}
+
 export function Diagnostics({ status, expected, identity }: DiagnosticsProps) {
   const build: Build | null = status?.build ?? null;
   const protocol = status?.ready?.protocol ?? null;
@@ -142,6 +167,7 @@ export function Diagnostics({ status, expected, identity }: DiagnosticsProps) {
               : `this window expects ${String(expected)} — they disagree`
         }
       />
+      <RemoteFact />
       {/* Why killing the app would leave the host running, when it would (#157).
           Shown here rather than as a banner, which was removed at the owner's
           request: it is a fact that matters only when something has gone wrong. */}

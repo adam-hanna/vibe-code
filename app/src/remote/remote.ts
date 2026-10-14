@@ -31,6 +31,74 @@ export interface RemoteStatus {
   phonesUnreadable: string | null;
   /** Whether the section is drawn at all. */
   preview: boolean;
+  /** The endpoint a phone dials. `off` whenever `preview` is false. */
+  endpoint: EndpointReport;
+}
+
+/** One home relay, as the endpoint sees it. `error` is iroh's own text. */
+export interface RelayInfo {
+  url: string;
+  connected: boolean;
+  error: string | null;
+}
+
+/** How a connected phone's traffic is travelling right now. */
+export type PathKind = 'direct' | 'relay' | 'none';
+
+export interface LinkInfo {
+  id: string;
+  path: PathKind;
+}
+
+/** Where the endpoint is, read off iroh when `remote_status` was asked. */
+export type EndpointReport =
+  | { state: 'off' }
+  | { state: 'noKey' }
+  | { state: 'starting' }
+  | { state: 'up'; relays: RelayInfo[]; links: LinkInfo[] }
+  | { state: 'failed'; reason: string };
+
+/**
+ * The diagnostics' sentence for the endpoint, or null when there is nothing to
+ * say because remote access is off.
+ *
+ * **Whether a phone reaches this desktop directly is said only of a phone that
+ * is connected**, because only a connection has a path to measure. With none,
+ * the sentence says so rather than guessing from the network.
+ */
+export function endpointNote(report: EndpointReport): string | null {
+  switch (report.state) {
+    case 'off':
+      return null;
+    case 'noKey':
+      return 'on, and waiting for a device key: the first pairing code makes one, and the endpoint starts then';
+    case 'starting':
+      return 'starting';
+    case 'failed':
+      return `could not start: ${report.reason}`;
+    case 'up': {
+      const relay = report.relays[0];
+      const relayPart =
+        relay === undefined
+          ? 'no home relay chosen yet'
+          : relay.connected
+            ? `home relay ${relay.url}`
+            : `home relay ${relay.url} not connected${relay.error === null ? '' : `: ${relay.error}`}`;
+      const counts = { direct: 0, relay: 0, none: 0 };
+      for (const link of report.links) counts[link.path] += 1;
+      const phones =
+        report.links.length === 0
+          ? 'no phone connected, so no path to report'
+          : [
+              counts.direct > 0 ? `${String(counts.direct)} direct` : null,
+              counts.relay > 0 ? `${String(counts.relay)} only through the relay` : null,
+              counts.none > 0 ? `${String(counts.none)} between paths` : null,
+            ]
+              .filter((part): part is string => part !== null)
+              .join(', ') + (report.links.length === 1 ? ' (1 phone)' : ` (${String(report.links.length)} phones)`);
+      return `up · ${relayPart} · ${phones}`;
+    }
+  }
 }
 
 /** The QR code as modules, `true` for dark, with no quiet zone. */

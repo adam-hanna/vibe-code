@@ -10,9 +10,9 @@
 //! is a dozen lines, and a dependency the phone also has to carry for that is
 //! not worth its weight.
 //!
-//! The parser, the messages and the decoders have no desktop caller yet: the
-//! phone reads a payload, and the `vibe/pair/1` handler (#342) reads the
-//! messages. The tests here are their caller until then.
+//! The payload parser has no desktop caller: the phone reads a payload, and
+//! the tests here are its caller until #345 builds one. The messages are read
+//! and written by the `vibe/pair/1` handler, `handshake.rs`.
 #![allow(dead_code)]
 
 use std::fmt;
@@ -30,6 +30,12 @@ pub const CODE_DOMAIN: &[u8] = b"vibe-pair-code/1";
 
 /// The longest phone name kept, in characters.
 pub const NAME_MAX: usize = 64;
+
+/// The largest message either end of `vibe/pair/1` reads, in bytes. A bound
+/// rather than a measurement: the biggest real message is a hello carrying a
+/// 64-character secret and a name that is cut to 64 characters, well under a
+/// kilobyte, and this stops a dialler making the desktop allocate what it says.
+pub const PAIR_MESSAGE_MAX: usize = 4096;
 
 /// What a QR code carries: where to dial, and the one-time secret.
 ///

@@ -186,6 +186,10 @@ pub fn run() {
             // and it can show the reason - which is far more use than an app that
             // refuses to start and explains itself to no one.
             let _ = launch(app.handle());
+            // The endpoint a phone dials (#342), only under the preview flag
+            // and only once a device key exists. It binds on Tauri's runtime
+            // and does not hold up the window.
+            remote::start(app.handle());
 
             let quit = MenuItem::with_id(app, "quit", "Quit Vibe", true, None::<&str>)?;
             let open = MenuItem::with_id(app, "open", "Open Vibe", true, None::<&str>)?;

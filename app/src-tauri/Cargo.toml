@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "The vibe desktop app: window, tray, and the process that does the work"
 authors = ["Adam Hanna"]
 edition = "2021"
-# Raised from 1.77.2 for iroh-base 1.3 (the device key, #341), which declares
+# Raised from 1.77.2 for iroh 1.3 and iroh-base 1.3 (#341, #342), which declare
 # 1.91. CI and the release workflow build on stable, so neither moves.
 rust-version = "1.91"
 
@@ -77,6 +77,28 @@ getrandom = "0.3"
 # via Tauri, so this adds nothing to the build; `default-features = false` keeps
 # it to the clock and drops the serialisation and localisation nobody here wants.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+# The desktop's end of a phone connection (#342): QUIC addressed by an ed25519
+# key, found through n0's DNS record and mDNS, through a relay until a direct path
+# is punched. The app's third network client and its first inbound one; all of
+# it is in `remote/`. Default features off for one reason: `portmapper` asks the
+# home router over UPnP/NAT-PMP/PCP to forward a port to this machine, which is a
+# change to somebody's network nobody asked for. Hole punching works without it,
+# measured on #339. `tls-ring` is iroh's default provider, kept so no C toolchain
+# for aws-lc is needed on Windows.
+iroh = { version = "1.3", default-features = false, features = ["tls-ring", "fast-apple-datapath"] }
+# A phone on the same network finds the desktop with no internet at all: 0.175s
+# with no relay on #339.
+iroh-mdns-address-lookup = "0.6"
+# iroh's runtime, already in the tree through Tauri with all three features on,
+# so naming them adds nothing to the build: `time` for the pairing handler's
+# waits, `sync` for the oneshot that carries the person's answer to it, and
+# `macros` for its `select!`.
+tokio = { version = "1", features = ["macros", "sync", "time"] }
+
+[dev-dependencies]
+# Two endpoints in one process, over loopback, for `remote/endpoint.rs`'s tests.
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 
 # The job object that makes a killed app take the host with it (#157). Already
 # in the tree via Tauri, so this adds nothing to the build; `windows-sys` rather
