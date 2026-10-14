@@ -80,6 +80,7 @@ function answer(line: string): Json {
   }
   const id = request['id'] ?? null;
   const kind = typeof request['type'] === 'string' ? request['type'] : '';
+  if (kind === 'fs' && request['op'] === 'list') return listed(id, String(request['dir'] ?? ''), String(request['path'] ?? '.'));
   const found =
     kind === 'artifact' && typeof request['name'] === 'string' ? fixture.artifact[request['name']] : fixture.answers[kind];
   if (found === undefined) {
@@ -89,6 +90,59 @@ function answer(line: string): Json {
   // A save is answered about the key it saved, not the one recorded.
   if ('key' in request && 'key' in frame) frame['key'] = request['key'];
   return frame;
+}
+
+/**
+ * A small disk for the folder chooser (#347), since one recorded listing cannot
+ * be walked: the host's resolution and its refusal, in its own words, over a
+ * home directory with two repositories in it. The recorded listing is `shop`.
+ */
+const HOME = '/home/you';
+const DISK: Record<string, readonly string[]> = {
+  [HOME]: ['.config', 'Documents', 'code'],
+  [`${HOME}/.config`]: [],
+  [`${HOME}/Documents`]: [],
+  [`${HOME}/code`]: ['blog', 'notes', 'shop'],
+  [`${HOME}/code/blog`]: ['.git', 'public', 'src'],
+  [`${HOME}/code/blog/public`]: [],
+  [`${HOME}/code/blog/src`]: [],
+  [`${HOME}/code/notes`]: [],
+  [`${HOME}/code/shop/.git`]: [],
+  [`${HOME}/code/shop/.vibe`]: [],
+};
+
+function resolved(dir: string, asked: string): string {
+  const parts: string[] = [];
+  const start = asked.startsWith('/') ? asked : `${dir}/${asked}`;
+  for (const part of start.split('/')) {
+    if (part === '' || part === '.') continue;
+    if (part === '..') parts.pop();
+    else parts.push(part);
+  }
+  return `/${parts.join('/')}`;
+}
+
+function listed(id: unknown, dir: string, asked: string): Json {
+  const full = resolved(dir, asked);
+  const recorded = fixture.answers['fs'];
+  if (full === `${HOME}/code/shop` && recorded !== undefined) return { ...recorded, id };
+  if (!(full === HOME || full.startsWith(`${HOME}/`))) {
+    return {
+      type: 'error',
+      id,
+      message: `${full} is outside the directories the pilot may read: ${HOME}. More can be added in Settings, under what the pilot may do.`,
+    };
+  }
+  const names = DISK[full];
+  if (names === undefined) return { type: 'error', id, message: `there is nothing at ${full}.` };
+  return {
+    type: 'fs',
+    id,
+    op: 'list',
+    path: full,
+    entries: [...names.map((name) => ({ name, kind: 'dir', bytes: null })), { name: 'README.md', kind: 'file', bytes: 7 }],
+    truncated: false,
+  };
 }
 
 /** `mock.rs`'s `status`. */
