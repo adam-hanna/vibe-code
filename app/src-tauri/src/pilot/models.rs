@@ -63,7 +63,7 @@ pub fn parse(provider: Provider, body: &Value) -> Option<Vec<ApiModel>> {
     Some(rows.into_iter().map(|(_, m)| m).collect())
 }
 
-fn list(provider: Provider) -> Result<Vec<ApiModel>, String> {
+pub(crate) fn list(provider: Provider) -> Result<Vec<ApiModel>, String> {
     let key = keys::read(provider)?;
     let agent = agent();
     let request = match provider {

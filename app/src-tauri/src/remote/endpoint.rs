@@ -277,9 +277,24 @@ impl RemoteEndpoint {
     ///
     /// `pair` serves `vibe/pair/1` (#341's handshake); `bridge` serves
     /// `vibe/remote/1` once the gate has admitted the phone (#343).
+    // The app starts through `start_with`; the tests and the pairing handler's
+    // tests start here.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn start(
         config: Config,
         gate: Arc<dyn Gate>,
+        pair: impl ProtocolHandler,
+        bridge: impl ProtocolHandler,
+    ) -> Result<Self, String> {
+        Self::start_with(config, gate, Live::default(), pair, bridge).await
+    }
+
+    /// `start`, registering connections into a [`Live`] the caller holds too,
+    /// so the bridge's Unpair closes the same set a revoke does (#343).
+    pub async fn start_with(
+        config: Config,
+        gate: Arc<dyn Gate>,
+        connections: Live,
         pair: impl ProtocolHandler,
         bridge: impl ProtocolHandler,
     ) -> Result<Self, String> {
@@ -300,7 +315,6 @@ impl RemoteEndpoint {
             .await
             .map_err(|e| format!("the remote-access endpoint could not start: {e}"))?;
 
-        let connections = Live::default();
         let remote = Remote {
             gate,
             connections: connections.clone(),

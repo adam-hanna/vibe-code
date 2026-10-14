@@ -11,14 +11,51 @@ import { dirKey } from './cockpit/projects';
  */
 
 /**
- * Whether a request id is one this window allocated.
- *
- * The window counts from 1 (`nextRequestId`), and each phone connection will
- * count from a multiple of 2^40 (#343), so "between 1 and the highest I have
- * handed out" is exactly "mine".
+ * The size of each client's range of request ids (#343): the desktop window
+ * counts from 1, and each phone connection from the `idBase` its `Welcome`
+ * carried, a multiple of this. `ID_RANGE` in `app/remote/src/control.rs` is the
+ * same number.
  */
-export function isOwn(id: number, highest: number): boolean {
-  return Number.isInteger(id) && id >= 1 && id <= highest;
+export const ID_RANGE = 2 ** 40;
+
+/**
+ * Whether a request id is one this client allocated.
+ *
+ * A client counts up from just past its base, so "above my base and no higher
+ * than the highest I have handed out" is exactly "mine". Every client sees
+ * every answer, so this is what keeps a phone's answers from being taken as the
+ * window's, and the other way round.
+ */
+export function isOwn(id: number, highest: number, base = 0): boolean {
+  return Number.isInteger(id) && id > base && id <= highest;
+}
+
+/** One client's request ids: where they come from, and which are its own. */
+export interface RequestIds {
+  next(): number;
+  own(id: number): boolean;
+}
+
+/**
+ * The ids a client allocates, counting from `base + 1`. The window's base is 0;
+ * a phone's is its connection's `idBase`. A base that is not a range this wire
+ * hands out is refused, as is one whose range a JavaScript number cannot count
+ * exactly.
+ */
+export function requestIds(base = 0): RequestIds {
+  if (
+    !Number.isSafeInteger(base) ||
+    base < 0 ||
+    base % ID_RANGE !== 0 ||
+    base + ID_RANGE - 1 > Number.MAX_SAFE_INTEGER
+  ) {
+    throw new Error(`${base} is not a request-id range`);
+  }
+  let highest = base;
+  return {
+    next: () => (highest += 1),
+    own: (id) => isOwn(id, highest, base),
+  };
 }
 
 export type Reread = { kind: 'keep' } | { kind: 'set'; value: string } | { kind: 'remove' };

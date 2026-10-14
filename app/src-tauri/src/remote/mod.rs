@@ -18,13 +18,15 @@
 //!   endpoint reaches n0.
 //! - **the endpoint** (`endpoint.rs`), what a phone dials, and **the pairing
 //!   handler** (`handshake.rs`), which carries `attempt` and `answer` over it.
+//! - **the bridge** (`bridge.rs`, #343), what a paired phone's connection on
+//!   `vibe/remote/1` is used for: its control stream, the allowed commands run
+//!   through the same code as the window's, and the events fanned out to it.
+//! - **the hub** (`hub.rs`, #343), the one seam every event leaves through, to
+//!   the window and to every phone in one order, and the live-run buffer.
 //!
 //! **The endpoint runs only under `VIBE_REMOTE_PREVIEW=1`**, the stand-in for
 //! the switch #344 builds, and only once a device key exists. With the flag
-//! unset nothing binds, nothing reaches a relay and nothing is published. The
-//! paired-only `vibe/remote/1` has no bridge until #343, so a paired phone's
-//! connection is held open and does nothing, which is what lets the
-//! diagnostics say how it is travelling.
+//! unset nothing binds, nothing reaches a relay and nothing is published.
 //!
 //! **No timer here.** An unanswered prompt is closed by the window when its
 //! clock reaches `expiresAt`, which it already holds; Rust says `expired` only
@@ -36,22 +38,24 @@ pub mod qr;
 /// Everything the phone also needs, in the shared crate (#345). Re-exported
 /// so the desktop's side names it as it always has.
 pub use vibe_remote::wire;
+pub(crate) mod bridge;
 pub mod endpoint;
 pub mod handshake;
+pub(crate) mod hub;
 pub(crate) mod identity;
 pub(crate) mod store;
 
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use iroh::endpoint::Connection;
-use iroh::protocol::{AcceptError, ProtocolHandler};
-use iroh::EndpointId;
+use iroh::{EndpointId, SecretKey};
 use iroh_base::PublicKey;
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Manager, State};
 
-use endpoint::{Config, Gate, LinkInfo, Reach, RelayInfo, RemoteEndpoint};
+use bridge::{Bridge, StoreUnpair, TauriCommands};
+use endpoint::{Config, Gate, LinkInfo, Live, Reach, RelayInfo, RemoteEndpoint};
+use hub::Hub;
 use handshake::{Desk, PairHandler, Shared};
 use identity::{Keychain, Vault};
 use pairing::{Answer, Pairing};
@@ -107,21 +111,26 @@ pub(crate) trait Emit {
 
 struct TauriEmit(AppHandle);
 
+/// Through the hub, like every event: `pair-request` reaches the connected
+/// phones as well as the window, and `pair-ended` the window only (#343).
 impl Emit for TauriEmit {
     fn pair_request(&self, request: &PairRequest) {
-        let _ = self.0.emit("remote://pair-request", request);
+        hub::emit(&self.0, "remote://pair-request", request);
     }
     fn pair_ended(&self, outcome: Outcome) {
-        let _ = self.0.emit("remote://pair-ended", Ended { outcome });
+        hub::emit(&self.0, "remote://pair-ended", &Ended { outcome });
     }
 }
 
 /// What the commands and the endpoint share: the pairing state, the phone
-/// waiting on a prompt, and the endpoint when it runs.
+/// waiting on a prompt, the endpoint when it runs, and the hub every event
+/// leaves through (#343) - which runs whether or not remote access is on, so a
+/// phone that connects mid-run is sent the whole run.
 #[derive(Default)]
 pub struct Remote {
     shared: Arc<Shared>,
     endpoint: Mutex<Running>,
+    hub: Arc<Hub>,
 }
 
 /// Where the endpoint is. `Off` is the default and the whole of it while
@@ -444,16 +453,26 @@ impl Gate for PairedList {
     }
 }
 
-/// `vibe/remote/1` until the bridge exists (#343): hold a paired phone's
-/// connection open, so it is counted and its path can be read, and do nothing
-/// with it.
+/// What `start` does, decided before anything is bound.
 #[derive(Debug)]
-struct Unbridged;
+enum Decision {
+    /// Remote access is off: nothing is read, bound or published.
+    Off,
+    NoKey,
+    Failed(String),
+    Start(SecretKey),
+}
 
-impl ProtocolHandler for Unbridged {
-    async fn accept(&self, conn: Connection) -> Result<(), AcceptError> {
-        conn.closed().await;
-        Ok(())
+/// With remote access off the keychain is not even asked, so there is no key,
+/// no endpoint, no socket and no relay connection.
+fn start_decision(preview: bool, read_key: impl FnOnce() -> Result<Option<SecretKey>, String>) -> Decision {
+    if !preview {
+        return Decision::Off;
+    }
+    match read_key() {
+        Ok(Some(key)) => Decision::Start(key),
+        Ok(None) => Decision::NoKey,
+        Err(why) => Decision::Failed(why),
     }
 }
 
@@ -461,17 +480,15 @@ impl ProtocolHandler for Unbridged {
 /// with. Called at launch and after the first pairing code makes the key; a
 /// second call while it is starting or up does nothing.
 pub(crate) fn start(app: &AppHandle) {
-    if !preview() {
-        return;
-    }
     let remote = app.state::<Remote>();
-    let key = match identity::read(&Keychain) {
-        Ok(Some(key)) => key,
-        Ok(None) => {
+    let key = match start_decision(preview(), || identity::read(&Keychain)) {
+        Decision::Off => return,
+        Decision::Start(key) => key,
+        Decision::NoKey => {
             *remote.running() = Running::NoKey;
             return;
         }
-        Err(why) => {
+        Decision::Failed(why) => {
             *remote.running() = Running::Failed(why);
             return;
         }
@@ -485,6 +502,7 @@ pub(crate) fn start(app: &AppHandle) {
     }
     let app = app.clone();
     let shared = remote.shared.clone();
+    let hub = remote.hub.clone();
     tauri::async_runtime::spawn(async move {
         let store = store_of(&app);
         let desk = Desk {
@@ -498,8 +516,25 @@ pub(crate) fn start(app: &AppHandle) {
         // n0's DNS and relays, plus mDNS, as #340 decided. The setting naming
         // a relay of the user's own is #344's, so there is none to read yet.
         let config = Config { key, reach: Reach::Internet { relay: None, mdns: true } };
-        let started =
-            RemoteEndpoint::start(config, Arc::new(PairedList(store)), PairHandler(Arc::new(desk)), Unbridged).await;
+        // One set of live connections, shared by the endpoint (which registers
+        // each), a revoke (which closes them) and the bridge's Unpair (which is
+        // the same revoke).
+        let live = Live::default();
+        let bridge = Bridge::new(
+            Arc::new(TauriCommands(app.clone())),
+            hub,
+            Arc::new(StoreUnpair(store.clone(), live.clone())),
+            app.package_info().version.to_string(),
+            hostname(),
+        );
+        let started = RemoteEndpoint::start_with(
+            config,
+            Arc::new(PairedList(store)),
+            live,
+            PairHandler(Arc::new(desk)),
+            bridge,
+        )
+        .await;
         let next = match started {
             Ok(ep) => {
                 crate::applog::app(&format!("remote access: endpoint {} is up", ep.id()));
@@ -516,16 +551,26 @@ pub(crate) fn start(app: &AppHandle) {
 
 #[tauri::command]
 pub fn remote_status(app: AppHandle, remote: State<'_, Remote>) -> RemoteStatus {
+    status_now(&app, &remote)
+}
+
+/// `remote_status`'s body, shared with a phone's call through the bridge (#343).
+pub(crate) fn status_now(app: &AppHandle, remote: &Remote) -> RemoteStatus {
     let running = remote.running();
     let report = if preview() { running.report() } else { EndpointReport::Off };
     match &*running {
-        Running::Up(ep) => RemoteStatus { endpoint: report, ..status(&Keychain, store_of(&app), ep.connections(), preview()) },
-        _ => RemoteStatus { endpoint: report, ..status(&Keychain, store_of(&app), &NoConnections, preview()) },
+        Running::Up(ep) => RemoteStatus { endpoint: report, ..status(&Keychain, store_of(app), ep.connections(), preview()) },
+        _ => RemoteStatus { endpoint: report, ..status(&Keychain, store_of(app), &NoConnections, preview()) },
     }
 }
 
 #[tauri::command]
 pub fn remote_pair_begin(app: AppHandle, remote: State<'_, Remote>) -> Result<PairBegin, String> {
+    pair_begin(&app, &remote)
+}
+
+/// `remote_pair_begin`'s body, shared with a phone's call through the bridge.
+pub(crate) fn pair_begin(app: &AppHandle, remote: &Remote) -> Result<PairBegin, String> {
     let secret = random::<32>()?;
     // The home relay, as an address hint, when the endpoint is up and has one.
     let relay = match &*remote.running() {
@@ -536,23 +581,33 @@ pub fn remote_pair_begin(app: AppHandle, remote: State<'_, Remote>) -> Result<Pa
     // The first code makes the device key, and an endpoint waiting for one
     // can start now.
     if begun.is_ok() {
-        start(&app);
+        start(app);
     }
     begun
 }
 
 #[tauri::command]
 pub fn remote_pair_answer(yes: bool, app: AppHandle, remote: State<'_, Remote>) -> Result<Outcome, String> {
-    let store = store_of(&app);
+    pair_answer(&app, &remote, yes)
+}
+
+/// `remote_pair_answer`'s body, shared with a phone's call through the bridge.
+pub(crate) fn pair_answer(app: &AppHandle, remote: &Remote, yes: bool) -> Result<Outcome, String> {
+    let store = store_of(app);
     answer_prompt(&remote.shared, store.as_ref().map_err(Clone::clone), &TauriEmit(app.clone()), hostname(), yes, now())
 }
 
 #[tauri::command]
 pub fn remote_revoke(id: String, app: AppHandle, remote: State<'_, Remote>) -> Result<(), String> {
-    let store = store_of(&app)?;
+    revoke_phone(&app, &remote, &id)
+}
+
+/// `remote_revoke`'s body, shared with a phone's call through the bridge.
+pub(crate) fn revoke_phone(app: &AppHandle, remote: &Remote, id: &str) -> Result<(), String> {
+    let store = store_of(app)?;
     match &*remote.running() {
-        Running::Up(ep) => revoke(&store, ep.connections(), &id),
-        _ => revoke(&store, &NoConnections, &id),
+        Running::Up(ep) => revoke(&store, ep.connections(), id),
+        _ => revoke(&store, &NoConnections, id),
     }
 }
 
@@ -899,6 +954,18 @@ mod tests {
                 "links": [{ "id": "p", "path": "direct" }],
             })
         );
+    }
+
+    /// Remote access off: the keychain is not asked, so no key is read and no
+    /// endpoint is built - nothing binds, nothing reaches a relay.
+    #[test]
+    fn with_remote_access_off_nothing_is_read_or_started() {
+        let decided = start_decision(false, || panic!("the keychain must not be asked"));
+        assert!(matches!(decided, Decision::Off));
+        assert_eq!(Running::default().report(), EndpointReport::Off);
+        assert!(matches!(start_decision(true, || Ok(None)), Decision::NoKey));
+        assert!(matches!(start_decision(true, || Err("locked".into())), Decision::Failed(ref w) if w == "locked"));
+        assert!(matches!(start_decision(true, || Ok(Some(SecretKey::generate()))), Decision::Start(_)));
     }
 
     #[test]

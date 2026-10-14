@@ -195,13 +195,25 @@ pub fn key_set(
     key: String,
     host: tauri::State<'_, crate::host::HostProcess>,
 ) -> Result<(), String> {
-    set(provider, &key)?;
-    let _ = host.send_keys(None);
-    Ok(())
+    set_key(provider, &key, &host)
 }
 
 #[tauri::command]
 pub fn key_clear(provider: Provider, host: tauri::State<'_, crate::host::HostProcess>) -> Result<(), String> {
+    clear_key(provider, &host)
+}
+
+/// `key_set`'s body, shared with a phone's call through the bridge (#343).
+/// It writes the keychain and answers nothing back: the key goes in and never
+/// comes out, on either road.
+pub(crate) fn set_key(provider: Provider, key: &str, host: &crate::host::HostProcess) -> Result<(), String> {
+    set(provider, key)?;
+    let _ = host.send_keys(None);
+    Ok(())
+}
+
+/// `key_clear`'s body, shared with a phone's call through the bridge (#343).
+pub(crate) fn clear_key(provider: Provider, host: &crate::host::HostProcess) -> Result<(), String> {
     clear(provider)?;
     let _ = host.send_keys(None);
     Ok(())

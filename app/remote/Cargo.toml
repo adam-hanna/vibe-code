@@ -26,7 +26,9 @@ iroh = { version = "1.3", default-features = false, features = ["tls-ring", "fas
 # with no relay on #339.
 iroh-mdns-address-lookup = "0.6"
 serde = { version = "1", features = ["derive"] }
-# The body of every framed message.
-serde_json = "1"
+# The body of every framed message. `raw_value` so an event's payload is
+# carried as the bytes the desktop serialised (#343); Tauri already turns it on
+# in both apps' builds.
+serde_json = { version = "1", features = ["raw_value"] }
 # The pairing matching code: six digits from a SHA-256 both ends compute.
 sha2 = "0.10"

@@ -47,7 +47,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 use tauri::utils::config::BundleType;
-use tauri::{AppHandle, Emitter, Manager, State, Url};
+use tauri::{AppHandle, Manager, State, Url};
 use tauri_plugin_updater::{Update, Updater, UpdaterExt};
 
 use crate::applog;
@@ -341,12 +341,17 @@ fn updater(app: &AppHandle) -> Result<Updater, String> {
 /// failure, which goes to the log and never to the screen.
 #[tauri::command]
 pub async fn update_check(app: AppHandle, pending: State<'_, Pending>) -> Result<Option<UpdateInfo>, ()> {
+    check(&app, &pending).await
+}
+
+/// `update_check`'s body, shared with a phone's call through the bridge (#343).
+pub(crate) async fn check(app: &AppHandle, pending: &Pending) -> Result<Option<UpdateInfo>, ()> {
     // An install is under way: describe what is being installed, and do not
     // ask the network for something that could replace it.
     if let Some(installing) = pending.installing() {
         return Ok(installing.as_ref().map(info));
     }
-    let found = match updater(&app) {
+    let found = match updater(app) {
         Ok(updater) => updater.check().await.map_err(|e| e.to_string()),
         Err(e) => Err(e),
     };
@@ -384,14 +389,28 @@ pub async fn update_install(
     page: bool,
     confirmed: bool,
 ) -> Result<Outcome, String> {
+    install(&app, &pending, page, confirmed, open_release_page).await
+}
+
+/// `update_install`'s body, shared with a phone's call through the bridge
+/// (#343). `open_page` is how `page` is honoured: the window opens the
+/// desktop's browser, and a phone's call opens nothing here, because the page
+/// is opened on the phone (`openOnPhone`), from the phone's own constant.
+pub(crate) async fn install(
+    app: &AppHandle,
+    pending: &Pending,
+    page: bool,
+    confirmed: bool,
+    open_page: fn() -> Result<(), String>,
+) -> Result<Outcome, String> {
     if page {
-        return open_release_page().map(|()| Outcome::Opened);
+        return open_page().map(|()| Outcome::Opened);
     }
     install_refusal(this_action())?;
     let hosts = app.state::<HostProcess>();
     // Held to the end; every return drops it, which thaws run starts and then
     // releases the slot. A restart never returns.
-    let held = claim(&pending, hosts.inner()).map_err(str::to_string)?;
+    let held = claim(pending, hosts.inner()).map_err(str::to_string)?;
     if needs_confirm(confirmed, held.run_hosts) {
         return Ok(Outcome::Confirm);
     }
@@ -401,10 +420,10 @@ pub async fn update_install(
     let bytes = update
         .download(
             |chunk, total| {
-                let _ = app.emit("app://update-progress", tally.add(chunk, total));
+                crate::remote::hub::emit(app, PROGRESS_EVENT, &tally.add(chunk, total));
             },
             || {
-                let _ = app.emit("app://update-progress", Progress::Installing);
+                crate::remote::hub::emit(app, PROGRESS_EVENT, &Progress::Installing);
             },
         )
         .await
@@ -423,12 +442,15 @@ pub async fn update_install(
         // The runs were stopped resumably; let them start again and bring the
         // service host back so the window can read them and resume one.
         drop(held);
-        let _ = host::launch(&app);
+        let _ = host::launch(app);
         return Err(e.to_string());
     }
     applog::app(&format!("update {} installed; restarting", update.version));
     app.restart();
 }
+
+/// Download and install progress, to the window and every connected phone.
+const PROGRESS_EVENT: &str = "app://update-progress";
 
 /// Run starts refused for as long as this lives; dropped on every path that
 /// does not restart.

@@ -93,7 +93,7 @@ vibe-remote = { path = "../remote" }
 # so naming them adds nothing to the build: `time` for the pairing handler's
 # waits, `sync` for the oneshot that carries the person's answer to it, and
 # `macros` for its `select!`.
-tokio = { version = "1", features = ["macros", "sync", "time"] }
+tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
 
 [dev-dependencies]
 # Two endpoints in one process, over loopback, for `remote/endpoint.rs`'s tests.
