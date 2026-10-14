@@ -69,14 +69,20 @@ node scripts/record-cli-fixtures.mjs --force   # re-record a version that alread
 introduced them, which could not record fixtures from inside a sandboxed turn. There is no
 other way past the check.
 
-There is **no linter and no formatter**. There are three workflows. `pages.yml` deploys the
-docs site from `main`. `ci.yml` runs on every push and pull request into `develop` and `main`:
-the core gate (`npm run typecheck && npm test`), the app gate (typecheck, vitest,
-`audit:contrast`) and the Rust tests, all on Ubuntu 22.04 with Node 22. `release.yml` builds the
-desktop bundles on a `v*` tag into a draft GitHub release (#239). What CI does **not** run: a
-linter or formatter, the tests on macOS or Windows, and `npm publish`. **`npm run typecheck &&
-npm test` before every commit is still the rule**, and it is still on you to run it: CI only
-reports after you push. A test that fails only on CI is a finding about the test or the code,
+There is **no linter and no formatter**. There are four workflows. `pages.yml` deploys the
+docs site from `main`. `ci.yml` runs on every push and pull request into `main`, and by hand
+(`workflow_dispatch`): the core gate (`npm run typecheck && npm test`), the app gate
+(typecheck, vitest, `audit:contrast`) and the Rust tests, all on Ubuntu 22.04 with Node 22.
+`mobile.yml` builds the phone app and launches it on an Android emulator and an iOS simulator,
+on a pull request into `main` that touches it, and by hand. `release.yml` builds the desktop
+bundles on a `v*` tag into a draft GitHub release (#239). What CI does **not** run: a linter or
+formatter, the tests on macOS or Windows, `npm publish` - and **anything on `develop`**.
+Actions minutes are a budget, so at the owner's decision a merge into `develop` runs nothing:
+**the gates are run locally before every merge into `develop`**, and CI runs in full on the
+release PR into `main`. So **`npm run typecheck && npm test`, and the app's and the Rust gates
+when you touch them, before every commit is the rule**, and nothing else will catch a miss
+until the release PR. `gh workflow run ci.yml --ref <branch>` runs CI on a branch when a
+change needs a clean machine sooner. A test that fails only on CI is a finding about the test or the code,
 never something to retry past or skip. Node 20+ (`engines`).
 
 **A release carries two names for each installer and the files an installed app updates
@@ -2310,7 +2316,8 @@ Xcode project does not link unless `bundle.iOS.frameworks` names it: without it 
 fails on fifty `_SC*` symbols. `gen/` is generated
 by `tauri <platform> init` on each machine and in CI, because iOS's needs macOS to make.
 `.github/workflows/mobile.yml` launches both mock builds - an Android emulator and an iOS
-simulator - and fails unless the cockpit read the recorded run.
+simulator - and fails unless the cockpit read the recorded run. It runs on a pull request into
+`main`, or by hand with `gh workflow run mobile.yml --ref <branch>`, never on `develop`.
 
 ## Repo map
 
@@ -2444,7 +2451,8 @@ docs/.vitepress/config.mts  the site's config: BASE (the one place the path is w
 docs/images/         screenshots, shared by README.md and the site
 docs/plans/          internal design notes, excluded from the site
 .github/workflows/pages.yml    builds docs/ from main and deploys it to Pages
-.github/workflows/ci.yml       the core, app and Rust gates on push and PR into develop and main
+.github/workflows/ci.yml       the core, app and Rust gates on push and PR into main, and by hand
+.github/workflows/mobile.yml   the phone app's tests and its emulator and simulator launches, on PR into main
 .github/workflows/release.yml  the desktop bundles on a v* tag, into one draft release
 .github/actions/linux-deps/    the Linux packages a Tauri build needs, listed once
 ```
