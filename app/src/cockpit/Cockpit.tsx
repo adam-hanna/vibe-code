@@ -93,6 +93,9 @@ import { emptyRun, foldReplay, forResume, hostLost, latestQuestions, reduce, set
 import {
   adoptionPlan,
   addRun,
+  holdUnclaimed,
+  learnInvokes,
+  watchRun,
   capOf,
   capRefusal,
   dropRun,
@@ -970,12 +973,41 @@ export function Cockpit() {
    * exit that would put a host that has gone back in the diagnostics popover.
    */
   const statusGen = useRef(0);
+  /**
+   * Every run host this window has had an entry for, started or watched (#347).
+   * A handle let go of - ended, refused, pruned - is not watched again when a
+   * late frame arrives from it: `routeFrame`'s `retired`.
+   */
+  const everSeen = useRef(new Set<string>());
+  /**
+   * Learn the invoke ids of runs this window is watching, from `host_status`,
+   * and apply any ending that was waiting on one (#347): a `result` ends the
+   * run as it would have on arrival, and an `error` fails it. The window that
+   * started it is the one that tells its host there will be no more requests.
+   */
+  const learnFrom = (status: host.Status) => {
+    const learned = learnInvokes(livesRef.current, status.runs);
+    if (learned.endings.length === 0 && learned.lives === livesRef.current) return;
+    updateLives(() => learned.lives);
+    const at = Date.now();
+    for (const { handle, frame } of learned.endings) {
+      updateLives((l) =>
+        updateRun(l, handle, (r) =>
+          frame.type === 'error' ? hostLost(r, at, frame.message) : reduce(r, frame, at),
+        ),
+      );
+      endLive(handle);
+    }
+  };
   const refreshStatus = useCallback(() => {
     if (!host.inShell()) return;
     const gen = (statusGen.current += 1);
     void host
       .status()
       .then((status) => {
+        // A watched run's invoke id, whatever the read's generation: an id never
+        // changes, so even an older answer states it correctly (#347).
+        learnFrom(status);
         if (gen === statusGen.current) setWire((w) => ({ ...w, status }));
       })
       // Left as it was. A refresh that failed is not a reason to blank facts the
@@ -1103,8 +1135,16 @@ export function Cockpit() {
     void (async () => {
       stop = await host.connect({
         frame: (from, frame) => {
+          let route = routeFrame(livesRef.current, from, everSeen.current);
+          // A run host this window never started (#347): watched from its first
+          // frame, then routed like any other, and its invoke id asked for.
+          if (route === 'watch') {
+            everSeen.current.add(from);
+            updateLives((l) => watchRun(l, from, protocolRef.current));
+            refreshStatus();
+            route = 'run';
+          }
           const lives = livesRef.current;
-          const route = routeFrame(lives, from);
           if (route === 'service') {
             // Everything else the service host says is read by its own
             // listener - the pilot, the commands, the reads. Only the protocol
@@ -1121,6 +1161,11 @@ export function Cockpit() {
           }
           const outcome = invokeOutcome(lives, from, frame);
           const at = Date.now();
+          // A watched run's ending cannot be told from a pause's answer until
+          // its invoke id is known, so it waits to be claimed.
+          if ((frame.type === 'result' || frame.type === 'error') && lives.some((e) => e.handle === from && e.invokeId === null)) {
+            updateLives((l) => holdUnclaimed(l, from, frame));
+          }
           // A run host answers its pause, unpause and cancel with `result`
           // frames too, and `reduce` reads any `result` as the command
           // returning - so only the invoke's own reaches it. Every frame still
@@ -1344,6 +1389,8 @@ export function Cockpit() {
       const entry: LiveRun = {
         handle,
         invokeId: id,
+        watched: false,
+        unclaimed: [],
         answered: new Set(),
         live: true,
         dir: meta.dir,
@@ -1362,6 +1409,7 @@ export function Cockpit() {
         run: { ...(seed ?? emptyRun()), protocol: protocolRef.current },
       };
       updateLives((l) => addRun(l, entry));
+      everSeen.current.add(handle);
       toPoint.current.add(handle);
       setBusy(true);
       void host
