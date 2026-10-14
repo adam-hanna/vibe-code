@@ -695,6 +695,9 @@ export function Cockpit() {
   const openSettings = useCallback((scope: 'global' | 'project') => {
     setSettingsScope(scope);
     setTab('settings');
+    // On a phone the settings open in the main pane, under whichever sheet the
+    // door was pressed in (#347): left open, the press looked like it did nothing.
+    if (SURFACE.overlayPanels) setPanels((p) => ({ ...p, sidebar: false, loop: false }));
   }, []);
   /**
    * The round a navigation asked for, or null (#223).
