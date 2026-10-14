@@ -67,9 +67,10 @@ jobs:
         working-directory: app/mobile
       - name: Build the APK
         working-directory: app/mobile
-        env:
-          NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
+        # The runner's own variable, read in the shell: the `env` context holds
+        # only what a workflow sets, so `${{ env.ANDROID_NDK_LATEST_HOME }}` is empty.
         run: |
+          export NDK_HOME="$ANDROID_NDK_LATEST_HOME"
           npx tauri android init --ci
           npx tauri android build --apk --target x86_64 --debug --features mock-desktop --ci
       - name: Launch on an emulator

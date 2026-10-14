@@ -47,6 +47,11 @@ android-native-keyring-store = "1"
 # The iOS Keychain's data-protection store: an iOS app may use no other.
 [target.'cfg(target_os = "ios")'.dependencies]
 apple-native-keyring-store = { version = "1", features = ["protected"] }
+# Held below 0.2.190, which made `mach_task_self` macOS-only: `num_threads`
+# 0.1.7, the newest, still calls it on iOS, and it arrives through `time`, which
+# both Tauri and iroh use. The desktop's lockfile is on 0.2.189. Lift this once
+# `num_threads` stops calling it there.
+libc = ">=0.2.150, <0.2.190"
 
 [features]
 # A desktop that is not there (#345): answers from a recorded session, so the
