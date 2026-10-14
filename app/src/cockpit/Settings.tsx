@@ -1326,12 +1326,15 @@ export function Settings({
       ) : (
         <>
           {/* ---- this window ------------------------------------------------- */}
+          {/* On a phone the text size is the phone's own (#347), so it is set
+              under This phone, not among the desktop's settings. */}
+          {!SURFACE.compactChrome && (
           <section className={S.block}>
             <h3 className={S.h}>how this is drawn</h3>
             <p className={S.note}>
-              {SURFACE.compactChrome ? 'This phone only — the desktop keeps a size of its own.' : 'This window, on this machine.'}{' '}
-              It is not written to <code>vibe.config.json</code> — how big you like your text is not
-              a fact about any run, and that file is meant to be committed.
+              This window, on this machine. It is not written to <code>vibe.config.json</code> — how
+              big you like your text is not a fact about any run, and that file is meant to be
+              committed.
             </p>
             <div className={S.scale}>
               {STEPS.map((step) => (
@@ -1357,6 +1360,7 @@ export function Settings({
               contrast gate is measured against.
             </p>
           </section>
+          )}
 
           {/* Whether this app asks for a newer version of itself (#299): the one
               network request the app makes on its own, so it is said in full

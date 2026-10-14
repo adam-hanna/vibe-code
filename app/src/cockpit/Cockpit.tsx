@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Activity, ChevronLeft, PanelLeft, PanelRightClose, PanelRightOpen, Plus, Settings as SettingsIcon, Terminal, X } from 'lucide-react';
+import { Activity, ChevronLeft, PanelLeft, PanelRightClose, PanelRightOpen, Plus, Settings as SettingsIcon, Smartphone, Terminal, X } from 'lucide-react';
 import { usePanelRef } from 'react-resizable-panels';
 import type { Layout, LayoutChangedMeta, PanelImperativeHandle } from 'react-resizable-panels';
 import { Badge } from '@/ui/badge';
@@ -12,6 +12,7 @@ import type { UpdateState } from '../shell/UpdatePopover';
 import { CHECK_EVERY_MS, CHECK_KEY, SKIP_KEY, checkEnabled, shown } from '../shell/update';
 import type { UpdateInfo } from '../shell/update';
 import { Palette } from '../shell/Palette';
+import { PhoneSettings } from '../remote/PhoneSettings';
 import { SURFACE } from '../surface';
 import { statusBarControls } from '../shell/controls';
 import { StatusBar } from '../shell/StatusBar';
@@ -715,6 +716,10 @@ export function Cockpit() {
     // lands here, and nothing else ever does. Never written to `where`: the
     // record is the desktop's too, and there it means the bottom panel.
     | 'commands'
+    // The phone's own settings (#347): what is true of the device rather than
+    // the desktop it reaches. Phone-only, reached from the sidebar's head, and
+    // never written to `where` for the reason `commands` is not.
+    | 'phone'
     // **The pilot, not the output pane** (#211). The complaint was exact: *"I
     // thought my initial prompt would be given to the pilot and the pilot would
     // take control"*, and the app answered it with a form and a tab beside the
@@ -741,9 +746,9 @@ export function Cockpit() {
    * under them, so their way back is a press that returns here. The pilot when
    * nothing else is known, since that is where the window lands.
    */
-  const cameFrom = useRef<Exclude<typeof tab, 'commands'>>('pilot');
+  const cameFrom = useRef<Exclude<typeof tab, 'commands' | 'phone'>>('pilot');
   useEffect(() => {
-    if (tab !== 'settings' && tab !== 'runs' && tab !== 'commands') cameFrom.current = tab;
+    if (tab !== 'settings' && tab !== 'runs' && tab !== 'commands' && tab !== 'phone') cameFrom.current = tab;
   }, [tab]);
   const openSettings = useCallback((scope: 'global' | 'project') => {
     setSettingsScope(scope);
@@ -751,6 +756,11 @@ export function Cockpit() {
     // On a phone the settings open in the main pane, under whichever sheet the
     // door was pressed in (#347): left open, the press looked like it did nothing.
     if (SURFACE.overlayPanels) setPanels((p) => ({ ...p, sidebar: false, loop: false }));
+  }, []);
+  /** The phone's own settings, opened the way the desktop's are: the sheets shut over it. */
+  const openPhone = useCallback(() => {
+    setTab('phone');
+    setPanels((p) => ({ ...p, sidebar: false, loop: false }));
   }, []);
   /**
    * The round a navigation asked for, or null (#223).
@@ -883,7 +893,7 @@ export function Cockpit() {
       if (placeKey === null) return;
       memory.setItem(
         placeKey,
-        writableWhere({ tab: tab === 'commands' ? cameFrom.current : tab, viewing, draftId, bottom, panels }),
+        writableWhere({ tab: tab === 'commands' || tab === 'phone' ? cameFrom.current : tab, viewing, draftId, bottom, panels }),
       );
     } catch {
       // Storage switched off: the next launch lands on the pilot, as it used to.
@@ -2237,6 +2247,9 @@ export function Cockpit() {
               <Tool label="Settings for all projects" onClick={act.settings}>
                 <SettingsIcon className="size-5" aria-hidden />
               </Tool>
+              <Tool label="This phone" onClick={openPhone}>
+                <Smartphone className="size-5" aria-hidden />
+              </Tool>
             </div>
           )}
           {panels.sidebar && (
@@ -2374,7 +2387,7 @@ export function Cockpit() {
           */}
           {/* A view with no tab of its own is not one of the run's panes, so on
               a phone the run's tabs give way to the way back (#347). */}
-          {SURFACE.compactChrome && (tab === 'settings' || tab === 'runs') ? (
+          {SURFACE.compactChrome && (tab === 'settings' || tab === 'runs' || tab === 'phone') ? (
             <div className="flex flex-none items-center gap-1 border-b border-rule-structure bg-page px-1 py-1">
               <Button variant="quiet" size="sm" onClick={() => setTab(cameFrom.current)}>
                 <ChevronLeft className="size-4" aria-hidden /> Back
@@ -2565,6 +2578,15 @@ export function Cockpit() {
               halted={!past && run.completed?.exit === NEEDS_HUMAN}
               busy={busy}
               onResume={(runId, dir) => resume(runId, dir, undefined, false, viewing?.task ?? run.identity?.task ?? null)}
+            />
+          )}
+          {tab === 'phone' && (
+            <PhoneSettings
+              scale={scale}
+              onScale={rescale}
+              connected={wire.connected}
+              failure={wire.failure}
+              build={wire.status?.build ?? null}
             />
           )}
           {tab === 'settings' && (
