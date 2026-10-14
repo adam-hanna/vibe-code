@@ -9,6 +9,7 @@
     "build": "tsc --noEmit && vite build",
     "build:mobile": "tsc --noEmit && vite build --mode mobile --outDir mobile/dist --emptyOutDir",
     "dev:mobile": "vite --mode mobile",
+    "dev:mobile:browser": "vite --mode mobile-browser --port 1421",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview",
     "audit:contrast": "node scripts/contrast.mjs",

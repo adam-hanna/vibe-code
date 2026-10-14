@@ -13,5 +13,10 @@
  *   exist to be reached by that chord.
  * - `tray`: the desktop's tray, whose Quit stops the app. A phone has none, so
  *   quitting the desktop app is in Settings there instead.
+ * - `overlayPanels`: whether the two side columns slide OVER the main pane
+ *   rather than sharing the row with it. A phone is too narrow for three
+ *   resizable columns: the side panels' minimums alone exceed its width, so a
+ *   panel there could be squeezed shut and then refuse to open. On a phone they
+ *   start shut, one at a time, and the main pane keeps the whole width.
  */
-export const SURFACE = { keyboard: true, palette: true, tray: true } as const;
+export const SURFACE = { keyboard: true, palette: true, tray: true, overlayPanels: false } as const;

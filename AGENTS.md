@@ -124,6 +124,7 @@ npm install
 npm run typecheck      # tsc --noEmit, same strictness as the core
 npm run build          # typecheck, then vite build
 npm run dev            # vite on :1420 — the webview alone, no host
+npm run dev:mobile:browser # the phone build on :1421 in a browser tab, answered by the recorded mock desktop - use device mode
 npm run audit:contrast # the design system's own gate
 npm run app:test       # vitest + cargo test — both sides
 npm run test:web       # vitest — the cockpit's reducer

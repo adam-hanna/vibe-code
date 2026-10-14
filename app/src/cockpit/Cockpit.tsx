@@ -17,6 +17,7 @@ import { StatusBar } from '../shell/StatusBar';
 import { ACTIONS, available, chordLabel, shortcutFor } from '../shell/actions';
 import type { ActionId } from '../shell/actions';
 import { ResizableGroup, ResizablePanel, ResizableSeparator } from '../ui/resizable';
+import { SideRegion, SideSeparator } from './SideRegion';
 import { TooltipProvider } from '../ui/tooltip';
 import { cn } from '@/lib/utils';
 import { projectName } from './projects';
@@ -28,7 +29,7 @@ import type { KeyStatus } from '../pilot/keys';
 import { PilotPane } from '../pilot/PilotPane';
 import { chatRun } from '../pilot/log';
 import { noCommands, reduceCommands, restore, running } from './commands';
-import { NOWHERE, readWhere, WHERE_KEY, writableWhere } from './where';
+import { NOWHERE, readWhere, WHERE_KEY, startPanels, writableWhere } from './where';
 import type { BottomTab, Panels, Tab, Viewing, Where } from './where';
 import { CommandsPane } from './CommandsPane';
 import { CodePane } from './CodePane';
@@ -425,7 +426,7 @@ export function Cockpit() {
    * drag handles between every region an arrangement is a setting, where a
    * collapse used to be a gesture.
    */
-  const [panels, setPanels] = useState<Panels>(() => storedWhere().panels);
+  const [panels, setPanels] = useState<Panels>(() => startPanels(storedWhere().panels, SURFACE.overlayPanels));
   /** The bottom panel's tab: Output or Commands, the two terminal-shaped panes. */
   const [bottom, setBottom] = useState<BottomTab>(() => storedWhere().bottom);
   /**
@@ -694,6 +695,9 @@ export function Cockpit() {
   const openSettings = useCallback((scope: 'global' | 'project') => {
     setSettingsScope(scope);
     setTab('settings');
+    // On a phone the settings open in the main pane, under whichever sheet the
+    // door was pressed in (#347): left open, the press looked like it did nothing.
+    if (SURFACE.overlayPanels) setPanels((p) => ({ ...p, sidebar: false, loop: false }));
   }, []);
   /**
    * The round a navigation asked for, or null (#223).
@@ -1804,6 +1808,25 @@ export function Cockpit() {
     return hooks;
   };
   const panes = mountedPanes(shownPane, knownPanes, busyPanes, drafts);
+  /**
+   * On a phone (#347) a press inside a sheet that changes what the MAIN pane
+   * shows puts the sheet away, so the press lands on what it opened rather than
+   * under the sheet that covers it - a run or a draft from the sidebar, a round
+   * card, the way back from an opened run, a resume or an implement from the footer.
+   * Presses that act in the sheet itself (expanding a project, answering a
+   * gate) leave it open. A desktop's side columns sit beside the main pane and
+   * never need this.
+   */
+  const shutSheets = (): void => {
+    if (SURFACE.overlayPanels) setPanels((p) => (p.sidebar || p.loop ? { ...p, sidebar: false, loop: false } : p));
+  };
+  // The composer is a dialog over everything, and what it starts lands in the
+  // main pane, so on a phone opening it puts any sheet away.
+  useEffect(() => {
+    if (composing !== null && SURFACE.overlayPanels) {
+      setPanels((p) => (p.sidebar || p.loop ? { ...p, sidebar: false, loop: false } : p));
+    }
+  }, [composing]);
 
   /**
    * Every action the shell offers, by id (`shell/actions.ts`). The palette, the
@@ -1813,8 +1836,12 @@ export function Cockpit() {
   const act: Record<ActionId, () => void> = {
     palette: () => setSwitching((o) => !o),
     newRun: () => setComposing({ dir: repoDir, locked: false }),
-    toggleSidebar: () => setPanels((p) => ({ ...p, sidebar: !p.sidebar })),
-    toggleLoop: () => setPanels((p) => ({ ...p, loop: !p.loop })),
+    // On a phone the two are sheets over the main pane, so opening one shuts
+    // the other (#347): two at once would cover the whole screen.
+    toggleSidebar: () =>
+      setPanels((p) => ({ ...p, sidebar: !p.sidebar, ...(SURFACE.overlayPanels && !p.sidebar ? { loop: false } : {}) })),
+    toggleLoop: () =>
+      setPanels((p) => ({ ...p, loop: !p.loop, ...(SURFACE.overlayPanels && !p.loop ? { sidebar: false } : {}) })),
     toggleBottom: () => setPanels((p) => ({ ...p, bottom: !p.bottom })),
     settings: () => openSettings('global'),
     diagnostics: () => setDiagnostics((o) => !o),
@@ -2049,7 +2076,7 @@ export function Cockpit() {
         <ResizableGroup
           id="shell"
           orientation="horizontal"
-          className="flex min-h-0 min-w-0 flex-1"
+          className="relative flex min-h-0 min-w-0 flex-1"
           defaultLayout={panels.sizes['shell']}
           onLayoutChanged={saveLayout('shell')}
         >
@@ -2058,7 +2085,11 @@ export function Cockpit() {
             bars on the left now"*. The activity bar is the strip now, and the
             sidebar is a region that can be put away. */}
         {/* Always mounted, collapsed to nothing when shut: see `sidebarPanel`. */}
-        <ResizablePanel
+        <SideRegion
+          side="left"
+          open={panels.sidebar}
+          onShut={() => setPanels((p) => ({ ...p, sidebar: false }))}
+          label="Projects and runs"
           id="sidebar"
           panelRef={sidebarPanel}
           collapsible
@@ -2081,6 +2112,7 @@ export function Cockpit() {
               setDraftId(d.id);
               rememberRepo(d.dir);
               open('pilot');
+              shutSheets();
             }}
             onForgetDraft={forgetDraft}
             onSettled={settleDrafts}
@@ -2123,6 +2155,7 @@ export function Cockpit() {
               setDraftId(null);
               setViewing({ dir: next, runId, task });
               setOpenAt(null);
+              shutSheets();
             }}
             onProject={(next) => {
               rememberRepo(next);
@@ -2142,8 +2175,8 @@ export function Cockpit() {
             }}
           />
           )}
-        </ResizablePanel>
-        <ResizableSeparator orientation="horizontal" />
+        </SideRegion>
+        <SideSeparator />
 
         <ResizablePanel id="center" minSize="30%" className="flex min-h-0 min-w-0 flex-col">
         <ResizableGroup
@@ -2164,10 +2197,24 @@ export function Cockpit() {
             <div>{viewing !== null && <p className="mt-[1em] mb-1 text-label text-tertiary">Run archive</p>}
               <h2 className="m-0 text-title font-semibold tracking-tight text-display">{tab === 'pilot' ? 'Your pilot' : tab === 'output' ? 'Output' : tab === 'plans' ? 'Plans' : tab === 'critique' ? 'Plan critique' : tab === 'code' ? 'Code changes' : tab === 'review' ? 'Code review' : tab === 'verify' ? 'Verification' : tab === 'questions' ? 'Questions' : tab === 'spend' ? 'Usage' : tab === 'settings' ? 'Settings' : 'Project runs'}</h2>
             </div>
+            <span className="flex items-center gap-1">
             <Button variant="quiet" size="sm" onClick={() => setTab('spend')} title="Usage for the live run">
               <Activity size={14} aria-hidden="true" />
               {run.spend.tokens === null ? 'No usage reported' : `${fmtTokens(run.spend.tokens)} tokens`}
             </Button>
+            {/* On a phone the run status is a sheet with no strip to reopen it
+                from (#347), so its way back is here - with the liveness dot the
+                desktop's strip carries, so a run working behind a shut sheet is
+                still said on screen. */}
+            {SURFACE.overlayPanels && !panels.loop && (
+              <Button variant="quiet" size="icon-sm" aria-label="Show run status" title="Show run status" onClick={act.toggleLoop}>
+                <PanelRightOpen className="size-4" aria-hidden />
+                {!past && shownLive !== null && !settled(run) && (
+                  <LivenessDot state={run.running === null ? 'waiting' : 'live'} />
+                )}
+              </Button>
+            )}
+            </span>
           </header>
           {/*
             Hi-fi 1's bar, in the design's own order. It had twelve tabs against
@@ -2593,7 +2640,7 @@ export function Cockpit() {
             draws — Plans, Plan critique, Code, Code review — and reading a card
             and then its artifact is the shortest path in the product. The runs
             take the left, next to the rail they are drawn from. */}
-        <ResizableSeparator orientation="horizontal" />
+        <SideSeparator />
         {/* Always mounted, like the sidebar, and collapsed to a strip rather
             than to nothing: *"The right pane should have a collapse button.
             When collapsed, I think the only thing that should be visible is the
@@ -2603,7 +2650,11 @@ export function Cockpit() {
             otherwise carries that dot is inside the column, and a run working
             behind a shut panel with nothing on screen saying so is the idle
             window that cost a fourteen-million-token turn. */}
-        <ResizablePanel
+        <SideRegion
+          side="right"
+          open={panels.loop}
+          onShut={() => setPanels((p) => ({ ...p, loop: false }))}
+          label="Run status"
           id="loop"
           panelRef={loopPanel}
           collapsible
@@ -2641,7 +2692,14 @@ export function Cockpit() {
                 the sidebar. The way back is the one thing that had to stay. */}
             <span className="ml-auto flex items-center gap-1">
               {past && viewing !== null && (
-                <Button variant="quiet" size="sm" onClick={() => setViewing(null)}>
+                <Button
+                  variant="quiet"
+                  size="sm"
+                  onClick={() => {
+                    setViewing(null);
+                    shutSheets();
+                  }}
+                >
                   back to the live run
                 </Button>
               )}
@@ -2756,7 +2814,10 @@ export function Cockpit() {
                 now={now}
                 compact
                 hostPid={past ? null : (shownLive?.pid ?? null)}
-                onOpen={open}
+                onOpen={(next, round) => {
+                  open(next, round);
+                  shutSheets();
+                }}
                 archive={archive}
               />
               {/* `4g`, and only on the ending that means the loop finished.
@@ -2777,8 +2838,14 @@ export function Cockpit() {
               onPause={pause}
               onUnpause={unpause}
               onStop={() => setConfirmStop(true)}
-              onResume={(runId, dir, raise) => resume(runId, dir, raise, false, columnRun.identity?.task ?? null)}
-              onImplement={(runId, dir) => implement(runId, dir, columnRun.identity?.task ?? null)}
+              onResume={(runId, dir, raise) => {
+                shutSheets();
+                return resume(runId, dir, raise, false, columnRun.identity?.task ?? null);
+              }}
+              onImplement={(runId, dir) => {
+                shutSheets();
+                return implement(runId, dir, columnRun.identity?.task ?? null);
+              }}
               caps={caps}
               gates={gates}
               order={order}
@@ -2788,7 +2855,7 @@ export function Cockpit() {
           </div>
           </>
           )}
-        </ResizablePanel>
+        </SideRegion>
         </ResizableGroup>
       </div>
 

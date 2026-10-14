@@ -75,6 +75,16 @@ export interface Where {
 
 export const OPEN_PANELS: Panels = { sidebar: true, loop: true, bottom: false, sizes: {} };
 
+/**
+ * The panels a window starts with. On a phone (`overlay`) the two side columns
+ * are sheets over the main pane (#347), so both start shut whatever was kept:
+ * a sheet left open last time would cover the screen on every launch. The
+ * sizes and the bottom panel are kept as they were.
+ */
+export function startPanels(stored: Panels, overlay: boolean): Panels {
+  return overlay ? { ...stored, sidebar: false, loop: false } : stored;
+}
+
 /** Where a fresh window lands, and where an unreadable record lands too. */
 export const NOWHERE: Where = { tab: 'pilot', viewing: null, draftId: null, bottom: 'commands', panels: OPEN_PANELS };
 
