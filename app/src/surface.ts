@@ -18,5 +18,18 @@
  *   resizable columns: the side panels' minimums alone exceed its width, so a
  *   panel there could be squeezed shut and then refuse to open. On a phone they
  *   start shut, one at a time, and the main pane keeps the whole width.
+ * - `compactChrome`: the frame around the panes in one row. On a phone the
+ *   activity bar's strip and the canvas heading together took a third of the
+ *   screen before any content: the strip is a column of three icons beside
+ *   every pane, and the heading's title repeats the tab that is selected under
+ *   it. So the phone draws neither. The Explorer and run-status toggles sit at
+ *   the two ends of the tab row, and New run and Settings head the Explorer
+ *   sheet, which is the phone's home.
  */
-export const SURFACE = { keyboard: true, palette: true, tray: true, overlayPanels: false } as const;
+export const SURFACE = {
+  keyboard: true,
+  palette: true,
+  tray: true,
+  overlayPanels: false,
+  compactChrome: false,
+} as const;

@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Activity, PanelRightClose, PanelRightOpen, Terminal, X } from 'lucide-react';
+import { Activity, PanelLeft, PanelRightClose, PanelRightOpen, Plus, Settings as SettingsIcon, Terminal, X } from 'lucide-react';
 import { usePanelRef } from 'react-resizable-panels';
 import type { Layout, LayoutChangedMeta, PanelImperativeHandle } from 'react-resizable-panels';
 import { Badge } from '@/ui/badge';
 import { Button } from '@/ui/button';
 import { LivenessDot } from '../design';
-import { ActivityBar } from '../shell/ActivityBar';
+import { ActivityBar, Tool } from '../shell/ActivityBar';
+import { PaneTabs } from '../shell/PaneTabs';
 import { UpdatePopover } from '../shell/UpdatePopover';
 import type { UpdateState } from '../shell/UpdatePopover';
 import { CHECK_EVERY_MS, CHECK_KEY, SKIP_KEY, checkEnabled, shown } from '../shell/update';
@@ -1878,6 +1879,28 @@ export function Cockpit() {
   const paletteShortcut = ACTIONS.find((a) => a.id === 'palette')?.shortcut;
   const paletteChord =
     paletteShortcut === undefined ? '' : chordLabel(paletteShortcut, typeof navigator === 'undefined' ? '' : navigator.platform);
+  // The ⬆ tool, while a newer unskipped version exists (#299). The activity
+  // bar draws it above ⚙; the phone, which has no bar, at the head of the
+  // Explorer sheet beside ⚙ (#347).
+  const updateTool = shown(update, skipped) ? (
+    <UpdatePopover
+      info={update}
+      state={updateState}
+      onInstall={() => installUpdate(false)}
+      onPage={openReleasePage}
+      onSkip={() => skipUpdate(update.version)}
+    />
+  ) : undefined;
+  // The run-status toggle with the liveness dot the desktop's shut strip
+  // carries, so a run working behind a shut sheet is still said on screen.
+  const statusToggle = (
+    <Button variant="quiet" size="icon-sm" aria-label="Show run status" title="Show run status" onClick={act.toggleLoop}>
+      <PanelRightOpen className="size-4" aria-hidden />
+      {!past && shownLive !== null && !settled(run) && (
+        <LivenessDot state={run.running === null ? 'waiting' : 'live'} />
+      )}
+    </Button>
+  );
 
   return (
     <TooltipProvider>
@@ -2055,25 +2078,17 @@ export function Cockpit() {
             where `＋ ⌘K ⚙` live now, at every width - `design/AUDIT.md` §1.1's
             finding was that they had nowhere to live - and its first icon puts
             the sidebar away and brings it back. */}
-        <ActivityBar
-          sidebarOpen={panels.sidebar}
-          onSidebar={act.toggleSidebar}
-          onNew={act.newRun}
-          onPalette={act.palette}
-          onSettings={act.settings}
-          paletteChord={paletteChord}
-          update={
-            shown(update, skipped) ? (
-              <UpdatePopover
-                info={update}
-                state={updateState}
-                onInstall={() => installUpdate(false)}
-                onPage={openReleasePage}
-                onSkip={() => skipUpdate(update.version)}
-              />
-            ) : undefined
-          }
-        />
+        {!SURFACE.compactChrome && (
+          <ActivityBar
+            sidebarOpen={panels.sidebar}
+            onSidebar={act.toggleSidebar}
+            onNew={act.newRun}
+            onPalette={act.palette}
+            onSettings={act.settings}
+            paletteChord={paletteChord}
+            update={updateTool}
+          />
+        )}
         {/* The three columns, each a resizable region. Sizes are saved on a
             drag and come back next launch (`where.ts`); a shut region is not
             rendered, and the library gives its room to the others. */}
@@ -2103,6 +2118,20 @@ export function Cockpit() {
           maxSize="50%"
           className="flex min-h-0 min-w-0 flex-col bg-column"
         >
+          {/* The activity bar's ＋ and ⚙, on a phone that has no bar (#347).
+              The Explorer is where a phone starts, so the two acts that begin
+              something head it. */}
+          {SURFACE.compactChrome && panels.sidebar && (
+            <div className="flex flex-none items-center justify-end gap-1 border-b border-rule-structure px-2 py-1">
+              <Tool label="New run" onClick={act.newRun}>
+                <Plus className="size-5" aria-hidden />
+              </Tool>
+              {updateTool}
+              <Tool label="Settings for all projects" onClick={act.settings}>
+                <SettingsIcon className="size-5" aria-hidden />
+              </Tool>
+            </div>
+          )}
           {panels.sidebar && (
           <Sidebar
             dir={repoDir}
@@ -2192,6 +2221,13 @@ export function Cockpit() {
         >
         <ResizablePanel id="main" minSize="20%" className="flex min-h-0 min-w-0 flex-col">
         <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-page" role="main">
+          {/* A phone draws no heading: its title repeats the selected tab, and
+              the tab row carries the run-status toggle instead (#347). An
+              opened run's label survives as one quiet line. */}
+          {SURFACE.compactChrome && viewing !== null && (
+            <p className="m-0 flex-none bg-page px-4 pt-1.5 text-label text-tertiary">Run archive</p>
+          )}
+          {!SURFACE.compactChrome && (
           <header className="flex flex-none items-center justify-between gap-4 px-7 pt-6 pb-4">
             {/*
               The line above the title is drawn only when it says something: an
@@ -2210,16 +2246,10 @@ export function Cockpit() {
                 from (#347), so its way back is here - with the liveness dot the
                 desktop's strip carries, so a run working behind a shut sheet is
                 still said on screen. */}
-            {SURFACE.overlayPanels && !panels.loop && (
-              <Button variant="quiet" size="icon-sm" aria-label="Show run status" title="Show run status" onClick={act.toggleLoop}>
-                <PanelRightOpen className="size-4" aria-hidden />
-                {!past && shownLive !== null && !settled(run) && (
-                  <LivenessDot state={run.running === null ? 'waiting' : 'live'} />
-                )}
-              </Button>
-            )}
+            {SURFACE.overlayPanels && !panels.loop && statusToggle}
             </span>
           </header>
+          )}
           {/*
             Hi-fi 1's bar, in the design's own order. It had twelve tabs against
             the design's seven, and `design/AUDIT.md` traced most of that to the
@@ -2234,7 +2264,15 @@ export function Cockpit() {
             they go, and putting them after the frames it does name is the least
             it can be wrong by.
           */}
-          <nav className="flex flex-none items-stretch gap-0.5 overflow-x-auto border-b border-rule-structure bg-page px-6" aria-label="panes">
+          <PaneTabs
+            selected={tab}
+            lead={
+              <Tool label="Explorer: runs and projects" on={panels.sidebar} onClick={act.toggleSidebar}>
+                <PanelLeft className="size-5" aria-hidden />
+              </Tool>
+            }
+            trail={statusToggle}
+          >
             {/* The pilot (#143, #144), and hi-fi 5's first tab. The count is
                 proposals waiting on a person, and it is here because a proposal
                 nobody sees blocks the conversation silently. */}
@@ -2345,8 +2383,10 @@ export function Cockpit() {
               has spent nothing yet has not spent zero; it has not been measured.
             */}
             {/* Usage now lives in the workspace heading, giving the artifact
-                navigation its full width. The same pane keeps both providers. */}
-          </nav>
+                navigation its full width. The same pane keeps both providers.
+                A phone has no heading; its way to the pane is the status bar's
+                usage readout, which opens the same pane. */}
+          </PaneTabs>
           {/* There is no "reading a saved run" strip here any more. The panes
               and the column both follow an opened run (#223), the sidebar
               highlights which run that is, and the footer carries the real

@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'vitest';
 import cockpit from './Cockpit.tsx?raw';
+import paneTabs from '../shell/PaneTabs.tsx?raw';
 import { initials, rail } from './squares';
 import { NOWHERE, readWhere } from './where';
 import type { ArchiveRun } from '../host';
@@ -87,7 +88,13 @@ describe('the tab bar the rail emptied', () => {
   //
   // Case 2 (the UI rework): the bar is found by its accessible name rather than
   // by a class that left with the stylesheet. Every claim below is unchanged.
-  const from = cockpit.indexOf('aria-label="panes"');
+  //
+  // Case 2 again (#347): the bar's container moved into `shell/PaneTabs.tsx`,
+  // which draws it as the desktop's bar or the phone's one-row chrome, so its
+  // accessible name is there and the cockpit's bar starts at `<PaneTabs`. The
+  // tabs themselves are still the cockpit's children of it, so every claim
+  // below still reads them; the name is pinned on both drawings separately.
+  const from = cockpit.indexOf('<PaneTabs');
   const to = cockpit.indexOf("{tab === 'pilot' && ", from);
   const bar = from < 0 ? '' : cockpit.slice(from, to < 0 ? cockpit.length : to);
   /** Where a label first appears in the bar, or Infinity. Order, not pixels. */
@@ -100,6 +107,8 @@ describe('the tab bar the rail emptied', () => {
     // Every tab says which one is current, which is what makes it a tab bar.
     expect(bar).toMatch(/aria-current=\{tab === /);
     expect(bar).toMatch(/Questions/);
+    // Both drawings of it - the desktop's bar and the phone's row - are named.
+    expect(paneTabs.match(/aria-label="panes"/g)).toHaveLength(2);
   });
 
   test('Settings and Runs are on the rail, not on the bar', () => {
