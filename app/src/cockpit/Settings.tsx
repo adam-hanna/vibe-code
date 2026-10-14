@@ -2214,11 +2214,20 @@ export function Settings({
                         disabled={busy}
                         onChange={() => save({ gates: { [boundary]: mode } })}
                       />
-                      <span>{MODE_NOTE[mode] ?? mode}</span>
+                      <span>{SURFACE.compactChrome ? mode : (MODE_NOTE[mode] ?? mode)}</span>
                     </label>
                   </td>
                 ))}
-                <td />
+                {/* A phone names the three modes on one line and says what the
+                    chosen one does under it (#347): each of the three sentences
+                    on every row was two screens for six boundaries. */}
+                {SURFACE.compactChrome ? (
+                  <td className={S.why}>
+                    {MODE_NOTE[gates[boundary] ?? ''] ?? gates[boundary]}
+                  </td>
+                ) : (
+                  <td />
+                )}
               </tr>
             ))}
             {/* The two with no row, named with their own reasons. `mergeSection`

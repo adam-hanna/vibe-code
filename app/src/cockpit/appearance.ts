@@ -1,5 +1,3 @@
-import { deviceKey } from './where';
-
 /**
  * How big the product is drawn, and nothing else about how it looks (#223).
  *
@@ -31,16 +29,6 @@ import { deviceKey } from './where';
 
 /** Where the scale is remembered. Beside `vibe.repo` and `vibe.projects`. */
 export const SCALE_KEY = 'vibe.typescale';
-
-/**
- * The key one device keeps its scale under (#347). The window's memory is the
- * desktop's files and a phone reaches the same ones, so a phone choosing
- * `larger` made the desktop's text larger too. A phone keeps its own, and one
- * that cannot say who it is keeps none and draws at 1.
- */
-export function scaleKeyOf(device: string | null | undefined): string | null {
-  return deviceKey(SCALE_KEY, device);
-}
 
 /** The custom property `tokens.css` multiplies every `--size-*` by. */
 export const SCALE_VAR = '--type-scale';

@@ -30,7 +30,7 @@ import type { KeyStatus } from '../pilot/keys';
 import { PilotPane } from '../pilot/PilotPane';
 import { chatRun } from '../pilot/log';
 import { noCommands, reduceCommands, restore, running } from './commands';
-import { NOWHERE, readWhere, WHERE_KEY, startPanels, writableWhere } from './where';
+import { deviceKey, NOWHERE, readWhere, WHERE_KEY, startPanels, writableWhere } from './where';
 import type { BottomTab, Panels, Tab, Viewing, Where } from './where';
 import { CommandsPane } from './CommandsPane';
 import { CodePane } from './CodePane';
@@ -181,20 +181,19 @@ const TICK_MS = 1000;
 const REPO_KEY = 'vibe.repo';
 
 /**
- * The key this device keeps its place under (`placeKeyOf` in `where.ts`), or
- * null for a phone that keeps none. Set once, before the cockpit mounts, by
- * `main.tsx` - the phone has to ask its own Rust who it is, and every read of
- * the place is a synchronous `useState` initialiser.
+ * The keys this device keeps its own state under (`deviceKey` in `where.ts`):
+ * where the window was pointed, how big the text is, and the repository it
+ * last named. A key is null for a phone that keeps none. Set once, before the
+ * cockpit mounts, by `main.tsx` - the phone has to ask its own Rust who it is,
+ * and every read below is a synchronous `useState` initialiser.
  */
 let placeKey: string | null = WHERE_KEY;
-export function keepPlaceUnder(key: string | null): void {
-  placeKey = key;
-}
-
-/** The key this device keeps its text size under (`scaleKeyOf`), the same way. */
 let scaleKey: string | null = SCALE_KEY;
-export function keepScaleUnder(key: string | null): void {
-  scaleKey = key;
+let repoKey: string | null = REPO_KEY;
+export function keepDeviceKeys(device: string | null): void {
+  placeKey = deviceKey(WHERE_KEY, device);
+  scaleKey = deviceKey(SCALE_KEY, device);
+  repoKey = deviceKey(REPO_KEY, device);
 }
 
 /** Where the window was pointed when it last closed. See `where.ts`. */
@@ -557,7 +556,11 @@ export function Cockpit() {
    */
   const [repoDir, setRepoDir] = useState(() => {
     try {
-      return memory.getItem(REPO_KEY) ?? '';
+      // A phone that has named no repository of its own starts where the
+      // desktop is, which is read and never written: the desktop's is the only
+      // pointer a new phone has, and borrowing it moves nothing.
+      if (repoKey === null) return memory.getItem(REPO_KEY) ?? '';
+      return memory.getItem(repoKey) ?? memory.getItem(REPO_KEY) ?? '';
     } catch {
       // Storage can be unavailable or full. A repository field that starts empty
       // is a smaller failure than a window that will not render.
@@ -566,8 +569,9 @@ export function Cockpit() {
   });
   const rememberRepo = useCallback((dir: string) => {
     setRepoDir(dir);
+    if (repoKey === null) return;
     try {
-      memory.setItem(REPO_KEY, dir);
+      memory.setItem(repoKey, dir);
     } catch {
       // See above. Nothing here is worth failing a render over.
     }
